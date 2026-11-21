@@ -30,5 +30,5 @@
     "url": "git+https://github.com/coasys/ad4m.git",
     "directory": "identity-wasm"
   },
-  "version": "0.13.1-staging.15"
+  "version": "0.13.1-staging.16"
 }

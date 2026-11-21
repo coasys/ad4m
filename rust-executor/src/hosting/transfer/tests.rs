@@ -1,5 +1,6 @@
 //! The carriage's guards: one at a time, the hourly limit, ownership, expiry, size and hash.
-//! Each test names its own person, so the shared state never crosses.
+//! Each test runs on its own `Transfers`: the store sweeps by the caller's clock, so tests
+//! that shared the global one would expire each other's transfers.
 
 use super::*;
 use crate::hosting::export::{ExportFile, FORMAT, VERSION};
@@ -22,12 +23,12 @@ fn big(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i % 251) as u8).collect()
 }
 
-fn read_all(person: &str, p: &Prepared, now: u64) -> Vec<u8> {
+fn read_all(t: &mut Transfers, person: &str, p: &Prepared, now: u64) -> Vec<u8> {
     let mut all = Vec::new();
     for index in 0..p.chunks {
         all.extend(
             STANDARD
-                .decode(chunk(person, &p.export_id, index, now).unwrap())
+                .decode(t.chunk(person, &p.export_id, index, now).unwrap())
                 .unwrap(),
         );
     }
@@ -36,40 +37,46 @@ fn read_all(person: &str, p: &Prepared, now: u64) -> Vec<u8> {
 
 #[test]
 fn an_export_is_read_in_one_mib_chunks_that_join_to_the_hashed_file() {
+    let mut t = Transfers::default();
     let bytes = big(CHUNK_BYTES * 2 + 17);
-    let p = prepare("p-chunks", bytes.clone(), T0).unwrap();
+    let p = t.prepare("p-chunks", bytes.clone(), T0).unwrap();
     assert_eq!(p.chunks, 3);
     assert_eq!(p.size, bytes.len() as u64);
     assert_eq!(p.sha256, hex::encode(Sha256::digest(&bytes)));
-    let joined = read_all("p-chunks", &p, T0 + 1);
+    let joined = read_all(&mut t, "p-chunks", &p, T0 + 1);
     assert_eq!(joined, bytes);
     // The last chunk ended it.
     assert_eq!(
-        chunk("p-chunks", &p.export_id, 0, T0 + 2),
+        t.chunk("p-chunks", &p.export_id, 0, T0 + 2),
         Err(TransferError::NotFound)
     );
 }
 
 #[test]
 fn an_export_belongs_to_the_person_that_prepared_it() {
-    let p = prepare("p-owner", big(10), T0).unwrap();
+    let mut t = Transfers::default();
+    let p = t.prepare("p-owner", big(10), T0).unwrap();
     assert_eq!(
-        chunk("p-other", &p.export_id, 0, T0),
+        t.chunk("p-other", &p.export_id, 0, T0),
         Err(TransferError::NotFound)
     );
-    assert!(chunk("p-owner", &p.export_id, 0, T0).is_ok());
+    assert!(t.chunk("p-owner", &p.export_id, 0, T0).is_ok());
 }
 
 #[test]
 fn one_export_at_a_time_and_four_an_hour() {
-    let p = prepare("p-rate", big(10), T0).unwrap();
-    assert_eq!(prepare("p-rate", big(10), T0 + 1), Err(TransferError::Busy));
-    read_all("p-rate", &p, T0 + 1);
+    let mut t = Transfers::default();
+    let p = t.prepare("p-rate", big(10), T0).unwrap();
+    assert_eq!(
+        t.prepare("p-rate", big(10), T0 + 1),
+        Err(TransferError::Busy)
+    );
+    read_all(&mut t, "p-rate", &p, T0 + 1);
     for n in 1..EXPORTS_PER_HOUR as u64 {
-        let p = prepare("p-rate", big(10), T0 + 10 * n).unwrap();
-        read_all("p-rate", &p, T0 + 10 * n);
+        let p = t.prepare("p-rate", big(10), T0 + 10 * n).unwrap();
+        read_all(&mut t, "p-rate", &p, T0 + 10 * n);
     }
-    let limited = prepare("p-rate", big(10), T0 + 100);
+    let limited = t.prepare("p-rate", big(10), T0 + 100);
     assert_eq!(
         limited,
         Err(TransferError::RateLimited {
@@ -77,80 +84,94 @@ fn one_export_at_a_time_and_four_an_hour() {
         })
     );
     // An hour after the first, one more is allowed.
-    assert!(prepare("p-rate", big(10), T0 + HOUR_SECS).is_ok());
+    assert!(t.prepare("p-rate", big(10), T0 + HOUR_SECS).is_ok());
 }
 
 #[test]
 fn an_export_expires_fifteen_minutes_after_its_last_chunk() {
-    let p = prepare("p-expiry", big(CHUNK_BYTES + 1), T0).unwrap();
-    chunk("p-expiry", &p.export_id, 0, T0 + EXPIRY_SECS - 1).unwrap();
+    let mut t = Transfers::default();
+    let p = t.prepare("p-expiry", big(CHUNK_BYTES + 1), T0).unwrap();
+    t.chunk("p-expiry", &p.export_id, 0, T0 + EXPIRY_SECS - 1)
+        .unwrap();
     // The chunk renewed it.
-    chunk("p-expiry", &p.export_id, 1, T0 + 2 * EXPIRY_SECS - 2).unwrap();
-    let q = prepare("p-expiry", big(10), T0 + 3 * EXPIRY_SECS).unwrap();
+    t.chunk("p-expiry", &p.export_id, 1, T0 + 2 * EXPIRY_SECS - 2)
+        .unwrap();
+    let q = t
+        .prepare("p-expiry", big(10), T0 + 3 * EXPIRY_SECS)
+        .unwrap();
     assert_eq!(
-        chunk("p-expiry", &q.export_id, 0, T0 + 4 * EXPIRY_SECS),
+        t.chunk("p-expiry", &q.export_id, 0, T0 + 4 * EXPIRY_SECS),
         Err(TransferError::NotFound)
     );
 }
 
 #[test]
 fn an_import_over_the_limit_is_refused_at_begin() {
+    let mut t = Transfers::default();
     assert_eq!(
-        begin_import("p-big", 11, "00", 10, T0),
+        t.begin_import("p-big", 11, "00", 10, T0),
         Err(TransferError::TooLarge { bytes: 11, max: 10 })
     );
-    assert!(begin_import("p-big", 10, "00", 10, T0).is_ok());
+    assert!(t.begin_import("p-big", 10, "00", 10, T0).is_ok());
 }
 
 #[test]
 fn an_import_commits_only_the_bytes_it_declared_in_order() {
+    let mut t = Transfers::default();
     let bytes = big(CHUNK_BYTES + 5);
     let sha = hex::encode(Sha256::digest(&bytes));
-    let id = begin_import("p-imp", bytes.len() as u64, &sha, MAX_IMPORT_BYTES, T0).unwrap();
+    let id = t
+        .begin_import("p-imp", bytes.len() as u64, &sha, MAX_IMPORT_BYTES, T0)
+        .unwrap();
     assert_eq!(
-        begin_import("p-imp", 1, &sha, MAX_IMPORT_BYTES, T0),
+        t.begin_import("p-imp", 1, &sha, MAX_IMPORT_BYTES, T0),
         Err(TransferError::Busy),
         "one import at a time per person"
     );
-    let send =
-        |index: u32, part: &[u8]| import_chunk("p-imp", &id, index, &STANDARD.encode(part), T0 + 1);
+    let send = |t: &mut Transfers, index: u32, part: &[u8]| {
+        t.import_chunk("p-imp", &id, index, &STANDARD.encode(part), T0 + 1)
+    };
     assert!(
         matches!(
-            send(1, &bytes[CHUNK_BYTES..]),
+            send(&mut t, 1, &bytes[CHUNK_BYTES..]),
             Err(TransferError::Invalid(_))
         ),
         "a chunk out of order"
     );
-    assert_eq!(send(0, &bytes[..CHUNK_BYTES]), Ok(1));
+    assert_eq!(send(&mut t, 0, &bytes[..CHUNK_BYTES]), Ok(1));
     assert!(
         matches!(
-            take_import("p-imp", &id, T0 + 2),
+            t.take_import("p-imp", &id, T0 + 2),
             Err(TransferError::Invalid(_))
         ),
         "short of the declared size"
     );
-    assert_eq!(send(1, &bytes[CHUNK_BYTES..]), Ok(2));
+    assert_eq!(send(&mut t, 1, &bytes[CHUNK_BYTES..]), Ok(2));
     assert_eq!(
-        take_import("p-other", &id, T0 + 2),
+        t.take_import("p-other", &id, T0 + 2),
         Err(TransferError::NotFound)
     );
-    assert_eq!(take_import("p-imp", &id, T0 + 2).unwrap(), bytes);
+    assert_eq!(t.take_import("p-imp", &id, T0 + 2).unwrap(), bytes);
     assert_eq!(
-        take_import("p-imp", &id, T0 + 3),
+        t.take_import("p-imp", &id, T0 + 3),
         Err(TransferError::NotFound)
     );
 }
 
 #[test]
 fn an_import_with_the_wrong_hash_or_too_many_bytes_is_refused() {
-    let id = begin_import("p-hash", 4, &"0".repeat(64), MAX_IMPORT_BYTES, T0).unwrap();
+    let mut t = Transfers::default();
+    let id = t
+        .begin_import("p-hash", 4, &"0".repeat(64), MAX_IMPORT_BYTES, T0)
+        .unwrap();
     assert!(matches!(
-        import_chunk("p-hash", &id, 0, &STANDARD.encode([1u8; 5]), T0),
+        t.import_chunk("p-hash", &id, 0, &STANDARD.encode([1u8; 5]), T0),
         Err(TransferError::Invalid(_))
     ));
-    import_chunk("p-hash", &id, 0, &STANDARD.encode([1u8; 4]), T0).unwrap();
+    t.import_chunk("p-hash", &id, 0, &STANDARD.encode([1u8; 4]), T0)
+        .unwrap();
     assert_eq!(
-        take_import("p-hash", &id, T0),
+        t.take_import("p-hash", &id, T0),
         Err(TransferError::Invalid("the sha256 does not match".into()))
     );
 }

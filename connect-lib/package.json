@@ -37,7 +37,7 @@
     "email": "nicolas@coasys.org"
   },
   "devDependencies": {
-    "@coasys/ad4m": "workspace:0.13.1-staging.15",
+    "@coasys/ad4m": "workspace:0.13.1-staging.16",
     "@types/node": "^16.11.11",
     "esbuild": "^0.15.5",
     "happy-dom": "^14.0.0",
@@ -50,5 +50,5 @@
     "url": "git+https://github.com/coasys/ad4m.git",
     "directory": "connect-lib"
   },
-  "version": "0.13.1-staging.15"
+  "version": "0.13.1-staging.16"
 }

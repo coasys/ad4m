@@ -303,7 +303,7 @@ async fn an_unreachable_index_is_a_transport_error() {
 
 #[test]
 fn only_https_or_loopback_http_urls_are_accepted() {
-    assert!(IndexClient::new("https://api.coasys.org/v1/index").is_ok());
+    assert!(IndexClient::new("https://api.coasys.app/v1/index").is_ok());
     assert!(IndexClient::new("http://127.0.0.1:9/v1/index").is_ok());
     assert!(IndexClient::new("http://localhost:9/v1/index").is_ok());
     assert!(IndexClient::new("http://index.example.org/v1/index").is_err());

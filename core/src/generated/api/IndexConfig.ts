@@ -7,7 +7,7 @@
  */
 export type IndexConfig = { 
 /**
- * The index's base URL, e.g. `https://api.coasys.org/v1/index`. Empty: none.
+ * The index's base URL, e.g. `https://api.coasys.app/v1/index`. Empty: none.
  */
 url: string, 
 /**
