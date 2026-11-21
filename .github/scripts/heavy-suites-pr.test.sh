@@ -190,11 +190,16 @@ statuses() {
       || [ "$(jq -r .target_url <<<"$b")" != https://github.com/coasys/ad4m/actions/runs/77 ]; then
       echo "  FAIL: malformed status: $b"; FAILED=1
     fi
+    # A run can end after any status (a cancel, the job's timeout), so each
+    # pending names what clears it: the PR getting ready, or a re-run.
+    if [ "$(jq -r .state <<<"$b")" = pending ] \
+      && ! jq -r .description <<<"$b" | grep -qE '[Rr]e-run|Runs when the PR is ready'; then
+      echo "  FAIL: pending without a recovery: $(jq -r .description <<<"$b")"; FAILED=1
+    fi
     got="${got:+$got }$(jq -r .state <<<"$b")"
   done <<<"$(grep -E "^POST .*/repos/coasys/ad4m/statuses/$SHA " "$TMP/curl.log")"
   [ "$got" = "$want" ] || { echo "  FAIL: want statuses '$want', got '$got'"; FAILED=1; }
 }
-no_status() { not_logged '/statuses/' "posted a status"; }
 # Every pending description names a recovery that clears it.
 recovery() {
   local d
@@ -231,7 +236,7 @@ event synchronize false dev
 push_ran
 check "push to a ready PR to dev, heavy jobs running: success, no new pipeline" 0 "success: Heavy suites running in CircleCI pipeline 8" \
   FAKE_PULLS="[$(pr 30 false dev)]" "${CCI[@]}"
-statuses success
+statuses pending success
 not_logged "$RUN_URL" "started a pipeline while one ran the suites"
 logged 'GET https://circleci.com/api/v2/project/circleci/VRkXSnZDyBKHhkHKBHTmLj/W84Q4MGGTeZwizersNwxB4/pipeline\?branch=feat%2Fx ' \
   "did not list the branch's pipelines"
@@ -243,14 +248,14 @@ check "push without CIRCLECI_API_TOKEN, heavy jobs running: success (reads need 
   FAKE_PULLS="[$(pr 30 false dev)]"
 check "[full-ci] in the head commit on a draft: success" 0 '^success:' \
   FAKE_PULLS="[$(pr 30 true dev)]" HEAVY_GATE_COMMIT_MSG=$'fix: y\n\n[full-ci]'
-statuses success
+statuses pending success
 
 fx_reset
 push_building
 fx jobs_wf1.3 "$(jobs build:10:success rust-tests:11:running)"; fx job_11 "$(step_ran)"
 check "push, build still running: pending, then success" 0 '^success: .*pipeline 8' \
   FAKE_PULLS="[$(pr 30 false dev)]" "${CCI[@]}"
-statuses pending success
+statuses pending pending success
 not_logged "$RUN_URL" "started a pipeline while the push's build ran"
 logged '^sleep 60' "did not wait between polls"
 
@@ -267,7 +272,7 @@ fx pipelines "$(pipes p1:8:$SHA)"; fx wf_p1 "$(wf wf1 failed)"
 fx jobs_wf1 "$(jobs build:10:failed rust-tests:null:blocked)"; fx job_10 "$(step_light)"
 check "push, build failed: pending, no new pipeline" 0 'pending: CircleCI pipeline 8 stopped before the heavy suites' \
   FAKE_PULLS="[$(pr 30 false dev)]" "${CCI[@]}"
-statuses pending
+statuses pending pending
 recovery "Push a fix.*$RERUN"
 not_logged "$RUN_URL" "rebuilt a commit whose build failed"
 
@@ -276,7 +281,7 @@ push_halted
 new_pipeline "$NEW_RAN" running
 check "push, the push's pipeline halted them: new pipeline" 0 'success: .*pipeline 4242' \
   FAKE_PULLS="[$(pr 30 false dev)]" "${CCI[@]}"
-statuses pending success
+statuses pending pending success
 
 # A state change with no push: the push's pipeline halted the heavy jobs.
 fx_reset
@@ -289,9 +294,9 @@ logged "$RUN_URL" "no pipeline/run request"
 line="$(grep -E "$RUN_URL" "$TMP/curl.log" | head -1)"
 [ "$(jq -c . <<<"${line#* * }")" = '{"definition_id":"def-1","config":{"branch":"feat/x"},"checkout":{"branch":"feat/x"}}' ] \
   || { echo "  FAIL: pipeline/run body: ${line#* * }"; FAILED=1; }
-statuses pending success
-d="$(grep -E "^POST .*/statuses/" "$TMP/curl.log" | head -1)"
-[ "$(jq -r .description <<<"${d#* * }")" = "Heavy suites started in CircleCI pipeline 4242; waiting for them." ] \
+statuses pending pending success
+d="$(grep -E "^POST .*/statuses/" "$TMP/curl.log" | sed -n 2p)"
+[ "$(jq -r .description <<<"${d#* * }")" = "Heavy suites started in CircleCI pipeline 4242; waiting for them. If this stays, re-run the Heavy suites workflow (Details)." ] \
   || { echo "  FAIL: first status after the trigger: ${d#* * }"; FAILED=1; }
 grep -qE "^GET .*/pulls/30 " "$TMP/curl.log" || { echo "  FAIL: did not check the PR's head before the trigger"; FAILED=1; }
 
@@ -301,7 +306,7 @@ new_pipeline "$(jobs build:20:running rust-tests:null:blocked)" running
 fx jobs_wf2.3 "$NEW_RAN"
 check "ready, the new pipeline still builds: pending, then success" 0 '^success: .*4242' \
   FAKE_PULLS="[$(pr 30 false dev)]" "${CCI[@]}"
-statuses pending success
+statuses pending pending success
 [ "$(grep -cE "$RUN_URL" "$TMP/curl.log")" = 1 ] || { echo "  FAIL: more than one pipeline/run"; FAILED=1; }
 
 fx_reset
@@ -309,7 +314,7 @@ push_halted
 new_pipeline "$(jobs build:20:success rust-tests:21:success)" success "$(step_halted)"
 check "ready, the new pipeline halts them too: pending" 0 'pending: CircleCI pipeline 4242 halted the heavy suites' \
   FAKE_PULLS="[$(pr 30 false dev)]" "${CCI[@]}"
-statuses pending pending
+statuses pending pending pending
 recovery "$RERUN"
 [ "$(grep -cE "$RUN_URL" "$TMP/curl.log")" = 1 ] || { echo "  FAIL: more than one pipeline/run"; FAILED=1; }
 
@@ -318,7 +323,7 @@ push_halted
 fx pipe_p-new '{"id":"p-new","number":4242,"state":"errored"}'
 check "ready, the new pipeline errors (config): pending" 0 'pending: CircleCI pipeline 4242 did not start' \
   FAKE_PULLS="[$(pr 30 false dev)]" "${CCI[@]}"
-statuses pending pending
+statuses pending pending pending
 recovery "push.*$RERUN"
 
 fx_reset
@@ -326,16 +331,16 @@ push_halted
 new_pipeline "$(jobs build:20:running rust-tests:null:blocked)" running "$(step_light running)"
 check "ready, the heavy jobs never start: pending after the wait" 0 'pending: CircleCI pipeline 4242 did not reach the heavy suites in 10 min' \
   FAKE_PULLS="[$(pr 30 false dev)]" "${CCI[@]}"
-statuses pending pending
+statuses pending pending pending
 recovery "$RERUN"
 [ "$(grep -c '^sleep' "$TMP/curl.log")" -le 10 ] || { echo "  FAIL: more polls than the wait allows"; FAILED=1; }
 
 fx_reset
 push_halted
-check "ready, the branch moved past the commit: no pipeline, no status" 0 "head of PR #30 is now $OTHER" \
+check "ready, the branch moved past the commit: no pipeline, only the first pending" 0 "head of PR #30 is now $OTHER" \
   FAKE_PULLS="[$(pr 30 false dev)]" "${CCI[@]}" FAKE_PR_HEAD="$OTHER"
 not_logged "$RUN_URL" "started a pipeline for a newer commit than the event's"
-no_status
+statuses pending
 
 fx_reset
 push_halted
@@ -343,7 +348,7 @@ fx pipelines.after "$(pipes p-new:4242:$OTHER p1:8:$SHA)"
 fx pipe_p-new "{\"id\":\"p-new\",\"number\":4242,\"state\":\"created\",\"trigger_parameters\":{\"git\":{\"checkout_sha\":\"$OTHER\"}}}"
 check "ready, the new pipeline checked out a newer commit: no success" 0 "pipeline 4242 checked out $OTHER" \
   FAKE_PULLS="[$(pr 30 false dev)]" "${CCI[@]}"
-statuses pending
+statuses pending pending
 not_logged '/statuses/.*"success"' "claimed success for a commit the pipeline did not build"
 
 fx_reset
@@ -398,6 +403,43 @@ check "a heavy job unreadable, then read as halted: new pipeline" 0 'success: .*
   FAKE_PULLS="[$(pr 30 false dev)]" "${CCI[@]}"
 logged "$RUN_URL" "no new pipeline after the unread job turned out halted"
 
+# Lal's review r2, 3: a cancel or the job's timeout can end the run after any
+# status. The first status comes before the CircleCI reads, and the one left
+# behind names the re-run.
+fx_reset
+push_building
+check "cancelled during the first wait: exit 143, the pending names the re-run" 143 '^pending: Waiting' \
+  FAKE_PULLS="[$(pr 30 false dev)]" "${CCI[@]}" FAKE_SLEEP_TERM=1
+recovery "$RERUN"
+first="$(grep -nE '/statuses/' "$TMP/curl.log" | head -1 | cut -d: -f1)"
+cci1="$(grep -nE 'circleci.com' "$TMP/curl.log" | head -1 | cut -d: -f1)"
+[ -n "$first" ] && [ "$first" -lt "${cci1:-0}" ] || { echo "  FAIL: no status before the first CircleCI read"; FAILED=1; }
+# Slow API answers count against the wait: the loop is bounded by the clock,
+# not by the number of sleeps, so the final status is posted in time.
+fx_reset
+push_halted
+new_pipeline "$(jobs build:20:running rust-tests:null:blocked)" running "$(step_light running)"
+check "slow CircleCI (30 s per request): ends by the wait, with the final pending" 0 'pending: CircleCI pipeline 4242 did not reach the heavy suites in 10 min' \
+  FAKE_PULLS="[$(pr 30 false dev)]" "${CCI[@]}" FAKE_CURL_SECS=30
+recovery "$RERUN"
+spent=$(( $(cat "$TMP/clock") - 1000000 ))
+# 600 s of wait, the last poll's 60 s, one request past that and the final status.
+[ "$spent" -le 720 ] || { echo "  FAIL: took $spent s of a 600 s wait"; FAILED=1; }
+# The default wait and poll leave 5 min of the job's timeout-minutes for
+# checkout, the gate, the last request and the final status.
+wait_default="$(grep -oE 'HEAVY_SUITES_WAIT_SECS:-[0-9]+' "$SCRIPT" | grep -oE '[0-9]+$')"
+poll_default="$(grep -oE 'HEAVY_SUITES_POLL_SECS:-[0-9]+' "$SCRIPT" | grep -oE '[0-9]+$')"
+timeout_min="$(grep -oE 'timeout-minutes: [0-9]+' "$DIR/../workflows/heavy-suites.yml" | grep -oE '[0-9]+$')"
+[ $(( timeout_min * 60 - wait_default - poll_default )) -ge 300 ] \
+  || { echo "  FAIL: timeout-minutes $timeout_min leaves under 5 min past the ${wait_default} s wait"; FAILED=1; }
+# A poll at the deadline starts nothing: that would run past it.
+fx_reset
+fx pipelines '{"items":[]}'
+check "no pipeline until the wait is over: no new pipeline at the deadline" 0 'pending: No CircleCI pipeline of this commit reached the heavy suites in 10 min' \
+  FAKE_PULLS="[$(pr 30 false dev)]" "${CCI[@]}" HEAVY_SUITES_GRACE_SECS=600
+not_logged "$RUN_URL" "started a pipeline after the wait"
+recovery "$RERUN"
+
 fx_reset
 event ready_for_review false feat/base
 check "ready for review, stacked: pending, no pipeline" 0 'pending: Not run: PR #30 targets feat/base' \
@@ -440,7 +482,7 @@ push_halted
 check "no CIRCLECI_API_TOKEN: pending, log line, exit 0" 0 'pending: .*no CIRCLECI_API_TOKEN' \
   FAKE_PULLS="[$(pr 30 false dev)]"
 not_logged "$RUN_URL" "started a pipeline without a token"
-statuses pending
+statuses pending pending
 recovery "Push a commit, or set the secret and re-run"
 check "no CIRCLECI_API_TOKEN: the log names the secret" 0 'CIRCLECI_API_TOKEN is not set' \
   FAKE_PULLS="[$(pr 30 false dev)]"
@@ -450,7 +492,7 @@ check "no CIRCLECI_API_TOKEN: the log names the secret" 0 'CIRCLECI_API_TOKEN is
 event opened false dev
 check "opened, no CIRCLECI_API_TOKEN, the push's pipeline halted them: pending" 0 '^pending: .*no CIRCLECI_API_TOKEN' \
   FAKE_PULLS="[$(pr 30 false dev)]"
-statuses pending
+statuses pending pending
 not_logged "$RUN_URL" "started a pipeline without a token"
 fx_reset
 push_ran
@@ -483,7 +525,7 @@ event ready_for_review false dev
 push_halted
 check "CircleCI trigger fails: pending, exit 0" 0 'pending: Could not start a CircleCI pipeline \(CircleCI trigger failed\)' \
   FAKE_PULLS="[$(pr 30 false dev)]" FAKE_CCI_RUN_FAIL=1 "${CCI[@]}"
-statuses pending
+statuses pending pending
 recovery "$RERUN"
 check "CircleCI answers without an id: pending" 0 '^pending: Could not start' \
   FAKE_PULLS="[$(pr 30 false dev)]" FAKE_CCI_RUN='{"message":"Permission denied"}' "${CCI[@]}"
@@ -496,7 +538,7 @@ recovery "$RERUN"
 check "PR lookup fails on ready, nothing ran: pending, no pipeline" 0 'pending: PR state unknown \(GitHub API request failed\)\. Re-run the Heavy suites workflow' \
   FAKE_PULLS_FAIL=1 "${CCI[@]}"
 not_logged "$RUN_URL" "started a pipeline on an unknown PR state"
-statuses pending
+statuses pending pending
 fx_reset
 push_ran
 check "PR lookup fails, a pipeline of this commit runs them: success" 0 '^success: .*pipeline 8' \

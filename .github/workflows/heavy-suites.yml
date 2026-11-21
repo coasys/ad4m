@@ -51,10 +51,13 @@ jobs:
       (github.event.action != 'edited' || github.event.changes.base) &&
       ((github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'full-ci')
     runs-on: ubuntu-latest
-    # The script waits up to 30 min (HEAVY_SUITES_WAIT_SECS) for the heavy jobs.
+    # The script waits up to 30 min of wall time (HEAVY_SUITES_WAIT_SECS), API
+    # time included, and posts its last status by about 33 min; the margin
+    # keeps the job's timeout from cutting that status off.
     timeout-minutes: 40
     # One run per PR. A newer event cancels a running one: the script keeps no
-    # state, so the next run finds a pipeline the cancelled one started.
+    # state, so the next run finds a pipeline the cancelled one started. Every
+    # pending it leaves behind names the re-run.
     concurrency:
       group: heavy-suites-${{ github.event.pull_request.number }}
       cancel-in-progress: true

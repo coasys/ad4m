@@ -9,17 +9,20 @@
 #
 # - asks the same should-run-heavy.sh the same question. Skip: the commit
 #   status `ci/heavy-suites` goes pending at once.
-# - Run: it watches this commit's CircleCI pipelines (the project is public, so
-#   reads need no token) and sets success only when one of them has its heavy
-#   jobs past heavy_gate, running or done. Their ci/circleci checks stay the
-#   pass or fail. While CircleCI's own pipeline builds, it waits. When none of
-#   this commit's pipelines ran the heavy jobs or will (they halted, or there is
-#   none after a grace time), it starts one for the branch, if the branch head
-#   is still this commit, and waits for that, up to HEAVY_SUITES_WAIT_SECS.
+# - Run: it watches this commit's newest CircleCI pipeline (the project is
+#   public, so reads need no token) and sets success only when its heavy jobs
+#   are past heavy_gate, running or done. Their ci/circleci checks stay the
+#   pass or fail. While CircleCI's own pipeline builds, it waits. When that
+#   pipeline halted the heavy jobs or stopped, or there is none after a grace
+#   time, it starts one for the branch, unless GitHub says the branch head moved
+#   on (a pipeline that checks out another commit never counts for this one),
+#   and waits for that, up to HEAVY_SUITES_WAIT_SECS of wall time.
 #
 # Never a green without a run: every other outcome is pending, and each pending
 # description names what clears it (a push, the PR getting ready, or a re-run of
-# this workflow, which looks again and starts what is missing). A failed PR
+# this workflow, which looks again and starts what is missing). That includes
+# the ones posted while it waits: a cancel or the job's timeout can end the run
+# after any of them. A failed PR
 # lookup starts nothing. Without CIRCLECI_API_TOKEN it starts nothing and says
 # so. A fork PR gets nothing (no secrets, read-only token, and CircleCI does not
 # build fork PRs on this project).
@@ -39,6 +42,8 @@
 # Test: bash .github/scripts/heavy-suites-pr.test.sh
 set -uo pipefail
 
+now() { date +%s; }
+start="$(now)"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 GATE="$DIR/../../.circleci/scripts/should-run-heavy.sh"
 CONTEXT=ci/heavy-suites
@@ -88,6 +93,15 @@ esac
 reason="${line#*: }"
 reason="${reason%%$'\n'*}"
 reason="${reason%% (http*}" # the request URL, too long for a status
+
+# The poll loop ends at the deadline. The CircleCI reads of its last poll stop
+# one poll interval past it, so a slow API cannot keep the run longer than
+# that plus one request (bounded by --max-time and --retry) and the final status.
+wait_s="${HEAVY_SUITES_WAIT_SECS:-1800}"
+poll_s="${HEAVY_SUITES_POLL_SECS:-60}"
+grace_s="${HEAVY_SUITES_GRACE_SECS:-180}"
+deadline=$(( start + wait_s ))
+past() { [ "$(now)" -ge $(( deadline + poll_s )) ]; }
 
 auth=()
 [ -n "${CIRCLECI_API_TOKEN:-}" ] && auth=(-H "Circle-Token: $CIRCLECI_API_TOKEN")
@@ -142,6 +156,7 @@ workflow_state() {
     if [ -f "$cache/$num" ]; then
       js="$(cat "$cache/$num")"
     else
+      past && { echo waiting; return; }
       js="$(cci_job "$num" | jq -r "$JOB_STATE" 2>/dev/null)" || js=""
       case "$js" in light|ran|halted|gate) ;; *) unread=1; continue ;; esac
       case "$st" in running|queued|not_running|on_hold) ;; *) echo "$js" > "$cache/$num" ;; esac
@@ -167,6 +182,7 @@ look() {
   list="$(cci "/project/$slug/pipeline?branch=$enc")" || { echo unknown; return; }
   while read -r id num; do
     [ -z "$id" ] && continue
+    past && { echo unknown; return; }
     wfs="$(cci "/pipeline/$id/workflow")" || { echo "waiting $num"; return; }
     read -r wid wst < <(jq -r '[.items[] | select(.name == "build-and-test")] | sort_by(.created_at)
       | last // empty | "\(.id) \(.status)"' <<<"$wfs" 2>/dev/null)
@@ -207,33 +223,37 @@ post() { # <state> <description>
   echo "$1: $desc"
 }
 
-# Every pending names what clears it; this is the one that always does.
+# Every pending names what clears it; this is the one that always does. A
+# cancel (a newer event) or the job's timeout can end the run after any status,
+# so the ones it waits on name it too.
 rerun="re-run the Heavy suites workflow (Details)."
 RERUN="Re-run the Heavy suites workflow (Details)."
+stays="If this stays, $rerun"
 
 if [ "$verdict" = skip ]; then
   post pending "Not run: $reason. Runs when the PR is ready and targets dev."
   exit 0
 fi
 
-# The gate runs the suites (or the PR state is unknown). Success only once a
-# pipeline of this commit has its heavy jobs past the gate; the ci/circleci
-# checks of those jobs are the pass or fail. Wait for CircleCI's own pipeline;
-# start one only when none of this commit's ran or will reach the gate.
-wait_s="${HEAVY_SUITES_WAIT_SECS:-1800}"
-poll_s="${HEAVY_SUITES_POLL_SECS:-60}"
-grace_s="${HEAVY_SUITES_GRACE_SECS:-180}"
-tries=$(( wait_s / poll_s ))
-mine="" mine_n="" waited=0
-for (( i = 1; i <= tries; i++ )); do
-  read -r st n <<<"$(look)"
-  echo "poll $i: $st ${n:+(pipeline $n)}"
+# The gate runs the suites (or the PR state is unknown). Success only once the
+# newest pipeline of this commit has its heavy jobs past the gate; the
+# ci/circleci checks of those jobs are the pass or fail. Wait for CircleCI's own
+# pipeline; start one only when that halted them, or there is none. The
+# loop ends by the deadline (wall time from the start, API time included), so
+# the final status is posted before the job's timeout-minutes.
+post pending "Looking for this commit's heavy suites in CircleCI. $stays"
+mine="" mine_n="" n="" i=0
+while :; do
+  i=$(( i + 1 ))
+  read -r st got <<<"$(look)"
+  [ "$st" = unknown ] || n="$got"
+  echo "poll $i: $st ${got:+(pipeline $got)}"
   case "$st" in
     ran)
       post success "Heavy suites running in CircleCI pipeline $n; their ci/circleci checks have the result."
       exit 0 ;;
     waiting)
-      [ -z "$mine" ] && post pending "Waiting for CircleCI pipeline $n to reach the heavy suites." ;;
+      [ -z "$mine" ] && post pending "Waiting for CircleCI pipeline $n to reach the heavy suites. $stays" ;;
     unknown) ;;
     none|halted|stopped)
       if [ -n "$mine" ]; then
@@ -259,16 +279,18 @@ for (( i = 1; i <= tries; i++ )); do
       elif [ "$st" = stopped ]; then
         post pending "CircleCI pipeline $n stopped before the heavy suites. Push a fix, or re-run it in CircleCI, then $rerun"
         exit 0
-      elif [ "$st" = none ] && [ "$waited" -lt "$grace_s" ]; then
+      elif [ "$st" = none ] && [ $(( $(now) - start )) -lt "$grace_s" ]; then
         : # CircleCI's own pipeline for a push may not be listed yet.
       elif [ "$verdict" = unsure ]; then
         post pending "PR state unknown ($reason). $RERUN"
         exit 0
+      elif [ "$(now)" -ge "$deadline" ]; then
+        break # the wait is over: start nothing now; the re-run will
       else
-        if ! now="$(pr_head)" || [ -z "$now" ]; then
+        if ! head="$(pr_head)" || [ -z "$head" ]; then
           echo "could not read PR #$number's head; starting the pipeline anyway"
-        elif [ "$now" != "$sha" ]; then
-          echo "head of PR #$number is now $now, not $sha: nothing to start for $sha; the new commit gets its own status"
+        elif [ "$head" != "$sha" ]; then
+          echo "head of PR #$number is now $head, not $sha: nothing to start for $sha; the new commit gets its own status"
           exit 0
         fi
         if [ -z "${CIRCLECI_API_TOKEN:-}" ]; then
@@ -286,11 +308,12 @@ for (( i = 1; i <= tries; i++ )); do
         fi
         read -r mine mine_n <<<"$started"
         echo "started CircleCI pipeline $mine_n for $branch"
-        post pending "Heavy suites started in CircleCI pipeline $mine_n; waiting for them."
+        post pending "Heavy suites started in CircleCI pipeline $mine_n; waiting for them. $stays"
       fi ;;
   esac
-  [ "$i" -lt "$tries" ] && sleep "$poll_s"
-  waited=$(( waited + poll_s ))
+  left=$(( deadline - $(now) ))
+  [ "$left" -le 0 ] && break
+  sleep $(( left < poll_s ? left : poll_s ))
 done
 
 if [ "$verdict" = unsure ] && [ -z "$mine" ]; then
