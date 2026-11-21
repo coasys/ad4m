@@ -257,7 +257,7 @@ logged '^sleep 60' "did not wait between polls"
 fx_reset
 fx pipelines '{"items":[]}'
 fx pipelines.2 "$(pipes p1:8:$SHA)"; fx wf_p1 "$(wf wf1 running)"
-fx jobs_wf1 "$(jobs build:10:success rust-tests:11:running)"; fx job_11 "$(step_ran)"
+fx jobs_wf1 "$(jobs build:10:success rust-tests:11:running)"; fx job_10 "$(step_light)"; fx job_11 "$(step_ran)"
 check "push, CircleCI has no pipeline yet: waits, no new pipeline" 0 '^success: .*pipeline 8' \
   FAKE_PULLS="[$(pr 30 false dev)]" "${CCI[@]}"
 not_logged "$RUN_URL" "started a second pipeline before the push's one appeared"
@@ -380,6 +380,23 @@ fx pipelines.after "$(pipes p-new:4242:$SHA p8:8:$SHA)"
 check "ready, the first workflow ran, its re-run halted: new pipeline" 0 'success: .*pipeline 4242' \
   FAKE_PULLS="[$(pr 30 false dev)]" "${CCI[@]}"
 logged "$RUN_URL" "took the first workflow's run for its halted re-run"
+
+# Lal's review r2, 2: a job whose details cannot be read may have halted, so
+# the workflow is not "ran" while one is unread.
+fx_reset
+push_ran
+rm "$TMP/fx/job_11"
+check "a heavy job's details never read, another ran: pending, no success" 0 'pending: CircleCI pipeline 8 did not reach the heavy suites in 10 min' \
+  FAKE_PULLS="[$(pr 30 false dev)]" "${CCI[@]}"
+not_logged '/statuses/.*"success"' "success while a heavy job was unread"
+fx_reset
+push_ran
+fx jobs_wf1 "$(jobs build:10:success rust-tests:11:success integration-tests-js:12:running)"
+fx job_11.1 '<html>502</html>'; fx job_11.2 '{}'; fx job_11 "$(step_halted)"
+new_pipeline "$NEW_RAN" running
+check "a heavy job unreadable, then read as halted: new pipeline" 0 'success: .*pipeline 4242' \
+  FAKE_PULLS="[$(pr 30 false dev)]" "${CCI[@]}"
+logged "$RUN_URL" "no new pipeline after the unread job turned out halted"
 
 fx_reset
 event ready_for_review false feat/base

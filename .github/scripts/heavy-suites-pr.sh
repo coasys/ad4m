@@ -123,29 +123,35 @@ start_pipeline() {
 # step last (`circleci-agent step halt` leaves exit 0 and status success, so the
 # step list is the only sign). Verified on real jobs of this project.
 # shellcheck disable=SC2016 # jq's $g, not the shell's
-JOB_STATE='([.steps[]?.name] | map(startswith("Stack gate")) | index(true)) as $g
+JOB_STATE='if (.steps | type) != "array" then "unread" else
+  ([.steps[]?.name] | map(startswith("Stack gate")) | index(true)) as $g
   | if $g == null then "light" elif $g < ((.steps | length) - 1) then "ran"
-    elif .lifecycle == "finished" then "halted" else "gate" end'
+    elif .lifecycle == "finished" then "halted" else "gate" end end'
 cache="$(mktemp -d)"
 trap 'rm -rf "$cache"' EXIT
 
 # workflow_state <workflow id> <workflow status>: ran, halted, waiting or stopped.
+# A job whose details cannot be read may have halted: while one is unread, the
+# workflow did not run the suites as far as we know (waiting), unless another
+# job halted.
 workflow_state() {
-  local jobs num st js ran=0
+  local jobs num st js ran=0 unread=0
   jobs="$(cci "/workflow/$1/job")" || { echo waiting; return; }
   while read -r num st; do
     [ "$num" = null ] && continue # not started
     if [ -f "$cache/$num" ]; then
       js="$(cat "$cache/$num")"
     else
-      js="$(cci_job "$num" | jq -r "$JOB_STATE")" || continue
+      js="$(cci_job "$num" | jq -r "$JOB_STATE" 2>/dev/null)" || js=""
+      case "$js" in light|ran|halted|gate) ;; *) unread=1; continue ;; esac
       case "$st" in running|queued|not_running|on_hold) ;; *) echo "$js" > "$cache/$num" ;; esac
     fi
     case "$js" in
       halted) echo halted; return ;;
       ran) ran=1 ;;
     esac
-  done < <(jq -r '.items[] | "\(.job_number) \(.status)"' <<<"$jobs")
+  done < <(jq -r '.items[] | "\(.job_number) \(.status)"' <<<"$jobs" 2>/dev/null)
+  if [ "$unread" = 1 ]; then echo waiting; return; fi
   if [ "$ran" = 1 ]; then echo ran; return; fi
   case "$2" in running|on_hold|failing|not_run) echo waiting ;; *) echo stopped ;; esac
 }
