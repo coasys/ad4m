@@ -177,6 +177,8 @@ export interface KeyIndexEntry {
     added: number;
     /** Seq of the revoke or rotate that ended it. */
     revoked: number | null;
+    /** Seq of the unlink that stopped it signing anything new. */
+    unlinked?: number | null;
     /** The bot scope in force at the head. */
     bot: JsonObject | null;
     /** The bot scope's expiry; null for a standing key or a master (only a bot key expires). */

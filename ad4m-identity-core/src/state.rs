@@ -36,13 +36,20 @@ pub struct KeyRecord {
     pub added: u64,
     /// The seq that revoked it, replaced it (a master at a `rotate`) or ended the log.
     pub revoked: Option<u64>,
+    /// The seq of the `unlink` that stopped it signing anything new. A revoke may follow.
+    pub unlinked: Option<u64>,
+    /// The `since` (ms since the epoch) of the `revoke` that ended it: the time from which the
+    /// person no longer trusts the key. `None` for a revoke without one, and for any other end.
+    pub revoked_since: Option<u64>,
     /// A bot key: `(seq, scope)` per `add` or `scope`, in seq order. Empty for every other key.
     pub scopes: Vec<(u64, BotScope)>,
 }
 
 impl KeyRecord {
     fn valid_at(&self, seq: u64) -> bool {
-        self.added <= seq && self.revoked.is_none_or(|r| seq < r)
+        self.added <= seq
+            && self.revoked.is_none_or(|r| seq < r)
+            && self.unlinked.is_none_or(|u| seq < u)
     }
 }
 
@@ -62,7 +69,7 @@ impl KeyState {
     }
 
     /// True when `key` (a key id or a signing multikey) was added at or before `seq`
-    /// and not revoked or replaced at or before `seq`. It reads no expiry.
+    /// and not revoked, replaced or unlinked at or before `seq`. It reads no expiry.
     pub fn key_valid_at(&self, key: &str, seq: u64) -> bool {
         self.record(key).is_some_and(|r| r.valid_at(seq))
     }

@@ -164,7 +164,20 @@ impl Log {
 
     pub fn revoke(&mut self, ids: &[&str]) {
         let ids: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
-        let event = build::revoke(&self.chain, &master(self.n), &ids).unwrap();
+        let event = build::revoke(&self.chain, &master(self.n), &ids, None).unwrap();
+        self.push(event);
+    }
+
+    /// A `revoke` with a `since`, signed by the current master key.
+    pub fn revoke_since(&mut self, ids: &[&str], since: u64) {
+        let ids: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
+        let event = build::revoke(&self.chain, &master(self.n), &ids, Some(since)).unwrap();
+        self.push(event);
+    }
+
+    /// An `unlink` of `id` signed by the current master key.
+    pub fn unlink(&mut self, id: &str) {
+        let event = build::unlink(&self.chain, &master(self.n), &id.to_string()).unwrap();
         self.push(event);
     }
 
@@ -215,10 +228,11 @@ pub fn vector_log() -> Log {
     ]);
     let bot_id = log.add(bot(&["read", "write"], 1_750_000_000)); // d3, seq 1
     log.scope(&bot_id, &["read"], 1_900_000_000); // seq 2
-    log.revoke(&["d2"]); // seq 3
-    log.rotate(&["d1"], false); // seq 4: m1
-    log.add(KeyLife::Standing); // d4, seq 5
-    log.rotate(&[], true); // seq 6: m2, end
+    log.unlink("d2"); // seq 3
+    log.revoke_since(&["d2"], 1_700_000_000_000); // seq 4
+    log.rotate(&["d1"], false); // seq 5: m1
+    log.add(KeyLife::Standing); // d4, seq 6
+    log.rotate(&[], true); // seq 7: m2, end
     log
 }
 
@@ -566,7 +580,7 @@ pub fn refusal_cases() -> Vec<Case> {
         policy("BadProof"),
     );
 
-    let unknown = build::revoke(&base.chain, &master(0), &["d9".to_string()]).unwrap();
+    let unknown = build::revoke(&base.chain, &master(0), &["d9".to_string()], None).unwrap();
     case(
         "revoke of an unknown key",
         "4",
@@ -576,10 +590,38 @@ pub fn refusal_cases() -> Vec<Case> {
 
     let mut revoked = Log::new();
     revoked.revoke(&["d1"]);
-    let again = build::revoke(&revoked.chain, &master(0), &["d1".to_string()]).unwrap();
+    let again = build::revoke(&revoked.chain, &master(0), &["d1".to_string()], None).unwrap();
     let mut events = revoked.events.clone();
     events.push(again);
     case("revoke twice", "4", typed(&events), policy("RevokedKey"));
+
+    let unlink_master = build::unlink(&base.chain, &master(0), &"m0".to_string()).unwrap();
+    case(
+        "unlink of a master key",
+        "16",
+        typed(&[first.clone(), unlink_master]),
+        policy("UnknownKey"),
+    );
+
+    let mut unlinked = Log::new();
+    unlinked.unlink("d1");
+    let again = build::unlink(&unlinked.chain, &master(0), &"d1".to_string()).unwrap();
+    let mut events = unlinked.events.clone();
+    events.push(again);
+    case("unlink twice", "16", typed(&events), policy("UnlinkedKey"));
+
+    let mut by_other = Log::new();
+    by_other.add(KeyLife::Standing);
+    let mut unlink_by_d2 = build::unlink_unsigned(&by_other.chain, &"d1".to_string()).unwrap();
+    sign(&mut unlink_by_d2, "d2", &dev(2));
+    let mut events = by_other.events.clone();
+    events.push(unlink_by_d2);
+    case(
+        "unlink signed by another device",
+        "16",
+        typed(&events),
+        policy("MissingProof"),
+    );
 
     let not_bot = build::scope(
         &base.chain,
@@ -674,7 +716,7 @@ pub fn refusal_cases() -> Vec<Case> {
         format("BadHash"),
     );
 
-    let mut empty_revoke = build::revoke_unsigned(&base.chain, &[]).unwrap();
+    let mut empty_revoke = build::revoke_unsigned(&base.chain, &[], None).unwrap();
     sign(&mut empty_revoke, "m0", &master(0));
     case(
         "revoke of no key",
@@ -686,7 +728,7 @@ pub fn refusal_cases() -> Vec<Case> {
     let mut ended = Log::new();
     ended.rotate(&[], true);
     assert_eq!(
-        build::revoke_unsigned(&ended.chain, &["d1".to_string()]).unwrap_err(),
+        build::revoke_unsigned(&ended.chain, &["d1".to_string()], None).unwrap_err(),
         build::BuildError::Ended,
         "the builder refuses to build on an ended log"
     );
@@ -697,6 +739,7 @@ pub fn refusal_cases() -> Vec<Case> {
         prev: Some(ended.chain.head().hash.clone()),
         op: Op::Revoke {
             revoke: vec!["d1".into()],
+            since: None,
         },
         proof: Vec::new(),
     };

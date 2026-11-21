@@ -345,14 +345,33 @@ and answers `JoinAdded`, so a repeated claim keeps the first row's identity and 
   key: `valid`, as before key logs. No anchor and a log lists the key: judged as anchored at
   the seq that added the key. With an anchor: no log lists the key, `invalid`; nothing known
   or the anchor past the trusted seq, `cantCheck`; a master key, `invalid`; the key added
-  after the anchor or revoked at or before it, `invalid`; a bot key whose scope is past its
+  after the anchor, revoked at or before it, or unlinked at or before it, `invalid`; a bot key whose scope is past its
   `expires` by the clock now, `invalid`. A key revoked after the anchor: `valid` only when the
   link is known to have entered before the `revoke`, else `flagged`. The only order a store
   knows is its own history (`check_entered`): a link it already counted (stored `valid`)
   before the revocation was accepted. Otherwise the link is `flagged`, and stays so until
   the space's order (identity slice 3.B) says which came first; a reader that synced
   after the revocation shows an earlier link of the key `flagged` where an early reader
-  counted it. No receipt-time rule and no attestation stands in for that order.
+  counted it. No attestation stands in for that order.
+  **`since`**: a `revoke` may name a `since` (ms). A link of the revoked key that this
+  executor first received at or after it is `flagged`, even when stored `valid` before. The
+  time is the executor's own, never the link's timestamp or anchor. The link store keeps it
+  as a receipt of the signed statement, not on the link: one receipt per proof key and
+  signature (a hash of both, length-prefixed), `ad4m://ontology/receivedAt` on a
+  `receipt:<hash>` node in the named graph `ad4m://receipts`, which no link read, SPARQL
+  query, snapshot or export touches. It is written only for a proof whose signature holds,
+  only when none exists (set once, never changed), and nothing removes it: a removal and a
+  re-add (a local diff or a peer's, which removes before it adds), a re-check, a rewrite and
+  `clear` keep it. A forged proof of the same fields gets none, so it cannot lend its time to
+  the real signature that arrives later. The judge reads the receipt of the link's stored
+  proof. A link first received before `since` keeps the rule above; a link stored before
+  receipts has none and is judged by that rule too. A revoke with a `since` fires the same `VerdictChange` as any revoke, and the
+  re-check re-judges the key's stored links, `valid` ones included.
+  **`unlink`**: a link of an unlinked key anchored below the unlink's seq is judged as for
+  an active key; anchored at or after it, `invalid` (`unlinked`). An unlink fires the same
+  `VerdictChange` as a revoke (`KeyVerdict::Unlinked`), and the link re-check follows. Known limit: a surviving unlinked key's holder can still sign a link with
+  an old anchor, and it counts until the person revokes (with a `since`). So the client's
+  self-unlink destroys the local key.
 - **Admission needs a confirmed head** (`check_signed_with`, `KeyMap::admits`). A new link
   counts (`valid`) only when the store confirmed the signer's trusted head (`accept`,
   `KeyMap::note_confirmed`) less than `ADMIT_FRESHNESS` ago, whatever its anchor: an older

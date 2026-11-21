@@ -13,7 +13,10 @@
 //!   pushes that failed, and the device's side that takes it from its inbox.
 //! - [`enc`]: the device's enc key, held by the app, and [`WithEncKey`], which opens the
 //!   inbox and the record key here: the executor passes only sealed text.
-//! - [`flows::revoke`]: a `revoke` signed by the current master key, published.
+//! - [`flows::revoke`]: a `revoke` signed by the current master key, published; with an
+//!   optional `since` for a lost or stolen key.
+//! - [`flows::unlink`]: an `unlink` signed by the key itself (it then destroys the key) or by
+//!   the current master key.
 //! - [`flows::requests`]: the holder's answer to a device's request (send the master key,
 //!   confirm a revocation).
 //! - [`record`]: the private details record, opened, merged and written in one place.

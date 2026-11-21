@@ -144,7 +144,7 @@ pub async fn answer<R: ExecutorRpc>(
             let unlocked = vault.unlock(&scid, MasterUse::Revoke, clock.now())?;
             let signer = unlocked.signer(clock.now())?;
             let revoked =
-                revoke_with(executor, vault, did, &chain, signer, key_ids, random).await?;
+                revoke_with(executor, vault, did, &chain, signer, key_ids, None, random).await?;
             let chain = chain_of(executor, did).await?;
             delete(executor, &chain, did, signer, &request.id, clock, random).await?;
             Ok(Answered::Revoked(revoked))
