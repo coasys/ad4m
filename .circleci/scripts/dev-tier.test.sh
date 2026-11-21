@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tests for .circleci/scripts/dev-tier.sh. A scratch git repo stands in for dev; a
 # fake `curl` on PATH answers CircleCI and GitHub from fixture files and records
-# every request, so they need no network. About a second.
+# every request, so they need no network. About 7 seconds (the stash checks wait 1 s each).
 # Run: bash .circleci/scripts/dev-tier.test.sh
 
 set -uo pipefail

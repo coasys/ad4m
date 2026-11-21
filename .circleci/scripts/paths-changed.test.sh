@@ -2,7 +2,7 @@
 # Tests for .circleci/scripts/paths-changed.sh. Scratch git repos (a bare one is
 # `origin`), no network. The skip list is the real one: read from
 # integration-tests-sfu-e2e's `skip_paths` default in .circleci/config.yml, so a
-# change to that list is tested here. About two seconds.
+# change to that list is tested here. About 6 seconds.
 # Run: bash .circleci/scripts/paths-changed.test.sh
 
 set -uo pipefail

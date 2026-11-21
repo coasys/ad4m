@@ -700,7 +700,7 @@ jobs:
           name: Test should-run-heavy.sh
           command: bash .circleci/scripts/should-run-heavy.test.sh
       - run:
-          # Scratch git repos and a fake curl, no network; about two seconds.
+          # Scratch git repos and a fake curl, no network; about 15 seconds.
           name: Test paths-changed.sh and dev-tier.sh (sfu-e2e path gate, 2-hourly dev tier)
           command: |
             bash .circleci/scripts/paths-changed.test.sh
