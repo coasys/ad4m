@@ -154,15 +154,35 @@ pub(super) async fn resolve_includes_recursive(
             _ => {}
         }
 
-        let rel = match shape.include_relations.iter().find(|r| r.name == *rel_name) {
-            Some(r) => r,
-            None => continue,
-        };
-
         let mut sub_query = match include_val {
             IncludeValue::Bool(true) => ModelQueryInput::default(),
             IncludeValue::SubQuery(sq) => *sq.clone(),
             _ => continue,
+        };
+
+        let undeclared;
+        let rel = match (
+            shape.include_relations.iter().find(|r| r.name == *rel_name),
+            sub_query.through.as_deref(),
+        ) {
+            (Some(r), None) => r,
+            (Some(r), Some(through)) => {
+                if r.predicate != through {
+                    return Err(anyhow!(
+                        "include on relation '{rel_name}': the class declares it through \
+                         '{}', and the include names '{through}'. Drop `through` to read \
+                         the declared relation, or include it under another name.",
+                        r.predicate
+                    ));
+                }
+                r
+            }
+            (None, Some(_)) => {
+                undeclared = undeclared_relation(rel_name, &sub_query)?;
+                &undeclared
+            }
+            // Not a relation of this class, and nothing says which link it means.
+            (None, None) => continue,
         };
         if sub_query.link_status.is_none() {
             sub_query.link_status = link_status.cloned();
@@ -203,6 +223,61 @@ pub(super) async fn resolve_includes_recursive(
         }
     }
     Ok(())
+}
+
+/// The relation an include names with `through` and `kind`, for a class that
+/// does not declare it.
+///
+/// It names no target class, since the class reading it knows nothing about
+/// what links to it, so its sources are hydrated as the classes they are:
+/// `polymorphic` is its default, as for a declared untyped relation, and an
+/// explicit `polymorphic: false` is refused by the same check.
+///
+/// Only the reverse kinds. An outgoing link the class does not declare has no
+/// targets in the hydrated instance to read, and is reachable through `links`.
+pub(super) fn undeclared_relation(
+    rel_name: &str,
+    sub_query: &ModelQueryInput,
+) -> Result<ShapeRelation, Error> {
+    let through = sub_query.through.as_deref().unwrap_or_default();
+    let predicate = validate_iri(through).map_err(|_| {
+        anyhow!(
+            "include on relation '{rel_name}': `through` must be a predicate IRI, got '{through}'"
+        )
+    })?;
+    let kind = match sub_query.kind.as_deref() {
+        Some(kind @ ("belongsToOne" | "belongsToMany")) => kind,
+        Some(kind @ ("hasOne" | "hasMany")) => {
+            return Err(anyhow!(
+                "include on relation '{rel_name}': `kind: {kind}` reads an outgoing link, \
+                 and only the links pointing at an instance can be read through a relation \
+                 its class does not declare. Read an outgoing one with `links`."
+            ))
+        }
+        Some(other) => {
+            return Err(anyhow!(
+                "include on relation '{rel_name}': `kind` must be `belongsToOne` or \
+                 `belongsToMany`, got '{other}'"
+            ))
+        }
+        None => {
+            return Err(anyhow!(
+                "include on relation '{rel_name}': `through` needs a `kind` \
+                 (`belongsToOne` or `belongsToMany`) to say how many it reads"
+            ))
+        }
+    };
+    Ok(ShapeRelation {
+        name: rel_name.to_string(),
+        predicate: predicate.to_string(),
+        direction: "reverse".to_string(),
+        kind: kind.to_string(),
+        max_count: (kind == "belongsToOne").then_some(1),
+        target_class_name: String::new(),
+        target_class_uri: String::new(),
+        target_class: String::new(),
+        polymorphic: true,
+    })
 }
 
 /// Refuse `limit`/`offset` on a polymorphic include.

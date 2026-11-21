@@ -944,6 +944,21 @@ The sub-query accepts: `where`, `order`, `limit`, `offset`, `include`, and `prop
 
 `limit` and `offset` apply to **each parent** on its own: `include: { comments: { limit: 5 } }` on a page of twenty recipes gives every recipe its own five comments (chosen by the include's `order`, or oldest first without one). A comment linked from two recipes counts toward each. A `polymorphic` include refuses both.
 
+#### Including a link the class does not declare
+
+An include names a relation the class declares, and any other name is skipped. A class cannot declare every link another app may later point at its instances: a conversation links to the action items it produced, and an action item's class, written by whoever wrote it, says nothing about conversations. Name the predicate with `through` and how many with `kind`, and the include reads the instances linking to each result:
+
+```typescript
+const items = await ActionItem.findAll(perspective, {
+  include: { extractedFrom: { through: 'we://extracted', kind: 'belongsToOne' } },
+});
+// items[0].extractedFrom: the conversation, or null when nothing links to it
+```
+
+- `kind` is `belongsToOne` (one instance, or `null`) or `belongsToMany` (a list). Only links pointing *at* the instance can be read this way; an outgoing one the class does not declare is reachable with [`links`](#per-link-rows-with-links).
+- The linking instances are hydrated as the classes they are, as a `polymorphic` include is, so the include refuses `limit` and `offset`. They arrive as plain objects carrying `__subjectClass`.
+- Where the class does declare the name, the declaration wins: the same predicate in `through` changes nothing, and a different one is an error.
+
 ### Sparse Fieldsets with `properties`
 
 Only hydrate specific properties to avoid unnecessary work (especially useful for properties with non-literal `resolveLanguage` that trigger network calls):

@@ -129,6 +129,8 @@ mod test_helpers;
 #[cfg(test)]
 mod timestamp_probe_tests;
 pub(crate) mod types;
+#[cfg(test)]
+mod undeclared_include_tests;
 mod union;
 pub(crate) mod utils;
 
