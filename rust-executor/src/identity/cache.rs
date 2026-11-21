@@ -663,6 +663,20 @@ CREATE TABLE IF NOT EXISTS identity_key_marks (
     UNIQUE (multikey, scid, expires)
 );";
 
+/// Applied after [`META_SCHEMA`], in order, each safe to run again. A mark is one row per
+/// `(multikey, scid, expires-or-none)`: the table's own `UNIQUE` does not hold for a
+/// NULL `expires` (SQLite treats NULLs as distinct), so the first statement collapses the
+/// duplicates an earlier release wrote (keeping the newest id, the one a sweep from an
+/// older mark still finds), the unique index then makes a repeated mark a no-op, and the
+/// last index leads on `expires` for [`KelCache::marked_expiring`] and the retirement.
+const MARKS_MIGRATION: &str = "DELETE FROM identity_key_marks WHERE id NOT IN (
+    SELECT MAX(id) FROM identity_key_marks GROUP BY multikey, scid, IFNULL(expires, -1)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS identity_key_marks_once
+    ON identity_key_marks (multikey, scid, IFNULL(expires, -1));
+CREATE INDEX IF NOT EXISTS identity_key_marks_expires
+    ON identity_key_marks (expires) WHERE expires IS NOT NULL;";
+
 fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -861,6 +875,7 @@ impl KelCache {
         key_map: Arc<KeyMap>,
     ) -> Result<Self, CacheError> {
         meta.execute_batch(META_SCHEMA).map_err(storage)?;
+        meta.execute_batch(MARKS_MIGRATION).map_err(storage)?;
         Ok(KelCache {
             store,
             meta: StdMutex::new(meta),
@@ -951,7 +966,8 @@ impl KelCache {
         };
         for key in changed_keys {
             if let Err(e) = meta.execute(
-                "INSERT INTO identity_key_marks (multikey, scid, expires) VALUES (?1, ?2, NULL)",
+                "INSERT INTO identity_key_marks (multikey, scid, expires) VALUES (?1, ?2, NULL)
+                 ON CONFLICT DO NOTHING",
                 params![key, scid],
             ) {
                 log::warn!("identity: could not journal the change of {key} in {scid}: {e}");
@@ -964,7 +980,8 @@ impl KelCache {
             }
             for (_, scope) in &record.scopes {
                 if let Err(e) = meta.execute(
-                    "INSERT OR IGNORE INTO identity_key_marks (multikey, scid, expires) VALUES (?1, ?2, ?3)",
+                    "INSERT INTO identity_key_marks (multikey, scid, expires) VALUES (?1, ?2, ?3)
+                     ON CONFLICT DO NOTHING",
                     params![record.sign, scid, scope.expires as i64],
                 ) {
                     log::warn!(
@@ -989,6 +1006,38 @@ impl KelCache {
             .query_map(params![id as i64], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(storage)?;
         rows.collect::<Result<_, _>>().map_err(storage)
+    }
+
+    /// Retires the marks nothing reads again, after their consumers processed them. The
+    /// rule follows the two readers: [`KelCache::marked_since`] only reads ids past the
+    /// recovery's `swept` mark, so a change mark (no `expires`) at or below `swept` is
+    /// spent; [`KelCache::marked_expiring`] only reads `expires` past the tick's
+    /// `expired_until`, so a scope mark at or below it is spent (the tick keeps a failed
+    /// re-check's signers itself, and a lag sweep does not need a scope mark, which is not a
+    /// verdict change). A mark neither reader will read again is never needed: a repeated
+    /// change writes a fresh row. Returns the rows deleted.
+    pub(crate) fn retire_marks(&self, swept: u64, expired_until: u64) -> Result<usize, CacheError> {
+        let meta = self.meta.lock().map_err(storage)?;
+        meta.execute(
+            "DELETE FROM identity_key_marks
+             WHERE (expires IS NULL AND id <= ?1) OR (expires IS NOT NULL AND expires <= ?2)",
+            params![swept as i64, expired_until as i64],
+        )
+        .map_err(storage)
+    }
+
+    /// Every journal row as `(id, multikey, scid, expires)`, for tests.
+    #[cfg(test)]
+    pub(crate) fn mark_rows(&self) -> Vec<(i64, String, String, Option<i64>)> {
+        let meta = self.meta.lock().unwrap();
+        let mut statement = meta
+            .prepare("SELECT id, multikey, scid, expires FROM identity_key_marks ORDER BY id")
+            .unwrap();
+        statement
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
     }
 
     /// The id of the last journaled mark (0 for none): the recovery's next `since`.

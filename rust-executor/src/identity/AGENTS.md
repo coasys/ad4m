@@ -360,11 +360,12 @@ and answers `JoinAdded`, so a repeated claim keeps the first row's identity and 
   or the anchor past the trusted seq, `cantCheck`; a master key, `invalid`; the key added
   after the anchor or revoked at or before it, `invalid`; a bot key whose scope is past its
   `expires` by the clock now, `invalid`. A key revoked after the anchor: `valid` only when the
-  link is known to have entered before the `revoke`, else `flagged`. Two witnesses prove
-  that order to a store (`SparqlStore::vouched_by_notice`, `check_entered`): the store's own
-  history — a link it already counted (stored `valid`) before the revocation was accepted —
-  and a revocation notice (below). With neither, the link is `flagged`; with either, every
-  honest reader reaches `valid`, whenever it synced.
+  link is known to have entered before the `revoke`, else `flagged`. The only order a store
+  knows is its own history (`check_entered`): a link it already counted (stored `valid`)
+  before the revocation was accepted. Otherwise the link is `flagged`, and stays so until
+  the space's order (identity slice 3.B) says which came first; a reader that synced
+  after the revocation shows an earlier link of the key `flagged` where an early reader
+  counted it. No receipt-time rule and no attestation stands in for that order.
 - **Admission needs a confirmed head** (`check_signed_with`, `KeyMap::admits`). A new link
   counts (`valid`) only when the store confirmed the signer's trusted head (`accept`,
   `KeyMap::note_confirmed`) less than `ADMIT_FRESHNESS` ago, whatever its anchor: an older
@@ -409,26 +410,12 @@ and answers `JoinAdded`, so a repeated claim keeps the first row's identity and 
   stored-link read selects `byBot` and `judgementVersion` beside `person` and decodes them as
   `sparql_store::decode_proof` does (a stale judgement: no person, no mark). A new read of
   stored links that keeps `person` must keep both.
-- **A revocation notice** (`NOTICE_PREDICATE`, `ad4m://entered-before-revoke`) is a link an
-  executor writes when the key map accepts a revocation: for every stored `valid` link of
-  the revoked key, one link `(reifier(L), ad4m://entered-before-revoke, person)` signed by a
-  device key of the same identity the revocation left valid, anchored at or past the
-  `revoke`'s seq (`identity::publish_revocation_notices`,
-  `PerspectiveInstance::publish_revocation_notices` — the revoking executor is the one that
-  knows which links it counted before its store confirmed the revocation). A still-valid
-  signer is required: the revoked key itself cannot forge one, and nobody can write it
-  before the revocation was learnt, so a `valid` notice is shareable, checkable proof the
-  vouched link entered the space first. A reader applies it in `vouched_by_notice`: the
-  notice's direct triple must point at the link's reifier and the identity that revoked its
-  signer (`identity::revocation_of` names both from the key map), and its stored person and
-  `proofAnchor` must match. Notices are ordinary links — shared in a neighbourhood, local
-  otherwise — so they sync like everything else and judge themselves by the same rules.
 - **The re-check** (`run_recheck`, started by `init`): on each `VerdictChange` the links of
-  that key (and, for a revocation, the notices above); every 60 s the links of bot keys
+  that key; every 60 s the links of bot keys
   whose scope `expires` fell since the last tick (`KeyMap::expiring` plus the journaled
-  marks, below — a log the map dropped still has its row), then the `cantCheck` links and
-  the `flagged` ones (`Recheck::Flagged`: a revocation notice arriving later may vouch for
-  one). Each is judged again and rewritten when
+  marks, below — a log the map dropped still has its row), then the `cantCheck` links. A
+  `flagged` link is not swept: it waits for 3.B's space order. Each is judged again and
+  rewritten when
   the verdict or person changed (`PerspectiveInstance::recheck_links`), except that neither
   a re-check nor a write of the same proof ever replaces a stored `valid` with `cantCheck`
   (`verdict::replaces`): the stored `valid` is the order the executor knows, and a log that
@@ -448,11 +435,17 @@ and answers `JoinAdded`, so a repeated claim keeps the first row's identity and 
   (`marked_since`, their logs read back into the map first so the links are judged with
   them) and then every link stored with a person (`Recheck::Logged`), so a lost change of a
   log already evicted is still made up for — including a link stored `valid` with no person
-  whose log only arrived inside the lost window. A journaled key the restored log shows
-  revoked gets its revocation notices too: a `Revoked` change lost in the lag still reaches
-  `publish_revocation_notices`. The expiry tick likewise reads a journaled
+  whose log only arrived inside the lost window. The expiry tick likewise reads a journaled
   log back before re-judging its bot's links (`expired_signers`, `marked_expiring`). `reset`
-  drops a log's rows with the rest of its copy. Reads page by
+  drops a log's rows with the rest of its copy. The journal stays small: a mark is one row
+  per `(key, scid, expires-or-none)` (a unique index over `IFNULL(expires, -1)`, since the
+  table's own `UNIQUE` does not hold for NULL; a repeated mark, such as a revoked key
+  reported again when its evicted log is read back, is `ON CONFLICT DO NOTHING`; the schema
+  migration collapses duplicates an earlier release wrote). `run_recheck` retires rows once
+  their reader is past them (`retire_marks`): a change mark when a lag sweep passed its id
+  (`marks_swept`), a scope mark when the tick read its `expires` (`expired_until`). With no
+  lag, change marks stay until the next sweep, at most one per key and log.
+  `marked_expiring` uses an index that leads on `expires`. Reads page by
   reifier IRI (`RECHECK_BATCH` rows): a key's links are read to the last page; the
   `cantCheck` pass reads one page per tick from `recheck_cursor` and wraps at the end, so
   links that stay unresolvable do not hide the ones after them. Rewritten links go through
