@@ -442,6 +442,8 @@ pub struct DeviceView {
     pub added_seq: u64,
     #[ts(type = "number | null")]
     pub revoked_seq: Option<u64>,
+    #[ts(type = "number | null")]
+    pub unlinked_seq: Option<u64>,
     /// The key is this agent's device key.
     pub this_device: bool,
 }

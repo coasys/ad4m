@@ -15,7 +15,7 @@
 //! {"cmd":"waitClaim"}                                -> {"matchCode","deviceKey","hint","canKeepMaster"}
 //! {"cmd":"confirm","name":"Desk","kind":"desktop-app","keepMaster":true}
 //!                                                    -> {"seq","keyId","master","record"}
-//! {"cmd":"revoke","did":"did:scid:…","keyIds":["d2"]}            -> {"seq","record"}
+//! {"cmd":"revoke","did":"did:scid:…","keyIds":["d2"],"since":ms?} -> {"seq","record"}
 //! {"cmd":"sendMaster","did":"did:scid:…","keyId":"d2"}           -> {"id","secret","record"}
 //! {"cmd":"takeMaster"}                                          -> {"did","index","record"} | null
 //! {"cmd":"record","did":"did:scid:…"}                            -> {"version","record"} | null
@@ -528,7 +528,8 @@ async fn main() {
                     let did = field(&command, "did")?;
                     let ids: Vec<String> = serde_json::from_value(command["keyIds"].clone())
                         .map_err(|e| format!("keyIds: {e}"))?;
-                    let revoked = revoke(&executor, &vault, did, &ids, &CLOCK, &RANDOM)
+                    let since = command["since"].as_u64();
+                    let revoked = revoke(&executor, &vault, did, &ids, since, &CLOCK, &RANDOM)
                         .await
                         .map_err(|e| e.to_string())?;
                     Ok(json!({ "seq": revoked.head.seq, "record": written(&revoked.record) }))
