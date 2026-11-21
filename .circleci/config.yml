@@ -35,8 +35,8 @@ references:
 # `heavy_gate`: on a draft PR, a PR whose base is not dev, or a branch with no PR they halt
 # green at once (.circleci/scripts/should-run-heavy.sh). The full-ci label or [full-ci] in
 # the commit message runs them anyway.
-# Tiers (CI-PLAN section 3): integration-tests-sfu-e2e runs on a PR only when the PR
-# touches SFU files (.circleci/scripts/paths-changed.sh). It, integration-tests-mcp and
+# Tiers (CI-PLAN section 3): integration-tests-sfu-e2e skips on a PR only when every file
+# the PR changes is on its skip list (.circleci/scripts/paths-changed.sh). It, integration-tests-mcp and
 # integration-tests-email-verification run on dev in workflow `dev-2-hourly`, every 2 hours
 # when dev has moved. A red run there opens the GitHub issue "dev red: <job>"
 # (.circleci/scripts/dev-tier.sh).
@@ -151,13 +151,15 @@ commands:
           # `build`); anything but its "skip" answer runs the suite, so a GitHub API
           # failure costs a full run, never a skipped one. A halted job is green: a PR
           # that gets ready or retargeted to dev without a push keeps that green until
-          # its workflow is rerun.
+          # its workflow is rerun. An override (the label, [full-ci], the nightly) is
+          # written to $BASH_ENV as CI_FULL_CI, so a later path gate in the job honours
+          # the same decision.
           name: Stack gate (heavy suites only for non-draft PRs to dev)
           environment:
             HEAVY_GATE_FORCE: << pipeline.parameters.run-nightly-llm >>
           command: |
             rc=0
-            bash .circleci/scripts/should-run-heavy.sh || rc=$?
+            HEAVY_GATE_EXPORT="$BASH_ENV" bash .circleci/scripts/should-run-heavy.sh || rc=$?
             if [ "$rc" = 10 ]; then
               circleci-agent step halt
             fi
@@ -369,10 +371,11 @@ commands:
           may be gone.
         type: boolean
         default: false
-      paths_gate:
+      skip_paths:
         description: >-
-          Git pathspecs, space-separated. When set, the job halts green on a PR whose
-          own changes touch none of them, and on dev (the 2-hourly tier runs it there).
+          Paths, space-separated (rules in .circleci/scripts/paths-changed.sh). When set,
+          the job halts green on a PR whose own changed files are all on this list, and
+          on dev (the 2-hourly tier runs it there).
         type: string
         default: ""
       dev_tier:
@@ -401,14 +404,17 @@ commands:
       - test_artifacts_dir
       - heavy_gate
       - when:
-          condition: << parameters.paths_gate >>
+          condition: << parameters.skip_paths >>
           steps:
             - run:
-                # Anything but the script's "skip" answer runs the job.
-                name: Path gate (on a PR, run only when these paths changed)
+                # Anything but the script's "skip" answer runs the job. heavy_gate's
+                # full-ci decision (CI_FULL_CI in $BASH_ENV) runs it too. set -f: the
+                # list holds globs for the script, not for this shell.
+                name: Path gate (on a PR, skip only when every changed file is on the skip list)
                 command: |
+                  set -f
                   rc=0
-                  bash .circleci/scripts/paths-changed.sh << parameters.paths_gate >> || rc=$?
+                  bash .circleci/scripts/paths-changed.sh << parameters.skip_paths >> || rc=$?
                   if [ "$rc" = 10 ]; then
                     circleci-agent step halt
                   fi
@@ -909,11 +915,20 @@ jobs:
   # executor, local languages (no Holochain). About 4 minutes. E6 shapes the
   # loopback with `tc` for its own ports only (runners share the host), and
   # skips where passwordless sudo is missing.
-  # On a PR it runs only when the PR touches the paths below; on dev it runs in
-  # the 2-hourly tier. The paths: the SFU and its RPC in the executor, the SDK's
-  # call client (core/src/neighbourhood: SfuManager, MeshManager, Session and
-  # the NeighbourhoodClient/Proxy call methods), the suite and its helpers, the
-  # test package's dependencies (@roamhq/wrtc), and CI itself.
+  # On a PR it halts green only when every file the PR changes is on skip_paths
+  # below; any other file, a new one too, runs it. On dev it runs in the 2-hourly
+  # tier. The list holds only what the job cannot read: the docs and other apps
+  # (docs/, docs-src/, ui/, ad4m-hooks/, test-runner/, plugins/), deployment
+  # and repo tooling, top-level Markdown and licence files, the other test suites
+  # (tests/js/tests/ except this suite, the AI and identity helpers, the bats and
+  # Rust-language tests) and the nightly's scripts. Workspace and crate manifests
+  # (package.json, Cargo.toml, build.rs) run it wherever they are, since pnpm
+  # install and cargo resolve the whole workspace. Kept off the list on purpose:
+  # the executor and every crate it builds from, core/, connect/ (tests/js
+  # links it), dapp/ and bootstrap-languages/ (in the binary or the stash),
+  # ai-wind-tunnel/ (the executor embeds its JSON), tests/js/utils, helpers,
+  # scripts, sdna and languages, the lockfiles, .cargo/, rust-toolchain.toml and
+  # .circleci/. Tested against this list: .circleci/scripts/paths-changed.test.sh.
   integration-tests-sfu-e2e:
     machine: true
     resource_class: coasys/marvin
@@ -921,17 +936,31 @@ jobs:
       dev_tier:
         type: boolean
         default: false
-      paths_gate:
+      skip_paths:
         # Empty in the 2-hourly tier: there the job always runs.
         type: string
         default: >-
-          rust-executor/src/sfu/ rust-executor/src/api/sfu_ws.rs core/src/neighbourhood/
-          tests/js/tests/sfu-e2e.test.ts tests/js/helpers/sfu/ tests/js/package.json .circleci/
+          docs/ docs-src/ ui/ ad4m-hooks/ test-runner/ plugins/ planning/
+          deploy/ docker/ Dockerfile docker-entrypoint.sh
+          .github/ .gitlab-ci.yml .claude/ .codegraph/ .githooks/ hooks/ .vscode/
+          setup-hooks.sh setup-hooks.bat setVersion.js .npmignore .config/nextest.toml
+          *.md CHANGELOG LICENSE CNAME
+          tests/js/tests/ !tests/js/tests/sfu-e2e.test.ts
+          tests/js/helpers/ai-models.ts tests/js/helpers/ai-upstream.ts
+          tests/js/helpers/ai-wind-tunnel/ tests/js/helpers/identity.ts
+          tests/js/demo-multi-user.js tests/js/demo-working.js
+          tests/js/email-verification-test-with-setup.sh tests/js/test-multi-user-with-setup.sh
+          tests/binaries.bats tests/integration.bats tests/test_helper/ tests/potluck.pl
+          tests/rust-languages/ tests/transcription_test.m4a tests/transcription_test.wav
+          scripts/coasys-spaces.sh scripts/coasys-spaces.test.sh scripts/run-llm-e2e.sh
+          scripts/we-agent-tools-cache.test.sh scripts/ci-fix-workdir.test.sh
+          scripts/install-hc-toolchain.test.sh
+          !*/package.json !*/Cargo.toml !*/build.rs
     steps:
       - setup_integration_test_environment:
           local: true
           dev_tier: << parameters.dev_tier >>
-          paths_gate: << parameters.paths_gate >>
+          skip_paths: << parameters.skip_paths >>
       - run:
           name: Run SFU end-to-end tests (local languages, no Holochain)
           command: |
@@ -1557,7 +1586,7 @@ workflows:
       - integration-tests-js:
           requires:
             - build
-      # On a PR only when SFU files change (the job's path gate); on dev in dev-2-hourly.
+      # On a PR unless every changed file is on its skip list (the job's path gate); on dev in dev-2-hourly.
       - integration-tests-sfu-e2e:
           requires:
             - build
@@ -1619,7 +1648,7 @@ workflows:
     jobs:
       - integration-tests-sfu-e2e:
           dev_tier: true
-          paths_gate: ""
+          skip_paths: ""
           context: [nightly-llm-e2e, dev-tier-github]
           serial-group: << pipeline.project.slug >>/dev-2-hourly-sfu-e2e
       - integration-tests-mcp:

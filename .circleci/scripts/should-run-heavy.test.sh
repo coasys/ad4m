@@ -106,6 +106,7 @@ check "workflow cache: next job after a failure asks again" 10 '^skip: no open P
 # exported <name> <expected CI_FULL_CI value, empty: none>
 exported() {
   local got=""
+  # shellcheck disable=SC2016 # expanded by the inner shell
   [ -s "$TMP/env" ] && got="$(env -i bash -c '. "$1"; printf %s "${CI_FULL_CI:-}"' _ "$TMP/env")"
   if [ "$got" = "$2" ]; then echo "  ok: $1 -> CI_FULL_CI='$got'"
   else echo "  FAIL: $1: CI_FULL_CI='$got' (want '$2'), file: $(cat "$TMP/env" 2>/dev/null)"; FAILED=1; fi

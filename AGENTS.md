@@ -193,7 +193,7 @@ This runs all four nightly jobs.
 
 | Suite | Languages | CI |
 |---|---|---|
-| `test-sfu-e2e`: single executor, end to end (about 4 min) | local, no Holochain: `pnpm run prepare-test-local` (`test-main-sfu-e2e` does both) | `integration-tests-sfu-e2e`: on a PR only when it touches SFU files (path list in the job), on dev every 2 hours (`dev-2-hourly`) |
+| `test-sfu-e2e`: single executor, end to end (about 4 min) | local, no Holochain: `pnpm run prepare-test-local` (`test-main-sfu-e2e` does both) | `integration-tests-sfu-e2e`: on every PR except one whose changed files are all on the job's `skip_paths` (docs, other apps, other suites), on dev every 2 hours (`dev-2-hourly`). The `full-ci` label or `[full-ci]` runs it anyway |
 | `test-sfu-browsers`: SFU and mesh calls in real Chromium, Firefox and WebKit, mixed (about 1 min past the world's start) | local, no Holochain: `pnpm run prepare-test-local` (`test-main-sfu-browsers` does both) | nightly, `integration-tests-sfu-browsers` |
 | `test-sfu`: `sfu-cascade`, `sfu-session` (T20, T21), `sfu-mesh` (network baselines) | Holochain: `pnpm run prepare-test` | nightly, `integration-tests-sfu` |
 
