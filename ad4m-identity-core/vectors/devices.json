@@ -1,5 +1,28 @@
 {
   "description": "The device inbox, the private record and the request box. HPKE base mode (RFC 9180): DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20-Poly1305, empty AAD; sealed = base64url(enc || ciphertext). An inbox seal's info is \"coasys:inbox\" || 0x00 || address (\"pre:<a>\" or \"<scid>/<keyId>\"); a record key's is \"coasys:record\" || 0x00 || scid. The record's aad is JCS({scid, version, recoveryKey}); its recoveryKey carries recoveryAttestation {keyId, sig}, the current master m0 over signing_bytes(\"coasys:recovery-key\", {scid, recoveryKey, keyId}); its envelope is signed by d1 over signing_bytes(\"coasys:private-record\", {scid, version, wrapped, recoveryKey, recoveryAttestation, nonce, ciphertext, signer}); the store's receipt for it is its head key over signing_bytes(\"coasys:record-receipt\", {scid, version, envelope, seq, store}), envelope the sha2-256 multihash of JCS(the signed envelope with scid and sig), seq the head when it accepted the write. The ephemeral keys and the record key come from the RNG stream sha256(seed || u64be(i)), 32 bytes per block, with the named seed. The X25519 secrets are sha256(\"enc secret d<n>\") and sha256(\"recovery secret\").",
+  "deviceKinds": {
+    "browserEntry": {
+      "canonical": "{\"address\":null,\"holdsMaster\":false,\"kind\":\"browser\",\"name\":\"Firefox on Pixel 8\",\"operator\":null,\"place\":null,\"runsExecutor\":false}",
+      "value": {
+        "address": null,
+        "holdsMaster": false,
+        "kind": "browser",
+        "name": "Firefox on Pixel 8",
+        "operator": null,
+        "place": null,
+        "runsExecutor": false
+      }
+    },
+    "kinds": [
+      "desktop-app",
+      "phone-app",
+      "browser",
+      "server",
+      "community-host",
+      "coasys-cloud",
+      "bot"
+    ]
+  },
   "log": [
     {
       "add": [

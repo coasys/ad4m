@@ -57,6 +57,25 @@ and answers `JoinAdded`, so a repeated claim keeps the first row's identity and 
   hands the app this executor's challenge and DID, but the app signs the server's own
   origin, and this executor refuses that. The executor-DID check stays as well. The
   challenge is spent before any of these checks, so a refused statement cannot be retried.
+- **A web login answers a code, not a token** (`connect.rs`, `key_login::login` and
+  `redeem_code`). A statement with `client: {kind: web, origin}` (and the request's `appId`)
+  is the same key login as a native one, with three more checks: the S256 `codeChallenge`
+  (43 base64url characters, a SHA-256), the `origin` normalised, and the origin listed in
+  the app's registry entry. The executor reads `GET <identity.registryUrl>/v1/connect/apps/{appId}`
+  itself (`AppRegistry`: default `https://api.coasys.app`, 5 minute cache, no redirects, no
+  stale answer: an unknown app or origin is `origin`, an unreadable registry is
+  `registry-unavailable`, 503). Never take the frame's word for it. The grant is minted, but its
+  token waits in `Codes` for 60 s: `user.redeemCode {code, codeVerifier}` gives it once, when
+  `S256(verifier)` is the statement's challenge. A code that is used wrong, expires or is
+  dropped ends its grant (`EndUnlessAnswered` lives in the pending entry); a wrong try spends
+  the code. Only a `firstParty` app may hold the operator role (and only on the operator
+  record's identity): any other web app gets the grant of the agent that speaks for the
+  identity, within the capabilities it asked for. The web grant's `auth.app_url` is the origin,
+  and a web renewal statement must name that origin (`grant`). `agent.signSessionStatement`
+  stays native-only. `tests/js/tests/identity-web-login.test.ts` runs it against a real
+  executor: a fake registry on loopback (`AD4M_IDENTITY_REGISTRY_URL`), a browser key held in
+  JS that claims the holder's offer and signs every statement itself (nothing asks the
+  executor to sign).
 - The cache only extends a log. A different event at a held seq that holds (below) records a
   fork, appends nothing and fires `identity-fork` once per fork, to the sessions of the
   identity's local agents.

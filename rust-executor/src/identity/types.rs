@@ -1092,8 +1092,9 @@ pub enum KeyPurpose {
 pub enum SessionClient {
     /// A native app that signed with its own device key (a desktop or phone shell).
     Native,
-    /// A web page that signed through the auth domain. Not accepted yet: a web login answers a
-    /// one-time code, which this executor does not issue.
+    /// A web page that signed through the auth domain with its browser key. The login answers
+    /// a one-time code ([`WebLoginCode`]), never a token. `origin` is the page's origin; it
+    /// must be one of the origins the registry lists for the login's `appId`.
     Web { origin: String },
 }
 
@@ -1125,7 +1126,8 @@ pub struct KeyStatement {
     /// The challenge from `user.sessionChallenge`.
     pub challenge: String,
     pub client: SessionClient,
-    /// PKCE for a web login; a native statement carries none.
+    /// PKCE for a web login (S256 of the verifier the app's page holds, base64url, 43
+    /// characters); a native statement and a renewal carry none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub code_challenge: Option<String>,
@@ -1167,6 +1169,39 @@ pub struct LoginWithKeyParams {
     /// The app the session is for: its name and the capabilities it asks for. The operator
     /// role holds every capability whatever it asks.
     pub app: crate::types::AuthInfoInput,
+    /// The app's id in the platform's registry; a web statement needs it, a native one has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub app_id: Option<String>,
+}
+
+/// `user.loginWithKey` for a web statement: the code that `user.redeemCode` turns into the
+/// session, with the verifier of the statement's `codeChallenge`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct WebLoginCode {
+    /// 32 random bytes, base64url without padding; good for one redeem.
+    pub code: String,
+    /// Unix seconds: 60 s after the login.
+    #[ts(type = "number")]
+    pub expires_at: u64,
+}
+
+/// What `user.loginWithKey` answers: a session for a native statement, a code for a web one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(untagged)]
+pub enum LoginWithKeyResult {
+    Session(KeySessionResult),
+    Code(WebLoginCode),
+}
+
+/// `user.redeemCode` params.
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RedeemCodeParams {
+    pub code: String,
+    /// The PKCE verifier whose S256 is the login's `codeChallenge`.
+    pub code_verifier: String,
 }
 
 /// The role of a session.

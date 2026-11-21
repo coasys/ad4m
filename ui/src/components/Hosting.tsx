@@ -2115,7 +2115,7 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
                   >
                     <j-box mb="400">
                       <j-text size="400" color="ui-500">
-                        Register to appear in ad4m-connect, receive wHOT payments, and enable earnings tracking.
+                        Register to appear in the host list, receive wHOT payments, and enable earnings tracking.
                         Registration is free and takes under a minute.
                       </j-text>
                     </j-box>

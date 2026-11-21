@@ -1113,6 +1113,7 @@ mod tests {
             challenges: Default::default(),
             inbox: Default::default(),
             audiences: Default::default(),
+            connect: Default::default(),
             store_keys_source: crate::identity::StoreSource::Config,
         });
         (service, store)

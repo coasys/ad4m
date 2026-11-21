@@ -1,7 +1,7 @@
 # Installation
 To kick off with AD4M and tap into its agent-centric network, you’ll need to install the core runtime and, for JavaScript UI projects, 
 the client libraries to connect your apps. AD4M provides the AD4M Launcher for ease of use, the AD4M CLI for developer flexibility, 
-and two npm packages—`@coasys/ad4m` and `@coasys/ad4m-connect`—for front-end integration. 
+and two npm packages—`@coasys/ad4m` and `@coasys/connect`—for front-end integration. 
 This guide aligns with the v0.10.1 release candidate (as of March 24, 2025), featuring AI integration and enhanced Social DNA querying.
 
 ## AD4M Launcher
@@ -46,7 +46,7 @@ This fetches metadata for a Language (e.g., social-context) at QmXyz123, outputt
 The ad4m-executor provides the runtime (like the Launcher sans UI), while ad4m offers client commands—together, they’re a developer’s toolkit for AD4M.
 
 ## AD4M Client Libraries for JS UI Projects
-For JavaScript UI projects (React, Vue, etc.), the client libraries `@coasys/ad4m` and `@coasys/ad4m-connect` connect your front-end to an AD4M instance (Launcher or CLI executor).
+For JavaScript UI projects (React, Vue, etc.), the client libraries `@coasys/ad4m` and `@coasys/connect` connect your front-end to an AD4M instance (Launcher or CLI executor).
 `@coasys/ad4m`: The core client, offering direct API access. Install it:
 ```bash
 npm install @coasys/ad4m
@@ -60,34 +60,27 @@ console.log(agent.did); // e.g., "did:key:z6Mk..."
 ```
 It’s suited for custom logic needing full API control.
 
-@coasys/ad4m-connect: A higher-level library with WebSocket connectivity and authentication handling, ideal for streamlined UI integration. Install it:
+`@coasys/connect`: A higher-level library for web apps. It signs the person in with their own browser key and keeps the session fresh. Install it:
 ```bash
-npm install @coasys/ad4m-connect
+npm install @coasys/connect
 ```
 Use it to connect and authenticate:
 ```javascript
+import { getAd4mConnect } from "@coasys/connect";
 
-import Ad4mConnect from "@coasys/ad4m-connect";
- 
-const ui = Ad4mConnect({
-  appName: "My First ADAM App",
-  appDesc: "This is my first app here.",
-  appDomain: "ad4m.dev",
-  appIconPath: "https://i.ibb.co/GnqjPJP/icon.png",
+const { client } = getAd4mConnect({
+  appId: "my-app",
+  endpoints: { authDomain: "https://coasys.id" },
   capabilities: [{ with: { domain: "*", pointers: ["*"] }, can: ["*"] }],
 });
- 
-// .connect() will show the authentication pop up
-ui.connect().then((client) => {
-  // Save the client after authentication is done
-  const perspectives = await client.perspective.all();
-  console.log(perspectives[0].name); // e.g., "MyCommunity"
-});
 
+// The Connect frame opens; the promise answers once the person has signed in.
+const ad4m = await client;
+const perspectives = await ad4m.perspective.all();
 ```
-Authentication Handling: Per [auth docs](/auth), `@coasys/ad4m-connect` manages capability-based auth. On first connect, it requests a capability token from the executor, prompting the user (via Launcher UI or CLI) to approve. Specify required capabilities (e.g., perspective:write) in the config. Once approved, it stores a JWT locally, auto-authenticating future connections. If the executor isn’t running or capabilities mismatch, it retries or prompts again—simplifying secure app setup.
+Authentication handling: see the [auth docs](/auth). The token stays in memory and the library renews it before it ends.
 
-Start with `@coasys/ad4m-connect` for quick UI integration with auth, then use `@coasys/ad4m` for deeper API calls. Ensure the executor (Launcher or ad4m-executor) is active first.
+Start with `@coasys/connect` for a web app that signs in, then use `@coasys/ad4m` for deeper API calls.
 ## System Requirements
 - OS: macOS 10.15+, or modern Linux (e.g., Ubuntu 22.04+, glibc 2.35+). 
   **We are working on a Windows build!.**

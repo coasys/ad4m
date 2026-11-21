@@ -1706,7 +1706,55 @@ fn build_devices() -> Value {
             "value": post,
             "body": ad4m_hash_chain::canonical_json(&serde_json::to_value(&post).unwrap()).unwrap(),
         },
+        // One entry per kind, as the record holds it: a browser's key is a device key of kind `browser`.
+        "deviceKinds": device_kind_vectors(),
     })
+}
+
+/// Every device kind with its wire word, and a browser entry: no executor, no master key.
+fn device_kind_vectors() -> Value {
+    let kinds = [
+        (DeviceKind::DesktopApp, "desktop-app"),
+        (DeviceKind::PhoneApp, "phone-app"),
+        (DeviceKind::Browser, "browser"),
+        (DeviceKind::Server, "server"),
+        (DeviceKind::CommunityHost, "community-host"),
+        (DeviceKind::CoasysCloud, "coasys-cloud"),
+        (DeviceKind::Bot, "bot"),
+    ];
+    let browser = DeviceEntry {
+        name: "Firefox on Pixel 8".into(),
+        kind: DeviceKind::Browser,
+        place: None,
+        address: None,
+        runs_executor: false,
+        holds_master: HoldsMaster::No,
+        master_index: None,
+        vault: None,
+        operator: None,
+    };
+    json!({
+        "kinds": kinds.iter().map(|(_, w)| *w).collect::<Vec<_>>(),
+        "browserEntry": {
+            "value": browser,
+            "canonical": ad4m_hash_chain::canonical_json(&serde_json::to_value(&browser).unwrap()).unwrap(),
+        },
+    })
+}
+
+fn check_device_kinds(file: &Value) {
+    let kinds: Vec<String> = serde_json::from_value(file["kinds"].clone()).unwrap();
+    for word in &kinds {
+        let kind: DeviceKind = serde_json::from_value(json!(word)).unwrap();
+        assert_eq!(serde_json::to_value(kind).unwrap(), json!(word));
+    }
+    assert!(kinds.iter().any(|w| w == "browser"));
+    let entry: DeviceEntry = serde_json::from_value(file["browserEntry"]["value"].clone()).unwrap();
+    assert_eq!(entry.kind, DeviceKind::Browser);
+    assert_eq!(
+        ad4m_hash_chain::canonical_json(&serde_json::to_value(&entry).unwrap()).unwrap(),
+        file["browserEntry"]["canonical"]
+    );
 }
 
 fn check_devices(file: &Value) {
@@ -1843,6 +1891,7 @@ fn check_devices(file: &Value) {
         file["request"]["body"]
     );
     check_post(&post, chain.state(), chain.head().seq, now).unwrap();
+    check_device_kinds(&file["deviceKinds"]);
 }
 
 // ----- Time -----

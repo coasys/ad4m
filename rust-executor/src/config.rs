@@ -244,6 +244,9 @@ pub struct Ad4mConfig {
     /// `identity.allowPrivateSrc`: let the `src` of a DID URL that `identity.resolve` reads
     /// reach loopback and private addresses. Off by default; for tests and local development.
     pub identity_allow_private_src: Option<bool>,
+    /// `identity.registryUrl`: the platform's base URL; a web login reads its app registry
+    /// there (`GET <url>/v1/connect/apps/{appId}`). Unset: `https://api.coasys.app`.
+    pub identity_registry_url: Option<String>,
     /// `public_origins`: the origins clients reach this executor at. A key statement's
     /// `audience` must be one of them; unset, one of this executor's own loopback origins —
     /// and on a listener the network reaches (`listens_on_network`: TLS, or `localhost`
@@ -861,6 +864,7 @@ impl Ad4mConfig {
             identity_store_url: None,
             identity_store_keys: None,
             identity_allow_private_src: None,
+            identity_registry_url: None,
             public_origins: None,
             ai_settings: None,
             hosting_index: None,

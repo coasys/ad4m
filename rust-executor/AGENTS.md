@@ -192,6 +192,10 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   (`PendingRequests::drop_*`, same selection as the grants, `keep`/`before` on the approval's
   time), under the lock a redemption mints under; `generate_capability_token` also refuses an
   approval whose session's grant no longer holds. Operator approvals carry no binding and stay.
+- **Web key login** (`identity/connect.rs`): a statement with `client: web` answers a one-time
+  code (60 s, single use, bound to a PKCE S256 `codeChallenge`), and `user.redeemCode` gives the
+  session for the verifier. The app registry (`identity.registryUrl`, `--identity-registry-url`,
+  `AD4M_IDENTITY_REGISTRY_URL`) decides the origin and the operator role: `src/identity/AGENTS.md`.
 - **Managed agents' wallet keys** are named by the DID (`KEY_NAME_MAIN` for the main agent):
   `AgentService::create_managed_agent_key` creates one under its DID,
   `AgentService::wallet_key_for_did` finds it (cached). A shared wallet cannot name keys, so there

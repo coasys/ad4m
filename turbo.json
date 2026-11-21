@@ -9,7 +9,7 @@
     "build-npm-packages": {
       "dependsOn": [
         "@coasys/ad4m#build",
-        "@coasys/ad4m-connect#build"
+        "@coasys/connect#build"
       ]
     },
     "build-libs": {
@@ -17,7 +17,7 @@
         "@coasys/ad4m-ldk#build",
         "@coasys/dapp#build",
         "@coasys/ad4m#build",
-        "@coasys/ad4m-connect#build",
+        "@coasys/connect#build",
         "@coasys/rust-ad4m-executor#build",
         "@coasys/ad4m-cli#build",
         "@coasys/link-server#build"
@@ -89,7 +89,7 @@
     },
 
     "build-dapp": {
-      "dependsOn": ["@coasys/ad4m#build", "@coasys/ad4m-connect#build", "@coasys/dapp#build"],
+      "dependsOn": ["@coasys/ad4m#build", "@coasys/connect#build", "@coasys/dapp#build"],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
 

@@ -221,15 +221,15 @@ cmd_sdk() {
     pnpm install --no-frozen-lockfile
     (cd core && pnpm install --no-frozen-lockfile)
     pnpm --filter @coasys/ad4m run build
-    pnpm --filter @coasys/ad4m-connect run build
+    pnpm --filter @coasys/connect run build
     rm -rf "$SDK_DIR"
     mkdir -p "$SDK_DIR"
     # pnpm pack writes connect's `workspace:` range on @coasys/ad4m as the version; WE's override
     # sends that to the core tarball as well.
     (cd core && pnpm pack --pack-destination "$SDK_DIR")
-    (cd connect && pnpm pack --pack-destination "$SDK_DIR")
+    (cd connect-lib && pnpm pack --pack-destination "$SDK_DIR")
     sdk_tarball ad4m >/dev/null
-    sdk_tarball ad4m-connect >/dev/null
+    sdk_tarball connect >/dev/null
     ls -l "$SDK_DIR"
 }
 
@@ -263,7 +263,7 @@ use_we_pnpm() {
 cmd_we() {
     local core connect
     core="$(sdk_tarball ad4m)"
-    connect="$(sdk_tarball ad4m-connect)"
+    connect="$(sdk_tarball connect)"
     rm -rf "$WE_DIR"
     mkdir -p "$WE_DIR"
     git -C "$WE_DIR" init -q
@@ -282,7 +282,7 @@ cmd_we() {
       pkg.pnpm = pkg.pnpm || {};
       pkg.pnpm.overrides = pkg.pnpm.overrides || {};
       pkg.pnpm.overrides["@coasys/ad4m"] = "file:" + process.env.CORE_TGZ;
-      pkg.pnpm.overrides["@coasys/ad4m-connect"] = "file:" + process.env.CONNECT_TGZ;
+      pkg.pnpm.overrides["@coasys/connect"] = "file:" + process.env.CONNECT_TGZ;
       fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + "\n");
     ' "$WE_DIR/package.json"
 
@@ -290,7 +290,7 @@ cmd_we() {
     cd "$WE_DIR"
     pnpm install --no-frozen-lockfile
     check_override ad4m "$core"
-    check_override ad4m-connect "$connect"
+    check_override connect "$connect"
     # `pnpm exec` only finds a bin of the filtered package. WE dev declares
     # playwright-core on @we/app-web. The e2e harness (coasys/we#468) moves it
     # to @we/e2e, and filtering the app then fails with "playwright-core not found".

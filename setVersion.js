@@ -56,11 +56,16 @@ if (isPreRelease) {
 }
 fs.writeFileSync('cli/Cargo.toml', cli.newContent)
 
-const connect = JSON.parse(fs.readFileSync('connect/package.json', 'utf8'))
+const connect = JSON.parse(fs.readFileSync('connect-lib/package.json', 'utf8'))
 console.log("Connect version: " + connect.version + " -> " + VERSION)
 connect.version = VERSION
 connect.devDependencies["@coasys/ad4m"] = "workspace:" + VERSION
-fs.writeFileSync('connect/package.json', JSON.stringify(connect, null, 2) + '\n')
+fs.writeFileSync('connect-lib/package.json', JSON.stringify(connect, null, 2) + '\n')
+
+const identityWasm = JSON.parse(fs.readFileSync('identity-wasm/package.json', 'utf8'))
+console.log("Identity wasm version: " + identityWasm.version + " -> " + VERSION)
+identityWasm.version = VERSION
+fs.writeFileSync('identity-wasm/package.json', JSON.stringify(identityWasm, null, 2) + '\n')
 
 const core = JSON.parse(fs.readFileSync('core/package.json', 'utf8'))
 console.log("Core version: " + core.version + " -> " + VERSION)

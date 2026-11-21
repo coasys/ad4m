@@ -23,9 +23,9 @@ words = [
 # `fold_stored`: the replay of a host's own stored, already-verified log, without the signature
 # checks. Only the identity store enables it; never a client, an executor or a wallet.
 stored-fold = []
-# wasm-bindgen exports: the `KelChain` class with `fold` and `import`, `KelHandle.didDocument`, and
-# the `Pow` class (`solve`, `solveRange`, `check`).
-wasm = ["dep:wasm-bindgen", "dep:js-sys"]
+# wasm-bindgen exports: the `KelChain` class with `fold` and `import`, `KelHandle.didDocument`, the
+# `Pow` class (`solve`, `solveRange`, `check`) and the new device's side of linking (`device`).
+wasm = ["dep:wasm-bindgen", "dep:js-sys", "rand_core/getrandom"]
 
 [dependencies]
 ad4m-hash-chain = { path = "../ad4m-hash-chain" }

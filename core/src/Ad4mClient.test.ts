@@ -302,7 +302,10 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
         let n = 0
         return () => ({ challenge: `challenge-${++n}`.padEnd(43, 'x'), executor: 'did:key:z6MkExecutor', expiresAt: 1060 })
     })(),
-    'user.loginWithKey': { token: 'key-jwt', expiresAt: 4600, grantId: 'grant-1', role: 'operator', did: 'did:key:z6MkMain', scid: 'did:scid:coasys:1:QmS' },
+    'user.loginWithKey': (p: Record<string, unknown>) => p.appId
+        ? { code: 'one-time-code', expiresAt: 1060 }
+        : { token: 'key-jwt', expiresAt: 4600, grantId: 'grant-1', role: 'operator', did: 'did:key:z6MkMain', scid: 'did:scid:coasys:1:QmS' },
+    'user.redeemCode': { token: 'web-jwt', expiresAt: 4600, grantId: 'grant-2', role: 'app', did: 'did:key:z6MkMain', scid: 'did:scid:coasys:1:QmS' },
     'user.renewSession': { token: 'renewed-jwt', expiresAt: 8200 },
     'user.currentSession': { role: 'operator', did: 'did:key:z6MkMain', scid: 'did:scid:coasys:1:QmS', keyId: 'd2', grantId: 'grant-1', expiresAt: 4600, operatorSource: 'key' },
     'user.endAllSessions': { ended: 2 },
@@ -1805,6 +1808,20 @@ describe('User and Auth', () => {
         expect(renewalProof.statement.grant).toBe('grant-1');
         expect((await ad4m.agent.renewSession(renewalProof)).token).toBe('renewed-jwt');
         expect(lastRpcCall).toEqual({ type: 'user.renewSession', params: { proof: renewalProof } });
+    });
+
+    test('a web login answers a code, redeemed with the PKCE verifier', async () => {
+        const proof = { statement: { v: 1, purpose: 'login' as const, client: { kind: 'web' as const, origin: 'https://coasys.app' } }, sig: 'zSig' } as any;
+        const app = { appName: 'we', appDesc: '', appDomain: 'coasys.app', capabilities: [] };
+        const answer = await ad4m.agent.loginWithKeyForWeb(proof, app, 'coasys-app');
+        expect(lastRpcCall).toEqual({ type: 'user.loginWithKey', params: { proof, app, appId: 'coasys-app' } });
+        expect(answer.code).toBe('one-time-code');
+        expect('token' in answer).toBe(false);
+
+        const session = await ad4m.agent.redeemCode(answer.code, 'v'.repeat(43));
+        expect(lastRpcCall).toEqual({ type: 'user.redeemCode', params: { code: 'one-time-code', codeVerifier: 'v'.repeat(43) } });
+        expect(session.token).toBe('web-jwt');
+        expect(session.grantId).toBe('grant-2');
     });
 
     test('currentSession() answers the caller\'s own session', async () => {

@@ -4,7 +4,6 @@
   "type": "module",
   "dependencies": {
     "@coasys/ad4m": "workspace:*",
-    "@coasys/ad4m-connect": "workspace:*",
     "@coasys/flux-ui": "^0.9.0",
     "@preact/preset-vite": "^2.4.0",
     "@spartan-hc/holo-hash": "0.7.0",
