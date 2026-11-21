@@ -7,3 +7,4 @@ pub mod requests;
 pub mod restore;
 pub mod revoke;
 pub mod rotate;
+pub mod unlink;

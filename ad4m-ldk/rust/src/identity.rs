@@ -114,6 +114,9 @@ pub struct KeyIndexEntry {
     /// Seq of the revoke or rotate that ended it.
     #[serde(default)]
     pub revoked: Option<u64>,
+    /// Seq of the unlink that stopped it signing anything new.
+    #[serde(default)]
+    pub unlinked: Option<u64>,
     /// The bot scope in force at the head.
     #[serde(default)]
     pub bot: Option<serde_json::Value>,
