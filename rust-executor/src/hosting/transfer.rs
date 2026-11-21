@@ -115,6 +115,174 @@ impl Transfers {
         self.imports.retain(|_, i| i.expires_at > now);
     }
 
+    fn may_prepare(&mut self, person: &str, now: u64) -> Result<(), TransferError> {
+        self.purge(now);
+        if self.exports.values().any(|e| e.person == person) {
+            return Err(TransferError::Busy);
+        }
+        let recent = self.recent(person, now);
+        if recent.len() >= EXPORTS_PER_HOUR {
+            let oldest = recent.iter().min().copied().unwrap_or(now);
+            return Err(TransferError::RateLimited {
+                retry_after_secs: (oldest + HOUR_SECS).saturating_sub(now).max(1),
+            });
+        }
+        Ok(())
+    }
+
+    fn prepare(
+        &mut self,
+        person: &str,
+        bytes: Vec<u8>,
+        now: u64,
+    ) -> Result<Prepared, TransferError> {
+        self.may_prepare(person, now)?;
+        let prepared = Prepared {
+            export_id: new_id(),
+            size: bytes.len() as u64,
+            sha256: hex::encode(Sha256::digest(&bytes)),
+            chunks: bytes.len().div_ceil(CHUNK_BYTES) as u32,
+            expires_at: now + EXPIRY_SECS,
+        };
+        self.prepared
+            .entry(person.to_string())
+            .or_default()
+            .push(now);
+        self.exports.insert(
+            prepared.export_id.clone(),
+            Export {
+                person: person.to_string(),
+                bytes,
+                expires_at: prepared.expires_at,
+            },
+        );
+        Ok(prepared)
+    }
+
+    fn chunk(
+        &mut self,
+        person: &str,
+        export_id: &str,
+        index: u32,
+        now: u64,
+    ) -> Result<String, TransferError> {
+        self.purge(now);
+        let export = self
+            .exports
+            .get_mut(export_id)
+            .filter(|e| e.person == person)
+            .ok_or(TransferError::NotFound)?;
+        let start = (index as usize)
+            .checked_mul(CHUNK_BYTES)
+            .filter(|start| *start < export.bytes.len())
+            .ok_or_else(|| TransferError::Invalid(format!("no chunk {index}")))?;
+        let end = (start + CHUNK_BYTES).min(export.bytes.len());
+        let data = STANDARD.encode(&export.bytes[start..end]);
+        export.expires_at = now + EXPIRY_SECS;
+        if end == export.bytes.len() {
+            self.exports.remove(export_id);
+        }
+        Ok(data)
+    }
+
+    fn begin_import(
+        &mut self,
+        person: &str,
+        size: u64,
+        sha256: &str,
+        max: u64,
+        now: u64,
+    ) -> Result<String, TransferError> {
+        if size > max {
+            return Err(TransferError::TooLarge { bytes: size, max });
+        }
+        self.purge(now);
+        if self.imports.values().any(|i| i.person == person) {
+            return Err(TransferError::Busy);
+        }
+        let import_id = new_id();
+        self.imports.insert(
+            import_id.clone(),
+            Import {
+                person: person.to_string(),
+                size,
+                sha256: sha256.to_ascii_lowercase(),
+                bytes: Vec::new(),
+                chunks: 0,
+                expires_at: now + EXPIRY_SECS,
+            },
+        );
+        Ok(import_id)
+    }
+
+    fn import_chunk(
+        &mut self,
+        person: &str,
+        import_id: &str,
+        index: u32,
+        data: &str,
+        now: u64,
+    ) -> Result<u32, TransferError> {
+        let bytes = STANDARD
+            .decode(data)
+            .map_err(|e| TransferError::Invalid(format!("chunk is not base64: {e}")))?;
+        if bytes.len() > CHUNK_BYTES {
+            return Err(TransferError::Invalid(format!(
+                "a chunk is at most {CHUNK_BYTES} bytes"
+            )));
+        }
+        self.purge(now);
+        let import = self
+            .imports
+            .get_mut(import_id)
+            .filter(|i| i.person == person)
+            .ok_or(TransferError::NotFound)?;
+        if index != import.chunks {
+            return Err(TransferError::Invalid(format!(
+                "expected chunk {}, got {index}",
+                import.chunks
+            )));
+        }
+        if (import.bytes.len() + bytes.len()) as u64 > import.size {
+            return Err(TransferError::Invalid(
+                "more bytes than the import declared".into(),
+            ));
+        }
+        import.bytes.extend_from_slice(&bytes);
+        import.chunks += 1;
+        import.expires_at = now + EXPIRY_SECS;
+        Ok(import.chunks)
+    }
+
+    fn take_import(
+        &mut self,
+        person: &str,
+        import_id: &str,
+        now: u64,
+    ) -> Result<Vec<u8>, TransferError> {
+        self.purge(now);
+        let import = self
+            .imports
+            .get(import_id)
+            .filter(|i| i.person == person)
+            .ok_or(TransferError::NotFound)?;
+        if import.bytes.len() as u64 != import.size {
+            return Err(TransferError::Invalid(format!(
+                "{} of {} bytes received",
+                import.bytes.len(),
+                import.size
+            )));
+        }
+        if hex::encode(Sha256::digest(&import.bytes)) != import.sha256 {
+            return Err(TransferError::Invalid("the sha256 does not match".into()));
+        }
+        Ok(self
+            .imports
+            .remove(import_id)
+            .map(|i| i.bytes)
+            .unwrap_or_default())
+    }
+
     /// `person`'s exports prepared in the last hour; forgets the older ones.
     fn recent(&mut self, person: &str, now: u64) -> Vec<u64> {
         let times = self.prepared.entry(person.to_string()).or_default();
@@ -161,65 +329,18 @@ pub fn decode(bytes: &[u8], max: u64) -> Result<ExportFile, TransferError> {
 /// Whether `person` may start an export now: none open, fewer than [`EXPORTS_PER_HOUR`] in the
 /// last hour. Asked before the file is built, because building it costs.
 pub fn may_prepare(person: &str, now: u64) -> Result<(), TransferError> {
-    let mut t = transfers();
-    t.purge(now);
-    if t.exports.values().any(|e| e.person == person) {
-        return Err(TransferError::Busy);
-    }
-    let recent = t.recent(person, now);
-    if recent.len() >= EXPORTS_PER_HOUR {
-        let oldest = recent.iter().min().copied().unwrap_or(now);
-        return Err(TransferError::RateLimited {
-            retry_after_secs: (oldest + HOUR_SECS).saturating_sub(now).max(1),
-        });
-    }
-    Ok(())
+    transfers().may_prepare(person, now)
 }
 
 /// Keeps `bytes` for `person` to read in chunks. Counts against the hourly limit.
 pub fn prepare(person: &str, bytes: Vec<u8>, now: u64) -> Result<Prepared, TransferError> {
-    may_prepare(person, now)?;
-    let mut t = transfers();
-    let prepared = Prepared {
-        export_id: new_id(),
-        size: bytes.len() as u64,
-        sha256: hex::encode(Sha256::digest(&bytes)),
-        chunks: bytes.len().div_ceil(CHUNK_BYTES) as u32,
-        expires_at: now + EXPIRY_SECS,
-    };
-    t.prepared.entry(person.to_string()).or_default().push(now);
-    t.exports.insert(
-        prepared.export_id.clone(),
-        Export {
-            person: person.to_string(),
-            bytes,
-            expires_at: prepared.expires_at,
-        },
-    );
-    Ok(prepared)
+    transfers().prepare(person, bytes, now)
 }
 
 /// Chunk `index` of `person`'s export, base64. Reading the last chunk ends the export; any
 /// chunk renews its 15 minutes.
 pub fn chunk(person: &str, export_id: &str, index: u32, now: u64) -> Result<String, TransferError> {
-    let mut t = transfers();
-    t.purge(now);
-    let export = t
-        .exports
-        .get_mut(export_id)
-        .filter(|e| e.person == person)
-        .ok_or(TransferError::NotFound)?;
-    let start = (index as usize)
-        .checked_mul(CHUNK_BYTES)
-        .filter(|start| *start < export.bytes.len())
-        .ok_or_else(|| TransferError::Invalid(format!("no chunk {index}")))?;
-    let end = (start + CHUNK_BYTES).min(export.bytes.len());
-    let data = STANDARD.encode(&export.bytes[start..end]);
-    export.expires_at = now + EXPIRY_SECS;
-    if end == export.bytes.len() {
-        t.exports.remove(export_id);
-    }
-    Ok(data)
+    transfers().chunk(person, export_id, index, now)
 }
 
 /// Opens an import of `size` bytes that hash to `sha256`.
@@ -230,27 +351,7 @@ pub fn begin_import(
     max: u64,
     now: u64,
 ) -> Result<String, TransferError> {
-    if size > max {
-        return Err(TransferError::TooLarge { bytes: size, max });
-    }
-    let mut t = transfers();
-    t.purge(now);
-    if t.imports.values().any(|i| i.person == person) {
-        return Err(TransferError::Busy);
-    }
-    let import_id = new_id();
-    t.imports.insert(
-        import_id.clone(),
-        Import {
-            person: person.to_string(),
-            size,
-            sha256: sha256.to_ascii_lowercase(),
-            bytes: Vec::new(),
-            chunks: 0,
-            expires_at: now + EXPIRY_SECS,
-        },
-    );
-    Ok(import_id)
+    transfers().begin_import(person, size, sha256, max, now)
 }
 
 /// Adds chunk `index` (the next one in order) to an import; answers how many chunks it holds.
@@ -261,62 +362,13 @@ pub fn import_chunk(
     data: &str,
     now: u64,
 ) -> Result<u32, TransferError> {
-    let bytes = STANDARD
-        .decode(data)
-        .map_err(|e| TransferError::Invalid(format!("chunk is not base64: {e}")))?;
-    if bytes.len() > CHUNK_BYTES {
-        return Err(TransferError::Invalid(format!(
-            "a chunk is at most {CHUNK_BYTES} bytes"
-        )));
-    }
-    let mut t = transfers();
-    t.purge(now);
-    let import = t
-        .imports
-        .get_mut(import_id)
-        .filter(|i| i.person == person)
-        .ok_or(TransferError::NotFound)?;
-    if index != import.chunks {
-        return Err(TransferError::Invalid(format!(
-            "expected chunk {}, got {index}",
-            import.chunks
-        )));
-    }
-    if (import.bytes.len() + bytes.len()) as u64 > import.size {
-        return Err(TransferError::Invalid(
-            "more bytes than the import declared".into(),
-        ));
-    }
-    import.bytes.extend_from_slice(&bytes);
-    import.chunks += 1;
-    import.expires_at = now + EXPIRY_SECS;
-    Ok(import.chunks)
+    transfers().import_chunk(person, import_id, index, data, now)
 }
 
 /// Ends an import and answers its bytes, once they are the size and hash it declared. An
 /// import that does not match stays open so the client may send the rest.
 pub fn take_import(person: &str, import_id: &str, now: u64) -> Result<Vec<u8>, TransferError> {
-    let mut t = transfers();
-    t.purge(now);
-    let import = t
-        .imports
-        .get(import_id)
-        .filter(|i| i.person == person)
-        .ok_or(TransferError::NotFound)?;
-    if import.bytes.len() as u64 != import.size {
-        return Err(TransferError::Invalid(format!(
-            "{} of {} bytes received",
-            import.bytes.len(),
-            import.size
-        )));
-    }
-    if hex::encode(Sha256::digest(&import.bytes)) != import.sha256 {
-        return Err(TransferError::Invalid("the sha256 does not match".into()));
-    }
-    Ok(t.imports
-        .remove(import_id)
-        .map(|i| i.bytes)
-        .unwrap_or_default())
+    transfers().take_import(person, import_id, now)
 }
 
 #[cfg(test)]
