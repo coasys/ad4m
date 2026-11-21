@@ -122,7 +122,7 @@ pub struct BotGrant {
 pub struct BotKeyState {
     /// Its id in the log (`d3`).
     pub key_id: String,
-    /// `valid`, `revoked`, `expired` or `notInLog`.
+    /// `valid`, `revoked`, `unlinked`, `expired` or `notInLog`.
     pub verdict: String,
     /// The actions the bot mark allows; empty for a key without it.
     pub can: Vec<String>,
@@ -192,6 +192,7 @@ fn key_state(key: BotKey) -> BotKeyState {
         verdict: match key.verdict {
             KeyVerdict::Valid => "valid",
             KeyVerdict::Revoked => "revoked",
+            KeyVerdict::Unlinked => "unlinked",
             KeyVerdict::Expired => "expired",
             KeyVerdict::NotInLog => "notInLog",
         }

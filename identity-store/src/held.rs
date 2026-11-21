@@ -174,6 +174,10 @@ pub fn state_before(state: &KeyState, seq: u64, next: Option<Hash>) -> KeyState 
         enc: r.enc.clone(),
         added: r.added,
         revoked: r.revoked.filter(|at| *at < seq),
+        unlinked: r.unlinked.filter(|at| *at < seq),
+        revoked_since: r
+            .revoked_since
+            .filter(|_| r.revoked.is_some_and(|at| at < seq)),
         scopes: r
             .scopes
             .iter()
