@@ -561,10 +561,12 @@ export async function wipePerspective(
  * Use this in after() hooks as a safety net.
  */
 export function killByPorts(ports: number[]): void {
+    // Only the process that listens on a port: `lsof -ti:<port>` also lists every process with a
+    // connection to it, and a test that still holds a client connection would kill itself.
     for (const port of ports) {
         try {
             // First try SIGTERM for graceful shutdown
-            execSync(`lsof -ti:${port} | xargs -r kill -TERM`, { stdio: 'ignore' });
+            execSync(`lsof -ti TCP:${port} -s TCP:LISTEN | xargs -r kill -TERM`, { stdio: 'ignore' });
         } catch (e) {
             // Port not in use — fine
         }
@@ -574,7 +576,7 @@ export function killByPorts(ports: number[]): void {
     for (const port of ports) {
         try {
             // SIGKILL anything still lingering
-            execSync(`lsof -ti:${port} | xargs -r kill -9`, { stdio: 'ignore' });
+            execSync(`lsof -ti TCP:${port} -s TCP:LISTEN | xargs -r kill -9`, { stdio: 'ignore' });
         } catch (e) {
             // Port not in use — fine
         }
