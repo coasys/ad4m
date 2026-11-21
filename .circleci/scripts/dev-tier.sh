@@ -4,9 +4,11 @@
 # the first and the last step of each of those jobs.
 #
 #   dev-tier.sh moved <job>   first step. Prints "run: ..." and exits 0, or
-#                             "skip: ..." and exits 10 when this commit already
-#                             passed <job> in this tier (the caller halts green).
-#                             Any lookup failure answers "run".
+#                             "skip: ..." and exits 10 when the latest finished
+#                             run of <job> in this tier on this commit passed
+#                             (the caller halts green). A red run after a green
+#                             one on the same commit runs again. Any lookup
+#                             failure answers "run".
 #   dev-tier.sh red <job>     last step, on failure. Opens one GitHub issue
 #                             titled "dev red: <job>", or comments on it when it
 #                             is open. It lists the last green commit of this
@@ -17,15 +19,26 @@
 #                             the open "dev red: <job>" issue, if there is one.
 #                             Never opens or closes an issue, never fails.
 #
+# One comment per change: the suite reruns every 2 hours while dev stays red,
+# but `red` comments only on a red commit the issue has not reported yet, or
+# after a green; `green` only after a red. The issue's body and the script's
+# comments carry a hidden marker, `<!-- dev-tier: red|green <sha> -->`; the last
+# one is the state the issue shows. When the comments cannot be read, it
+# comments (noise rather than silence).
+#
+# The issue is found by listing the repository's open issues (all pages) and
+# matching the title exactly, not by search (token-based, one page, indexed late).
+# A failed page means no answer: `red` then opens nothing and exits 1.
+#
 # "Last green" is the newest successful run of <job> in this workflow on this
 # branch, from the CircleCI v1.1 API (the nightly's llm-e2e check reads the same
 # list). A halted run counts as successful, but `moved` halts only on a commit
-# that already passed, so a halted run is always on a green commit.
+# whose latest run passed, so a halted run is always on a green commit.
 #
 # Issues are opened only for dev. On any other branch (a run by hand) and
 # without GITHUB_TOKEN, `red` prints the text it would post and exits 0.
 #
-#   CIRCLE_BRANCH, CIRCLE_SHA1, CIRCLE_BUILD_URL  from CircleCI
+#   CIRCLE_BRANCH, CIRCLE_SHA1, CIRCLE_BUILD_URL, CIRCLE_BUILD_NUM  from CircleCI
 #   CIRCLECI_API_TOKEN    read-only CircleCI token (context nightly-llm-e2e)
 #   GITHUB_TOKEN          GitHub token with Issues: write on the repo
 #   DEV_TIER_NO_ISSUE     set by an earlier step: the failure is not the suite's
@@ -54,6 +67,7 @@ repo="${DEV_TIER_REPO:-coasys/ad4m}"
 circle_api="${DEV_TIER_CIRCLE_API:-https://circleci.com/api/v1.1/project/circleci/VRkXSnZDyBKHhkHKBHTmLj/W84Q4MGGTeZwizersNwxB4}"
 gh_api="${DEV_TIER_GITHUB_API:-https://api.github.com}"
 title="dev red: $job"
+marker_re='<!-- dev-tier: (red|green) ([0-9a-f]{40}) -->'
 
 # Prints "<sha> <build url>" of the newest successful run of $job in $workflow on
 # $branch, or nothing. Reads up to 5 pages of 100 jobs (about 25 dev pipelines).
@@ -79,18 +93,49 @@ last_green() {
   done
 }
 
+# Prints "<status> <build url>" of the latest finished run of $job in $workflow
+# on $branch at commit $sha, or nothing. Running and queued runs (this one among
+# them) do not count. Reads up to 5 pages of 100 jobs, all statuses.
+last_result() {
+  local enc offset body hit
+  local auth=()
+  [ -n "${CIRCLECI_API_TOKEN:-}" ] && auth=(-H "Circle-Token: $CIRCLECI_API_TOKEN")
+  enc="$(jq -rn --arg b "$branch" '$b|@uri')" || return 0
+  for offset in 0 100 200 300 400; do
+    body="$(curl -fsSL --max-time 20 --retry 2 "${auth[@]}" \
+      "$circle_api/tree/$enc?limit=100&shallow=true&offset=$offset" 2>/dev/null)" || return 0
+    hit="$(jq -r --arg w "$workflow" --arg j "$job" --arg s "$sha" --arg me "${CIRCLE_BUILD_NUM:-}" '
+      if type != "array" then "stop"
+      elif length == 0 then "stop"
+      else (first(.[] | select(.workflows.workflow_name? == $w and .workflows.job_name? == $j
+                               and .vcs_revision == $s and ((.build_num // "") | tostring) != $me
+                               and (.lifecycle // "finished") == "finished"
+                               and (.status // "") != "not_run" and (.status // "") != "")
+                 | "\(.status) \(.build_url // "")") // "")
+      end' <<<"$body" 2>/dev/null)" || return 0
+    case "$hit" in
+      stop) return 0 ;;
+      "") ;;
+      *) echo "$hit"; return 0 ;;
+    esac
+  done
+}
+
 if [ "$mode" = moved ]; then
   [ -z "$sha" ] && { echo "run: no CIRCLE_SHA1"; exit 0; }
-  read -r green green_url <<<"$(last_green)"
-  if [ -z "${green:-}" ]; then
-    echo "run: no successful $workflow run of $job on $branch found"
-    exit 0
-  fi
-  if [ "$green" = "$sha" ]; then
-    echo "skip: $branch @ ${sha:0:12} already passed $job in $workflow (${green_url:-}): dev has not moved"
-    exit 10
-  fi
-  echo "run: $branch @ ${sha:0:12}, last green in $workflow ${green:0:12} (${green_url:-})"
+  read -r status result_url <<<"$(last_result)"
+  case "${status:-}" in
+    "")
+      echo "run: no finished $workflow run of $job on $branch @ ${sha:0:12} found: dev moved, or the lookup failed"
+      ;;
+    success|fixed)
+      echo "skip: $branch @ ${sha:0:12} already passed $job in $workflow (${result_url:-}): dev has not moved"
+      exit 10
+      ;;
+    *)
+      echo "run: the latest finished $workflow run of $job on $branch @ ${sha:0:12} is $status (${result_url:-}): run it again"
+      ;;
+  esac
   exit 0
 fi
 
@@ -104,22 +149,69 @@ gh_auth=()
 gh_get() { curl -fsSL --max-time 20 --retry 2 -H 'Accept: application/vnd.github+json' "${gh_auth[@]}" "$1" 2>/dev/null; }
 gh_post() { curl -fsSL --max-time 20 -X POST -H 'Accept: application/vnd.github+json' "${gh_auth[@]}" --data "$2" "$1" 2>/dev/null; }
 
-# Prints the number of the open issue titled $title, or nothing. Fails when the
-# search fails, so the caller never opens a second issue blindly.
+# Prints "<number> [red|green <sha>]" of the open issue titled $title (the
+# marker in its body, if any), or nothing. Lists the open issues page by page
+# (pull requests are in that list too; skipped). Fails when a page fails or 30
+# full pages go by, so the caller never opens a second issue blindly.
 open_issue() {
-  local q body
-  q="$(jq -rn --arg q "repo:$repo is:issue is:open in:title \"$title\"" '$q|@uri')" || return 1
-  body="$(gh_get "$gh_api/search/issues?q=$q")" || return 1
-  jq -er --arg t "$title" '(first(.items[] | select(.title == $t) | .number) // "") | tostring' <<<"$body" 2>/dev/null
+  local page body hit
+  for page in $(seq 1 30); do
+    body="$(gh_get "$gh_api/repos/$repo/issues?state=open&per_page=100&page=$page")" || return 1
+    hit="$(jq -r --arg t "$title" --arg re "$marker_re" '
+      if type != "array" then "error"
+      else (first(.[] | select(.title == $t and (has("pull_request") | not)))
+              | "\(.number) \([(.body // "") | scan($re)] | last // [] | join(" "))")
+           // (if length < 100 then "end" else "" end)
+      end' <<<"$body" 2>/dev/null)" || return 1
+    case "$hit" in
+      error) return 1 ;;
+      end) return 0 ;;
+      "") ;;
+      *) echo "${hit% }"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# issue_state <number> <state from the body>: prints the issue's last marker,
+# "red|green <sha>", from its body and comments (oldest first), or nothing.
+# Fails when the comments cannot be read.
+issue_state() {
+  local state="$2" page body out
+  for page in $(seq 1 30); do
+    body="$(gh_get "$gh_api/repos/$repo/issues/$1/comments?per_page=100&page=$page")" || return 1
+    out="$(jq -r --arg re "$marker_re" '
+      if type != "array" then error("not a list")
+      else "\(length) \([.[] | (.body // "") | scan($re)] | last // [] | join(" "))"
+      end' <<<"$body" 2>/dev/null)" || return 1
+    [ -n "${out#* }" ] && state="${out#* }"
+    [ "${out%% *}" -lt 100 ] && { echo "$state"; return 0; }
+  done
+  echo "$state"
+}
+
+# post_comment <number> <text>: prints what happened; fails when GitHub refuses.
+post_comment() {
+  gh_post "$gh_api/repos/$repo/issues/$1/comments" "$(jq -cn --arg b "$2" '{body:$b}')" >/dev/null
 }
 
 if [ "$mode" = green ]; then
   [ "$branch" != dev ] && { echo "not dev ($branch): nothing to note"; exit 0; }
   [ -z "${GITHUB_TOKEN:-}" ] && { echo "GITHUB_TOKEN is not set: nothing to note"; exit 0; }
-  n="$(open_issue)" || { echo "could not search GitHub issues; nothing noted"; exit 0; }
-  [ -z "$n" ] && { echo "no open issue \"$title\""; exit 0; }
-  text="Green again at $sha ([run]($run_url)). If this commit is one of the red ones above, the failure was flaky: label this issue \`flaky\`. Close the issue when the cause is fixed or reverted."
-  if gh_post "$gh_api/repos/$repo/issues/$n/comments" "$(jq -cn --arg b "$text" '{body:$b}')" >/dev/null; then
+  found="$(open_issue)" || { echo "could not list GitHub issues; nothing noted"; exit 0; }
+  [ -z "$found" ] && { echo "no open issue \"$title\""; exit 0; }
+  n="${found%% *}"
+  body_state=""
+  [ "$found" != "$n" ] && body_state="${found#* }"
+  if state="$(issue_state "$n" "$body_state")"; then
+    case "$state" in
+      green\ *) echo "no comment: #$n already says green (at ${state#green }); nothing changed"; exit 0 ;;
+    esac
+  fi
+  text="Green again at $sha ([run]($run_url)). If this commit is one of the red ones above, the failure was flaky: label this issue \`flaky\`. Close the issue when the cause is fixed or reverted.
+
+<!-- dev-tier: green $sha -->"
+  if post_comment "$n" "$text"; then
     echo "commented on #$n"
   else
     echo "could not comment on #$n"
@@ -189,16 +281,23 @@ PRs and commits merged between them (first-parent line of dev):
 $list
 
 Flaky? Rerun the job on the same commit. If it goes green, label this issue \`flaky\`.
-Close this issue when dev is green again because the cause was fixed or reverted."
+Close this issue when dev is green again because the cause was fixed or reverted.
 
-comment="Still red at $sha ([run]($run_url)).
+<!-- dev-tier: red $sha -->"
+
+# comment_text <Still red|Red again>
+comment_text() {
+  echo "$1 at $sha ([run]($run_url)).
 
 - Last green commit of this tier: $green_line${compare:+
 $compare}
 
 PRs and commits merged between them:
 
-$list"
+$list
+
+<!-- dev-tier: red $sha -->"
+}
 
 show() { echo "----"; echo "$1"; echo "----"; }
 
@@ -213,13 +312,26 @@ if [ -z "${GITHUB_TOKEN:-}" ]; then
   exit 0
 fi
 
-if ! n="$(open_issue)"; then
-  echo "could not search GitHub issues for \"$title\"; no issue opened. It would say:"
+if ! found="$(open_issue)"; then
+  echo "could not list GitHub issues to find \"$title\"; no issue opened. It would say:"
   show "$body"
   exit 1
 fi
-if [ -n "$n" ]; then
-  if gh_post "$gh_api/repos/$repo/issues/$n/comments" "$(jq -cn --arg b "$comment" '{body:$b}')" >/dev/null; then
+if [ -n "$found" ]; then
+  n="${found%% *}"
+  body_state=""
+  [ "$found" != "$n" ] && body_state="${found#* }"
+  head="Still red"
+  if state="$(issue_state "$n" "$body_state")"; then
+    case "$state" in
+      "red $sha") echo "no comment: #$n already reports red at ${sha:0:12}; the next comment comes with another red commit or a change of state"; exit 0 ;;
+      green\ *) head="Red again" ;;
+    esac
+  else
+    echo "could not read the comments of #$n; commenting anyway"
+  fi
+  comment="$(comment_text "$head")"
+  if post_comment "$n" "$comment"; then
     echo "commented on #$n"
     exit 0
   fi
