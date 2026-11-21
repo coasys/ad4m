@@ -4,8 +4,10 @@
 # the PR that targets dev, instead of once per branch per push.
 #
 # Prints one line, "run: <reason>" or "skip: <reason>", and exits 0 to run or
-# 10 to skip. Any other exit is a failure of this script; the caller runs the
-# suite then (fails open). Every lookup that fails also answers "run".
+# 10 to skip. Every lookup that fails also answers "run", with exit 11: run,
+# but only because the PR state is unknown. Any other exit is a failure of this
+# script. heavy_gate runs the suite on anything but 10 (fails open); the GitHub
+# workflow heavy-suites.yml shows 11 as a pending status, not a green one.
 #
 # Runs:  HEAVY_GATE_FORCE=true (the nightly pipeline), a tag, a push to dev,
 #        staging or main, a head commit whose message holds [full-ci], an open
@@ -30,6 +32,7 @@
 set -uo pipefail
 
 run() { echo "run: $*"; exit 0; }
+unsure() { echo "run: $*"; exit 11; }
 
 branch="${CIRCLE_BRANCH:-}"
 
@@ -45,8 +48,8 @@ case "$msg" in
   *"[full-ci]"*) run "[full-ci] in the commit message" ;;
 esac
 
-command -v curl >/dev/null || run "curl not installed"
-command -v jq >/dev/null || run "jq not installed"
+command -v curl >/dev/null || unsure "curl not installed"
+command -v jq >/dev/null || unsure "jq not installed"
 
 repo="${HEAVY_GATE_REPO:-}"
 if [ -z "$repo" ]; then
@@ -82,7 +85,7 @@ esac
 auth=()
 [ -n "${GITHUB_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $GITHUB_TOKEN")
 body="$(curl -fsSL --max-time 20 --retry 2 -H 'Accept: application/vnd.github+json' "${auth[@]}" "$url" 2>/dev/null)" \
-  || run "GitHub API request failed ($url)"
+  || unsure "GitHub API request failed ($url)"
 
 # One verdict for all the branch's open PRs: run if any of them asks for it.
 verdict="$(jq -r '
@@ -99,9 +102,9 @@ verdict="$(jq -r '
     end' <<<"$body" 2>/dev/null)"
 
 case "$verdict" in
-  "run: unexpected"*) run "${verdict#run: }" ;;
+  "run: unexpected"*) unsure "${verdict#run: }" ;;
   "run: "*|"skip: "*) ;;
-  *) run "could not read the GitHub API answer" ;;
+  *) unsure "could not read the GitHub API answer" ;;
 esac
 if [ -n "$cache" ]; then
   printf '%s\n' "$verdict" > "$cache.tmp.$$" && mv "$cache.tmp.$$" "$cache"
