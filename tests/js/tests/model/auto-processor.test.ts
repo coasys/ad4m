@@ -14,10 +14,10 @@
  * `processed.itemIds` is the batch a pass retired. Only the smoke test at the
  * top depends on the model producing anything in particular.
  *
- * Requires a reachable LLM (Ollama, OpenAI-compatible). Endpoint + model are
- * env-overridable to match the Rust e2e suite:
- *   INTERPRETATION_E2E_BASE_URL (default http://localhost:11434/v1)
- *   INTERPRETATION_E2E_MODEL    (default qwen3.8-27b-48k)
+ * Requires staging's llama-server. Endpoint + model are env-overridable
+ * to match the Rust e2e suite (`addE2eLlm`):
+ *   INTERPRETATION_E2E_BASE_URL (default http://127.0.0.1:12460/v1)
+ *   INTERPRETATION_E2E_MODEL    (default qwen3.8-27b-ud-q4_k_m)
  *
  * Run (from tests/js, executor built + `pnpm run prepare-test` once):
  *   pnpm ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/model/auto-processor.test.ts
@@ -26,14 +26,8 @@
 import { expect } from "chai";
 import { Ad4mClient, Link, PerspectiveProxy } from "@coasys/ad4m";
 import type { AutoProcessorEvent, AutoProcessorStep } from "@coasys/ad4m";
-import { addOllamaLlm, startAgent, waitUntil } from "../../helpers/index.js";
+import { addE2eLlm, E2E_PASS_TIMEOUT_MS, startAgent, waitUntil } from "../../helpers/index.js";
 import { ConversationSubgroup } from "./auto-processor-models.js";
-
-const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
-// Ask for the window the Modelfile already loaded (qwen3.8-27b-48k: 49152). Without it the
-// Ollama provider requests num_ctx 131072 and Ollama reloads the model out of staging's residency.
-const MAX_NUM_CTX = Number(process.env.INTERPRETATION_E2E_MAX_NUM_CTX) || 49152;
-const MODEL = process.env.INTERPRETATION_E2E_MODEL || "qwen3.8-27b-48k";
 
 // Speaker and timestamp come off the body link's reifier, not an app-level
 // `ns://author` predicate: `?timestamp` is required (it is what makes a turn
@@ -51,14 +45,15 @@ const SUBGROUP_CLASS = "ns://ConversationSubgroup";
 
 // LLM E2E gate — this suite drives the executor's real LLM path. Skipped by
 // default (unset `LLM_E2E`); the nightly `llm-e2e` workflow on `dev` runs it
-// against Marvin's Ollama. Run locally with `LLM_E2E=1`, or the umbrella
+// against the host's llama-server. Run locally with `LLM_E2E=1`, or the umbrella
 // `./scripts/run-llm-e2e.sh` at the repo root.
 const describeIfLLM: Mocha.SuiteFunction = (process.env.LLM_E2E === "1"
   ? describe
   : (describe.skip as unknown as Mocha.SuiteFunction));
 
 describeIfLLM("perspective.addAutoProcessor (WS + LLM)", function () {
-  this.timeout(600_000);
+  // Several passes, and each may queue on the single llama-server slot.
+  this.timeout(3_600_000);
 
   let ad4m: Ad4mClient;
   let stopAgent: (() => Promise<void>) | null = null;
@@ -75,7 +70,7 @@ describeIfLLM("perspective.addAutoProcessor (WS + LLM)", function () {
     ad4m = agent.client;
     stopAgent = agent.stop;
 
-    const modelId = await addOllamaLlm(ad4m, "interpretation-llm", BASE_URL, MODEL, MAX_NUM_CTX);
+    const modelId = await addE2eLlm(ad4m, "interpretation-llm");
     await ad4m.ai.setDefaultModel("LLM", modelId);
   });
 
@@ -125,7 +120,7 @@ describeIfLLM("perspective.addAutoProcessor (WS + LLM)", function () {
   /** The batches a pass actually retired. */
   const retired = () => events.filter((e) => e.step === "processed").map((e) => e.itemIds);
 
-  const waitForStep = (step: AutoProcessorStep, timeoutMs = 180_000) =>
+  const waitForStep = (step: AutoProcessorStep, timeoutMs = E2E_PASS_TIMEOUT_MS) =>
     waitUntil(() => steps().includes(step), timeoutMs, `a \`${step}\` signal`);
 
   // ── the whole loop, end to end ────────────────────────────────────────────
@@ -196,7 +191,7 @@ describeIfLLM("perspective.addAutoProcessor (WS + LLM)", function () {
     // Five turns at batchMax 2 takes at least three passes to work through.
     await waitUntil(
       () => retired().flat().length >= texts.length,
-      300_000,
+      1_200_000,
       "every turn to be retired by some pass",
     );
 
@@ -217,7 +212,7 @@ describeIfLLM("perspective.addAutoProcessor (WS + LLM)", function () {
 
     await say("Our webhook retries keep dropping during payment outages.");
     await say("Right, the payments queue cannot replay what got dropped.");
-    await waitUntil(() => retired().length >= 1, 180_000, "the first pass");
+    await waitUntil(() => retired().length >= 1, E2E_PASS_TIMEOUT_MS, "the first pass");
     const firstWave = retired()[0];
     expect(firstWave.length).to.equal(2);
 
@@ -225,7 +220,7 @@ describeIfLLM("perspective.addAutoProcessor (WS + LLM)", function () {
     // cursor this second pass would re-interpret the first wave along with it.
     await say("Separately, the retro is moved to Thursday morning.");
     await say("I'll book the room and send the invite.");
-    await waitUntil(() => retired().length >= 2, 180_000, "the second pass");
+    await waitUntil(() => retired().length >= 2, E2E_PASS_TIMEOUT_MS, "the second pass");
 
     const secondWave = retired()[1];
     expect(secondWave.length, "the second pass sees only what arrived after the first").to.equal(2);

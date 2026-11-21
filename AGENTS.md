@@ -112,21 +112,38 @@ so the same file runs on both link languages.
 
 ### Nightly (`nightly-llm-e2e` workflow)
 
-A pipeline with `run-nightly-llm: true` runs only this workflow, on `coasys/marvin`
-(local Ollama). Each job has its own serial group. The jobs: `llm-e2e`,
+A pipeline with `run-nightly-llm: true` runs only this workflow, on `coasys/marvin`.
+Each job has its own serial group. The jobs: `llm-e2e`,
 `integration-tests-sfu`, `integration-tests-sfu-browsers` (see below) and
 `coasys-spaces`.
 
+`llm-e2e` runs the ignored Rust interpretation suites and the JS suites gated
+by `LLM_E2E=1`. It does not start a model server. It prompts staging's
+llama-server at `http://127.0.0.1:12460/v1` (alias `qwen3.8-27b-ud-q4_k_m`,
+kind `LLAMA_SERVER`, context budget 57344 under the server's 65536-token
+slot) and embeds with Ollama's `nomic-embed-text` on `:11434`. A preflight
+checks `/health` and that `/v1/models` lists the alias, and fails the job
+when the unit is down. Requests share that one slot with staging's own AI
+processing.
+
 `coasys-spaces` runs WE's product suite (`pnpm --filter @we/app-web test:spaces`,
 WE `apps/we-web/tests/live/coasys-spaces/`): a Coasys space, a call, its
-transcript (executor Whisper), extraction on Ollama `qwen3.8-27b-48k` (the
-model staging and `llm-e2e` use, which Marvin keeps loaded), and flows.
-Ollama's OpenAI endpoint runs a model with the server's default context window
-and cuts a longer prompt silently. So when the model's own `num_ctx` is below
-`COASYS_SPACES_LLM_NUM_CTX` (16384), `llm-check` makes a variant such as
-`coasys-spaces-gemma3-12b:ctx16384` (`/api/create`) and the suite runs on it.
-A model with a large enough `num_ctx` (the 48k tag) runs as it is, so the GPU
-holds one load. It uses this commit's executor and SDK:
+transcript (executor Whisper), extraction on staging's llama-server
+(`http://127.0.0.1:12460/v1`, model `qwen3.8-27b-ud-q4_k_m`), and flows.
+That server is already running (`llama-qwen27b.service`, one 98304-token slot)
+and already holds the GPU. The job does not start it and does not load a model.
+`COASYS_SPACES_LLM_NUM_CTX` is empty, so `llm-check` does not make a context
+variant. `/api/create` runs only when the server is Ollama (`/api/version`
+returns a version) and `COASYS_SPACES_LLM_NUM_CTX` is set: a hand run against
+Ollama can still make a variant such as `coasys-spaces-gemma3-12b:ctx16384`
+when the model's own `num_ctx` is smaller. A model whose own `num_ctx` is
+already that large is used as it is. The job also sets
+`COASYS_SPACES_LLM_ENDPOINT_KIND=LLAMA_SERVER`,
+`COASYS_SPACES_LLM_NATIVE_TOOLS=true`,
+`COASYS_SPACES_LLM_REQUEST_TIMEOUT_SECS=900` and
+`COASYS_SPACES_LLM_MAX_NUM_CTX=90112`. The script passes those through;
+WE's real tier (we#468) registers them on the endpoint. The 900s limit
+includes time queued on the one slot. It uses this commit's executor and SDK:
 
 - The executor is the one the `build` job published for the commit
   (`$EXECUTOR_PUBLISH_DIR/<sha>/manifest.json`, sha256 checked). If there is none,
@@ -140,13 +157,16 @@ The job halts green when the same ad4m commit, WE commit, tier and model already
 passed on the host (`~/.local/state/ad4m-ci/coasys-spaces/last-success`). Set
 `COASYS_SPACES_FORCE=1` to run anyway. A checkout with changes (a run by hand
 with local edits) runs, but neither skips nor records a pass. It shares the serial group
-`nightly-llm` with `llm-e2e`: both use the host's Ollama and GPU, so they run
-one after the other. Screenshots, traces and logs are under the
+`nightly-llm` with `llm-e2e`, so the two do not run at once: both prompt
+staging's llama-server on :12460, and `llm-e2e`'s embeddings stay on Ollama.
+A completion in this job may wait a few minutes on llama-server's one
+slot, behind staging. Screenshots, traces and logs are under the
 job's artifacts, `coasys-spaces/`.
 
 Each step is a subcommand of `scripts/coasys-spaces.sh`. `bash
-scripts/coasys-spaces.sh all` runs the whole job on a machine with Ollama and the
-model (`COASYS_SPACES_TIER=stub` needs no model). `bash
+scripts/coasys-spaces.sh all` runs the whole job. The real tier needs the model
+server named by `COASYS_SPACES_LLM_*` (the nightly job uses staging's
+llama-server). `COASYS_SPACES_TIER=stub` needs no model. `bash
 scripts/coasys-spaces.test.sh` tests the script.
 
 To run the workflow by hand on a branch, with another WE ref (the definition id
@@ -180,6 +200,13 @@ This runs all four nightly jobs.
   canvas (not black; headless WebKit never plays a `<video>`, so not there).
   On the SFU, Chromium + Firefox also asserts the payload types differ per
   leg and each receiver gets its own numbers (#1684).
+- The page keeps one muted `<video>` per session (`participantId`), as an
+  app keeps one tile per participant, and removes it when the session
+  leaves the list. Never one per agent DID: an agent listed twice (two
+  devices, or a lost tab beside its successor) then swaps two streams on
+  one element at every render, and headless WebKit's tab hangs or crashes
+  (`Target crashed`). A tab that crashes or does not report within 30 s
+  fails with its user, browser and last console errors.
 - On a host with no audio server (CI's runner: no PulseAudio or PipeWire),
   Firefox keeps every `AudioContext` `suspended` (`currentTime` 0) and its
   analyser reads silence, though the audio arrives and decodes. No Firefox
@@ -220,6 +247,10 @@ This runs all four nightly jobs.
   adapter does. Test code must not use raw call RPCs, `ensureMembership` or
   `WebRtcPeer`; the first test in `sfu-e2e.test.ts` fails if it does (E11's
   outsider is the one exemption). The admin client only builds the world.
+  One exception: a `WorldSpec` user with `main: true` is the executor's main
+  agent, called with the operator credential, still only through the SDK.
+  E23 uses it, since only the main agent's own devices show how the executor
+  routes the main agent's broadcasts.
 - Each user sends its own tone (`toneFor(i)`) and a video of known size, so
   receivers check *who* they hear and at which simulcast layer.
 - E6 shapes the loopback with `tc netem`, only for its world's ports
@@ -240,6 +271,15 @@ This runs all four nightly jobs.
   E18 makes the same cut, then fires `online` in the participant process
   (`Participant.networkChanged`). Both assert the call came back in place:
   u2 saw no departures, so no rebuild.
+- `@roamhq/wrtc` fires `iceconnectionstatechange` when libwebrtc's legacy
+  ICE state changes, but `iceConnectionState` returns the standardized
+  state, which libwebrtc changes just after. On a loaded host a listener
+  reads the old state, and no event comes for the new one: E17's cut read
+  "completed", the SDK did not restart ICE, and the call stayed silent.
+  `specPeerConnection` (`e2e/webrtc.ts`) looks at the state again 10 ms,
+  100 ms and 1 s after each event and fires one more event when it changed.
+  A browser fires the event for the state it reports. Do not take this out,
+  and do not read a state change from the binding's event alone.
 - A participant process killed by a signal nobody sent (the libwebrtc binding
   crashes rarely while closing) reruns the scenario once; an assertion failure
   never does.
@@ -268,12 +308,15 @@ the participant id); a session never receives its own media or its own
 `sfu-data` (`senderParticipantId`), but does receive its agent's other
 device; room capacity comes from the
 space's policy (`maxMeshParticipants × 4`, 128 without one), and cascade
-per-node capacity only drives redirects; the server drops a peer only after
+per-node capacity only drives redirects; the server drops a peer after
 10 s of ICE `Disconnected`, or, once the client asked for an ICE restart
-(`sfu.callRestartIce`), 10 s after the request or after the restart's answer;
+(`sfu.callRestartIce`), 15 s after the request. The restart's answer ends
+that grace and the 10 s disconnect clock starts again. The deadline sweep
+also drops a peer when a server offer stays unanswered after both resends
+(resend at 10 s and at 30 s, drop at 70 s), even when ICE stays connected;
 on ICE `disconnected` or a network change the SDK restarts ICE in place (the
 SFU stays the only offerer: the restart comes as a server renegotiation
-offer), and rebuilds the call if that has not reconnected within 5 s; a
+offer), and rebuilds the call if that has not reconnected within 15 s; a
 failed connection is rebuilt at once, and a rebuild retries the join for
 120 s. The restart names the session's `participantId` (only that session
 restarts, never another device of the agent), and a manager with no session
@@ -309,6 +352,43 @@ state swaps them during a rollback); the answerer holds its own first offer
 until the pair connects; `join` waits for the channel to listen before the
 session announces presence; the buffer for not-yet-listed peers never drops a
 description.
+
+Mesh presence (`core/src/neighbourhood/Session.ts`): each device in a mesh
+call puts two links into its agent's one online status, once, at join: a
+presence link (source `did#device`, `ad4m://session/in-call`, target the
+room) and a marker (same source, `ad4m://session/in-call-beat`, target the
+room) that says the device beats. The beat itself is never persisted: every
+20 s, and at once on join, the device sends a `beat` message on the call's
+telepresence channel (`{v, call, to: "*", kind: "beat"}` through
+`MeshManager.beat`, so it is counted like any send), on its own timer, so a
+roster poll that hangs cannot stop it. Never write liveness into the online
+status: p-diff-sync keeps every `set_online_status` as a permanent chain
+entry and `get_online_status` scans them all. A receiver ties a beat to the
+link author the executor verified plus the device in the payload, so an
+agent can vouch only for its own devices, and a beat never makes a device: a
+device is in the call only through its own agent's presence link. A reader
+records, on its own clock, when it last heard each device with the marker
+(or first saw it, if it never heard it) and leaves it out after 90 s with no
+beat; a new beat brings it back at the next poll (3 s). A poll that finds
+the reader's pair with the device connected counts as hearing it, so a call
+whose signals fail while media flows keeps its peers. The executor routes a
+broadcast to every agent it hosts in the neighbourhood, the sender's agent
+too (main or managed), so two devices of one agent on one executor hear each
+other; each device drops its own messages. So a device that
+died without leaving (a crash, a closed browser, a lost network) leaves every
+roster within about 90 s + a poll, even while another device of its agent
+keeps the status alive, a live device survives three lost beats in a row,
+and a reader that joins late keeps a device it has never heard for up to
+90 s. A device with no marker (an older SDK, which drops the unknown `beat`
+kind without a word) never goes stale. Status writes are join, leave, and
+one repair when a poll finds a stale device of this agent (its links go) or
+this device's presence link or marker missing (a sibling took them out while it missed
+beats; they go back), at most once per 90 s; nothing is written over a
+status that reads as none. The beat stops on leave, destroy and `replaced`.
+A tab reopened in the same browser profile keeps its device id
+(`localStorage`) and simply takes its links over. `sfu-browsers.test.ts` pins
+both: the same-profile rejoin lists the user once, and a dead second device
+leaves everyone's list within `GHOST_GONE_MS`.
 
 ### AI wind tunnel
 

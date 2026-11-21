@@ -714,24 +714,13 @@ impl Ad4mMcpHandler {
     /// Resolve a literal value from a link target URI.
     /// Delegates to rust-client's `Literal` implementation for proper URL decoding.
     pub(crate) fn resolve_literal_value(target: &str) -> String {
-        use ad4m_client::literal::Literal;
-        if let Ok(literal) = Literal::from_url(target.to_string()) {
-            match literal.get() {
-                Ok(value) => value.to_string(),
-                Err(_) => target.to_string(),
-            }
-        } else {
-            target.to_string()
-        }
+        crate::perspectives::instances::resolve_literal_value(target)
     }
 
     /// Encode a string value as a `literal:string:` URL.
     /// Uses rust-client's `Literal` for proper URL encoding.
     pub(crate) fn encode_literal(value: &str) -> String {
-        use ad4m_client::literal::Literal;
-        Literal::from_string(value.to_string())
-            .to_url()
-            .unwrap_or_else(|_| format!("literal:string:{}", value))
+        crate::perspectives::instances::encode_literal(value)
     }
 
     /// Wrap a bare string as a literal URI; pass an already-URI value through.
@@ -747,51 +736,16 @@ impl Ad4mMcpHandler {
         instances::link_target(value)
     }
 
-    /// Get the SHACL name literal for a class, trying both encoded and raw formats.
-    /// Flux's TypeScript Literal doesn't URL-encode inner URIs, producing
-    /// "literal:string:shacl://Class", while Rust's Literal produces
-    /// "literal:string:shacl%3A%2F%2FClass". Returns (encoded, raw).
-    pub(crate) fn shacl_name_variants(class_name: &str) -> (String, String) {
-        let encoded = Self::encode_literal(&format!("shacl://{}", class_name));
-        let raw = format!("literal:string:shacl://{}", class_name);
-        (encoded, raw)
-    }
-
-    /// Query SHACL shape links for a class, trying encoded then raw name format.
-    pub(crate) async fn get_shacl_shape_links(
+    /// The shape node URI of the registered class `class_name`.
+    pub(crate) fn class_shape_uri(
         perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
         class_name: &str,
-    ) -> Vec<crate::types::DecoratedLinkExpression> {
-        let (encoded, raw) = Self::shacl_name_variants(class_name);
-        let links = perspective
-            .get_links(&crate::types::LinkQuery {
-                source: Some(encoded),
-                predicate: Some("ad4m://shacl_shape_uri".to_string()),
-                ..Default::default()
-            })
-            .await
-            .unwrap_or_default();
-        if !links.is_empty() {
-            return links;
-        }
+    ) -> Option<String> {
         perspective
-            .get_links(&crate::types::LinkQuery {
-                source: Some(raw),
-                predicate: Some("ad4m://shacl_shape_uri".to_string()),
-                ..Default::default()
-            })
-            .await
-            .unwrap_or_default()
-    }
-
-    /// Escape string for safe use in Prolog queries
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn escape_prolog_string(s: &str) -> String {
-        s.replace('\\', "\\\\")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r")
-            .replace('"', "\\\"")
-            .replace('\'', "\\'")
+            .shapes(Some(vec![class_name.to_string()]))
+            .ok()?
+            .into_iter()
+            .find_map(|summary| summary.shape.node_shape_uri)
     }
 
     /// Resolve a property name to its predicate URI using SHACL shape links.
@@ -823,56 +777,14 @@ impl Ad4mMcpHandler {
         value: &str,
         agent_context: &crate::agent::AgentContext,
     ) -> String {
-        // Short-circuit only when the value is a well-formed absolute IRI —
-        // the same predicate the SPARQL query builder uses to gate its
-        // `UNION { ?s <pred> <val> }` IRI arm. Sharing the check keeps write
-        // and read agreeing on what "already a URI" means; otherwise values
-        // like `"Note: buy milk"` would slip through and become invalid
-        // `NamedNode::new_unchecked` targets that no query can match.
-        if crate::perspectives::model_query::is_safe_iri_target(value) {
-            return value.to_string();
-        }
-
-        // Resolve the original-cased property name from SHACL.
-        // Dynamic tools lowercase the property name (e.g. "isconversation"),
-        // but the SHACL links store the original case (e.g. "isConversation").
-        let original_property_name = {
-            let props: Vec<crate::mcp::shacl::ShaclProperty> =
-                crate::mcp::shacl::load_class_properties(perspective, class_name).await;
-            let prop_lower = property_name.to_lowercase();
-            props
-                .into_iter()
-                .find(|p| p.name == property_name || p.name.to_lowercase() == prop_lower)
-                .map(|p| p.name)
-                .unwrap_or_else(|| property_name.to_string())
-        };
-
-        // Try to parse as JSON to recover native types (bool, number).
-        // MCP tool schemas declare all values as strings, so "false" arrives
-        // as the string "false" — but the language controller needs json!(false).
-        let json_value: serde_json::Value = serde_json::from_str(value)
-            .unwrap_or_else(|_| serde_json::Value::String(value.to_string()));
-
-        match perspective
-            .resolve_property_value(
-                class_name,
-                &original_property_name,
-                &json_value,
-                agent_context,
-            )
-            .await
-        {
-            Ok(url) => url,
-            Err(e) => {
-                log::warn!(
-                    "Failed to resolve property value for {}.{}: {}, falling back to encode_literal",
-                    class_name,
-                    original_property_name,
-                    e
-                );
-                Self::encode_literal(value)
-            }
-        }
+        crate::perspectives::instances::property_target(
+            perspective,
+            class_name,
+            property_name,
+            value,
+            agent_context,
+        )
+        .await
     }
 }
 

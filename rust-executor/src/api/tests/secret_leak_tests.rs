@@ -192,6 +192,7 @@ fn params(method: &str, fx: &Fixture) -> Value {
             json!({ "deviceKey": "leak-test-device", "deviceKeyType": "ethereum" })
         }
         "ai.getDefaultModel" => json!({ "modelType": "LLM" }),
+        "runtime.logTail" => json!({ "lines": 10 }),
         "ai.modelStatus" => json!({ "id": fx.model_id }),
         "expression.get" | "expression.getRaw" | "expression.interactions" => {
             json!({ "url": "literal://string:leak" })
@@ -205,17 +206,13 @@ fn params(method: &str, fx: &Fixture) -> Value {
         | "neighbourhood.onlineAgents"
         | "neighbourhood.otherAgents"
         | "perspective.get"
-        | "perspective.getAllShacl"
-        | "perspective.getShaclNames"
+        | "perspective.shapes"
         | "perspective.interpretationOverlays"
         | "perspective.queryLinks"
         | "perspective.snapshot"
         | "perspective.flowStates"
         | "perspective.subjectClassesOf" => json!({ "uuid": uuid }),
-        "perspective.flowFired" => json!({ "uuid": uuid, "instance": "test://leak" }),
-        "perspective.getShacl" | "perspective.getShaclTargetClass" => {
-            json!({ "uuid": uuid, "name": "Leak" })
-        }
+        "perspective.flowFired" => json!({ "uuid": uuid, "instances": ["test://leak"] }),
         "perspective.getSubjectData" => {
             json!({ "uuid": uuid, "subjectClass": "Leak", "expressionAddress": "test://leak" })
         }

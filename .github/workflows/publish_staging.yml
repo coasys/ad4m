@@ -172,7 +172,12 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: deno-snapshot
-        path: rust-executor/CUSTOM_DENO_SNAPSHOT.bin
+        # The snapshot and the two residual sources `residual_lazy.rs` includes.
+        path: |
+          rust-executor/CUSTOM_DENO_SNAPSHOT.bin
+          rust-executor/CUSTOM_DENO_SNAPSHOT.residual_esm.rs
+          rust-executor/CUSTOM_DENO_SNAPSHOT.residual_js.rs
+        if-no-files-found: error
         retention-days: 1
 
   # Linux Binary Build - Uses Docker container (all deps pre-installed)

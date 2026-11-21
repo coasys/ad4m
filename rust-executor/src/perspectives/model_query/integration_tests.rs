@@ -73,7 +73,7 @@ async fn fixture_query(
     shape: &ModelShape,
     query: &ModelQueryInput,
     resolver: &dyn super::types::ShapeResolver,
-) -> Result<super::types::ModelQueryResult, deno_core::anyhow::Error> {
+) -> Result<super::types::ModelQueryResult, anyhow::Error> {
     super::query::execute_model_query(store, shape, &with_unverified(query), resolver).await
 }
 
@@ -82,7 +82,7 @@ async fn fixture_query_from_json(
     class_name: &str,
     query: &ModelQueryInput,
     shape_json: &str,
-) -> Result<super::types::ModelQueryResult, deno_core::anyhow::Error> {
+) -> Result<super::types::ModelQueryResult, anyhow::Error> {
     execute_model_query_from_json(store, class_name, &with_unverified(query), shape_json).await
 }
 
@@ -837,6 +837,7 @@ fn make_shape_with_relation(class: &str, rel_name: &str, predicate: &str) -> Mod
             transform: None,
             interpretation_hint: None,
             identity: false,
+            in_values: None,
             local: false,
             ordering: None,
         }],
@@ -1483,6 +1484,7 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            in_values: None,
             local: false,
             ordering: None,
         }],
@@ -1920,6 +1922,7 @@ async fn test_getters_run_after_pagination() {
     }"#;
 
     let query_input = ModelQueryInput {
+        count: Some(true),
         limit: Some(2),
         deep_query: Some(true),
         order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
@@ -1930,7 +1933,7 @@ async fn test_getters_run_after_pagination() {
         .await
         .unwrap();
     assert_eq!(result.instances.len(), 2, "should return 2 instances");
-    assert_eq!(result.total_count, 5, "total count should be 5");
+    assert_eq!(result.total_count.unwrap(), 5, "total count should be 5");
 
     // Both returned instances should have replyingTo populated
     for inst in &result.instances {
@@ -2063,6 +2066,7 @@ async fn test_where_filter_signed_expression_string() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            in_values: None,
             local: false,
             ordering: None,
         }],
@@ -2152,6 +2156,7 @@ async fn test_where_filter_signed_expression_no_matches() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            in_values: None,
             local: false,
             ordering: None,
         }],
@@ -2289,6 +2294,7 @@ async fn test_where_filter_multiple_conditions() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            in_values: None,
             local: false,
             ordering: None,
         }],
@@ -2371,6 +2377,7 @@ async fn test_where_filter_missing_property_on_target() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            in_values: None,
             local: false,
             ordering: None,
         }],
@@ -2451,6 +2458,7 @@ async fn test_where_filter_plain_literal_string() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            in_values: None,
             local: false,
             ordering: None,
         }],
@@ -2554,6 +2562,7 @@ async fn test_where_filter_on_multiple_instances() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            in_values: None,
             local: false,
             ordering: None,
         }],
@@ -2958,6 +2967,7 @@ fn scalar_prop(name: &str, predicate: &str, required: bool, flag: bool) -> Shape
         transform: None,
         interpretation_hint: None,
         identity: false,
+        in_values: None,
         local: false,
         ordering: None,
     }
@@ -2982,6 +2992,7 @@ fn collection_prop(name: &str, predicate: &str, getter: Option<&str>) -> ShapePr
         transform: None,
         interpretation_hint: None,
         identity: false,
+        in_values: None,
         local: false,
         ordering: None,
     }
@@ -3581,6 +3592,7 @@ async fn test_full_model_query_ops_with_pagination_pushed() {
         &store,
         "Scored",
         &ModelQueryInput {
+            count: Some(true),
             where_clause: Some(wc),
             limit: Some(3),
             offset: Some(2),
@@ -3592,7 +3604,11 @@ async fn test_full_model_query_ops_with_pagination_pushed() {
     .await
     .unwrap();
     assert_eq!(result.instances.len(), 3, "Should get 3 items in page");
-    assert_eq!(result.total_count, 7, "Total matching items: score >= 30");
+    assert_eq!(
+        result.total_count.unwrap(),
+        7,
+        "Total matching items: score >= 30"
+    );
 }
 
 #[tokio::test]
@@ -3697,6 +3713,7 @@ async fn test_full_model_query_ops_contains_with_pagination() {
         &store,
         "Person",
         &ModelQueryInput {
+            count: Some(true),
             where_clause: Some(wc),
             limit: Some(1),
             offset: Some(1),
@@ -3708,7 +3725,7 @@ async fn test_full_model_query_ops_contains_with_pagination() {
     .await
     .unwrap();
     assert_eq!(result.instances.len(), 1, "Should get 1 item in page");
-    assert_eq!(result.total_count, 3, "Total matching: 3 Alices");
+    assert_eq!(result.total_count.unwrap(), 3, "Total matching: 3 Alices");
     assert_eq!(
         result.instances[0]["name"].as_str().unwrap(),
         "Alice Brown",
@@ -3793,24 +3810,24 @@ async fn test_plain_literal_where_paginate_count() {
         "status".to_string(),
         WhereCondition::String("active".to_string()),
     );
-    let result = fixture_query_from_json(
-        &store,
-        "Task",
-        &ModelQueryInput {
-            where_clause: Some(wc.clone()),
-            limit: Some(2),
-            offset: Some(0),
-            order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
-            count: Some(true),
-            ..Default::default()
-        },
-        shape_json,
-    )
-    .await
-    .unwrap();
+    let first_page = ModelQueryInput {
+        where_clause: Some(wc.clone()),
+        limit: Some(2),
+        offset: Some(0),
+        order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
+        count: Some(true),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Task", &first_page, shape_json)
+        .await
+        .unwrap();
 
     assert_eq!(result.instances.len(), 2, "Page should have 2 items");
-    assert_eq!(result.total_count, 3, "Total active items should be 3");
+    assert_eq!(
+        result.total_count.unwrap(),
+        3,
+        "Total active items should be 3"
+    );
     assert_eq!(result.instances[0]["name"].as_str().unwrap(), "Alpha");
     assert_eq!(result.instances[1]["name"].as_str().unwrap(), "Beta");
     assert_eq!(result.instances[0]["status"].as_str().unwrap(), "active");
@@ -3832,8 +3849,42 @@ async fn test_plain_literal_where_paginate_count() {
     .unwrap();
 
     assert_eq!(result2.instances.len(), 1);
-    assert_eq!(result2.total_count, 3);
+    assert_eq!(result2.total_count.unwrap(), 3);
     assert_eq!(result2.instances[0]["name"].as_str().unwrap(), "Delta");
+
+    // Without `count`: the same rows, no total, and none on the wire.
+    for count in [None, Some(false)] {
+        let uncounted = fixture_query_from_json(
+            &store,
+            "Task",
+            &ModelQueryInput {
+                count,
+                ..first_page.clone()
+            },
+            shape_json,
+        )
+        .await
+        .unwrap();
+        assert_eq!(uncounted.instances, result.instances, "count: {count:?}");
+        assert_eq!(uncounted.total_count, None, "count: {count:?}");
+        let wire = serde_json::to_value(&uncounted).unwrap();
+        assert!(wire.get("totalCount").is_none(), "{wire}");
+
+        let count_only = fixture_query_from_json(
+            &store,
+            "Task",
+            &ModelQueryInput {
+                count,
+                limit: Some(0),
+                ..first_page.clone()
+            },
+            shape_json,
+        )
+        .await
+        .unwrap();
+        assert!(count_only.instances.is_empty());
+        assert_eq!(count_only.total_count, None, "limit 0, count: {count:?}");
+    }
 }
 
 /// Guards that the `contains` filter — which doesn't reduce to a direct
@@ -3974,6 +4025,7 @@ async fn test_perf_large_dataset_paginated_query() {
         &store,
         "Message",
         &ModelQueryInput {
+            count: Some(true),
             where_clause: Some(wc),
             limit: Some(50),
             offset: Some(0),
@@ -3988,7 +4040,8 @@ async fn test_perf_large_dataset_paginated_query() {
 
     assert_eq!(result.instances.len(), 50, "Should get 50 messages");
     assert_eq!(
-        result.total_count, msgs_per_channel,
+        result.total_count.unwrap(),
+        msgs_per_channel,
         "Total count should be messages in one channel"
     );
     eprintln!(
@@ -4099,7 +4152,8 @@ async fn test_perf_flux_message_parent_scope_paginated() {
 
     assert_eq!(result.instances.len(), 30, "Should get 30 messages");
     assert_eq!(
-        result.total_count, msgs_per_channel,
+        result.total_count.unwrap(),
+        msgs_per_channel,
         "Total count should be {} messages in channel-2",
         msgs_per_channel
     );
@@ -4300,6 +4354,7 @@ async fn test_full_model_query_order_by_property_string() {
         &store,
         "Person",
         &ModelQueryInput {
+            count: Some(true),
             limit: Some(2),
             order: Some(vec![("name".to_string(), OrderDirection::ASC)]),
             ..Default::default()
@@ -4309,7 +4364,7 @@ async fn test_full_model_query_order_by_property_string() {
     .await
     .unwrap();
     assert_eq!(result.instances.len(), 2);
-    assert_eq!(result.total_count, 3);
+    assert_eq!(result.total_count.unwrap(), 3);
     // First 2 alphabetically: Alice, Bob
     assert_eq!(result.instances[0]["name"].as_str().unwrap(), "Alice");
     assert_eq!(result.instances[1]["name"].as_str().unwrap(), "Bob");
@@ -4319,6 +4374,7 @@ async fn test_full_model_query_order_by_property_string() {
         &store,
         "Person",
         &ModelQueryInput {
+            count: Some(true),
             limit: Some(2),
             order: Some(vec![("name".to_string(), OrderDirection::DESC)]),
             ..Default::default()
@@ -4377,6 +4433,7 @@ async fn test_full_model_query_order_by_property_string_signed_envelope() {
         &store,
         "Person2",
         &ModelQueryInput {
+            count: Some(true),
             limit: Some(2),
             order: Some(vec![("name".to_string(), OrderDirection::ASC)]),
             ..Default::default()
@@ -4386,7 +4443,7 @@ async fn test_full_model_query_order_by_property_string_signed_envelope() {
     .await
     .unwrap();
     assert_eq!(result.instances.len(), 2);
-    assert_eq!(result.total_count, 3);
+    assert_eq!(result.total_count.unwrap(), 3);
     assert_eq!(result.instances[0]["name"].as_str().unwrap(), "Alice");
     assert_eq!(result.instances[1]["name"].as_str().unwrap(), "Bob");
 }
@@ -4427,6 +4484,7 @@ async fn test_full_model_query_order_by_property_number() {
         &store,
         "Scored",
         &ModelQueryInput {
+            count: Some(true),
             limit: Some(3),
             order: Some(vec![("score".to_string(), OrderDirection::ASC)]),
             ..Default::default()
@@ -4436,7 +4494,7 @@ async fn test_full_model_query_order_by_property_number() {
     .await
     .unwrap();
     assert_eq!(result.instances.len(), 3);
-    assert_eq!(result.total_count, 5);
+    assert_eq!(result.total_count.unwrap(), 5);
     let got_scores: Vec<f64> = result
         .instances
         .iter()
@@ -4449,6 +4507,7 @@ async fn test_full_model_query_order_by_property_number() {
         &store,
         "Scored",
         &ModelQueryInput {
+            count: Some(true),
             limit: Some(2),
             order: Some(vec![("score".to_string(), OrderDirection::DESC)]),
             ..Default::default()
@@ -4547,6 +4606,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            in_values: None,
             local: false,
             ordering: None,
         }],
@@ -4865,7 +4925,7 @@ async fn test_sort_by_projection_count_with_pagination() {
     .unwrap();
 
     assert_eq!(result.instances.len(), 2, "page size should be 2");
-    assert_eq!(result.total_count, 5, "total should be 5");
+    assert_eq!(result.total_count.unwrap(), 5, "total should be 5");
     let page1: Vec<u64> = result
         .instances
         .iter()
@@ -6958,8 +7018,14 @@ async fn test_polymorphic_include_hydrates_each_child_as_its_own_class() {
         .find(|c| c["id"] == "we://i/1")
         .expect("the image block");
 
-    assert_eq!(text["__subjectClass"].as_str(), Some("TextBlock"));
-    assert_eq!(image["__subjectClass"].as_str(), Some("ImageBlock"));
+    assert_eq!(
+        text["__subjectClass"].as_str(),
+        Some("we://models/TextBlock")
+    );
+    assert_eq!(
+        image["__subjectClass"].as_str(),
+        Some("we://models/ImageBlock")
+    );
     // The property that only exists on the concrete class — the thing a
     // base-class hydration silently drops.
     assert_eq!(text["text"].as_str(), Some("hello"));
@@ -7075,7 +7141,10 @@ async fn test_polymorphic_include_hydrates_the_most_derived_class() {
     assert_eq!(children.len(), 1, "one link, one child");
 
     let child = &children[0];
-    assert_eq!(child["__subjectClass"].as_str(), Some("TextBlock"));
+    assert_eq!(
+        child["__subjectClass"].as_str(),
+        Some("we://models/TextBlock")
+    );
     // `text` exists only on the subclass, so its presence is the proof that the
     // subclass's shape did the hydrating and not the parent's.
     assert_eq!(child["text"].as_str(), Some("hello"));
@@ -7083,7 +7152,7 @@ async fn test_polymorphic_include_hydrates_the_most_derived_class() {
     // simply true, and it is reported.
     assert_eq!(
         child["__subjectClasses"],
-        serde_json::json!(["TextBlock", "Block"]),
+        serde_json::json!(["we://models/TextBlock", "we://models/Block"]),
         "the whole set, most specific first"
     );
 }
@@ -7207,7 +7276,7 @@ async fn test_polymorphic_include_returns_one_member_per_link_for_a_multi_class_
     assert_eq!(child["id"].as_str(), Some("we://b/1"));
     assert_eq!(
         child["__subjectClass"].as_str(),
-        Some("Bookmark"),
+        Some("we://models/Bookmark"),
         "the ranking ties, so the tie-break decides — and decides the same way everywhere"
     );
     assert_eq!(child["url"].as_str(), Some("https://ad4m.dev"));
@@ -7215,7 +7284,7 @@ async fn test_polymorphic_include_returns_one_member_per_link_for_a_multi_class_
     // `TextBlock` for it directly.
     assert_eq!(
         child["__subjectClasses"],
-        serde_json::json!(["Bookmark", "TextBlock"])
+        serde_json::json!(["we://models/Bookmark", "we://models/TextBlock"])
     );
 }
 
@@ -7396,7 +7465,7 @@ async fn test_polymorphic_include_prefers_a_class_the_caller_named() {
 
     assert_eq!(
         entry["__subjectClass"].as_str(),
-        Some("Post"),
+        Some("we://models/Post"),
         "the caller named Post, and the target is one"
     );
     assert_eq!(entry["title"].as_str(), Some("Chocolate Cake"));
@@ -7405,7 +7474,7 @@ async fn test_polymorphic_include_prefers_a_class_the_caller_named() {
     // preference was applied precisely because the head is not the chosen class.
     assert_eq!(
         entry["__subjectClasses"],
-        serde_json::json!(["ImagePost", "Post"]),
+        serde_json::json!(["we://models/ImagePost", "we://models/Post"]),
         "the whole set, still most specific first"
     );
 }
@@ -7519,7 +7588,10 @@ async fn test_preferring_classes_does_not_drop_the_ones_not_named() {
         .iter()
         .find(|e| e["id"] == "we://r/1")
         .expect("the unnamed class is still a member");
-    assert_eq!(recipe["__subjectClass"].as_str(), Some("Recipe"));
+    assert_eq!(
+        recipe["__subjectClass"].as_str(),
+        Some("we://models/Recipe")
+    );
     assert_eq!(recipe["ingredients"].as_str(), Some("flour, sugar"));
 }
 
@@ -7748,8 +7820,11 @@ async fn test_polymorphic_reverse_include_hydrates_each_source_as_its_own_class(
         .find(|c| c["id"] == "we://b/1")
         .expect("the board");
 
-    assert_eq!(collection["__subjectClass"].as_str(), Some("Collection"));
-    assert_eq!(board["__subjectClass"].as_str(), Some("Board"));
+    assert_eq!(
+        collection["__subjectClass"].as_str(),
+        Some("we://models/Collection")
+    );
+    assert_eq!(board["__subjectClass"].as_str(), Some("we://models/Board"));
     // The property that exists only on the concrete class — before this, both
     // took the same path through the declared target class and arrived empty.
     assert_eq!(collection["title"].as_str(), Some("Reading list"));
@@ -8888,6 +8963,7 @@ async fn a_traverse_scope_with_an_unwritable_predicate_matches_nothing() {
         .unwrap();
 
     let query = ModelQueryInput {
+        count: Some(true),
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
             // A space cannot appear in an IRI term.
@@ -8912,7 +8988,7 @@ async fn a_traverse_scope_with_an_unwritable_predicate_matches_nothing() {
             .filter_map(|i| i["id"].as_str())
             .collect::<Vec<_>>()
     );
-    assert_eq!(result.total_count, 0, "and a total that agrees");
+    assert_eq!(result.total_count.unwrap(), 0, "and a total that agrees");
 }
 
 /// The same rule for the older spellings, which had the same hole: a `Raw`
@@ -9027,6 +9103,7 @@ async fn a_per_anchor_limit_refuses_an_order_the_store_cannot_express() {
 async fn a_walk_totals_the_walk_rather_than_one_step_of_it() {
     let store = comment_tree_store();
     let query = ModelQueryInput {
+        count: Some(true),
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
             predicate: Some("we://comment".to_string()),
@@ -9049,7 +9126,8 @@ async fn a_walk_totals_the_walk_rather_than_one_step_of_it() {
         .collect();
     assert_eq!(ids, vec!["we://c1", "we://r1"], "one per level, two levels");
     assert_eq!(
-        result.total_count, 2,
+        result.total_count.unwrap(),
+        2,
         "the total is the walk's own union, not root's three direct replies"
     );
 }
@@ -9064,6 +9142,7 @@ async fn a_walk_totals_the_walk_rather_than_one_step_of_it() {
 async fn a_count_only_walk_totals_the_walk_too() {
     let store = comment_tree_store();
     let query = ModelQueryInput {
+        count: Some(true),
         parent: Some(Scope::Traverse {
             ids: vec!["we://root".to_string()],
             predicate: Some("we://comment".to_string()),
@@ -9085,7 +9164,8 @@ async fn a_count_only_walk_totals_the_walk_too() {
         "a count-only query returns no rows"
     );
     assert_eq!(
-        result.total_count, 2,
+        result.total_count.unwrap(),
+        2,
         "the count is the walk's own union, exactly as the full query reports it"
     );
 }
@@ -9218,6 +9298,7 @@ async fn a_transitive_read_excludes_every_named_anchor() {
 async fn a_transitive_read_totals_what_it_returns() {
     let store = comment_tree_store();
     let query = ModelQueryInput {
+        count: Some(true),
         parent: Some(traverse_scope(
             &["we://root", "we://c1"],
             true,
@@ -9235,7 +9316,8 @@ async fn a_transitive_read_totals_what_it_returns() {
         "c2, c3, r1, r2, rr1 — both anchors excluded"
     );
     assert_eq!(
-        result.total_count, 5,
+        result.total_count.unwrap(),
+        5,
         "the total counts what the scope returns, not the anchors it starts from"
     );
 }
@@ -9977,9 +10059,9 @@ async fn test_polymorphic_has_one_hydrates_as_one_record_of_its_own_class() {
         task.is_object(),
         "a to-one hydrates as one object, got {task}"
     );
-    assert_eq!(task["__subjectClass"], "TaskBlock");
+    assert_eq!(task["__subjectClass"], "we://models/TaskBlock");
     assert_eq!(task["title"], "ship");
-    assert_eq!(note["__subjectClass"], "NoteBlock");
+    assert_eq!(note["__subjectClass"], "we://models/NoteBlock");
     assert_eq!(note["text"], "hello");
 }
 
@@ -10074,6 +10156,7 @@ async fn paged(offset: Option<usize>, limit: usize) -> (Vec<String>, usize, bool
         &ModelQueryInput {
             offset,
             limit: Some(limit),
+            count: Some(true),
             ..Default::default()
         },
         shape_json,
@@ -10088,7 +10171,7 @@ async fn paged(offset: Option<usize>, limit: usize) -> (Vec<String>, usize, bool
         .iter()
         .map(|i| i["id"].as_str().unwrap().to_string())
         .collect();
-    (ids, result.total_count, counted)
+    (ids, result.total_count.expect("count: true"), counted)
 }
 
 fn paged_ids(range: std::ops::Range<usize>) -> Vec<String> {
@@ -10164,6 +10247,7 @@ async fn a_short_page_sliced_per_anchor_keeps_the_stores_count() {
             )),
             order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
             limit: Some(10),
+            count: Some(true),
             ..Default::default()
         },
         COMMENT_SHAPE_JSON,
@@ -10177,7 +10261,8 @@ async fn a_short_page_sliced_per_anchor_keeps_the_stores_count() {
         .collect();
     assert_eq!(ids, vec!["we://c1"], "one per anchor, oldest first");
     assert_eq!(
-        result.total_count, 3,
+        result.total_count,
+        Some(3),
         "the page is short because of the slice, not because the scope ran out"
     );
 }

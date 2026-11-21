@@ -16,7 +16,11 @@ REST/WS shim. Split plan: spec item 6.
 
 `*_ws.rs`, one per RPC namespace: `agent`, `ai`, `expressions`, `hosting`,
 `languages`, `neighbourhoods`, `perspectives` (largest; also SHACL + interpretation
-handlers), `runtime`, `users`, and `agent_session` (`perspective.runAgent`). Each exposes `register_ws_handlers(&mut HandlerMap)`
+handlers), `runtime`, `config` (`runtime.config`, `runtime.setConfig`), `users`, `identity`,
+`agent_session` (`perspective.runAgent`), and `perspective_instances` (`perspective.instance*`:
+validated instance writes over `perspectives/instances/`, the same functions as the MCP
+`instance_*` tools; a refused write is a `WsRpcError` with the `InstanceError` as `data`: 422
+for a shape violation, see the module doc). Each exposes `register_ws_handlers(&mut HandlerMap)`
 called from `ws_handler::build_handler_map`.
 
 Handler shape (`perspectives_ws.rs::add_link` is representative):
@@ -112,6 +116,16 @@ without that check. A guard runs before the handler's own checks. A handler chec
 part of the guard (compute credits, param validation beyond the contract type) runs after the
 access check: a call that fails both gets the access answer.
 
+**Local only.** A method flagged `.local_only()` (`MethodFlags::local_only`) answers only the
+operator on this machine (`Session::is_operator_on_this_machine`: the admin credential, or no
+token on an executor without one, on a loopback listener). The dispatcher checks it after the
+guard: every other caller gets 403 `guards::LOCAL_ONLY` (`local-only: …`), a grant with every
+capability and the admin credential on a network listener included. The guard table marks
+these methods "local only". `runtime.setConfig` is not local only as a whole: it refuses each
+`machine` key to a caller off this machine (`config_rpc`). `identity.custodyStatus` adds the
+custody channel's own check (`identity::custody::admit`: the admin credential, not a tokenless
+operator, and `--custody-channel`).
+
 Notes on some methods:
 
 - `agent.generate` creates the main agent on first run only: it refuses (409) an
@@ -127,7 +141,9 @@ Notes on some methods:
 - `runtime.exportData` (`Executor`) has two kinds. A `perspective` export checks
   `get_perspective_with_access` in its handler, so an app exports only the main agent's
   perspectives. A `db` export names no perspective and checks nothing past the guard: it writes
-  the whole executor database (`export_all_to_json`) for any session the guard admits.
+  the whole executor database (`export_all_to_json`). It and `runtime.importData` read and
+  write paths on the executor's machine; they are not local only yet (key login adds them,
+  with `agent.generate`, `agent.import` and `agent.lock`).
 - `Cap` methods that read executor-wide data users read today: `agent.getTrustedAgents`,
   `ai.models`, `language.*` reads, link-language templates,
   `runtime.hcAgentInfos`/`networkMetrics`/`hostRates`/`unytVersionInfo`. `Executor` would refuse
@@ -149,7 +165,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-228 methods: Cap 81, CapAnyPointer 1, Executor 43, Open 5, Operator 22, Owns 74, UserOrOperator 2.
+236 methods: Cap 81, CapAnyPointer 1, Executor 43, Open 5, Operator 28, Owns 76, UserOrOperator 2. Local only (the operator on this machine): 5.
 
 | Method | Guard |
 |---|---|
@@ -175,7 +191,7 @@ the guard checked:
 | `agent.revokeToken` | `Owns(Grant token, agent:UPDATE)` |
 | `agent.sign` | `Cap(agent:SIGN)` |
 | `agent.status` | `Cap(agent:READ)` |
-| `agent.unlock` | `Executor(agent:SIGN)` |
+| `agent.unlock` | `Executor(agent:SIGN)`, local only |
 | `agent.updateProfile` | `Cap(agent:UPDATE)` |
 | `ai.addEndpoint` | `Executor(artificial intelligence:CREATE)` |
 | `ai.addModel` | `Executor(artificial intelligence:CREATE)` |
@@ -228,12 +244,14 @@ the guard checked:
 | `hosting.walletHistory` | `Executor(runtime.hosting:READ)` |
 | `identity.claimOffer` | `Operator` |
 | `identity.cosignIncept` | `UserOrOperator(agent:SIGN)` |
+| `identity.custodyStatus` | `Operator`, local only |
 | `identity.devices` | `Cap(agent:READ)` |
 | `identity.joinStatus` | `Cap(agent:READ)` |
 | `identity.log` | `Cap(agent:READ)` |
 | `identity.offers` | `Cap(agent:READ)` |
 | `identity.openOffer` | `Cap(agent:UPDATE)` |
 | `identity.publish` | `UserOrOperator(agent:UPDATE)` |
+| `identity.rekey` | `Operator`, local only |
 | `identity.resetLog` | `Operator` |
 | `identity.resolve` | `Cap(agent:READ)` |
 | `identity.status` | `Cap(agent:READ)` |
@@ -260,7 +278,6 @@ the guard checked:
 | `perspective.addLink` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.addLinkExpression` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.addLinks` | `Owns(Perspective uuid, perspective:UPDATE)` |
-| `perspective.addSdna` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.all` | `CapAnyPointer(perspective:READ)` |
 | `perspective.commitBatch` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.create` | `Cap(perspective:CREATE)` |
@@ -275,11 +292,12 @@ the guard checked:
 | `perspective.flowStates` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.flowValidOutputs` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.get` | `Owns(Perspective uuid, perspective:READ)`, 404 → `null` |
-| `perspective.getAllShacl` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.getShacl` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.getShaclNames` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.getShaclTargetClass` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.getSubjectData` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.instanceAddToCollection` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.instanceCreate` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.instanceRemove` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.instanceRemoveFromCollection` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.instanceUpdate` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.interpretationOverlays` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.linkMutations` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.mintFlowReceipt` | `Owns(Perspective uuid, perspective:UPDATE)` |
@@ -290,6 +308,7 @@ the guard checked:
 | `perspective.queryLinks` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.queryProlog` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.querySparql` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.registerShapes` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.rejectFlowProposal` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.rejectInterpretation` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.remove` | `Owns(Perspective uuid, perspective:DELETE)` |
@@ -301,6 +320,7 @@ the guard checked:
 | `perspective.runAgent` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.runInterpretation` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.runInterpretationWithHarness` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.shapes` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.snapshot` | `Owns(Perspective uuid, perspective:READ)`, 404 → `null` |
 | `perspective.subjectClassesOf` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.subscribeQuery` | `Owns(Perspective uuid, perspective:READ)` |
@@ -313,6 +333,7 @@ the guard checked:
 | `runtime.addHcAgentInfos` | `Executor(runtime.hc_agent_info:CREATE)` |
 | `runtime.addLinkLanguageTemplates` | `Executor(runtime.known_link_languages:CREATE)` |
 | `runtime.computeLog` | `Cap(agent:READ)` |
+| `runtime.config` | `Operator` |
 | `runtime.createNotification` | `Cap(agent:UPDATE)` |
 | `runtime.deleteNotification` | `Cap(agent:UPDATE)` |
 | `runtime.exportData` | `Executor(agent:UPDATE)` |
@@ -326,15 +347,18 @@ the guard checked:
 | `runtime.inbox` | `Cap(runtime.messages:READ)` |
 | `runtime.info` | `Open` |
 | `runtime.linkLanguageTemplates` | `Cap(runtime.known_link_languages:READ)` |
+| `runtime.logTail` | `Operator` |
 | `runtime.networkMetrics` | `Cap(runtime.hc_agent_info:READ)` |
 | `runtime.notifications` | `Cap(agent:UPDATE)` |
 | `runtime.openLink` | `Operator` |
 | `runtime.outbox` | `Executor(runtime.messages:READ)` |
-| `runtime.quit` | `Executor(runtime:QUIT)` |
+| `runtime.quit` | `Executor(runtime:QUIT)`, local only |
 | `runtime.removeFriends` | `Executor(runtime.friends:DELETE)` |
 | `runtime.removeLinkLanguageTemplates` | `Executor(runtime.known_link_languages:DELETE)` |
+| `runtime.restart` | `Operator`, local only |
 | `runtime.restartHolochain` | `Operator` |
 | `runtime.sendFriendMessage` | `Executor(runtime.messages:CREATE)` |
+| `runtime.setConfig` | `Operator` |
 | `runtime.setFreeHostingEnabled` | `Executor(*:*)` |
 | `runtime.setHostRates` | `Operator` |
 | `runtime.setStatus` | `Cap(runtime.my_status:UPDATE)` |
@@ -455,7 +479,9 @@ them against those two guards.
   once to each of `event_recipients`, each copy naming that DID as `recipient`
   (`perspectives::publish_telepresence_signal`, used by both link-language paths and by
   `send_signal` / `send_broadcast` for the executor's own agents: a neighbourhood's owners are
-  only this executor's agents). `notification-triggered` goes to the notification's `ownerDid`,
+  only this executor's agents). A broadcast reaches every owner, the sender's own agent too, main
+  or managed, so its other clients hear it (two devices of one agent in a mesh call); `loopback`
+  adds a second copy to every owner. `notification-triggered` goes to the notification's `ownerDid`,
   never to co-owners, and needs the query capability on its perspective (its `triggerMatch` is
   query results), not `runtime.notifications`' AGENT_UPDATE. `auto-processor-event` goes to the pass owner when it is one of
   `event_recipients`, else nobody (`auto_processor::events::pass_audience`);
@@ -579,9 +605,11 @@ them against those two guards.
   `core/src/generated/api/`, but not its `index.ts`: add the export line there by hand.
 - `crate::types::core` (domain) vs `crate::types::domain` (wire/input). Some duplicates,
   see spec item 5. Prefer `crate::types::X` re-exports.
-- `WsRpcError { code, message }` (`ws_handler.rs`): constructors `bad_request`,
+- `WsRpcError { code, message, data }` (`ws_handler.rs`): constructors `bad_request`,
   `unauthorized`, `forbidden`, `not_found`, `conflict`, `too_many_requests`,
-  `internal`, `not_implemented`. No `From` impls for domain errors yet.
+  `internal`, `not_implemented`; `.with_data(value)` adds structured detail, sent as
+  `error.data` (`to_wire`) and read by the SDK as `RpcError.data`. No `From` impls for domain
+  errors yet.
 
 ## openai_compat/
 

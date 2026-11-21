@@ -1,17 +1,12 @@
 //! `instance_add_to_collection` + `instance_remove_from_collection` —
 //! collection membership on any subject class.
 
-use super::{
-    class_properties, coerce_scalar, decoded_literal, describe_value, error_json, fetch_instance,
-    find_property, instance_uri, link_target, not_found, pretty, resolve_writable_class,
-    validation_failure, Ad4mMcpHandler, PropView, ValidationError,
-};
-use crate::mcp::shacl;
-use crate::types::{Link, LinkQuery, LinkStatus};
+use super::{common_error, error_json, pretty, Ad4mMcpHandler};
+use crate::perspectives::instances::{self as shared, InstanceError, WriteStep};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
 
 /// Parameters for adding an item to a collection property
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -43,76 +38,56 @@ pub struct InstanceRemoveFromCollectionParams {
     pub item_uri: String,
 }
 
-/// Resolve `collection` to a writable collection property of the class, or
-/// return the validation-failure payload that explains why it is not one
-/// (unknown name, single-valued property, read-only relation).
-fn resolve_collection<'a, 'p>(
-    class_name: &str,
-    infos: &'a [PropView<'p>],
-    collection: &str,
-    item_uri: &str,
-) -> Result<&'a PropView<'p>, String> {
-    let Some(info) = find_property(infos, collection) else {
-        let names: Vec<&str> = infos
-            .iter()
-            .filter(|i| i.collection() && i.writable())
-            .map(|i| i.name())
-            .collect();
-        return Err(validation_failure(
-            class_name,
-            &[ValidationError {
-                property: collection.to_string(),
-                problem: format!(
-                    "unknown collection on class '{}'. Collections: {}",
-                    class_name,
-                    if names.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        names.join(", ")
-                    }
-                ),
-                expected_type: None,
-                cardinality: None,
-                received: None,
-            }],
-        ));
-    };
-    if !info.collection() {
-        return Err(validation_failure(
-            class_name,
-            &[ValidationError {
-                property: info.name().to_string(),
-                problem: "is a single-valued property, not a collection — use \
-                          instance_update to set it"
-                    .to_string(),
-                expected_type: Some(info.type_name()),
-                cardinality: Some(info.cardinality_text().to_string()),
-                received: Some(describe_value(&Value::String(item_uri.to_string()))),
-            }],
-        ));
+/// The collection tools' text for a refused or failed write.
+fn collection_error(error: &InstanceError) -> String {
+    if let Some(text) = common_error(error) {
+        return text;
     }
-    if let Some(reason) = info.read_only_reason() {
-        return Err(validation_failure(
+    match error {
+        InstanceError::Failed {
             class_name,
-            &[ValidationError {
-                property: info.name().to_string(),
-                problem: format!("read-only: {reason}"),
-                expected_type: Some(info.type_name()),
-                cardinality: Some(info.cardinality_text().to_string()),
-                received: None,
-            }],
-        ));
+            step,
+            error,
+        } => error_json(match step {
+            WriteStep::ReadShape => format!("{error:#}"),
+            WriteStep::ReadInstance => format!("Error reading {class_name} instance: {error}"),
+            WriteStep::ResolveCollection { collection } => {
+                format!("Error resolving collection '{collection}': {error}")
+            }
+            WriteStep::ReadCollection { collection } => {
+                format!("Error reading collection '{collection}': {error:#}")
+            }
+            WriteStep::AddCollectionItem { collection, .. } => {
+                format!("Error adding to collection '{collection}': {error:#}")
+            }
+            WriteStep::RemoveCollectionItem {
+                collection,
+                item,
+                removed,
+            } => format!(
+                "Error removing '{item}' from collection '{collection}' ({removed} link(s) \
+                 already removed): {error:#}"
+            ),
+            other => format!("Error writing collection ({other:?}): {error:#}"),
+        }),
+        InstanceError::StoredAsExpressions {
+            collection,
+            item_uri,
+            language,
+            members,
+            ..
+        } => error_json(format!(
+            "'{}' is not how collection '{}' stores its members: the property declares \
+             resolveLanguage '{}', so each member is an expression address created at write \
+             time, not the value passed to instance_add_to_collection. Pass item_uri exactly \
+             as instance_get lists it. Current members: {}.",
+            item_uri,
+            collection,
+            language,
+            members.join(", ")
+        )),
+        other => error_json(format!("{other:?}")),
     }
-    Ok(info)
-}
-
-/// Whether a stored collection link target denotes `wanted`. The target may
-/// be the item URI itself (references), the literal-encoded form of a bare
-/// value, or a signed literal envelope whose payload is the value — accept
-/// all three spellings so the caller can pass back whatever instance_get
-/// showed them.
-fn target_matches(target: &str, wanted: &str, encoded: &str) -> bool {
-    target == wanted || target == encoded || decoded_literal(target) == wanted
 }
 
 impl Ad4mMcpHandler {
@@ -130,125 +105,34 @@ impl Ad4mMcpHandler {
                 Ok(v) => v,
                 Err(e) => return e,
             };
-        let (class_name, shape) = match resolve_writable_class(&perspective, &p.class_name).await {
-            Ok(v) => v,
-            Err(e) => return e,
-        };
-
-        let infos = class_properties(&shape);
-        let info = match resolve_collection(&class_name, &infos, &p.collection, &p.item_uri) {
-            Ok(info) => info,
-            Err(e) => return e,
-        };
-        if let Err(e) = coerce_scalar(info, &Value::String(p.item_uri.clone())) {
-            return validation_failure(&class_name, &[e]);
-        }
-
-        let base_uri = match instance_uri("base_uri", &p.base_uri) {
-            Ok(uri) => uri,
-            Err(e) => return e,
-        };
-        match fetch_instance(&perspective, &class_name, &base_uri).await {
-            Ok(Some(_)) => {}
-            Ok(None) => return not_found(&class_name, &base_uri),
-            Err(e) => return error_json(format!("Error reading {class_name} instance: {e}")),
-        }
-
-        let predicate = match shacl::resolve_property_predicate(
-            &perspective,
-            &class_name,
-            &info.name(),
+        match shared::add_to_collection(
+            &mut perspective,
+            &agent_context,
+            shared::InstanceAddToCollection {
+                class_name: p.class_name.clone(),
+                base_uri: p.base_uri.clone(),
+                collection: p.collection.clone(),
+                item_uri: p.item_uri.clone(),
+                batch_id: None,
+            },
         )
         .await
         {
-            Ok(pred) => pred,
-            Err(e) => {
-                return error_json(format!(
-                    "Error resolving collection '{}': {}",
-                    info.name(),
-                    e
-                ))
+            Ok(added) => {
+                let mut result = json!({
+                    "success": true,
+                    "class_name": added.class_name,
+                    "base_uri": added.base_uri,
+                    "collection": added.collection,
+                    "item_uri": added.item_uri,
+                    "links_added": added.links_added,
+                });
+                if added.already_member {
+                    result["already_member"] = json!(true);
+                }
+                pretty(&result)
             }
-        };
-
-        // Idempotent: the store dedups the raw triple, but every signed
-        // link expression gets its own reifier, so adding the same item
-        // twice would show up as a duplicate member. Look for an existing
-        // membership link first and leave the collection untouched if the
-        // item is already in it.
-        let wanted = p.item_uri.trim();
-        let encoded = link_target(wanted);
-        let existing = match perspective
-            .get_links(&LinkQuery {
-                source: Some(base_uri.clone()),
-                predicate: Some(predicate.clone()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) => links,
-            Err(e) => {
-                return error_json(format!(
-                    "Error reading collection '{}': {:#}",
-                    info.name(),
-                    e
-                ))
-            }
-        };
-        if existing
-            .iter()
-            .any(|link| target_matches(&link.data.target, wanted, &encoded))
-        {
-            return pretty(&json!({
-                "success": true,
-                "class_name": class_name,
-                "base_uri": base_uri,
-                "collection": info.name(),
-                "item_uri": p.item_uri,
-                "links_added": 0,
-                "already_member": true,
-            }));
-        }
-
-        let target = Self::create_property_expression(
-            &perspective,
-            &class_name,
-            &info.name(),
-            &p.item_uri,
-            &agent_context,
-        )
-        .await;
-        let link = Link {
-            source: base_uri.clone(),
-            predicate: Some(predicate),
-            target,
-        };
-        // This path writes the membership link directly rather than running
-        // the collection's `adder` action, so the action's `local` flag never
-        // reaches it — resolve the status from the property shape instead, or
-        // a `local: true` collection would be gossiped by this tool alone.
-        let status = if info.local() {
-            LinkStatus::Local
-        } else {
-            LinkStatus::Shared
-        };
-        match perspective
-            .add_link(link, status, None, &agent_context)
-            .await
-        {
-            Ok(_) => pretty(&json!({
-                "success": true,
-                "class_name": class_name,
-                "base_uri": base_uri,
-                "collection": info.name(),
-                "item_uri": p.item_uri,
-                "links_added": 1,
-            })),
-            Err(e) => error_json(format!(
-                "Error adding to collection '{}': {:#}",
-                info.name(),
-                e
-            )),
+            Err(e) => collection_error(&e),
         }
     }
 
@@ -261,122 +145,33 @@ impl Ad4mMcpHandler {
         params: Parameters<InstanceRemoveFromCollectionParams>,
     ) -> String {
         let p = &params.0;
-        let (mut perspective, _agent_context) =
+        let (mut perspective, agent_context) =
             match self.get_writable_perspective(&p.perspective_id).await {
                 Ok(v) => v,
                 Err(e) => return e,
             };
-        let (class_name, shape) = match resolve_writable_class(&perspective, &p.class_name).await {
-            Ok(v) => v,
-            Err(e) => return e,
-        };
-
-        let infos = class_properties(&shape);
-        let info = match resolve_collection(&class_name, &infos, &p.collection, &p.item_uri) {
-            Ok(info) => info,
-            Err(e) => return e,
-        };
-
-        let base_uri = match instance_uri("base_uri", &p.base_uri) {
-            Ok(uri) => uri,
-            Err(e) => return e,
-        };
-        match fetch_instance(&perspective, &class_name, &base_uri).await {
-            Ok(Some(_)) => {}
-            Ok(None) => return not_found(&class_name, &base_uri),
-            Err(e) => return error_json(format!("Error reading {class_name} instance: {e}")),
-        }
-
-        let predicate = match shacl::resolve_property_predicate(
-            &perspective,
-            &class_name,
-            &info.name(),
+        match shared::remove_from_collection(
+            &mut perspective,
+            &agent_context,
+            shared::InstanceRemoveFromCollection {
+                class_name: p.class_name.clone(),
+                base_uri: p.base_uri.clone(),
+                collection: p.collection.clone(),
+                item_uri: p.item_uri.clone(),
+                batch_id: None,
+            },
         )
         .await
         {
-            Ok(pred) => pred,
-            Err(e) => {
-                return error_json(format!(
-                    "Error resolving collection '{}': {}",
-                    info.name(),
-                    e
-                ))
-            }
-        };
-
-        let wanted = p.item_uri.trim();
-        let encoded = link_target(wanted);
-        let links = match perspective
-            .get_links(&LinkQuery {
-                source: Some(base_uri.clone()),
-                predicate: Some(predicate),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) => links,
-            Err(e) => {
-                return error_json(format!(
-                    "Error reading collection '{}': {:#}",
-                    info.name(),
-                    e
-                ))
-            }
-        };
-        let stored_targets: Vec<String> = links.iter().map(|l| l.data.target.clone()).collect();
-        let mut removed = 0usize;
-        for link in links {
-            if !target_matches(&link.data.target, wanted, &encoded) {
-                continue;
-            }
-            match perspective.remove_link(link.into(), None).await {
-                Ok(_) => removed += 1,
-                Err(e) => {
-                    return error_json(format!(
-                        "Error removing '{}' from collection '{}' ({} link(s) already \
-                         removed): {:#}",
-                        wanted,
-                        info.name(),
-                        removed,
-                        e
-                    ))
-                }
-            }
+            Ok(removed) => pretty(&json!({
+                "success": true,
+                "class_name": removed.class_name,
+                "base_uri": removed.base_uri,
+                "collection": removed.collection,
+                "item_uri": removed.item_uri,
+                "links_removed": removed.links_removed,
+            })),
+            Err(e) => collection_error(&e),
         }
-
-        // A collection whose property declares a custom `resolveLanguage`
-        // stores each member as an `expression_create` address, not as the
-        // value the caller passed to instance_add_to_collection — so nothing
-        // here can match by value and "0 links removed, success" would be a
-        // silent lie. Say what the stored addresses are instead.
-        if removed == 0 && !stored_targets.is_empty() {
-            if let Ok(Some(lang)) = perspective
-                .get_resolve_language_from_shacl(&class_name, &info.name())
-                .await
-            {
-                if lang != "literal" {
-                    return error_json(format!(
-                        "'{}' is not how collection '{}' stores its members: the property \
-                         declares resolveLanguage '{}', so each member is an expression \
-                         address created at write time, not the value passed to \
-                         instance_add_to_collection. Pass item_uri exactly as instance_get \
-                         lists it. Current members: {}.",
-                        wanted,
-                        info.name(),
-                        lang,
-                        stored_targets.join(", ")
-                    ));
-                }
-            }
-        }
-
-        pretty(&json!({
-            "success": true,
-            "class_name": class_name,
-            "base_uri": base_uri,
-            "collection": info.name(),
-            "item_uri": p.item_uri,
-            "links_removed": removed,
-        }))
     }
 }

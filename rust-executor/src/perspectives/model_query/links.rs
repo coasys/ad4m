@@ -44,7 +44,7 @@
 //! `createdAt`: that is the earlier date, so for role eligibility it widens
 //! the window.
 
-use deno_core::anyhow::{anyhow, Error};
+use anyhow::{anyhow, Error};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -400,7 +400,7 @@ fn collect_links_predicates(
         let target = shape
             .and_then(|s| s.include_relations.iter().find(|r| r.name == *name))
             .filter(|r| !r.target_class_name.is_empty())
-            .and_then(|r| resolver.get_shape(&r.target_class_name).ok());
+            .and_then(|r| resolver.get_shape(r.target()).ok());
         collect_links_predicates(target.as_deref(), sub, resolver, out);
     }
 }
@@ -435,6 +435,8 @@ mod tests {
             max_count: None,
             target_class_name: target.into(),
             target_class_uri: String::new(),
+            target_class: String::new(),
+            polymorphic: false,
         };
         let mut top = shape("Top", vec![relation("mids", "we://mids")]);
         top.include_relations = vec![rel("mids", "we://mids", "Mid")];

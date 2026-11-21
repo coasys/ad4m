@@ -18,6 +18,21 @@ export type ConformanceFilterFn = (
 ) => { getter: string; conformanceConditions: ConformanceCondition[] } | undefined;
 
 /**
+ * The namespace of a class that declares none: the scheme (`x://`) of its
+ * first property's `through`, else of its first relation's predicate, else
+ * `ad4m://`. Reordering the fields can move such a class: declare
+ * `@Model({ namespace })` to pin it.
+ */
+function deriveNamespace(
+    properties: Record<string, PropertyMetadataEntry>,
+    relations: Record<string, RelationMetadataEntry>,
+): string {
+    const first = Object.values(properties)[0]?.through
+        ?? (Object.keys(properties).length === 0 ? Object.values(relations)[0]?.predicate : undefined);
+    return first?.match(/^([^:]+:\/\/)/)?.[1] ?? "ad4m://";
+}
+
+/**
  * Build a SHACL shape for a model class.
  *
  * @param subjectName          - The model's registered name (from `@Model({ name })`)
@@ -54,32 +69,13 @@ export function buildSHACL(
     interpretationHint?: string,
     /** `@Model({ abstract: true })`: emitted as one `ad4m://abstract` link. */
     isAbstract?: boolean,
+    /** `@Model({ namespace })`: the namespace of the class and shape URIs. */
+    namespace?: string,
 ): { shape: SHACLShape; name: string } {
     const obj = target.prototype;
 
-    // ── Determine namespace from first property or relation ─────────────
-    let namespace = "ad4m://";
-
-    // Try properties first
-    if (Object.keys(properties).length > 0) {
-        const firstProp = properties[Object.keys(properties)[0]];
-        if (firstProp.through) {
-            const match = firstProp.through.match(/^([^:]+:\/\/)/);
-            if (match) {
-                namespace = match[1];
-            }
-        }
-    }
-    // Fall back to relations if no properties
-    else if (Object.keys(allRelationsMeta).length > 0) {
-        const firstRel = allRelationsMeta[Object.keys(allRelationsMeta)[0]];
-        if (firstRel.predicate) {
-            const match = firstRel.predicate.match(/^([^:]+:\/\/)/);
-            if (match) {
-                namespace = match[1];
-            }
-        }
-    }
+    // ── Namespace: declared, else the first property's or relation's ────
+    namespace ??= deriveNamespace(properties, allRelationsMeta);
 
     // ── Create SHACL shape ──────────────────────────────────────────────
     const shapeUri = `${namespace}${subjectName}Shape`;
@@ -201,8 +197,10 @@ export function buildSHACL(
             propShape.hasValue = propMeta.initial;
         }
 
-        // sh:in — allowed values (enum constraint)
-        if (propMeta.options && propMeta.options.length > 0) {
+        // sh:in — allowed values (enum constraint). An explicit empty list
+        // is kept: it denies every value, which dropping would widen to
+        // unconstrained.
+        if (propMeta.options !== undefined) {
             propShape.in = propMeta.options;
         }
 
@@ -327,6 +325,7 @@ export function buildSHACL(
         // Encode relation kind so the executor can derive direction and
         // scalar-vs-collection rendering without consulting the JS class.
         relShape.relationKind = relMeta.kind;
+        if (relMeta.polymorphic) relShape.polymorphic = true;
 
         // Scalar relations cap at 1.
         if (relMeta.kind === 'hasOne' || relMeta.kind === 'belongsToOne') {
@@ -416,18 +415,22 @@ export function buildSHACL(
             let cachedGetter: string | undefined;
             let cachedConditions: ConformanceCondition[] | undefined;
             
+            // Resolved once the target class exists: an access before
+            // that leaves the filter unset and tries again next time.
             const resolveFilter = () => {
                 if (resolved) return;
-                resolved = true;
+                let TargetClass: any;
                 try {
-                    const TargetClass = targetThunk();
-                    const filter = conformanceFilterFn(predicate, TargetClass);
-                    if (filter) {
-                        cachedGetter = filter.getter;
-                        cachedConditions = filter.conformanceConditions;
-                    }
-                } catch (e) {
-                    // Target class may not be available yet
+                    TargetClass = targetThunk();
+                } catch {
+                    return;
+                }
+                if (!TargetClass) return;
+                resolved = true;
+                const filter = conformanceFilterFn(predicate, TargetClass);
+                if (filter) {
+                    cachedGetter = filter.getter;
+                    cachedConditions = filter.conformanceConditions;
                 }
             };
 
