@@ -2970,7 +2970,10 @@ mod empty_answer_retry_tests {
     use super::run_interpretation_with_strategy_and_model;
     use crate::ai_service::AIService;
     use crate::db::Ad4mDb;
+    use crate::perspectives::auto_processor::config::processor_node;
+    use crate::perspectives::auto_processor::cursor::load_processed_source_ids;
     use crate::perspectives::interpretation::DedupStrategy;
+    use crate::perspectives::interpretation::InterpretationRunCursor;
     use crate::perspectives::interpretation::TranscriptTurn;
     use crate::perspectives::interpretation_test_support::{
         graph_titles_lower, setup_perspective_no_llm, TASK_SDNA,
@@ -3278,5 +3281,200 @@ mod empty_answer_retry_tests {
         first.assert_async().await;
         second.assert_async().await;
         third.assert_async().await;
+    }
+
+    /// The retry's request fails. The pass returns that error and does not
+    /// mint a run, so the cursor does not name the item. A later pass still
+    /// processes it.
+    #[tokio::test]
+    async fn empty_answer_retry_transport_failure_does_not_commit_the_cursor() {
+        let mut upstream = mockito::Server::new_async().await;
+        // Oldest mock that still needs hits is served first.
+        let first = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_on)
+            .with_body(reply("[]", "stop"))
+            .expect(1)
+            .create_async()
+            .await;
+        let failed = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_on)
+            .with_status(500)
+            .with_body("upstream unavailable")
+            .expect(1)
+            .create_async()
+            .await;
+        let later = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_on)
+            .with_body(reply(RECORD, "stop"))
+            .expect(1)
+            .create_async()
+            .await;
+        let thinking_off_call = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_off)
+            .expect(0)
+            .create_async()
+            .await;
+
+        let (mut perspective, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        install_llama(&upstream.url()).await;
+        let cursor = InterpretationRunCursor {
+            processor: processor_node("empty-retry-transport"),
+            sources: vec!["turn-missed".into()],
+        };
+        let turns = said("Please write the spec by Friday");
+        let outcome = run_interpretation_with_strategy_and_model(
+            &mut perspective,
+            &shapes,
+            &turns,
+            "ad4m://empty-retry/",
+            &ctx,
+            &DedupStrategy::default(),
+            None,
+            None,
+            Some(&cursor),
+            false,
+            None,
+            None,
+        )
+        .await;
+        let message = format!(
+            "{:#}",
+            outcome.expect_err("the retry's transport error fails the pass")
+        );
+        assert!(
+            message.contains("500"),
+            "the pass must surface the upstream status, got {message}"
+        );
+        let titles = graph_titles_lower(&perspective, &shapes).await;
+        assert!(
+            titles.is_empty(),
+            "a failed retry stores nothing, got {titles:?}"
+        );
+        // The failure wrote no run. Register the class so the cursor query
+        // is a read of an empty set, not a missing-class error.
+        crate::perspectives::interpretation::ensure_interpretation_overlay_classes(
+            &mut perspective,
+            &ctx,
+        )
+        .await
+        .expect("overlay classes");
+        let now = chrono::Utc::now().timestamp_millis();
+        let processed = load_processed_source_ids(&perspective, "empty-retry-transport", now, None)
+            .await
+            .expect("cursor");
+        assert!(
+            !processed.contains("turn-missed"),
+            "a failed retry must not commit the cursor, got {processed:?}"
+        );
+
+        let outcome = run_interpretation_with_strategy_and_model(
+            &mut perspective,
+            &shapes,
+            &turns,
+            "ad4m://empty-retry/",
+            &ctx,
+            &DedupStrategy::default(),
+            None,
+            None,
+            Some(&cursor),
+            false,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            outcome.is_ok(),
+            "a later pass processes the item, got {outcome:?}"
+        );
+        let processed = load_processed_source_ids(
+            &perspective,
+            "empty-retry-transport",
+            chrono::Utc::now().timestamp_millis(),
+            None,
+        )
+        .await
+        .expect("cursor");
+        assert!(
+            processed.contains("turn-missed"),
+            "the later pass commits the cursor, got {processed:?}"
+        );
+        let titles = graph_titles_lower(&perspective, &shapes).await;
+        assert!(
+            titles.iter().any(|title| title == "write the spec"),
+            "the later pass stores the record, got {titles:?}"
+        );
+        first.assert_async().await;
+        failed.assert_async().await;
+        later.assert_async().await;
+        thinking_off_call.assert_async().await;
+    }
+
+    /// The retry's text does not parse. The pass keeps the first empty
+    /// answer, and the debug capture is that first answer, not the text
+    /// that failed to parse.
+    #[tokio::test]
+    async fn empty_answer_retry_that_does_not_parse_restores_the_debug_capture() {
+        let mut upstream = mockito::Server::new_async().await;
+        let first = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_on)
+            .with_body(reply("[]", "stop"))
+            .expect(1)
+            .create_async()
+            .await;
+        let second = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_on)
+            .with_body(reply("NOT-JSON-RETRY", "stop"))
+            .expect(1)
+            .create_async()
+            .await;
+        let thinking_off_call = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_off)
+            .expect(0)
+            .create_async()
+            .await;
+
+        let (mut perspective, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        install_llama(&upstream.url()).await;
+        let outcome = run_interpretation_with_strategy_and_model(
+            &mut perspective,
+            &shapes,
+            &said("Please write the spec by Friday"),
+            "ad4m://empty-retry/",
+            &ctx,
+            &DedupStrategy::default(),
+            None,
+            None,
+            None,
+            true,
+            None,
+            None,
+        )
+        .await;
+        let outcome = outcome.expect("an unparseable retry keeps the first answer");
+        assert!(
+            outcome.bases.is_empty(),
+            "the first answer was empty, got {outcome:?}"
+        );
+        let debug = outcome.debug.expect("emit_debug_events keeps the capture");
+        assert_eq!(
+            debug.response, "[]",
+            "the capture must be the first answer, not the unparseable retry"
+        );
+        assert!(
+            debug.prompt.contains("Please write the spec by Friday"),
+            "the capture is this pass's prompt"
+        );
+        let titles = graph_titles_lower(&perspective, &shapes).await;
+        assert!(titles.is_empty(), "{titles:?}");
+        first.assert_async().await;
+        second.assert_async().await;
+        thinking_off_call.assert_async().await;
     }
 }
