@@ -1275,8 +1275,8 @@ pub fn on_verdict_change(change: &VerdictChange) -> usize {
 }
 
 /// Ends the sessions of the local bot whose key is `key` (a multikey) when its owner's log
-/// revoked the key (`verdict` [`KeyVerdict::Revoked`], or [`KeyVerdict::NotInLog`]: the log
-/// no longer lists it). `scid` is the identity whose log gave the verdict: only the bot's
+/// ended the key (`verdict` [`KeyVerdict::Revoked`] or [`KeyVerdict::Unlinked`], or
+/// [`KeyVerdict::NotInLog`]: the log no longer lists it). `scid` is the identity whose log gave the verdict: only the bot's
 /// owner speaks for its key. One key can sit in more than one log this executor reads, and a
 /// revocation in another identity's log says nothing about the key in the owner's, where it may
 /// still be valid. A bot's token is not bound to its key (a bot's key never logs in), so
@@ -1284,7 +1284,10 @@ pub fn on_verdict_change(change: &VerdictChange) -> usize {
 /// nothing here: its owner may extend the scope, and each call and event checks the key
 /// anyway (`crate::bots::decide_key`). Returns how many active grants ended.
 fn end_revoked_bot(scid: &str, key: &str, verdict: KeyVerdict) -> usize {
-    if !matches!(verdict, KeyVerdict::Revoked | KeyVerdict::NotInLog) {
+    if !matches!(
+        verdict,
+        KeyVerdict::Revoked | KeyVerdict::Unlinked | KeyVerdict::NotInLog
+    ) {
         return 0;
     }
     let did = format!("did:key:{key}");
@@ -1725,7 +1728,7 @@ mod tests {
     use crate::identity::device::{enc_key_of, multikey_of as device_multikey};
     use crate::identity::resolver::Resolver;
     use crate::types::{AuthInfoInput, CapabilityInput, ResourceInput};
-    use ad4m_identity_core::build::{add_unsigned, cosign, revoke, sign_domain, Signer};
+    use ad4m_identity_core::build::{add_unsigned, cosign, revoke, sign_domain, unlink, Signer};
     use ad4m_identity_core::{BotScope, DeviceKey, KeyLife};
     use ed25519_dalek::SigningKey;
     use std::sync::atomic::Ordering;
@@ -2899,8 +2902,13 @@ mod tests {
         ));
 
         // A revoked key.
-        let revoke_phone =
-            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        let revoke_phone = revoke(
+            &world.log.chain(),
+            &world.log.master,
+            &["d2".to_string()],
+            None,
+        )
+        .unwrap();
         world.log.events.push(revoke_phone);
         let world = world.with_store();
         accept_signed(&world.service.cache, &world.log.events).await;
@@ -2990,8 +2998,13 @@ mod tests {
         let over = session.over();
 
         let mut changes = world.service.cache.subscribe();
-        let revoke_phone =
-            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        let revoke_phone = revoke(
+            &world.log.chain(),
+            &world.log.master,
+            &["d2".to_string()],
+            None,
+        )
+        .unwrap();
         world.log.events.push(revoke_phone);
         accept_signed(&world.service.cache, &world.log.events).await;
         let mut ended = 0;
@@ -3019,7 +3032,12 @@ mod tests {
     // on the re-check when the subscription missed it.
     #[tokio::test]
     async fn revoking_a_bots_key_ends_the_bots_sessions() {
-        for (seed, via_recheck) in [(190u8, false), (195u8, true)] {
+        // The owner revokes or unlinks the bot's key: either ends its sessions.
+        for (seed, via_recheck, unlinks) in [
+            (190u8, false, false),
+            (195u8, true, false),
+            (197u8, false, true),
+        ] {
             let mut world = world(seed).await;
             let did = format!("did:key:{}", world.bot.key());
             crate::bots::remember(crate::db::BotRow {
@@ -3053,8 +3071,12 @@ mod tests {
             assert!(!grant.is_ended(), "a valid bot key keeps its sessions");
 
             let bot_id = "d3".to_string();
-            let revoke_bot = revoke(&world.log.chain(), &world.log.master, &[bot_id]).unwrap();
-            world.log.events.push(revoke_bot);
+            let end_bot = if unlinks {
+                unlink(&world.log.chain(), &world.log.master, &bot_id).unwrap()
+            } else {
+                revoke(&world.log.chain(), &world.log.master, &[bot_id], None).unwrap()
+            };
+            world.log.events.push(end_bot);
             if via_recheck {
                 *world.store.events.lock().unwrap() = world.log.events.clone();
                 // Stale for both the refresh and the session read, so the re-check reads the
@@ -3162,8 +3184,13 @@ mod tests {
         // The key's revocation is accepted into the cache: persisted on the file a
         // restart re-opens.
         let mut changes = world.service.cache.subscribe();
-        let revoke_phone =
-            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        let revoke_phone = revoke(
+            &world.log.chain(),
+            &world.log.master,
+            &["d2".to_string()],
+            None,
+        )
+        .unwrap();
         world.log.events.push(revoke_phone);
         accept_signed(&world.service.cache, &world.log.events).await;
         let mut change = None;
@@ -3422,8 +3449,13 @@ mod tests {
         let fresh_session = open(&fresh.token).unwrap();
         // A revocation on the store, never published to this executor's subscribers, right
         // after that login read the log: the re-check reads the store all the same.
-        let revoke_phone =
-            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        let revoke_phone = revoke(
+            &world.log.chain(),
+            &world.log.master,
+            &["d2".to_string()],
+            None,
+        )
+        .unwrap();
         world.log.events.push(revoke_phone);
         *world.store.events.lock().unwrap() = world.log.events.clone();
         assert_eq!(
@@ -3596,8 +3628,13 @@ mod tests {
         );
 
         // The key is revoked: a renewal ends the grant.
-        let revoke_phone =
-            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        let revoke_phone = revoke(
+            &world.log.chain(),
+            &world.log.master,
+            &["d2".to_string()],
+            None,
+        )
+        .unwrap();
         world.log.events.push(revoke_phone);
         *world.store.events.lock().unwrap() = world.log.events.clone();
         world.service.cache.note_refreshed(&world.log.scid(), 0);
@@ -4260,8 +4297,13 @@ mod tests {
             .unwrap();
         assert!(key.admits());
         // The store learns the revocation; the cache does not (the change is on its way).
-        let revoke_phone =
-            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        let revoke_phone = revoke(
+            &world.log.chain(),
+            &world.log.master,
+            &["d2".to_string()],
+            None,
+        )
+        .unwrap();
         world.log.events.push(revoke_phone);
         *world.store.events.lock().unwrap() = world.log.events.clone();
         assert_eq!(
@@ -4304,8 +4346,13 @@ mod tests {
             tokio::spawn(async move { login(&service, params(proof), now()).await })
         };
         entered_store(&entered).await;
-        let revoke_phone =
-            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        let revoke_phone = revoke(
+            &world.log.chain(),
+            &world.log.master,
+            &["d2".to_string()],
+            None,
+        )
+        .unwrap();
         world.log.events.push(revoke_phone);
         accept_signed(&service.cache, &world.log.events).await;
         world.store.store_down.store(true, Ordering::SeqCst);
@@ -4415,8 +4462,13 @@ mod tests {
         let result = world.login_as(&world.phone).await.unwrap();
         let session = open(&result.token).unwrap();
         // The cache's trusted log learns the revocation; the store cannot be read.
-        let revoke_phone =
-            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        let revoke_phone = revoke(
+            &world.log.chain(),
+            &world.log.master,
+            &["d2".to_string()],
+            None,
+        )
+        .unwrap();
         world.log.events.push(revoke_phone);
         accept_signed(&world.service.cache, &world.log.events).await;
         world.store.store_down.store(true, Ordering::SeqCst);
@@ -4524,7 +4576,8 @@ mod tests {
             .unwrap()
             .admits());
         // The store learns the agent's revocation; the cache does not.
-        let revoke_agent = revoke(&world.log.chain(), &world.log.master, &[agent_key_id]).unwrap();
+        let revoke_agent =
+            revoke(&world.log.chain(), &world.log.master, &[agent_key_id], None).unwrap();
         world.log.events.push(revoke_agent);
         *world.store.events.lock().unwrap() = world.log.events.clone();
         assert_eq!(
@@ -4586,8 +4639,13 @@ mod tests {
         let session = open(&result.token).unwrap();
         // Subscribed before the change fired, as `init` subscribes before it spawns.
         let changes = world.service.cache.subscribe();
-        let revoke_phone =
-            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        let revoke_phone = revoke(
+            &world.log.chain(),
+            &world.log.master,
+            &["d2".to_string()],
+            None,
+        )
+        .unwrap();
         world.log.events.push(revoke_phone);
         accept_signed(&world.service.cache, &world.log.events).await;
         // The store cannot confirm it: only the change the watcher buffered ends the
@@ -4650,8 +4708,13 @@ mod tests {
         // A revocation the subscription receives before the agent's DID is ready: the
         // watcher runs no pass and ends nothing yet.
         let calls = world.store.log_calls.load(Ordering::SeqCst);
-        let revoke_phone =
-            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        let revoke_phone = revoke(
+            &world.log.chain(),
+            &world.log.master,
+            &["d2".to_string()],
+            None,
+        )
+        .unwrap();
         world.log.events.push(revoke_phone);
         accept_signed(&service.cache, &world.log.events).await;
         for _ in 0..10 {
@@ -4697,8 +4760,13 @@ mod tests {
             crate::agent::agent_ready(),
         ));
         entered_store(&entered).await;
-        let revoke_phone =
-            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        let revoke_phone = revoke(
+            &world.log.chain(),
+            &world.log.master,
+            &["d2".to_string()],
+            None,
+        )
+        .unwrap();
         world.log.events.push(revoke_phone);
         accept_signed(&service.cache, &world.log.events).await;
         for _ in 0..10 {
@@ -4755,8 +4823,13 @@ mod tests {
             })
             .collect();
         // The session's key is revoked on the store; no change ever reached this executor.
-        let revoke_phone =
-            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        let revoke_phone = revoke(
+            &world.log.chain(),
+            &world.log.master,
+            &["d2".to_string()],
+            None,
+        )
+        .unwrap();
         world.log.events.push(revoke_phone);
         *world.store.events.lock().unwrap() = world.log.events.clone();
 
@@ -4836,8 +4909,13 @@ mod tests {
         }
         // The grant's own read stalls too, so its decision is the outage path's: a
         // revocation the cache already holds ends it now, sweep or no sweep.
-        let revoke_phone =
-            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        let revoke_phone = revoke(
+            &world.log.chain(),
+            &world.log.master,
+            &["d2".to_string()],
+            None,
+        )
+        .unwrap();
         world.log.events.push(revoke_phone);
         accept_signed(&world.service.cache, &world.log.events).await;
         world
@@ -5070,8 +5148,13 @@ mod tests {
             None,
         )
         .unwrap();
-        let revoke_bot =
-            revoke(&world.log.chain(), &world.log.master, &["d3".to_string()]).unwrap();
+        let revoke_bot = revoke(
+            &world.log.chain(),
+            &world.log.master,
+            &["d3".to_string()],
+            None,
+        )
+        .unwrap();
         world.log.events.push(revoke_bot);
         *world.store.events.lock().unwrap() = world.log.events.clone();
         world.service.cache.note_refreshed(&world.log.scid(), 0);
@@ -5154,8 +5237,13 @@ mod tests {
         }
         // The session's key is revoked on the store; no verdict change reached this
         // executor.
-        let revoke_phone =
-            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        let revoke_phone = revoke(
+            &world.log.chain(),
+            &world.log.master,
+            &["d2".to_string()],
+            None,
+        )
+        .unwrap();
         world.log.events.push(revoke_phone);
         *world.store.events.lock().unwrap() = world.log.events.clone();
 
@@ -5233,8 +5321,13 @@ mod tests {
             .collect();
         // The session's key is revoked on the store; no verdict change reached this
         // executor.
-        let revoke_phone =
-            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        let revoke_phone = revoke(
+            &world.log.chain(),
+            &world.log.master,
+            &["d2".to_string()],
+            None,
+        )
+        .unwrap();
         world.log.events.push(revoke_phone);
         *world.store.events.lock().unwrap() = world.log.events.clone();
 
@@ -5319,8 +5412,13 @@ mod tests {
         // The key is revoked on the store just after that read: no verdict change
         // reaches this executor.
         let revoked_at = tokio::time::Instant::now();
-        let revoke_phone =
-            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        let revoke_phone = revoke(
+            &world.log.chain(),
+            &world.log.master,
+            &["d2".to_string()],
+            None,
+        )
+        .unwrap();
         world.log.events.push(revoke_phone);
         *world.store.events.lock().unwrap() = world.log.events.clone();
         while session.check().is_ok()
@@ -5672,8 +5770,13 @@ mod tests {
             )
             .unwrap();
         // The session's key is revoked on the store.
-        let revoke_phone =
-            revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        let revoke_phone = revoke(
+            &world.log.chain(),
+            &world.log.master,
+            &["d2".to_string()],
+            None,
+        )
+        .unwrap();
         world.log.events.push(revoke_phone);
         *world.store.events.lock().unwrap() = world.log.events.clone();
         let service = Arc::new(world.service);
@@ -5816,7 +5919,8 @@ mod tests {
         let result = world.login_as(&world.phone).await.unwrap();
         let session = open(&result.token).unwrap();
         // The agent's device key is revoked; the phone's stays valid.
-        let revoke_agent = revoke(&world.log.chain(), &world.log.master, &[agent_key_id]).unwrap();
+        let revoke_agent =
+            revoke(&world.log.chain(), &world.log.master, &[agent_key_id], None).unwrap();
         world.log.events.push(revoke_agent);
         let mut changes = world.service.cache.subscribe();
         accept_signed(&world.service.cache, &world.log.events).await;
@@ -5857,7 +5961,8 @@ mod tests {
         let _bound = MainBound::to(&world.log.scid());
         let result = world.login_as(&world.phone).await.unwrap();
         let session = open(&result.token).unwrap();
-        let revoke_agent = revoke(&world.log.chain(), &world.log.master, &[agent_key_id]).unwrap();
+        let revoke_agent =
+            revoke(&world.log.chain(), &world.log.master, &[agent_key_id], None).unwrap();
         world.log.events.push(revoke_agent);
         *world.store.events.lock().unwrap() = world.log.events.clone();
         recheck_key_grants(&world.service, now(), &RecheckAttempts::default()).await;

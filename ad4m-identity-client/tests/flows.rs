@@ -21,6 +21,7 @@ use ad4m_identity_client::flows::requests::{
 use ad4m_identity_client::flows::restore::{ListedDevice, RestoreFlow};
 use ad4m_identity_client::flows::revoke::{key_id_of, revoke, revoke_and_rotate};
 use ad4m_identity_client::flows::rotate::{rotate, MAX_TRIES};
+use ad4m_identity_client::flows::unlink::{unlink_key, unlink_self};
 use ad4m_identity_client::record::{self, Change};
 use ad4m_identity_client::{
     ClientError, Clock, CustodyNote, EncKey, ExecutorRpc, MasterUse, MemoryVault, OsRandom,
@@ -2082,6 +2083,7 @@ async fn revoke_ends_the_second_executors_key() {
             &vault,
             &did,
             &["d9".to_string()],
+            None,
             &SystemClock,
             &OsRandom
         )
@@ -2093,6 +2095,7 @@ async fn revoke_ends_the_second_executors_key() {
         &vault,
         &did,
         std::slice::from_ref(&d2),
+        None,
         &SystemClock,
         &OsRandom,
     )
@@ -2132,6 +2135,126 @@ async fn revoke_ends_the_second_executors_key() {
     .unwrap();
     let refused = claim(&b, &again.link(), None).await.unwrap_err();
     assert_eq!(refused.code, 409, "{refused:?}");
+}
+
+/// Executors `a` (d1), `b` (d2) and `c` (d3) linked to one identity.
+async fn three_executors() -> (Custody, Custody, Custody, MemoryVault, String) {
+    let store = TestStore::new();
+    let a = custody(&store, 1);
+    let b = custody(&store, 2);
+    let c = custody(&store, 3);
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 6).await;
+    for node in [&b, &c] {
+        let flow = LinkFlow::open(
+            &a,
+            &vault,
+            &did,
+            OfferKind::Node,
+            None,
+            STORE_URL,
+            &SystemClock,
+            &OsRandom,
+        )
+        .await
+        .unwrap();
+        let claimed_node = claim(node, &flow.offer_string(), None).await.unwrap();
+        let claimed = flow.wait_for_claim().await.unwrap();
+        flow.confirm(&claimed, entry("node.example", DeviceKind::Server), false)
+            .await
+            .unwrap();
+        join(node, &claimed_node["offerId"]).await;
+    }
+    (a, b, c, vault, did)
+}
+
+#[tokio::test]
+async fn a_device_unlinks_itself_without_the_vault_and_the_master_unlinks_another() {
+    let (a, _b, _c, vault, did) = three_executors().await;
+    let unlocks = vault.unlocks().len();
+
+    // d2 unlinks itself with its own key: the vault stays closed, the caller gets the key to
+    // destroy.
+    let done = unlink_self(
+        &a,
+        &did,
+        &"d2".to_string(),
+        &SigningKey::from_bytes(&[2; 32]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(done.destroy_key, "d2");
+    assert_eq!(vault.unlocks().len(), unlocks);
+    let chain = ad4m_identity_core::fold(&a.events(&did).await.unwrap()).unwrap();
+    assert_eq!(chain.state().keys["d2"].unlinked, Some(done.head.seq));
+
+    // A key that is not d3's cannot unlink d3.
+    let wrong = unlink_self(
+        &a,
+        &did,
+        &"d3".to_string(),
+        &SigningKey::from_bytes(&[2; 32]),
+    )
+    .await;
+    assert!(matches!(wrong, Err(ClientError::Build(_))), "{wrong:?}");
+
+    // The master unlinks d3 (one unlock), and may revoke d2 after its unlink.
+    let head = unlink_key(&a, &vault, &did, &"d3".to_string(), &SystemClock)
+        .await
+        .unwrap();
+    assert_eq!(head.seq, done.head.seq + 1);
+    assert_eq!(vault.unlocks().last(), Some(&MasterUse::Unlink));
+    assert!(matches!(
+        unlink_key(&a, &vault, &did, &"d9".to_string(), &SystemClock).await,
+        Err(ClientError::Protocol(_))
+    ));
+    revoke(
+        &a,
+        &vault,
+        &did,
+        &["d2".to_string()],
+        None,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let chain = ad4m_identity_core::fold(&a.events(&did).await.unwrap()).unwrap();
+    assert!(chain.state().keys["d2"].revoked.is_some());
+}
+
+#[tokio::test]
+async fn a_revoke_carries_its_since_and_the_store_refuses_one_before_the_key_was_added() {
+    let (a, _b, _c, vault, did) = three_executors().await;
+    let now_ms = SystemClock.now() * 1000;
+    // Before the add: refused, nothing appended.
+    let seq = a.events(&did).await.unwrap().len();
+    let early = revoke(
+        &a,
+        &vault,
+        &did,
+        &["d2".to_string()],
+        Some(now_ms - 3_600_000),
+        &SystemClock,
+        &OsRandom,
+    )
+    .await;
+    assert!(early.is_err(), "{early:?}");
+    assert_eq!(a.events(&did).await.unwrap().len(), seq);
+    // From now: kept in the log.
+    revoke(
+        &a,
+        &vault,
+        &did,
+        &["d2".to_string()],
+        Some(now_ms),
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    let events = a.events(&did).await.unwrap();
+    assert!(matches!(events.last().unwrap().op, Op::Revoke { since: Some(s), .. } if s == now_ms));
 }
 
 /// A claim view the store changed after the device signed it: the holder refuses it in
@@ -3944,7 +4067,7 @@ impl ExecutorRpc for Racing<'_> {
                 }
                 Race::Revoke(id) => {
                     let master = words::master_key(&self.seed, n).unwrap();
-                    build::revoke(&chain, &master, &[id]).unwrap()
+                    build::revoke(&chain, &master, &[id], None).unwrap()
                 }
             };
             self.inner
@@ -6734,6 +6857,7 @@ async fn what_the_revoked_device_wrote_last_survives_the_revokes_record_write() 
         &vault,
         &did,
         std::slice::from_ref(&d2),
+        None,
         &SystemClock,
         &OsRandom,
     )

@@ -332,6 +332,14 @@ pub(crate) const JUDGEMENT_VERSION: u64 = 1;
 pub(crate) fn judgement_stale(version: &str, signature: &str) -> bool {
     !signature.is_empty() && version.parse::<u64>().unwrap_or(0) < JUDGEMENT_VERSION
 }
+/// When this executor first received a signed statement (unix ms), on its receipt node in
+/// [`RECEIPTS_GRAPH`]. Set once, never changed, never removed. The judge reads it against a
+/// revoke's `since`. This executor's index only; the link never carries it.
+const ONT_RECEIVED_AT: &str = "ad4m://ontology/receivedAt";
+/// The named graph that holds the receipts, and nothing else. Every read of links, every
+/// SPARQL query and every export reads the default graph, so a receipt is never a link or an
+/// annotation, and [`SparqlStore::clear`] (the wipe) leaves this graph alone.
+const RECEIPTS_GRAPH: &str = "ad4m://receipts";
 const ONT_STATUS: &str = "ad4m://ontology/status";
 /// The target exactly as the link was signed, kept only when it differs from
 /// what [`storage_term_to_target_string`] renders for the stored term. See
@@ -841,6 +849,63 @@ fn make_reifier_iri(link: &LinkExpression) -> NamedNode {
     NamedNode::new_unchecked(format!("link:{}", &hash[..32]))
 }
 
+/// The node of the receipt of a signed statement: a hash of the proof's key and signature,
+/// each length-prefixed so no two pairs share an encoding. The signature covers the data, the
+/// timestamp and the anchor, and Ed25519 is deterministic, so the pair names the statement.
+fn receipt_iri(proof: &ExpressionProof) -> NamedNode {
+    let mut hasher = Sha256::new();
+    for part in [&proof.key, &proof.signature] {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
+    let hash = hex::encode(hasher.finalize());
+    NamedNode::new_unchecked(format!("receipt:{}", &hash[..32]))
+}
+
+/// When `tx` first received the statement `proof` signs (unix ms), if it has a receipt.
+fn receipt_time(tx: &Transaction<'_>, proof: &ExpressionProof) -> Result<Option<u64>, Error> {
+    let receipt = receipt_iri(proof);
+    let graph = NamedNodeRef::new_unchecked(RECEIPTS_GRAPH);
+    for quad in tx.quads_for_pattern(
+        Some(receipt.as_ref().into()),
+        Some(NamedNodeRef::new_unchecked(ONT_RECEIVED_AT)),
+        None,
+        Some(GraphNameRef::NamedNode(graph)),
+    ) {
+        if let Term::Literal(l) = quad?.object {
+            return Ok(l.value().parse().ok());
+        }
+    }
+    Ok(None)
+}
+
+/// The receipt time of `link`'s proof in `tx`. A proof whose signature holds and has no
+/// receipt gets one now (`now`, unix ms); it is never rewritten, and nothing removes it, so a
+/// removal and a re-add keep the first time. A proof whose signature does not hold gets none:
+/// the time of a forgery is not the time of the statement.
+fn receive(
+    tx: &mut Transaction<'_>,
+    link: &LinkExpression,
+    now: u64,
+) -> Result<Option<u64>, Error> {
+    if let Some(held) = receipt_time(tx, &link.proof)? {
+        return Ok(Some(held));
+    }
+    if !link.signature_holds() {
+        return Ok(None);
+    }
+    let receipt = receipt_iri(&link.proof);
+    let graph = NamedNodeRef::new_unchecked(RECEIPTS_GRAPH);
+    let time = literal(&now.to_string());
+    tx.insert(QuadRef::new(
+        receipt.as_ref(),
+        NamedNodeRef::new_unchecked(ONT_RECEIVED_AT),
+        TermRef::Literal(time.as_ref()),
+        GraphNameRef::NamedNode(graph),
+    ));
+    Ok(Some(now))
+}
+
 /// Build the direct triple `(source, predicate, target)` for a link.
 ///
 /// The target is rendered through [`target_to_storage_term`] so `literal:*`
@@ -1119,10 +1184,16 @@ fn write_link_quads_proof(
         .iter()
         .any(|v| v == "valid");
     let entered = counted_before.then_some(false);
+    // The receipt belongs to the signed statement, not to the reifier: one proof, one time.
+    let received_at = receive(
+        tx,
+        link,
+        chrono::Utc::now().timestamp_millis().max(0) as u64,
+    )?;
     let checked = if own {
-        link.check_own_entered(entered)
+        link.check_own_entered(entered, received_at)
     } else {
-        link.check_entered(entered)
+        link.check_entered(entered, received_at)
     };
     // A stored `valid` is not replaced by `cantCheck` ([`replaces`]): the stored judgement
     // (`proofValid`, the verdict, the person) stays as it is, and with it the order above.
@@ -1566,14 +1637,17 @@ impl SparqlStore {
 
     /// Returns the number of quads in the store (for diagnostics).
     pub fn quad_count(&self) -> usize {
-        self.store.len().unwrap_or(0)
+        self.store
+            .quads_for_pattern(None, None, None, Some(GraphNameRef::DefaultGraph))
+            .count()
     }
 
-    /// Returns true if the store contains any quads beyond the migration marker.
+    /// Returns true if the store contains any quads beyond the migration marker. Receipts are
+    /// not data.
     pub fn has_data(&self) -> bool {
         let migration_subj = NamedNodeRef::new_unchecked(MIGRATION_SUBJECT);
         self.store
-            .quads_for_pattern(None, None, None, None)
+            .quads_for_pattern(None, None, None, Some(GraphNameRef::DefaultGraph))
             .any(|q| {
                 q.as_ref()
                     .map(|quad| quad.subject != migration_subj.into())
@@ -1662,6 +1736,29 @@ impl SparqlStore {
     /// it came from.
     pub(crate) fn rejudge_link(&self, link: &LinkExpression) -> Result<(), Error> {
         self.write_link(link, false, false).map(|_| ())
+    }
+
+    /// When this store first received the statement `link`'s proof signs (unix ms): the
+    /// receipt of its key and signature. `None` when it has no receipt: a signature that does
+    /// not hold, or a link stored before the store kept receipts.
+    pub(crate) fn received_at(&self, link: &LinkExpression) -> Result<Option<u64>, Error> {
+        let receipt = receipt_iri(&link.proof);
+        let quad = self
+            .store
+            .quads_for_pattern(
+                Some(receipt.as_ref().into()),
+                Some(NamedNodeRef::new_unchecked(ONT_RECEIVED_AT)),
+                None,
+                Some(GraphNameRef::NamedNode(NamedNodeRef::new_unchecked(
+                    RECEIPTS_GRAPH,
+                ))),
+            )
+            .next()
+            .transpose()?;
+        Ok(quad.and_then(|q| match q.object {
+            Term::Literal(l) => l.value().parse().ok(),
+            _ => None,
+        }))
     }
 
     /// A link language's removal: remove `link` unless this store holds it
@@ -2814,13 +2911,14 @@ impl SparqlStore {
             .map_err(|e| anyhow!("spawn_blocking join error: {}", e))?
     }
 
-    /// Remove all triples from the store.
+    /// Remove all triples from the store, except the receipts ([`RECEIPTS_GRAPH`]): a link
+    /// written again afterwards keeps the time its statement was first received.
     pub fn clear(&self) -> Result<(), Error> {
         let _writer = self
             .writer
             .lock()
             .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
-        let cleared = self.store.clear();
+        let cleared = self.store.clear_graph(GraphNameRef::DefaultGraph);
         self.note_write(WriteDelta::Other);
         cleared?;
         Ok(())
@@ -3482,15 +3580,18 @@ mod tests {
         let link = make_link(&signer, "ad4m://src", "ad4m://pred", "ad4m://tgt");
         svc.add_link(&link).unwrap();
 
-        // No named graphs should exist
+        // The receipts graph is the only named graph.
         let named: Vec<_> = svc
             .store
             .named_graphs()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert!(
-            named.is_empty(),
-            "No named graphs should be used in reifier model"
+        assert_eq!(
+            named,
+            vec![oxigraph::model::NamedOrBlankNode::from(
+                NamedNode::new_unchecked(RECEIPTS_GRAPH)
+            )],
+            "only the receipts graph is named in the reifier model"
         );
     }
 
@@ -3501,26 +3602,25 @@ mod tests {
         let link = make_link(&signer, "ad4m://src", "ad4m://pred", "ad4m://tgt");
         svc.add_link(&link).unwrap();
 
-        // All quads should be in the default graph
+        // Every quad is in the default graph, but the one receipt.
         let all_quads: Vec<_> = svc
             .store
             .quads_for_pattern(None, None, None, None)
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-
-        for quad in &all_quads {
-            assert_eq!(
-                quad.graph_name,
-                GraphName::DefaultGraph,
-                "Found quad not in default graph: {:?}",
-                quad
-            );
-        }
+        let (linked, receipts): (Vec<_>, Vec<_>) = all_quads
+            .iter()
+            .partition(|q| q.graph_name == GraphName::DefaultGraph);
+        assert_eq!(receipts.len(), 1, "one receipt: {receipts:?}");
+        assert_eq!(
+            receipts[0].graph_name,
+            GraphName::NamedNode(NamedNode::new_unchecked(RECEIPTS_GRAPH))
+        );
 
         // Should have: 1 direct triple + 1 reifier + 8 metadata (no anchor, no person for
         // a link without an anchor whose key no log lists; the judgement version always
         // writes) = 10 quads
-        assert_eq!(all_quads.len(), 10, "Expected 10 quads total");
+        assert_eq!(linked.len(), 10, "Expected 10 quads in the default graph");
     }
 
     /// The canonical storage model needs no migration: a `literal:*` wire target
@@ -3971,6 +4071,205 @@ mod tests {
 
         let all = svc.get_all_links(&EvalStop::none()).unwrap();
         assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn the_first_received_time_is_set_once_and_never_changed() {
+        let signer = TestSigner::generate();
+        let svc = new_service();
+        let link = make_link(&signer, "literal:string:a", "p://x", "literal:string:b");
+        assert_eq!(svc.received_at(&link).unwrap(), None, "nothing stored yet");
+        let before = chrono::Utc::now().timestamp_millis() as u64;
+        svc.add_link(&link).unwrap();
+        let first = svc
+            .received_at(&link)
+            .unwrap()
+            .expect("stamped by the first write");
+        assert!(first >= before);
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        svc.add_link(&link).unwrap();
+        svc.rejudge_link(&link).unwrap();
+        assert_eq!(
+            svc.received_at(&link).unwrap(),
+            Some(first),
+            "a re-write keeps it"
+        );
+
+        // A removal, a wipe and a write again keep it.
+        svc.remove_link(&link).unwrap();
+        svc.clear().unwrap();
+        svc.add_link(&link).unwrap();
+        assert_eq!(svc.received_at(&link).unwrap(), Some(first));
+    }
+
+    /// A person's log with d1 live (published at seq 0), and a link d1 signed anchored at 0.
+    /// `tamper` swaps the signature for one that does not hold.
+    fn d1_link(log: &crate::identity::cache::tests::TestLog, tamper: bool) -> LinkExpression {
+        use ad4m_identity_core::build::Signer;
+        let data = Link {
+            source: "ad4m://post".into(),
+            predicate: Some("we://mention".into()),
+            target: "ad4m://someone".into(),
+        };
+        let key = log.device.key();
+        let bytes = crate::agent::signatures::anchored_signing_bytes(&data, T1, 0).unwrap();
+        let signature = if tamper {
+            hex::encode([7u8; 64])
+        } else {
+            hex::encode(log.device.sign(&bytes))
+        };
+        LinkExpression {
+            author: format!("did:key:{key}"),
+            timestamp: T1.into(),
+            data,
+            proof: crate::types::ExpressionProof {
+                key: format!("did:key:{key}#{key}"),
+                signature,
+                anchor: Some(0),
+            },
+            status: Some(LinkStatus::Shared),
+        }
+    }
+
+    fn publish_log(log: &crate::identity::cache::tests::TestLog, trusted: u64) {
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        let map = global_key_map();
+        map.publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted,
+            },
+        );
+        map.note_confirmed(&log.scid(), chrono::Utc::now().timestamp() as u64);
+    }
+
+    fn now_ms() -> u64 {
+        chrono::Utc::now().timestamp_millis() as u64
+    }
+
+    fn pause() {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    fn verdict_of(svc: &SparqlStore) -> Option<LinkVerdict> {
+        let links = svc.get_all_links(&EvalStop::none()).unwrap();
+        assert_eq!(links.len(), 1, "{links:?}");
+        links[0].verdict.clone()
+    }
+
+    /// The time of a bad signature is not the time of the statement: the same five fields
+    /// written with a signature that does not hold at T0 and with the real one at T2 are
+    /// received at T2, so a revoke with a `since` between them flags the link.
+    #[test]
+    fn a_forged_proof_does_not_lend_its_time_to_the_real_signature() {
+        use crate::identity::cache::global_key_map;
+        let mut log = crate::identity::cache::tests::TestLog::new(116);
+        publish_log(&log, 0);
+        let forged = d1_link(&log, true);
+        let real = d1_link(&log, false);
+        let svc = new_service();
+
+        svc.add_remote_link(&forged).unwrap();
+        assert_eq!(
+            svc.received_at(&forged).unwrap(),
+            None,
+            "no receipt for a forgery"
+        );
+        pause();
+        let since = now_ms();
+        pause();
+        svc.add_remote_link(&real).unwrap();
+        assert_eq!(verdict_of(&svc), Some(LinkVerdict::Valid));
+        assert!(svc.received_at(&real).unwrap().unwrap() >= since);
+
+        // The key is revoked, with a `since` after the forgery and before the real write.
+        log.revoke_d1_since(Some(since));
+        publish_log(&log, 1);
+        svc.rejudge_link(&real).unwrap();
+        assert_eq!(verdict_of(&svc), Some(LinkVerdict::Flagged));
+        global_key_map().forget(&log.scid());
+    }
+
+    /// A removal and a write again (one `apply_diff`, or a peer's diff, which removes before it
+    /// adds) keep the time the statement was first received: a revoke with a `since` between
+    /// the first time and the replay does not flag the link by `since`.
+    #[test]
+    fn a_removal_and_a_write_again_keep_the_first_received_time() {
+        use crate::identity::cache::global_key_map;
+        for remote in [false, true] {
+            let mut log =
+                crate::identity::cache::tests::TestLog::new(if remote { 117 } else { 118 });
+            publish_log(&log, 0);
+            let link = d1_link(&log, false);
+            let svc = new_service();
+            svc.add_remote_link(&link).unwrap();
+            let first = svc.received_at(&link).unwrap().unwrap();
+            pause();
+            let since = now_ms();
+            pause();
+            if remote {
+                assert!(svc.remove_remote_link(&link).unwrap());
+                assert!(svc.add_remote_link(&link).unwrap());
+            } else {
+                let one = std::slice::from_ref(&link);
+                svc.apply_diff(one, one, false).unwrap();
+            }
+            assert_eq!(
+                svc.received_at(&link).unwrap(),
+                Some(first),
+                "remote: {remote}"
+            );
+            assert_eq!(verdict_of(&svc), Some(LinkVerdict::Valid));
+
+            log.revoke_d1_since(Some(since));
+            publish_log(&log, 1);
+            svc.rejudge_link(&link).unwrap();
+            assert_eq!(
+                verdict_of(&svc),
+                Some(LinkVerdict::Valid),
+                "counted before the revoke, received before its since (remote: {remote})"
+            );
+            global_key_map().forget(&log.scid());
+        }
+    }
+
+    /// A receipt is not a link, an annotation or data: no SPARQL read, link query, link count
+    /// or `has_data` sees it, while the store keeps it.
+    #[test]
+    fn receipts_do_not_show_as_links_or_annotations() {
+        let signer = TestSigner::generate();
+        let svc = new_service();
+        let link = make_link(&signer, "ad4m://a", "ad4m://p", "ad4m://t");
+        assert!(!svc.has_data());
+        svc.add_link(&link).unwrap();
+        assert!(svc.received_at(&link).unwrap().is_some());
+
+        let rows = svc
+            .query_arbitrary(&EvalStop::none(), "SELECT ?s ?p ?o WHERE { ?s ?p ?o }")
+            .unwrap();
+        assert!(
+            !rows.contains("receipt:") && !rows.contains("receivedAt"),
+            "{rows}"
+        );
+        assert!(!rows.contains("ad4m://receipts"), "{rows}");
+        let links = svc.get_all_links(&EvalStop::none()).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            svc.quad_count(),
+            10,
+            "direct triple, rdf:reifies, 8 annotations (the judgement version among them)"
+        );
+
+        svc.remove_link(&link).unwrap();
+        assert_eq!(svc.quad_count(), 0);
+        assert!(!svc.has_data(), "a receipt alone is no data");
+        assert!(svc.get_all_links(&EvalStop::none()).unwrap().is_empty());
+        assert!(
+            svc.received_at(&link).unwrap().is_some(),
+            "the receipt stays"
+        );
     }
 
     #[test]
@@ -4545,7 +4844,10 @@ mod tests {
 
         // The log leaves the key map: the link alone would judge `cantCheck` now.
         map.forget(&log.scid());
-        assert_eq!(link.check_entered(None).verdict, LinkVerdict::CantCheck);
+        assert_eq!(
+            link.check_entered(None, None).verdict,
+            LinkVerdict::CantCheck
+        );
         assert!(svc.add_remote_link(&link).unwrap());
         assert_eq!(judged(&svc), counted, "the stored valid stays");
         svc.rejudge_link(&link).unwrap();

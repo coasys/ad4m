@@ -4,6 +4,12 @@
 //! seq they were made at: did:key links, and profiles whose `proof.record` anchors them. A
 //! did:scid expression without an anchor is judged at the trusted head, so it turns invalid.
 //!
+//! A key that is lost or stolen, not just retired, gets a `since`: the time (ms) from which the
+//! person no longer trusts it. A reader flags the key's links it first received at or after
+//! `since`. The store takes a `since` up to the revoke's append time and no
+//! earlier than the key's `add`. A key that is only retired is better `unlink`ed first
+//! (`flows::unlink`): its older links stay valid.
+//!
 //! Then the private record is written again: the revoked devices leave it, with any pending
 //! revocation of theirs, and the new version's record key is wrapped to the remaining devices
 //! only, so a revoked device cannot read it.
@@ -30,12 +36,14 @@ pub struct Revoked {
     pub record: Result<u64, ClientError>,
 }
 
-/// Revokes the device keys `key_ids` of the identity `did`.
+/// Revokes the device keys `key_ids` of the identity `did`. `since` (ms since the epoch) is the
+/// time from which the keys are no longer trusted; `None` is the revoke's own append time.
 pub async fn revoke<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
     did: &str,
     key_ids: &[KeyId],
+    since: Option<u64>,
     clock: &dyn Clock,
     random: &dyn Random,
 ) -> Result<Revoked, ClientError> {
@@ -50,6 +58,7 @@ pub async fn revoke<R: ExecutorRpc>(
         &chain,
         unlocked.signer(clock.now())?,
         key_ids,
+        since,
         random,
     )
     .await
@@ -102,9 +111,10 @@ pub(crate) async fn revoke_with<R: ExecutorRpc>(
     chain: &KelChain,
     signer: &dyn MasterSigner,
     key_ids: &[KeyId],
+    since: Option<u64>,
     random: &dyn Random,
 ) -> Result<Revoked, ClientError> {
-    let event = revoke_event(chain, signer, key_ids)?;
+    let event = revoke_event(chain, signer, key_ids, since)?;
     let head = executor.publish(std::slice::from_ref(&event), None).await?;
     let record = record::write(executor, vault, did, &[], random).await;
     Ok(Revoked { head, record })
