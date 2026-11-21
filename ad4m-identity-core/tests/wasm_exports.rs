@@ -35,7 +35,8 @@ fn fold_export_matches_the_log_vector() {
     assert_eq!(json!(handle.hashes()), file["hashes"]);
     assert_eq!(rust(&handle.state().unwrap()), file["state"]);
     let head = rust(&handle.head().unwrap());
-    assert_eq!(head["hash"], file["hashes"][6]);
+    let last = file["hashes"].as_array().unwrap().last().unwrap();
+    assert_eq!(&head["hash"], last);
     assert_eq!(
         handle.hash_at(0.0).unwrap(),
         file["hashes"][0].as_str().unwrap()
@@ -88,7 +89,7 @@ fn import_export_appends_and_reports() {
     let rest: Vec<Value> = events[1..].iter().rev().cloned().collect();
     let appended = rust(&KelChainJs::import(&mut handle, js(&json!(rest))).unwrap());
     assert_eq!(appended["kind"], "appended");
-    assert_eq!(appended["count"], 6);
+    assert_eq!(appended["count"], rest.len());
     assert_eq!(json!(handle.hashes()), file["hashes"]);
     let again = rust(&KelChainJs::import(&mut handle, js(&file["events"])).unwrap());
     assert_eq!(again, json!({"kind": "already-have"}));
