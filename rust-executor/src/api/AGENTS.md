@@ -17,11 +17,8 @@ REST/WS shim. Split plan: spec item 6.
 `languages`, `neighbourhoods`, `perspectives` (largest; also SHACL + interpretation
 handlers), `runtime`, `config` (`runtime.config`, `runtime.setConfig`), `users`, `identity`,
 `key_login` (login with a device key and the calls of key sessions; the work is in
-`identity::key_login`), `agent_session` (`perspective.runAgent`), and `perspective_instances` (`perspective.instance*`:
-validated instance writes over `perspectives/instances/`, the same functions as the MCP
-`instance_*` tools; a refused write is a `WsRpcError` with the `InstanceError` as `data`: 422
-for a shape violation, see the module doc). Each exposes `register_ws_handlers(&mut HandlerMap)`
-called from `ws_handler::build_handler_map`.
+`identity::key_login`), and `agent_session` (`perspective.runAgent`). Each exposes
+`register_ws_handlers(&mut HandlerMap)` called from `ws_handler::build_handler_map`.
 
 Handler shape (`perspectives_ws.rs::add_link` is representative):
 
@@ -85,7 +82,7 @@ handler. `HandlerMap::admit` runs the steps before the handler alone.
 | `Operator` | no capability; `ctx.is_operator()` (the admin credential, or no token on a loopback listener of an executor without one), else 403 "Admin credential required" (`guards::OPERATOR_ONLY`), whatever the caller's capabilities |
 | `Cap(cap)` | none: any caller holding `cap`. An anonymous caller holds only the anonymous set (request a capability, redeem it, sign up, log in, verify an email); the handler acts on `ctx.acts_as()` |
 | `Executor(cap)` | the operator or a grant on the main agent: 403 naming the method to a session on a managed agent, whatever its capabilities, and to an anonymous caller. A grant on the main agent passes (D5): WE web administers a local executor with an app token holding `*` |
-| `UserOrOperator(cap)` | the operator, or a session on a managed agent (a user, or an app the user approved): 403 "<method> for the main agent needs the admin credential" to a grant on the main agent, whatever its capabilities, and to an anonymous caller. For calls that bind the caller's agent for good (`identity.cosignIncept`, `identity.publish`): every app holds their capabilities by default |
+| `UserOrOperator(cap)` | the operator, or a session on a managed agent (a user, or an app the user approved): 403 "<method> for the main agent needs the admin credential" to a grant on the main agent, whatever its capabilities, and to an anonymous caller. For calls that bind the caller's agent for good (`identity.cosignIncept`, `identity.publish`) or speak for this device to its identity's other devices (`identity.postRequest`, `identity.deleteRequest`): every app holds their capabilities by default |
 | `Owns { cap, id, owner }` | the resource `id` reads from the params exists and the operator or the session's agent owns it (`guards::owns`), else 404, missing or not |
 
 `Owns` per `Owner` (who owns the resource; the operator reaches all):
@@ -128,10 +125,21 @@ that create or lock the executor's agent and move its data folder: `agent.genera
 `agent.lock`, `runtime.exportData` and `runtime.importData` are not local
 only, so a remote operator (a key login, or the admin credential on a network listener) may
 move the whole data folder. `agent.import` is not local only either — but it is not
-implemented: its handler answers "Agent import not yet implemented". The guard table marks the local-only methods "local only". `runtime.setConfig` is not local only as a whole: it refuses each
-`machine` key to a caller off this machine (`config_rpc`). `identity.custodyStatus` adds the
-custody channel's own check (`identity::custody::admit`: the admin credential, not a tokenless
-operator, and `--custody-channel`).
+implemented: its handler answers "Agent import not yet implemented". The guard table marks
+the local-only methods "local only". `runtime.setConfig` is not local only as a whole: it refuses each `machine` key to a caller
+off this machine (`config_rpc`). `identity.custodyStatus`, `identity.inboxSealed` (the
+joined inbox still sealed to the custody service's key), the custody key in
+`identity.claimOffer`, `identity.prepareDevice` and `identity.cosignIncept`, and, with the
+channel on, `identity.inboxAck` add the
+custody channel's own check (`identity::custody::admit`: the custody credential on a loopback
+listener of an executor started with `--custody-channel`); every other caller, the admin
+credential included, gets 403 `no-custody-channel`. The custody credential is its own
+principal (`Principal::Custody`), not an operator: `Session::open` refuses it off a loopback
+listener, it holds no capability, and dispatch (`admit_entry`) lets it reach only the methods
+in `identity::custody::CUSTODY_METHODS` (403 `not-a-custody-call` otherwise), acting as the
+main agent. Its sessions get only `Audience::LocalOperator` events. The events only
+local-only methods read (`link-ticket`, `inbox-message`) go to `Audience::LocalOperator`, the
+operator's sessions on this machine.
 
 Notes on some methods:
 
@@ -182,7 +190,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-242 methods: Cap 82, CapAnyPointer 1, Executor 43, Open 9, Operator 29, Owns 76, UserOrOperator 2. Local only (the operator on this machine): 6.
+255 methods: Cap 86, CapAnyPointer 1, Executor 43, Open 9, Operator 36, Owns 76, UserOrOperator 4. Local only (the operator on this machine): 13.
 
 | Method | Guard |
 |---|---|
@@ -260,16 +268,29 @@ the guard checked:
 | `hosting.setHotWallet` | `Cap(agent:UPDATE)` |
 | `hosting.wallet` | `Executor(runtime.hosting:READ)` |
 | `hosting.walletHistory` | `Executor(runtime.hosting:READ)` |
+| `identity.acceptJoin` | `Operator`, local only |
+| `identity.cancelJoin` | `Operator`, local only |
 | `identity.claimOffer` | `Operator` |
 | `identity.cosignIncept` | `UserOrOperator(agent:SIGN)` |
 | `identity.custodyStatus` | `Operator`, local only |
+| `identity.deleteRequest` | `UserOrOperator(agent:UPDATE)` |
 | `identity.devices` | `Cap(agent:READ)` |
+| `identity.endPrepared` | `Operator`, local only |
+| `identity.inbox` | `Operator`, local only |
+| `identity.inboxAck` | `Operator`, local only |
+| `identity.inboxPut` | `Cap(agent:UPDATE)` |
+| `identity.inboxSealed` | `Operator`, local only |
 | `identity.joinStatus` | `Cap(agent:READ)` |
 | `identity.log` | `Cap(agent:READ)` |
 | `identity.offers` | `Cap(agent:READ)` |
 | `identity.openOffer` | `Cap(agent:UPDATE)` |
+| `identity.postRequest` | `UserOrOperator(agent:UPDATE)` |
+| `identity.prepareDevice` | `Operator`, local only |
 | `identity.publish` | `UserOrOperator(agent:UPDATE)` |
+| `identity.record` | `Cap(agent:READ)` |
+| `identity.recordPut` | `Cap(agent:UPDATE)` |
 | `identity.rekey` | `Operator`, local only |
+| `identity.requests` | `Cap(agent:READ)` |
 | `identity.resetLog` | `Operator` |
 | `identity.resolve` | `Cap(agent:READ)` |
 | `identity.status` | `Cap(agent:READ)` |
@@ -502,9 +523,7 @@ them against those two guards.
   once to each of `event_recipients`, each copy naming that DID as `recipient`
   (`perspectives::publish_telepresence_signal`, used by both link-language paths and by
   `send_signal` / `send_broadcast` for the executor's own agents: a neighbourhood's owners are
-  only this executor's agents). A broadcast reaches every owner, the sender's own agent too, main
-  or managed, so its other clients hear it (two devices of one agent in a mesh call); `loopback`
-  adds a second copy to every owner. `notification-triggered` goes to the notification's `ownerDid`,
+  only this executor's agents). `notification-triggered` goes to the notification's `ownerDid`,
   never to co-owners, and needs the query capability on its perspective (its `triggerMatch` is
   query results), not `runtime.notifications`' AGENT_UPDATE. `auto-processor-event` goes to the pass owner when it is one of
   `event_recipients`, else nobody (`auto_processor::events::pass_audience`);
@@ -628,11 +647,9 @@ them against those two guards.
   `core/src/generated/api/`, but not its `index.ts`: add the export line there by hand.
 - `crate::types::core` (domain) vs `crate::types::domain` (wire/input). Some duplicates,
   see spec item 5. Prefer `crate::types::X` re-exports.
-- `WsRpcError { code, message, data }` (`ws_handler.rs`): constructors `bad_request`,
+- `WsRpcError { code, message }` (`ws_handler.rs`): constructors `bad_request`,
   `unauthorized`, `forbidden`, `not_found`, `conflict`, `too_many_requests`,
-  `internal`, `not_implemented`; `.with_data(value)` adds structured detail, sent as
-  `error.data` (`to_wire`) and read by the SDK as `RpcError.data`. No `From` impls for domain
-  errors yet.
+  `internal`, `not_implemented`. No `From` impls for domain errors yet.
 
 ## openai_compat/
 

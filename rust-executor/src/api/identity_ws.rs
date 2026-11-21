@@ -14,11 +14,16 @@ use super::ws_handler::{HandlerMap, NoParams, WsRpcError};
 use crate::agent::capabilities::{
     AGENT_READ_CAPABILITY, AGENT_SIGN_CAPABILITY, AGENT_UPDATE_CAPABILITY,
 };
+use crate::agent::AgentContext;
 use crate::identity::types::{
-    ClaimOfferParams, ClaimOfferResult, CosignInceptParams, DeviceKeys, DeviceView,
-    DidResolutionResult, IdentityLog, IdentityStatus, JoinStatus, JoinStatusParams, LogParams,
-    OfferListing, OfferOpened, OffersParams, OpenOfferParams, PublishParams, ResetLogParams,
-    ResolveParams, SignedHead,
+    AcceptJoinParams, CancelJoinParams, ClaimOfferParams, ClaimOfferResult, CosignInceptParams,
+    DeleteRequestParams, DeviceKeys, DeviceRequest, DeviceView, DidResolutionResult,
+    EndPreparedParams, IdentityLog, IdentityStatus, InboxAckParams, InboxEntry, InboxPutParams,
+    InboxStored, JoinAccepted, JoinCancelled, JoinStatus, JoinStatusParams, LogParams,
+    OfferListing, OfferOpened, OffersParams, OpenOfferParams, PostRequestParams,
+    PrepareDeviceParams, PreparedDevice, PreparedEnded, PublishParams, RecordParams,
+    RecordPutParams, RecordStored, RequestPosted, RequestsParams, ResetLogParams, ResolveParams,
+    SealedInboxMessage, SignedHead, StoredRecord,
 };
 use crate::types::RequestContext;
 
@@ -106,11 +111,15 @@ async fn resolve(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRp
     answer(result)
 }
 
+/// `identity.cosignIncept`. From the custody credential the incept may list the custody
+/// service's own X25519 key as this device's `enc`; from any other caller only the wallet's.
 async fn cosign_incept(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let p: CosignInceptParams = parse(params)?;
+    let custody =
+        crate::identity::custody::admit(&ctx.session, crate::config::custody_channel_on()).is_ok();
     answer(
         crate::identity::service()?
-            .cosign_incept(&ctx.acts_as(), &p.event)
+            .cosign_incept(&ctx.acts_as(), &p.event, custody)
             .await?,
     )
 }
@@ -142,12 +151,33 @@ async fn offers(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpc
     )
 }
 
-async fn claim_offer(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+async fn claim_offer(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let p: ClaimOfferParams = parse(params)?;
+    let can_keep_master = p.can_keep_master.unwrap_or(false);
+    // Only the custody service may say this device keeps the master key, and only with its
+    // own key: the master key is sealed to it, never to a key this executor holds.
+    if can_keep_master || p.enc.is_some() {
+        crate::identity::custody::admit(&ctx.session, crate::config::custody_channel_on())?;
+    }
+    match (can_keep_master, &p.enc) {
+        (true, None) => {
+            return Err(WsRpcError::bad_request(
+                "no-custody-enc: canKeepMaster needs enc, the custody service's X25519 key",
+            ))
+        }
+        (false, Some(_)) => {
+            return Err(WsRpcError::bad_request(
+                "invalid: enc is the key of a device that keeps the master key; it needs \
+                 canKeepMaster",
+            ))
+        }
+        _ => {}
+    }
+    let offer = crate::identity::service::parse_offer(&p.offer)?;
     answer(
         crate::identity::service()?
             .claims()
-            .claim_for_main(&p)
+            .claim_for_main(&offer, p.enc.as_deref(), p.hint)
             .await?,
     )
 }
@@ -162,8 +192,139 @@ async fn join_status(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     )
 }
 
+/// `identity.acceptJoin`: the person at this computer accepts the main agent's held first-run
+/// claim (operator, this machine only).
+async fn accept_join(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let p: AcceptJoinParams = parse(params)?;
+    answer(
+        crate::identity::service()?
+            .claims()
+            .accept_join(&AgentContext::main_agent(), &p.offer_id)?,
+    )
+}
+
+/// `identity.cancelJoin`: the main agent's claim never binds (operator, this machine only).
+async fn cancel_join(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let p: CancelJoinParams = parse(params)?;
+    answer(
+        crate::identity::service()?
+            .claims()
+            .cancel_join(&AgentContext::main_agent(), &p.offer_id)?,
+    )
+}
+
 async fn devices(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     answer(crate::identity::service()?.devices(&ctx.acts_as()).await?)
+}
+
+/// `identity.prepareDevice`: this executor's device string; its pre-join inbox is read until
+/// the string expires, and a valid ticket is claimed (`identity::inbox`). With `enc` (the
+/// custody service's key, the custody channel only) the claim says `canKeepMaster`.
+async fn prepare_device(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let p: PrepareDeviceParams = parse(params)?;
+    if p.enc.is_some() {
+        crate::identity::custody::admit(&ctx.session, crate::config::custody_channel_on())?;
+    }
+    let service = crate::identity::service()?;
+    answer(crate::identity::inbox::prepare_device(&service, p.enc).await?)
+}
+
+/// `identity.endPrepared`: ends a device string's read and cancels every claim it made, on
+/// this executor only (`identity::inbox`).
+async fn end_prepared(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let p: EndPreparedParams = parse(params)?;
+    answer(crate::identity::service()?.end_prepared(&p.device).await?)
+}
+
+async fn inbox_put(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let p: InboxPutParams = parse(params)?;
+    answer(crate::identity::service()?.inbox_put(&p).await?)
+}
+
+/// `identity.inbox`: the main agent's waiting messages, by id and times only.
+async fn inbox(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    answer(
+        crate::identity::service()?
+            .pull_inbox(
+                &AgentContext::main_agent(),
+                crate::config::custody_channel_on(),
+            )
+            .await?,
+    )
+}
+
+/// `identity.inboxSealed`: the custody channel's call; the main agent's joined messages,
+/// still sealed to the custody service's key.
+async fn inbox_sealed(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    crate::identity::custody::admit(&ctx.session, crate::config::custody_channel_on())?;
+    answer(
+        crate::identity::service()?
+            .inbox_sealed(&AgentContext::main_agent())
+            .await?,
+    )
+}
+
+/// `identity.inboxAck`: deletes a joined message. With the custody channel the joined inbox
+/// holds master keys for the custody service, which reads them (`identity.inboxSealed`) until
+/// it acknowledges each: only the custody service acknowledges, so the admin credential an
+/// app's window may hold cannot drop a master key before the custody service has it. The
+/// custody service acknowledges a stale or false message too, once it opened it.
+async fn inbox_ack(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let channel_on = crate::config::custody_channel_on();
+    if channel_on {
+        crate::identity::custody::admit(&ctx.session, channel_on)?;
+    }
+    let p: InboxAckParams = parse(params)?;
+    answer(
+        crate::identity::service()?
+            .inbox_ack(&AgentContext::main_agent(), &p.id)
+            .await?,
+    )
+}
+
+async fn record(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let p: RecordParams = parse(params)?;
+    answer(
+        crate::identity::service()?
+            .record(&ctx.acts_as(), &p)
+            .await?,
+    )
+}
+
+async fn record_put(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let p: RecordPutParams = parse(params)?;
+    answer(
+        crate::identity::service()?
+            .record_put(&ctx.acts_as(), &p)
+            .await?,
+    )
+}
+
+async fn requests(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let p: RequestsParams = parse(params)?;
+    answer(
+        crate::identity::service()?
+            .requests(&ctx.acts_as(), &p)
+            .await?,
+    )
+}
+
+async fn post_request(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let p: PostRequestParams = parse(params)?;
+    answer(
+        crate::identity::service()?
+            .post_request(&ctx.acts_as(), &p)
+            .await?,
+    )
+}
+
+async fn delete_request(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let p: DeleteRequestParams = parse(params)?;
+    answer(
+        crate::identity::service()?
+            .delete_request(&ctx.acts_as(), &p)
+            .await?,
+    )
 }
 
 /// `identity.rekey`: a new main wallet key; every place that holds the main agent's DID moves
@@ -199,7 +360,9 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // Signs with the agent's own device key, and publishes what the custody service signed.
     // Both can bind the agent to an identity for good, so for the main agent only the
     // operator (the custody service holds the admin credential): every app holds these
-    // capabilities by default. A user acts for their own agent.
+    // capabilities by default. A user acts for their own agent. `identity.postRequest` and
+    // `identity.deleteRequest` below take the same guard: they speak for this device to the
+    // identity's other devices.
     map.method::<CosignInceptParams, Value>("identity.cosignIncept", cosign_incept)
         .guard(Guard::UserOrOperator(AGENT_SIGN_CAPABILITY.clone()));
     map.method::<PublishParams, SignedHead>("identity.publish", publish)
@@ -213,18 +376,76 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // runs inside `claim_for_main`, so it never depends on this guard.
     map.method::<ClaimOfferParams, ClaimOfferResult>("identity.claimOffer", claim_offer)
         .guard(Guard::Operator);
+    // A write, though it answers a state: on `spent` it binds the main agent to the identity
+    // and may record the operator, so a client does not replay it as a read.
     map.method::<JoinStatusParams, JoinStatus>("identity.joinStatus", join_status)
-        .read()
         .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
+    // The person at this computer accepts a first-run claim (one that would record the
+    // operator) before the main agent joins, or cancels any claim not yet joined: the
+    // operator on this machine only, so whoever sees the device string and delivers a ticket
+    // first does not take the desktop.
+    map.method::<AcceptJoinParams, JoinAccepted>("identity.acceptJoin", accept_join)
+        .local_only()
+        .guard(Guard::Operator);
+    map.method::<CancelJoinParams, JoinCancelled>("identity.cancelJoin", cancel_join)
+        .local_only()
+        .guard(Guard::Operator);
     map.method::<NoParams, Vec<DeviceView>>("identity.devices", devices)
         .read()
         .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
+    // The device inbox of this executor's main key: the operator on this machine only. Its
+    // device string, its messages and the claim of a ticket are the main agent's.
+    map.method::<PrepareDeviceParams, PreparedDevice>("identity.prepareDevice", prepare_device)
+        .local_only()
+        .guard(Guard::Operator);
+    // The person here cancelled the code screen: no claim of that device string binds.
+    map.method::<EndPreparedParams, PreparedEnded>("identity.endPrepared", end_prepared)
+        .local_only()
+        .guard(Guard::Operator);
+    map.method::<NoParams, Vec<InboxEntry>>("identity.inbox", inbox)
+        .read()
+        .local_only()
+        .guard(Guard::Operator);
+    // With the custody channel, only the custody service acknowledges (`inbox_ack`).
+    map.method::<InboxAckParams, bool>("identity.inboxAck", inbox_ack)
+        .local_only()
+        .guard(Guard::Operator);
+    // The joined messages as sealed, for the custody service to open with its own key: the
+    // custody channel only (`identity::custody::admit`); every other caller gets 403.
+    map.method::<NoParams, Vec<SealedInboxMessage>>("identity.inboxSealed", inbox_sealed)
+        .read()
+        .local_only()
+        .guard(Guard::Operator);
+    // Passes a master-signed inbox write: the signature is the authority, as for openOffer.
+    map.method::<InboxPutParams, InboxStored>("identity.inboxPut", inbox_put)
+        .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
+    // The private record and the request box of the agent's identity: reads and writes
+    // signed by a key of the identity, or by the agent's own device key. A record write
+    // carries an envelope a key of the identity signed, so the device's request only carries
+    // it.
+    map.method::<RecordParams, Option<StoredRecord>>("identity.record", record)
+        .read()
+        .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
+    map.method::<RecordPutParams, RecordStored>("identity.recordPut", record_put)
+        .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
+    map.method::<RequestsParams, Vec<DeviceRequest>>("identity.requests", requests)
+        .read()
+        .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
+    // A post is signed by the agent's own device key alone, and so is a deletion that carries
+    // no request: both speak for this device to the identity's other devices. Every app holds
+    // agent:UPDATE by default, so as for publish: for the main agent only the operator, and a
+    // user acts for their own agent.
+    map.method::<PostRequestParams, RequestPosted>("identity.postRequest", post_request)
+        .guard(Guard::UserOrOperator(AGENT_UPDATE_CAPABILITY.clone()));
+    map.method::<DeleteRequestParams, bool>("identity.deleteRequest", delete_request)
+        .guard(Guard::UserOrOperator(AGENT_UPDATE_CAPABILITY.clone()));
     // A new main key for this executor: only on this machine, never from a network session.
     map.method::<NoParams, DeviceKeys>("identity.rekey", rekey)
         .local_only()
         .guard(Guard::Operator);
-    // The custody channel: the admin credential on a loopback listener of an executor started
-    // with --custody-channel (`identity::custody::admit`); any other caller gets 403.
+    // The custody channel: the custody credential on a loopback listener of an executor started
+    // with --custody-channel (`identity::custody::admit`); any other caller, the admin
+    // credential included, gets 403.
     map.method::<NoParams, DeviceKeys>("identity.custodyStatus", custody_status)
         .read()
         .local_only()
@@ -300,26 +521,44 @@ mod tests {
         .is_none());
     }
 
-    /// Each call carries its guard: reads the agent read capability; co-signing and publishing
-    /// the agent sign and update capabilities, and for the main agent the operator; other writes
-    /// the agent update capability; a claim for the main agent and a log reset the operator.
+    /// Each call carries its guard: reads the agent read capability; co-signing, publishing and
+    /// posting to or deleting from the request box the agent sign and update capabilities, and
+    /// for the main agent the operator; other writes the agent update capability; a claim for
+    /// the main agent and a log reset the operator.
     #[test]
     fn every_identity_call_has_its_guard() {
         let mut map = HandlerMap::new();
         register_ws_handlers(&mut map);
         let cap = |c: &Capability| format!("{:?}", Guard::Cap(c.clone()));
+        let user_or_operator = |c: &Capability| format!("{:?}", Guard::UserOrOperator(c.clone()));
         let expected = [
+            ("identity.acceptJoin", format!("{:?}", Guard::Operator)),
+            ("identity.cancelJoin", format!("{:?}", Guard::Operator)),
             ("identity.claimOffer", format!("{:?}", Guard::Operator)),
             (
                 "identity.cosignIncept",
                 format!("{:?}", Guard::UserOrOperator(AGENT_SIGN_CAPABILITY.clone())),
             ),
             ("identity.custodyStatus", format!("{:?}", Guard::Operator)),
+            (
+                "identity.deleteRequest",
+                user_or_operator(&AGENT_UPDATE_CAPABILITY),
+            ),
             ("identity.devices", cap(&AGENT_READ_CAPABILITY)),
+            ("identity.endPrepared", format!("{:?}", Guard::Operator)),
+            ("identity.inbox", format!("{:?}", Guard::Operator)),
+            ("identity.inboxAck", format!("{:?}", Guard::Operator)),
+            ("identity.inboxPut", cap(&AGENT_UPDATE_CAPABILITY)),
+            ("identity.inboxSealed", format!("{:?}", Guard::Operator)),
             ("identity.joinStatus", cap(&AGENT_READ_CAPABILITY)),
             ("identity.log", cap(&AGENT_READ_CAPABILITY)),
             ("identity.offers", cap(&AGENT_READ_CAPABILITY)),
             ("identity.openOffer", cap(&AGENT_UPDATE_CAPABILITY)),
+            (
+                "identity.postRequest",
+                user_or_operator(&AGENT_UPDATE_CAPABILITY),
+            ),
+            ("identity.prepareDevice", format!("{:?}", Guard::Operator)),
             (
                 "identity.publish",
                 format!(
@@ -327,7 +566,10 @@ mod tests {
                     Guard::UserOrOperator(AGENT_UPDATE_CAPABILITY.clone())
                 ),
             ),
+            ("identity.record", cap(&AGENT_READ_CAPABILITY)),
+            ("identity.recordPut", cap(&AGENT_UPDATE_CAPABILITY)),
             ("identity.rekey", format!("{:?}", Guard::Operator)),
+            ("identity.requests", cap(&AGENT_READ_CAPABILITY)),
             ("identity.resetLog", format!("{:?}", Guard::Operator)),
             ("identity.resolve", cap(&AGENT_READ_CAPABILITY)),
             ("identity.status", cap(&AGENT_READ_CAPABILITY)),
@@ -344,10 +586,74 @@ mod tests {
         assert_eq!(got, want);
     }
 
-    /// `identity.rekey` and the custody channel stay on this machine: the admin credential on
-    /// a network listener and an app with every capability get 403 `local-only`. The custody
-    /// channel then also needs `--custody-channel`: without it the operator on this machine
-    /// gets 403 `no-custody-channel`.
+    /// Review coasys/ad4m#1635: an app on the main agent with only the default capabilities
+    /// (agent:UPDATE among them) posted to the identity's request box signed by this device's
+    /// key, and deleted this device's pending requests. It gets 403 now, before any handler
+    /// runs; a user's session on its own agent still passes the guard.
+    #[tokio::test]
+    async fn an_app_with_the_default_capabilities_does_not_speak_for_this_device() {
+        let mut map = HandlerMap::new();
+        register_ws_handlers(&mut map);
+        let defaults = crate::agent::capabilities::get_user_default_capabilities();
+        assert!(defaults.contains(&AGENT_UPDATE_CAPABILITY));
+        let app = Arc::new(RequestContext::app_for_test(defaults.clone()));
+        let user = RequestContext::user_for_test("did:key:alice", defaults);
+        for (method, params) in [
+            (
+                "identity.postRequest",
+                serde_json::json!({ "body": { "kind": "send-master" } }),
+            ),
+            ("identity.deleteRequest", serde_json::json!({ "id": "r" })),
+        ] {
+            let refused = map
+                .dispatch(method, params.clone(), app.clone())
+                .await
+                .unwrap_err();
+            assert_eq!(
+                (refused.code, refused.message),
+                (
+                    403,
+                    format!("{method} for the main agent needs the admin credential")
+                )
+            );
+            assert!(map.admit(method, &params, &user).await.is_ok(), "{method}");
+        }
+    }
+
+    /// The idempotent reads a client resends after a reconnect. `identity.joinStatus` is none:
+    /// on `spent` it binds the main agent and may record the operator.
+    #[test]
+    fn the_identity_reads_are_the_calls_that_change_nothing() {
+        let mut map = HandlerMap::new();
+        register_ws_handlers(&mut map);
+        let reads: Vec<&str> = map
+            .specs()
+            .into_iter()
+            .filter(|s| s.read)
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(
+            reads,
+            [
+                "identity.custodyStatus",
+                "identity.devices",
+                "identity.inbox",
+                "identity.inboxSealed",
+                "identity.log",
+                "identity.offers",
+                "identity.record",
+                "identity.requests",
+                "identity.resolve",
+                "identity.status",
+            ]
+        );
+    }
+
+    /// `identity.rekey`, the custody channel and the device inbox stay on this machine: the
+    /// admin credential on a network listener and an operator from a key login get 403
+    /// `local-only`, an app with every capability 403. The custody channel then also needs
+    /// `--custody-channel`: without it the operator on this machine gets 403
+    /// `no-custody-channel`.
     #[tokio::test]
     async fn rekey_and_the_custody_channel_refuse_every_caller_off_this_machine() {
         use crate::agent::session::{Principal, Session};
@@ -363,21 +669,35 @@ mod tests {
                 crate::agent::capabilities::ALL_CAPABILITY.clone(),
             ]))
         };
-        for method in ["identity.rekey", "identity.custodyStatus"] {
-            let refused = map
-                .dispatch(method, serde_json::json!({}), network())
-                .await
-                .unwrap_err();
-            assert_eq!(refused.code, 403, "{method}");
-            assert!(
-                refused.message.starts_with("local-only"),
-                "{method}: {}",
-                refused.message
-            );
-            let refused = map
-                .dispatch(method, serde_json::json!({}), app())
-                .await
-                .unwrap_err();
+        let key_login = || {
+            Arc::new(RequestContext::for_session(
+                Session::for_test(Principal::Operator).from_key_login(),
+            ))
+        };
+        for (method, params) in [
+            ("identity.rekey", serde_json::json!({})),
+            ("identity.custodyStatus", serde_json::json!({})),
+            ("identity.inboxSealed", serde_json::json!({})),
+            ("identity.prepareDevice", serde_json::json!({})),
+            ("identity.endPrepared", serde_json::json!({ "device": "d" })),
+            ("identity.inbox", serde_json::json!({})),
+            ("identity.inboxAck", serde_json::json!({ "id": "m1" })),
+            ("identity.acceptJoin", serde_json::json!({ "offerId": "o" })),
+            ("identity.cancelJoin", serde_json::json!({ "offerId": "o" })),
+        ] {
+            for caller in [network(), key_login()] {
+                let refused = map
+                    .dispatch(method, params.clone(), caller)
+                    .await
+                    .unwrap_err();
+                assert_eq!(refused.code, 403, "{method}");
+                assert!(
+                    refused.message.starts_with("local-only"),
+                    "{method}: {}",
+                    refused.message
+                );
+            }
+            let refused = map.dispatch(method, params, app()).await.unwrap_err();
             assert_eq!(refused.code, 403, "{method}");
         }
         let saved = crate::config::GLOBAL_AD4M_CONFIG
@@ -385,31 +705,302 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         crate::config::set_global_config(crate::Ad4mConfig::default());
-        let no_channel = map
-            .dispatch(
-                "identity.custodyStatus",
+        let mut no_channel = vec![];
+        for method in ["identity.custodyStatus", "identity.inboxSealed"] {
+            no_channel.push(
+                map.dispatch(
+                    method,
+                    serde_json::json!({}),
+                    Arc::new(RequestContext::operator_for_test()),
+                )
+                .await
+                .unwrap_err(),
+            );
+        }
+        // With the flag, a tokenless operator on loopback is still not the custody service.
+        crate::config::set_global_config(crate::Ad4mConfig {
+            custody_channel: Some(true),
+            ..Default::default()
+        });
+        no_channel.push(
+            map.dispatch(
+                "identity.inboxSealed",
                 serde_json::json!({}),
-                Arc::new(RequestContext::operator_for_test()),
+                Arc::new(RequestContext::for_session(
+                    Session::for_test(Principal::Operator).without_credential(),
+                )),
             )
             .await
-            .unwrap_err();
+            .unwrap_err(),
+        );
+        // With the flag, the admin credential on loopback is not the custody service either:
+        // an app's window may hold it.
+        for method in ["identity.custodyStatus", "identity.inboxSealed"] {
+            no_channel.push(
+                map.dispatch(
+                    method,
+                    serde_json::json!({}),
+                    Arc::new(RequestContext::operator_for_test()),
+                )
+                .await
+                .unwrap_err(),
+            );
+        }
         *crate::config::GLOBAL_AD4M_CONFIG
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = saved;
-        assert_eq!(no_channel.code, 403);
+        for refused in no_channel {
+            assert_eq!(refused.code, 403);
+            assert!(
+                refused
+                    .message
+                    .starts_with(crate::identity::custody::NO_CUSTODY_CHANNEL),
+                "{}",
+                refused.message
+            );
+        }
+    }
+
+    /// A claim that says it keeps the master key needs the custody channel's caller: an
+    /// executor without the channel would delete every master key sent to it, and with the
+    /// channel only the custody credential on loopback (the custody service) reads one.
+    #[tokio::test]
+    async fn a_claim_keeps_the_master_key_only_through_the_custody_channel() {
+        use crate::agent::session::{Principal, Session};
+        let mut map = HandlerMap::new();
+        register_ws_handlers(&mut map);
+        let saved = crate::config::GLOBAL_AD4M_CONFIG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let params = serde_json::json!({
+            "offer": "coasys:offer:1:x",
+            "canKeepMaster": true,
+            "enc": CUSTODY_ENC,
+        });
+        crate::config::set_global_config(crate::Ad4mConfig::default());
+        let mut refused = vec![map
+            .dispatch(
+                "identity.claimOffer",
+                params.clone(),
+                Arc::new(RequestContext::operator_for_test()),
+            )
+            .await
+            .unwrap_err()];
+        crate::config::set_global_config(crate::Ad4mConfig {
+            custody_channel: Some(true),
+            ..Default::default()
+        });
+        for session in [
+            Session::for_test(Principal::Operator).from_key_login(),
+            Session::for_test(Principal::Operator).on_network(),
+            Session::for_test(Principal::Operator).without_credential(),
+            Session::for_test(Principal::Operator),
+            Session::for_test(Principal::Operator)
+                .as_custody()
+                .on_network(),
+        ] {
+            refused.push(
+                map.dispatch(
+                    "identity.claimOffer",
+                    params.clone(),
+                    Arc::new(RequestContext::for_session(session)),
+                )
+                .await
+                .unwrap_err(),
+            );
+        }
+        *crate::config::GLOBAL_AD4M_CONFIG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = saved;
+        for refused in refused {
+            assert_eq!(refused.code, 403);
+            assert!(
+                refused
+                    .message
+                    .starts_with(crate::identity::custody::NO_CUSTODY_CHANNEL),
+                "{}",
+                refused.message
+            );
+        }
+    }
+
+    /// The WE main renderer's socket is the admin credential on a loopback listener: an operator
+    /// on this machine, but not the custody channel. The custody guard refuses it, and
+    /// `identity.inboxSealed` with it (review on coasys/ad4m#1649).
+    #[tokio::test]
+    async fn the_renderers_admin_credential_does_not_pass_the_custody_guard() {
+        use crate::agent::capabilities::ListenerReach;
+        use crate::agent::session::{OperatorSource, Session};
+        use crate::secret::Secret;
+
+        let token = "a023150c-c1ef-449a-b17d-8139b1ea5d55";
+        let admin_credential = Some(Secret::new(token));
+        let renderer = Session::open(token, &admin_credential, ListenerReach::Loopback).unwrap();
+        assert_eq!(renderer.operator_source(), Some(OperatorSource::Credential));
+        assert!(renderer.is_operator_on_this_machine());
+        let refused = crate::identity::custody::admit(&renderer, true).unwrap_err();
         assert!(
-            no_channel
+            refused
                 .message
                 .starts_with(crate::identity::custody::NO_CUSTODY_CHANNEL),
             "{}",
-            no_channel.message
+            refused.message
+        );
+
+        let mut map = HandlerMap::new();
+        register_ws_handlers(&mut map);
+        let channel = crate::config::CustodyChannelForTest::on();
+        let answer = map
+            .dispatch(
+                "identity.inboxSealed",
+                serde_json::json!({}),
+                Arc::new(RequestContext::for_session(renderer)),
+            )
+            .await;
+        drop(channel);
+        let refused = answer.expect_err("the renderer does not reach inboxSealed");
+        assert!(
+            refused
+                .message
+                .starts_with(crate::identity::custody::NO_CUSTODY_CHANNEL),
+            "refused by something else than the custody guard: {} {}",
+            refused.code,
+            refused.message
         );
     }
 
-    /// With `--custody-channel`, the admin credential on a loopback listener gets this
+    /// Review coasys/ad4m#1635: `identity.inboxAck` is `Guard::Operator`, so the renderer, which
+    /// holds the admin credential, can delete a sealed master transfer before the custody service
+    /// has taken and stored it. Acknowledging must be custody-only like the master key's read. Fails at
+    /// 6e0ac329e (the error is not the custody guard's).
+    #[tokio::test]
+    async fn the_renderers_admin_credential_does_not_acknowledge_an_inbox_message() {
+        use crate::agent::capabilities::ListenerReach;
+        use crate::agent::session::Session;
+        use crate::secret::Secret;
+
+        let token = "a023150c-c1ef-449a-b17d-8139b1ea5d55";
+        let renderer =
+            Session::open(token, &Some(Secret::new(token)), ListenerReach::Loopback).unwrap();
+        let mut map = HandlerMap::new();
+        register_ws_handlers(&mut map);
+        let channel = crate::config::CustodyChannelForTest::on();
+        let answer = map
+            .dispatch(
+                "identity.inboxAck",
+                serde_json::json!({ "id": "m1" }),
+                Arc::new(RequestContext::for_session(renderer)),
+            )
+            .await;
+        drop(channel);
+        let refused = answer.expect_err("the renderer does not acknowledge inbox messages");
+        assert!(
+            refused.code == 403
+                && refused
+                    .message
+                    .starts_with(crate::identity::custody::NO_CUSTODY_CHANNEL),
+            "not refused by the custody guard: {} {}",
+            refused.code,
+            refused.message
+        );
+    }
+
+    /// Review coasys/ad4m#1635: the custody credential opens a session for the custody calls
+    /// and no other method. The executor's own settings, its key and its lock refuse it before
+    /// their handlers run, while the calls the custody service makes pass.
+    #[tokio::test]
+    async fn the_custody_credential_reaches_only_the_custody_calls() {
+        use crate::agent::capabilities::ListenerReach;
+        use crate::agent::session::Session;
+        use crate::secret::Secret;
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let map = crate::api::ws_handler::build_handler_map();
+        let admin = Some(Secret::new("the-admin-credential"));
+        let saved = crate::config::GLOBAL_AD4M_CONFIG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        crate::config::set_global_config(crate::Ad4mConfig {
+            custody_channel: Some(true),
+            admin_credential: admin.clone(),
+            custody_credential: Some("custody-secret".into()),
+            ..Default::default()
+        });
+        let custody = Session::open("custody-secret", &admin, ListenerReach::Loopback).unwrap();
+        let ctx = RequestContext::for_session(custody);
+        let mut answers = vec![];
+        for (method, params) in [
+            (
+                "runtime.setConfig",
+                serde_json::json!({ "set": { "logLevel": "debug" } }),
+            ),
+            ("identity.rekey", serde_json::json!({})),
+            ("agent.lock", serde_json::json!({ "passphrase": "p" })),
+            ("agent.generate", serde_json::json!({ "passphrase": "p" })),
+            ("runtime.quit", serde_json::json!({})),
+            ("user.currentSession", serde_json::json!({})),
+            (
+                "identity.resetLog",
+                serde_json::json!({ "did": "did:scid:coasys:1:Qm" }),
+            ),
+        ] {
+            answers.push((method, map.admit(method, &params, &ctx).await));
+        }
+        let mut admitted = vec![];
+        for (method, params) in [
+            ("identity.custodyStatus", serde_json::json!({})),
+            ("identity.inboxSealed", serde_json::json!({})),
+            ("identity.inboxAck", serde_json::json!({ "id": "m1" })),
+            ("identity.inbox", serde_json::json!({})),
+            ("identity.status", serde_json::json!({})),
+            (
+                "identity.claimOffer",
+                serde_json::json!({
+                    "offer": "coasys:offer:1:x",
+                    "canKeepMaster": true,
+                    "enc": CUSTODY_ENC,
+                }),
+            ),
+            ("identity.joinStatus", serde_json::json!({ "offerId": "o" })),
+            ("identity.acceptJoin", serde_json::json!({ "offerId": "o" })),
+            ("identity.cancelJoin", serde_json::json!({ "offerId": "o" })),
+            ("identity.prepareDevice", serde_json::json!({})),
+            (
+                "identity.prepareDevice",
+                serde_json::json!({ "enc": CUSTODY_ENC }),
+            ),
+            ("identity.endPrepared", serde_json::json!({ "device": "d" })),
+            ("identity.cosignIncept", serde_json::json!({ "event": {} })),
+            ("identity.publish", serde_json::json!({ "events": [] })),
+        ] {
+            admitted.push((method, map.admit(method, &params, &ctx).await));
+        }
+        *crate::config::GLOBAL_AD4M_CONFIG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = saved;
+
+        for (method, answer) in answers {
+            let refused = answer.expect_err(method);
+            assert_eq!(refused.code, 403, "{method}");
+            assert!(
+                refused
+                    .message
+                    .starts_with(crate::identity::custody::NOT_A_CUSTODY_CALL),
+                "{method}: {}",
+                refused.message
+            );
+        }
+        for (method, answer) in admitted {
+            assert!(answer.is_ok(), "{method}: {answer:?}");
+        }
+    }
+
+    /// With `--custody-channel`, the custody credential on a loopback listener gets this
     /// computer's device keys.
     #[tokio::test]
-    async fn the_custody_channel_answers_the_admin_credential_on_loopback() {
+    async fn the_custody_channel_answers_the_custody_credential_on_loopback() {
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         let mut map = HandlerMap::new();
@@ -422,7 +1013,12 @@ mod tests {
             .dispatch(
                 "identity.custodyStatus",
                 serde_json::json!({}),
-                Arc::new(RequestContext::operator_for_test()),
+                Arc::new(RequestContext::for_session(
+                    crate::agent::session::Session::for_test(
+                        crate::agent::session::Principal::Operator,
+                    )
+                    .as_custody(),
+                )),
             )
             .await;
         crate::config::set_global_config(crate::Ad4mConfig::default());
@@ -432,6 +1028,105 @@ mod tests {
         assert_eq!(
             keys.enc,
             crate::identity::device::enc_key_of(&signing).unwrap()
+        );
+    }
+
+    /// An X25519 multikey: the custody service's own `enc` key in these tests.
+    const CUSTODY_ENC: &str = "z6LSbysY2xFMRpGMhb7tFTLMpeuPRaqaWM1yECx2AtzE3KCc";
+
+    /// The master key never leaves the executor in an answer: `identity.takeMaster` is no
+    /// method, and the custody service reads its messages sealed (`identity.inboxSealed`).
+    #[tokio::test]
+    async fn no_call_takes_the_master_key_from_the_executor() {
+        let mut map = HandlerMap::new();
+        register_ws_handlers(&mut map);
+        let custody = Arc::new(RequestContext::for_session(
+            crate::agent::session::Session::for_test(crate::agent::session::Principal::Operator)
+                .as_custody(),
+        ));
+        let channel = crate::config::CustodyChannelForTest::on();
+        let answer = map
+            .dispatch("identity.takeMaster", serde_json::json!({}), custody)
+            .await;
+        drop(channel);
+        let refused = answer.expect_err("no such method");
+        assert_eq!(refused.code, 404, "{}", refused.message);
+        assert!(crate::identity::custody::CUSTODY_METHODS.contains(&"identity.inboxSealed"));
+        assert!(!crate::identity::custody::CUSTODY_METHODS.contains(&"identity.takeMaster"));
+    }
+
+    /// `enc`, the custody service's own key, comes from the custody service only and goes with
+    /// `canKeepMaster`: the custody service without it gets 400 `no-custody-enc`, `enc`
+    /// without `canKeepMaster` 400, and the admin credential with `enc` 403. Each is refused
+    /// before the offer is read.
+    #[tokio::test]
+    async fn the_custody_enc_comes_from_the_custody_service_with_can_keep_master() {
+        use crate::agent::session::{Principal, Session};
+        let mut map = HandlerMap::new();
+        register_ws_handlers(&mut map);
+        let custody = || {
+            Arc::new(RequestContext::for_session(
+                Session::for_test(Principal::Operator).as_custody(),
+            ))
+        };
+        let admin = || Arc::new(RequestContext::operator_for_test());
+        let offer = "coasys:offer:1:x";
+        let channel = crate::config::CustodyChannelForTest::on();
+        let mut answers = vec![];
+        for (caller, method, params) in [
+            (
+                custody(),
+                "identity.claimOffer",
+                serde_json::json!({ "offer": offer, "canKeepMaster": true }),
+            ),
+            (
+                custody(),
+                "identity.claimOffer",
+                serde_json::json!({ "offer": offer, "enc": CUSTODY_ENC }),
+            ),
+            (
+                custody(),
+                "identity.claimOffer",
+                serde_json::json!({ "offer": offer, "canKeepMaster": false, "enc": CUSTODY_ENC }),
+            ),
+            (
+                admin(),
+                "identity.claimOffer",
+                serde_json::json!({ "offer": offer, "canKeepMaster": true, "enc": CUSTODY_ENC }),
+            ),
+            (
+                admin(),
+                "identity.prepareDevice",
+                serde_json::json!({ "enc": CUSTODY_ENC }),
+            ),
+        ] {
+            answers.push(map.dispatch(method, params, caller).await);
+        }
+        drop(channel);
+        let refusals: Vec<(u16, String)> = answers
+            .into_iter()
+            .map(|a| {
+                let e = a.expect_err("refused");
+                (
+                    e.code,
+                    e.message.split(':').next().unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+        let no_channel = crate::identity::custody::NO_CUSTODY_CHANNEL
+            .split(':')
+            .next()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            refusals,
+            [
+                (400, "no-custody-enc".to_string()),
+                (400, "invalid".to_string()),
+                (400, "invalid".to_string()),
+                (403, no_channel.clone()),
+                (403, no_channel),
+            ]
         );
     }
 }
