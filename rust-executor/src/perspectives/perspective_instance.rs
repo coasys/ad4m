@@ -9966,6 +9966,40 @@ mod tests {
         );
     }
 
+    /// The shape registry reads the same cut: a class or shape whose links
+    /// do not count is absent from `class_names`, `class_keys` and `shapes`,
+    /// as `get_shape` already has it.
+    #[tokio::test]
+    async fn the_shape_registry_lists_only_classes_whose_links_count() {
+        let perspective = setup().await;
+        let signer = TestSigner::generate();
+        store_shacl_links(
+            &perspective,
+            "Typed",
+            VERDICT_SDNA,
+            &[("ns://Typed", "rdf://type")],
+            &signer,
+        );
+        store_shacl_links(
+            &perspective,
+            "Shaped",
+            VERDICT_SDNA,
+            &[("ns://Shaped", "ad4m://shape")],
+            &signer,
+        );
+        store_shacl_links(&perspective, "Counted", VERDICT_SDNA, &[], &signer);
+
+        assert_eq!(
+            perspective.class_names().unwrap(),
+            ["Counted"],
+            "Typed and Shaped have a definition link that does not count"
+        );
+        assert_eq!(perspective.class_keys().unwrap(), ["Counted"]);
+        let shapes = perspective.shapes(None).unwrap();
+        let names: Vec<&str> = shapes.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["Counted"]);
+    }
+
     /// `sh://path` is a required join in the shape read: the property drops
     /// out of the shape when the only link asserting it does not count. The
     /// OPTIONAL fields are cut the same way — an `ad4m://local` that does

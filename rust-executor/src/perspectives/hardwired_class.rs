@@ -283,6 +283,37 @@ mod tests {
         );
     }
 
+    /// A peer's newer shape of the class whose links this executor judged
+    /// invalid is not the class: `ensure_subject_classes` still registers its
+    /// own, and the registered class is the counting one.
+    #[tokio::test]
+    async fn a_newer_shape_whose_links_do_not_count_does_not_stop_the_write() {
+        use crate::agent::signatures::TestSigner;
+        use crate::types::{LinkExpression, LinkStatus};
+        let (mut perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
+        let signer = TestSigner::generate();
+        let mut newer = shape();
+        newer.properties.push(property("ad4m://hw/c", "c"));
+        let sdna = serde_json::to_string(&newer).unwrap();
+        for l in
+            crate::perspectives::shacl_parser::parse_shacl_to_links(&sdna, "Hardwired").unwrap()
+        {
+            let mut le = LinkExpression::from(signer.sign(l.normalize()));
+            le.proof.signature = "ab".repeat(64);
+            le.status = Some(LinkStatus::Shared);
+            perspective.sparql_store.add_link(&le).unwrap();
+        }
+        assert!(perspective.shapes(None).unwrap().is_empty());
+        assert!(perspective.class_names().unwrap().is_empty());
+
+        ensure_subject_classes(&mut perspective, &[CLASS], &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(paths(&stored(&perspective)), ["ad4m://hw/a", "ad4m://hw/b"]);
+        assert!(perspective.get_shape("ad4m://Hardwired").is_ok());
+    }
+
     fn triples(perspective: &PerspectiveInstance) -> Vec<(String, Option<String>, String)> {
         let mut triples: Vec<_> = perspective
             .sparql_store

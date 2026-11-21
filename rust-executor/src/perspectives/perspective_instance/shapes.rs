@@ -76,9 +76,11 @@ pub(crate) fn shape_hash(shape: &SHACLShape) -> String {
 }
 
 impl PerspectiveInstance {
-    /// The own links stored for the class `target_class`: its index links,
-    /// those of every shape it points to, and of every property those shapes
-    /// list.
+    /// The own links stored for the class `target_class` that count (a link
+    /// whose verdict does not count decides no schema, here or in
+    /// `load_shape`): its index links, those of every shape it points to, and
+    /// of every property those shapes list. A non-counting copy of a link a
+    /// shape gives is not held, so `register_shapes` writes a counting one.
     fn own_shape_links(
         &self,
         target_class: &str,
@@ -89,10 +91,11 @@ impl PerspectiveInstance {
                 .get_links_by_source(&EvalStop::none(), source)?
                 .into_iter()
                 .filter(|l| {
-                    l.data
-                        .predicate
-                        .as_deref()
-                        .is_some_and(|p| is_own_link(node, p, &l.data.target))
+                    l.counts()
+                        && l.data
+                            .predicate
+                            .as_deref()
+                            .is_some_and(|p| is_own_link(node, p, &l.data.target))
                 })
                 .collect::<Vec<DecoratedLinkExpression>>())
         };
@@ -136,6 +139,7 @@ impl PerspectiveInstance {
                 None,
             )?
             .into_iter()
+            .filter(|l| l.counts())
             .map(|l| l.data.source)
             .collect();
         let mut registry = Vec::new();
