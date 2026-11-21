@@ -204,18 +204,18 @@ pub fn live_tenant_of_device(device_did: &str) -> Result<Option<Tenant>, HostRef
 
 /// Whether a call by the managed agent `device_did` is admitted (AR-05 4.5.7, R64): a `Held`
 /// tenant's session may only read, export (`data.export*`), see its usage and leave; every
-/// other call answers `not-admitted`. `read` is whether the method is an idempotent read.
-/// Every other agent, and a tenant in any other state, is admitted here.
+/// other call answers `not-admitted`. While a tenant's leave runs, its session may only read
+/// (AR-05 4.9.2 step 1). `read` is whether the method is an idempotent read. Every other
+/// agent, and a tenant in any other state, is admitted here.
 pub fn admit_call(device_did: &str, method: &str, read: bool) -> Result<(), HostRefusal> {
-    let may = read
-        || method.starts_with("data.export")
-        || method == "host.usage"
-        || method == "host.leave";
-    if may {
+    if read {
         return Ok(());
     }
+    let held_may =
+        method.starts_with("data.export") || method == "host.usage" || method == "host.leave";
     match live_tenant_of_device(device_did)? {
-        Some(t) if t.state == TenantState::Held => Err(HostRefusal::NotAdmitted),
+        Some(t) if is_leaving(&t.row.id) => Err(HostRefusal::NotAdmitted),
+        Some(t) if t.state == TenantState::Held && !held_may => Err(HostRefusal::NotAdmitted),
         _ => Ok(()),
     }
 }
@@ -821,8 +821,8 @@ fn did_hash(did_scid: &str) -> String {
     hex::encode(Sha256::digest(did_scid.as_bytes()))
 }
 
-/// `host.leave` (AR-05 4.9.2): the tenant takes no new writes, its sessions and key end,
-/// then its data stays (`Detached`) or goes with its data key (`Deleted`).
+/// `host.leave` (AR-05 4.9.2): the tenant takes no new writes, its data stays (`Detached`)
+/// or goes with its data key (`Deleted`), then its sessions and key end.
 pub async fn leave(
     env: &dyn HostEnv,
     tenant_id: &str,
@@ -849,9 +849,6 @@ async fn finish_leave(
     t: &Tenant,
     keep_data: bool,
 ) -> Result<LeaveResult, HostRefusal> {
-    if let (Some(did), Some(key)) = (&t.row.device_did, &t.row.device_key_name) {
-        env.end_device(did, key).map_err(HostRefusal::internal)?;
-    }
     let detached = TenantRow {
         device_key_name: None,
         state: TenantState::Detached.as_str().into(),
@@ -861,13 +858,24 @@ async fn finish_leave(
     db_backend()
         .transition_tenant(&t.row.id, &["active", "held"], &detached)
         .map_err(db_err)?;
-    let result = env
-        .leave_person(&t.row.id, keep_data)
-        .await
-        .map_err(HostRefusal::internal)?;
-    if !keep_data {
-        tombstone(&t.row, env.now())?;
+    let left = async {
+        let result = env
+            .leave_person(&t.row.id, keep_data)
+            .await
+            .map_err(HostRefusal::internal)?;
+        if !keep_data {
+            tombstone(&t.row, env.now())?;
+        }
+        Ok(result)
     }
+    .await;
+    // The key and its sessions end last, after a failed step too, with nothing awaited
+    // after: ending the session drops the session's calls in flight at their next await,
+    // and this call must still answer. Until here `leaving` refuses the tenant's writes.
+    if let (Some(did), Some(key)) = (&t.row.device_did, &t.row.device_key_name) {
+        env.end_device(did, key).map_err(HostRefusal::internal)?;
+    }
+    let result = left?;
     env.emit(HostEvent::TenantLeft {
         tenant_id: t.row.id.clone(),
         did_scid: t.row.did_scid.clone(),
