@@ -5,23 +5,33 @@ name: Heavy suites
 # PR whose base is not dev, or a branch with no PR. CircleCI starts a pipeline on
 # a push only, so a PR that later got ready or was retargeted to dev kept green
 # checks for suites that never ran. On each PR event below,
-# .github/scripts/heavy-suites-pr.sh:
+# .github/scripts/heavy-suites-pr.sh sets the commit status `ci/heavy-suites` on
+# the head commit:
 #
-# - sets the commit status `ci/heavy-suites` on the head commit: pending while
-#   the gate skips the suites there, success when they run;
-# - when the PR got ready, was reopened, retargeted to dev or labeled full-ci
-#   (no push), starts a new CircleCI pipeline for its branch, whose gate then
-#   runs the suites.
+# - pending while the gate skips the suites there;
+# - success only once a CircleCI pipeline of that commit has its heavy jobs past
+#   the gate (running or done); their ci/circleci checks are the pass or fail.
+#   It waits for CircleCI's own pipeline, and starts one for the branch when none
+#   of the commit's pipelines ran them (e.g. they halted before the PR got ready).
+# - pending with what clears it in every other case. "Re-run" means re-running
+#   this workflow: it looks again and starts what is missing.
+#
+# Why the job polls CircleCI: a `status`, `check_suite` or `workflow_run`
+# workflow runs only from the default branch (dev), so it could not be tried on
+# its own PR, and a `status` workflow would start once per CircleCI context. The
+# wait is bounded: build takes 6.4 min median, 18.5 min p95 (CircleCI insights,
+# dev, Nov 2026), and the heavy jobs start right after it.
 #
 # Secrets and settings (none of them is required for the status):
 # - secret CIRCLECI_API_TOKEN: a CircleCI personal API token that can trigger
-#   pipelines in the project. Without it no pipeline starts: the log says so and
-#   the status stays pending until the CircleCI workflow is rerun by hand.
+#   pipelines in the project. Reads need no token (the project is public). Without it no
+#   pipeline starts and the status says so.
 # - variable CIRCLECI_PIPELINE_DEFINITION_ID: Project Settings → Pipelines in
 #   CircleCI. Optional while the project has one pipeline definition.
 #
-# A fork PR gets nothing: its token is read-only and it has no secrets. The
-# script says so in the log.
+# A fork PR gets nothing: its token is read-only and it has no secrets, and
+# CircleCI does not build fork PRs on this project either. The script says so in
+# the log.
 
 on:
   pull_request:
@@ -41,12 +51,13 @@ jobs:
       (github.event.action != 'edited' || github.event.changes.base) &&
       ((github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'full-ci')
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    # One run per PR at a time; a newer event replaces a waiting one, and a
-    # started run finishes (it may be starting a pipeline).
+    # The script waits up to 30 min (HEAVY_SUITES_WAIT_SECS) for the heavy jobs.
+    timeout-minutes: 40
+    # One run per PR. A newer event cancels a running one: the script keeps no
+    # state, so the next run finds a pipeline the cancelled one started.
     concurrency:
       group: heavy-suites-${{ github.event.pull_request.number }}
-      cancel-in-progress: false
+      cancel-in-progress: true
     steps:
       # The merge commit and its parents: the scripts, and the head commit's
       # message for [full-ci].

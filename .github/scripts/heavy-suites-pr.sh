@@ -7,21 +7,22 @@
 # PR gets ready, is retargeted to dev, is reopened or gets the full-ci label, so
 # such a PR kept green checks for suites that never ran. This script:
 #
-# - sets the commit status `ci/heavy-suites` on the PR's head commit: pending
-#   when the gate skips the suites there, success when they run. It asks the
-#   same script the same question, so the two agree.
-# - starts a new CircleCI pipeline for the head branch when the PR's state
-#   changed without a push (ready_for_review, reopened, base changed, full-ci
-#   label added) and the gate now runs the suites; its gate decides again.
-#   Also on `opened`, when the push's pipeline already passed its gate (its
-#   `build` finished) before the PR existed.
+# - asks the same should-run-heavy.sh the same question. Skip: the commit
+#   status `ci/heavy-suites` goes pending at once.
+# - Run: it watches this commit's CircleCI pipelines (the project is public, so
+#   reads need no token) and sets success only when one of them has its heavy
+#   jobs past heavy_gate, running or done. Their ci/circleci checks stay the
+#   pass or fail. While CircleCI's own pipeline builds, it waits. When none of
+#   this commit's pipelines ran the heavy jobs or will (they halted, or there is
+#   none after a grace time), it starts one for the branch, if the branch head
+#   is still this commit, and waits for that, up to HEAVY_SUITES_WAIT_SECS.
 #
-# Never a silent green: the status turns success only when the suites run in a
-# pipeline of this commit. A failed lookup leaves it pending and, on a state
-# change, still starts a pipeline (CircleCI's own gate fails open).
-# Without CIRCLECI_API_TOKEN it starts no pipeline, says so in the log, and
-# leaves the status pending on a state change. A fork PR gets nothing (no
-# secrets, read-only token).
+# Never a green without a run: every other outcome is pending, and each pending
+# description names what clears it (a push, the PR getting ready, or a re-run of
+# this workflow, which looks again and starts what is missing). A failed PR
+# lookup starts nothing. Without CIRCLECI_API_TOKEN it starts nothing and says
+# so. A fork PR gets nothing (no secrets, read-only token, and CircleCI does not
+# build fork PRs on this project).
 #
 #   GITHUB_EVENT_PATH, GITHUB_REPOSITORY, GITHUB_TOKEN (statuses: write),
 #   GITHUB_API_URL, GITHUB_SERVER_URL, GITHUB_RUN_ID   from GitHub Actions
@@ -30,6 +31,10 @@
 #   CIRCLECI_PROJECT_SLUG            default the coasys/ad4m GitHub App project
 #   CIRCLECI_API                     default https://circleci.com/api/v2
 #   HEAVY_GATE_COMMIT_MSG            default: `git log -1 --format=%B <head sha>`
+#   HEAVY_SUITES_WAIT_SECS           default 1800: how long to wait for the heavy jobs
+#   HEAVY_SUITES_POLL_SECS           default 60
+#   HEAVY_SUITES_GRACE_SECS          default 180: wait for CircleCI's own pipeline
+#                                    to appear before starting one
 #
 # Test: bash .github/scripts/heavy-suites-pr.test.sh
 set -uo pipefail
@@ -48,6 +53,7 @@ field() { jq -r "$1 // empty" "$ev"; }
 action="$(field .action)"
 sha="$(field .pull_request.head.sha)"
 branch="$(field .pull_request.head.ref)"
+number="$(field .pull_request.number)"
 head_repo="$(field .pull_request.head.repo.full_name)"
 
 if [ "$head_repo" != "$repo" ]; then
@@ -56,17 +62,13 @@ if [ "$head_repo" != "$repo" ]; then
 fi
 [ -n "$sha" ] && [ -n "$branch" ] || { echo "::error::no head sha or branch in the event"; exit 1; }
 
-trigger=false
 case "$action" in
-  opened|reopened|ready_for_review) trigger=true ;;
-  synchronize|converted_to_draft) ;;
+  opened|reopened|ready_for_review|synchronize|converted_to_draft) ;;
   edited)
     if [ -z "$(field .changes.base)" ]; then echo "edited, but not a base change: nothing to do"; exit 0; fi
-    trigger=true
     ;;
   labeled|unlabeled)
     if [ "$(field .label.name)" != full-ci ]; then echo "$action, but not the full-ci label: nothing to do"; exit 0; fi
-    [ "$action" = labeled ] && trigger=true
     ;;
   *) echo "pull_request $action: nothing to do"; exit 0 ;;
 esac
@@ -87,28 +89,13 @@ reason="${line#*: }"
 reason="${reason%%$'\n'*}"
 reason="${reason%% (http*}" # the request URL, too long for a status
 
-cci() { # GET <path>
-  curl -fsSL --max-time 20 --retry 2 -H "Circle-Token: $CIRCLECI_API_TOKEN" "$cci_api$1" 2>/dev/null
+auth=()
+[ -n "${CIRCLECI_API_TOKEN:-}" ] && auth=(-H "Circle-Token: $CIRCLECI_API_TOKEN")
+cci() { # GET <path under /api/v2>. The project is public: reads work without a token.
+  curl -fsSL --max-time 20 --retry 2 ${auth[@]+"${auth[@]}"} "$cci_api$1" 2>/dev/null
 }
-
-# opened: did the gate in the head commit's pipeline already run? It runs when
-# `build` finishes. Yes, or unknown: a new pipeline is needed.
-gate_already_ran() {
-  local enc pipe wf build
-  enc="$(jq -rn --arg b "$branch" '$b|@uri')"
-  pipe="$(cci "/project/$slug/pipeline?branch=$enc" \
-    | jq -er --arg s "$sha" 'first(.items[] | select(.vcs.revision == $s) | .id)')" \
-    || { echo "no CircleCI pipeline found for $sha"; return 0; }
-  wf="$(cci "/pipeline/$pipe/workflow" | jq -er 'first(.items[] | select(.name == "build-and-test") | .id) // ""')" \
-    || { echo "could not read pipeline $pipe's workflows"; return 0; }
-  [ -z "$wf" ] && { echo "pipeline $pipe has no build-and-test workflow yet"; return 1; }
-  build="$(cci "/workflow/$wf/job" | jq -er 'first(.items[] | select(.name == "build") | .status)')" \
-    || { echo "could not read the build job of workflow $wf"; return 0; }
-  echo "pipeline $pipe: build is $build"
-  case "$build" in
-    queued|not_running|blocked|running|on_hold) return 1 ;;
-  esac
-  return 0
+cci_job() { # GET a job's v1.1 details; v2 has no steps.
+  curl -fsSL --max-time 20 --retry 2 ${auth[@]+"${auth[@]}"} "${cci_api%/v2}/v1.1/project/$slug/$1" 2>/dev/null
 }
 
 definition() {
@@ -121,60 +108,183 @@ definition() {
   cci "/projects/$id/pipeline-definitions" | jq -er 'if (.items | length) == 1 then .items[0].id else error end'
 }
 
-# Starts a pipeline for the branch; prints its number. No --retry: a retried
-# POST can start two.
+# Starts a pipeline for the branch; prints "<id> <number>". No --retry: a
+# retried POST can start two.
 start_pipeline() {
   local def body
   def="$(definition)" || { echo "::warning::could not pick the CircleCI pipeline definition; set the repository variable CIRCLECI_PIPELINE_DEFINITION_ID" >&2; return 2; }
   body="$(jq -cn --arg d "$def" --arg b "$branch" '{definition_id: $d, config: {branch: $b}, checkout: {branch: $b}}')"
   curl -fsSL --max-time 30 -X POST -H "Circle-Token: $CIRCLECI_API_TOKEN" -H 'Content-Type: application/json' \
-    -d "$body" "$cci_api/project/$slug/pipeline/run" 2>/dev/null | jq -er '.number // .id'
+    -d "$body" "$cci_api/project/$slug/pipeline/run" 2>/dev/null | jq -er 'select(.id and .number) | "\(.id) \(.number)"'
 }
 
-started="" why=""
-if [ "$trigger" = true ] && [ "$verdict" != skip ]; then
-  if [ -z "${CIRCLECI_API_TOKEN:-}" ]; then
-    echo "::warning::CIRCLECI_API_TOKEN is not set: no new CircleCI pipeline for $branch. Rerun its CircleCI workflow by hand."
-    why="no CIRCLECI_API_TOKEN secret"
-  elif [ "$action" = opened ] && ! gate_already_ran; then
-    trigger=false
-  else
-    src=0
-    started="$(start_pipeline)" || src=$?
-    if [ -n "$started" ] && [ "$src" = 0 ]; then
-      echo "started CircleCI pipeline $started for $branch"
+# A heavy job runs heavy_gate's step (found by its name, "Stack gate ..."). It
+# ran when a step follows that one; it halted when the job finished with that
+# step last (`circleci-agent step halt` leaves exit 0 and status success, so the
+# step list is the only sign). Verified on real jobs of this project.
+# shellcheck disable=SC2016 # jq's $g, not the shell's
+JOB_STATE='([.steps[]?.name] | map(startswith("Stack gate")) | index(true)) as $g
+  | if $g == null then "light" elif $g < ((.steps | length) - 1) then "ran"
+    elif .lifecycle == "finished" then "halted" else "gate" end'
+cache="$(mktemp -d)"
+trap 'rm -rf "$cache"' EXIT
+
+# workflow_state <workflow id> <workflow status>: ran, halted, waiting or stopped.
+workflow_state() {
+  local jobs num st js ran=0
+  jobs="$(cci "/workflow/$1/job")" || { echo waiting; return; }
+  while read -r num st; do
+    [ "$num" = null ] && continue # not started
+    if [ -f "$cache/$num" ]; then
+      js="$(cat "$cache/$num")"
     else
-      started=""
-      if [ "$src" = 2 ]; then why="set CIRCLECI_PIPELINE_DEFINITION_ID"; else why="CircleCI trigger failed"; fi
-      echo "::warning::no new CircleCI pipeline for $branch: $why"
+      js="$(cci_job "$num" | jq -r "$JOB_STATE")" || continue
+      case "$st" in running|queued|not_running|on_hold) ;; *) echo "$js" > "$cache/$num" ;; esac
     fi
+    case "$js" in
+      halted) echo halted; return ;;
+      ran) ran=1 ;;
+    esac
+  done < <(jq -r '.items[] | "\(.job_number) \(.status)"' <<<"$jobs")
+  if [ "$ran" = 1 ]; then echo ran; return; fi
+  case "$2" in running|on_hold|failing|not_run) echo waiting ;; *) echo stopped ;; esac
+}
+
+rank() { case "$1" in ran) echo 5 ;; waiting) echo 4 ;; stopped) echo 3 ;; halted) echo 2 ;; *) echo 1 ;; esac; }
+
+# look: the best state of this commit's build-and-test workflows, as
+# "<state> <pipeline number>": ran > waiting > stopped > halted > none, or
+# "unknown" when CircleCI cannot be read.
+look() {
+  local enc list id num wfs wid wst st best=none bestn=""
+  enc="$(jq -rn --arg b "$branch" '$b|@uri')"
+  list="$(cci "/project/$slug/pipeline?branch=$enc")" || { echo unknown; return; }
+  while read -r id num; do
+    [ -z "$id" ] && continue
+    wfs="$(cci "/pipeline/$id/workflow")" || { st=waiting; wfs=""; }
+    [ -n "$wfs" ] && st=none
+    while read -r wid wst; do
+      [ -z "$wid" ] && continue
+      st="$(workflow_state "$wid" "$wst")"
+      [ "$st" = ran ] && break
+    done < <(jq -r '.items[] | select(.name == "build-and-test") | "\(.id) \(.status)"' <<<"$wfs" 2>/dev/null)
+    # A pipeline with no workflow yet is still being set up.
+    [ "$st" = none ] && st=waiting
+    if [ "$(rank "$st")" -gt "$(rank "$best")" ]; then best="$st" bestn="$num"; fi
+  done < <(jq -r --arg s "$sha" '.items[] | select((.trigger_parameters.git.checkout_sha // .vcs.revision) == $s) | "\(.id) \(.number)"' <<<"$list")
+  echo "$best $bestn"
+}
+
+# The PR's head now, or nothing when GitHub does not answer.
+pr_head() {
+  curl -fsSL --max-time 20 --retry 2 -H "Authorization: Bearer ${GITHUB_TOKEN:-}" \
+    -H 'Accept: application/vnd.github+json' "$gh_api/repos/$repo/pulls/$number" 2>/dev/null | jq -r '.head.sha // empty'
+}
+
+last=""
+post() { # <state> <description>
+  local desc="${2:0:140}" body
+  [ "$1 $desc" = "$last" ] && return 0
+  body="$(jq -cn --arg s "$1" --arg c "$CONTEXT" --arg d "$desc" \
+    --arg u "${GITHUB_SERVER_URL:-https://github.com}/$repo/actions/runs/${GITHUB_RUN_ID:-}" \
+    '{state: $s, context: $c, description: $d, target_url: $u}')"
+  if ! curl -fsSL --max-time 20 --retry 2 -X POST -H "Authorization: Bearer ${GITHUB_TOKEN:-}" \
+    -H 'Accept: application/vnd.github+json' -d "$body" "$gh_api/repos/$repo/statuses/$sha" >/dev/null 2>&1; then
+    echo "::error::could not set the $CONTEXT status on $sha"
+    exit 1
   fi
-fi
+  last="$1 $desc"
+  echo "$1: $desc"
+}
+
+RERUN="Re-run the Heavy suites workflow (Details)."
 
 if [ "$verdict" = skip ]; then
-  state=pending desc="Not run: $reason. Runs when the PR is ready and targets dev."
-elif [ "$verdict" = unsure ]; then
-  state=pending desc="PR state unknown ($reason); re-run this check."
-elif [ -n "$started" ]; then
-  state=success desc="Heavy suites run in CircleCI pipeline $started."
-elif [ "$trigger" = true ] && [ "$action" = opened ] && [ -z "${CIRCLECI_API_TOKEN:-}" ]; then
-  # The push's gate runs after build, minutes after the push: it normally saw this PR.
-  state=success desc="Heavy suites run in this commit's CircleCI pipeline."
-elif [ "$trigger" = true ] && [ -z "${CIRCLECI_API_TOKEN:-}" ]; then
-  state=pending desc="Not run yet: $why. Rerun the CircleCI workflow before merging."
-elif [ "$trigger" = true ]; then
-  state=pending desc="Not run yet: $why. Re-run this check to try again."
-else
-  state=success desc="Heavy suites run in this commit's CircleCI pipeline."
+  post pending "Not run: $reason. Runs when the PR is ready and targets dev."
+  exit 0
 fi
-desc="${desc:0:140}"
 
-body="$(jq -cn --arg s "$state" --arg c "$CONTEXT" --arg d "$desc" \
-  --arg u "${GITHUB_SERVER_URL:-https://github.com}/$repo/actions/runs/${GITHUB_RUN_ID:-}" \
-  '{state: $s, context: $c, description: $d, target_url: $u}')"
-if ! curl -fsSL --max-time 20 --retry 2 -X POST -H "Authorization: Bearer ${GITHUB_TOKEN:-}" \
-  -H 'Accept: application/vnd.github+json' -d "$body" "$gh_api/repos/$repo/statuses/$sha" >/dev/null 2>&1; then
-  echo "::error::could not set the $CONTEXT status on $sha"
-  exit 1
+# The gate runs the suites (or the PR state is unknown). Success only once a
+# pipeline of this commit has its heavy jobs past the gate; the ci/circleci
+# checks of those jobs are the pass or fail. Wait for CircleCI's own pipeline;
+# start one only when none of this commit's ran or will reach the gate.
+wait_s="${HEAVY_SUITES_WAIT_SECS:-1800}"
+poll_s="${HEAVY_SUITES_POLL_SECS:-60}"
+grace_s="${HEAVY_SUITES_GRACE_SECS:-180}"
+tries=$(( wait_s / poll_s ))
+mine="" mine_n="" waited=0
+for (( i = 1; i <= tries; i++ )); do
+  read -r st n <<<"$(look)"
+  echo "poll $i: $st ${n:+(pipeline $n)}"
+  case "$st" in
+    ran)
+      post success "Heavy suites running in CircleCI pipeline $n; their ci/circleci checks have the result."
+      exit 0 ;;
+    waiting)
+      [ -z "$mine" ] && post pending "Waiting for CircleCI pipeline $n to reach the heavy suites." ;;
+    unknown) ;;
+    none|halted|stopped)
+      if [ -n "$mine" ]; then
+        if [ "$st" = halted ] && [ "$n" = "$mine_n" ]; then
+          post pending "CircleCI pipeline $mine_n halted the heavy suites (the PR changed?). $RERUN"
+          exit 0
+        fi
+        if [ "$st" = stopped ] && [ "$n" = "$mine_n" ]; then
+          post pending "CircleCI pipeline $mine_n stopped before the heavy suites. Push a fix, or re-run it in CircleCI, then $RERUN"
+          exit 0
+        fi
+        # Not listed yet, or it did not start.
+        p="$(cci "/pipeline/$mine")"
+        if [ "$(jq -r '.state // empty' <<<"$p")" = errored ]; then
+          post pending "CircleCI pipeline $mine_n did not start (config error?). Fix and push, or $RERUN"
+          exit 0
+        fi
+        got="$(jq -r '.trigger_parameters.git.checkout_sha // .vcs.revision // empty' <<<"$p")"
+        if [ -n "$got" ] && [ "$got" != "$sha" ]; then
+          echo "pipeline $mine_n checked out $got, not $sha: the branch moved; the new commit gets its own status"
+          exit 0
+        fi
+      elif [ "$st" = stopped ]; then
+        post pending "CircleCI pipeline $n stopped before the heavy suites. Push a fix, or re-run it in CircleCI, then $RERUN"
+        exit 0
+      elif [ "$st" = none ] && [ "$waited" -lt "$grace_s" ]; then
+        : # CircleCI's own pipeline for a push may not be listed yet.
+      elif [ "$verdict" = unsure ]; then
+        post pending "PR state unknown ($reason). $RERUN"
+        exit 0
+      else
+        if ! now="$(pr_head)" || [ -z "$now" ]; then
+          echo "could not read PR #$number's head; starting the pipeline anyway"
+        elif [ "$now" != "$sha" ]; then
+          echo "head of PR #$number is now $now, not $sha: nothing to start for $sha; the new commit gets its own status"
+          exit 0
+        fi
+        if [ -z "${CIRCLECI_API_TOKEN:-}" ]; then
+          echo "::warning::CIRCLECI_API_TOKEN is not set: no new CircleCI pipeline for $branch."
+          post pending "Heavy suites ${n:+halted in pipeline $n, }not run; no CIRCLECI_API_TOKEN. Push a commit, or set the secret and re-run (Details)."
+          exit 0
+        fi
+        src=0
+        started="$(start_pipeline)" || src=$?
+        if [ "$src" != 0 ] || [ -z "$started" ]; then
+          if [ "$src" = 2 ]; then why="set CIRCLECI_PIPELINE_DEFINITION_ID"; else why="CircleCI trigger failed"; fi
+          echo "::warning::no new CircleCI pipeline for $branch: $why"
+          post pending "Could not start a CircleCI pipeline ($why). $RERUN"
+          exit 0
+        fi
+        read -r mine mine_n <<<"$started"
+        echo "started CircleCI pipeline $mine_n for $branch"
+        post pending "Heavy suites started in CircleCI pipeline $mine_n; waiting for them."
+      fi ;;
+  esac
+  [ "$i" -lt "$tries" ] && sleep "$poll_s"
+  waited=$(( waited + poll_s ))
+done
+
+if [ "$verdict" = unsure ] && [ -z "$mine" ]; then
+  post pending "PR state unknown ($reason). $RERUN"
+  exit 0
 fi
-echo "$state: $desc"
+which="No CircleCI pipeline of this commit"
+if [ -n "$mine_n" ]; then which="CircleCI pipeline $mine_n"; elif [ -n "${n:-}" ]; then which="CircleCI pipeline $n"; fi
+post pending "$which did not reach the heavy suites in $(( wait_s / 60 )) min. $RERUN"

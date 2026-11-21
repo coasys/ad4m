@@ -30,8 +30,8 @@ references:
 # `heavy_gate`: on a draft PR, a PR whose base is not dev, or a branch with no PR they halt
 # green at once (.circleci/scripts/should-run-heavy.sh). The full-ci label or [full-ci] in
 # the commit message runs them anyway. The GitHub workflow heavy-suites.yml shows a halt as
-# the pending status ci/heavy-suites, and starts a new pipeline when the PR gets ready or is
-# retargeted to dev without a push.
+# the pending status ci/heavy-suites; it turns success only once a pipeline of the commit runs
+# the heavy jobs, and starts one when the PR gets ready or is retargeted to dev without a push.
 
 commands:
   fix_workdir:
@@ -157,9 +157,11 @@ commands:
           # with [full-ci] in its message. The decision is in the script (tested in
           # `build`); anything but its "skip" answer runs the suite, so a GitHub API
           # failure costs a full run, never a skipped one. A halted job is green; the
-          # GitHub workflow heavy-suites.yml sets the pending status ci/heavy-suites on
-          # the commit, and starts a new pipeline when the PR gets ready, is reopened,
-          # retargeted to dev or labeled full-ci without a push.
+          # GitHub workflow heavy-suites.yml keeps the status ci/heavy-suites pending
+          # until a pipeline of the commit runs the heavy jobs, and starts one when the
+          # PR gets ready, is reopened, retargeted to dev or labeled full-ci without a
+          # push. Its script tells a halted job from one that ran by this step's name
+          # (it starts with "Stack gate") and whether a step follows it: keep both.
           name: Stack gate (heavy suites only for non-draft PRs to dev)
           environment:
             HEAVY_GATE_FORCE: << pipeline.parameters.run-nightly-llm >>
@@ -465,8 +467,8 @@ jobs:
           name: Test should-run-heavy.sh
           command: bash .circleci/scripts/should-run-heavy.test.sh
       - run:
-          # Fake curl for the GitHub and CircleCI APIs, no network; about two seconds. The
-          # ci/heavy-suites status and the new pipeline on a PR state change (heavy-suites.yml).
+          # Fake curl for the GitHub and CircleCI APIs, no network; about 15 seconds. The
+          # ci/heavy-suites status: CircleCI reads, the new pipeline, every pending (heavy-suites.yml).
           name: Test heavy-suites-pr.sh
           command: bash .github/scripts/heavy-suites-pr.test.sh
       - build_adam
