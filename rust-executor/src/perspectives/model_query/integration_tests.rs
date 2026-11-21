@@ -4020,7 +4020,7 @@ async fn test_perf_large_dataset_paginated_query() {
         WhereCondition::String("test://channel-1".to_string()),
     );
 
-    let start = std::time::Instant::now();
+    let start = web_time::Instant::now();
     let result = fixture_query_from_json(
         &store,
         "Message",
@@ -4129,7 +4129,7 @@ async fn test_perf_flux_message_parent_scope_paginated() {
     }"#;
 
     // Query: get 30 most recent messages from channel-2 (ORDER BY createdAt DESC)
-    let start = std::time::Instant::now();
+    let start = web_time::Instant::now();
     let result = fixture_query_from_json(
         &store,
         "Message",
@@ -4185,7 +4185,7 @@ async fn test_perf_flux_message_parent_scope_paginated() {
 
     // --- Raw SPARQL comparison: flag-reifier vs parent-reifier vs no ORDER ---
     // Test 1: No ORDER BY (just the conformance)
-    let t_no_order = std::time::Instant::now();
+    let t_no_order = web_time::Instant::now();
     let q_no_order = r#"SELECT DISTINCT ?source WHERE {
         <test://channel-2> <ad4m://has_child> ?source .
         ?source <flux://entry_type> <flux://has_message> .
@@ -4199,7 +4199,7 @@ async fn test_perf_flux_message_parent_scope_paginated() {
     eprintln!("[RAW] no ORDER BY: {:?}", t_no_order.elapsed());
 
     // Test 2: Flag-reifier probe (what we currently generate)
-    let t_flag = std::time::Instant::now();
+    let t_flag = web_time::Instant::now();
     let q_flag = r#"SELECT DISTINCT ?source ?_first_ts WHERE {
         <test://channel-2> <ad4m://has_child> ?source .
         ?source <flux://entry_type> <flux://has_message> .
@@ -4212,7 +4212,7 @@ async fn test_perf_flux_message_parent_scope_paginated() {
     eprintln!("[RAW] flag-reifier ORDER BY: {:?}", t_flag.elapsed());
 
     // Test 3: Parent-reifier probe (uses the fully-bound parent IRI)
-    let t_parent = std::time::Instant::now();
+    let t_parent = web_time::Instant::now();
     let q_parent = r#"SELECT DISTINCT ?source ?_first_ts WHERE {
         <test://channel-2> <ad4m://has_child> ?source .
         ?source <flux://entry_type> <flux://has_message> .
@@ -4228,7 +4228,7 @@ async fn test_perf_flux_message_parent_scope_paginated() {
     eprintln!("[RAW] parent-reifier ORDER BY: {:?}", t_parent.elapsed());
 
     // Test 4: Wildcard reifier (the old expensive pattern)
-    let t_wild = std::time::Instant::now();
+    let t_wild = web_time::Instant::now();
     let q_wild = r#"SELECT DISTINCT ?source ?_first_ts WHERE {
         <test://channel-2> <ad4m://has_child> ?source .
         ?source <flux://entry_type> <flux://has_message> .
@@ -4242,7 +4242,7 @@ async fn test_perf_flux_message_parent_scope_paginated() {
     eprintln!("[RAW] wildcard-reifier ORDER BY: {:?}", t_wild.elapsed());
 
     // Test 5: Full outer query (the actual generated pattern)
-    let t_full = std::time::Instant::now();
+    let t_full = web_time::Instant::now();
     let q_full = r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {
         {
             SELECT DISTINCT ?source ?_first_ts WHERE {
@@ -4291,7 +4291,7 @@ async fn test_perf_flux_message_parent_scope_paginated() {
         .map(|s| format!("<{s}>"))
         .collect::<Vec<_>>()
         .join(" ");
-    let t_outer = std::time::Instant::now();
+    let t_outer = web_time::Instant::now();
     let q_outer = format!(
         r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
         VALUES ?source {{ {source_values} }}
@@ -5330,7 +5330,7 @@ async fn test_sort_by_relation_property_with_missing_relation() {
 
 #[test]
 fn bench_indexed_literal_vs_str_filter() {
-    use std::time::Instant;
+    use web_time::Instant;
 
     // Skip in debug builds — comparing per-row function call to an index probe
     // is meaningless without optimisations.
