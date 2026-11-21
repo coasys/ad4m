@@ -137,7 +137,7 @@ routes
 check "moved: CircleCI API failure runs" 0 '^run: no successful' moved
 routes "GET /tree/dev unauthorized.json"
 check "moved: CircleCI error object runs" 0 '^run: no successful' moved
-routes "GET /tree/feat/x tree-same.json"
+routes "GET /tree/feat%2Fx tree-same.json"
 check "moved: a run by hand on another branch asks for that branch" 10 '^skip: feat/x @' moved CIRCLE_BRANCH=feat/x
 check "moved: no CIRCLE_SHA1 runs" 0 '^run: no CIRCLE_SHA1' moved CIRCLE_SHA1=
 
@@ -177,6 +177,10 @@ routes "GET /tree/dev tree-unknown.json" "GET /search/issues search-none.json" "
 check "red: green commit not in this checkout still opens the issue" 0 '^opened' red
 logged "says the range is unavailable" 'not in this checkout'
 
+routes "GET /tree/dev tree-same.json" "GET /search/issues search-none.json" "POST /repos/coasys/ad4m/issues issue.json"
+check "red: this commit passed the tier before: says probably flaky" 0 '^opened' red
+logged "flaky hint" 'passed this tier before: probably a flaky failure'
+
 routes "GET /tree/dev tree-green.json" "GET /search/issues search-none.json" "${STD_PRS[@]}"
 check "red: GitHub refuses the issue: exit 1, body in the log" 1 'could not open the issue' red
 grep -q 'First red commit' <<<"$OUT" || { echo "  FAIL: body not printed on failure"; FAILED=1; }
@@ -188,7 +192,7 @@ routes "GET /tree/dev tree-green.json" "${STD_PRS[@]}"
 check "red: no GITHUB_TOKEN prints the body, opens nothing" 0 'GITHUB_TOKEN is not set' red GITHUB_TOKEN=
 grep -q "First red commit: $RED" <<<"$OUT" || { echo "  FAIL: body not printed"; FAILED=1; }
 not_logged "nothing sent to GitHub issues" "issues"
-routes "GET /tree/feat/x tree-green.json"
+routes "GET /tree/feat%2Fx tree-green.json"
 check "red: a run on another branch opens nothing" 0 'not dev' red CIRCLE_BRANCH=feat/x
 not_logged "nothing sent to GitHub issues" "issues"
 check "red: DEV_TIER_NO_ISSUE (no build stash) opens nothing" 0 '^no issue: no build stash' red DEV_TIER_NO_ISSUE="no build stash"

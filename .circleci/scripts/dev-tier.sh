@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+# The 2-hourly dev tier (workflow dev-2-hourly): the jobs that left the PR
+# workflow run there, on dev, every 2 hours when dev has moved. This script is
+# the first and the last step of each of those jobs.
+#
+#   dev-tier.sh moved <job>   first step. Prints "run: ..." and exits 0, or
+#                             "skip: ..." and exits 10 when this commit already
+#                             passed <job> in this tier (the caller halts green).
+#                             Any lookup failure answers "run".
+#   dev-tier.sh red <job>     last step, on failure. Opens one GitHub issue
+#                             titled "dev red: <job>", or comments on it when it
+#                             is open. It lists the last green commit of this
+#                             tier, the first red commit and the PRs merged
+#                             between them. Exits 1 when GitHub refuses (the
+#                             text is in the log then).
+#   dev-tier.sh green <job>   last step, on success. Comments "green again" on
+#                             the open "dev red: <job>" issue, if there is one.
+#                             Never opens or closes an issue, never fails.
+#
+# "Last green" is the newest successful run of <job> in this workflow on this
+# branch, from the CircleCI v1.1 API (the nightly's llm-e2e check reads the same
+# list). A halted run counts as successful, but `moved` halts only on a commit
+# that already passed, so a halted run is always on a green commit.
+#
+# Issues are opened only for dev. On any other branch (a run by hand) and
+# without GITHUB_TOKEN, `red` prints the text it would post and exits 0.
+#
+#   CIRCLE_BRANCH, CIRCLE_SHA1, CIRCLE_BUILD_URL  from CircleCI
+#   CIRCLECI_API_TOKEN    read-only CircleCI token (context nightly-llm-e2e)
+#   GITHUB_TOKEN          GitHub token with Issues: write on the repo
+#   DEV_TIER_NO_ISSUE     set by an earlier step: the failure is not the suite's
+#                         (no build stash for the commit); `red` opens nothing
+#   DEV_TIER_WORKFLOW     default dev-2-hourly
+#   DEV_TIER_REPO         default coasys/ad4m
+#   DEV_TIER_CIRCLE_API   default https://circleci.com/api/v1.1/project/circleci/VRkXSnZDyBKHhkHKBHTmLj/W84Q4MGGTeZwizersNwxB4
+#   DEV_TIER_GITHUB_API   default https://api.github.com
+#
+# Test: bash .circleci/scripts/dev-tier.test.sh
+set -uo pipefail
+
+mode="${1:-}"
+job="${2:-}"
+case "$mode" in
+  moved|red|green) ;;
+  *) echo "usage: dev-tier.sh moved|red|green <job>" >&2; exit 2 ;;
+esac
+[ -z "$job" ] && { echo "usage: dev-tier.sh moved|red|green <job>" >&2; exit 2; }
+
+branch="${CIRCLE_BRANCH:-dev}"
+sha="${CIRCLE_SHA1:-}"
+run_url="${CIRCLE_BUILD_URL:-}"
+workflow="${DEV_TIER_WORKFLOW:-dev-2-hourly}"
+repo="${DEV_TIER_REPO:-coasys/ad4m}"
+circle_api="${DEV_TIER_CIRCLE_API:-https://circleci.com/api/v1.1/project/circleci/VRkXSnZDyBKHhkHKBHTmLj/W84Q4MGGTeZwizersNwxB4}"
+gh_api="${DEV_TIER_GITHUB_API:-https://api.github.com}"
+title="dev red: $job"
+
+# Prints "<sha> <build url>" of the newest successful run of $job in $workflow on
+# $branch, or nothing. Reads up to 5 pages of 100 jobs (about 25 dev pipelines).
+last_green() {
+  local enc offset body hit
+  local auth=()
+  [ -n "${CIRCLECI_API_TOKEN:-}" ] && auth=(-H "Circle-Token: $CIRCLECI_API_TOKEN")
+  enc="$(jq -rn --arg b "$branch" '$b|@uri')" || return 0
+  for offset in 0 100 200 300 400; do
+    body="$(curl -fsSL --max-time 20 --retry 2 "${auth[@]}" \
+      "$circle_api/tree/$enc?filter=successful&limit=100&shallow=true&offset=$offset" 2>/dev/null)" || return 0
+    hit="$(jq -r --arg w "$workflow" --arg j "$job" '
+      if type != "array" then "stop"
+      elif length == 0 then "stop"
+      else (first(.[] | select(.workflows.workflow_name? == $w and .workflows.job_name? == $j and (.vcs_revision // "") != "")
+                 | "\(.vcs_revision) \(.build_url // "")") // "")
+      end' <<<"$body" 2>/dev/null)" || return 0
+    case "$hit" in
+      stop) return 0 ;;
+      "") ;;
+      *) echo "$hit"; return 0 ;;
+    esac
+  done
+}
+
+if [ "$mode" = moved ]; then
+  [ -z "$sha" ] && { echo "run: no CIRCLE_SHA1"; exit 0; }
+  read -r green green_url <<<"$(last_green)"
+  if [ -z "${green:-}" ]; then
+    echo "run: no successful $workflow run of $job on $branch found"
+    exit 0
+  fi
+  if [ "$green" = "$sha" ]; then
+    echo "skip: $branch @ ${sha:0:12} already passed $job in $workflow (${green_url:-}): dev has not moved"
+    exit 10
+  fi
+  echo "run: $branch @ ${sha:0:12}, last green in $workflow ${green:0:12} (${green_url:-})"
+  exit 0
+fi
+
+if [ "$mode" = red ] && [ -n "${DEV_TIER_NO_ISSUE:-}" ]; then
+  echo "no issue: $DEV_TIER_NO_ISSUE"
+  exit 0
+fi
+
+gh_auth=()
+[ -n "${GITHUB_TOKEN:-}" ] && gh_auth=(-H "Authorization: Bearer $GITHUB_TOKEN")
+gh_get() { curl -fsSL --max-time 20 --retry 2 -H 'Accept: application/vnd.github+json' "${gh_auth[@]}" "$1" 2>/dev/null; }
+gh_post() { curl -fsSL --max-time 20 -X POST -H 'Accept: application/vnd.github+json' "${gh_auth[@]}" --data "$2" "$1" 2>/dev/null; }
+
+# Prints the number of the open issue titled $title, or nothing. Fails when the
+# search fails, so the caller never opens a second issue blindly.
+open_issue() {
+  local q body
+  q="$(jq -rn --arg q "repo:$repo is:issue is:open in:title \"$title\"" '$q|@uri')" || return 1
+  body="$(gh_get "$gh_api/search/issues?q=$q")" || return 1
+  jq -er --arg t "$title" '(first(.items[] | select(.title == $t) | .number) // "") | tostring' <<<"$body" 2>/dev/null
+}
+
+if [ "$mode" = green ]; then
+  [ "$branch" != dev ] && { echo "not dev ($branch): nothing to note"; exit 0; }
+  [ -z "${GITHUB_TOKEN:-}" ] && { echo "GITHUB_TOKEN is not set: nothing to note"; exit 0; }
+  n="$(open_issue)" || { echo "could not search GitHub issues; nothing noted"; exit 0; }
+  [ -z "$n" ] && { echo "no open issue \"$title\""; exit 0; }
+  text="Green again at $sha ([run]($run_url)). If this commit is one of the red ones above, the failure was flaky: label this issue \`flaky\`. Close the issue when the cause is fixed or reverted."
+  if gh_post "$gh_api/repos/$repo/issues/$n/comments" "$(jq -cn --arg b "$text" '{body:$b}')" >/dev/null; then
+    echo "commented on #$n"
+  else
+    echo "could not comment on #$n"
+  fi
+  exit 0
+fi
+
+# --- red
+read -r green green_url <<<"$(last_green)"
+green="${green:-}"
+
+# The commits on dev's first-parent line between the last green and this commit,
+# one line each: the PR with its title and author when the subject names one.
+changes() {
+  if [ -z "$green" ]; then
+    echo "No green run of this tier on record, so there is no range to list."
+    return
+  fi
+  if [ "$green" = "$sha" ]; then
+    echo "This commit passed this tier before: probably a flaky failure."
+    return
+  fi
+  if ! git cat-file -e "$green^{commit}" 2>/dev/null || ! git cat-file -e "$sha^{commit}" 2>/dev/null; then
+    echo "The last green commit is not in this checkout; see the compare link."
+    return
+  fi
+  local short subj n pr count=0
+  while IFS=$'\t' read -r short subj; do
+    count=$((count + 1))
+    if [ "$count" -gt 50 ]; then
+      echo "- ... more; see the compare link"
+      break
+    fi
+    n=""
+    if [[ "$subj" =~ ^Merge\ pull\ request\ \#([0-9]+) ]]; then n="${BASH_REMATCH[1]}"
+    elif [[ "$subj" =~ \(\#([0-9]+)\)$ ]]; then n="${BASH_REMATCH[1]}"
+    fi
+    if [ -z "$n" ]; then
+      echo "- $short $subj"
+    elif pr="$(gh_get "$gh_api/repos/$repo/pulls/$n" | jq -er '"\(.title) (@\(.user.login))"' 2>/dev/null)"; then
+      echo "- #$n $pr"
+    else
+      echo "- #$n $subj"
+    fi
+  done < <(git log --first-parent --format='%h%x09%s' "$green..$sha" 2>/dev/null)
+}
+
+list="$(changes)"
+if [ -n "$green" ]; then
+  green_line="$green${green_url:+ ([run]($green_url))}"
+  compare="- Changes: https://github.com/$repo/compare/$green...$sha"
+else
+  green_line="none on record"
+  compare=""
+fi
+
+# TODO: assign the authors of the listed PRs (CI-PLAN section 3, step 2) once
+# Nico agrees. Until then the issue names them and assigns nobody.
+body="The 2-hourly dev tier job \`$job\` (workflow \`$workflow\`) failed on dev.
+
+- First red commit: $sha ([run]($run_url))
+- Last green commit of this tier: $green_line${compare:+
+$compare}
+
+PRs and commits merged between them (first-parent line of dev):
+
+$list
+
+Flaky? Rerun the job on the same commit. If it goes green, label this issue \`flaky\`.
+Close this issue when dev is green again because the cause was fixed or reverted."
+
+comment="Still red at $sha ([run]($run_url)).
+
+- Last green commit of this tier: $green_line${compare:+
+$compare}
+
+PRs and commits merged between them:
+
+$list"
+
+show() { echo "----"; echo "$1"; echo "----"; }
+
+if [ "$branch" != dev ]; then
+  echo "not dev ($branch): no issue opened. It would say:"
+  show "$body"
+  exit 0
+fi
+if [ -z "${GITHUB_TOKEN:-}" ]; then
+  echo "GITHUB_TOKEN is not set: no issue opened. It would say:"
+  show "$body"
+  exit 0
+fi
+
+if ! n="$(open_issue)"; then
+  echo "could not search GitHub issues for \"$title\"; no issue opened. It would say:"
+  show "$body"
+  exit 1
+fi
+if [ -n "$n" ]; then
+  if gh_post "$gh_api/repos/$repo/issues/$n/comments" "$(jq -cn --arg b "$comment" '{body:$b}')" >/dev/null; then
+    echo "commented on #$n"
+    exit 0
+  fi
+  echo "could not comment on #$n. It would say:"
+  show "$comment"
+  exit 1
+fi
+if answer="$(gh_post "$gh_api/repos/$repo/issues" "$(jq -cn --arg t "$title" --arg b "$body" '{title:$t, body:$b}')")"; then
+  echo "opened $(jq -r '.html_url // .number' <<<"$answer" 2>/dev/null)"
+  exit 0
+fi
+echo "could not open the issue \"$title\". It would say:"
+show "$body"
+exit 1
