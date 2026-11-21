@@ -4447,7 +4447,8 @@ impl PerspectiveInstance {
             // A link this store already counted was here before the revocation reached the
             // key map: the one order the executor knows. The store judges the same way.
             let entered = (before.verdict == Some(LinkVerdict::Valid)).then_some(false);
-            let now = link.check_entered(entered);
+            let received_at = self.sparql_store.received_at(link)?;
+            let now = link.check_entered(entered, received_at);
             if before.verdict.as_ref() == Some(&now.verdict) && before.person == now.person {
                 continue;
             }

@@ -506,21 +506,26 @@ pub(crate) async fn lag_scopes(
 /// key revoked after its anchor is `flagged` ([`check_signed_entered`] for the one order the
 /// executor does know).
 pub fn check_signed<T: serde::Serialize>(expr: &Expression<T>) -> CheckedLink {
-    check_signed_entered(expr, None)
+    resolver::check_signed_with(expr, &cache::global_key_map(), None, service::now())
 }
 
 /// [`check_signed`] with what the caller knows of the order: `Some(false)` for a link this
 /// executor held as `valid` before the signer's revocation reached its key map (the link store
 /// at a re-judgement), `Some(true)` for one that arrived after, `None` when nothing is known.
+/// `received_at`: when this executor first received the link (unix ms), where the link store
+/// kept it; a revoke's `since` reads it.
 pub fn check_signed_entered<T: serde::Serialize>(
     expr: &Expression<T>,
     entered_after_revoke: Option<bool>,
+    received_at: Option<u64>,
 ) -> CheckedLink {
-    resolver::check_signed_with(
+    resolver::check_signed_with_provenance(
         expr,
         &cache::global_key_map(),
         entered_after_revoke,
+        received_at,
         service::now(),
+        |_| false,
     )
 }
 
@@ -536,11 +541,13 @@ pub fn check_signed_entered<T: serde::Serialize>(
 pub fn check_signed_own<T: serde::Serialize>(
     expr: &Expression<T>,
     entered_after_revoke: Option<bool>,
+    received_at: Option<u64>,
 ) -> CheckedLink {
     resolver::check_signed_with_provenance(
         expr,
         &cache::global_key_map(),
         entered_after_revoke,
+        received_at,
         service::now(),
         is_local_agent,
     )

@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS keys (
     key_id  TEXT NOT NULL,
     added   INTEGER NOT NULL,
     revoked INTEGER,
+    unlinked INTEGER,
     bot     TEXT,
     expires INTEGER,
     master  INTEGER NOT NULL CHECK (master IN (0, 1))
@@ -362,9 +363,10 @@ pub fn indexed_signs(conn: &Connection, scid: &str, key_id: &str) -> Result<Vec<
 /// must exist.
 pub(crate) fn put_keys(conn: &Connection, state: &KeyState, head_seq: u64) -> Result<(), ApiError> {
     let mut stmt = conn.prepare_cached(
-        "INSERT INTO keys (sign, scid, key_id, added, revoked, bot, expires, master)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-         ON CONFLICT(sign) DO UPDATE SET revoked = excluded.revoked, bot = excluded.bot,
+        "INSERT INTO keys (sign, scid, key_id, added, revoked, unlinked, bot, expires, master)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(sign) DO UPDATE SET revoked = excluded.revoked,
+                                         unlinked = excluded.unlinked, bot = excluded.bot,
                                          expires = excluded.expires
          WHERE keys.scid = excluded.scid",
     )?;
@@ -382,6 +384,7 @@ pub(crate) fn put_keys(conn: &Connection, state: &KeyState, head_seq: u64) -> Re
             record.id,
             to_sql(record.added)?,
             record.revoked.map(to_sql).transpose()?,
+            record.unlinked.map(to_sql).transpose()?,
             bot,
             expires.map(to_sql).transpose()?,
             master,
@@ -493,6 +496,18 @@ pub(crate) fn stored_hash(
         .optional()?)
 }
 
+/// When the store appended the event of `scid` at `seq` (unix seconds).
+pub(crate) fn stored_at(conn: &Connection, scid: &str, seq: u64) -> Result<Option<u64>, ApiError> {
+    Ok(conn
+        .query_row(
+            "SELECT stored_at FROM chain_entries WHERE type = ?1 AND chain = ?2 AND seq = ?3",
+            params![KEL, scid, to_sql(seq)?],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .map(from_sql))
+}
+
 /// The stored event of `scid` at `seq`, parsed (one primary-key lookup of `chain_entries`).
 pub(crate) fn stored_event(
     conn: &Connection,
@@ -516,7 +531,8 @@ pub(crate) fn stored_event(
 /// A key's standing at the stored head of its log, by the key index.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Standing {
-    /// Revoked, replaced (a master) or ended at or before the head.
+    /// Revoked, unlinked, replaced (a master) or ended at or before the head: it signs nothing
+    /// new.
     pub revoked: bool,
     /// The `expires` of the bot scope in force at the head; `None` for a key without the bot
     /// mark.
@@ -525,13 +541,15 @@ pub(crate) struct Standing {
 
 /// The standing of the signing key `sign` at the head of the log that lists it.
 pub(crate) fn standing(conn: &Connection, sign: &str) -> Result<Option<Standing>, ApiError> {
-    let mut stmt = conn.prepare_cached("SELECT revoked, bot, expires FROM keys WHERE sign = ?1")?;
+    let mut stmt =
+        conn.prepare_cached("SELECT revoked, unlinked, bot, expires FROM keys WHERE sign = ?1")?;
     Ok(stmt
         .query_row(params![sign], |row| {
-            let bot: Option<String> = row.get(1)?;
+            let bot: Option<String> = row.get(2)?;
             Ok(Standing {
-                revoked: row.get::<_, Option<i64>>(0)?.is_some(),
-                bot_expires: bot.and(row.get::<_, Option<i64>>(2)?).map(from_sql),
+                revoked: row.get::<_, Option<i64>>(0)?.is_some()
+                    || row.get::<_, Option<i64>>(1)?.is_some(),
+                bot_expires: bot.and(row.get::<_, Option<i64>>(3)?).map(from_sql),
             })
         })
         .optional()?)
@@ -544,12 +562,13 @@ pub fn key_entry(conn: &Connection, sign: &str) -> Result<Option<KeyIndexEntry>,
         String,
         i64,
         Option<i64>,
+        Option<i64>,
         Option<String>,
         Option<i64>,
     );
     let row: Option<Row> = conn
         .query_row(
-            "SELECT scid, key_id, added, revoked, bot, expires FROM keys WHERE sign = ?1",
+            "SELECT scid, key_id, added, revoked, unlinked, bot, expires FROM keys WHERE sign = ?1",
             params![sign],
             |r| {
                 Ok((
@@ -559,11 +578,12 @@ pub fn key_entry(conn: &Connection, sign: &str) -> Result<Option<KeyIndexEntry>,
                     r.get(3)?,
                     r.get(4)?,
                     r.get(5)?,
+                    r.get(6)?,
                 ))
             },
         )
         .optional()?;
-    let Some((scid, key_id, added, revoked, bot, expires)) = row else {
+    let Some((scid, key_id, added, revoked, unlinked, bot, expires)) = row else {
         return Ok(None);
     };
     let head = signed_head(conn, &scid)?
@@ -577,6 +597,7 @@ pub fn key_entry(conn: &Connection, sign: &str) -> Result<Option<KeyIndexEntry>,
         key_id,
         added: from_sql(added),
         revoked: revoked.map(from_sql),
+        unlinked: unlinked.map(from_sql),
         bot,
         expires: expires.map(from_sql),
         paused: false,
