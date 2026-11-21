@@ -197,9 +197,10 @@ fn self_unlink_signer(
 }
 
 /// The refusal of a `revoke`'s `since` (spec rule K17), by the store's clock `now` (unix
-/// seconds): not after `now`, not before the
-/// store appended the `add` of any key the event names (`added_at`, per key). `since` is in ms
-/// and compared by whole seconds, the store's grain.
+/// seconds): not after `now`, not before the store appended the `add` of any key the event
+/// names (`added_at`, per key). `since` is in ms and compared by whole seconds, the grain of
+/// the store's clock and append times: a `since` later in the append second is accepted, so a
+/// client may send its own `Date.now()` without racing the store's second.
 fn check_since(
     event: &Event,
     state: &ad4m_identity_core::KeyState,
