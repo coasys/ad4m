@@ -174,14 +174,15 @@ impl Language {
         let controller = LanguageController::global_instance();
         let script = r#"JSON.stringify((await language.perspectiveSyncCurrentRevision()) ?? null)"#;
 
-        // A read: its answer may lag a commit queued just behind it, which callers
-        // tolerate (it is a "may differ" hint, not a fence).
+        // Ordered, as `render`: the fallback sync (`share_links_missing_remotely`)
+        // reads both as a fence. Run beside an in-flight commit, they would miss
+        // its links, and the pass would commit them again.
         let result = controller
             .call_language(
                 &self.address,
                 script,
                 AgentContext::main_agent(),
-                CallKind::Concurrent,
+                CallKind::Ordered,
             )
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -199,12 +200,13 @@ impl Language {
         let controller = LanguageController::global_instance();
         let script = r#"JSON.stringify((await language.perspectiveSyncRender()) ?? null)"#;
 
+        // Ordered: see `current_revision`.
         let result = controller
             .call_language(
                 &self.address,
                 script,
                 AgentContext::main_agent(),
-                CallKind::Concurrent,
+                CallKind::Ordered,
             )
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;

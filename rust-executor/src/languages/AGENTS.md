@@ -27,15 +27,20 @@ ordered call and other concurrent calls, up to `MAX_CONCURRENT_CALLS` (16) in
 flight — the next ones wait for a slot without holding up ordered calls. Mark a
 call concurrent only when it changes no state a later call depends on and needs
 no position in the send order. Today that is: the reads `get_expression`,
-`is_immutable_expression`, `current_revision`, `render`, `peersRemote`
-(`Language::others`), `getOnlineAgents`, every language-language
+`is_immutable_expression`, `peersRemote`
+(`Language::others`), `getOnlineAgents` (p-diff-sync shares one lookup
+between overlapping calls, so they hold one `STATUS_CONCURRENCY` of zome-call
+permits), every language-language
 `expressionGet`/`languageGetSource` fetch, the three icon reads,
 `interactions()` (not `expressionInteract`, which can write), the identity
 reads (`identityLog`, `keyOwner`, `listOffers`, `offerState`, the
 `expressionGet` behind `agent_version`), and the telepresence emits
 `sendSignal`/`sendBroadcast` — one message each, whose order the protocol
 tolerates (MeshManager numbers offers and drops overtaken ones). Ordered stays:
-`commit` and `sync` (diff order, the sync cursor), `setLocalAgents`,
+`commit` and `sync` (diff order, the sync cursor), `current_revision` and
+`render` (the fallback sync reads them as a fence behind an in-flight commit:
+`share_links_missing_remotely` would otherwise commit its links again),
+`setLocalAgents`,
 `setOnlineStatus`, `expressionCreate`, `expressionInteract`, Holochain signal
 delivery, identity writes (`append`, `putAgent`, `openOffer`, `claimOffer`),
 language publish. Loading, callback registration and teardown run with no call

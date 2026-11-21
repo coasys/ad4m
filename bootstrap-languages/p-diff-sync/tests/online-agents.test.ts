@@ -8,7 +8,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { getOnlineAgents, STATUS_CONCURRENCY } from "../online-agents.ts";
+import { getOnlineAgents, singleFlight, STATUS_CONCURRENCY } from "../online-agents.ts";
 
 type Deferred = { resolve: (v: any) => void; reject: (e: any) => void };
 
@@ -108,5 +108,41 @@ describe("p-diff-sync getOnlineAgents", () => {
         const { started, lookup } = controlledStatusLookup();
         assert.deepEqual(await getOnlineAgents(async () => [], lookup), []);
         assert.equal(started.length, 0);
+    });
+});
+
+describe("singleFlight", () => {
+    it("gives overlapping callers the one lookup in flight, so they hold one cap of status calls", async () => {
+        const { started, lookup } = controlledStatusLookup();
+        const agents = Array.from({ length: 20 }, (_, i) => `agent-${i}`);
+        const shared = singleFlight(() => getOnlineAgents(async () => agents, lookup));
+
+        const polls = [shared(), shared(), shared(), shared()];
+        await flush();
+        assert.equal(started.length, CAP, "four overlapping polls started more than one lookup's calls");
+
+        // Settle calls as they start until the one lookup ends.
+        for (let i = 0; i < started.length; i++) {
+            started[i].deferred.resolve({ did: started[i].agent });
+            await flush();
+        }
+        const rosters = await Promise.all(polls);
+        for (const roster of rosters) assert.deepEqual(roster.map((a) => a.did), agents);
+        assert.equal(started.length, agents.length);
+    });
+
+    it("starts a new lookup once the one in flight has ended, also after a failure", async () => {
+        let lookups = 0;
+        let fail = true;
+        const shared = singleFlight(async () => {
+            lookups++;
+            if (fail) throw new Error("conductor gone");
+            return ["fresh"];
+        });
+
+        await assert.rejects(shared(), /conductor gone/);
+        fail = false;
+        assert.deepEqual(await shared(), ["fresh"]);
+        assert.equal(lookups, 2);
     });
 });
