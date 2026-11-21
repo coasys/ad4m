@@ -142,7 +142,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'perspective.removeLink': true,
     'perspective.queryProlog': JSON.stringify([{ X: 'test' }]),
     'perspective.querySparql': JSON.stringify([{ id: '1' }]),
-    'perspective.addSdna': true,
+    'perspective.registerShapes': { unchanged: [], written: ['test://TestClass'], generation: 1 },
     'perspective.executeCommands': true,
     'perspective.createSubject': true,
     // A `colour` property is refused as the executor refuses an unknown property: 422 with the
@@ -782,9 +782,9 @@ describe('PerspectiveClient', () => {
         expect(result.additions).toHaveLength(1);
     });
 
-    test('addSdna() adds SDNA', async () => {
-        const result = await ad4m.perspective.addSdna('uuid-1', 'TestClass', 'code', 'subject_class');
-        expect(result).toBe(true);
+    test('registerShapes() registers shapes', async () => {
+        const result = await ad4m.perspective.registerShapes('uuid-1', [{ target_class: 'test://TestClass', properties: [] }]);
+        expect(result).toEqual({ unchanged: [], written: ['test://TestClass'], generation: 1 });
     });
 
     test('queryProlog() runs prolog query', async () => {

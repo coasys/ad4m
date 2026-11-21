@@ -973,29 +973,6 @@ fn annotation_values(
     .collect()
 }
 
-/// [`annotation_values`] read on the committed store, outside a transaction.
-fn store_annotation_values(
-    store: &Store,
-    reifier: &NamedNode,
-    predicate: &str,
-) -> Result<Vec<String>, Error> {
-    store
-        .quads_for_pattern(
-            Some(reifier.as_ref().into()),
-            Some(NamedNodeRef::new_unchecked(predicate)),
-            None,
-            Some(GraphNameRef::DefaultGraph),
-        )
-        .map(|q| {
-            q.map(|quad| match quad.object {
-                Term::Literal(l) => l.value().to_string(),
-                other => other.to_string(),
-            })
-            .map_err(Error::from)
-        })
-        .collect()
-}
-
 /// Whether the store, as `tx` reads it, holds `link` (by its reifier) with
 /// `Local` status. A link language's diff must not add to or remove such a
 /// link (#1146).
@@ -1071,9 +1048,8 @@ fn write_link_quads(
     link: &LinkExpression,
     status: &LinkStatus,
     own: bool,
-    vouched: bool,
 ) -> Result<(), Error> {
-    write_link_quads_proof(tx, link, status, false, own, vouched)
+    write_link_quads_proof(tx, link, status, false, own)
 }
 
 /// [`write_link_quads`], but with `repair` the whole proof is rewritten
@@ -1088,7 +1064,6 @@ fn write_link_quads_proof(
     status: &LinkStatus,
     repair: bool,
     own: bool,
-    vouched: bool,
 ) -> Result<(), Error> {
     let (source_iri, predicate_iri, target_term) = make_direct_triple(link);
     let reifier_iri = make_reifier_iri(link);
@@ -1139,13 +1114,11 @@ fn write_link_quads_proof(
     // verdict is `valid`.
     //
     // A link this store already counts was here before any revocation its key
-    // map holds now (`entered_after_revoke`); `vouched` says the same through a
-    // stored revocation notice ([`SparqlStore::vouched_by_notice`]), which is
-    // the witness a late syncer can check. Neither known: no order proven.
+    // map holds now (`entered_after_revoke`). Nothing stored: no order known.
     let counted_before = annotation_values(tx, &reifier_iri, ONT_LINK_VERDICT)?
         .iter()
         .any(|v| v == "valid");
-    let entered = (counted_before || vouched).then_some(false);
+    let entered = counted_before.then_some(false);
     let checked = if own {
         link.check_own_entered(entered)
     } else {
@@ -1645,10 +1618,6 @@ impl SparqlStore {
             )
         })?;
         refuse_link_metadata(link)?;
-        // A revocation notice already stored may order the link ahead of a
-        // revocation its key map knows (`vouched`): read before the write so
-        // the judgement below sees the committed store.
-        let vouched = self.vouched_by_notice(link)?;
         let _writer = self
             .writer
             .lock()
@@ -1658,7 +1627,7 @@ impl SparqlStore {
             return Ok(false);
         }
         let delta = added_delta(&tx, std::slice::from_ref(link))?;
-        write_link_quads(&mut tx, link, status, own, vouched)?;
+        write_link_quads(&mut tx, link, status, own)?;
         tx.commit()?;
         self.note_write(delta);
         Ok(true)
@@ -1699,74 +1668,6 @@ impl SparqlStore {
     /// as `Local` (#1146). Returns whether it was applied.
     pub(crate) fn remove_remote_link(&self, link: &LinkExpression) -> Result<bool, Error> {
         self.delete_link(link, true)
-    }
-
-    /// Whether a stored revocation notice ([`crate::identity::verdict::NOTICE_PREDICATE`])
-    /// vouches for `link`: a `valid` link whose direct triple is
-    /// `(reifier(link), NOTICE_PREDICATE, person)` — its source names `link`'s reifier —
-    /// whose stored person is the identity that revoked `link`'s signer and whose
-    /// `proofAnchor` is at or past the seq the `revoke` sits at. A still-valid key of that
-    /// identity could only sign it after the revocation was learnt, so it orders `link`
-    /// ahead of the revocation for every reader, whenever the reader synced
-    /// (`entered_after_revoke == Some(false)` at judgement). `false` when the key map
-    /// knows no revocation of the signer.
-    pub(crate) fn vouched_by_notice(&self, link: &LinkExpression) -> Result<bool, Error> {
-        let Some((person, revoked)) = crate::identity::revocation_of(&link.author) else {
-            return Ok(false);
-        };
-        let reifier = make_reifier_iri(link);
-        let notice_pred = NamedNodeRef::new_unchecked(crate::identity::verdict::NOTICE_PREDICATE);
-        let person_node = NamedNodeRef::new_unchecked(&person);
-        let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
-        // The direct triples that claim to vouch `reifier` for `person`.
-        let claimed: Vec<_> = self
-            .store
-            .quads_for_pattern(
-                Some(reifier.as_ref().into()),
-                Some(notice_pred),
-                Some(person_node.into()),
-                Some(GraphNameRef::DefaultGraph),
-            )
-            .collect::<Result<_, _>>()?;
-        for quad in claimed {
-            let NamedOrBlankNode::NamedNode(source) = quad.subject else {
-                continue;
-            };
-            let Term::NamedNode(target) = quad.object else {
-                continue;
-            };
-            let triple = Triple::new(source, quad.predicate, target);
-            // The reifier of each such direct triple is a candidate notice.
-            for quad in self.store.quads_for_pattern(
-                None,
-                Some(rdf_reifies),
-                Some(TermRef::Triple(&triple)),
-                Some(GraphNameRef::DefaultGraph),
-            ) {
-                let NamedOrBlankNode::NamedNode(notice) = quad?.subject else {
-                    continue;
-                };
-                let counted = store_annotation_values(&self.store, &notice, ONT_LINK_VERDICT)?
-                    .iter()
-                    .any(|v| v == "valid");
-                if !counted {
-                    continue;
-                }
-                let same_identity =
-                    store_annotation_values(&self.store, &notice, ONT_PERSON)?.contains(&person);
-                if !same_identity {
-                    continue;
-                }
-                let anchored_after =
-                    store_annotation_values(&self.store, &notice, ONT_PROOF_ANCHOR)?
-                        .iter()
-                        .any(|a| a.parse::<u64>().is_ok_and(|at| at >= revoked));
-                if anchored_after {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
     }
 
     /// Test-only: drop the `proofValid` annotation from a stored link's
@@ -1868,12 +1769,6 @@ impl SparqlStore {
         for link in removals.iter().chain(additions) {
             refuse_link_metadata(link)?;
         }
-        // A stored revocation notice may order an addition ahead of a
-        // revocation its key map knows (`vouched`): read before the write.
-        let vouched: Vec<bool> = additions
-            .iter()
-            .map(|link| self.vouched_by_notice(link))
-            .collect::<Result<_, _>>()?;
         let _writer = self
             .writer
             .lock()
@@ -1892,7 +1787,7 @@ impl SparqlStore {
         for link in removals {
             remove_link_quads(&mut tx, link)?;
         }
-        for (link, vouched) in additions.iter().zip(&vouched) {
+        for link in additions {
             let Some(status) = link.status.as_ref() else {
                 log::warn!(
                     "Refusing to store link without an explicit local/shared status: {} -[{}]-> {}",
@@ -1902,7 +1797,7 @@ impl SparqlStore {
                 );
                 continue;
             };
-            write_link_quads(&mut tx, link, status, own, *vouched)?;
+            write_link_quads(&mut tx, link, status, own)?;
         }
         tx.commit()?;
         self.note_write(delta);
@@ -2654,20 +2549,6 @@ impl SparqlStore {
         self.query_links(stop, None, Some(predicate), None, None, None, None)
     }
 
-    /// Get all links with the given predicate where source ends with the given suffix.
-    pub fn get_links_by_predicate_and_source_suffix(
-        &self,
-        stop: &EvalStop,
-        predicate: &str,
-        source_suffix: &str,
-    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
-        let links = self.get_links_by_predicate(stop, predicate)?;
-        Ok(links
-            .into_iter()
-            .filter(|l| l.data.source.ends_with(source_suffix))
-            .collect())
-    }
-
     fn sparql_evaluator(&self, stop: &EvalStop) -> SparqlEvaluator {
         SparqlEvaluator::new()
             .with_cancellation_token(stop.token.clone())
@@ -3074,8 +2955,7 @@ impl SparqlStore {
             ));
         }
         for (link, status) in &restored {
-            let vouched = self.vouched_by_notice(link)?;
-            write_link_quads_proof(&mut tx, link, status, true, false, vouched)?;
+            write_link_quads_proof(&mut tx, link, status, true, false)?;
         }
         tx.commit()?;
         self.note_write(WriteDelta::Other);
@@ -3131,8 +3011,7 @@ impl SparqlStore {
             .lock()
             .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
         let mut tx = self.store.start_transaction()?;
-        let vouched = self.vouched_by_notice(link)?;
-        write_link_quads(&mut tx, link, link.status.as_ref().unwrap(), true, vouched)?;
+        write_link_quads(&mut tx, link, link.status.as_ref().unwrap(), true)?;
         tx.commit()?;
         self.note_write(WriteDelta::Other);
         Ok(())
@@ -4681,110 +4560,49 @@ mod tests {
     }
 
     /// A reader that learns of the revocation before it sees the link a revoked key signed
-    /// (the late syncer) reaches the same verdict as one that held the link early — when a
-    /// revocation notice vouches for it. The notice is a `valid` link
-    /// `(reifier(L), ad4m://entered-before-revoke, person)` signed by a still-valid device
-    /// of the same identity, anchored at the seq the `revoke` sits at or past it: it could
-    /// only be written after the revocation, so it orders the link before it. A link no
-    /// notice covers stays `flagged`.
+    /// has no order between them, so the link reads `flagged` (and no person) until the
+    /// space's order (identity slice 3.B) says it came first.
     #[test]
-    fn a_notice_orders_a_late_synced_link_before_the_revocation() {
+    fn a_link_of_a_key_revoked_before_it_was_read_is_flagged() {
         use crate::identity::cache::tests::TestLog;
         use crate::identity::cache::{global_key_map, TrustedLog};
-        use crate::identity::verdict::NOTICE_PREDICATE;
-        use ad4m_identity_core::build::{add_unsigned, cosign, Signer};
-        use ad4m_identity_core::{DeviceKey, KeyLife};
+        use ad4m_identity_core::build::Signer;
         let mut log = TestLog::new(115);
-        // A second, standing device key: the notice's signer.
-        let other = ed25519_dalek::SigningKey::from_bytes(&[116; 32]);
-        let chain = log.chain();
-        let device = DeviceKey {
-            id: chain.state().next_device_id(),
-            sign: other.key(),
-            enc: ad4m_identity_core::encode_x25519_multikey(&[116; 32]),
-            life: KeyLife::Standing,
-        };
-        let mut event = add_unsigned(&chain, device, "offer", "co-sig").unwrap();
-        cosign(&mut event, "m0", &log.master).unwrap();
-        log.events.push(event);
-        // The reader learns the revocation first: the log at seq 2 revokes d1 there.
+        // The reader learns the revocation first: the log at seq 1 revokes d1 there.
         log.revoke_d1();
         let map = global_key_map();
         map.publish(
             &log.scid(),
             TrustedLog {
                 state: log.chain().state().clone(),
-                trusted: 2,
+                trusted: 1,
             },
         );
         map.note_confirmed(&log.scid(), chrono::Utc::now().timestamp() as u64);
-        let person = ad4m_identity_core::did_of(&log.scid());
-        let signed = |signer: &ed25519_dalek::SigningKey, data: Link, anchor: u64, at: &str| {
-            let key = signer.key();
-            let bytes =
-                crate::agent::signatures::anchored_signing_bytes(&data, at, anchor).unwrap();
-            LinkExpression {
-                author: format!("did:key:{key}"),
-                timestamp: at.into(),
-                data,
-                proof: crate::types::ExpressionProof {
-                    key: format!("did:key:{key}#{key}"),
-                    signature: hex::encode(signer.sign(&bytes)),
-                    anchor: Some(anchor),
-                },
-                status: Some(LinkStatus::Shared),
-            }
-        };
-        // The pre-revocation link, signed by d1 anchored at seq 0.
+        // A link signed by d1, anchored at seq 0, before the revocation.
         let data = Link {
             source: "ad4m://post".into(),
             predicate: Some("we://mention".into()),
             target: "ad4m://someone".into(),
         };
-        let link = signed(&log.device, data.clone(), 0, T1);
-        // The notice for it: d2 signs `(reifier, NOTICE_PREDICATE, person)` anchored at 2.
-        let notice = signed(
-            &other,
-            Link {
-                source: make_reifier_iri(&link).as_str().to_string(),
-                predicate: Some(NOTICE_PREDICATE.into()),
-                target: person.clone(),
+        let key = log.device.key();
+        let bytes = crate::agent::signatures::anchored_signing_bytes(&data, T1, 0).unwrap();
+        let link = LinkExpression {
+            author: format!("did:key:{key}"),
+            timestamp: T1.into(),
+            data,
+            proof: crate::types::ExpressionProof {
+                key: format!("did:key:{key}#{key}"),
+                signature: hex::encode(log.device.sign(&bytes)),
+                anchor: Some(0),
             },
-            2,
-            T2,
-        );
-        // A second link of d1 no notice covers.
-        let unvouched = signed(
-            &log.device,
-            Link {
-                source: "ad4m://other".into(),
-                predicate: Some("we://mention".into()),
-                target: "ad4m://someone".into(),
-            },
-            0,
-            T1,
-        );
-        let svc = new_service();
-        assert!(svc.add_remote_link(&notice).unwrap());
-        assert!(svc.add_remote_link(&link).unwrap());
-        assert!(svc.add_remote_link(&unvouched).unwrap());
-        let links = svc.get_all_links(&EvalStop::none()).unwrap();
-        let verdict_of = |source: &str| {
-            links
-                .iter()
-                .find(|l| l.data.source == source)
-                .map(|l| (l.verdict.clone(), l.person.clone()))
+            status: Some(LinkStatus::Shared),
         };
-        assert_eq!(
-            verdict_of("ad4m://post"),
-            Some((Some(LinkVerdict::Valid), Some(person.clone()))),
-            "the notice orders the vouched link before the revocation"
-        );
-        assert_eq!(
-            verdict_of("ad4m://other"),
-            Some((Some(LinkVerdict::Flagged), None)),
-            "no notice: the order is unproven"
-        );
+        let svc = new_service();
+        assert!(svc.add_remote_link(&link).unwrap());
+        let links = svc.get_all_links(&EvalStop::none()).unwrap();
+        assert_eq!(links[0].verdict, Some(LinkVerdict::Flagged));
+        assert_eq!(links[0].person, None);
         map.forget(&log.scid());
     }
 
