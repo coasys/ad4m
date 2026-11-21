@@ -78,7 +78,7 @@ fn proc_status_memory() -> String {
 }
 
 /// Recursively compute directory size in bytes.
-fn dir_size(path: &std::path::Path) -> u64 {
+pub(crate) fn dir_size(path: &std::path::Path) -> u64 {
     let mut total = 0u64;
     if let Ok(entries) = std::fs::read_dir(path) {
         for entry in entries.flatten() {

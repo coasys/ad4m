@@ -455,6 +455,7 @@ pub(super) fn afford_prompt(
     };
     check_compute_credits(agent_did)
         .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
+    crate::hosting::meter::count_ai_run(Some(agent_did));
     let affordable = affordable_ai_units(agent_did, model_id)
         .map_err(|e| OpenAIError::internal(format!("Could not read the credits: {e}")))?;
     if affordable.is_some_and(|affordable| affordable <= prompt_estimate) {

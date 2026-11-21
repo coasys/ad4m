@@ -54,9 +54,21 @@ import type { ComputeLogEntry } from "./ComputeLogEntry";
 import type { CosignInceptParams } from "./CosignInceptParams";
 import type { CreateBotParams } from "./CreateBotParams";
 import type { CreateExpressionRequest } from "./CreateExpressionRequest";
+import type { CreateInviteParams } from "./CreateInviteParams";
+import type { CreateInviteResult } from "./CreateInviteResult";
 import type { CreatePerspectiveRequest } from "./CreatePerspectiveRequest";
 import type { CreateUserRequest } from "./CreateUserRequest";
 import type { CreatedBot } from "./CreatedBot";
+import type { DataChunk } from "./DataChunk";
+import type { DataExportChunkParams } from "./DataExportChunkParams";
+import type { DataExportPrepareParams } from "./DataExportPrepareParams";
+import type { DataExportPrepared } from "./DataExportPrepared";
+import type { DataImportBeginParams } from "./DataImportBeginParams";
+import type { DataImportBegun } from "./DataImportBegun";
+import type { DataImportChunkParams } from "./DataImportChunkParams";
+import type { DataImportChunked } from "./DataImportChunked";
+import type { DataImportCommitParams } from "./DataImportCommitParams";
+import type { DataImported } from "./DataImported";
 import type { DecoratedLinkExpression } from "./DecoratedLinkExpression";
 import type { DecoratedPerspective } from "./DecoratedPerspective";
 import type { DeleteRequestParams } from "./DeleteRequestParams";
@@ -86,6 +98,12 @@ import type { FlowStateEntry } from "./FlowStateEntry";
 import type { FriendsListRequest } from "./FriendsListRequest";
 import type { GenerateAgentRequest } from "./GenerateAgentRequest";
 import type { GenerateJwtRequest } from "./GenerateJwtRequest";
+import type { HostInfo } from "./HostInfo";
+import type { HostJoinStatus } from "./HostJoinStatus";
+import type { HostJoinStatusParams } from "./HostJoinStatusParams";
+import type { HostLeaveParams } from "./HostLeaveParams";
+import type { HostPolicyPatch } from "./HostPolicyPatch";
+import type { HostPolicyView } from "./HostPolicyView";
 import type { HostRate } from "./HostRate";
 import type { HostingInfoResult } from "./HostingInfoResult";
 import type { HostingRequestPaymentResult } from "./HostingRequestPaymentResult";
@@ -102,9 +120,12 @@ import type { InstanceCreated } from "./InstanceCreated";
 import type { InstanceRemoved } from "./InstanceRemoved";
 import type { InstanceUpdated } from "./InstanceUpdated";
 import type { InteractionMeta } from "./InteractionMeta";
+import type { InviteView } from "./InviteView";
 import type { JoinAccepted } from "./JoinAccepted";
 import type { JoinCancelled } from "./JoinCancelled";
 import type { JoinNeighbourhoodRequest } from "./JoinNeighbourhoodRequest";
+import type { JoinRequest } from "./JoinRequest";
+import type { JoinResult } from "./JoinResult";
 import type { JoinStatus } from "./JoinStatus";
 import type { JoinStatusParams } from "./JoinStatusParams";
 import type { JsonValue } from "./serde_json/JsonValue";
@@ -118,6 +139,7 @@ import type { LanguageListParams } from "./LanguageListParams";
 import type { LanguageMeta } from "./LanguageMeta";
 import type { LanguageRef } from "./LanguageRef";
 import type { LanguageWriteSettingsParams } from "./LanguageWriteSettingsParams";
+import type { LeaveResult } from "./LeaveResult";
 import type { LinkLanguageTemplatesRequest } from "./LinkLanguageTemplatesRequest";
 import type { LocalAiHardware } from "./LocalAiHardware";
 import type { LocalAiInstallParams } from "./LocalAiInstallParams";
@@ -210,6 +232,8 @@ import type { RecordParams } from "./RecordParams";
 import type { RecordPutParams } from "./RecordPutParams";
 import type { RecordStored } from "./RecordStored";
 import type { RegisterResult } from "./RegisterResult";
+import type { RemoveTenantParams } from "./RemoveTenantParams";
+import type { RemoveTenantResult } from "./RemoveTenantResult";
 import type { RenewSessionParams } from "./RenewSessionParams";
 import type { RenewedSession } from "./RenewedSession";
 import type { RequestCapabilityRequest } from "./RequestCapabilityRequest";
@@ -218,6 +242,7 @@ import type { RequestPosted } from "./RequestPosted";
 import type { RequestsParams } from "./RequestsParams";
 import type { ResetLogParams } from "./ResetLogParams";
 import type { ResolveParams } from "./ResolveParams";
+import type { RevokeInviteParams } from "./RevokeInviteParams";
 import type { RunAgentRequest } from "./RunAgentRequest";
 import type { RunInterpretationRequest } from "./RunInterpretationRequest";
 import type { RunInterpretationWithHarnessRequest } from "./RunInterpretationWithHarnessRequest";
@@ -278,6 +303,8 @@ import type { StorageStatus } from "./StorageStatus";
 import type { StorageUnlockParams } from "./StorageUnlockParams";
 import type { StorageUnlockResult } from "./StorageUnlockResult";
 import type { StoredRecord } from "./StoredRecord";
+import type { TenantUsage } from "./TenantUsage";
+import type { TenantView } from "./TenantView";
 import type { TrustedAgentsWrapper } from "./TrustedAgentsWrapper";
 import type { UnlockAgentRequest } from "./UnlockAgentRequest";
 import type { UnwrapRecordKeyParams } from "./UnwrapRecordKeyParams";
@@ -368,6 +395,11 @@ export interface RpcMethods {
   "bot.list": { params: Record<string, never>; result: Array<BotAgent> };
   "bot.log": { params: BotLogParams; result: Array<BotActivity> };
   "bot.setGrant": { params: SetGrantParams; result: BotAgent };
+  "data.exportChunk": { params: DataExportChunkParams; result: DataChunk };
+  "data.exportPrepare": { params: DataExportPrepareParams; result: DataExportPrepared };
+  "data.importBegin": { params: DataImportBeginParams; result: DataImportBegun };
+  "data.importChunk": { params: DataImportChunkParams; result: DataImportChunked };
+  "data.importCommit": { params: DataImportCommitParams; result: DataImported };
   "events.unwatch": { params: Record<string, never>; result: boolean };
   "events.watch": { params: Partial<Record<EventName, Array<string> | null>>; result: boolean };
   "expression.create": { params: CreateExpressionRequest; result: string };
@@ -376,6 +408,18 @@ export interface RpcMethods {
   "expression.getRaw": { params: ExpressionUrlRequest; result: string | null };
   "expression.interact": { params: ExpressionInteractRequest; result: string };
   "expression.interactions": { params: ExpressionUrlRequest; result: Array<InteractionMeta> };
+  "host.createInvite": { params: CreateInviteParams; result: CreateInviteResult };
+  "host.info": { params: Record<string, never>; result: HostInfo };
+  "host.join": { params: JoinRequest; result: JoinResult };
+  "host.joinStatus": { params: HostJoinStatusParams; result: HostJoinStatus };
+  "host.leave": { params: HostLeaveParams; result: LeaveResult };
+  "host.listInvites": { params: Record<string, never>; result: Array<InviteView> };
+  "host.policy": { params: Record<string, never>; result: HostPolicyView };
+  "host.removeTenant": { params: RemoveTenantParams; result: RemoveTenantResult };
+  "host.revokeInvite": { params: RevokeInviteParams; result: boolean };
+  "host.setPolicy": { params: HostPolicyPatch; result: HostPolicyView };
+  "host.tenants": { params: Record<string, never>; result: Array<TenantView> };
+  "host.usage": { params: Record<string, never>; result: TenantUsage };
   "hosting.info": { params: Record<string, never>; result: HostingInfoResult };
   "hosting.requestPayment": { params: RequestPaymentRequest; result: HostingRequestPaymentResult };
   "hosting.setHotWallet": { params: SetHotWalletAddressRequest; result: boolean };
@@ -607,6 +651,12 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "expression.getMany",
   "expression.getRaw",
   "expression.interactions",
+  "host.info",
+  "host.joinStatus",
+  "host.listInvites",
+  "host.policy",
+  "host.tenants",
+  "host.usage",
   "hosting.info",
   "hosting.wallet",
   "hosting.walletHistory",
@@ -696,6 +746,10 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "ai.removeEndpoint",
   "ai.updateEndpoint",
   "bot.createAgent",
+  "data.exportPrepare",
+  "data.importCommit",
+  "host.leave",
+  "host.removeTenant",
   "language.applyTemplate",
   "language.publish",
   "neighbourhood.join",

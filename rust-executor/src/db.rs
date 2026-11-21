@@ -27,6 +27,7 @@ mod ai_sessions;
 mod bots;
 mod endpoints;
 pub(crate) mod grants;
+mod hosting;
 mod identity;
 mod model_migration;
 mod rekey;
@@ -35,6 +36,7 @@ mod tasks;
 pub use bots::{BotActivityRow, BotGrantRow, BotRow};
 pub use endpoints::InvalidEndpoint;
 pub use grants::{GrantKeyRow, GrantRow};
+pub use hosting::{InviteRow, TenantInsert, TenantRow};
 #[cfg(test)]
 pub(crate) use identity::operator_record_in;
 pub(crate) use identity::set_operator_record_if_empty_in;
@@ -469,6 +471,8 @@ impl Ad4mDb {
         Self::create_grants_table(&conn)?;
         // The operator record and the identities local agents speak for: see identity::.
         Self::create_identity_tables(&conn)?;
+        // The tenants, invites and AI-run counts of a host: see hosting::.
+        hosting::create_hosting_tables(&conn)?;
         // The bots and their activity log: see bots::.
         Self::create_bot_tables(&conn)?;
 
@@ -3735,8 +3739,7 @@ impl Ad4mDb {
         }
     }
 
-    /// Points the user `username` at the agent `did` (tests build stale or mismatched rows).
-    #[cfg(test)]
+    /// Points the user `username` at the agent `did` (a tenant's rejoin gives its row a new key).
     pub fn set_user_did(&self, username: &str, did: &str) -> Ad4mDbResult<()> {
         self.conn.execute(
             "UPDATE users SET did = ?2 WHERE username = ?1",

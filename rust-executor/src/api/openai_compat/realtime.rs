@@ -285,6 +285,7 @@ where
                     let _ = send_error(&mut socket, "insufficient_quota", &refused).await;
                     continue;
                 }
+                crate::hosting::meter::count_ai_run(caller.user_did());
 
                 // Tear down any prior session before opening a new one.
                 if let Some(old_sid) = stream_id.take() {

@@ -255,7 +255,7 @@ async fn storage_unlock(
         None => startup::get_executor_url()?,
     };
     let token = identity::admin_credential(admin_credential, process_env)?;
-    let secret = storage::read_secret_from_terminal("Storage secret")?;
+    let secret = storage::read_secret_for_unlock("Storage secret")?;
     println!("{}", storage::unlock(&executor_url, &token, &secret).await?);
     Ok(())
 }

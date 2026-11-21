@@ -93,6 +93,7 @@ pub async fn transcriptions(
         check_compute_credits(agent_did)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
     }
+    crate::hosting::meter::count_ai_run(auth.user_did());
 
     let started = std::time::Instant::now();
     let reply = client
@@ -170,6 +171,7 @@ pub async fn speech(
         check_credits_cover(agent_did, amount)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
     }
+    crate::hosting::meter::count_ai_run(auth.user_did());
     // Billed once the endpoint has answered: a request that failed or timed out, queued
     // or not, costs nothing.
     let audio = passthrough::forward_speech(upstream, body).await?;

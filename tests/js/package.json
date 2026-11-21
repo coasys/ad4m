@@ -13,6 +13,8 @@
     "test-all-local": "node scripts/cleanup.js && pnpm run test-simple && node scripts/cleanup.js && pnpm run test-app && node scripts/cleanup.js && pnpm run test-auth && node scripts/cleanup.js && pnpm run test-config-file && node scripts/cleanup.js && pnpm run test-integration-local && node scripts/cleanup.js && pnpm run test-prolog-and-literals && node scripts/cleanup.js",
     "test-simple": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/simple.test.ts",
     "test-integration": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/integration.test.ts",
+    "test-main-host-tenants": "export LOCAL_MODE=true && node scripts/cleanTestingData.js && pnpm run prepare-test-local && node scripts/cleanup.js && pnpm run test-host-tenants && node scripts/cleanup.js && node scripts/cleanTestingData.js",
+    "test-host-tenants": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/host-tenants.test.ts tests/data-export-import.test.ts",
     "test-identity": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/identity.test.ts",
     "test-integration-server-link": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/integration-server-link.test.ts",
     "test-integration-local": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/integration-local.test.ts",

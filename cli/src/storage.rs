@@ -99,6 +99,24 @@ pub fn read_secret_from_terminal(prompt: &str) -> Result<Zeroizing<String>> {
         .context("cannot read the secret from the terminal")
 }
 
+/// The secret for `storage unlock`: one line from a pipe when stdin is not a terminal (a
+/// script that holds the secret in its memory, as `coasys-cloud` does; a pipe is private to
+/// the two processes), else typed at the terminal.
+pub fn read_secret_for_unlock(prompt: &str) -> Result<Zeroizing<String>> {
+    use std::io::{BufRead, IsTerminal};
+    if std::io::stdin().is_terminal() {
+        return read_secret_from_terminal(prompt);
+    }
+    let mut line = Zeroizing::new(String::new());
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .context("cannot read the secret from stdin")?;
+    Ok(Zeroizing::new(
+        line.trim_end_matches(['\r', '\n']).to_string(),
+    ))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UnlockAnswer {

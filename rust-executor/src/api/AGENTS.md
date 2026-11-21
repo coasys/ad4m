@@ -204,7 +204,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-270 methods: Cap 88, CapAnyPointer 1, Executor 48, Open 10, Operator 42, Owns 76, UserOrOperator 5. Local only (the operator on this machine): 17.
+287 methods: Cap 93, CapAnyPointer 3, Executor 48, Open 13, Operator 49, Owns 76, UserOrOperator 5. Local only (the operator on this machine): 17.
 
 | Method | Guard |
 |---|---|
@@ -276,12 +276,29 @@ the guard checked:
 | `bot.list` | `Executor(agent:READ)` |
 | `bot.log` | `Executor(agent:READ)` |
 | `bot.setGrant` | `Executor(agent:UPDATE)` |
+| `data.exportChunk` | `CapAnyPointer(perspective:READ)` |
+| `data.exportPrepare` | `CapAnyPointer(perspective:READ)` |
+| `data.importBegin` | `Cap(perspective:CREATE)` |
+| `data.importChunk` | `Cap(perspective:CREATE)` |
+| `data.importCommit` | `Cap(perspective:CREATE)` |
 | `expression.create` | `Cap(expression:CREATE)` |
 | `expression.get` | `Cap(expression:READ)` |
 | `expression.getMany` | `Cap(expression:READ)` |
 | `expression.getRaw` | `Cap(expression:READ)` |
 | `expression.interact` | `Cap(expression:UPDATE)` |
 | `expression.interactions` | `Cap(expression:READ)` |
+| `host.createInvite` | `Operator` |
+| `host.info` | `Open` |
+| `host.join` | `Open` |
+| `host.joinStatus` | `Open` |
+| `host.leave` | `Cap(runtime.hosting:UPDATE)` |
+| `host.listInvites` | `Operator` |
+| `host.policy` | `Operator` |
+| `host.removeTenant` | `Operator` |
+| `host.revokeInvite` | `Operator` |
+| `host.setPolicy` | `Operator` |
+| `host.tenants` | `Operator` |
+| `host.usage` | `Cap(runtime.hosting:READ)` |
 | `hosting.info` | `Cap(runtime.hosting:READ)` |
 | `hosting.requestPayment` | `Cap(agent:UPDATE)` |
 | `hosting.setHotWallet` | `Cap(agent:UPDATE)` |

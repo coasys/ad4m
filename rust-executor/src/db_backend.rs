@@ -34,8 +34,8 @@ use tokio::sync::OnceCell;
 use crate::ai_sessions::types::{AiSession, AiSessionMessage, AiSessionUpdate};
 use crate::db::{
     Ad4mDb, Ad4mDbResult, BotActivityRow, BotGrantRow, BotRow, ComputeLogEntry,
-    FlowReplicaStateRow, GrantRow, JoinAccept, JoinAdded, JoinCancel, JoinRow, OperatorRecordRow,
-    OperatorSetBy, PaymentRequest,
+    FlowReplicaStateRow, GrantRow, InviteRow, JoinAccept, JoinAdded, JoinCancel, JoinRow,
+    OperatorRecordRow, OperatorSetBy, PaymentRequest, TenantInsert, TenantRow,
 };
 use crate::secret::Secret;
 use crate::types::{
@@ -71,6 +71,7 @@ macro_rules! ad4m_db_methods {
                 password_hash: &str
             ) -> Ad4mDbResult<()>;
             fn get_user(&self, username: &str) -> Ad4mDbResult<UserInfo>;
+            fn set_user_did(&self, username: &str, did: &str) -> Ad4mDbResult<()>;
             fn get_username_by_did(&self, did: &str) -> Ad4mDbResult<Option<String>>;
             fn update_user_last_seen(&self, email: &str) -> Ad4mDbResult<()>;
             fn update_agent_last_seen(&self, agent_did: &str) -> Ad4mDbResult<()>;
@@ -437,6 +438,33 @@ macro_rules! ad4m_db_methods {
             fn move_notification_owner(&self, old: &str, new: &str) -> Ad4mDbResult<usize>;
             fn move_flow_rows(&self, old: &str, new: &str) -> Ad4mDbResult<usize>;
             fn clear_joins(&self) -> Ad4mDbResult<usize>;
+
+            // Hosting: tenants, invites, AI-run counts (`db/hosting.rs`)
+            fn insert_tenant(&self, tenant: &TenantRow) -> Ad4mDbResult<TenantInsert>;
+            fn tenant(&self, id: &str) -> Ad4mDbResult<Option<TenantRow>>;
+            fn live_tenant_of(&self, did_scid: &str) -> Ad4mDbResult<Option<TenantRow>>;
+            fn live_tenant_of_device(&self, device_did: &str) -> Ad4mDbResult<Option<TenantRow>>;
+            fn live_tenants(&self) -> Ad4mDbResult<Vec<TenantRow>>;
+            fn expired_pending_tenants(&self, now: u64) -> Ad4mDbResult<Vec<TenantRow>>;
+            fn count_serving_tenants(&self) -> Ad4mDbResult<u32>;
+            fn transition_tenant(&self, id: &str, from: &[&str], to: &TenantRow) -> Ad4mDbResult<bool>;
+            fn remove_tenant_row(&self, id: &str) -> Ad4mDbResult<bool>;
+            fn tombstone_tenant(&self, id: &str, did_hash: &str, now: u64) -> Ad4mDbResult<bool>;
+            fn insert_invite(&self, invite: &InviteRow) -> Ad4mDbResult<()>;
+            fn invite(&self, id: &str) -> Ad4mDbResult<Option<InviteRow>>;
+            fn invite_by_hash(&self, hash: &[u8]) -> Ad4mDbResult<Option<InviteRow>>;
+            fn invites(&self) -> Ad4mDbResult<Vec<InviteRow>>;
+            fn count_open_invites(&self, now: u64) -> Ad4mDbResult<u32>;
+            fn spend_invite(&self, id: &str, tenant_id: &str, now: u64) -> Ad4mDbResult<bool>;
+            fn unspend_invite(&self, tenant_id: &str) -> Ad4mDbResult<bool>;
+            fn revoke_invite(&self, id: &str) -> Ad4mDbResult<bool>;
+            fn count_ai_run(&self, tenant_id: &str, day: &str) -> Ad4mDbResult<()>;
+            fn ai_runs(&self, tenant_id: &str, day: &str) -> Ad4mDbResult<u64>;
+            fn link_bytes(&self, uuid: &str) -> Ad4mDbResult<u64>;
+            fn compute_charged(&self, agent_did: &str) -> Ad4mDbResult<f64>;
+            fn delete_ai_runs(&self, tenant_id: &str) -> Ad4mDbResult<usize>;
+            fn delete_user(&self, username: &str) -> Ad4mDbResult<bool>;
+            fn unbind_agent_identity(&self, agent_did: &str) -> Ad4mDbResult<bool>;
             // AI sessions (`ai_sessions/`): a run's state lives in these tables,
             // never only in memory. Every method scopes by `owner_did` (`None` = the main
             // agent), so a caller can never reach another agent's session.
