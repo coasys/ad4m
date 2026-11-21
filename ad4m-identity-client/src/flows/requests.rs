@@ -168,7 +168,8 @@ pub async fn answer<R: ExecutorRpc>(
 }
 
 /// [`answer`] with the 12 `words`, which a `confirm-revoke` asking for a rotation needs: the
-/// `rotate` to master *n*+1 is published first, then the listed keys are revoked with master
+/// `rotate` to master *n*+1 is published first (it unlinks the listed keys still valid, so the
+/// log shows them ended there), then the listed keys are revoked with master
 /// *n*+1 ([`super::revoke::revoke_and_rotate`]; this device keeps *n*+1 and sends it to the apps
 /// that kept the master key, never to the keys being revoked), and the request is deleted with
 /// master *n*+1. A rotation that landed with a revoke that failed is `RotatedNotRevoked`, the

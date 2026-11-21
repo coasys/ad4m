@@ -15,8 +15,8 @@
 //! only, so a revoked device cannot read it.
 //!
 //! "Also replace my master key" ([`revoke_and_rotate`]): a `rotate` replaces the master key
-//! first (it needs the 12 words), naming no key and never sending the new master to the keys
-//! to revoke; then the `revoke` of those keys follows, signed by the new master, with the
+//! first (it needs the 12 words), unlinking the keys to revoke that are still valid (so the log
+//! shows them ended at the rotation) and never sending the new master to them; then the `revoke` of those keys follows, signed by the new master, with the
 //! person's `since`. Rotating first is what lets it recover a frozen identity: after a rival
 //! event by the current master the store accepts only a `rotate`, so a revoke signed by the
 //! current master would be refused. A device that may have held the master key is revoked
@@ -73,7 +73,8 @@ pub async fn revoke<R: ExecutorRpc>(
 
 /// Revokes the device keys `key_ids` of `did`, after rotating to master *n*+1 from the 12
 /// `words` ("Also replace my master key"). The `rotate` ([`super::rotate::rotate`]) comes first
-/// and names no key; it never sends the new master to the keys to revoke; then the `revoke`
+/// and unlinks the keys to revoke that are still valid at the head (those already unlinked
+/// ended earlier); it never sends the new master to them; then the `revoke`
 /// of those keys follows as its own event, signed by master *n*+1 (the words derive it, so no
 /// vault unlock is needed), with the person's `since` (as [`revoke`]). Every call rotates: a
 /// master replaced by an earlier call is not a reason to keep the current one, since a device
@@ -86,7 +87,7 @@ pub async fn revoke<R: ExecutorRpc>(
 ///
 /// The rotation is public once published. A failure of the revoke after it is
 /// [`ClientError::RotatedNotRevoked`]: the master key is replaced and the devices are not
-/// yet revoked. It carries the [`PendingRevoke`] for [`finish_revoke`], which publishes only
+/// yet revoked (they are unlinked by the rotation, so no longer valid for new links). It carries the [`PendingRevoke`] for [`finish_revoke`], which publishes only
 /// the revoke (with a `since` the caller may correct); calling this again would rotate again.
 /// The returned `head` is the revoke's and `record` the write after it, which drops the
 /// revoked devices.
@@ -124,13 +125,16 @@ pub async fn revoke_and_rotate<R: ExecutorRpc>(
     check_keys(&chain, did, key_ids)?;
     // A key the log already revoked stays as it is (an unlinked one may still be revoked).
     let key_ids = still_valid(&chain, key_ids);
-    // Rotate first, naming none of the keys, and never send them the new master: the revoke
-    // follows, signed by it. A frozen log (a rival event by the current master) accepts only a
-    // rotation, so a revoke signed by the current master would be refused. With nothing left
-    // to revoke it is only the rotation.
-    let rotated =
-        super::rotate::rotate_excluding(executor, vault, did, words, &[], &key_ids, clock, random)
-            .await?;
+    // Rotate first, unlinking the keys still valid at the head (the rotation drops the ones
+    // already unlinked or revoked from its list) and never sending them the new master: the log
+    // then shows them ended at the rotation. The revoke follows, signed by the new master. A
+    // frozen log (a rival event by the current master) accepts only a rotation, so a revoke
+    // signed by the current master would be refused. With nothing left to revoke it is only the
+    // rotation.
+    let rotated = super::rotate::rotate_excluding(
+        executor, vault, did, words, &key_ids, &key_ids, clock, random,
+    )
+    .await?;
     if key_ids.is_empty() {
         return Ok(rotated);
     }

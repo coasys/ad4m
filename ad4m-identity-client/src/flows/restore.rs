@@ -10,10 +10,12 @@
 //! 2. The person picks the devices to lock out. Apps (desktop, phone, browser, and a device
 //!    the record does not name) are ticked by default; servers, community hosts, Coasys cloud
 //!    and bots are not.
-//! 3. [`RestoreFlow::finish`]: one `rotate` to a fresh master *n*+1 that names no key
+//! 3. [`RestoreFlow::finish`]: one `rotate` to a fresh master *n*+1 that unlinks the ticked
+//!    devices still valid at the head (a device already unlinked ended earlier), so the log
+//!    itself shows them ended at the rotation and never sent *n*+1
 //!    ([`super::rotate`], with its rebuild after a `409`); the vault stages *n*+1 before the
 //!    publish (a vault that refuses leaves nothing public) and promotes it after. Then an
-//!    explicit `revoke` of the ticked devices, signed by *n*+1, with the person's `since`
+//!    explicit `revoke` of all the ticked devices, signed by *n*+1, with the person's `since`
 //!    (ms; the time from which a lost device is no longer trusted). Rotating first recovers an
 //!    identity a rival event froze (the store then accepts only a `rotate`); the lock-out is a
 //!    revoke, not an unlink, because a lost device is the case where a thief signs new links
@@ -275,14 +277,15 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
         }
         check_since(since, self.clock)?;
         let scid = scid_of(&self.did)?;
-        // The rotation names no key: the lock-out is the revoke that follows.
+        // The rotation unlinks the lock-out (those still valid at the head), so the log shows
+        // them ended at the rotation and never sent the new master; the revoke follows.
         let published = publish_rotation(
             self.executor,
             self.vault,
             &scid,
             &self.did,
             &self.seed,
-            &[],
+            lock_out,
             self.random,
         )
         .await?;

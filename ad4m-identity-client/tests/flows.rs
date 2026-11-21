@@ -4140,11 +4140,18 @@ async fn a_revocation_with_a_rotation_needs_the_words() {
     };
     deleted.unwrap();
     rotated.kept.as_ref().unwrap();
-    // rotated first (unlinking nothing), then revoked by its own event: `head` is the revoke
-    assert_eq!((rotated.index, rotated.unlinked.clone()), (1, vec![]));
+    // rotated first (unlinking the target), then revoked by its own event: `head` is the revoke
+    assert_eq!(
+        (rotated.index, rotated.unlinked.clone()),
+        (1, vec![d3.clone()])
+    );
     let revoke_seq = rotated.head.seq;
+    assert_eq!(
+        key_end(&a, &did, &d3).await,
+        (Some(revoke_seq - 1), Some(revoke_seq)),
+        "unlinked by the rotation, revoked by the next event"
+    );
     assert_eq!(host.status().await.unwrap().revoked, Some(revoke_seq));
-    assert_eq!(key_end(&a, &did, &d3).await, (None, Some(revoke_seq)));
     assert!(
         a.requests(0).await.unwrap().is_empty(),
         "deleted by master #1"
@@ -4185,17 +4192,20 @@ async fn a_revocation_with_a_rotation_needs_the_words() {
     )
     .await
     .unwrap();
-    // two events: the rotation that names no key, then the explicit revoke (with the
+    // two events: the rotation that unlinks the target, then the explicit revoke (with the
     // person's `since`) signed by the new master
     assert_eq!(a.fake().publishes.get(), publishes + 2);
-    assert_eq!((rotated.index, rotated.unlinked.clone()), (2, vec![]));
+    assert_eq!(
+        (rotated.index, rotated.unlinked.clone()),
+        (2, vec![d2.clone()])
+    );
     let revoke_seq = rotated.head.seq;
     assert_eq!(phone.status().await.unwrap().revoked, Some(revoke_seq));
     let chain = ad4m_identity_core::fold(&a.events(&did).await.unwrap()).unwrap();
     let record = &chain.state().keys[&d2];
     assert_eq!(
         (record.revoked, record.revoked_since, record.unlinked),
-        (Some(revoke_seq), Some(since), None)
+        (Some(revoke_seq), Some(since), Some(revoke_seq - 1))
     );
     // revoking a key the log already revoked publishes only the rotation (the log's head is
     // the revoke, not a rotation: no retry)
@@ -4337,10 +4347,14 @@ async fn the_words_restore_the_identity_on_a_new_device() {
         (Some(did.as_str()), Some("d4"))
     );
     // locked out by an explicit revoke after the rotation, with the person's `since`: the
-    // rotation itself unlinks nothing; the revoke is the head of the rotation's successor
+    // rotation unlinks each of them (the log shows them ended there), the revoke follows
     let revoke_seq = restored.head.seq;
     for id in ["d1", d2.as_str()] {
-        assert_eq!(key_end(&new, &did, id).await, (None, Some(revoke_seq)));
+        assert_eq!(
+            key_end(&new, &did, id).await,
+            (Some(revoke_seq - 1), Some(revoke_seq)),
+            "{id}: unlinked by the rotation, revoked by the next event"
+        );
     }
     assert_eq!(key_end(&new, &did, &d3).await, (None, None));
     let chain = ad4m_identity_core::fold(&new.events(&did).await.unwrap()).unwrap();
@@ -4472,10 +4486,13 @@ async fn revoke_and_rotate_recovers_a_frozen_identity() {
     .await
     .unwrap();
     assert_eq!(rotated.index, 1);
-    assert!(rotated.unlinked.is_empty());
+    assert_eq!(rotated.unlinked, vec![d2.clone()]);
     rotated.record.as_ref().unwrap();
     let revoke_seq = rotated.head.seq;
-    assert_eq!(key_end(&a, &did, &d2).await, (None, Some(revoke_seq)));
+    assert_eq!(
+        key_end(&a, &did, &d2).await,
+        (Some(revoke_seq - 1), Some(revoke_seq))
+    );
     let chain = ad4m_identity_core::fold(&a.events(&did).await.unwrap()).unwrap();
     assert_eq!(chain.state().keys[&d2].revoked_since, Some(since));
     assert_eq!(
@@ -4607,10 +4624,16 @@ async fn a_failed_revoke_after_the_rotation_is_retried_without_a_second_rotation
         }
     );
     assert_eq!(a.fake().publishes.get(), publishes + 1, "the rotation");
+    let rotation_seq = a.events(&did).await.unwrap().len() as u64 - 1;
     assert_eq!(
         key_end(&a, &did, &d2).await,
-        (None, None),
-        "not revoked yet"
+        (Some(rotation_seq), None),
+        "unlinked by the rotation, not revoked yet"
+    );
+    let chain = ad4m_identity_core::fold(&a.events(&did).await.unwrap()).unwrap();
+    assert!(
+        !chain.state().key_valid_at(&d2, chain.head().seq),
+        "no longer valid for new links while pending"
     );
 
     flaky.rpc().refuse.set(false);
@@ -4630,8 +4653,78 @@ async fn a_failed_revoke_after_the_rotation_is_retried_without_a_second_rotation
     rotated.record.as_ref().unwrap();
     let chain = ad4m_identity_core::fold(&a.events(&did).await.unwrap()).unwrap();
     assert_eq!(chain.state().masters.len(), 2, "no second rotation");
+    assert_eq!(chain.state().keys[&d2].unlinked, Some(rotation_seq));
     assert_eq!(chain.state().keys[&d2].revoked, Some(rotated.head.seq));
     assert_eq!(chain.state().keys[&d2].revoked_since, Some(since));
+}
+
+/// A target the log already unlinked ended earlier: the rotation names only the targets still
+/// valid, and the revoke still takes both (a revoke wins over an unlink).
+#[tokio::test]
+async fn a_target_unlinked_before_the_call_is_not_in_the_rotation_but_is_revoked() {
+    let store = TestStore::new();
+    let a = custody(&store, 1);
+    let desk = custody(&store, 2);
+    let phone = custody(&store, 3);
+    let vault = MemoryVault::new();
+    let desk_vault = MemoryVault::new();
+    let did = create(&a, &vault, 72).await;
+    let d2 = holding_app(
+        &a,
+        &vault,
+        &did,
+        &desk,
+        &desk_vault,
+        entry("Desk", DeviceKind::DesktopApp),
+    )
+    .await;
+    let d3 = link_app(
+        &a,
+        &vault,
+        &did,
+        &phone,
+        entry("Phone", DeviceKind::PhoneApp),
+        false,
+    )
+    .await;
+    let words = words::from_entropy(&[72; 16]);
+
+    let unlinked = unlink_key(&a, &vault, &did, &d2, &SystemClock, &OsRandom)
+        .await
+        .unwrap();
+    let unlink_seq = unlinked.head.seq;
+    assert_eq!(
+        key_end(&a, &did, &d2).await,
+        (Some(unlink_seq), None),
+        "unlinked, not revoked"
+    );
+
+    // `since` is now: after the keys' adds, before the rotation and the revoke.
+    let since = SystemClock.now() * 1000;
+    let rotated = revoke_and_rotate(
+        &a,
+        &vault,
+        &did,
+        &[d2.clone(), d3.clone()],
+        Some(since),
+        &words,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    assert_eq!(rotated.unlinked, vec![d3.clone()], "d2 ended earlier");
+    let revoke_seq = rotated.head.seq;
+    assert_eq!(
+        key_end(&a, &did, &d2).await,
+        (Some(unlink_seq), Some(revoke_seq)),
+        "keeps its earlier unlink, revoked by the revoke"
+    );
+    assert_eq!(
+        key_end(&a, &did, &d3).await,
+        (Some(revoke_seq - 1), Some(revoke_seq)),
+        "unlinked by the rotation, revoked by the revoke"
+    );
 }
 
 /// A restore whose revoke fails after the rotation: `finish` says so, the devices are not
@@ -4682,7 +4775,12 @@ async fn a_restore_whose_revoke_fails_is_retried_by_revoke_locked_out() {
         ),
         "{failed:?}"
     );
-    assert_eq!(key_end(&a, &did, "d1").await, (None, None));
+    let rotation_seq = a.events(&did).await.unwrap().len() as u64 - 1;
+    assert_eq!(
+        key_end(&a, &did, "d1").await,
+        (Some(rotation_seq), None),
+        "unlinked by the rotation, not revoked yet"
+    );
     new.rpc().refuse.set(false);
     let restored = flow
         .revoke_locked_out(Some(since), entry("New laptop", DeviceKind::DesktopApp))
@@ -4746,7 +4844,11 @@ async fn a_restore_enrols_only_after_the_lock_out_is_revoked() {
         "{failed:?}"
     );
     let events = a.events(&did).await.unwrap().len();
-    assert_eq!(key_end(&a, &did, &d2).await, (None, None), "still valid");
+    assert_eq!(
+        key_end(&a, &did, &d2).await,
+        (Some(events as u64 - 1), None),
+        "unlinked by the rotation, not revoked"
+    );
 
     let enrol = flow.enrol(this()).await;
     assert!(matches!(&enrol, Err(ClientError::Protocol(m)) if m.contains("revoke_locked_out")));
@@ -5023,8 +5125,9 @@ async fn finish_revoke_resumes_one_rotation_and_takes_a_corrected_since() {
     assert_eq!(a.fake().publishes.get(), publishes);
 }
 
-/// `answer_with_words` leaves the request in the box when the revoke fails after the rotation;
-/// `finish_answer` publishes only the revoke and deletes it.
+/// `answer_with_words` rotates (unlinking the target) and the revoke fails after it: the store
+/// has dropped the target's own request with the unlink, and `finish_answer` publishes only the
+/// revoke and counts the delete (a 404) as done.
 #[tokio::test]
 async fn finish_answer_publishes_only_the_revoke_and_deletes_the_request() {
     let store = TestStore::new();
@@ -5065,7 +5168,15 @@ async fn finish_answer_publishes_only_the_revoke_and_deletes_the_request() {
     let Err(ClientError::RotatedNotRevoked { pending, .. }) = failed else {
         panic!("expected RotatedNotRevoked, got {failed:?}");
     };
-    assert_eq!(a.requests(0).await.unwrap().len(), 1, "the request stays");
+    // The poster is the target: the rotation unlinked it, and the store drops the requests of
+    // a key the log no longer holds valid (`purge_ended`), so the box is empty already; the
+    // resume's delete answers 404 and counts as done.
+    assert!(a.requests(0).await.unwrap().is_empty());
+    assert_eq!(
+        key_end(&a, &did, &d2).await,
+        (Some(a.events(&did).await.unwrap().len() as u64 - 1), None),
+        "unlinked by the rotation, not revoked yet"
+    );
 
     flaky.rpc().refuse.set(false);
     let publishes = a.fake().publishes.get();
@@ -6112,7 +6223,10 @@ async fn answering_with_words_reports_a_failed_delete_with_the_rotation() {
         matches!(&deleted, Err(ClientError::Rpc(e)) if e.code == 503),
         "{deleted:?}"
     );
-    assert_eq!((rotated.index, rotated.unlinked.clone()), (1, vec![]));
+    assert_eq!(
+        (rotated.index, rotated.unlinked.clone()),
+        (1, vec![d3.clone()])
+    );
     rotated.kept.as_ref().unwrap();
     assert_eq!(vault.master_index(&scid).unwrap(), Some(1));
     assert_eq!(host.status().await.unwrap().revoked, Some(rotated.head.seq));
