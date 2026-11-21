@@ -150,29 +150,33 @@ workflow_state() {
   case "$2" in running|on_hold|failing|not_run) echo waiting ;; *) echo stopped ;; esac
 }
 
-rank() { case "$1" in ran) echo 5 ;; waiting) echo 4 ;; stopped) echo 3 ;; halted) echo 2 ;; *) echo 1 ;; esac; }
-
-# look: the best state of this commit's build-and-test workflows, as
-# "<state> <pipeline number>": ran > waiting > stopped > halted > none, or
-# "unknown" when CircleCI cannot be read.
+# look: the state of this commit's newest build-and-test workflow, in its
+# newest pipeline, as "<state> <pipeline number>"; "none" when the commit has
+# none, "unknown" when CircleCI cannot be read. Only the newest counts: its jobs
+# set the ci/circleci checks GitHub shows, so an older run (passed or failed)
+# says nothing about them. A re-run in CircleCI adds a workflow to the pipeline.
 look() {
-  local enc list id num wfs wid wst st best=none bestn=""
+  local enc list id num wfs wid wst
   enc="$(jq -rn --arg b "$branch" '$b|@uri')"
   list="$(cci "/project/$slug/pipeline?branch=$enc")" || { echo unknown; return; }
   while read -r id num; do
     [ -z "$id" ] && continue
-    wfs="$(cci "/pipeline/$id/workflow")" || { st=waiting; wfs=""; }
-    [ -n "$wfs" ] && st=none
-    while read -r wid wst; do
-      [ -z "$wid" ] && continue
-      st="$(workflow_state "$wid" "$wst")"
-      [ "$st" = ran ] && break
-    done < <(jq -r '.items[] | select(.name == "build-and-test") | "\(.id) \(.status)"' <<<"$wfs" 2>/dev/null)
-    # A pipeline with no workflow yet is still being set up.
-    [ "$st" = none ] && st=waiting
-    if [ "$(rank "$st")" -gt "$(rank "$best")" ]; then best="$st" bestn="$num"; fi
-  done < <(jq -r --arg s "$sha" '.items[] | select((.trigger_parameters.git.checkout_sha // .vcs.revision) == $s) | "\(.id) \(.number)"' <<<"$list")
-  echo "$best $bestn"
+    wfs="$(cci "/pipeline/$id/workflow")" || { echo "waiting $num"; return; }
+    read -r wid wst < <(jq -r '[.items[] | select(.name == "build-and-test")] | sort_by(.created_at)
+      | last // empty | "\(.id) \(.status)"' <<<"$wfs" 2>/dev/null)
+    if [ -z "${wid:-}" ]; then
+      # No workflow yet: still being set up. Only other workflows: an older
+      # pipeline may have ours.
+      case "$(jq -r '.items | length' <<<"$wfs" 2>/dev/null)" in
+        ''|0) echo "waiting $num"; return ;;
+      esac
+      continue
+    fi
+    echo "$(workflow_state "$wid" "$wst") $num"
+    return
+  done < <(jq -r --arg s "$sha" '[.items[] | select((.trigger_parameters.git.checkout_sha // .vcs.revision) == $s)]
+    | sort_by(-.number) | .[] | "\(.id) \(.number)"' <<<"$list")
+  echo none
 }
 
 # The PR's head now, or nothing when GitHub does not answer.

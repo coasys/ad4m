@@ -352,6 +352,35 @@ check "ready, a pipeline of this commit already runs them (a re-run): success, n
   FAKE_PULLS="[$(pr 30 false dev)]" "${CCI[@]}"
 not_logged "$RUN_URL" "started a second pipeline"
 
+# Lal's review r2, 1: the newest pipeline of the commit is the one its
+# ci/circleci checks show. An older one that ran (and failed) must not vouch
+# for a newer one that halted.
+fx_reset
+fx pipelines "$(pipes p9:9:$SHA p8:8:$SHA)"
+fx wf_p9 "$(wf wf9 success)"; fx jobs_wf9 "$(jobs build:90:success rust-tests:91:success)"
+fx job_90 "$(step_light)"; fx job_91 "$(step_halted)"
+fx wf_p8 "$(wf wf8 failed)"; fx jobs_wf8 "$(jobs build:80:success rust-tests:81:failed)"
+fx job_80 "$(step_light)"; fx job_81 "$(step_ran finished)"
+new_pipeline "$NEW_RAN" running
+fx pipelines.after "$(pipes p-new:4242:$SHA p9:9:$SHA p8:8:$SHA)"
+check "ready, an older pipeline ran and failed, the newest halted: new pipeline" 0 'success: .*pipeline 4242' \
+  FAKE_PULLS="[$(pr 30 false dev)]" "${CCI[@]}"
+logged "$RUN_URL" "took the older pipeline's run for the newer halted one"
+not_logged '/statuses/.*pipeline 8' "named the older pipeline"
+# The same with a re-run of the workflow in CircleCI: the newest
+# build-and-test workflow of the pipeline counts.
+fx_reset
+fx pipelines "$(pipes p8:8:$SHA)"
+fx wf_p8 '{"items":[{"id":"wf-b","name":"build-and-test","status":"success","created_at":"2026-11-21T10:00:00Z"},{"id":"wf-a","name":"build-and-test","status":"failed","created_at":"2026-11-21T09:00:00Z"}]}'
+fx jobs_wf-a "$(jobs build:80:success rust-tests:81:failed)"; fx job_81 "$(step_ran finished)"
+fx jobs_wf-b "$(jobs rust-tests:91:success)"; fx job_91 "$(step_halted)"
+fx job_80 "$(step_light)"
+new_pipeline "$NEW_RAN" running
+fx pipelines.after "$(pipes p-new:4242:$SHA p8:8:$SHA)"
+check "ready, the first workflow ran, its re-run halted: new pipeline" 0 'success: .*pipeline 4242' \
+  FAKE_PULLS="[$(pr 30 false dev)]" "${CCI[@]}"
+logged "$RUN_URL" "took the first workflow's run for its halted re-run"
+
 fx_reset
 event ready_for_review false feat/base
 check "ready for review, stacked: pending, no pipeline" 0 'pending: Not run: PR #30 targets feat/base' \
