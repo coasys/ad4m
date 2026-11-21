@@ -1,7 +1,8 @@
 use ad4m_client::Ad4mClient;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 use rustyline::Editor;
+use std::io::IsTerminal;
 
 #[derive(Debug, Subcommand)]
 pub enum LanguageFunctions {
@@ -114,60 +115,36 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<LanguageFunctions>) ->
 
             println!("Publishing language found in file `{}`...", path);
 
-            if name.is_none()
-                || description.is_none()
-                || possible_template_params.is_none()
-                || source_code_link.is_none()
-            {
-                println!("Please enter meta-information for this language: ");
-            };
-
-            let mut rl = Editor::<()>::new()?;
-            let name = name.unwrap_or_else(|| {
-                rl.readline("Name (should match name in code): ")
-                    .expect("Could not read name from stdin!")
-            });
-            let description = description.unwrap_or_else(|| {
-                rl.readline("Description: ")
-                    .expect("Could not read description from stdin!")
-            });
-            let possible_template_params_string = possible_template_params.unwrap_or_else(|| {
-                rl.readline("Template parameters (comma spearated list): ")
-                    .expect("Could not read template parameters from stdin!")
-            });
-            let possible_template_params: Vec<String> = possible_template_params_string
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect();
-            let source_code_link = source_code_link.unwrap_or_else(|| {
-                rl.readline("Source code link: ")
-                    .expect("Could not read source code link from stdin!")
-            });
-
-            let description = if description.is_empty() {
-                None
-            } else {
-                Some(description)
-            };
-            let possible_template_params = if possible_template_params_string.is_empty() {
-                None
-            } else {
-                Some(possible_template_params)
-            };
-            let source_code_link = if source_code_link.is_empty() {
-                None
-            } else {
-                Some(source_code_link)
-            };
+            let interactive = std::io::stdin().is_terminal();
+            let mut rl = None;
+            let meta = publish_meta(
+                PublishMetaArgs {
+                    name,
+                    description,
+                    possible_template_params,
+                    source_code_link,
+                },
+                interactive,
+                |prompt| {
+                    if rl.is_none() {
+                        println!("Please enter meta-information for this language: ");
+                        rl = Some(Editor::<()>::new()?);
+                    }
+                    rl.as_mut()
+                        .expect("editor was just created")
+                        .readline(prompt)
+                        .with_context(|| format!("Could not read `{}` from stdin", prompt.trim()))
+                },
+            )?;
 
             let publish_result = ad4m_client
                 .languages
                 .publish(
                     path,
-                    Some(name),
-                    description,
-                    possible_template_params,
-                    source_code_link,
+                    Some(meta.name),
+                    Some(meta.description),
+                    meta.possible_template_params,
+                    meta.source_code_link,
                 )
                 .await?;
             println!(
@@ -185,4 +162,127 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<LanguageFunctions>) ->
         }
     };
     Ok(())
+}
+
+struct PublishMetaArgs {
+    name: Option<String>,
+    description: Option<String>,
+    possible_template_params: Option<String>,
+    source_code_link: Option<String>,
+}
+
+#[derive(Debug, PartialEq)]
+struct PublishMeta {
+    name: String,
+    /// Always sent: `language.publish` requires a description, empty or not.
+    description: String,
+    possible_template_params: Option<Vec<String>>,
+    source_code_link: Option<String>,
+}
+
+/// Fills in the meta-information `languages publish` sends. On a terminal, each
+/// value not given as a flag is asked for. Without one (a script, CI, a pipe)
+/// nothing is asked: `--name` is required and the other values default to empty.
+fn publish_meta(
+    args: PublishMetaArgs,
+    interactive: bool,
+    mut ask: impl FnMut(&str) -> Result<String>,
+) -> Result<PublishMeta> {
+    if !interactive && args.name.is_none() {
+        bail!("--name is required when stdin is not a terminal");
+    }
+    let mut value = |given: Option<String>, prompt: &str| match given {
+        Some(v) => Ok(v),
+        None if interactive => ask(prompt),
+        None => Ok(String::new()),
+    };
+    let name = value(args.name, "Name (should match name in code): ")?;
+    let description = value(args.description, "Description: ")?;
+    let possible_template_params = value(
+        args.possible_template_params,
+        "Template parameters (comma separated list): ",
+    )?;
+    let source_code_link = value(args.source_code_link, "Source code link: ")?;
+
+    let non_empty = |s: String| if s.is_empty() { None } else { Some(s) };
+    Ok(PublishMeta {
+        name,
+        description,
+        possible_template_params: non_empty(possible_template_params)
+            .map(|s| s.split(',').map(|p| p.trim().to_string()).collect()),
+        source_code_link: non_empty(source_code_link),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(name: Option<&str>) -> PublishMetaArgs {
+        PublishMetaArgs {
+            name: name.map(String::from),
+            description: None,
+            possible_template_params: None,
+            source_code_link: None,
+        }
+    }
+
+    #[test]
+    fn without_a_terminal_nothing_is_asked_and_missing_values_are_empty() {
+        let meta = publish_meta(args(Some("note-store")), false, |prompt| {
+            panic!("asked `{}` without a terminal", prompt)
+        })
+        .unwrap();
+        assert_eq!(
+            meta,
+            PublishMeta {
+                name: "note-store".into(),
+                description: String::new(),
+                possible_template_params: None,
+                source_code_link: None,
+            }
+        );
+    }
+
+    #[test]
+    fn without_a_terminal_the_name_is_required() {
+        let err = publish_meta(args(None), false, |_| Ok("asked".into())).unwrap_err();
+        assert!(err.to_string().contains("--name is required"), "{err}");
+    }
+
+    #[test]
+    fn on_a_terminal_only_the_missing_values_are_asked() {
+        let mut asked = vec![];
+        let meta = publish_meta(
+            PublishMetaArgs {
+                name: Some("note-store".into()),
+                description: None,
+                possible_template_params: Some("uid, name".into()),
+                source_code_link: None,
+            },
+            true,
+            |prompt| {
+                asked.push(prompt.to_string());
+                Ok(if prompt.starts_with("Description") {
+                    "Notes".into()
+                } else {
+                    String::new()
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(asked, ["Description: ", "Source code link: "]);
+        assert_eq!(meta.description, "Notes");
+        assert_eq!(
+            meta.possible_template_params,
+            Some(vec!["uid".to_string(), "name".to_string()])
+        );
+        assert_eq!(meta.source_code_link, None);
+    }
+
+    #[test]
+    fn on_a_terminal_a_failed_read_is_an_error_not_a_panic() {
+        let err = publish_meta(args(None), true, |_| bail!("EOF")).unwrap_err();
+        assert!(err.to_string().contains("EOF"), "{err}");
+    }
 }
