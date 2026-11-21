@@ -746,6 +746,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "body": { "kind": "send-master" } }),
     ),
     ("identity.deleteRequest", || json!({ "id": "r" })),
+    ("identity.unwrapRecordKey", || json!({ "wrapped": "w" })),
     // Key sessions.
     (
         "user.loginWithKey",
@@ -1250,6 +1251,7 @@ fn the_local_only_methods_are_the_ones_that_stay_on_this_machine() {
             "identity.inboxSealed",
             "identity.prepareDevice",
             "identity.rekey",
+            "identity.unwrapRecordKey",
             "runtime.quit",
             "runtime.restart",
         ]
@@ -1517,6 +1519,7 @@ async fn operator_methods_answer_everyone_else_admin_credential_required() {
             "identity.prepareDevice",
             "identity.rekey",
             "identity.resetLog",
+            "identity.unwrapRecordKey",
             "runtime.config",
             "runtime.grantNotification",
             "runtime.importData",

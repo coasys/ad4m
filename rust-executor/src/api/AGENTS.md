@@ -82,7 +82,7 @@ handler. `HandlerMap::admit` runs the steps before the handler alone.
 | `Operator` | no capability; `ctx.is_operator()` (the admin credential, or no token on a loopback listener of an executor without one), else 403 "Admin credential required" (`guards::OPERATOR_ONLY`), whatever the caller's capabilities |
 | `Cap(cap)` | none: any caller holding `cap`. An anonymous caller holds only the anonymous set (request a capability, redeem it, sign up, log in, verify an email); the handler acts on `ctx.acts_as()` |
 | `Executor(cap)` | the operator or a grant on the main agent: 403 naming the method to a session on a managed agent, whatever its capabilities, and to an anonymous caller. A grant on the main agent passes (D5): WE web administers a local executor with an app token holding `*` |
-| `UserOrOperator(cap)` | the operator, or a session on a managed agent (a user, or an app the user approved): 403 "<method> for the main agent needs the admin credential" to a grant on the main agent, whatever its capabilities, and to an anonymous caller. For calls that bind the caller's agent for good (`identity.cosignIncept`, `identity.publish`) or speak for this device to its identity's other devices (`identity.postRequest`, `identity.deleteRequest`): every app holds their capabilities by default |
+| `UserOrOperator(cap)` | the operator, or a session on a managed agent (a user, or an app the user approved): 403 "<method> for the main agent needs the admin credential" to a grant on the main agent, whatever its capabilities, and to an anonymous caller. For calls that bind the caller's agent for good (`identity.cosignIncept`, `identity.publish`): every app holds their capabilities by default |
 | `Owns { cap, id, owner }` | the resource `id` reads from the params exists and the operator or the session's agent owns it (`guards::owns`), else 404, missing or not |
 
 `Owns` per `Owner` (who owns the resource; the operator reaches all):
@@ -190,7 +190,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-255 methods: Cap 86, CapAnyPointer 1, Executor 43, Open 9, Operator 36, Owns 76, UserOrOperator 4. Local only (the operator on this machine): 13.
+256 methods: Cap 86, CapAnyPointer 1, Executor 43, Open 9, Operator 37, Owns 76, UserOrOperator 4. Local only (the operator on this machine): 14.
 
 | Method | Guard |
 |---|---|
@@ -294,6 +294,7 @@ the guard checked:
 | `identity.resetLog` | `Operator` |
 | `identity.resolve` | `Cap(agent:READ)` |
 | `identity.status` | `Cap(agent:READ)` |
+| `identity.unwrapRecordKey` | `Operator`, local only |
 | `language.all` | `Cap(language:READ)` |
 | `language.applyTemplate` | `Cap(language:CREATE)` |
 | `language.get` | `Cap(language:READ)` |

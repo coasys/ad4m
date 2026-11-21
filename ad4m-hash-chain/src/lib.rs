@@ -23,7 +23,7 @@ pub use codec::{
     decode_ed25519_multikey, decode_hash, decode_proof_value, encode_ed25519_multikey, encode_hash,
     encode_proof_value, hash_bytes, sha256, Hash, HashError, Multikey, ED25519_PUB, SHA2_256,
 };
-pub use jcs::{canonical_json, CanonError, MAX_SAFE_INTEGER};
+pub use jcs::{canonical_json, canonical_json_exact, CanonError, MAX_SAFE_INTEGER};
 pub use proof::{
     signing_input, signing_input_json, verify_proof, verify_proof_json, Proof, ProofError,
     CRYPTOSUITE, PROOF_TYPE,
