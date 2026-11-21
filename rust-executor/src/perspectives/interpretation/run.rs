@@ -2855,3 +2855,323 @@ mod tests {
         assert_eq!(flows[0].current_state, "identified");
     }
 }
+
+/// A parsed empty answer (`[]`, or instances and flow proposals both empty)
+/// on a pass that had transcript items is one sampling miss. These tests
+/// drive that pass through the real runner and a scripted llama-server,
+/// the same stub the thinking-off retry uses.
+#[cfg(test)]
+mod empty_answer_retry_tests {
+    use super::run_interpretation_with_strategy_and_model;
+    use crate::ai_service::AIService;
+    use crate::db::Ad4mDb;
+    use crate::perspectives::interpretation::DedupStrategy;
+    use crate::perspectives::interpretation::TranscriptTurn;
+    use crate::perspectives::interpretation_test_support::{
+        graph_titles_lower, setup_perspective_no_llm, TASK_SDNA,
+    };
+    use crate::types::{Endpoint, EndpointKind, ModelInput, ModelType};
+
+    const RECORD: &str = r#"[{"class":"Task","title":"Write the spec"}]"#;
+    const FLOW_ONLY: &str = r#"{"instances":[],"flow_proposals":[{"instance":"ad4m://flow/instance/1","toState":"scoped"}]}"#;
+
+    fn reply(content: &str, finish: &str) -> String {
+        serde_json::json!({
+            "choices": [{
+                "message": { "content": content },
+                "finish_reason": finish
+            }]
+        })
+        .to_string()
+    }
+
+    fn body(request: &mockito::Request) -> serde_json::Value {
+        serde_json::from_slice(request.body().unwrap()).unwrap()
+    }
+
+    fn thinking_on(request: &mockito::Request) -> bool {
+        body(request).get("chat_template_kwargs").is_none()
+    }
+
+    fn thinking_off(request: &mockito::Request) -> bool {
+        body(request)["chat_template_kwargs"]["enable_thinking"] == false
+    }
+
+    async fn install_llama(base_url: &str) {
+        AIService::init_global_instance().await.expect("AIService");
+        let service = AIService::global_instance().await.expect("AIService");
+        service.wait_loaded().await;
+        let name = format!("empty-retry-{}", uuid::Uuid::new_v4());
+        let mut endpoint = Endpoint::for_test(&name, EndpointKind::LlamaServer, base_url, &name);
+        // Large enough that the interpretation prompt is not a size failure.
+        // The empty retry is about a parsed `[]`, not a window overflow.
+        endpoint.max_num_ctx = Some(131_072);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).expect("endpoint");
+        let model_id = service
+            .add_model(ModelInput {
+                name: format!("empty-retry-{}", uuid::Uuid::new_v4()),
+                model_type: ModelType::Llm,
+                endpoint_id: endpoint.id,
+                remote_model: "m".into(),
+                native_tools: None,
+            })
+            .await
+            .expect("model");
+        service
+            .set_default_model(ModelType::Llm, model_id)
+            .await
+            .expect("default model");
+    }
+
+    async fn interpret(
+        base_url: &str,
+        turns: &[TranscriptTurn],
+    ) -> (anyhow::Result<super::InterpretationOutcome>, Vec<String>) {
+        // `ensure_db_init` (inside the perspective setup) replaces the
+        // in-memory database the first time this process calls it. Register
+        // the model after that, or the prompt resolves `default` against an
+        // empty database.
+        let (mut perspective, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        install_llama(base_url).await;
+        let outcome = run_interpretation_with_strategy_and_model(
+            &mut perspective,
+            &shapes,
+            turns,
+            "ad4m://empty-retry/",
+            &ctx,
+            &DedupStrategy::default(),
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await;
+        let titles = graph_titles_lower(&perspective, &shapes).await;
+        (outcome, titles)
+    }
+
+    fn said(text: &str) -> Vec<TranscriptTurn> {
+        vec![TranscriptTurn::from_speaker_text("Ada", text)]
+    }
+
+    /// `[]`, then a Task. The record is stored and the model is called twice.
+    /// Both calls leave thinking on: this retry is not the thinking-off retry.
+    #[tokio::test]
+    async fn empty_answer_then_a_record_is_stored_and_the_model_is_called_twice() {
+        let mut upstream = mockito::Server::new_async().await;
+        // mockito 1.7.2 serves the oldest mock that still needs hits.
+        let first = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_on)
+            .with_body(reply("[]", "stop"))
+            .expect(1)
+            .create_async()
+            .await;
+        let second = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_on)
+            .with_body(reply(RECORD, "stop"))
+            .expect(1)
+            .create_async()
+            .await;
+        let thinking_off_call = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_off)
+            .expect(0)
+            .create_async()
+            .await;
+
+        let (outcome, titles) =
+            interpret(&upstream.url(), &said("Please write the spec by Friday")).await;
+        assert!(
+            outcome.is_ok(),
+            "the retry's record must be applied, got {outcome:?}"
+        );
+        assert!(
+            titles.iter().any(|title| title == "write the spec"),
+            "the record from the second answer must be stored, got {titles:?}"
+        );
+        first.assert_async().await;
+        second.assert_async().await;
+        thinking_off_call.assert_async().await;
+    }
+
+    /// Small talk: transcript items, and both answers are `[]`. One retry,
+    /// then nothing is stored. The model is called exactly twice.
+    #[tokio::test]
+    async fn empty_answer_on_small_talk_retries_once_and_stores_nothing() {
+        let mut upstream = mockito::Server::new_async().await;
+        let calls = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_on)
+            .with_body(reply("[]", "stop"))
+            .expect(2)
+            .create_async()
+            .await;
+        let thinking_off_call = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_off)
+            .expect(0)
+            .create_async()
+            .await;
+
+        let (outcome, titles) = interpret(&upstream.url(), &said("hey")).await;
+        assert!(
+            outcome.is_ok(),
+            "a second empty answer is a successful pass, got {outcome:?}"
+        );
+        assert!(
+            titles.is_empty(),
+            "small talk stores nothing, got {titles:?}"
+        );
+        assert!(
+            outcome.unwrap().bases.is_empty(),
+            "the pass writes no bases"
+        );
+        calls.assert_async().await;
+        thinking_off_call.assert_async().await;
+    }
+
+    /// No transcript items: a parsed `[]` is not a miss. One call.
+    #[tokio::test]
+    async fn empty_answer_with_no_transcript_items_is_not_retried() {
+        let mut upstream = mockito::Server::new_async().await;
+        let only = upstream
+            .mock("POST", "/v1/chat/completions")
+            .with_body(reply("[]", "stop"))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let (outcome, titles) = interpret(&upstream.url(), &[]).await;
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert!(titles.is_empty(), "{titles:?}");
+        only.assert_async().await;
+    }
+
+    /// The first answer already has an instance. One call, and it is stored.
+    #[tokio::test]
+    async fn empty_answer_is_not_retried_when_the_first_answer_has_instances() {
+        let mut upstream = mockito::Server::new_async().await;
+        let only = upstream
+            .mock("POST", "/v1/chat/completions")
+            .with_body(reply(RECORD, "stop"))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let (outcome, titles) =
+            interpret(&upstream.url(), &said("Please write the spec by Friday")).await;
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert!(
+            titles.iter().any(|title| title == "write the spec"),
+            "{titles:?}"
+        );
+        only.assert_async().await;
+    }
+
+    /// The first answer has a flow proposal and no instances. One call.
+    #[tokio::test]
+    async fn empty_answer_is_not_retried_when_the_first_answer_has_flow_proposals() {
+        let mut upstream = mockito::Server::new_async().await;
+        let only = upstream
+            .mock("POST", "/v1/chat/completions")
+            .with_body(reply(FLOW_ONLY, "stop"))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let (outcome, titles) = interpret(&upstream.url(), &said("Move the spec to scoped")).await;
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert!(
+            titles.is_empty(),
+            "a proposal alone writes no Task, got {titles:?}"
+        );
+        only.assert_async().await;
+    }
+
+    /// The empty-answer retry is one call with thinking still on. A cut or
+    /// empty reply on that call does not add the thinking-off retry: a pass
+    /// makes at most one extra model call for emptiness.
+    #[tokio::test]
+    async fn empty_answer_retry_does_not_add_a_thinking_off_call() {
+        let mut upstream = mockito::Server::new_async().await;
+        // Oldest mock that still needs hits is served first.
+        let first = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_on)
+            .with_body(reply("[]", "stop"))
+            .expect(1)
+            .create_async()
+            .await;
+        let second = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_on)
+            .with_body(reply("", "length"))
+            .expect(1)
+            .create_async()
+            .await;
+        let thinking_off_call = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_off)
+            .expect(0)
+            .create_async()
+            .await;
+
+        let (outcome, titles) =
+            interpret(&upstream.url(), &said("Please write the spec by Friday")).await;
+        assert!(
+            outcome.is_ok(),
+            "a retry that does not parse keeps the first empty answer, got {outcome:?}"
+        );
+        assert!(titles.is_empty(), "{titles:?}");
+        first.assert_async().await;
+        second.assert_async().await;
+        thinking_off_call.assert_async().await;
+    }
+
+    /// A size failure already spent the pass's one extra call (thinking off).
+    /// When that retry parses as `[]`, the empty-answer retry does not add
+    /// a third call, and the record that a third call would have returned
+    /// is not stored.
+    #[tokio::test]
+    async fn empty_answer_after_thinking_off_does_not_call_the_model_again() {
+        let mut upstream = mockito::Server::new_async().await;
+        // Oldest mock that still needs hits is served first. The record is
+        // a catch-all with expect(0), so it is only a fallback after the
+        // two scripted replies have been consumed.
+        let first = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_on)
+            .with_body(reply("", "length"))
+            .expect(1)
+            .create_async()
+            .await;
+        let second = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_off)
+            .with_body(reply("[]", "stop"))
+            .expect(1)
+            .create_async()
+            .await;
+        let third = upstream
+            .mock("POST", "/v1/chat/completions")
+            .with_body(reply(RECORD, "stop"))
+            .expect(0)
+            .create_async()
+            .await;
+
+        let (outcome, titles) =
+            interpret(&upstream.url(), &said("Please write the spec by Friday")).await;
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert!(
+            titles.is_empty(),
+            "the thinking-off answer was empty; a third call must not store the record, got {titles:?}"
+        );
+        first.assert_async().await;
+        second.assert_async().await;
+        third.assert_async().await;
+    }
+}
