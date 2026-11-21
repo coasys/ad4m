@@ -148,7 +148,7 @@ impl IdentityService {
     }
 }
 
-fn mirror_head(head: &ad4m_ldk::identity::SignedHead) -> Result<SignedHead, WsRpcError> {
+pub(super) fn mirror_head(head: &ad4m_ldk::identity::SignedHead) -> Result<SignedHead, WsRpcError> {
     convert(head).map_err(|e| WsRpcError::internal(e.to_string()))
 }
 
@@ -1165,6 +1165,9 @@ mod tests {
         claim_error: std::sync::Mutex<Option<IdentityError>>,
         /// What `offer_state` answers for every offer.
         offer: std::sync::Mutex<String>,
+        /// The next append fails once: with the error before anything is committed (`false`), or
+        /// after the store committed (`true`: the answer is lost).
+        append_fault: std::sync::Mutex<Option<(IdentityError, bool)>>,
     }
 
     impl RecordingStore {
@@ -1176,6 +1179,7 @@ mod tests {
                 claims: std::sync::atomic::AtomicUsize::new(0),
                 claim_error: std::sync::Mutex::new(None),
                 offer: std::sync::Mutex::new("claimed".into()),
+                append_fault: std::sync::Mutex::new(None),
             }
         }
     }
@@ -1221,6 +1225,10 @@ mod tests {
         ) -> Result<ad4m_ldk::identity::SignedHead, IdentityError> {
             self.appends
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let fault = self.append_fault.lock().unwrap().take();
+            if let Some((error, false)) = fault {
+                return Err(error);
+            }
             if self.conflict {
                 let held = self.inner.events.lock().unwrap().clone();
                 let chain = ad4m_identity_core::fold(&held).unwrap();
@@ -1239,6 +1247,9 @@ mod tests {
                 .collect();
             let mut held = self.inner.events.lock().unwrap();
             held.extend(events);
+            if let Some((error, true)) = fault {
+                return Err(error);
+            }
             let chain = ad4m_identity_core::fold(&held).unwrap();
             let head = chain.head();
             Ok(self
@@ -1612,6 +1623,32 @@ mod tests {
         )))
     }
 
+    /// The key `name` (a retired key of `did`) holds no secret: not in memory, and not in the
+    /// keystore a save writes and a restart reads. Its public key is still known, and it still
+    /// answers the DID document, so what it signed verifies and it is listed.
+    fn assert_secret_destroyed(name: &str, did: &str) {
+        let backend = crate::wallet::wallet_backend();
+        assert!(backend.get_secret_key(name).is_none(), "the secret is gone");
+        assert!(
+            backend.sign(name, b"new link").is_none(),
+            "it signs nothing"
+        );
+        assert_eq!(backend.get_did_document(name).expect("listed").id, did);
+        let public = backend.get_public_key(name).expect("the public key stays");
+        // Saved and read back, as after a restart.
+        let cipher = backend.export("unlink");
+        let mut reloaded = crate::wallet::Wallet::new();
+        reloaded.load(cipher);
+        reloaded
+            .unlock("unlink".into())
+            .expect("the keystore opens");
+        let name = name.to_string();
+        assert!(reloaded.get_secret_key(&name).is_none());
+        assert!(reloaded.sign(&name, b"new link").is_none());
+        assert_eq!(reloaded.get_public_key(&name), Some(public));
+        assert!(reloaded.get_secret_key(&did.to_string()).is_none());
+    }
+
     /// A user's device unlinks itself: the `unlink` reaches the store signed by the device key
     /// (no master key), the key leaves the wallet's working keys, the agent's grants end, and
     /// `identity.status` shows the key `unlinked`. A second call is refused: the key is dead.
@@ -1642,10 +1679,12 @@ mod tests {
         assert!(grant.is_ended(), "the agent is signed out");
         assert!(!other.is_ended(), "another agent is not");
         assert!(crate::AgentService::wallet_key_for_did(&agent_did).is_err());
-        let retired = crate::wallet::wallet_backend()
-            .get_did_document(&crate::agent::rekey::retired_managed_key_name(&agent_did))
-            .expect("the key is kept for history");
-        assert_eq!(retired.id, agent_did);
+        assert_secret_destroyed(
+            &crate::agent::rekey::retired_managed_key_name(&agent_did),
+            &agent_did,
+        );
+        assert_eq!(db(|db| db.unlink_intent(&agent_did)).unwrap(), None);
+        assert!(!crate::agent::fence::is_raised(&agent_did));
         let status = service.status(&agent).await.unwrap();
         assert_eq!(status.unlinked, Some(head.seq));
         assert_eq!(status.revoked, None);
@@ -1655,6 +1694,282 @@ mod tests {
         assert_eq!(again.code, 409);
         assert!(again.message.starts_with("key-dead"), "{}", again.message);
         assert_eq!(backend.appends.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// A device whose `unlink` the store committed but whose answer was lost: the intent and
+    /// the fence stay, the key still works for nothing (signing is refused), and the retry
+    /// finishes the cleanup instead of answering `key-dead`, with no second append.
+    #[tokio::test]
+    async fn an_unlink_whose_answer_is_lost_is_finished_by_the_retry() {
+        let _dir = unlocked_agent_service();
+        let agent = user_agent("lost");
+        let (agent_did, _) = device_key(&agent).unwrap();
+        let backend = Arc::new(RecordingStore::new(vec![], false));
+        let service = service_on(backend.clone());
+        linked(&service, &agent, 72).await;
+        let grant = grant_on(&agent);
+        *backend.append_fault.lock().unwrap() =
+            Some((IdentityError::Unavailable("timed out".into()), true));
+
+        let lost = service.unlink_self(&agent).await.expect_err("no answer");
+
+        assert_eq!(lost.code, 503);
+        assert_eq!(
+            backend.inner.events.lock().unwrap().len(),
+            2,
+            "it committed"
+        );
+        assert!(
+            db(|db| db.unlink_intent(&agent_did)).unwrap().is_some(),
+            "the intent stays"
+        );
+        assert!(crate::agent::fence::is_raised(&agent_did));
+        assert!(crate::AgentService::wallet_key_for_did(&agent_did).is_ok());
+        assert!(!grant.is_ended());
+        let refused = crate::agent::sign_for_context(b"a link", &agent).expect_err("fenced");
+        assert!(refused.to_string().contains("being unlinked"), "{refused}");
+
+        let head = service
+            .unlink_self(&agent)
+            .await
+            .expect("the retry cleans up");
+
+        assert_eq!(head.seq, 1);
+        assert_eq!(backend.appends.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(grant.is_ended());
+        assert_secret_destroyed(
+            &crate::agent::rekey::retired_managed_key_name(&agent_did),
+            &agent_did,
+        );
+        assert_eq!(db(|db| db.unlink_intent(&agent_did)).unwrap(), None);
+        assert!(!crate::agent::fence::is_raised(&agent_did));
+        let dead = service
+            .unlink_self(&agent)
+            .await
+            .expect_err("now it is dead");
+        assert!(dead.message.starts_with("key-dead"), "{}", dead.message);
+    }
+
+    /// A failure before the store committed that does not say so (a 5xx): the intent stays, and
+    /// the retry publishes the `unlink` again, then cleans up.
+    #[tokio::test]
+    async fn an_ambiguous_failure_keeps_the_intent_and_the_retry_publishes_again() {
+        let _dir = unlocked_agent_service();
+        let agent = user_agent("ambiguous");
+        let (agent_did, _) = device_key(&agent).unwrap();
+        let backend = Arc::new(RecordingStore::new(vec![], false));
+        let service = service_on(backend.clone());
+        linked(&service, &agent, 73).await;
+        *backend.append_fault.lock().unwrap() =
+            Some((IdentityError::Unavailable("down".into()), false));
+
+        let failed = service.unlink_self(&agent).await.expect_err("unavailable");
+
+        assert_eq!(failed.code, 503);
+        assert_eq!(
+            backend.inner.events.lock().unwrap().len(),
+            1,
+            "nothing committed"
+        );
+        assert!(db(|db| db.unlink_intent(&agent_did)).unwrap().is_some());
+        assert!(crate::agent::fence::is_raised(&agent_did));
+
+        let head = service
+            .unlink_self(&agent)
+            .await
+            .expect("the retry publishes");
+
+        assert_eq!(head.seq, 1);
+        assert_eq!(backend.appends.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert_secret_destroyed(
+            &crate::agent::rekey::retired_managed_key_name(&agent_did),
+            &agent_did,
+        );
+        assert_eq!(db(|db| db.unlink_intent(&agent_did)).unwrap(), None);
+        assert!(!crate::agent::fence::is_raised(&agent_did));
+    }
+
+    /// A store that refuses the `unlink` for sure (a 4xx) leaves nothing behind: the intent and
+    /// the fence go, and the key works as before.
+    #[tokio::test]
+    async fn a_refused_unlink_clears_the_intent_and_the_fence() {
+        let _dir = unlocked_agent_service();
+        let agent = user_agent("refused");
+        let (agent_did, _) = device_key(&agent).unwrap();
+        let backend = Arc::new(RecordingStore::new(vec![], false));
+        let service = service_on(backend.clone());
+        linked(&service, &agent, 74).await;
+        let grant = grant_on(&agent);
+        *backend.append_fault.lock().unwrap() =
+            Some((IdentityError::Invalid("not today".into()), false));
+
+        let refused = service.unlink_self(&agent).await.expect_err("refused");
+
+        assert_eq!(refused.code, 400);
+        assert_eq!(db(|db| db.unlink_intent(&agent_did)).unwrap(), None);
+        assert!(!crate::agent::fence::is_raised(&agent_did));
+        assert!(!grant.is_ended());
+        assert!(crate::agent::sign_for_context(b"a link", &agent).is_ok());
+        assert!(crate::wallet::wallet_backend()
+            .get_secret_key(&crate::AgentService::wallet_key_for_did(&agent_did).unwrap())
+            .is_some());
+    }
+
+    /// A restart with a pending intent: the fence is loaded from the database before anything
+    /// signs, and `resume_pending` finishes the unlink (here: the store holds it already).
+    #[tokio::test]
+    async fn a_restart_finishes_a_pending_unlink() {
+        let _dir = unlocked_agent_service();
+        let agent = user_agent("restart");
+        let (agent_did, _) = device_key(&agent).unwrap();
+        let backend = Arc::new(RecordingStore::new(vec![], false));
+        let service = service_on(backend.clone());
+        linked(&service, &agent, 75).await;
+        *backend.append_fault.lock().unwrap() =
+            Some((IdentityError::Unavailable("lost".into()), true));
+        service.unlink_self(&agent).await.expect_err("no answer");
+
+        // The process stops: the in-memory fence is gone, the intent is in the database.
+        crate::agent::fence::lift(&agent_did);
+        assert!(crate::agent::sign_for_context(b"x", &agent).is_ok());
+        let intents = db(|db| db.unlink_intents()).unwrap();
+        crate::agent::fence::load(intents.into_iter().map(|(did, _)| did));
+        assert!(crate::agent::sign_for_context(b"x", &agent).is_err());
+
+        service.resume_pending().await;
+
+        assert_secret_destroyed(
+            &crate::agent::rekey::retired_managed_key_name(&agent_did),
+            &agent_did,
+        );
+        assert_eq!(db(|db| db.unlink_intent(&agent_did)).unwrap(), None);
+        assert!(!crate::agent::fence::is_raised(&agent_did));
+    }
+
+    /// A key the log shows unlinked whose secret is still here (no intent, as after a crash
+    /// before the intent was stored, or an unlink by another device) is cleaned up by the call,
+    /// not refused as `key-dead`.
+    #[tokio::test]
+    async fn a_key_the_log_shows_unlinked_is_cleaned_up_by_the_call() {
+        let _dir = unlocked_agent_service();
+        let agent = user_agent("dead-in-log");
+        let (agent_did, _) = device_key(&agent).unwrap();
+        let backend = Arc::new(RecordingStore::new(vec![], false));
+        let service = service_on(backend.clone());
+        linked(&service, &agent, 76).await;
+        *backend.append_fault.lock().unwrap() =
+            Some((IdentityError::Unavailable("lost".into()), true));
+        service.unlink_self(&agent).await.expect_err("no answer");
+        db(|db| db.clear_unlink_intent(&agent_did)).unwrap();
+        crate::agent::fence::lift(&agent_did);
+
+        let head = service.unlink_self(&agent).await.expect("cleaned up");
+
+        assert_eq!(head.seq, 1);
+        assert_eq!(backend.appends.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_secret_destroyed(
+            &crate::agent::rekey::retired_managed_key_name(&agent_did),
+            &agent_did,
+        );
+    }
+
+    /// Only the `unlink` signs with a fenced key.
+    #[tokio::test]
+    async fn a_fenced_key_signs_nothing_but_its_unlink() {
+        let _dir = unlocked_agent_service();
+        let agent = user_agent("fenced");
+        let other = user_agent("unfenced");
+        let (agent_did, _) = device_key(&agent).unwrap();
+
+        crate::agent::fence::raise(&agent_did);
+        let refused = crate::agent::sign_for_context(b"a link", &agent);
+        let signer = WalletSigner::new(&agent).unwrap();
+        ad4m_identity_core::build::Signer::sign(&signer, b"a link");
+        let signer_failed = signer.check();
+        let unlink_signer = WalletSigner::for_unlink(&agent).unwrap();
+        ad4m_identity_core::build::Signer::sign(&unlink_signer, b"the unlink");
+        let unlink_ok = unlink_signer.check();
+        let other_signs = crate::agent::sign_for_context(b"a link", &other);
+        crate::agent::fence::lift(&agent_did);
+        let after = crate::agent::sign_for_context(b"a link", &agent);
+
+        assert!(refused.is_err());
+        assert!(signer_failed.is_err());
+        assert!(unlink_ok.is_ok());
+        assert!(other_signs.is_ok());
+        assert!(after.is_ok());
+    }
+
+    /// A key another device ended is destroyed here and its agent signed out; an agent whose
+    /// own unlink is pending is left to its cleanup.
+    #[tokio::test]
+    async fn a_key_another_device_ended_is_destroyed_here() {
+        use crate::identity::verdict::{KeyVerdict, VerdictChange};
+        let _dir = unlocked_agent_service();
+        let agent = user_agent("remote");
+        let (agent_did, key) = device_key(&agent).unwrap();
+        let backend = Arc::new(RecordingStore::new(vec![], false));
+        let service = service_on(backend.clone());
+        let scid = linked(&service, &agent, 77).await;
+        let grant = grant_on(&agent);
+        let change = VerdictChange {
+            key,
+            scid: scid.clone(),
+            verdict: KeyVerdict::Revoked,
+        };
+
+        // Its own unlink is pending: the cleanup of that signs it out, not this.
+        db(|db| db.set_unlink_intent(&agent_did, &scid, 1)).unwrap();
+        crate::identity::unlink::end_dead_key(&change).await;
+        assert!(!grant.is_ended());
+        assert!(crate::AgentService::wallet_key_for_did(&agent_did).is_ok());
+        db(|db| db.clear_unlink_intent(&agent_did)).unwrap();
+
+        crate::identity::unlink::end_dead_key(&change).await;
+
+        assert!(grant.is_ended());
+        assert_secret_destroyed(
+            &crate::agent::rekey::retired_managed_key_name(&agent_did),
+            &agent_did,
+        );
+        assert_eq!(db(|db| db.unlink_intent(&agent_did)).unwrap(), None);
+        assert!(!crate::agent::fence::is_raised(&agent_did));
+    }
+
+    /// The verdict channel lagged and the change was lost: the sweep checks every local agent
+    /// against its own trusted log and ends the key the log shows unlinked.
+    #[tokio::test]
+    async fn the_sweep_after_a_lag_ends_a_key_the_log_shows_unlinked() {
+        let _dir = unlocked_agent_service();
+        let agent = user_agent("lagged");
+        let alive = user_agent("alive");
+        let (agent_did, _) = device_key(&agent).unwrap();
+        let backend = Arc::new(RecordingStore::new(vec![], false));
+        let service = service_on(backend.clone());
+        let scid = linked(&service, &agent, 78).await;
+        let grant = grant_on(&agent);
+        let alive_grant = grant_on(&alive);
+        // The store holds an `unlink` of the key that this executor never heard of as a change.
+        *backend.append_fault.lock().unwrap() =
+            Some((IdentityError::Unavailable("lost".into()), true));
+        service.unlink_self(&agent).await.expect_err("no answer");
+        db(|db| db.clear_unlink_intent(&agent_did)).unwrap();
+        crate::agent::fence::lift(&agent_did);
+        service
+            .cache
+            .refresh(service.backend.as_ref(), &scid)
+            .await
+            .unwrap();
+        assert!(!grant.is_ended());
+
+        crate::identity::unlink::sweep_dead_keys(&service.cache).await;
+
+        assert!(grant.is_ended());
+        assert!(!alive_grant.is_ended());
+        assert_secret_destroyed(
+            &crate::agent::rekey::retired_managed_key_name(&agent_did),
+            &agent_did,
+        );
     }
 
     /// The main agent that unlinks itself gets a new key (`identity.rekey`'s move) and its apps
@@ -1675,8 +1990,9 @@ mod tests {
         assert_eq!(head.seq, 1);
         assert!(grant.is_ended());
         assert_ne!(crate::agent::did(), old, "a new did:key");
-        assert!(crate::wallet::wallet_backend()
-            .key_exists(&crate::agent::rekey::retired_key_name(&old)));
+        assert_secret_destroyed(&crate::agent::rekey::retired_key_name(&old), &old);
+        assert_eq!(db(|db| db.unlink_intent(&old)).unwrap(), None);
+        assert!(!crate::agent::fence::is_raised(&old));
         let status = service.status(&main).await.unwrap();
         assert_eq!(status.did, None, "the new key speaks for no identity");
     }
@@ -1713,6 +2029,15 @@ mod tests {
         let revoke = ad4m_identity_core::build::revoke(&chain, &master, &["d1".to_string()], None)
             .expect("a revoke");
         backend.inner.events.lock().unwrap().push(revoke);
+
+        // The key is dead in the log but its secret is still here: the call takes it out of
+        // use without publishing anything more.
+        service
+            .unlink_self(&agent)
+            .await
+            .expect("the cleanup of a dead key");
+        let (did, _) = device_key(&agent).unwrap();
+        assert_secret_destroyed(&crate::agent::rekey::retired_managed_key_name(&did), &did);
 
         let refused = service.unlink_self(&agent).await.expect_err("dead");
 
@@ -1763,11 +2088,11 @@ mod tests {
             verdict: KeyVerdict::Expired,
             ..change.clone()
         };
-        crate::identity::unlink::end_sessions_of(&wrong_scid);
-        crate::identity::unlink::end_sessions_of(&expired);
+        crate::identity::unlink::end_dead_key(&wrong_scid).await;
+        crate::identity::unlink::end_dead_key(&expired).await;
         assert!(!grant.is_ended());
 
-        crate::identity::unlink::end_sessions_of(&change);
+        crate::identity::unlink::end_dead_key(&change).await;
 
         assert!(grant.is_ended(), "the agent is signed out");
         let status = service.status(&agent).await.unwrap();

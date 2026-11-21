@@ -326,27 +326,35 @@ impl Wallet {
             .as_ref()?
             .by_name
             .get(name)
+            .filter(|key| !key.secret.is_empty())
             .map(|key| key.secret.clone())
     }
 
     pub fn get_did_document(&self, name: &String) -> Option<did_key::Document> {
         self.keys.as_ref()?.by_name.get(name).map(|key| {
+            // A key whose secret was destroyed still has its public side and its document.
+            let secret = Some(&key.secret).filter(|secret| !secret.is_empty());
             let key = did_key::from_existing_key::<Ed25519KeyPair>(
                 &key.public.clone(),
-                Some(&key.secret.clone()),
+                secret.map(|s| s.as_slice()),
             );
             key.get_did_document(DID_DOCUMENT_CONFIG)
         })
     }
 
     pub fn sign(&self, name: &String, message: &[u8]) -> Option<Vec<u8>> {
-        self.keys.as_ref()?.by_name.get(name).map(|key| {
-            let key = did_key::from_existing_key::<Ed25519KeyPair>(
-                &key.public.clone(),
-                Some(&key.secret.clone()),
-            );
-            key.sign(message)
-        })
+        self.keys
+            .as_ref()?
+            .by_name
+            .get(name)
+            .filter(|key| !key.secret.is_empty())
+            .map(|key| {
+                let key = did_key::from_existing_key::<Ed25519KeyPair>(
+                    &key.public.clone(),
+                    Some(&key.secret.clone()),
+                );
+                key.sign(message)
+            })
     }
 
     pub fn lock(&mut self, passphrase: String) {
@@ -424,6 +432,28 @@ impl Wallet {
             .remove(name)
             .ok_or_else(|| anyhow!("no key named {}", name))?;
         keys.by_name.insert(retired_name.to_string(), key);
+        Ok(())
+    }
+
+    /// Deletes the secret of the key `name` and keeps its public key under that name, so what
+    /// the key signed still verifies and the key is still listed. Nothing can sign with it
+    /// again, and the next [`Wallet::lock`] or [`Wallet::export`] writes the keystore without
+    /// the secret. Idempotent.
+    pub fn destroy_secret(&mut self, name: &str) -> Result<(), AnyError> {
+        let keys = self
+            .keys
+            .as_mut()
+            .ok_or_else(|| anyhow!("wallet is locked"))?;
+        let key = keys
+            .by_name
+            .get_mut(name)
+            .ok_or_else(|| anyhow!("no key named {}", name))?;
+        // Overwritten before it is dropped: a plain `clear` would leave the bytes in the
+        // allocation.
+        for byte in key.secret.iter_mut() {
+            *byte = 0;
+        }
+        key.secret = Vec::new();
         Ok(())
     }
 }
@@ -532,6 +562,14 @@ pub trait WalletBackend: Send + Sync {
     /// main agent's old key). Shared mode cannot rename keys.
     fn retire_key(&self, _name: &str, _retired_name: &str) -> Result<(), AnyError> {
         Err(anyhow!("this wallet backend cannot rename keys"))
+    }
+
+    /// Deletes the secret of the key `name` and keeps its public key under that name (a key
+    /// that signed links and must never sign again: `identity.unlinkSelf`). The keystore the
+    /// next save writes no longer holds the secret. Shared mode keeps keys server-side and
+    /// cannot.
+    fn destroy_secret(&self, _name: &str) -> Result<(), AnyError> {
+        Err(anyhow!("this wallet backend cannot delete a key's secret"))
     }
 }
 
@@ -711,6 +749,11 @@ impl WalletBackend for LocalWallet {
     fn retire_key(&self, name: &str, retired_name: &str) -> Result<(), AnyError> {
         let mut wallet = self.inner.lock().expect("wallet lock");
         wallet.retire_key(name, retired_name)
+    }
+
+    fn destroy_secret(&self, name: &str) -> Result<(), AnyError> {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        wallet.destroy_secret(name)
     }
 }
 
@@ -928,6 +971,41 @@ impl WalletBackend for SharedWallet {
 mod tests {
     //Test the encryption and decryption of a string
     use super::*;
+
+    /// A key whose secret was destroyed keeps its public side, and the keystore a save writes
+    /// and a restart reads holds no secret of it: nothing can sign with it again.
+    #[test]
+    fn a_destroyed_secret_is_gone_from_memory_and_from_the_keystore() {
+        let mut wallet = Wallet::new();
+        wallet.generate_keypair("dead".into());
+        wallet.generate_keypair("live".into());
+        let public = wallet.get_public_key(&"dead".to_string()).unwrap();
+        let live_secret = wallet.get_secret_key(&"live".to_string()).unwrap();
+        let id = wallet.get_did_document(&"dead".to_string()).unwrap().id;
+
+        wallet.destroy_secret("dead").unwrap();
+        wallet.destroy_secret("dead").unwrap();
+        assert!(wallet.destroy_secret("missing").is_err());
+
+        let mut restarted = Wallet::new();
+        restarted.load(wallet.export("pw".into()));
+        restarted.unlock("pw".into()).unwrap();
+        for wallet in [&wallet, &restarted] {
+            assert_eq!(wallet.get_secret_key(&"dead".to_string()), None);
+            assert_eq!(wallet.sign(&"dead".to_string(), b"a link"), None);
+            assert_eq!(
+                wallet.get_public_key(&"dead".to_string()),
+                Some(public.clone())
+            );
+            assert_eq!(wallet.get_did_document(&"dead".to_string()).unwrap().id, id);
+            assert_eq!(wallet.list_key_names(), vec!["dead", "live"]);
+            assert_eq!(
+                wallet.get_secret_key(&"live".to_string()),
+                Some(live_secret.clone())
+            );
+            assert!(wallet.sign(&"live".to_string(), b"a link").is_some());
+        }
+    }
 
     #[test]
     fn test_slice_to_u8_array() {

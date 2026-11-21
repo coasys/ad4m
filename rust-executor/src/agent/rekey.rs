@@ -82,6 +82,27 @@ impl AgentService {
         Ok(())
     }
 
+    /// Deletes the secret of the retired key `did` (a retired managed agent's key, or a retired
+    /// main key), keeping its public key under the retired name, and saves the agent file, so
+    /// the keystore on disk holds no secret of it. Nothing is left to do when the wallet has no
+    /// retired key of `did`, or one without a secret. When the save fails the error is
+    /// returned: the secret is gone from memory but the file may still hold it, and the
+    /// caller tries again. Needs an unlocked agent whose passphrase is in memory.
+    pub fn destroy_retired_key(&self, did: &str) -> Result<(), AnyError> {
+        self.signing_checks()?;
+        let passphrase = self.passphrase.clone().ok_or_else(|| {
+            anyhow!("the agent's passphrase is not in memory: unlock the agent first")
+        })?;
+        let backend = wallet_backend();
+        for name in [retired_managed_key_name(did), retired_key_name(did)] {
+            if backend.key_exists(&name) {
+                backend.destroy_secret(&name)?;
+            }
+        }
+        super::forget_managed_key_names();
+        self.try_save(&passphrase)
+    }
+
     /// Gives the main agent a new wallet key and keeps the old one under its retired name.
     /// Moves this service's own copies of the DID: the DID, its document, the signing key id
     /// and the profile (the profile's DID; its links stay as signed), and saves the agent
@@ -187,6 +208,9 @@ pub(crate) mod tests {
         }
         fn retire_key(&self, name: &str, retired_name: &str) -> Result<(), AnyError> {
             self.inner.retire_key(name, retired_name)
+        }
+        fn destroy_secret(&self, name: &str) -> Result<(), AnyError> {
+            self.inner.destroy_secret(name)
         }
     }
 
