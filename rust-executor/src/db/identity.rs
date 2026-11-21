@@ -179,6 +179,16 @@ impl Ad4mDb {
         }
     }
 
+    /// Tests on the shared database: drops the binding of `agent_did`.
+    #[cfg(test)]
+    pub(crate) fn clear_agent_identity_for_test(&self, agent_did: &str) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "DELETE FROM identity_agents WHERE agent_did = ?1",
+            params![agent_did],
+        )?;
+        Ok(())
+    }
+
     /// The local agents (`did:key`s) that speak for `scid`.
     pub fn agents_of_identity(&self, scid: &str) -> Ad4mDbResult<Vec<String>> {
         let mut stmt = self

@@ -510,6 +510,28 @@ static AGENT_PUBLISH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_ne
 /// the person's, each a few agent-language calls with their own store timeouts).
 const MANAGED_PROFILE_PUBLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Set once the main agent's DID is known — `load` reads it from the agent file at start,
+/// `create_new_keys` sets it on a first run. `did_for_context(&AgentContext::Main)` answers
+/// from then on; before it (and before the service exists at all, where the call panics) a
+/// task that needs the DID, like the key-session watcher, waits on [`agent_ready`].
+static AGENT_READY: std::sync::LazyLock<tokio::sync::watch::Sender<bool>> =
+    std::sync::LazyLock::new(|| tokio::sync::watch::channel(false).0);
+
+/// A receiver of [`AGENT_READY`]: `true` once the main agent's DID is known.
+pub fn agent_ready() -> tokio::sync::watch::Receiver<bool> {
+    AGENT_READY.subscribe()
+}
+
+fn mark_agent_ready() {
+    AGENT_READY.send_replace(true);
+}
+
+/// Back to "no main agent yet", as a fresh process starts: a test of what marks it.
+#[cfg(test)]
+pub(crate) fn unmark_agent_ready_for_test() {
+    AGENT_READY.send_replace(false);
+}
+
 /// SHA-256 over the names and public keys in a wallet, in name order.
 fn key_set_fingerprint(wallet: &dyn crate::wallet::WalletBackend) -> String {
     use sha2::{Digest, Sha256};
@@ -1041,6 +1063,7 @@ impl AgentService {
 
         self.did_document = Some(serde_json::to_string(&did_document()).unwrap());
         self.did = Some(did.clone());
+        mark_agent_ready();
         self.agent = Some(Agent {
             did,
             perspective: Some(Perspective { links: vec![] }),
@@ -1278,6 +1301,7 @@ impl AgentService {
         }
 
         self.did = Some(dump.did.clone());
+        mark_agent_ready();
         self.did_document = Some(dump.did_document);
         self.signing_key_id = Some(dump.signing_key_id);
 

@@ -613,6 +613,14 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             .into_owned(),
     );
 
+    // Grants are the allowlist of tokens: load them before the identity module starts its
+    // watchers, so a verdict change they answer acts on the loaded grants (a revoked row is
+    // cancelled here before any replay reaches it).
+    if let Err(e) = agent::grants::load_at_start() {
+        // Without its grants the API would refuse every token: it does not start.
+        return failed_start(format!("Could not load the grants: {e}"));
+    }
+
     // The key-log cache lives in the same database file.
     {
         let db_path = std::path::Path::new(
@@ -676,16 +684,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     info!("Initializing Agent service...");
     AgentService::init_global_instance(config.app_data_path.clone().unwrap());
 
-    // Load agent data from disk (wallet cipher, DID, etc.) if previously initialized.
-    // On the old JS-based executor this was done by the JS AgentService calling AGENT.load().
-    AgentService::with_mutable_global_instance(|agent_service| {
-        if agent_service.is_initialized() {
-            agent_service.load();
-            info!("Agent loaded from disk");
-        } else {
-            info!("Agent not yet initialized (first run)");
-        }
-    });
+    // Load agent data from disk (wallet cipher, DID, etc.) if previously initialized, then
+    // end the key-bound grants the persisted verdicts refuse — a grant's `agent_speaks`
+    // reads the main agent's DID, so the load comes first; the API serves no session yet.
+    load_agent_and_end_revoked_key_grants(crate::identity::service().ok().as_deref()).await;
     // After the agent loads: health events go to the sessions acting as the main agent.
     ai_service::endpoints::spawn_health_loop();
     // The installed local AI runtimes, in the background.
@@ -709,12 +711,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             }
         }
     });
-
-    // Grants are the allowlist of tokens: load them before the API serves.
-    if let Err(e) = agent::grants::load_at_start() {
-        // Without its grants the API would refuse every token: it does not start.
-        return failed_start(format!("Could not load the grants: {e}"));
-    }
 
     if config.admin_credential.is_none() {
         // Only reachable with insecure_no_admin_credential (checked above).
@@ -1004,6 +1000,33 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         }
         result
     })
+}
+
+/// `run`'s order for the start-up pass over the key-bound grants: the persisted agent is
+/// read in first (as the old JS executor's `AGENT.load()` did), then the cached verdicts
+/// end the grants they refuse. `agent_speaks` asks a grant's agent's DID — before
+/// `AgentService::init_global_instance` that read panics ("AgentService not initialized",
+/// inside the singleton's lock, so it poisons too), and before `load` reads the file in it
+/// finds no agent and ends a grant it should keep. The API has not started serving, so the
+/// pass still precedes every session it acts on.
+pub(crate) async fn load_agent_and_end_revoked_key_grants(
+    service: Option<&crate::identity::service::IdentityService>,
+) {
+    AgentService::with_mutable_global_instance(|agent_service| {
+        if agent_service.is_initialized() {
+            agent_service.load();
+            info!("Agent loaded from disk");
+        } else {
+            info!("Agent not yet initialized (first run)");
+        }
+    });
+    if let Some(service) = service {
+        crate::identity::key_login::end_key_grants_revoked_in_cache(
+            service,
+            crate::agent::grants::Grants::global(),
+        )
+        .await;
+    }
 }
 
 /// What the executor's graceful shutdown (`SHUTDOWN_TX`, which a signal fires) cleans up before

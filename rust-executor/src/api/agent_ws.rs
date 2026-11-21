@@ -120,11 +120,14 @@ async fn get_apps(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     apps_of(&ctx)
 }
 
-/// The app list of the agent the caller acts as, as clients see it: no tokens.
+/// The app list of the agent the caller acts as, as clients see it: no tokens. An
+/// operator-role grant shows to the operator alone; an app on the main agent it sits on
+/// must not learn its request id (`Owns` refuses it there too).
 fn apps_of(ctx: &RequestContext) -> Result<Value, WsRpcError> {
     let apps: Vec<crate::types::Apps> = Grants::global()
         .list(&ctx.acts_as())
         .iter()
+        .filter(|grant| !grant.is_operator() || ctx.is_operator())
         .map(|grant| grant.as_app())
         .collect();
     Ok(serde_json::to_value(apps)?)
@@ -713,8 +716,14 @@ async fn permit_capability_handler(
             ));
         }
     }
-    let random_number_challenge =
-        crate::agent::capabilities::permit_capability_within(auth, &held).map_err(|_| missing())?;
+    // A key-bound session's approval binds the grant the same way (delegated): the app's
+    // token ends with the device and the identity, as the approving session's would.
+    let random_number_challenge = crate::agent::capabilities::permit_capability_within(
+        auth,
+        &held,
+        ctx.session.grant().map(|g| &**g),
+    )
+    .map_err(|_| missing())?;
     Ok(Value::String(random_number_challenge))
 }
 
@@ -985,6 +994,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
     map.method::<UpdateProfileRequest, Agent>("agent.updateProfile", update_profile)
         .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
+    // `agent.generate`, `agent.import` and `agent.lock` are not local only: the operator calls
+    // them from anywhere, an operator from a key login included.
     map.method::<GenerateAgentRequest, AgentStatus>("agent.generate", generate_agent)
         .long()
         .guard(Guard::Executor(AGENT_CREATE_CAPABILITY.clone()));
