@@ -31,6 +31,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 echo "$method $url" >> "$FAKE_LOG"
+[ -n "${FAKE_ON_CALL:-}" ] && bash -c "$FAKE_ON_CALL"
 [ -n "$data" ] && echo "  data: $data" >> "$FAKE_LOG"
 while read -r m sub file; do
   [ -z "$m" ] && continue
@@ -254,6 +255,51 @@ check "red: a run on another branch opens nothing" 0 'not dev' red CIRCLE_BRANCH
 not_logged "nothing sent to GitHub issues" "issues"
 check "red: DEV_TIER_NO_ISSUE (no build stash) opens nothing" 0 '^no issue: no build stash' red DEV_TIER_NO_ISSUE="no build stash"
 not_logged "nothing sent" "."
+
+# --- stash: wait for build's stash of the commit while that build runs; build
+# here when it is gone; fail (no issue) when that build is red.
+STASH="$TMP/stash/$RED"
+STASH_ENV=(CI_ARTIFACT_DIR="$TMP/stash" DEV_TIER_POLL_SECS=0.1 DEV_TIER_WAIT_SECS=1 DEV_TIER_NONE_GRACE_SECS=0)
+stash_files() { mkdir -p "$STASH"; for f in ad4m ad4m-executor identity-store holder integration-inputs.tar; do echo x > "$STASH/$f"; done; }
+build_row() { row build-and-test build "$RED" "$1" "$2" "${3:-finished}"; }
+echo "[$(build_row 5 running running)]" > "$FIX/build-running.json"
+echo "[$(build_row 5 failed)]" > "$FIX/build-failed.json"
+echo "[$(build_row 5 timedout)]" > "$FIX/build-timedout.json"
+echo "[$(build_row 5 success)]" > "$FIX/build-success.json"
+echo "[$(build_row 5 canceled)]" > "$FIX/build-canceled.json"
+echo "[$(build_row 6 queued queued),$(build_row 5 failed)]" > "$FIX/build-rerun-queued.json"
+echo "[$(row build-and-test build "$GREEN" 5 running running),$(row dev-2-hourly integration-tests-sfu-e2e "$RED" 4 failed)]" > "$FIX/build-other-commit.json"
+
+rm -rf "$TMP/stash"; stash_files
+routes
+check "stash: there: use it, no API call" 0 "^stash: .*$RED" stash "${STASH_ENV[@]}"
+not_logged "no API call" "."
+rm -rf "$TMP/stash"
+routes "GET /tree/dev build-running.json"
+check "stash: build running, stash arrives: use it" 0 "^stash: " stash "${STASH_ENV[@]}" \
+  FAKE_ON_CALL="mkdir -p '$STASH'; for f in ad4m ad4m-executor identity-store holder integration-inputs.tar; do echo x > '$STASH/'\$f; done"
+logged "asks for all of dev's jobs" "GET $CIRCLE/tree/dev\\?limit=100&shallow=true&offset=0$"
+rm -rf "$TMP/stash"
+check "stash: build still running at the deadline: build here" 12 '^build here: waited .*build of .* is running' stash "${STASH_ENV[@]}"
+routes "GET /tree/dev build-failed.json"
+check "stash: build of this commit failed: fail, no build here" 11 "^build of ${RED:0:12} failed" stash "${STASH_ENV[@]}"
+routes "GET /tree/dev build-timedout.json"
+check "stash: build of this commit timed out: fail" 11 'failed: timedout' stash "${STASH_ENV[@]}"
+routes "GET /tree/dev build-success.json"
+check "stash: build passed, stash gone (12 h cleanup): build here" 12 '^build here: build of .* finished \(success' stash "${STASH_ENV[@]}"
+routes "GET /tree/dev build-canceled.json"
+check "stash: build cancelled: build here" 12 '^build here: build of .* finished \(canceled' stash "${STASH_ENV[@]}"
+routes "GET /tree/dev build-rerun-queued.json"
+check "stash: a queued rerun over a failed build: wait, then build here" 12 '^build here: waited .*is running' stash "${STASH_ENV[@]}"
+routes "GET offset=100 empty.json" "GET /tree/dev build-other-commit.json"
+check "stash: no build of this commit: build here" 12 '^build here: no build of' stash "${STASH_ENV[@]}"
+routes "GET offset=100 empty.json" "GET /tree/dev build-other-commit.json"
+check "stash: no build yet, within the grace: wait" 12 '^build here: waited .*no build of' stash "${STASH_ENV[@]}" DEV_TIER_NONE_GRACE_SECS=60
+routes
+check "stash: CircleCI API failure: wait, then build here" 12 '^build here: waited .*cannot tell' stash "${STASH_ENV[@]}"
+routes "GET /tree/dev unauthorized.json"
+check "stash: CircleCI error object: wait, then build here" 12 '^build here: waited .*cannot tell' stash "${STASH_ENV[@]}"
+check "stash: no CIRCLE_SHA1: build here" 12 '^build here: no CIRCLE_SHA1' stash "${STASH_ENV[@]}" CIRCLE_SHA1=
 
 # --- green: note it on the open issue; never opens or closes one.
 routes "GET /issues/41/comments comments-none.json" "GET issues?state=open issues-open.json" "POST /repos/coasys/ad4m/issues/41/comments comment.json"
