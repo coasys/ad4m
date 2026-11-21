@@ -1565,6 +1565,20 @@ impl SparqlStore {
         *self.writes.borrow()
     }
 
+    /// The write generation when no write is in flight, or `None` while one
+    /// holds the writer lock. A write is visible to readers once it commits
+    /// and raises the generation only after that, still under the lock: a
+    /// generation read here counts every write a reader could have seen.
+    pub(crate) fn settled_write_generation(&self) -> Result<Option<u64>, Error> {
+        match self.writer.try_lock() {
+            Ok(_writer) => Ok(Some(self.write_generation())),
+            Err(std::sync::TryLockError::WouldBlock) => Ok(None),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                Err(anyhow!("SPARQL store writer lock poisoned"))
+            }
+        }
+    }
+
     /// A receiver that sees each new write generation.
     pub(crate) fn watch_writes(&self) -> tokio::sync::watch::Receiver<u64> {
         self.writes.subscribe()
@@ -2847,6 +2861,19 @@ mod tests {
 
     fn new_service() -> SparqlStore {
         SparqlStore::new(None).unwrap()
+    }
+
+    /// A write commits before it raises the generation, still holding the
+    /// writer lock: while the lock is held, no generation is settled.
+    #[test]
+    fn no_generation_is_settled_while_a_write_holds_the_lock() {
+        let svc = new_service();
+        let before = svc.write_generation();
+        {
+            let _in_flight = svc.writer.lock().unwrap();
+            assert_eq!(svc.settled_write_generation().unwrap(), None);
+        }
+        assert_eq!(svc.settled_write_generation().unwrap(), Some(before));
     }
 
     /// `apply_diff` removes before it adds, so a link removed and re-added

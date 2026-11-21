@@ -116,7 +116,9 @@ pub(super) fn index_page(
     };
     // Each read below takes its own snapshot of the store. Every index write
     // raises the write generation before the writer lock is released, so an
-    // equal generation after the reads means no write came between them.
+    // equal settled generation after the reads (see
+    // `SparqlStore::settled_write_generation`) means no write came between
+    // them; a write still in flight then sends the query to SPARQL.
     let generation = store.write_generation();
     let reader = store.scope_reader();
     let noncanonical = reader.noncanonical(&rule.class)?;
@@ -178,7 +180,7 @@ pub(super) fn index_page(
     // outside the executor's form, even one removed again), or another rule
     // of the class installed and built, means what was read may not answer
     // this query: the caller's SPARQL id phase does.
-    if store.write_generation() != generation
+    if store.settled_write_generation()? != Some(generation)
         || store.scope_index_rule(&rule.class).as_ref() != Some(&rule)
         || store.scope_index_readiness(&rule) != Readiness::Ready
     {
