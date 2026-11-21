@@ -2108,22 +2108,17 @@ mod tests {
         );
     }
 
+    /// #1794: the transcript is a model query now. One conforming
+    /// `ns://Message` = one turn; `speaker`/`timestamp` are the instance's
+    /// author/creation metadata — the writing agent's DID and the link's
+    /// time — not any `ns://author` property a writer may claim.
     #[tokio::test]
-    async fn gather_transcript_sparql_returns_speaker_text_and_timestamp() {
-        // The generic SPARQL gather must:
-        //   1. run an arbitrary SELECT against the perspective's Oxigraph store,
-        //   2. bind `?speaker` from the body-link reifier (`ad4m://ontology/author`
-        //      = the signing agent, NOT a separate ns://author property),
-        //   3. bind `?text` and, when it's a `literal:string:...` URI, decode it,
-        //   4. bind `?timestamp` from the same reifier,
-        //   5. preserve caller-visible ordering by returning rows as SPARQL gave
-        //      them (deterministic when ORDER BY is in the query).
+    async fn gather_transcript_model_returns_speaker_text_and_timestamp() {
         use crate::agent::did_for_context;
-        use crate::perspectives::interpretation::graph::{
-            gather_transcript_sparql, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY,
-        };
+        use crate::perspectives::interpretation::graph::gather_transcript_model;
+        use crate::perspectives::interpretation_test_support::MESSAGE_SDNA;
         let (mut perspective, _shapes, ctx) =
-            setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
         let me = did_for_context(&ctx).expect("test agent DID");
         seed_message(
             &mut perspective,
@@ -2134,8 +2129,8 @@ mod tests {
             "ns://body",
         )
         .await;
-        // Link timestamps are RFC3339 millis; sleep so ORDER BY ?timestamp is
-        // deterministic rather than a same-millisecond tie (undefined order).
+        // Link timestamps are RFC3339 millis; sleep so ordering is
+        // deterministic rather than a same-millisecond tie.
         std::thread::sleep(std::time::Duration::from_millis(2));
         seed_message(
             &mut perspective,
@@ -2147,39 +2142,129 @@ mod tests {
         )
         .await;
 
-        let turns = gather_transcript_sparql(&perspective, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY)
+        let turns = gather_transcript_model(&perspective, "ns://Message", "body", "{}")
             .await
-            .expect("gather_transcript_sparql");
+            .expect("gather_transcript_model")
+            .turns;
         assert_eq!(turns.len(), 2, "got {turns:#?}");
-        assert_eq!(turns[0].text, "hello world");
-        assert_eq!(turns[1].text, "second turn");
+        // The read promises no order (the queue sorts by text-link timestamp
+        // later), so turns are matched by text and their metadata checked
+        // per turn.
+        let by_text: std::collections::HashMap<
+            &str,
+            &crate::perspectives::interpretation::types::TranscriptTurn,
+        > = turns.iter().map(|t| (t.text.as_str(), t)).collect();
+        let hello = by_text["hello world"];
+        let second = by_text["second turn"];
         // Speaker is the link signer (test agent), not the ns://author target.
-        assert_eq!(turns[0].speaker, me);
-        assert_eq!(turns[1].speaker, me);
+        assert_eq!(hello.speaker, me);
+        assert_eq!(second.speaker, me);
         assert!(
-            !turns[0].timestamp.is_empty() && !turns[1].timestamp.is_empty(),
-            "reifier timestamp must be bound; got {turns:#?}"
-        );
-        assert_ne!(
-            turns[0].timestamp, turns[1].timestamp,
-            "sequentially seeded links must have distinct timestamps"
+            !hello.timestamp.is_empty() && !second.timestamp.is_empty(),
+            "instance timestamp must be hydrated; got {turns:#?}"
         );
         assert!(
-            turns[0].timestamp < turns[1].timestamp,
-            "ORDER BY ?timestamp must be chronological; got {turns:#?}"
+            hello.timestamp < second.timestamp,
+            "the earlier-written turn must carry the earlier timestamp; got {turns:#?}"
         );
     }
 
+    /// The queue order the watcher sees is the transcript order — the text
+    /// links' timestamps — not the order the instances come back in. Here
+    /// the two disagree on purpose: `msg://a` sorts before `msg://z` by
+    /// instance id but its body link was signed ten minutes later, so an
+    /// instance-ordered queue would hand the pass `[a, z]` while the
+    /// conversation order is `[z, a]`.
     #[tokio::test]
-    async fn gather_transcript_sparql_scopes_to_predicate() {
-        // Proves this is a real scope, not a rebranded gather-everything. Seed one
-        // "body"-predicated message and one "system-log" message; a query that
-        // filters on `ns://body` must return exactly the first.
-        use crate::perspectives::interpretation::graph::{
-            gather_transcript_sparql, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY,
-        };
+    async fn the_pending_queue_orders_by_text_link_timestamp() {
+        use crate::agent::signatures::TestSigner;
+        use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
+        use crate::perspectives::auto_processor::watcher::WatcherState;
+        use crate::perspectives::interpretation_test_support::MESSAGE_SDNA;
+        use crate::types::{LinkExpression, LinkStatus};
+
         let (mut perspective, _shapes, ctx) =
-            setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+        let signer = TestSigner::generate();
+        let signed =
+            |source: &str, predicate: &str, target: &str, at: chrono::DateTime<chrono::Utc>| {
+                let mut l = LinkExpression::from(
+                    signer.sign_at(
+                        Link {
+                            source: source.to_string(),
+                            predicate: Some(predicate.to_string()),
+                            target: target.to_string(),
+                        }
+                        .normalize(),
+                        at,
+                    ),
+                );
+                l.status = Some(LinkStatus::Shared);
+                l
+            };
+        let t0 = chrono::Utc::now() - chrono::Duration::minutes(10);
+        for (msg, body, at) in [
+            ("msg://z", "literal:string:z words", t0),
+            (
+                "msg://a",
+                "literal:string:a words",
+                t0 + chrono::Duration::minutes(10),
+            ),
+        ] {
+            perspective
+                .sparql_store
+                .add_link(&signed(msg, "ns://type", "ns://message", at))
+                .expect("flag");
+            perspective
+                .sparql_store
+                .add_link(&signed(msg, "ns://body", body, at))
+                .expect("body");
+        }
+
+        let cfg = AutoProcessorConfig {
+            processor_id: "ordered".into(),
+            source_class: "ns://Message".into(),
+            source_text: "body".into(),
+            source_query: None,
+            interpretation_classes: vec!["ns://Task".into()],
+            debounce_ms: 600_000,
+            batch_min: 1,
+            batch_max: 32,
+            claim_ttl_ms: 60_000,
+            ..Default::default()
+        };
+        write_processor(&mut perspective, &cfg, Some(false), &ctx)
+            .await
+            .expect("write_processor");
+        let mut watcher = WatcherState::new();
+        perspective
+            .run_auto_processor_tick(&mut watcher, chrono::Utc::now().timestamp_millis(), &ctx)
+            .await;
+
+        let texts: Vec<&str> = watcher
+            .pending_for("ordered")
+            .expect("the tick queues both turns")
+            .items
+            .iter()
+            .map(|t| t.text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            ["z words", "a words"],
+            "the queue must follow the text links' timestamps, not instance order"
+        );
+    }
+
+    /// A node carrying the text predicate without the class flag does not
+    /// conform, so it never reaches the transcript; and `where` in the
+    /// scope query narrows the instances the class yields.
+    #[tokio::test]
+    async fn gather_transcript_model_enforces_shape_and_where() {
+        use crate::perspectives::interpretation::graph::gather_transcript_model;
+        use crate::perspectives::interpretation_test_support::MESSAGE_SDNA;
+        use crate::types::{Link, LinkStatus};
+        let (mut perspective, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
         seed_message(
             &mut perspective,
             &ctx,
@@ -2189,52 +2274,335 @@ mod tests {
             "ns://body",
         )
         .await;
-        seed_message(
-            &mut perspective,
-            &ctx,
-            "msg://bot",
-            "did:key:bot",
-            "system boot",
-            "ns://system_log",
-        )
-        .await;
-
-        let scoped = gather_transcript_sparql(&perspective, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY)
+        // A body link with no `ns://type` flag: the node has the text
+        // property but does not conform to `ns://Message`.
+        perspective
+            .add_link(
+                Link {
+                    source: "msg://shapeless".into(),
+                    predicate: Some("ns://body".into()),
+                    target: "literal:string:forged-looking".into(),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
             .await
-            .expect("gather_transcript_sparql");
-        assert_eq!(
-            scoped.len(),
-            1,
-            "scoped query must exclude messages under other predicates; got {scoped:#?}"
-        );
-        assert_eq!(scoped[0].text, "I'll ship the doc");
+            .expect("seed shapeless");
+
+        let turns = gather_transcript_model(&perspective, "ns://Message", "body", "{}")
+            .await
+            .expect("gather_transcript_model")
+            .turns;
+        assert_eq!(turns.len(), 1, "got {turns:#?}");
+        assert_eq!(turns[0].text, "I'll ship the doc");
+
+        // `where` is a caller-side scope the model query applies.
+        let filtered = gather_transcript_model(
+            &perspective,
+            "ns://Message",
+            "body",
+            r#"{"where":{"body":{"contains":"ship"}}}"#,
+        )
+        .await
+        .expect("gather_transcript_model where")
+        .turns;
+        assert_eq!(filtered.len(), 1, "got {filtered:#?}");
+        let empty = gather_transcript_model(
+            &perspective,
+            "ns://Message",
+            "body",
+            r#"{"where":{"body":{"contains":"nothing-matches"}}}"#,
+        )
+        .await
+        .expect("gather_transcript_model where empty")
+        .turns;
+        assert!(empty.is_empty(), "got {empty:#?}");
     }
 
+    /// #1794/#1113: a link whose signature does not verify is withheld by
+    /// default — a forged "message from another member" never reaches the
+    /// transcript, so it cannot reach the author election, the speaker
+    /// names or the output attribution. Uses real signatures.
     #[tokio::test]
-    async fn gather_transcript_sparql_rejects_missing_timestamp() {
-        use crate::perspectives::interpretation::graph::gather_transcript_sparql;
+    async fn gather_transcript_model_withholds_forged_links() {
+        use crate::agent::signatures::TestSigner;
+        use crate::perspectives::interpretation::graph::gather_transcript_model;
+        use crate::perspectives::interpretation_test_support::MESSAGE_SDNA;
+        use crate::types::{Link, LinkExpression, LinkStatus};
         let (mut perspective, _shapes, ctx) =
-            setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+
+        // A real message from another member: `TestSigner` is a different
+        // agent than the test's main agent, so its DID is its speaker.
+        let other = TestSigner::generate();
+        let signed = |source: &str, predicate: &str, target: &str| {
+            let mut l = LinkExpression::from(other.sign_at(
+                Link {
+                    source: source.to_string(),
+                    predicate: Some(predicate.to_string()),
+                    target: target.to_string(),
+                },
+                chrono::Utc::now(),
+            ));
+            l.status = Some(LinkStatus::Shared);
+            l
+        };
+        perspective
+            .sparql_store
+            .add_link(&signed("msg://other-1", "ns://type", "ns://message"))
+            .expect("seed other type");
+        perspective
+            .sparql_store
+            .add_link(&signed(
+                "msg://other-1",
+                "ns://body",
+                "literal:string:real words",
+            ))
+            .expect("seed other body");
+
+        // A forged "message from that member": links that carry its author
+        // but a signature that does not cover them — what a peer without
+        // the key can gossip (#1113). The forged flag AND the forged body
+        // sit on the same node: `msg://forged-1` is a shape-complete
+        // `ns://Message` whose links simply do not verify, so the proof
+        // filter is the only thing dropping it — a missing body or flag
+        // would fail conformance with verification off.
+        let mut forged_flag = signed("msg://other-1", "ns://type", "ns://message");
+        forged_flag.data.source = "msg://forged-1".to_string();
+        assert!(
+            !forged_flag.compute_proof_valid(),
+            "the fixture must not verify"
+        );
+        let mut forged_body = signed(
+            "msg://forged-2",
+            "ns://body",
+            "literal:string:words never said",
+        );
+        forged_body.data.source = "msg://forged-1".to_string();
+        assert!(!forged_body.compute_proof_valid());
+        perspective
+            .sparql_store
+            .add_link(&forged_flag)
+            .expect("seed forged flag");
+        perspective
+            .sparql_store
+            .add_link(&forged_body)
+            .expect("seed forged body");
+
         seed_message(
             &mut perspective,
             &ctx,
-            "msg://1",
-            "did:key:alice",
-            "hello",
+            "msg://mine",
+            "did:key:me",
+            "my words",
             "ns://body",
         )
         .await;
-        let err = gather_transcript_sparql(
-            &perspective,
-            "SELECT ?speaker ?text WHERE { ?m <ns://body> ?text . ?m <ns://author> ?speaker . }",
-        )
-        .await
-        .expect_err("query without ?timestamp must fail");
-        let msg = format!("{err:#}");
+
+        let turns = gather_transcript_model(&perspective, "ns://Message", "body", "{}")
+            .await
+            .expect("gather_transcript_model")
+            .turns;
+        assert_eq!(turns.len(), 2, "got {turns:#?}");
         assert!(
-            msg.contains("?timestamp"),
-            "error must mention the missing binding; got {msg}"
+            turns.iter().all(|t| t.text != "words never said"),
+            "forged text must not reach the transcript; got {turns:#?}"
         );
+        let others_turn = turns
+            .iter()
+            .find(|t| t.text == "real words")
+            .expect("other member's signed message");
+        assert_eq!(others_turn.speaker, other.did);
+    }
+
+    /// When an edit lands as a *newer* text link by a different signer, the
+    /// turn's speaker is that link's signer — hydration's `author` is the
+    /// earliest link's, which would attribute the editor's words to the
+    /// instance's creator. The timestamp is the text link's too, so the edit
+    /// orders where it was written, not where the instance was created.
+    #[tokio::test]
+    async fn gather_transcript_model_speaker_is_the_text_link_signer() {
+        use crate::agent::signatures::TestSigner;
+        use crate::perspectives::interpretation::graph::gather_transcript_model;
+        use crate::perspectives::interpretation_test_support::MESSAGE_SDNA;
+        use crate::types::{Link, LinkExpression, LinkStatus};
+        let (perspective, _shapes, _ctx) =
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+
+        let alice = TestSigner::generate();
+        let bob = TestSigner::generate();
+        let alice_at = chrono::Utc::now() - chrono::Duration::seconds(10);
+        let bob_at = chrono::Utc::now();
+
+        let signed = |signer: &TestSigner,
+                      predicate: &str,
+                      target: &str,
+                      at: chrono::DateTime<chrono::Utc>| {
+            let mut l = LinkExpression::from(signer.sign_at(
+                Link {
+                    source: "msg://edit".into(),
+                    predicate: Some(predicate.into()),
+                    target: target.into(),
+                },
+                at,
+            ));
+            l.status = Some(LinkStatus::Shared);
+            l
+        };
+
+        // Alice creates the message; Bob writes the (only) body later. Both
+        // links verify — the question is whose words `body` is.
+        perspective
+            .sparql_store
+            .add_link(&signed(&alice, "ns://type", "ns://message", alice_at))
+            .expect("alice flag");
+        let bob_body = signed(&bob, "ns://body", "literal:string:edited words", bob_at);
+        perspective
+            .sparql_store
+            .add_link(&bob_body)
+            .expect("bob body");
+
+        let turns = gather_transcript_model(&perspective, "ns://Message", "body", "{}")
+            .await
+            .expect("gather_transcript_model")
+            .turns;
+        assert_eq!(turns.len(), 1, "got {turns:#?}");
+        let turn = &turns[0];
+        assert_eq!(turn.text, "edited words");
+        assert_eq!(
+            turn.speaker, bob.did,
+            "speaker must be the text link's signer, not the instance creator {}",
+            alice.did
+        );
+        assert_eq!(
+            turn.timestamp, bob_body.timestamp,
+            "the turn orders where the text was written"
+        );
+    }
+
+    /// A `resolveLanguage` value the language cannot serve yet is not a
+    /// message body: the expression URL must not reach the interpretation
+    /// input. The turn is dropped from the read — and once the language
+    /// serves the expression, a later read returns it resolved.
+    #[tokio::test]
+    async fn gather_transcript_model_drops_unresolvable_language_text() {
+        use crate::agent::signatures::TestSigner;
+        use crate::perspectives::interpretation::graph::gather_transcript_model;
+        use crate::perspectives::interpretation_test_support::{
+            serve_test_language, stop_test_language, MESSAGE_SDNA,
+        };
+        use crate::types::{Link, LinkExpression, LinkStatus};
+        let (perspective, _shapes, _ctx) =
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+
+        // `resolveLanguage: "literal"` makes `body` expression-resolved, so
+        // a target on another language is fetched through the language
+        // controller. That language is not loaded here: the fetch fails.
+        let author = TestSigner::generate();
+        let signed = |predicate: &str, target: &str| {
+            let mut l = LinkExpression::from(author.sign(Link {
+                source: "msg://lang".into(),
+                predicate: Some(predicate.into()),
+                target: target.into(),
+            }));
+            l.status = Some(LinkStatus::Shared);
+            l
+        };
+        perspective
+            .sparql_store
+            .add_link(&signed("ns://type", "ns://message"))
+            .expect("type link");
+        perspective
+            .sparql_store
+            .add_link(&signed("ns://body", "QmUnavailableLang://expr1"))
+            .expect("body link");
+
+        let turns = gather_transcript_model(&perspective, "ns://Message", "body", "{}")
+            .await
+            .expect("gather_transcript_model")
+            .turns;
+        assert!(
+            turns.is_empty(),
+            "an unresolvable text must not reach the transcript; got {turns:#?}"
+        );
+
+        // The language comes up and serves the expression; the next read
+        // resolves the same target to the text.
+        let expression =
+            serde_json::to_string(&author.sign("resolved words")).expect("expression json");
+        serve_test_language("QmUnavailableLang", expression).await;
+        let turns = gather_transcript_model(&perspective, "ns://Message", "body", "{}")
+            .await
+            .expect("gather_transcript_model")
+            .turns;
+        stop_test_language("QmUnavailableLang").await;
+        assert_eq!(turns.len(), 1, "got {turns:#?}");
+        assert_eq!(turns[0].text, "resolved words");
+        assert_eq!(turns[0].speaker, author.did);
+    }
+
+    /// A `where` on a language-backed property the language cannot serve
+    /// yet is undecided, and `matches_where` keeps such a row. The turn is
+    /// held as an unresolved text is — not built on a condition nobody
+    /// checked — and the read reports `has_unresolved`, so it is retried.
+    #[tokio::test]
+    async fn gather_transcript_model_holds_a_turn_whose_where_property_is_unresolved() {
+        use crate::agent::signatures::TestSigner;
+        use crate::perspectives::interpretation::graph::gather_transcript_model;
+        use crate::types::{Link, LinkExpression, LinkStatus};
+        const LABELLED_SDNA: &str = r#"{
+  "target_class":"ns://Message",
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://message","min_count":1,"max_count":1},
+    {"path":"ns://body","name":"body","resolve_language":"literal","min_count":1,"max_count":1},
+    {"path":"ns://label","name":"label","resolve_language":"QmUnavailableLabelLang","max_count":1}
+  ]
+}"#;
+        let (perspective, _shapes, _ctx) =
+            setup_perspective_no_llm(&[("ns://Message", LABELLED_SDNA)]).await;
+        let author = TestSigner::generate();
+        for (predicate, target) in [
+            ("ns://type", "ns://message"),
+            ("ns://body", "literal:string:words"),
+            ("ns://label", "QmUnavailableLabelLang://x"),
+        ] {
+            let mut l = LinkExpression::from(author.sign(Link {
+                source: "msg://labelled".into(),
+                predicate: Some(predicate.into()),
+                target: target.into(),
+            }));
+            l.status = Some(LinkStatus::Shared);
+            perspective.sparql_store.add_link(&l).expect("link");
+        }
+
+        // The instance hydrates: without the `where`, its turn is read.
+        let unfiltered = gather_transcript_model(&perspective, "ns://Message", "body", "{}")
+            .await
+            .expect("gather_transcript_model");
+        assert_eq!(unfiltered.turns.len(), 1, "got {:#?}", unfiltered.turns);
+        assert_eq!(unfiltered.turns[0].text, "words");
+
+        // Under `NOT`, and under `NOT` inside `AND`, the same property is
+        // as undecided as at the top.
+        for where_json in [
+            r#"{"where":{"label":"hi"}}"#,
+            r#"{"where":{"NOT":{"label":"blocked"}}}"#,
+            r#"{"where":{"AND":[{"NOT":{"label":"blocked"}}]}}"#,
+        ] {
+            let held = gather_transcript_model(&perspective, "ns://Message", "body", where_json)
+                .await
+                .expect("gather_transcript_model");
+            assert!(
+                held.turns.is_empty(),
+                "{where_json}: an undecided where must not admit the turn; got {:#?}",
+                held.turns
+            );
+            assert!(
+                held.has_unresolved,
+                "{where_json}: the held turn must be retried"
+            );
+        }
     }
 
     // ---- interpretation_task_name_for_model + ensure_..._for_model --------

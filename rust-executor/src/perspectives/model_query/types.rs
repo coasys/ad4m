@@ -284,7 +284,15 @@ where
 /// scoping (e.g. AutoProcessor's `existing_scope` / `mint_scope` fields — the
 /// former constrains dedup lookups; the latter turns each new mint into a
 /// child link under the given node).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+///
+/// `Deserialize` is manual (below): an untagged enum takes the first variant
+/// that parses and drops the keys it does not name, so the impl looks at the
+/// keys first to catch the mixtures no variant can see — `path` beside `id`,
+/// say, which would otherwise read as the `Raw` scope with the walk dropped.
+/// `Serialize` stays derived with `untagged` (the attribute only affects the
+/// derived impl): each variant writes as its flat field map, the same shape
+/// `ScopeRepr` parses back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum Scope {
     Model {
@@ -329,6 +337,36 @@ pub enum Scope {
         /// class; only the rows are.
         #[serde(default)]
         predicate: Option<String>,
+        /// A different predicate at each hop: `["we://children",
+        /// "we://thread"]` from a conversation is its direct children through
+        /// the first and their replies through the second — the union of every
+        /// hop, not only the deepest, each record reported once. The length is
+        /// the depth, and `direction` applies to every hop.
+        ///
+        /// A path read is an edge walk: class conformance and `where` decide
+        /// only which reached nodes are returned, never which are walked
+        /// through — a reply under a child that fails either is still
+        /// returned when the reply itself passes. Every edge keeps the
+        /// query's proof and link-status guards, and only the edges are
+        /// guarded: an intermediate node of a foreign class, or one carrying
+        /// a forged class flag, is walked through when its membership edges
+        /// are valid. `levels` answers differently on purpose: each of its
+        /// levels is a scoped read, so a node it filters out does end that
+        /// walk.
+        ///
+        /// No frontier cap beyond the path's length: each hop is one guarded
+        /// query over the whole frontier of the hop before it, so the cost
+        /// grows with the nodes reached, not with the page asked for.
+        ///
+        /// This is the level walk `levels` makes with its own relation named
+        /// per level rather than the same one throughout, and no per-anchor
+        /// breadth: a hop follows every link, not `levels[i]` of them. It is
+        /// refused alongside `predicate` (it is a list of them), `transitive`
+        /// and `max_depth` (a path bounds itself by length), `levels` (the
+        /// same walk with one predicate), and `limit_per_anchor` (it has no
+        /// breadth to set — one named per hop would need a parallel list).
+        #[serde(default)]
+        path: Option<Vec<String>>,
         /// Follow the predicate as far as it goes, rather than one step.
         ///
         /// Note the path reports only its endpoints: SPARQL property paths bind
@@ -405,6 +443,131 @@ pub enum Scope {
 #[serde(deny_unknown_fields)]
 pub struct ContainedScope {
     pub id: String,
+}
+
+/// The untagged wire form [`Scope::deserialize`] parses into, kept private so
+/// the public impl can inspect the keys first — an untagged parse drops the
+/// keys its chosen variant does not declare.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ScopeRepr {
+    Model {
+        model: String,
+        id: String,
+        field: Option<String>,
+    },
+    Raw {
+        id: String,
+        predicate: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Traverse {
+        #[serde(deserialize_with = "deserialize_ids_flex")]
+        ids: Vec<String>,
+        #[serde(default)]
+        predicate: Option<String>,
+        #[serde(default)]
+        path: Option<Vec<String>>,
+        #[serde(default)]
+        transitive: bool,
+        #[serde(default)]
+        direction: ScopeDirection,
+        #[serde(default, alias = "limit_per_anchor")]
+        limit_per_anchor: Option<usize>,
+        #[serde(default)]
+        levels: Option<Vec<usize>>,
+        #[serde(default, alias = "max_depth")]
+        max_depth: Option<usize>,
+    },
+    Contained(ContainedScope),
+}
+
+/// Keys only the traverse variant reads. Beside `id`, `model` or `field` —
+/// the one-anchor variants' keys — they are silently dropped by the untagged
+/// parse, answering a different scope than was sent.
+const TRAVERSE_ONLY_KEYS: [&str; 9] = [
+    "ids",
+    "path",
+    "transitive",
+    "direction",
+    "levels",
+    "limitPerAnchor",
+    "limit_per_anchor",
+    "maxDepth",
+    "max_depth",
+];
+
+/// Traverse keys a `path` replaces (see [`Scope::Traverse::path`]).
+const PATH_COMPETING_KEYS: [&str; 7] = [
+    "predicate",
+    "transitive",
+    "levels",
+    "limitPerAnchor",
+    "limit_per_anchor",
+    "maxDepth",
+    "max_depth",
+];
+
+impl<'de> Deserialize<'de> for Scope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        if let Some(object) = value.as_object() {
+            let mixed = ["id", "model", "field"]
+                .iter()
+                .any(|k| object.contains_key(*k))
+                && TRAVERSE_ONLY_KEYS.iter().any(|k| object.contains_key(*k));
+            if mixed {
+                return Err(serde::de::Error::custom(
+                    "scope: a traverse key (`ids`, `path`, `transitive`, `direction`, `levels`, \
+                     `limitPerAnchor`, `maxDepth`) cannot sit beside `id`, `model` or `field` — \
+                     the untagged parse would drop it, reading a different scope than was sent",
+                ));
+            }
+            // Presence, not value: past the parse, `transitive: false` and an
+            // absent `transitive` are the same `false`, so only the keys can
+            // tell a caller who named a competing field.
+            if object.contains_key("path") {
+                if let Some(key) = PATH_COMPETING_KEYS
+                    .iter()
+                    .find(|k| object.contains_key(**k))
+                {
+                    return Err(serde::de::Error::custom(format!(
+                        "scope: `{key}` cannot sit beside `path` — a path names one predicate \
+                         per hop and bounds itself by its length"
+                    )));
+                }
+            }
+        }
+        Ok(
+            match ScopeRepr::deserialize(value).map_err(serde::de::Error::custom)? {
+                ScopeRepr::Model { model, id, field } => Scope::Model { model, id, field },
+                ScopeRepr::Raw { id, predicate } => Scope::Raw { id, predicate },
+                ScopeRepr::Traverse {
+                    ids,
+                    predicate,
+                    path,
+                    transitive,
+                    direction,
+                    limit_per_anchor,
+                    levels,
+                    max_depth,
+                } => Scope::Traverse {
+                    ids,
+                    predicate,
+                    path,
+                    transitive,
+                    direction,
+                    limit_per_anchor,
+                    levels,
+                    max_depth,
+                },
+                ScopeRepr::Contained(c) => Scope::Contained(c),
+            },
+        )
+    }
 }
 
 /// Which way a traversal follows its predicate.
@@ -1404,10 +1567,65 @@ mod produced_by_flow_filter_tests {
 ///
 /// Produced by [`super::hydration::group_results_by_source`] from raw SPARQL
 /// result rows, then consumed by [`super::hydration::hydrate_one`] to build
-/// a fully typed JSON object.
+/// a fully typed JSON object — and, when the query asked for `links` on a
+/// predicate the instance query fetches, by [`super::links::attach_links`]
+/// to serve `__links` from the same rows instead of re-reading them.
 #[derive(Debug)]
 pub(super) struct InstanceLinks {
     pub(super) source: String,
-    /// (predicate, target, author, timestamp) for each link
-    pub(super) links: Vec<(String, String, String, String)>,
+    pub(super) links: Vec<InstanceLinkRow>,
+}
+
+/// One link of an instance as the instance query returns it: the columns
+/// hydration always binds plus, when the query asked for them, the per-link
+/// provenance a `__links` read would otherwise fetch in a second query.
+#[derive(Debug)]
+pub(super) struct InstanceLinkRow {
+    pub(super) predicate: String,
+    pub(super) target: String,
+    pub(super) author: String,
+    pub(super) timestamp: String,
+    pub(super) provenance: Option<LinkRowProvenance>,
+}
+
+impl InstanceLinkRow {
+    /// The order this row competes in wherever one link must be picked —
+    /// hydration's scalar last-write-wins and [`super::links::sort_link_rows`]
+    /// alike — so both always name the same link: timestamp, then the link's
+    /// target as signed (the wire bytes when the store keeps them apart),
+    /// then author, then signature. The last three make the order total: two
+    /// agents can write the same triple in the same millisecond and the store
+    /// returns those rows in no fixed order.
+    pub(super) fn rank(&self) -> (&str, &str, &str, &str) {
+        let (wire, signature) = match &self.provenance {
+            Some(p) => (p.wire_target.as_str(), p.proof_signature.as_str()),
+            None => ("", ""),
+        };
+        (
+            self.timestamp.as_str(),
+            if wire.is_empty() {
+                self.target.as_str()
+            } else {
+                wire
+            },
+            self.author.as_str(),
+            signature,
+        )
+    }
+}
+
+/// The columns `__links` reports for one row — carried by the instance
+/// query's rows when a `links` request is served from hydration (see
+/// [`super::links::attach_links`]).
+#[derive(Debug)]
+pub(super) struct LinkRowProvenance {
+    /// The signed bytes the store keeps apart from its canonical literal
+    /// rendering (`ad4m://ontology/wireTarget`); empty when there are none.
+    pub(super) wire_target: String,
+    pub(super) proof_key: String,
+    pub(super) proof_signature: String,
+    /// The stored signature verdict (`"true"` / `"false"`).
+    pub(super) proof_valid: String,
+    /// The reifier's `ad4m://ontology/status` annotation, empty when none.
+    pub(super) status: String,
 }

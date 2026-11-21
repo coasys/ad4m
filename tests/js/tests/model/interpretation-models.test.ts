@@ -140,8 +140,8 @@ describeIfLLM("InterpretationOverlay / InterpretationRun / AutoProcessorConfig â
     // Simulate what addAutoProcessor writes to the perspective. No
     // `rdf://type` link needed â€” the class dropped its type discriminator;
     // conformance is by the presence of the required scalars
-    // (`processor_id`, `source_scope_query`, `debounce_ms`, `batch_max`,
-    // `claim_ttl_ms`, `interpretation_class`).
+    // (`processor_id`, `source_class`, `source_text`, `debounce_ms`,
+    // `batch_max`, `claim_ttl_ms`, `interpretation_class`).
     await p.add(new Link({
       source: "ad4m://autoprocessor/my-proc",
       predicate: "ad4m://processor_id",
@@ -149,8 +149,13 @@ describeIfLLM("InterpretationOverlay / InterpretationRun / AutoProcessorConfig â
     }));
     await p.add(new Link({
       source: "ad4m://autoprocessor/my-proc",
-      predicate: "ad4m://source_scope_query",
-      target: "literal:string:SELECT ?x WHERE { ?x a ?y }",
+      predicate: "ad4m://source_class",
+      target: "literal:string:ns://Message",
+    }));
+    await p.add(new Link({
+      source: "ad4m://autoprocessor/my-proc",
+      predicate: "ad4m://source_text",
+      target: "literal:string:body",
     }));
     await p.add(new Link({
       source: "ad4m://autoprocessor/my-proc",

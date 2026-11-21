@@ -43,6 +43,33 @@ pub(crate) fn retain_ingestible(additions: &mut Vec<LinkExpression>) {
     });
 }
 
+/// What `persist_remote_diff` does with one link's store result: the
+/// generation an applied write took goes to the feed entry's coverage,
+/// `Some`; a skipped (stored `Local`) or failed write takes none. Returns
+/// whether the link was applied.
+fn applied(
+    kind: &str,
+    link: &LinkExpression,
+    result: Result<Option<u64>, AnyError>,
+    generations: &mut Vec<u64>,
+) -> bool {
+    match result {
+        Ok(generation) => {
+            generations.extend(generation);
+            generation.is_some()
+        }
+        Err(e) => {
+            log::warn!(
+                "Dropping remote {kind} of {} -[{}]-> {}: {e:?}",
+                link.data.source,
+                link.data.predicate.as_deref().unwrap_or(""),
+                link.data.target
+            );
+            false
+        }
+    }
+}
+
 impl PerspectiveInstance {
     /// Write a link language's diff, removals first like
     /// [`Self::persist_link_diff`] and under the same `persist_lock`,
@@ -61,38 +88,63 @@ impl PerspectiveInstance {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let effects = self.retraction_effects(&diff.additions)?;
-        let applied = |kind: &str, link: &LinkExpression, result: Result<bool, AnyError>| {
-            result.unwrap_or_else(|e| {
-                log::warn!(
-                    "Dropping remote {kind} of {} -[{}]-> {}: {e:?}",
-                    link.data.source,
-                    link.data.predicate.as_deref().unwrap_or(""),
-                    link.data.target
-                );
-                false
-            })
-        };
+        // The generations this diff's own writes took: one per applied
+        // write, since the remote path has no single-transaction step.
+        let mut generations = Vec::new();
         // A tombstone ends only a Shared link (`monotonic::ends`), so its
         // removals need no Local check; `fold_into` publishes them.
         for retracted in &effects.retracted {
-            if let Err(e) = self
+            match self
                 .sparql_store
                 .remove_link(&LinkExpression::from(retracted.clone()))
             {
-                log::warn!("Failed to remove retracted link from SPARQL store: {:?}", e);
+                Ok(g) => generations.push(g),
+                Err(e) => {
+                    log::warn!("Failed to remove retracted link from SPARQL store: {:?}", e)
+                }
             }
         }
         let removals = diff
             .removals
             .into_iter()
-            .filter(|l| applied("removal", l, self.sparql_store.remove_remote_link(l)))
-            .collect();
+            .filter(|l| {
+                applied(
+                    "removal",
+                    l,
+                    self.sparql_store.remove_remote_link(l),
+                    &mut generations,
+                )
+            })
+            .collect::<Vec<_>>();
         let additions = diff
             .additions
             .into_iter()
             .filter(|l| !effects.covers(l))
-            .filter(|l| applied("addition", l, self.sparql_store.add_remote_link(l)))
-            .collect();
+            .filter(|l| {
+                applied(
+                    "addition",
+                    l,
+                    self.sparql_store.add_remote_link(l),
+                    &mut generations,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        // The feed entry right after the writes — what was applied, plus the
+        // retracted links the published diff reports — tagged with the
+        // generations the writes took, so a draining tick can prove the feed
+        // covers the store's movement here too.
+        self.broadcast_commit_write(
+            crate::perspectives::perspective_instance::subscription_triggers::writes_of_links(
+                additions
+                    .iter()
+                    .map(|l| &l.data)
+                    .chain(removals.iter().map(|l| &l.data))
+                    .chain(effects.retracted.iter().map(|l| &l.data)),
+            ),
+            generations,
+        );
+
         Ok((
             PerspectiveDiff {
                 additions,

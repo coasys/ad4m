@@ -6,15 +6,16 @@ use super::config::{processor_node, write_processor, AutoProcessorConfig};
 use super::events::{next_event_matching, subscribe, AutoProcessorStep};
 use super::watcher::{PendingTurn, WatcherState};
 use crate::perspectives::interpretation::{
-    ensure_interpretation_overlay_classes, gather_transcript_sparql, mint_interpretation_run,
-    InterpretationRunCursor, InterpretationRunMeta, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY,
+    ensure_interpretation_overlay_classes, gather_transcript_model, mint_interpretation_run,
+    InterpretationRunCursor, InterpretationRunMeta,
 };
-use crate::perspectives::interpretation_test_support::{seed_message, setup_perspective_no_llm};
+use crate::perspectives::interpretation_test_support::{
+    seed_message, setup_perspective_no_llm, MESSAGE_SDNA,
+};
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use std::time::Duration;
 
-/// How many times this perspective's store read a transcript: the scope
-/// query, or a read of what it gained from added links (`delta_read`).
+/// How many times this perspective's store read a transcript.
 fn transcript_queries(p: &PerspectiveInstance) -> usize {
     p.sparql_store
         .queries_run()
@@ -23,24 +24,39 @@ fn transcript_queries(p: &PerspectiveInstance) -> usize {
         .count()
 }
 
-/// Every transcript read selects `?speaker`; no config or cursor read does.
+/// The transcript's model query selects the instances conforming to the
+/// source class: it names the class flag's target. No config or cursor read
+/// does.
 fn is_transcript_read(query: &str) -> bool {
-    query.contains("?speaker")
-}
-
-/// The rows every transcript read of this store returned so far.
-fn transcript_rows(p: &PerspectiveInstance) -> usize {
-    p.sparql_store
-        .query_rows_run()
-        .iter()
-        .filter(|(q, _)| is_transcript_read(q))
-        .map(|(_, rows)| rows)
-        .sum()
+    query.contains("ns://message")
 }
 
 /// Every store read: SPARQL queries and link index scans.
 fn all_queries(p: &PerspectiveInstance) -> usize {
     p.sparql_store.queries_run().len() + p.sparql_store.link_scans_run()
+}
+
+/// The next commit-feed batch carrying `predicate`, on a deadline: a bare
+/// `recv()` hangs a regressed test at the suite timeout, and settling for
+/// whatever batch arrived first would let the assertion below it pass on a
+/// write it was not about.
+async fn recv_edge(
+    commits: &mut tokio::sync::broadcast::Receiver<
+        crate::perspectives::perspective_instance::CommitWrite,
+    >,
+    predicate: &str,
+) -> std::sync::Arc<crate::perspectives::perspective_instance::subscription_triggers::Writes> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match commits.recv().await {
+                Ok(Some(writes)) if writes.wrote(predicate) => return writes,
+                Ok(_) => {}
+                Err(e) => panic!("commit feed: {e}"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no commit-feed batch carrying `{predicate}` within 5 s"))
 }
 
 fn config(
@@ -50,7 +66,9 @@ fn config(
 ) -> AutoProcessorConfig {
     AutoProcessorConfig {
         processor_id: processor_id.into(),
-        source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+        source_class: "ns://Message".into(),
+        source_text: "body".into(),
+        source_query: None,
         interpretation_classes: vec!["ns://Task".into()],
         debounce_ms,
         batch_min: 1,
@@ -96,12 +114,23 @@ async fn mint_run(
 }
 
 async fn turn_ids(p: &PerspectiveInstance) -> Vec<PendingTurn> {
-    gather_transcript_sparql(p, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY)
+    gather_transcript_model(p, "ns://Message", "body", "{}")
         .await
         .expect("gather")
+        .turns
         .iter()
         .map(PendingTurn::from_transcript)
         .collect()
+}
+
+/// `MESSAGE_SDNA` with `body` on a real `resolveLanguage` — the shape of a
+/// text property whose stored target is an expression IRI the store cannot
+/// decode, so a `where` on it is decided after hydration.
+fn message_sdna_on_language(language: &str) -> String {
+    MESSAGE_SDNA.replace(
+        "\"resolve_language\":\"literal\"",
+        &format!("\"resolve_language\":\"{language}\""),
+    )
 }
 
 fn pending_texts(watcher: &WatcherState, processor_id: &str) -> Vec<String> {
@@ -116,7 +145,7 @@ fn pending_texts(watcher: &WatcherState, processor_id: &str) -> Vec<String> {
 /// perspective whose links did not change is not queried again.
 #[tokio::test]
 async fn a_tick_without_link_changes_queries_nothing_when_no_processor_is_declared() {
-    let (p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     let mut watcher = WatcherState::new();
     let now_ms = chrono::Utc::now().timestamp_millis();
 
@@ -143,7 +172,7 @@ async fn a_tick_without_link_changes_queries_nothing_when_no_processor_is_declar
 /// query. A new turn is read on the next tick, and queued once.
 #[tokio::test]
 async fn a_tick_rereads_the_transcript_only_after_a_link_change() {
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     seed_message(
         &mut p,
         &ctx,
@@ -217,7 +246,7 @@ async fn a_tick_rereads_the_transcript_only_after_a_link_change() {
 #[tokio::test]
 async fn reused_reads_queue_only_new_turns_and_follow_the_window() {
     const WINDOW: i64 = 60_000;
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     seed_message(&mut p, &ctx, "msg://1", "did:key:alice", "old", "ns://body").await;
     write_processor(
         &mut p,
@@ -272,6 +301,8 @@ async fn reused_reads_queue_only_new_turns_and_follow_the_window() {
         transcript_reads + 1,
         "a consumed turn coming back is read again, once"
     );
+    // A transcript read is one scope query: its `links` provenance comes
+    // back on the instance query's own rows.
     assert_eq!(all_queries(&p), reads + 1, "and nothing else is read");
     let reads = all_queries(&p);
     p.run_auto_processor_tick(&mut watcher, now_ms + WINDOW / 2 + 1_500, &ctx)
@@ -316,7 +347,7 @@ async fn reused_reads_queue_only_new_turns_and_follow_the_window() {
 /// wakes for a new turn, queues it once, and ends promptly on teardown.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_watch_loop_sleeps_until_a_link_changes() {
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     seed_message(
         &mut p,
         &ctx,
@@ -398,17 +429,95 @@ async fn the_watch_loop_sleeps_until_a_link_changes() {
         .expect("loop task");
 }
 
-/// Writes that add no turn (reactions, other agents' outputs, claims, a peer
-/// syncing) wake an idle loop, but they must not make it read more often than
-/// the idle back-off it replaced: a write-woken tick waits out the back-off
-/// (doubling from the base tick up to 4 s) since the last read that found the
-/// store changed. Here an unrelated link lands every 100 ms for 3 s; the
-/// reads must be at least the first back-off step (1 s) apart.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unrelated_writes_do_not_make_an_idle_loop_read_more_often_than_the_back_off() {
+/// The wait itself, without the loop: `wait_for_tick` runs every committed
+/// batch through the trigger before it decides — an out-of-scope write is
+/// evaluated (`matched` is invoked) and the wait ends `Elapsed`, not `Write`;
+/// an in-scope one ends it `Write`. `Elapsed` alone cannot distinguish "the
+/// write was ruled out" from "the write never arrived", so the matcher is
+/// counted.
+#[tokio::test]
+async fn the_wait_evaluates_a_write_and_only_a_match_ends_it() {
+    use super::watcher::{wait_for_tick, WaitEnd};
     use crate::types::{Link, LinkStatus};
 
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    write_processor(&mut p, &config("waited", 600_000, None), Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    // Builds the wake trigger the loop would test against.
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    let mut rx = p.commit_writes.subscribe();
+    let teardown = p.is_teardown.clone();
+
+    p.add_link(
+        Link {
+            source: "note://reactions".into(),
+            predicate: Some("ns://reaction".into()),
+            target: "literal:string:r1".into(),
+        },
+        LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .expect("unrelated link");
+    let evaluated = std::cell::Cell::new(0usize);
+    let end = wait_for_tick(&teardown, 400, Some(&mut rx), None, |w| {
+        // Only the reaction batch counts: a setup write broadcast by a
+        // spawned task can land in the feed first, and "any batch was
+        // evaluated" would then prove nothing about this one.
+        if w.wrote("ns://reaction") {
+            evaluated.set(evaluated.get() + 1);
+        }
+        p.auto_processor_writes_match(&watcher, w)
+    })
+    .await;
+    assert!(
+        evaluated.get() >= 1,
+        "the out-of-scope write was never evaluated, so `Elapsed` proves nothing"
+    );
+    assert_eq!(
+        end,
+        WaitEnd::Elapsed,
+        "an out-of-scope write ended the wait"
+    );
+
+    // Positive control: an in-scope write ends the same wait.
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "first",
+        "ns://body",
+    )
+    .await;
+    let end = wait_for_tick(&teardown, 2_000, Some(&mut rx), None, |w| {
+        p.auto_processor_writes_match(&watcher, w)
+    })
+    .await;
+    assert_eq!(
+        end,
+        WaitEnd::Write,
+        "an in-scope write did not end the wait"
+    );
+}
+
+/// Writes that cannot touch the scope (a predicate the model trigger has no
+/// rule for: reactions, other agents' outputs, claims, a peer syncing) do not
+/// wake an idle loop at all (#1794): `check_subscribed_queries` reports them
+/// to the commit feed, the processor's `ModelTrigger` rules them out, and the
+/// loop sleeps on. The control write after them — received last, so every
+/// earlier write was evaluated by then — wakes the loop for exactly one more
+/// transcript read; had any unrelated write woken it, the count would be
+/// higher.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unrelated_writes_do_not_wake_an_idle_loop() {
+    use crate::types::{Link, LinkStatus};
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     seed_message(
         &mut p,
         &ctx,
@@ -446,12 +555,9 @@ async fn unrelated_writes_do_not_make_an_idle_loop_read_more_often_than_the_back
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let mut reads = vec![tokio::time::Instant::now()];
-    let mut seen = transcript_queries(&p);
+    let seen = transcript_queries(&p);
 
-    let start = tokio::time::Instant::now();
-    let mut i = 0;
-    while start.elapsed() < Duration::from_secs(3) {
+    for i in 0..20 {
         p.add_link(
             Link {
                 source: "note://reactions".into(),
@@ -464,32 +570,34 @@ async fn unrelated_writes_do_not_make_an_idle_loop_read_more_often_than_the_back
         )
         .await
         .expect("unrelated link");
-        i += 1;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let now = transcript_queries(&p);
-        if now > seen {
-            reads.extend(std::iter::repeat_n(tokio::time::Instant::now(), now - seen));
-            seen = now;
-        }
     }
 
-    let gaps: Vec<u128> = reads
-        .windows(2)
-        .map(|w| (w[1] - w[0]).as_millis())
-        .collect();
-    println!(
-        "{} transcript reads in ~3 s of unrelated writes, gaps {gaps:?} ms",
-        reads.len()
-    );
-    assert!(
-        reads.len() <= 3,
-        "{} transcript reads in ~3 s of unrelated writes (gaps {gaps:?} ms); \
-         the back-off allows at most 3",
-        reads.len()
-    );
-    assert!(
-        gaps.iter().all(|g| *g >= 800),
-        "reads closer than the first back-off step: gaps {gaps:?} ms"
+    // Positive control, received after every unrelated write: it wakes the
+    // loop, which reads the transcript once. Waiting for that read also
+    // waits out every earlier evaluation — and a wake on any of the 20
+    // would have produced one more read than this.
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://2",
+        "did:key:alice",
+        "second",
+        "ns://body",
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while transcript_queries(&p) == seen {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the in-scope write never woke the loop"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        transcript_queries(&p),
+        seen + 1,
+        "exactly the control write woke the loop"
     );
 
     p.teardown_background_tasks().await;
@@ -505,7 +613,7 @@ async fn unrelated_writes_do_not_make_an_idle_loop_read_more_often_than_the_back
 async fn a_kept_transcript_holds_no_text_for_consumed_turns() {
     use super::watcher::CachedTurn;
 
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     seed_message(
         &mut p,
         &ctx,
@@ -543,7 +651,7 @@ async fn a_kept_transcript_holds_no_text_for_consumed_turns() {
 
     let mut watcher = WatcherState::new();
     p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
-    let (kept_at, kept) = watcher
+    let (kept_at, kept, _) = watcher
         .reads
         .transcript(&cfg)
         .expect("the tick kept its read");
@@ -561,6 +669,848 @@ async fn a_kept_transcript_holds_no_text_for_consumed_turns() {
     assert_eq!(pending_texts(&watcher, "lean"), vec!["open"]);
 }
 
+/// `MESSAGE_SDNA` plus a required `ns://priority` the seeded message
+/// lacks.
+const MESSAGE_SDNA_V2: &str = r#"{
+  "target_class":"ns://Message",
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://message","min_count":1,"max_count":1},
+    {"path":"ns://body","name":"body","resolve_language":"literal","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://body","target":"value"}]},
+    {"path":"ns://priority","name":"priority","min_count":1,"max_count":1}
+  ]
+}"#;
+
+/// `MESSAGE_SDNA` with `body` moved to `ns://body2`.
+const MESSAGE_SDNA_BODY2: &str = r#"{
+  "target_class":"ns://Message",
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://message","min_count":1,"max_count":1},
+    {"path":"ns://body2","name":"body","resolve_language":"literal","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://body2","target":"value"}]}
+  ]
+}"#;
+
+/// A shape-only write — nothing the transcript's trigger matches, no
+/// `ns://type` or `ns://body` link moves — still invalidates the kept read:
+/// the shape it was read under is gone. The edit below adds a required
+/// property the seeded message lacks, so the re-read returns no turns and
+/// the pending queue is drained of it — before the fix the kept read was
+/// trusted for as long as only schema writes landed.
+///
+/// The write goes through `register_shape_json` — the production commit
+/// path — because a raw `sparql_store` write takes the unclassifiable
+/// fallback and would mark the read stale by accident, hiding the bug it
+/// tests for.
+#[tokio::test]
+async fn a_schema_write_stales_the_kept_transcript() {
+    use crate::types::{Link, LinkStatus};
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "hello",
+        "ns://body",
+    )
+    .await;
+    let cfg = config("schema", 600_000, None);
+    write_processor(&mut p, &cfg, Some(false), &ctx)
+        .await
+        .expect("write_processor");
+
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    assert_eq!(pending_texts(&watcher, "schema"), vec!["hello"]);
+    let reads = transcript_queries(&p);
+    assert_eq!(reads, 1);
+
+    // The unrelated-write optimisation the schema case must not give up: a
+    // predicate the trigger has no rule for keeps the kept read.
+    p.add_link(
+        Link {
+            source: "note://reactions".into(),
+            predicate: Some("ns://reaction".into()),
+            target: "literal:string:+1".into(),
+        },
+        LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .expect("unrelated link");
+    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+        .await;
+    assert_eq!(
+        transcript_queries(&p),
+        reads,
+        "an unrelated write must not re-read the kept transcript"
+    );
+
+    p.register_shape_json(MESSAGE_SDNA_V2, &ctx)
+        .await
+        .expect("register_shape_json");
+    p.run_auto_processor_tick(&mut watcher, now_ms + 1000, &ctx)
+        .await;
+    assert_eq!(
+        transcript_queries(&p),
+        reads + 1,
+        "a schema write must re-read the kept transcript"
+    );
+    assert!(
+        pending_texts(&watcher, "schema").is_empty(),
+        "the message no longer conforms, so its turn is dropped"
+    );
+
+    // The trigger's predicate rules were compiled from the same shape the
+    // kept read ran under, so the schema write must rebuild it, not only
+    // stale the read: with `body` moved to `ns://body2` the old rules still
+    // watch `ns://body`, and a data write on the new predicate would match
+    // nothing — neither wake nor stale (#1795).
+    p.register_shape_json(MESSAGE_SDNA_BODY2, &ctx)
+        .await
+        .expect("register_shape_json body2");
+    p.run_auto_processor_tick(&mut watcher, now_ms + 1500, &ctx)
+        .await;
+    let reads = transcript_queries(&p);
+
+    p.add_link(
+        Link {
+            source: "msg://1".into(),
+            predicate: Some("ns://body2".into()),
+            target: "literal:string:hi".into(),
+        },
+        LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .expect("body2 link");
+    p.run_auto_processor_tick(&mut watcher, now_ms + 2000, &ctx)
+        .await;
+    assert_eq!(
+        transcript_queries(&p),
+        reads + 1,
+        "a data write on the new predicate must wake and stale the kept transcript"
+    );
+    assert_eq!(
+        pending_texts(&watcher, "schema"),
+        vec!["hi"],
+        "the re-read sees the message conform to the new shape"
+    );
+}
+
+/// An edit to only the `resolveLanguage`/`transform`/`getter` link of a
+/// stored property shape carries no SHACL-vocabulary predicate, yet it IS
+/// the shape — the classifier must see it through the source: the node an
+/// existing `sh://property` link names. The same predicate on instance
+/// data, which a `@Property` decorator emits onto every instance's
+/// property URI, must not stale (#1795).
+#[tokio::test]
+async fn a_shape_detail_edit_stales_the_kept_transcript() {
+    use crate::types::{Link, LinkStatus, PerspectiveDiff};
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "hello",
+        "ns://body",
+    )
+    .await;
+    write_processor(&mut p, &config("shape", 600_000, None), Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    assert_eq!(pending_texts(&watcher, "shape"), vec!["hello"]);
+    let reads = transcript_queries(&p);
+    assert_eq!(reads, 1);
+
+    // The decorator's per-instance spelling of the same predicate is data:
+    // `msg://1.body` is named by no `sh://property` link.
+    p.add_link(
+        Link {
+            source: "msg://1.body".into(),
+            predicate: Some("ad4m://resolveLanguage".into()),
+            target: "literal:string:literal".into(),
+        },
+        LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .expect("instance resolveLanguage");
+    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+        .await;
+    assert_eq!(
+        transcript_queries(&p),
+        reads,
+        "resolveLanguage on an instance property URI is data, not schema"
+    );
+
+    // A local write on the shape's property node — `ns://Message.type`
+    // here (`{namespace}{ClassName}.{name}` for `ns://Message`'s `type`) —
+    // is the stored shape. The flag property declares no `resolveLanguage`,
+    // so the shape the tick reads shows whether it took the edit.
+    let type_language = |p: &PerspectiveInstance| {
+        p.get_shape("ns://Message")
+            .expect("shape")
+            .properties
+            .iter()
+            .find(|prop| prop.name == "type")
+            .and_then(|prop| prop.resolve_language.clone())
+    };
+    assert_eq!(type_language(&p), None);
+    p.add_link(
+        Link {
+            source: "ns://Message.type".into(),
+            predicate: Some("ad4m://resolveLanguage".into()),
+            target: "literal:string:literal".into(),
+        },
+        LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .expect("shape resolveLanguage");
+    p.run_auto_processor_tick(&mut watcher, now_ms + 1000, &ctx)
+        .await;
+    assert_eq!(
+        transcript_queries(&p),
+        reads + 1,
+        "a resolveLanguage edit on a property shape must stale the kept transcript"
+    );
+    assert_eq!(
+        type_language(&p).as_deref(),
+        Some("literal"),
+        "the re-read parses the edited shape, not the cached one"
+    );
+    let reads = transcript_queries(&p);
+
+    // A peer's diff lands the same classification through
+    // `persist_remote_diff`'s feed entry: signed links are applied before
+    // the tick drains, so the property node already answers as a shape.
+    let signer = crate::agent::signatures::TestSigner::generate();
+    let data = crate::types::Link {
+        source: "ns://Message.body".into(),
+        predicate: Some("ad4m://transform".into()),
+        target: "literal:string:{}".into(),
+    }
+    .normalize();
+    let signed = signer.sign(data);
+    p.diff_from_link_language(PerspectiveDiff {
+        additions: vec![crate::types::LinkExpression::from(signed)],
+        removals: vec![],
+    })
+    .await
+    .expect("peer diff");
+    p.run_auto_processor_tick(&mut watcher, now_ms + 1500, &ctx)
+        .await;
+    assert_eq!(
+        transcript_queries(&p),
+        reads + 1,
+        "a peer diff editing only a shape detail must stale the kept transcript"
+    );
+}
+
+/// A peer's schema diff moves the store before its feed entry is broadcast
+/// (`persist_remote_diff` writes, then broadcasts). A tick in between sees a
+/// write no entry classified: it must re-read under the stored shape, not
+/// the cached one, though nothing has dropped the cache yet.
+#[tokio::test]
+async fn a_schema_write_seen_before_its_feed_entry_is_read_under_the_new_shape() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "hello",
+        "ns://body",
+    )
+    .await;
+    write_processor(
+        &mut p,
+        &config("gap-shape", 600_000, None),
+        Some(false),
+        &ctx,
+    )
+    .await
+    .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    let type_language = |p: &PerspectiveInstance| {
+        p.get_shape("ns://Message")
+            .expect("shape")
+            .properties
+            .iter()
+            .find(|prop| prop.name == "type")
+            .and_then(|prop| prop.resolve_language.clone())
+    };
+    assert_eq!(type_language(&p), None, "the tick cached the shape");
+
+    // Straight into the store: no feed entry, no cache drop.
+    let mut schema = crate::types::LinkExpression::from(
+        crate::agent::signatures::TestSigner::generate().sign(crate::types::Link {
+            source: "ns://Message.type".into(),
+            predicate: Some("ad4m://resolveLanguage".into()),
+            target: "literal:string:literal".into(),
+        }),
+    );
+    schema.status = Some(crate::types::LinkStatus::Shared);
+    p.sparql_store
+        .add_link(&schema)
+        .expect("a peer's schema link");
+    let reads = transcript_queries(&p);
+
+    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+        .await;
+    assert_eq!(transcript_queries(&p), reads + 1, "the gap stales the read");
+    assert_eq!(
+        type_language(&p),
+        Some("literal".to_string()),
+        "the re-read parsed the stored shape, not the cached one"
+    );
+}
+
+/// A watcher's feed subscribes on its first tick, after any entry already
+/// sent. A schema write whose entry went out before that, and whose writer
+/// has not yet dropped the cached shape, is in neither the feed nor a gap
+/// the feed can see. The first drain counts as a gap, so the first tick
+/// reads under the stored shape, not the cached one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_first_tick_after_a_schema_entry_it_never_saw_reads_the_new_shape() {
+    use crate::perspectives::perspective_instance::subscription_triggers;
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "hello",
+        "ns://body",
+    )
+    .await;
+    write_processor(
+        &mut p,
+        &config("first-tick-shape", 600_000, None),
+        Some(false),
+        &ctx,
+    )
+    .await
+    .expect("write_processor");
+    let type_language = |p: &PerspectiveInstance| {
+        p.get_shape("ns://Message")
+            .expect("shape")
+            .properties
+            .iter()
+            .find(|prop| prop.name == "type")
+            .and_then(|prop| prop.resolve_language.clone())
+    };
+    assert_eq!(type_language(&p), None, "the old shape is cached");
+
+    // Written and broadcast, but the writer has not dropped the cache yet.
+    let mut schema = crate::types::LinkExpression::from(
+        crate::agent::signatures::TestSigner::generate().sign(crate::types::Link {
+            source: "ns://Message.type".into(),
+            predicate: Some("ad4m://resolveLanguage".into()),
+            target: "literal:string:literal".into(),
+        }),
+    );
+    schema.status = Some(crate::types::LinkStatus::Shared);
+    p.sparql_store
+        .add_link(&schema)
+        .expect("a peer's schema link");
+    p.broadcast_commit_write(
+        subscription_triggers::writes_of_links([schema.data].iter()),
+        vec![p.sparql_store.write_generation()],
+    );
+
+    let mut watcher = WatcherState::new();
+    p.run_auto_processor_tick(&mut watcher, chrono::Utc::now().timestamp_millis(), &ctx)
+        .await;
+    assert_eq!(
+        type_language(&p),
+        Some("literal".to_string()),
+        "the first tick read the stored shape, not the cached one"
+    );
+}
+
+/// A peer's diff is written link by link under `persist_lock` and broadcast
+/// before the lock is released. Paused half way — a new required property's
+/// path written, its `sh://minCount` not yet — the store holds a shape under
+/// which a message that lacks the property still conforms. A tick that runs
+/// meanwhile, for as long as the diff takes, must not start a pass under
+/// that half shape: it waits for the diff before it drains, sees the schema
+/// entry, and holds. Under the whole shape the message does not conform,
+/// so it never drains.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tick_inside_a_diff_still_being_written_drains_nothing() {
+    use crate::perspectives::perspective_instance::subscription_triggers;
+    use crate::types::{Link, LinkExpression, LinkStatus};
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "hello",
+        "ns://body",
+    )
+    .await;
+    write_processor(&mut p, &config("half-diff", 1_000, None), Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    assert_eq!(
+        pending_texts(&watcher, "half-diff"),
+        vec!["hello"],
+        "queued, inside its debounce"
+    );
+
+    // The diff: a required `label` the message does not have.
+    let signer = crate::agent::signatures::TestSigner::generate();
+    let link = |source: &str, predicate: &str, target: &str| {
+        let mut l = LinkExpression::from(signer.sign(Link {
+            source: source.into(),
+            predicate: Some(predicate.into()),
+            target: target.into(),
+        }));
+        l.status = Some(LinkStatus::Shared);
+        l
+    };
+    let label = "ns://Message.label";
+    let first_half = [
+        link("ns://MessageShape", "sh://property", label),
+        link(label, "rdf://type", "sh://PropertyShape"),
+        link(label, "sh://path", "ns://label"),
+    ];
+    let min_count = link(label, "sh://minCount", "literal:1^^xsd:integer");
+
+    let (half_written_tx, half_written_rx) = std::sync::mpsc::channel();
+    let (finish_tx, finish_rx) = std::sync::mpsc::channel::<()>();
+    let peer = p.clone();
+    let diff = std::thread::spawn(move || {
+        let _persisting = peer.persist_lock.lock().unwrap();
+        let mut generations: Vec<u64> = first_half
+            .iter()
+            .map(|l| peer.sparql_store.add_link(l).expect("first half"))
+            .collect();
+        half_written_tx.send(()).unwrap();
+        finish_rx.recv().unwrap();
+        generations.push(peer.sparql_store.add_link(&min_count).expect("minCount"));
+        let all: Vec<Link> = first_half
+            .iter()
+            .chain([&min_count])
+            .map(|l| l.data.clone())
+            .collect();
+        peer.broadcast_commit_write(
+            subscription_triggers::writes_of_links(all.iter()),
+            generations,
+        );
+    });
+    half_written_rx.recv().unwrap();
+
+    // Two ticks' worth of time inside the paused diff: the tick waits for it
+    // before any drain.
+    let ticking = p.clone();
+    let tick_ctx = ctx.clone();
+    let tick = tokio::spawn(async move {
+        ticking
+            .run_auto_processor_tick(&mut watcher, now_ms + 2_000, &tick_ctx)
+            .await;
+        watcher
+    });
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    assert!(
+        !tick.is_finished(),
+        "the tick waits for the diff before it drains"
+    );
+    finish_tx.send(()).unwrap();
+    diff.join().unwrap();
+    let mut watcher = tick.await.unwrap();
+    assert!(
+        !watcher.last_pass_ms.contains_key("half-diff"),
+        "no pass under the half shape"
+    );
+
+    p.run_auto_processor_tick(&mut watcher, now_ms + 2_500, &ctx)
+        .await;
+    assert!(
+        !watcher.last_pass_ms.contains_key("half-diff"),
+        "under the whole shape the message does not conform: no pass"
+    );
+    assert!(pending_texts(&watcher, "half-diff").is_empty());
+}
+
+/// The links of `sdna_json`'s shape, signed as a peer would send them.
+fn peer_shape_diff(sdna_json: &str) -> crate::types::PerspectiveDiff {
+    let signer = crate::agent::signatures::TestSigner::generate();
+    crate::types::PerspectiveDiff {
+        additions: crate::perspectives::shacl_parser::parse_shacl_to_links(sdna_json, "Message")
+            .expect("shape links")
+            .into_iter()
+            .map(|l| crate::types::LinkExpression::from(signer.sign(l.normalize())))
+            .collect(),
+        removals: vec![],
+    }
+}
+
+/// The tick that drains a peer's schema diff re-reads under the new shape:
+/// the entry stales every kept transcript, and a re-read under the shape
+/// the write replaced, from a cache still warm, would be marked fresh
+/// (#1795). The tick drops the shape cache where it marks the reads stale,
+/// so no write path's ordering decides which shape it parses.
+#[tokio::test]
+async fn a_peer_schema_diff_is_re_read_under_the_new_shape() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "hello",
+        "ns://body",
+    )
+    .await;
+    write_processor(&mut p, &config("order", 50, None), Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    assert_eq!(pending_texts(&watcher, "order"), vec!["hello"]);
+    assert_eq!(transcript_queries(&p), 1);
+
+    p.diff_from_link_language(peer_shape_diff(MESSAGE_SDNA_V2))
+        .await
+        .expect("peer schema diff");
+
+    // The driven tick stands in for the one the entry wakes: the message
+    // lacks `ns://priority`, so under the new shape it no longer conforms.
+    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+        .await;
+    assert_eq!(transcript_queries(&p), 2);
+    assert!(
+        pending_texts(&watcher, "order").is_empty(),
+        "the re-read under the new shape drops the message"
+    );
+
+    // The same ordering on the loop's own timer: the schema write's feed
+    // entry wakes its wait, and the tick re-reads once.
+    let looping = p.clone();
+    let loop_ctx = ctx.clone();
+    let handle = tokio::spawn(async move { looping.auto_processor_watch_loop(loop_ctx).await });
+    let reads = transcript_queries(&p);
+
+    p.diff_from_link_language(peer_shape_diff(MESSAGE_SDNA_BODY2))
+        .await
+        .expect("second peer schema diff");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while transcript_queries(&p) == reads {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the loop's timer-driven tick never re-read the transcript"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    p.teardown_background_tasks().await;
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("teardown ends the loop promptly")
+        .expect("loop task");
+}
+
+/// A fed write is only half of coverage: an entry's arrival says nothing
+/// about the writes before it. Here an in-scope write bypasses the feed (a
+/// raw `sparql_store` write, the way a peer's links land in these tests) and
+/// an unrelated fed write lands after it — its entry classified, matching
+/// nothing. The generation the raw write took has no entry, so the tick must
+/// treat the gap as unclassifiable and re-read the kept transcript — which
+/// picks the bypassed turn up — rather than trusting the unrelated entry's
+/// say-so.
+#[tokio::test]
+async fn an_unfed_write_before_a_fed_one_stales_the_kept_transcript() {
+    use crate::types::{Link, LinkStatus};
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "first",
+        "ns://body",
+    )
+    .await;
+    write_processor(&mut p, &config("gap", 600_000, None), Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    assert_eq!(pending_texts(&watcher, "gap"), vec!["first"]);
+    let reads = transcript_queries(&p);
+    assert_eq!(reads, 1);
+
+    // The write the feed never sees.
+    let signer = crate::agent::signatures::TestSigner::generate();
+    for l in message_links(&signer, "msg://raw", "raw", chrono::Utc::now()) {
+        p.sparql_store.add_link(&l).expect("unfed write");
+    }
+    // An unrelated fed write after it: classified, matching nothing.
+    p.add_link(
+        Link {
+            source: "note://reactions".into(),
+            predicate: Some("ns://reaction".into()),
+            target: "literal:string:+1".into(),
+        },
+        LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .expect("unrelated link");
+
+    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+        .await;
+    assert_eq!(
+        transcript_queries(&p),
+        reads + 1,
+        "a generation no entry accounts for must re-read the kept transcript"
+    );
+    assert_eq!(
+        pending_texts(&watcher, "gap"),
+        vec!["first", "raw"],
+        "the bypassed in-scope write is in the transcript it staled"
+    );
+}
+
+/// The gap does not need a matching write to matter: a feed-bypassing write
+/// and an unrelated fed one, both outside the scope, still re-read the kept
+/// transcript. The fed entry alone proves nothing about the generation the
+/// raw write took — coverage is every generation since the last drain
+/// having an entry, not the newest entry reaching the store's count.
+#[tokio::test]
+async fn a_feed_bypassing_write_stales_the_kept_transcript() {
+    use crate::types::{Link, LinkStatus};
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "first",
+        "ns://body",
+    )
+    .await;
+    write_processor(&mut p, &config("raw", 600_000, None), Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    let reads = transcript_queries(&p);
+    assert_eq!(reads, 1);
+
+    // An unrelated write the feed never sees, then an unrelated fed write.
+    let signer = crate::agent::signatures::TestSigner::generate();
+    let raw = crate::types::Link {
+        source: "note://raw".into(),
+        predicate: Some("ns://reaction".into()),
+        target: "literal:string:raw".into(),
+    }
+    .normalize();
+    let signed = signer.sign(raw);
+    let mut unfed = crate::types::LinkExpression::from(signed);
+    unfed.status = Some(LinkStatus::Local);
+    p.sparql_store.add_link(&unfed).expect("unfed write");
+    p.add_link(
+        Link {
+            source: "note://reactions".into(),
+            predicate: Some("ns://reaction".into()),
+            target: "literal:string:+1".into(),
+        },
+        LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .expect("unrelated link");
+
+    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+        .await;
+    assert_eq!(
+        transcript_queries(&p),
+        reads + 1,
+        "a generation no entry accounts for must re-read the kept transcript"
+    );
+    assert_eq!(
+        pending_texts(&watcher, "raw"),
+        vec!["first"],
+        "nothing in scope changed; the re-read returns the same turns"
+    );
+}
+
+/// A fed write that lands mid-tick — after the tick read the store's
+/// generation — leaves an entry carrying a generation above the one the
+/// tick saw. The drain proves coverage past the generation it read, so the
+/// next tick owes nothing: no gap, no stale-all, the kept transcript is
+/// reused. Sending on `commit_writes` is what the commit path does; the
+/// store staying at `generation` is what "mid-tick" means — the write had
+/// not committed when the tick looked.
+#[tokio::test]
+async fn a_write_landing_mid_tick_is_covered_without_a_stale_all() {
+    use crate::perspectives::perspective_instance::subscription_triggers;
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "first",
+        "ns://body",
+    )
+    .await;
+    write_processor(&mut p, &config("mid", 600_000, None), Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    let reads = transcript_queries(&p);
+    assert_eq!(reads, 1);
+
+    // An unrelated entry carrying a generation above the store's — what a
+    // fed write committing after the tick's generation read leaves behind.
+    let reaction = crate::types::Link {
+        source: "note://reactions".into(),
+        predicate: Some("ns://reaction".into()),
+        target: "literal:string:+1".into(),
+    };
+    let generation = p.sparql_store.write_generation();
+    let mut writes =
+        subscription_triggers::writes_of_links([reaction.clone()].iter()).expect("predicated link");
+    writes.generations = vec![generation + 1];
+    p.commit_writes
+        .send(Some(std::sync::Arc::new(writes)))
+        .expect("the feed is watched");
+
+    // This tick drains the entry while the store still reads `generation`.
+    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+        .await;
+
+    // The write commits. Straight into the store, so the store moves to
+    // `generation + 1` without a second entry: only the coverage the drain
+    // above proved can account for it. A drain that dropped what it proved
+    // past the generation it read would see a gap here and re-read.
+    let mut committed = crate::types::LinkExpression::from(
+        crate::agent::signatures::TestSigner::generate().sign(reaction),
+    );
+    committed.status = Some(crate::types::LinkStatus::Shared);
+    p.sparql_store.add_link(&committed).expect("commit");
+    assert_eq!(p.sparql_store.write_generation(), generation + 1);
+
+    p.run_auto_processor_tick(&mut watcher, now_ms + 1_000, &ctx)
+        .await;
+    assert_eq!(
+        transcript_queries(&p),
+        reads,
+        "coverage proven past the generation read: the next tick owes nothing"
+    );
+    assert_eq!(pending_texts(&watcher, "mid"), vec!["first"]);
+}
+
+/// The link-by-link fallback of `write_link_diff` still broadcasts one feed
+/// entry — carrying one generation per link the fallback wrote — so a diff
+/// `apply_diff` refuses whole stays covered: one entry, N generations, no
+/// stale-all. The refusal below is a link in the store's metadata
+/// vocabulary, which `apply_diff` fails the diff on and the fallback then
+/// skips per link.
+#[tokio::test]
+async fn a_fallback_diff_feeds_one_entry_with_every_generation_it_took() {
+    use crate::agent::signatures::TestSigner;
+    use crate::types::PerspectiveDiff;
+
+    const N: usize = 3;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "first",
+        "ns://body",
+    )
+    .await;
+    write_processor(&mut p, &config("fb", 600_000, None), Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    let reads = transcript_queries(&p);
+    assert_eq!(reads, 1);
+
+    let signer = TestSigner::generate();
+    let link = |predicate: &str, target: &str| {
+        let signed = signer.sign(
+            crate::types::Link {
+                source: "note://reactions".into(),
+                predicate: Some(predicate.into()),
+                target: target.into(),
+            }
+            .normalize(),
+        );
+        let mut l = crate::types::LinkExpression::from(signed);
+        l.status = Some(crate::types::LinkStatus::Local);
+        l
+    };
+    let mut additions: Vec<_> = (0..N)
+        .map(|i| link("ns://reaction", &format!("literal:string:r{i}")))
+        .collect();
+    additions.push(link("ad4m://ontology/note", "literal:string:x"));
+
+    let mut rx = p.commit_writes.subscribe();
+    let before = p.sparql_store.write_generation();
+    p.persist_link_diff(&PerspectiveDiff::from(additions, Vec::new()))
+        .await
+        .expect("persist_link_diff");
+
+    let entry = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("a feed entry within 5 s")
+        .expect("the feed is open")
+        .expect("the batch carried only predicated links");
+    let expected: Vec<u64> = (before + 1..=before + N as u64).collect();
+    assert_eq!(
+        entry.generations, expected,
+        "one generation per link the fallback wrote — the refused one took none"
+    );
+    assert_eq!(p.sparql_store.write_generation(), before + N as u64);
+
+    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+        .await;
+    assert_eq!(
+        transcript_queries(&p),
+        reads,
+        "every generation accounted for: the kept transcript is reused"
+    );
+}
+
 /// Hand `watcher` a kept read of `n` pending turns, as if the store had
 /// answered them at the current generation, and tick twice over it: the
 /// first tick queues them (every id is new), the second re-records them as
@@ -569,10 +1519,17 @@ async fn a_kept_transcript_holds_no_text_for_consumed_turns() {
 async fn id_comparisons_in_two_ticks_over(n: usize) -> (u64, u64) {
     use super::watcher::id_comparisons;
 
-    let (p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     let cfg = config("many", 600_000, None);
     let generation = p.sparql_store.write_generation();
     let mut watcher = WatcherState::new();
+    // A watcher that has ticked already: a new feed's first drain is a gap,
+    // which would drop the kept read below.
+    watcher.commit_feed = Some((
+        p.commit_writes.subscribe(),
+        generation,
+        std::collections::BTreeSet::new(),
+    ));
     watcher.reads.set_configs(generation, vec![cfg.clone()]);
     watcher
         .reads
@@ -587,7 +1544,7 @@ async fn id_comparisons_in_two_ticks_over(n: usize) -> (u64, u64) {
         .collect();
     watcher
         .reads
-        .set_transcript(&cfg, generation, turns, |_, _| true);
+        .set_transcript(&cfg, generation, turns, |_, _| true, None);
 
     let now_ms = chrono::Utc::now().timestamp_millis();
     let before = id_comparisons();
@@ -639,6 +1596,91 @@ async fn a_tick_over_50k_kept_turns_records_them_in_linear_time() {
     }
 }
 
+/// A turn whose `resolveLanguage` text the language cannot serve is not a
+/// turn yet: it is not queued, and — the subtle half — it is not *consumed*
+/// either. Kept reads are trusted while the store's write generation holds,
+/// but an expression arriving is not a store write, so a read that dropped an
+/// unresolved text carries a retry clock of its own: past it, the tick
+/// re-reads the transcript even though no link changed.
+#[tokio::test]
+async fn an_unresolvable_text_is_neither_queued_nor_consumed() {
+    use super::watcher::{TickOutcome, UNRESOLVED_TEXT_RETRY_MS};
+    use crate::agent::signatures::TestSigner;
+    use crate::perspectives::interpretation_test_support::{
+        serve_test_language, stop_test_language,
+    };
+    use crate::types::{Link, LinkStatus};
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    write_processor(&mut p, &config("lang", 600_000, None), Some(false), &ctx)
+        .await
+        .expect("write_processor");
+
+    // The message's body lives on a language that is not loaded: the
+    // resolveLanguage fetch fails. `body` carries `resolveLanguage: literal`
+    // in the SDNA, which is what makes it an expression-resolved property.
+    for (predicate, target) in [
+        ("ns://type", "ns://message"),
+        ("ns://body", "QmUnavailableLang://expr1"),
+    ] {
+        p.add_link(
+            Link {
+                source: "msg://lang".into(),
+                predicate: Some(predicate.into()),
+                target: target.into(),
+            },
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("seed message link");
+    }
+
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let outcome = p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    assert_eq!(
+        outcome,
+        TickOutcome::Idle,
+        "nothing to queue: an unresolvable text is not a turn"
+    );
+    assert!(
+        pending_texts(&watcher, "lang").is_empty(),
+        "the expression URL must not be queued as the body"
+    );
+
+    // A tick just inside the retry clock still trusts the kept read — the
+    // retry is at the loop's idle cadence, not every poll.
+    let outcome = p
+        .run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+        .await;
+    assert_eq!(outcome, TickOutcome::Idle);
+    let queries_at_idle = transcript_queries(&p);
+    assert_eq!(queries_at_idle, 1);
+
+    // The language comes up and serves the expression — without a store
+    // write. Past the retry clock, the next tick re-reads and queues it.
+    let expression = serde_json::to_string(&TestSigner::generate().sign("resolved words"))
+        .expect("expression json");
+    serve_test_language("QmUnavailableLang", expression).await;
+    let outcome = p
+        .run_auto_processor_tick(&mut watcher, now_ms + UNRESOLVED_TEXT_RETRY_MS, &ctx)
+        .await;
+    stop_test_language("QmUnavailableLang").await;
+    assert_eq!(
+        outcome,
+        TickOutcome::Pending,
+        "now the turn waits out its debounce"
+    );
+    assert_eq!(
+        transcript_queries(&p),
+        2,
+        "past the retry clock the kept read is not trusted"
+    );
+    assert_eq!(pending_texts(&watcher, "lang"), vec!["resolved words"]);
+}
+
 /// Josh's profile, part 3: on an executor with no model a processor's turns
 /// stay pending forever, and a pending tick polled at the base rate (0.5 s)
 /// forever, in every loop of the space. With no model a tick drains nothing,
@@ -651,7 +1693,7 @@ async fn with_no_model_pending_turns_back_off_to_the_idle_delay() {
         next_tick_delay_ms, TickOutcome, AUTO_PROCESSOR_IDLE_TICK_MAX_MS, AUTO_PROCESSOR_TICK_MS,
     };
 
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     seed_message(
         &mut p,
         &ctx,
@@ -707,13 +1749,18 @@ async fn with_no_model_pending_turns_back_off_to_the_idle_delay() {
 
 /// The loop itself, with no model and a turn pending: after the tick that
 /// finds no model it waits for a write or the idle fallback, instead of
-/// ticking every 0.5 s. Counted by how often a tick asked for a model.
+/// ticking every 0.5 s. Counted by how often a tick asked for a model. The
+/// observation is deterministic, not an elapsed window: out-of-scope writes
+/// the wait evaluates must not tick it, and the in-scope control write after
+/// them — received last, so every earlier write was evaluated by then —
+/// ticks it exactly once more.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn with_no_model_the_watch_loop_stops_polling() {
     use super::watcher::test_hooks::{PassHooks, HOOKS};
+    use crate::types::{Link, LinkStatus};
     use std::sync::atomic::Ordering;
 
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     seed_message(
         &mut p,
         &ctx,
@@ -746,13 +1793,47 @@ async fn with_no_model_the_watch_loop_stops_polling() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    let ticks = checks.load(Ordering::Relaxed);
-    println!("{ticks} ticks in ~3 s with a turn pending and no model");
+    let parked = checks.load(Ordering::Relaxed);
+
+    for i in 0..10 {
+        p.add_link(
+            Link {
+                source: "note://reactions".into(),
+                predicate: Some("ns://reaction".into()),
+                target: format!("literal:string:r{i}"),
+            },
+            LinkStatus::Local,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("unrelated link");
+    }
+
+    // Positive control, received after every unrelated write: an in-scope
+    // turn ends the wait, whose tick asks for a model once more.
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://2",
+        "did:key:alice",
+        "second",
+        "ns://body",
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while checks.load(Ordering::Relaxed) == parked {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the in-scope write never woke the loop"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(
-        ticks, 1,
-        "with no model and no write the loop ticked {ticks} times in ~3 s; \
-         polling at 0.5 s would be about 6"
+        checks.load(Ordering::Relaxed),
+        parked + 1,
+        "only the in-scope write ticked the parked loop; \
+         a poll at 0.5 s would have ticked many times by now"
     );
 
     p.teardown_background_tasks().await;
@@ -762,44 +1843,57 @@ async fn with_no_model_the_watch_loop_stops_polling() {
         .expect("loop task");
 }
 
-/// A body link signed by `signer` at `at`, as a peer's link arrives.
-fn body_link(
+/// The two links of a conforming `ns://Message` — the class flag, then the
+/// body — signed by `signer` at `at`, as a peer's links arrive.
+fn message_links(
     signer: &crate::agent::signatures::TestSigner,
     msg: &str,
     text: &str,
     at: chrono::DateTime<chrono::Utc>,
-) -> crate::types::LinkExpression {
-    let data = crate::types::Link {
-        source: msg.into(),
-        predicate: Some("ns://body".into()),
-        target: format!("literal:string:{text}"),
-    }
-    .normalize();
-    let signed = signer.sign_at(data, at);
-    crate::types::LinkExpression {
-        author: signed.author,
-        timestamp: signed.timestamp,
-        data: signed.data,
-        proof: signed.proof,
-        status: Some(crate::types::LinkStatus::Local),
-    }
+) -> Vec<crate::types::LinkExpression> {
+    let sign = |predicate: &str, target: &str| {
+        let data = crate::types::Link {
+            source: msg.into(),
+            predicate: Some(predicate.into()),
+            target: target.into(),
+        }
+        .normalize();
+        let signed = signer.sign_at(data, at);
+        crate::types::LinkExpression {
+            author: signed.author,
+            timestamp: signed.timestamp,
+            data: signed.data,
+            proof: signed.proof,
+            status: Some(crate::types::LinkStatus::Local),
+        }
+    };
+    vec![
+        sign("ns://type", "ns://message"),
+        sign("ns://body", &format!("literal:string:{text}")),
+    ]
 }
 
-/// The ids of the kept transcript, and of a fresh read of the same query:
-/// a read brought up to date from added links must hold the same turns.
+/// The ids of the kept transcript, and of a fresh model-query read of the
+/// same scope: the kept read must hold the same turns.
 async fn kept_and_fresh_ids(
     p: &PerspectiveInstance,
     watcher: &WatcherState,
     cfg: &AutoProcessorConfig,
 ) -> (Vec<String>, Vec<String>) {
-    let (_, kept) = watcher.reads.transcript(cfg).expect("a kept read");
+    let (_, kept, _) = watcher.reads.transcript(cfg).expect("a kept read");
     let mut kept: Vec<String> = kept.iter().map(|t| t.id().to_string()).collect();
-    let mut fresh: Vec<String> = gather_transcript_sparql(p, &cfg.source_scope_query)
-        .await
-        .expect("fresh read")
-        .iter()
-        .map(|t| PendingTurn::from_transcript(t).id)
-        .collect();
+    let mut fresh: Vec<String> = gather_transcript_model(
+        p,
+        &cfg.source_class,
+        &cfg.source_text,
+        &cfg.transcript_query_json(),
+    )
+    .await
+    .expect("fresh read")
+    .turns
+    .iter()
+    .map(|t| PendingTurn::from_transcript(t).id)
+    .collect();
     kept.sort();
     kept.dedup();
     fresh.sort();
@@ -807,92 +1901,12 @@ async fn kept_and_fresh_ids(
     (kept, fresh)
 }
 
-/// Josh's profile, part 2: in a busy conversation every write moves the
-/// store's generation, so with turns pending each tick read all N turns
-/// again. After the first read, a tick reads only what the links added since
-/// can add: a new message is one row, an unrelated link none.
-#[tokio::test]
-async fn a_write_after_the_first_read_reads_only_the_new_turns() {
-    const N: usize = 200;
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-    for i in 0..N {
-        seed_message(
-            &mut p,
-            &ctx,
-            &format!("msg://{i}"),
-            "did:key:alice",
-            &format!("turn {i}"),
-            "ns://body",
-        )
-        .await;
-    }
-    let cfg = config("delta", 600_000, None);
-    write_processor(&mut p, &cfg, Some(false), &ctx)
-        .await
-        .expect("write_processor");
-
-    let mut watcher = WatcherState::new();
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    let rows = transcript_rows(&p);
-    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
-    assert_eq!(
-        transcript_rows(&p) - rows,
-        N,
-        "the first tick reads every turn"
-    );
-
-    seed_message(
-        &mut p,
-        &ctx,
-        "msg://new",
-        "did:key:alice",
-        "new",
-        "ns://body",
-    )
-    .await;
-    let rows = transcript_rows(&p);
-    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
-        .await;
-    assert_eq!(
-        transcript_rows(&p) - rows,
-        1,
-        "a tick after a new message reads that message, not all {} turns",
-        N + 1
-    );
-    let pending = pending_texts(&watcher, "delta");
-    assert_eq!(pending.len(), N + 1);
-    assert_eq!(pending.last().map(String::as_str), Some("new"));
-
-    p.add_link(
-        crate::types::Link {
-            source: "note://reactions".into(),
-            predicate: Some("ns://reaction".into()),
-            target: "literal:string:r".into(),
-        },
-        crate::types::LinkStatus::Local,
-        None,
-        &ctx,
-    )
-    .await
-    .expect("unrelated link");
-    let rows = transcript_rows(&p);
-    p.run_auto_processor_tick(&mut watcher, now_ms + 1_000, &ctx)
-        .await;
-    assert_eq!(
-        transcript_rows(&p) - rows,
-        0,
-        "an unrelated link adds no row"
-    );
-
-    let (kept, fresh) = kept_and_fresh_ids(&p, &watcher, &cfg).await;
-    assert_eq!(kept, fresh, "the merged read holds what a full read holds");
-}
-
 /// A turn that arrives late, stamped before every turn already read (a peer's
-/// link syncing in), is read from what was added, not missed for being old.
+/// link syncing in), is not missed for being old: the next tick reads the
+/// scope in full and queues it.
 #[tokio::test]
-async fn a_late_turn_with_an_older_timestamp_is_read_from_the_links_added() {
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+async fn a_late_turn_with_an_older_timestamp_is_queued() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     for i in 0..20 {
         seed_message(
             &mut p,
@@ -914,63 +1928,51 @@ async fn a_late_turn_with_an_older_timestamp_is_read_from_the_links_added() {
 
     let signer = crate::agent::signatures::TestSigner::generate();
     let yesterday = chrono::Utc::now() - chrono::Duration::days(1);
-    p.sparql_store
-        .add_link(&body_link(&signer, "msg://late", "late", yesterday))
-        .expect("a peer's link");
-    let rows = transcript_rows(&p);
+    for l in message_links(&signer, "msg://late", "late", yesterday) {
+        p.sparql_store.add_link(&l).expect("a peer's link");
+    }
     p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
         .await;
-    assert_eq!(transcript_rows(&p) - rows, 1, "only the late turn is read");
-    assert_eq!(
-        pending_texts(&watcher, "late").last().map(String::as_str),
-        Some("late"),
-        "the late turn is queued"
+    assert!(
+        pending_texts(&watcher, "late").iter().any(|t| t == "late"),
+        "the late turn is queued; got {:?}",
+        pending_texts(&watcher, "late")
     );
     let (kept, fresh) = kept_and_fresh_ids(&p, &watcher, &cfg).await;
     assert_eq!(kept, fresh);
 }
 
-/// WE's scope query (a channel's messages, directly or in a thread, flagged
-/// as input): an old message enters the scope when its thread link lands
-/// after its body. The row is read from the added link, though no new turn
-/// link was written.
+/// `source_query.parent` limits the transcript to children of that parent:
+/// an old message enters the scope when its parent link lands after its
+/// body, and the next tick picks it up.
 #[tokio::test]
-async fn a_link_that_brings_an_old_message_into_scope_is_read_from_the_links_added() {
-    const SCOPE: &str = r#"SELECT ?speaker ?text ?timestamp WHERE {
-  { <ns://chan> <ns://child> ?m . }
-  UNION
-  { <ns://chan> <ns://child> ?line . ?line <ns://thread> ?m . }
-  ?m <ns://flag> <ns://text-block> .
-  ?m <ns://source> ?source .
-  FILTER(?source IN ("input", "typed"))
-  ?m <ns://body> ?text .
-  ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?m <ns://body> ?text )>> .
-  ?r <ad4m://ontology/author> ?speaker .
-  ?r <ad4m://ontology/timestamp> ?timestamp .
-}
-ORDER BY ?timestamp"#;
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+async fn a_link_that_brings_an_old_message_into_a_parent_scope_is_queued() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     let link = |s: &str, pr: &str, t: &str| crate::types::Link {
         source: s.into(),
         predicate: Some(pr.into()),
         target: t.into(),
     };
-    let mut links = vec![
+    p.add_link(
         link("ns://chan", "ns://child", "msg://1"),
-        link("ns://chan", "ns://child", "line://1"),
-    ];
+        crate::types::LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .expect("child link");
     for m in ["msg://1", "msg://2"] {
-        links.push(link(m, "ns://flag", "ns://text-block"));
-        links.push(link(m, "ns://source", "literal:string:input"));
-        links.push(link(m, "ns://body", &format!("literal:string:{m}")));
-    }
-    for l in links {
-        p.add_link(l, crate::types::LinkStatus::Local, None, &ctx)
-            .await
-            .expect("link");
+        for l in [
+            link(m, "ns://type", "ns://message"),
+            link(m, "ns://body", &format!("literal:string:{m}")),
+        ] {
+            p.add_link(l, crate::types::LinkStatus::Local, None, &ctx)
+                .await
+                .expect("link");
+        }
     }
     let cfg = AutoProcessorConfig {
-        source_scope_query: SCOPE.into(),
+        source_query: Some(r#"{"parent":{"id":"ns://chan","predicate":"ns://child"}}"#.into()),
         ..config("we", 600_000, None)
     };
     write_processor(&mut p, &cfg, Some(false), &ctx)
@@ -982,46 +1984,31 @@ ORDER BY ?timestamp"#;
     assert_eq!(pending_texts(&watcher, "we"), vec!["msg://1"]);
 
     p.add_link(
-        link("line://1", "ns://thread", "msg://2"),
+        link("ns://chan", "ns://child", "msg://2"),
         crate::types::LinkStatus::Local,
         None,
         &ctx,
     )
     .await
-    .expect("thread link");
-    let reads = transcript_queries(&p);
-    let rows = transcript_rows(&p);
+    .expect("child link");
     p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
         .await;
     assert_eq!(pending_texts(&watcher, "we"), vec!["msg://1", "msg://2"]);
-    assert_eq!(transcript_queries(&p) - reads, 1);
-    assert_eq!(
-        transcript_rows(&p) - rows,
-        1,
-        "only the message it brought in"
-    );
-    assert!(
-        p.sparql_store
-            .queries_run()
-            .last()
-            .is_some_and(|q| q.contains("VALUES")),
-        "a read of what the thread link added, not the scope query"
-    );
     let (kept, fresh) = kept_and_fresh_ids(&p, &watcher, &cfg).await;
     assert_eq!(kept, fresh);
 }
 
-/// A removal (a deleted message, or the old half of an edit) may take rows
-/// away, which a read of what was added cannot see: the tick reads the whole
-/// transcript again, and the kept read no longer holds the removed turn.
+/// A removal (a deleted message, or the old half of an edit) takes rows away:
+/// the tick reads the whole transcript again, and the kept read no longer
+/// holds the removed turn.
 #[tokio::test]
 async fn a_removal_reads_the_whole_transcript_again() {
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     let signer = crate::agent::signatures::TestSigner::generate();
     let start = chrono::Utc::now() - chrono::Duration::minutes(10);
-    let links: Vec<_> = (0..10)
+    let links: Vec<Vec<_>> = (0..10)
         .map(|i| {
-            body_link(
+            message_links(
                 &signer,
                 &format!("msg://{i}"),
                 &format!("turn {i}"),
@@ -1029,7 +2016,7 @@ async fn a_removal_reads_the_whole_transcript_again() {
             )
         })
         .collect();
-    for l in &links {
+    for l in links.iter().flatten() {
         p.sparql_store.add_link(l).expect("link");
     }
     let cfg = config("removal", 600_000, None);
@@ -1040,72 +2027,13 @@ async fn a_removal_reads_the_whole_transcript_again() {
     let now_ms = chrono::Utc::now().timestamp_millis();
     p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
 
-    p.sparql_store.remove_link(&links[3]).expect("remove");
-    let rows = transcript_rows(&p);
+    // Removing the flag link takes msg://3 out of the class.
+    p.sparql_store.remove_link(&links[3][0]).expect("remove");
     p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
         .await;
-    assert_eq!(transcript_rows(&p) - rows, 9, "a full read");
     let (kept, fresh) = kept_and_fresh_ids(&p, &watcher, &cfg).await;
     assert_eq!(kept, fresh);
     assert_eq!(kept.len(), 9);
-
-    // Added links after that are read from the log again.
-    p.sparql_store
-        .add_link(&body_link(
-            &signer,
-            "msg://10",
-            "turn 10",
-            chrono::Utc::now(),
-        ))
-        .expect("link");
-    let rows = transcript_rows(&p);
-    p.run_auto_processor_tick(&mut watcher, now_ms + 1_000, &ctx)
-        .await;
-    assert_eq!(transcript_rows(&p) - rows, 1);
-}
-
-/// A long run of writes that are not additions (removals, here of a link the
-/// store does not hold) keeps the store's write log bounded, and the tick
-/// after them reads the whole transcript.
-#[tokio::test]
-async fn a_long_run_of_removals_keeps_the_write_log_bounded_and_the_next_tick_reads_in_full() {
-    use crate::perspectives::write_log::WRITE_LOG_MAX_ENTRIES;
-
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-    let signer = crate::agent::signatures::TestSigner::generate();
-    let start = chrono::Utc::now() - chrono::Duration::minutes(10);
-    for i in 0..10 {
-        p.sparql_store
-            .add_link(&body_link(
-                &signer,
-                &format!("msg://{i}"),
-                &format!("turn {i}"),
-                start + chrono::Duration::seconds(i),
-            ))
-            .expect("link");
-    }
-    let cfg = config("bounded", 600_000, None);
-    write_processor(&mut p, &cfg, Some(false), &ctx)
-        .await
-        .expect("write_processor");
-    let mut watcher = WatcherState::new();
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
-
-    let ghost = body_link(&signer, "msg://ghost", "never stored", start);
-    for _ in 0..3 * WRITE_LOG_MAX_ENTRIES {
-        p.sparql_store.remove_link(&ghost).expect("remove");
-    }
-    assert!(
-        p.sparql_store.write_log_entries() <= WRITE_LOG_MAX_ENTRIES,
-        "{} log entries after {} removals",
-        p.sparql_store.write_log_entries(),
-        3 * WRITE_LOG_MAX_ENTRIES
-    );
-    let rows = transcript_rows(&p);
-    p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
-        .await;
-    assert_eq!(transcript_rows(&p) - rows, 10, "the tick reads in full");
 }
 
 /// Josh's open question 1 and Lal's P2-2: a loop waiting after a `NoModel`
@@ -1118,7 +2046,7 @@ async fn a_model_becoming_ready_wakes_a_loop_waiting_for_one() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     seed_message(
         &mut p,
         &ctx,
@@ -1193,12 +2121,12 @@ async fn a_model_becoming_ready_wakes_a_loop_waiting_for_one() {
 async fn a_late_older_turn_is_merged_where_a_fresh_read_puts_it() {
     use super::watcher::turn_id;
 
-    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
     let signer = crate::agent::signatures::TestSigner::generate();
     let start = chrono::Utc::now() - chrono::Duration::minutes(10);
-    let links: Vec<_> = (0..4)
+    let links: Vec<Vec<_>> = (0..4)
         .map(|i| {
-            body_link(
+            message_links(
                 &signer,
                 &format!("msg://{i}"),
                 &format!("turn {i}"),
@@ -1209,10 +2137,10 @@ async fn a_late_older_turn_is_merged_where_a_fresh_read_puts_it() {
     let ids: Vec<String> = links
         .iter()
         .enumerate()
-        .map(|(i, l)| turn_id(&l.author, &format!("turn {i}"), &l.timestamp))
+        .map(|(i, l)| turn_id(&l[1].author, &format!("turn {i}"), &l[1].timestamp))
         .collect();
     // Turns 1 to 3 first; turn 0, the oldest, arrives late.
-    for l in &links[1..] {
+    for l in links[1..].iter().flatten() {
         p.sparql_store.add_link(l).expect("link");
     }
     let cfg = config("ordered", 600_000, None);
@@ -1225,16 +2153,11 @@ async fn a_late_older_turn_is_merged_where_a_fresh_read_puts_it() {
     merged.defer_turns("ordered", &ids, now_ms, 10_000);
     p.run_auto_processor_tick(&mut merged, now_ms, &ctx).await;
 
-    p.sparql_store.add_link(&links[0]).expect("the late turn");
+    for l in &links[0] {
+        p.sparql_store.add_link(l).expect("the late turn");
+    }
     p.run_auto_processor_tick(&mut merged, now_ms + 500, &ctx)
         .await;
-    assert!(
-        p.sparql_store
-            .queries_run()
-            .last()
-            .is_some_and(|q| q.contains("VALUES")),
-        "the late turn was merged from a read of what was added"
-    );
 
     let mut fresh = WatcherState::new();
     fresh.defer_turns("ordered", &ids, now_ms, 10_000);
@@ -1242,7 +2165,7 @@ async fn a_late_older_turn_is_merged_where_a_fresh_read_puts_it() {
         .await;
 
     let order = |w: &WatcherState| -> Vec<String> {
-        let (_, turns) = w.reads.transcript(&cfg).expect("a kept read");
+        let (_, turns, _) = w.reads.transcript(&cfg).expect("a kept read");
         turns.iter().map(|t| t.id().to_string()).collect()
     };
     assert_eq!(order(&merged), ids, "the merged read is in timestamp order");
@@ -1272,4 +2195,478 @@ async fn a_late_older_turn_is_merged_where_a_fresh_read_puts_it() {
         batch_ids(fresh.drain_ready_batch(&drain, now_ms + 20_500)),
         "the first FIFO batch is the fresh read's"
     );
+}
+
+/// A forged message — a signature over other data, carried on this link —
+/// does not verify, and default model-query provenance withholds it (#1113):
+/// the instance loses its `body` and never becomes a turn. A peer without
+/// the key cannot put words into the transcript, and a speaker name in the
+/// LLM input can only come from a link that verifies.
+#[tokio::test]
+async fn a_forged_message_is_not_in_the_transcript() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    let signer = crate::agent::signatures::TestSigner::generate();
+    let at = chrono::Utc::now() - chrono::Duration::minutes(5);
+    let real = message_links(&signer, "msg://real", "real text", at);
+    for l in &real {
+        p.sparql_store.add_link(l).expect("link");
+    }
+    // What a peer without the key can gossip: the signer's signature over a
+    // different body, asserted on this one.
+    let mut forged = message_links(&signer, "msg://forged", "decoy", at);
+    forged[1].data.target = "literal:string:forged text".into();
+    assert!(
+        !forged[1].compute_proof_valid(),
+        "the fixture must not verify"
+    );
+    for l in forged {
+        p.sparql_store.add_link(&l).expect("forged link");
+    }
+
+    let cfg = config("proof", 600_000, None);
+    write_processor(&mut p, &cfg, Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+
+    let items = &watcher.pending_for("proof").expect("pending").items;
+    assert_eq!(
+        items.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
+        vec!["real text"]
+    );
+    // A turn's speaker and timestamp are the instance's own link metadata:
+    // the DID that signed it and the earliest of its link timestamps.
+    assert_eq!(items[0].speaker, signer.did);
+    assert_eq!(items[0].timestamp, real[1].timestamp);
+}
+
+/// The scope is the class, not the predicate: a node carrying the text
+/// property without the class flag does not conform, so the model query
+/// never returns it and its "body" never becomes a turn.
+#[tokio::test]
+async fn a_text_predicate_without_the_class_flag_is_not_in_the_transcript() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    let signer = crate::agent::signatures::TestSigner::generate();
+    let at = chrono::Utc::now() - chrono::Duration::minutes(5);
+    for l in message_links(&signer, "msg://real", "real text", at) {
+        p.sparql_store.add_link(&l).expect("link");
+    }
+    // A signed, verified body link — but no flag: the node does not conform.
+    let bare = message_links(&signer, "msg://bare", "bare body", at)[1].clone();
+    p.sparql_store.add_link(&bare).expect("body-only link");
+
+    let cfg = config("shape", 600_000, None);
+    write_processor(&mut p, &cfg, Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+
+    assert_eq!(pending_texts(&watcher, "shape"), vec!["real text"]);
+}
+
+/// `source_query.where` narrows the scope the way a model subscription's
+/// would: only conforming instances whose `body` matches become turns.
+#[tokio::test]
+async fn a_where_clause_filters_the_transcript() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    let signer = crate::agent::signatures::TestSigner::generate();
+    let at = chrono::Utc::now() - chrono::Duration::minutes(5);
+    for (msg, text) in [("msg://keep", "keep me"), ("msg://drop", "another")] {
+        for l in message_links(&signer, msg, text, at) {
+            p.sparql_store.add_link(&l).expect("link");
+        }
+    }
+    let cfg = AutoProcessorConfig {
+        source_query: Some(r#"{"where":{"body":{"contains":"keep"}}}"#.into()),
+        ..config("w", 600_000, None)
+    };
+    write_processor(&mut p, &cfg, Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+
+    assert_eq!(pending_texts(&watcher, "w"), vec!["keep me"]);
+}
+
+/// The same `where` must not reject a row whose `resolveLanguage` fetch
+/// failed: a value comparison on an expression-backed property is never
+/// pushed, and the hydrated raw URL is `__unresolved` — undecidable, not a
+/// non-match. The row is not a turn yet, but the retry clock re-reads it
+/// once the language serves the expression, and the turn is then admitted
+/// without a store write (#1795).
+#[tokio::test]
+async fn a_where_on_the_text_keeps_an_unresolvable_row_for_retry() {
+    use super::watcher::{TickOutcome, UNRESOLVED_TEXT_RETRY_MS};
+    use crate::agent::signatures::TestSigner;
+    use crate::perspectives::interpretation_test_support::{
+        serve_test_language, stop_test_language,
+    };
+    use crate::types::{Link, LinkStatus};
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[(
+        "ns://Message",
+        &message_sdna_on_language("QmUnavailableWhereLang"),
+    )])
+    .await;
+    let cfg = AutoProcessorConfig {
+        source_query: Some(r#"{"where":{"body":{"contains":"resolved"}}}"#.into()),
+        ..config("wu", 600_000, None)
+    };
+    write_processor(&mut p, &cfg, Some(false), &ctx)
+        .await
+        .expect("write_processor");
+
+    // The message's body lives on a language that is not loaded; the stored
+    // target is the raw expression URL, which `contains "resolved"` cannot
+    // prove false of the resolved value.
+    for (predicate, target) in [
+        ("ns://type", "ns://message"),
+        ("ns://body", "QmUnavailableWhereLang://expr1"),
+    ] {
+        p.add_link(
+            Link {
+                source: "msg://wu".into(),
+                predicate: Some(predicate.into()),
+                target: target.into(),
+            },
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("seed message link");
+    }
+
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let outcome = p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    assert_eq!(
+        outcome,
+        TickOutcome::Idle,
+        "nothing to queue: an unresolvable text is not a turn"
+    );
+    assert!(
+        pending_texts(&watcher, "wu").is_empty(),
+        "the expression URL must not be queued as the body"
+    );
+
+    // The language comes up and serves the expression — without a store
+    // write. The `where` cannot reject the row on the raw URL, so the read
+    // carried `__unresolved`, the retry clock re-reads, and the turn —
+    // whose resolved text matches — is queued.
+    let expression = serde_json::to_string(&TestSigner::generate().sign("resolved words"))
+        .expect("expression json");
+    serve_test_language("QmUnavailableWhereLang", expression).await;
+    let outcome = p
+        .run_auto_processor_tick(&mut watcher, now_ms + UNRESOLVED_TEXT_RETRY_MS, &ctx)
+        .await;
+    stop_test_language("QmUnavailableWhereLang").await;
+    assert_eq!(
+        outcome,
+        TickOutcome::Pending,
+        "the resolved text satisfies the where and the turn waits out its debounce"
+    );
+    assert_eq!(
+        transcript_queries(&p),
+        2,
+        "past the retry clock the kept read is not trusted"
+    );
+    assert_eq!(pending_texts(&watcher, "wu"), vec!["resolved words"]);
+}
+
+/// The mirror of the retry test: a value comparison on an expression-backed
+/// property is decided on the resolved value, after hydration — so a body
+/// that does not satisfy the `where` is dropped, even though the raw
+/// expression URL the store holds is all a pushed comparison could see
+/// (#1795).
+#[tokio::test]
+async fn a_where_on_the_text_drops_the_row_whose_resolved_value_fails() {
+    use super::watcher::TickOutcome;
+    use crate::agent::signatures::TestSigner;
+    use crate::perspectives::interpretation_test_support::{
+        serve_test_language, stop_test_language,
+    };
+    use crate::types::{Link, LinkStatus};
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[(
+        "ns://Message",
+        &message_sdna_on_language("QmResolvedWhereLang"),
+    )])
+    .await;
+    let cfg = AutoProcessorConfig {
+        source_query: Some(r#"{"where":{"body":{"contains":"resolved"}}}"#.into()),
+        ..config("wr", 600_000, None)
+    };
+    write_processor(&mut p, &cfg, Some(false), &ctx)
+        .await
+        .expect("write_processor");
+
+    // The language is already up and the expression decodes to a body the
+    // `where` excludes. The comparison is not pushed — only the
+    // post-hydration filter can reject the row.
+    let expression = serde_json::to_string(&TestSigner::generate().sign("other words"))
+        .expect("expression json");
+    serve_test_language("QmResolvedWhereLang", expression).await;
+    for (predicate, target) in [
+        ("ns://type", "ns://message"),
+        ("ns://body", "QmResolvedWhereLang://expr1"),
+    ] {
+        p.add_link(
+            Link {
+                source: "msg://wr".into(),
+                predicate: Some(predicate.into()),
+                target: target.into(),
+            },
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("seed message link");
+    }
+
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let outcome = p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    // The body resolves: an unfiltered read returns it decoded, so the
+    // `where`, not a failed fetch, is what drops it below.
+    let unfiltered = crate::perspectives::interpretation::gather_transcript_model(
+        &p,
+        "ns://Message",
+        "body",
+        "{}",
+    )
+    .await
+    .expect("unfiltered read");
+    stop_test_language("QmResolvedWhereLang").await;
+    let texts: Vec<&str> = unfiltered.turns.iter().map(|t| t.text.as_str()).collect();
+    assert_eq!(texts, vec!["other words"]);
+    assert_eq!(
+        outcome,
+        TickOutcome::Idle,
+        "a resolved body that fails the `where` is not a turn"
+    );
+    assert!(
+        pending_texts(&watcher, "wr").is_empty(),
+        "the resolved `other words` must not queue under `contains: resolved`"
+    );
+}
+
+/// The `NOT` case: `NOT {body: {contains: "resolved"}}` cannot be pushed
+/// either — the inner comparison would test the raw expression IRI — so the
+/// whole negation is decided on the resolved value. A body matching the
+/// negated condition must be rejected post-hydration, not kept as a turn.
+#[tokio::test]
+async fn a_not_where_on_the_text_drops_the_row_whose_resolved_value_matches() {
+    use super::watcher::TickOutcome;
+    use crate::agent::signatures::TestSigner;
+    use crate::perspectives::interpretation_test_support::{
+        serve_test_language, stop_test_language,
+    };
+    use crate::types::{Link, LinkStatus};
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[(
+        "ns://Message",
+        &message_sdna_on_language("QmResolvedNotLang"),
+    )])
+    .await;
+    let cfg = AutoProcessorConfig {
+        source_query: Some(r#"{"where":{"NOT":{"body":{"contains":"resolved"}}}}"#.into()),
+        ..config("wn", 600_000, None)
+    };
+    write_processor(&mut p, &cfg, Some(false), &ctx)
+        .await
+        .expect("write_processor");
+
+    let expression = serde_json::to_string(&TestSigner::generate().sign("resolved words"))
+        .expect("expression json");
+    serve_test_language("QmResolvedNotLang", expression).await;
+    for (predicate, target) in [
+        ("ns://type", "ns://message"),
+        ("ns://body", "QmResolvedNotLang://expr1"),
+    ] {
+        p.add_link(
+            Link {
+                source: "msg://wn".into(),
+                predicate: Some(predicate.into()),
+                target: target.into(),
+            },
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("seed message link");
+    }
+
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let outcome = p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    // As above: the body resolves, so the negation is what drops it.
+    let unfiltered = crate::perspectives::interpretation::gather_transcript_model(
+        &p,
+        "ns://Message",
+        "body",
+        "{}",
+    )
+    .await
+    .expect("unfiltered read");
+    stop_test_language("QmResolvedNotLang").await;
+    let texts: Vec<&str> = unfiltered.turns.iter().map(|t| t.text.as_str()).collect();
+    assert_eq!(texts, vec!["resolved words"]);
+    assert_eq!(
+        outcome,
+        TickOutcome::Idle,
+        "a body matching the negated `contains` is not a turn"
+    );
+    assert!(
+        pending_texts(&watcher, "wn").is_empty(),
+        "`resolved words` must not queue under `NOT contains: resolved`"
+    );
+}
+
+/// A `path` scope — `{"parent":{"ids":C,"path":["ns://child","we://thread"]}}`
+/// — reads a conversation's children and, one hop further, their replies:
+/// both become pending turns while a message under another conversation
+/// never does (#1795). The wake half rides the same scope: the `ns://child`
+/// edge under a different anchor cannot change the read, so the trigger
+/// rules it out, while the same edge under the scoped anchor and a
+/// `we://thread` edge off a scoped message both wake it.
+#[tokio::test]
+async fn a_path_scope_reads_children_and_their_replies() {
+    use crate::types::{Link, LinkStatus};
+
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    let link = |source: &str, predicate: &str, target: &str| Link {
+        source: source.into(),
+        predicate: Some(predicate.into()),
+        target: target.into(),
+    };
+
+    // Conversation C holds a direct child; that child threads a reply one
+    // `we://thread` hop deeper. Another conversation holds a message the
+    // path cannot reach.
+    for (s, pr, t) in [
+        ("we://conv", "ns://child", "msg://direct"),
+        ("msg://direct", "we://thread", "msg://reply"),
+        ("we://other-conv", "ns://child", "msg://other"),
+    ] {
+        p.add_link(link(s, pr, t), LinkStatus::Local, None, &ctx)
+            .await
+            .expect("scope edge");
+    }
+    for (msg, text) in [
+        ("msg://direct", "direct"),
+        ("msg://reply", "reply"),
+        ("msg://other", "other conv"),
+    ] {
+        for l in [
+            link(msg, "ns://type", "ns://message"),
+            link(msg, "ns://body", &format!("literal:string:{text}")),
+        ] {
+            p.add_link(l, LinkStatus::Local, None, &ctx)
+                .await
+                .expect("message link");
+        }
+    }
+
+    let cfg = AutoProcessorConfig {
+        source_query: Some(
+            r#"{"parent":{"ids":"we://conv","path":["ns://child","we://thread"]}}"#.into(),
+        ),
+        ..config("path", 600_000, None)
+    };
+    write_processor(&mut p, &cfg, Some(false), &ctx)
+        .await
+        .expect("write_processor");
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    let mut texts = pending_texts(&watcher, "path");
+    texts.sort();
+    assert_eq!(
+        texts,
+        vec!["direct", "reply"],
+        "hop one and hop two queue; the foreign conversation's message does not"
+    );
+
+    // The wake check is over the same `Writes` the commit feed reports.
+    // The membership edge under another conversation is ruled out…
+    let mut commits = p.commit_writes.subscribe();
+    p.add_link(
+        link("we://other-conv", "ns://child", "msg://late"),
+        LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .expect("foreign edge");
+    let writes = recv_edge(&mut commits, "ns://child").await;
+    assert!(
+        !p.auto_processor_writes_match(&watcher, &writes),
+        "a child edge under another conversation must not wake the loop"
+    );
+    // …while the same edge under the anchor — and the thread edge that
+    // would carry a new reply — both do.
+    for (s, pr, t) in [
+        ("we://conv", "ns://child", "msg://new"),
+        ("msg://reply", "we://thread", "msg://deeper"),
+    ] {
+        p.add_link(link(s, pr, t), LinkStatus::Local, None, &ctx)
+            .await
+            .expect("in-scope edge");
+        let writes = recv_edge(&mut commits, pr).await;
+        assert!(
+            p.auto_processor_writes_match(&watcher, &writes),
+            "{s} -{pr}-> {t} must wake the loop"
+        );
+    }
+}
+
+/// A pass writes to the store, so the queues the tick recorded before it
+/// may be out of date: a later processor drains only on the next tick, after
+/// it re-read the store, and that tick drains it first.
+#[tokio::test]
+async fn a_pass_that_writes_leaves_the_next_drain_to_the_next_tick() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+    seed_message(
+        &mut p,
+        &ctx,
+        "msg://1",
+        "did:key:alice",
+        "first",
+        "ns://body",
+    )
+    .await;
+    for id in ["a", "b"] {
+        write_processor(&mut p, &config(id, 0, None), Some(false), &ctx)
+            .await
+            .expect("write_processor");
+    }
+    let mut watcher = WatcherState::new();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+
+    let before = p.sparql_store.write_generation();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+    assert!(
+        p.sparql_store.write_generation() > before,
+        "the pass wrote to the store"
+    );
+    assert!(pending_texts(&watcher, "a").is_empty(), "a drained");
+    assert_eq!(
+        pending_texts(&watcher, "b"),
+        vec!["first".to_string()],
+        "b waits for a tick that read the store after a's pass"
+    );
+
+    p.run_auto_processor_tick(&mut watcher, now_ms + 1, &ctx)
+        .await;
+    assert!(pending_texts(&watcher, "b").is_empty(), "b drained next");
+    assert_eq!(watcher.last_pass_ms.get("b"), Some(&(now_ms + 1)));
 }

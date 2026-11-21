@@ -6,6 +6,14 @@
  */
 export type PerspectiveAddAutoProcessorParams = { uuid: string, processorId: string, 
 /**
- * SPARQL `SELECT ?speaker ?text ?timestamp` over the source items.
+ * The class of the source items, as a model query resolves a class.
  */
-sourceScopeQuery: string, basePrefix?: string, interpretationClasses: Array<string>, flows?: Array<string>, debounceMs: number, batchMin?: number, batchMax: number, maxWaitMs?: number, claimTtlMs: number, dedupStrategyJson?: string, sourceWindowMs?: number, existingScope?: any, mintScope?: any, maxToolCalls?: number, emitDebugEvents?: boolean, };
+sourceClass: string, 
+/**
+ * The name of the class property that holds an item's text.
+ */
+sourceText: string, 
+/**
+ * Optional JSON model-query object, limited to `parent` and `where`.
+ */
+sourceQuery?: string, basePrefix?: string, interpretationClasses: Array<string>, flows?: Array<string>, debounceMs: number, batchMin?: number, batchMax: number, maxWaitMs?: number, claimTtlMs: number, dedupStrategyJson?: string, sourceWindowMs?: number, existingScope?: any, mintScope?: any, maxToolCalls?: number, emitDebugEvents?: boolean, };

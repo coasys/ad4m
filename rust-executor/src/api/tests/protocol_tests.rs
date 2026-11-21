@@ -371,6 +371,36 @@ async fn agents_by_dids_checks_params_and_capability() {
     assert_eq!(err.code, 403);
 }
 
+/// A source scope the class cannot answer is the caller's error: a 400
+/// naming the problem, not a 500 from the write behind it.
+#[tokio::test]
+async fn add_auto_processor_refuses_a_bad_source_scope_as_a_bad_request() {
+    use crate::perspectives::interpretation_test_support::MESSAGE_SDNA;
+    let p = registered_perspective(&[("ns://Message", MESSAGE_SDNA)]).await;
+    let params = |source_query: &str| {
+        json!({
+            "uuid": p.0,
+            "processorId": "p",
+            "sourceClass": "ns://Message",
+            "sourceText": "body",
+            "sourceQuery": source_query,
+            "interpretationClasses": ["C"],
+            "debounceMs": 0,
+            "batchMax": 1,
+            "claimTtlMs": 1,
+        })
+    };
+    let err = call(
+        "perspective.addAutoProcessor",
+        params(r#"{"where":{"bdoy":"x"}}"#),
+        admin_ctx(),
+    )
+    .await
+    .expect_err("a where key the class lacks");
+    assert_eq!(err.code, 400, "{}", err.message);
+    assert!(err.message.contains("bdoy"), "{}", err.message);
+}
+
 // ── perspective.flowFired ───────────────────────────
 
 #[tokio::test]

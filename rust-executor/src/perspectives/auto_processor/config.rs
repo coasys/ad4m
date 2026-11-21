@@ -3,8 +3,9 @@
 //!
 //! Phase **P-B1** of the AutoProcessor arc. Config primitive only — the
 //! executor watcher (P-B2) reads these back from a perspective, then debounces
-//! new content in `source_scope_query`, wins a claim via [`super::claim`], and
-//! calls `run_interpretation_with_strategy` for the configured
+//! new content in the model-query scope (`source_class` + `source_text` +
+//! `source_query`), wins a claim via [`super::claim`], and calls
+//! `run_interpretation_with_strategy` for the configured
 //! `interpretation_classes`.
 //!
 //! A processor is a **hard-wired SHACL subject class** ([`AUTO_PROCESSOR_SDNA`],
@@ -111,7 +112,7 @@ pub(crate) const AUTO_PROCESSOR_CLASS: &str = "ad4m://AutoProcessor";
 /// No dedicated `rdf://type` flag by design (Nico 2026-08-19: "type flags
 /// are an anti-pattern for subject classes; match over all the properties
 /// instead"). Conformance is entirely by the presence of the required
-/// scalars: a node with `processor_id` + `source_scope_query` +
+/// scalars: a node with `processor_id` + `source_class` + `source_text` +
 /// `interpretation_class` + `debounce_ms` + `batch_max` + `claim_ttl_ms`
 /// IS an AutoProcessor. A half-synced node missing any of them is simply
 /// not an instance yet. Same pattern the `InterpretationOverlay` class
@@ -136,21 +137,31 @@ pub struct AutoProcessorConfig {
     /// [`super::claim::batch_node`], so claims by different processors never
     /// collide even on the same id-set.
     pub processor_id: String,
-    /// SPARQL `SELECT` returning `?speaker` + `?text` + `?timestamp` bindings —
-    /// the same shape
-    /// [`crate::perspectives::interpretation::graph::gather_transcript_sparql`]
-    /// accepts. Defines "the content this processor watches". Copy
-    /// [`crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY`]
-    /// (reifier `ad4m://ontology/author` + `ad4m://ontology/timestamp` on the
-    /// body link) rather than selecting speaker+text alone.
-    pub source_scope_query: String,
+    /// The class of the messages this processor watches: a class name or
+    /// target-class IRI, resolved exactly as `model_query` resolves a class.
+    /// Required — reading the transcript is a model query over this class, so
+    /// unverified links are withheld (#1113), `resolveLanguage` values are
+    /// resolved, and only shape-conforming instances become turns.
+    pub source_class: String,
+    /// The name of the class property that holds the message text — a
+    /// hydration key of `source_class`, e.g. `"body"`. Required.
+    pub source_text: String,
+    /// Optional JSON model-query object scoping the transcript further.
+    /// Restricted to the `parent` and `where` keys of
+    /// [`crate::perspectives::model_query::ModelQueryInput`]: the processor
+    /// owns the fields it selects and the order it reads in, so any other
+    /// key (`order`, `limit`, `offset`, `include`, `projections`, `count`,
+    /// `properties`, …) is refused on write and skips the config on load.
+    pub source_query: Option<String>,
     /// URI namespace new interpreted instances are minted under (the "spawn
     /// scope"), e.g. `soa://project/42/`. `None` falls back to a per-processor
     /// default (`ad4m://autoprocessor/<id>/instance/`), preserving the original
-    /// behaviour when a config omits `ad4m://base_prefix`. Existing instances to
-    /// upsert into are gathered from the perspective's registered classes; a
-    /// caller that wants create+update confined to one subtree points both this
-    /// and `source_scope_query` at that subtree.
+    /// behaviour when a config omits `ad4m://base_prefix`. This is only the
+    /// namespace of the minted URIs — it does not constrain which existing
+    /// instances are upserted (that is [`Self::existing_scope`]) nor parent
+    /// the new instances (that is [`Self::mint_scope`]), so a processor
+    /// reading project A can still update a matching instance under project
+    /// B's prefix unless `existing_scope` says otherwise.
     pub base_prefix: Option<String>,
     /// Class URIs (SHACL `target_class`) the interpretation engine is asked
     /// to materialize on each pass. Must contain at least one entry;
@@ -235,6 +246,193 @@ pub struct AutoProcessorConfig {
     pub emit_debug_events: bool,
 }
 
+/// The `source_query` keys the `ModelQueryInput` grammar allows here.
+/// Anything else — `order`, `limit`, `offset`, `include`, `projections`,
+/// `count`, `properties`, `linkStatus`, `includeUnverified`, … — would let a
+/// config override the transcript's own fields, order, or provenance, which
+/// is precisely the authority this struct refuses to hand out.
+const SOURCE_QUERY_ALLOWED_KEYS: [&str; 2] = ["parent", "where"];
+
+/// Validate `source_query` JSON: a `ModelQueryInput` object naming only
+/// [`SOURCE_QUERY_ALLOWED_KEYS`]. Used on write (refuses the config) and on
+/// load (skips it), so a hand-edited or partially-synced value fails closed
+/// both ways. Returns the parsed input for callers that want it.
+pub(crate) fn validate_source_query(
+    json: &str,
+) -> anyhow::Result<crate::perspectives::model_query::ModelQueryInput> {
+    let value: serde_json::Value = serde_json::from_str(json)
+        .map_err(|e| anyhow::anyhow!("source_query is not valid JSON: {e:#}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("source_query must be a JSON object"))?;
+    for key in object.keys() {
+        if !SOURCE_QUERY_ALLOWED_KEYS.contains(&key.as_str()) {
+            anyhow::bail!("source_query key `{key}` is not allowed; only `parent` and `where` are");
+        }
+    }
+    serde_json::from_value(value)
+        .map_err(|e| anyhow::anyhow!("source_query does not parse as a model query: {e:#}"))
+}
+
+/// `where` keys that are clause grammar, not property names: `producedByFlow`
+/// is extracted before the query runs, and `author`/`base`/`id`/`timestamp`/
+/// `createdAt`/`updatedAt` name the fields hydration gives every instance
+/// rather than a shape property.
+const WHERE_GRAMMAR_KEYS: [&str; 10] = [
+    "AND",
+    "OR",
+    "NOT",
+    "author",
+    "base",
+    "id",
+    "timestamp",
+    "createdAt",
+    "updatedAt",
+    "producedByFlow",
+];
+
+/// Every `where` leaf must name a property of the source class (or the
+/// grammar keys). Any other key compiles to nothing and is rejected by
+/// post-hydration filtering — either way the transcript reads empty forever,
+/// a typo indistinguishable from a quiet channel. Recurses through the
+/// clause-level combinators only: `some`/`none` bodies name properties of
+/// the *related* class, which this shape cannot check.
+fn validate_source_query_where(
+    input: &crate::perspectives::model_query::ModelQueryInput,
+    shape: &crate::perspectives::model_query::ModelShape,
+) -> anyhow::Result<()> {
+    use crate::perspectives::model_query::types::WhereCondition;
+    fn check(
+        clause: &std::collections::BTreeMap<String, WhereCondition>,
+        shape: &crate::perspectives::model_query::ModelShape,
+    ) -> anyhow::Result<()> {
+        for (key, condition) in clause {
+            match key.as_str() {
+                "AND" | "OR" => {
+                    if let WhereCondition::SubClauses(branches) = condition {
+                        for branch in branches {
+                            check(branch, shape)?;
+                        }
+                    }
+                }
+                "NOT" => {
+                    if let Some(branch) = condition.as_not_clause() {
+                        check(&branch, shape)?;
+                    }
+                }
+                k if WHERE_GRAMMAR_KEYS.contains(&k) => {}
+                k if shape.properties.iter().any(|p| p.name == k) => {}
+                k => anyhow::bail!(
+                    "source_query.where key `{k}` is not a property of source class \
+                     `{}`; the scope would match nothing",
+                    shape.target_class
+                ),
+            }
+        }
+        Ok(())
+    }
+    match &input.where_clause {
+        Some(clause) => check(clause, shape),
+        None => Ok(()),
+    }
+}
+
+/// The source scope's validity for one config at whatever the local store
+/// can prove: the `source_query` JSON grammar always; when the source
+/// class's shape is here to check against (a shape that has not synced yet
+/// is not a refusal — the loader re-checks on every read), the `where`
+/// property names, that `source_text` is a stored property (a turn's
+/// speaker and time come off its text link, which a getter's computed
+/// value does not have), and the refusals the transcript query itself
+/// would make when it runs.
+pub(crate) fn check_source_scope(
+    perspective: &PerspectiveInstance,
+    cfg: &AutoProcessorConfig,
+) -> anyhow::Result<()> {
+    let input = cfg
+        .source_query
+        .as_deref()
+        .map(validate_source_query)
+        .transpose()?;
+    if let Ok(shape) = perspective.get_shape(&cfg.source_class) {
+        if shape
+            .properties
+            .iter()
+            .any(|p| p.name == cfg.source_text && p.getter.is_some())
+        {
+            anyhow::bail!(
+                "source_text `{}` is a getter on `{}`: a turn needs the stored link its \
+                 speaker and time come from",
+                cfg.source_text,
+                shape.target_class
+            );
+        }
+        if let Some(input) = &input {
+            validate_source_query_where(input, &shape)?;
+        }
+        // The query a tick runs, refused now rather than on every tick:
+        // otherwise the processor registers and never produces a turn.
+        let transcript: crate::perspectives::model_query::ModelQueryInput =
+            serde_json::from_str(&cfg.transcript_query_json())?;
+        perspective.refuse_unanswerable_query(&shape, &transcript)?;
+    }
+    Ok(())
+}
+
+impl AutoProcessorConfig {
+    /// What defines "the content this processor watches": two configs whose
+    /// scope keys differ read different transcripts, so a kept read tagged
+    /// with one key is stale under the other.
+    pub(crate) fn scope_key(&self) -> (String, String, Option<String>) {
+        (
+            self.source_class.clone(),
+            self.source_text.clone(),
+            self.source_query.clone(),
+        )
+    }
+
+    /// The model query the transcript read runs: the caller's `parent` /
+    /// `where` scope, plus the text property a turn is built from.
+    /// `gather_transcript_model` adds `links: [source_text]` itself so the
+    /// turn's speaker/timestamp come off the selected text link's row, and
+    /// orders the result in [`super::watcher::transcript_cmp`] order — never
+    /// the config's.
+    pub(crate) fn transcript_query_json(&self) -> String {
+        let mut query = serde_json::json!({
+            "properties": [&self.source_text],
+        });
+        if let Some(source_query) = &self.source_query {
+            if let Ok(serde_json::Value::Object(scope)) = serde_json::from_str(source_query) {
+                for key in SOURCE_QUERY_ALLOWED_KEYS {
+                    if let Some(v) = scope.get(key) {
+                        query[key] = v.clone();
+                    }
+                }
+            }
+        }
+        query.to_string()
+    }
+}
+
+/// Every property predicate of the [`AUTO_PROCESSOR_CLASS`] shape. A
+/// committed write touching one may create, change or remove a config, so
+/// the watch loop treats it as a wake even with no processor declared yet
+/// (the write may be declaring the first). Parsed out of the SDNA, so a new
+/// config property joins the set for free.
+pub(crate) fn config_write_predicates() -> &'static std::collections::HashSet<String> {
+    static PREDICATES: std::sync::OnceLock<std::collections::HashSet<String>> =
+        std::sync::OnceLock::new();
+    PREDICATES.get_or_init(|| {
+        serde_json::from_str::<serde_json::Value>(AUTO_PROCESSOR_SDNA)
+            .expect("AUTO_PROCESSOR_SDNA is valid JSON")["properties"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|p| p["path"].as_str().map(str::to_string))
+            .collect()
+    })
+}
+
 /// Deterministic node URI for an AutoProcessor. Deterministic in
 /// `processor_id` so every peer addresses the same node once state syncs.
 pub fn processor_node(processor_id: &str) -> String {
@@ -249,12 +447,17 @@ pub async fn ensure_auto_processor_class(
     ensure_subject_classes(perspective, &[AUTO_PROCESSOR], context).await
 }
 
-/// The hard-wired `AutoProcessor` class. `flows` is its newest property: a
-/// shape without it is older.
+/// The hard-wired `AutoProcessor` class. `source_class` is its newest property
+/// and `source_scope_query` is one a later revision removed: a stored shape
+/// missing the first or still declaring the second is older. `ad4m://flow`
+/// cannot be the newest-path marker — the pre-`source_class` shape already
+/// carries it for `flows`, so an old stored shape would pass that check and
+/// its missing setters would silently drop every new field a processor is
+/// written with.
 pub(crate) const AUTO_PROCESSOR: HardwiredClass = HardwiredClass {
     sdna: AUTO_PROCESSOR_SDNA,
-    newest_path: Some("ad4m://flow"),
-    removed_path: None,
+    newest_path: Some("ad4m://source_class"),
+    removed_path: Some("ad4m://source_scope_query"),
 };
 
 /// Register the class if needed, then mint the processor as a subject instance.
@@ -284,6 +487,23 @@ pub async fn write_processor(
             cfg.processor_id
         );
     }
+    if cfg.source_class.is_empty() {
+        anyhow::bail!(
+            "write_processor: `{}` has no source_class",
+            cfg.processor_id
+        );
+    }
+    // Whitespace is no property name either: `scalar_string` on load reads
+    // " " back as a value, so it must be refused here, not just `""`.
+    if cfg.source_text.trim().is_empty() {
+        anyhow::bail!("write_processor: `{}` has no source_text", cfg.processor_id);
+    }
+    check_source_scope(perspective, cfg).map_err(|e| {
+        anyhow::anyhow!(
+            "write_processor: `{}` bad source scope: {e:#}",
+            cfg.processor_id
+        )
+    })?;
     ensure_auto_processor_class(perspective, context).await?;
 
     let node = processor_node(&cfg.processor_id);
@@ -294,12 +514,16 @@ pub async fn write_processor(
     // (2026-08-20 debug: exact bug we hit).
     let mut values = serde_json::json!({
         "processorId": cfg.processor_id,
-        "sourceScopeQuery": cfg.source_scope_query,
+        "sourceClass": cfg.source_class,
+        "sourceText": cfg.source_text,
         "debounceMs": cfg.debounce_ms.to_string(),
         "batchMin": cfg.batch_min.to_string(),
         "batchMax": cfg.batch_max.to_string(),
         "claimTtlMs": cfg.claim_ttl_ms.to_string(),
     });
+    if let Some(source_query) = &cfg.source_query {
+        values["sourceQuery"] = source_query.clone().into();
+    }
     if let Some(base_prefix) = &cfg.base_prefix {
         values["basePrefix"] = base_prefix.clone().into();
     }
@@ -532,7 +756,7 @@ pub async fn load_processors(
     // above — model_query keys results by property name.
     let query = serde_json::json!({
         "properties": [
-            "processorId", "sourceScopeQuery", "basePrefix",
+            "processorId", "sourceClass", "sourceText", "sourceQuery", "basePrefix",
             "interpretationClasses", "flows", "debounceMs", "batchMin", "batchMax",
             "maxWaitMs", "claimTtlMs", "dedupStrategy", "sourceWindowMs",
             "existingScope", "mintScope", "maxToolCalls", "emitDebugEvents",
@@ -550,6 +774,13 @@ pub async fn load_processors(
     for instance in result["instances"].as_array().into_iter().flatten() {
         match config_from_instance(instance) {
             Some(cfg) => {
+                // Grammar was checked in `config_from_instance`; this is the
+                // half that needs the store: the source class's shape, when
+                // it is here.
+                if let Err(e) = check_source_scope(perspective, &cfg) {
+                    report_bad_source_query(instance, &format!("{e:#}"));
+                    continue;
+                }
                 log_flow_selection_once(&cfg);
                 out.push(cfg);
             }
@@ -588,6 +819,23 @@ pub async fn load_processors(
     }
     out.sort_by(|a, b| a.processor_id.cmp(&b.processor_id));
     Ok(out)
+}
+
+/// Report why this instance's stored `sourceQuery` is refused, through the
+/// same throttle `load_processors` uses to report a skipped node
+/// ([`first_report_for`]). The warning names the field — and consumes the
+/// instance's one report, so the generic "missing / unparseable fields"
+/// line does not also print for the same node.
+fn report_bad_source_query(instance: &serde_json::Value, why: &str) {
+    let id = instance["id"].as_str().unwrap_or("<no id>");
+    if first_report_for(id) {
+        log::warn!(
+            "load_processors: AutoProcessor instance `{id}` has an invalid source scope \
+             ({why}); skipping (further occurrences suppressed). Instance as read: {instance}"
+        );
+    } else {
+        log::debug!("load_processors: still skipping `{id}` (invalid source scope)");
+    }
 }
 
 /// Map one hydrated `model_query` instance onto an [`AutoProcessorConfig`], or
@@ -666,6 +914,30 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         return None;
     }
 
+    // `sourceQuery`: absent → whole-class scope. Presence is checked before
+    // `scalar_string`, which reads an empty literal (like any non-scalar) as
+    // absent — a stored-but-empty `sourceQuery` is a malformed config, not
+    // an omission. Present but carrying keys the processor owns (order,
+    // limit, …) or unparseable → the whole config is refused, the same
+    // policy every other malformed field gets: a silently weakened scope
+    // reads content the processor never opted into.
+    let source_query = match instance.get("sourceQuery") {
+        None => None,
+        Some(_) => match scalar("sourceQuery") {
+            Some(json) => match validate_source_query(&json) {
+                Ok(_) => Some(json),
+                Err(e) => {
+                    report_bad_source_query(instance, &format!("{e:#}"));
+                    return None;
+                }
+            },
+            None => {
+                report_bad_source_query(instance, "present but empty or not a scalar");
+                return None;
+            }
+        },
+    };
+
     // Scope JSON blobs — a present-but-unparseable value is a config error
     // (bail, same policy as other required-shape fields). Absent → None.
     let existing_scope = match scalar("existingScope") {
@@ -710,9 +982,21 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
     };
     let emit_debug_events = parse_bool("emitDebugEvents")?.unwrap_or(false);
 
+    // `scalar_string` reads an empty literal as absent but a whitespace one
+    // as a value — a stored `" "` would survive hydration to name nothing
+    // readable. Fail it closed like the other malformed fields.
+    if scalar("sourceText").is_none_or(|s| s.trim().is_empty()) {
+        return None;
+    }
+
     Some(AutoProcessorConfig {
         processor_id: scalar("processorId")?,
-        source_scope_query: scalar("sourceScopeQuery")?,
+        // `scalar_string` reads an empty literal as absent, so a missing or
+        // empty required source field fails closed here exactly like the
+        // other malformed fields.
+        source_class: scalar("sourceClass")?,
+        source_text: scalar("sourceText")?,
+        source_query,
         base_prefix: scalar("basePrefix"),
         interpretation_classes,
         flows,
@@ -748,9 +1032,9 @@ mod tests {
     fn sample_config(id: &str) -> AutoProcessorConfig {
         AutoProcessorConfig {
             processor_id: id.into(),
-            source_scope_query: format!(
-                "SELECT ?speaker ?text WHERE {{ ?s <ns://{id}/turn> ?t . }}"
-            ),
+            source_class: format!("ns://{id}/Turn"),
+            source_text: "body".into(),
+            source_query: None,
             base_prefix: Some(format!("soa://{id}/instance/")),
             // Kept in sorted order to match [`load_processors`]'s canonical
             // ordering — see the assertion in
@@ -777,6 +1061,77 @@ mod tests {
             .expect("write_processor");
         let loaded = load_processors(&p).await.expect("load_processors");
         assert_eq!(loaded, vec![cfg]);
+    }
+
+    /// The class as a pre-`source_class` executor stored it — the verbatim
+    /// `auto_processor.json` at the parent commit: `sourceScopeQuery`
+    /// instead of `sourceClass`/`sourceText`/`sourceQuery`, but already
+    /// carrying `ad4m://flow` (which made it a bad refresh marker).
+    const OLD_AUTO_PROCESSOR_SDNA: &str = r#"{
+  "target_class": "ad4m://AutoProcessor",
+  "interpretation_hint": "An automatic interpretation processor: the content it watches, the classes it materializes, and its batching/claim timings.",
+  "constructor_actions": [
+    {"action": "addLink", "source": "this", "predicate": "ad4m://processor_id", "target": "placeholder"}
+  ],
+  "properties": [
+    {"path": "ad4m://processor_id",      "name": "processorId",         "identity": true, "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://processor_id", "target": "value"}]},
+    {"path": "ad4m://source_scope_query","name": "sourceScopeQuery",                      "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://source_scope_query", "target": "value"}]},
+    {"path": "ad4m://base_prefix",       "name": "basePrefix",                            "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://base_prefix", "target": "value"}]},
+    {"path": "ad4m://interpretation_class","name": "interpretationClasses","collection": true,"datatype": "xsd://string", "min_count": 1, "setter": [{"action": "addLink", "source": "this", "predicate": "ad4m://interpretation_class", "target": "value"}]},
+    {"path": "ad4m://flow",              "name": "flows",               "collection": true,"datatype": "xsd://string", "min_count": 0, "setter": [{"action": "addLink", "source": "this", "predicate": "ad4m://flow", "target": "value"}]},
+    {"path": "ad4m://debounce_ms",       "name": "debounceMs",                            "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://debounce_ms", "target": "value"}]},
+    {"path": "ad4m://batch_min",         "name": "batchMin",                              "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://batch_min", "target": "value"}]},
+    {"path": "ad4m://batch_max",         "name": "batchMax",                              "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://batch_max", "target": "value"}]},
+    {"path": "ad4m://max_wait_ms",       "name": "maxWaitMs",                             "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://max_wait_ms", "target": "value"}]},
+    {"path": "ad4m://claim_ttl_ms",      "name": "claimTtlMs",                            "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://claim_ttl_ms", "target": "value"}]},
+    {"path": "ad4m://source_window_ms",  "name": "sourceWindowMs",                        "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://source_window_ms", "target": "value"}]},
+    {"path": "ad4m://dedup_strategy",    "name": "dedupStrategy",                         "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://dedup_strategy", "target": "value"}]},
+    {"path": "ad4m://existing_scope",    "name": "existingScope",                         "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://existing_scope", "target": "value"}]},
+    {"path": "ad4m://mint_scope",        "name": "mintScope",                             "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://mint_scope", "target": "value"}]},
+    {"path": "ad4m://max_tool_calls",    "name": "maxToolCalls",                          "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://max_tool_calls", "target": "value"}]},
+    {"path": "ad4m://emit_debug_events", "name": "emitDebugEvents",                       "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://emit_debug_events", "target": "value"}]}
+  ]
+}"#;
+
+    /// Re-registering a processor on a perspective that still stores the old
+    /// `sourceScopeQuery` shape must upgrade the class first — the stored
+    /// shape has no setters for `sourceClass`/`sourceText`/`sourceQuery`, so
+    /// without the refresh `create_subject` drops every new field with only a
+    /// log line and the write reports success while `load_processors` sees
+    /// nothing. The refresh replaces the shape wholesale: `source_scope_query`
+    /// must be gone afterwards, not just joined by the new paths.
+    #[tokio::test]
+    async fn write_processor_upgrades_a_stored_old_shape() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        p.register_shape_json(OLD_AUTO_PROCESSOR_SDNA, &ctx)
+            .await
+            .expect("store old shape");
+        let declares = |p: &PerspectiveInstance, path: &str| {
+            p.shapes(Some(vec![AUTO_PROCESSOR_CLASS.to_string()]))
+                .expect("shapes")
+                .iter()
+                .any(|s| s.shape.properties.iter().any(|prop| prop.path == path))
+        };
+        assert!(
+            declares(&p, "ad4m://source_scope_query"),
+            "fixture check: the stored shape is the old one"
+        );
+
+        let cfg = sample_config("upgraded");
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write_processor");
+
+        assert!(
+            declares(&p, "ad4m://source_class"),
+            "the write must refresh the stored shape to the current SDNA"
+        );
+        assert!(
+            !declares(&p, "ad4m://source_scope_query"),
+            "the refresh replaces the shape — no `source_scope_query` left"
+        );
+        let loaded = load_processors(&p).await.expect("load_processors");
+        assert_eq!(loaded, vec![cfg], "every new field must land and load");
     }
 
     /// The config lives in the *shared* graph: every link the subject class
@@ -1417,5 +1772,279 @@ mod tests {
             .expect("write off");
         let loaded = load_processors(&p).await.expect("load off");
         assert!(!loaded[0].emit_debug_events);
+    }
+
+    /// `source_query` may only narrow the scope (`parent`, `where`). Any key
+    /// the processor owns — order, limit, fields, provenance — is refused at
+    /// write time, because silently narrowing or widening the transcript is
+    /// the authority this field must not grant.
+    #[tokio::test]
+    async fn write_rejects_source_query_processor_keys() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        for bad in [
+            r#"{"limit": 5}"#,
+            r#"{"order": {"timestamp": "asc"}}"#,
+            r#"{"includeUnverified": true}"#,
+            r#"{"properties": ["body"]}"#,
+            r#"{"where": {"body": "x"}, "offset": 3}"#,
+            "not json {",
+            r#"["parent"]"#,
+        ] {
+            let mut cfg = sample_config("bad-scope");
+            cfg.source_query = Some(bad.into());
+            let err = write_processor(&mut p, &cfg, Some(false), &ctx)
+                .await
+                .expect_err("a key the processor owns must be refused");
+            assert!(
+                err.to_string().contains("source_query"),
+                "unexpected error for {bad}: {err}"
+            );
+        }
+    }
+
+    /// A `where` key must name a property of the source class or a field
+    /// every hydrated instance carries: `timestamp`, `createdAt` and
+    /// `updatedAt` are such fields, beside `author`, `base` and `id`. A
+    /// name that is neither would read an empty transcript forever.
+    #[tokio::test]
+    async fn source_query_where_names_a_property_or_a_hydrated_field() {
+        use crate::perspectives::interpretation_test_support::MESSAGE_SDNA;
+        let (mut p, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Message", MESSAGE_SDNA)]).await;
+        let scoped = |where_json: &str| AutoProcessorConfig {
+            source_class: "ns://Message".into(),
+            source_text: "body".into(),
+            source_query: Some(format!(r#"{{"where":{where_json}}}"#)),
+            ..sample_config("where-names")
+        };
+        for field in ["timestamp", "createdAt", "updatedAt"] {
+            write_processor(
+                &mut p,
+                &scoped(&format!(r#"{{"{field}":{{"gt":0}}}}"#)),
+                Some(false),
+                &ctx,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("`{field}` is a hydrated field: {e}"));
+        }
+        let err = write_processor(&mut p, &scoped(r#"{"bdoy":"x"}"#), Some(false), &ctx)
+            .await
+            .expect_err("a typo is not a property");
+        assert!(err.to_string().contains("bdoy"), "{err}");
+    }
+
+    /// What the transcript query would refuse on every tick is refused on
+    /// write: `author` beside a value comparison on a language-backed
+    /// property can be answered neither in the store nor after hydration.
+    #[tokio::test]
+    async fn a_source_query_the_transcript_read_would_refuse_is_refused_on_write() {
+        use crate::perspectives::interpretation_test_support::MESSAGE_SDNA;
+        let on_language = MESSAGE_SDNA.replace(
+            "\"resolve_language\":\"literal\"",
+            "\"resolve_language\":\"QmSomeLang\"",
+        );
+        let (mut p, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Message", &on_language)]).await;
+        let cfg = AutoProcessorConfig {
+            source_class: "ns://Message".into(),
+            source_text: "body".into(),
+            source_query: Some(
+                r#"{"where":{"body":{"contains":"approved","author":"did:key:a"}}}"#.into(),
+            ),
+            ..sample_config("refused")
+        };
+        let err = write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect_err("unanswerable on every tick");
+        assert!(err.to_string().contains("author"), "{err}");
+    }
+
+    /// A turn's speaker and time come off its text link, so `sourceText`
+    /// must name a stored property. A getter computes its value from other
+    /// links and has none: refused on write, and a node edited to name one
+    /// is skipped on load.
+    #[tokio::test]
+    async fn source_text_on_a_getter_is_refused_on_write_and_skipped_on_load() {
+        const GETTER_SDNA: &str = r#"{
+  "target_class":"ns://Message",
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://message","min_count":1,"max_count":1},
+    {"path":"ns://body","name":"body","resolve_language":"literal","min_count":1,"max_count":1},
+    {"path":"ns://summary","name":"summary","getter":"SELECT ?target WHERE { <Base> <ns://body> ?target . } LIMIT 1"}
+  ]
+}"#;
+        let (mut p, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Message", GETTER_SDNA)]).await;
+        let on = |id: &str, text: &str| AutoProcessorConfig {
+            source_class: "ns://Message".into(),
+            source_text: text.into(),
+            ..sample_config(id)
+        };
+        let err = write_processor(&mut p, &on("computed", "summary"), Some(false), &ctx)
+            .await
+            .expect_err("a getter has no text link");
+        assert!(err.to_string().contains("summary"), "{err}");
+
+        write_processor(&mut p, &on("stored", "body"), Some(false), &ctx)
+            .await
+            .expect("a stored property is a text");
+        write_processor(&mut p, &on("edited", "body"), Some(false), &ctx)
+            .await
+            .expect("write edited");
+        p.update_subject(
+            class_option(),
+            processor_node("edited"),
+            serde_json::json!({ "sourceText": "summary" }),
+            None,
+            &ctx,
+        )
+        .await
+        .expect("edit sourceText to the getter");
+        let loaded = load_processors(&p).await.expect("load");
+        let ids: Vec<&str> = loaded.iter().map(|c| c.processor_id.as_str()).collect();
+        assert_eq!(ids, vec!["stored"]);
+    }
+
+    /// `parent` and `where` are the scope the config may name — they
+    /// round-trip.
+    #[tokio::test]
+    async fn source_query_parent_and_where_roundtrip() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let mut cfg = sample_config("scoped");
+        cfg.source_query = Some(
+            r#"{"parent": {"id": "flux://channel/42", "predicate": "ns://child"}, "where": {"body": {"contains": "x"}}}"#
+                .into(),
+        );
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write");
+        let loaded = load_processors(&p).await.expect("load");
+        assert_eq!(loaded[0].source_query, cfg.source_query);
+    }
+
+    /// A `source_query` that was hand-edited to carry a processor-owned key is
+    /// a config error on load exactly like an unparseable numeric: the node is
+    /// skipped, not loaded with a weakened scope.
+    #[tokio::test]
+    async fn load_skips_node_with_disallowed_source_query_key() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        write_processor(&mut p, &sample_config("good"), Some(false), &ctx)
+            .await
+            .expect("write good");
+        write_processor(&mut p, &sample_config("sneaky"), Some(false), &ctx)
+            .await
+            .expect("write sneaky");
+        p.update_subject(
+            class_option(),
+            processor_node("sneaky"),
+            serde_json::json!({ "sourceQuery": "{\"limit\": 1}" }),
+            None,
+            &ctx,
+        )
+        .await
+        .expect("inject disallowed key");
+        let loaded = load_processors(&p).await.expect("load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].processor_id, "good");
+    }
+
+    /// A stored empty `sourceQuery` is a malformed value, not an omission:
+    /// `scalar_string` reads `""` as absent, so presence must be checked
+    /// first, or the node would load with a whole-class scope it never
+    /// declared.
+    #[tokio::test]
+    async fn load_skips_node_with_empty_source_query() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        write_processor(&mut p, &sample_config("good"), Some(false), &ctx)
+            .await
+            .expect("write good");
+        write_processor(&mut p, &sample_config("empty-scope"), Some(false), &ctx)
+            .await
+            .expect("write empty-scope");
+        p.update_subject(
+            class_option(),
+            processor_node("empty-scope"),
+            serde_json::json!({ "sourceQuery": "" }),
+            None,
+            &ctx,
+        )
+        .await
+        .expect("empty sourceQuery");
+        let loaded = load_processors(&p).await.expect("load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].processor_id, "good");
+    }
+
+    /// A node missing either required source field is not a usable scope; an
+    /// empty one is the same case written out. Both skip rather than build a
+    /// transcript query that can never resolve.
+    #[tokio::test]
+    async fn load_skips_node_missing_or_empty_source_fields() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        write_processor(&mut p, &sample_config("good"), Some(false), &ctx)
+            .await
+            .expect("write good");
+        write_processor(&mut p, &sample_config("empty-source"), Some(false), &ctx)
+            .await
+            .expect("write empty-source");
+        p.update_subject(
+            class_option(),
+            processor_node("empty-source"),
+            serde_json::json!({ "sourceClass": "" }),
+            None,
+            &ctx,
+        )
+        .await
+        .expect("empty sourceClass");
+
+        // A partial node carrying every field but `sourceText`.
+        p.add_links(
+            vec![
+                Link {
+                    source: processor_node("no-text"),
+                    predicate: Some("rdf://type".into()),
+                    target: AUTO_PROCESSOR_CLASS.into(),
+                },
+                Link {
+                    source: processor_node("no-text"),
+                    predicate: Some("ad4m://processor_id".into()),
+                    target: "literal:string:no-text".into(),
+                },
+                Link {
+                    source: processor_node("no-text"),
+                    predicate: Some("ad4m://source_class".into()),
+                    target: "literal:string:ns://Message".into(),
+                },
+                Link {
+                    source: processor_node("no-text"),
+                    predicate: Some("ad4m://debounce_ms".into()),
+                    target: "literal:string:100".into(),
+                },
+                Link {
+                    source: processor_node("no-text"),
+                    predicate: Some("ad4m://batch_max".into()),
+                    target: "literal:string:8".into(),
+                },
+                Link {
+                    source: processor_node("no-text"),
+                    predicate: Some("ad4m://claim_ttl_ms".into()),
+                    target: "literal:string:60000".into(),
+                },
+                Link {
+                    source: processor_node("no-text"),
+                    predicate: Some("ad4m://interpretation_class".into()),
+                    target: "ns://Task".into(),
+                },
+            ],
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("seed no-text");
+
+        let loaded = load_processors(&p).await.expect("load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].processor_id, "good");
     }
 }

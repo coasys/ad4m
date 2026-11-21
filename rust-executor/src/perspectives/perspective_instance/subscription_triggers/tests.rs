@@ -701,6 +701,220 @@ async fn a_record_linked_under_the_parent_anchor_enters() {
     assert_eq!(ids(&last_result(&p, &id).await), vec!["ns://p4"]);
 }
 
+/// A class-flag write under a DIFFERENT parent does not re-run a
+/// parent-scoped subscription: the node can never be in this scope's
+/// result. Its flag's `joins` match is gated by the scope's edge; the edge
+/// write under this scope's anchor still re-runs. Red on `dev`: `joins`
+/// fired on the flag's predicate and value alone (#1795).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flag_write_under_another_parent_does_not_rerun() {
+    let mut p = blog().await;
+    check(&p).await;
+
+    let (id, first) = subscribe(
+        &p,
+        "Post",
+        json!({ "parent": { "id": "ns://board", "predicate": "ns://child" } }),
+    )
+    .await;
+    assert!(ids(&first).is_empty(), "{first}");
+
+    // Flagged under a different parent through the same edge predicate.
+    record(&mut p, "ns://other", "Post", &[]).await;
+    add(&mut p, "ns://other-board", "ns://child", "ns://other").await;
+    check(&p).await;
+    assert_eq!(reruns::count(&id), 0, "ns://other is under another parent");
+    assert!(ids(&last_result(&p, &id).await).is_empty());
+
+    // Control: an edge write under the scope's anchor still wakes it.
+    record(&mut p, "ns://p4", "Post", &[]).await;
+    add(&mut p, "ns://board", "ns://child", "ns://p4").await;
+    check(&p).await;
+    assert_eq!(reruns::count(&id), 1, "the anchor's edge write must wake");
+    assert_eq!(ids(&last_result(&p, &id).await), vec!["ns://p4"]);
+
+    // And a flag write on an already-linked node: the flag lands after the
+    // edge, so only its `joins` rule — now gated — can wake the check.
+    add(&mut p, "ns://board", "ns://child", "ns://p5").await;
+    check(&p).await;
+    let before = reruns::count(&id);
+    add(&mut p, "ns://p5", FLAG, "ns://post").await;
+    check(&p).await;
+    assert_eq!(
+        reruns::count(&id),
+        before + 1,
+        "a flag on a node inside the scope must still wake it"
+    );
+    let mut now = ids(&last_result(&p, &id).await);
+    now.sort();
+    assert_eq!(now, vec!["ns://p4", "ns://p5"]);
+}
+
+/// A Comment linked to an in-scope Post is not linked to the anchor through
+/// the scope's edge — it is not a scope member. Its flag write is a `joins`
+/// match whose parent-edge gate must not apply: the gate proves a member
+/// out of scope, and a quantified record under an in-scope member is not a
+/// member itself. Red when `joins`/`scan` gated every scanned class's flag
+/// (#1795 review round 2, item 12).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_quantified_records_flag_inside_the_scope_reruns() {
+    let mut p = blog().await;
+    record(&mut p, "ns://p1", "Post", &[]).await;
+    add(&mut p, "ns://board", "ns://child", "ns://p1").await;
+    // c1's relation to the in-scope post and its `where` value land before
+    // its flag: only the flag write itself can wake the check.
+    add(&mut p, "ns://p1", "ns://comment", "ns://c1").await;
+    add(&mut p, "ns://c1", "ns://text", "literal:string:hot").await;
+    check(&p).await;
+
+    let (id, first) = subscribe(
+        &p,
+        "Post",
+        json!({
+            "parent": { "id": "ns://board", "predicate": "ns://child" },
+            "where": { "comments": { "some": { "text": "hot" } } }
+        }),
+    )
+    .await;
+    assert!(ids(&first).is_empty(), "{first}");
+
+    add(&mut p, "ns://c1", FLAG, "ns://comment").await;
+    check(&p).await;
+
+    assert_eq!(
+        reruns::count(&id),
+        1,
+        "a flag on a quantified record linked in scope must wake"
+    );
+    assert_eq!(ids(&last_result(&p, &id).await), vec!["ns://p1"]);
+}
+
+/// The same, when the quantified class IS the subscribed class: a Comment
+/// query whose `where` reads its `replies`, themselves Comments. A reply is
+/// not under the anchor, yet its flag write makes the in-scope comment
+/// match, so a flag a quantifier scans is never gated, even when the
+/// subscribed class carries it too. Red when the gate keyed on the
+/// subscribed class's flags alone (#1795).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_self_referential_quantifier_reruns_on_a_reply_flag() {
+    let mut p = blog().await;
+    record(&mut p, "ns://c1", "Comment", &[]).await;
+    add(&mut p, "ns://board", "ns://child", "ns://c1").await;
+    // r1's relation to the in-scope comment and its `where` value land
+    // before its flag: only the flag write itself can wake the check.
+    add(&mut p, "ns://c1", "ns://reply", "ns://r1").await;
+    add(&mut p, "ns://r1", "ns://text", "literal:string:hot").await;
+    check(&p).await;
+
+    let (id, first) = subscribe(
+        &p,
+        "Comment",
+        json!({
+            "parent": { "id": "ns://board", "predicate": "ns://child" },
+            "where": { "replies": { "some": { "text": "hot" } } }
+        }),
+    )
+    .await;
+    assert!(ids(&first).is_empty(), "{first}");
+
+    add(&mut p, "ns://r1", FLAG, "ns://comment").await;
+    check(&p).await;
+
+    assert_eq!(
+        reruns::count(&id),
+        1,
+        "a reply's flag must wake the comment it makes match"
+    );
+    assert_eq!(ids(&last_result(&p, &id).await), vec!["ns://c1"]);
+}
+
+/// A `path` scope — children through one predicate, replies through another.
+/// A write on either hop's predicate wakes the query; a write on an
+/// unrelated predicate does not. Flag writes stay conservative: a two-hop
+/// path cannot prove a flagged node out of scope with one lookup.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_path_scope_wakes_on_either_hop() {
+    let mut p = blog().await;
+    check(&p).await;
+
+    let (id, first) = subscribe(
+        &p,
+        "Post",
+        json!({ "parent": { "ids": "ns://conv", "path": ["ns://child", "ns://thread"] } }),
+    )
+    .await;
+    assert!(ids(&first).is_empty(), "{first}");
+
+    // An unrelated predicate under the anchor does not wake.
+    add(&mut p, "ns://conv", "ns://pinned", "ns://elsewhere").await;
+    check(&p).await;
+    assert_eq!(reruns::count(&id), 0, "unrelated predicate: {id}");
+
+    // Hop 1: an edge on the first path predicate under the anchor. The flag
+    // and the edge get their own checks, or the rerun could have been the
+    // flag's conservative wake instead of the edge's.
+    record(&mut p, "ns://block", "Post", &[]).await;
+    check(&p).await;
+    assert_eq!(
+        reruns::count(&id),
+        1,
+        "a class-flag write is conservatively a wake at depth"
+    );
+    add(&mut p, "ns://conv", "ns://child", "ns://block").await;
+    check(&p).await;
+    assert_eq!(
+        reruns::count(&id),
+        2,
+        "the first hop's edge must wake on its own"
+    );
+    assert_eq!(ids(&last_result(&p, &id).await), vec!["ns://block"]);
+
+    // Hop 2: a reply edge on the second path predicate, under a node whose
+    // membership the trigger cannot see — the predicate alone must wake it.
+    record(&mut p, "ns://reply", "Post", &[]).await;
+    check(&p).await;
+    assert_eq!(
+        reruns::count(&id),
+        3,
+        "a class-flag write is conservatively a wake at depth"
+    );
+    add(&mut p, "ns://block", "ns://thread", "ns://reply").await;
+    check(&p).await;
+    assert_eq!(
+        reruns::count(&id),
+        4,
+        "the second hop's edge must wake on its own"
+    );
+    let mut now = ids(&last_result(&p, &id).await);
+    now.sort();
+    assert_eq!(now, vec!["ns://block", "ns://reply"]);
+
+    // A flag on a node nowhere near the scope still wakes it: below the
+    // first hop the walk's intermediates are unseen, so one lookup cannot
+    // prove the flagged node out of scope — but the rerun keeps it out.
+    record(&mut p, "ns://other-block", "Post", &[]).await;
+    check(&p).await;
+    assert_eq!(
+        reruns::count(&id),
+        5,
+        "a class-flag write is conservatively a wake at depth"
+    );
+    assert!(
+        !ids(&last_result(&p, &id).await).contains(&"ns://other-block".to_string()),
+        "woken, not admitted"
+    );
+
+    // The edge predicates under another conversation, though: the first
+    // hop's `near` reads the anchor, and a foreign anchor is not it.
+    add(&mut p, "ns://other-conv", "ns://child", "ns://other-block").await;
+    check(&p).await;
+    assert_eq!(
+        reruns::count(&id),
+        5,
+        "an edge under another anchor must not wake"
+    );
+}
+
 /// A record moving under a parent several levels down a transitive
 /// traversal. The link's source is neither an anchor nor in the result, so
 /// only the predicate can say it matters.

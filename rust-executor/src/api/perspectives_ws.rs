@@ -1746,9 +1746,18 @@ async fn add_auto_processor_handler(
     let agent_context = ctx.acts_as();
 
     let emit_debug_events_write = body.emit_debug_events;
+    if body.source_class.trim().is_empty() {
+        return Err(WsRpcError::bad_request("`sourceClass` must be non-empty"));
+    }
+    if body.source_text.trim().is_empty() {
+        return Err(WsRpcError::bad_request("`sourceText` must be non-empty"));
+    }
+
     let cfg = AutoProcessorConfig {
         processor_id: body.processor_id.clone(),
-        source_scope_query: body.source_scope_query,
+        source_class: body.source_class,
+        source_text: body.source_text,
+        source_query: body.source_query,
         base_prefix: body.base_prefix,
         interpretation_classes: body.interpretation_classes,
         flows: body.flows.unwrap_or_default(),
@@ -1764,6 +1773,12 @@ async fn add_auto_processor_handler(
         max_tool_calls: body.max_tool_calls,
         emit_debug_events: emit_debug_events_write.unwrap_or(false),
     };
+    // Same rule `write_processor` applies, answered at the boundary: an
+    // invalid source scope (`sourceQuery` grammar, a `where` key the class
+    // lacks, a getter `sourceText`) is the caller's error, a 400 — not a
+    // 500, and not a write the loader then silently skips.
+    crate::perspectives::auto_processor::config::check_source_scope(&perspective, &cfg)
+        .map_err(|e| WsRpcError::bad_request(format!("source scope: {e:#}")))?;
     write_processor(
         &mut perspective,
         &cfg,
@@ -2664,8 +2679,14 @@ pub struct PerspectiveEvaluateGettersParams {
 pub struct PerspectiveAddAutoProcessorParams {
     pub uuid: String,
     pub processor_id: String,
-    /// SPARQL `SELECT ?speaker ?text ?timestamp` over the source items.
-    pub source_scope_query: String,
+    /// The class of the source items, as a model query resolves a class.
+    pub source_class: String,
+    /// The name of the class property that holds an item's text.
+    pub source_text: String,
+    /// Optional JSON model-query object, limited to `parent` and `where`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub source_query: Option<String>,
     #[serde(default)]
     #[ts(optional)]
     pub base_prefix: Option<String>,

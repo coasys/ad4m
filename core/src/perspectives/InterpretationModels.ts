@@ -40,9 +40,21 @@ export class AutoProcessorConfig extends Ad4mModel {
   @Property({ through: "ad4m://processor_id", required: true, identity: true })
   processorId: string = "";
 
-  /** SPARQL SELECT that gathers source items each pass. */
-  @Property({ through: "ad4m://source_scope_query", required: true })
-  sourceScopeQuery: string = "";
+  /** Class of the source items (a class name or target-class IRI). */
+  @Property({ through: "ad4m://source_class", required: true })
+  sourceClass: string = "";
+
+  /** Name of the class property that holds a source item's text. */
+  @Property({ through: "ad4m://source_text", required: true })
+  sourceText: string = "";
+
+  /**
+   * Optional model-query JSON restricting the source scope; only `parent`
+   * and `where` keys are allowed — the processor owns ordering, hydration
+   * and pagination.
+   */
+  @Optional({ through: "ad4m://source_query" })
+  sourceQuery?: string;
 
   /** URI prefix for minted instances; omit for the per-processor default. */
   // No resolveLanguage — Rust SDNA declares none for this property, so under
@@ -132,7 +144,7 @@ export class AutoProcessorConfig extends Ad4mModel {
   // No `@Flag` type discriminator (Nico 2026-08-19: "type flags are an
   // anti-pattern for subject classes; match over all the properties
   // instead"). Conformance is by the presence of `processorId` +
-  // `sourceScopeQuery` + `interpretationClasses` + `debounceMs` +
+  // `sourceClass` + `sourceText` + `interpretationClasses` + `debounceMs` +
   // `batchMax` + `claimTtlMs` — the Rust SDNA takes the same shape.
 }
 

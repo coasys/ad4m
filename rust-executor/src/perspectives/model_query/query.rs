@@ -14,37 +14,61 @@ use super::hydration::{
     filter_properties, group_results_by_source, hydrate_instances, ALWAYS_KEPT,
 };
 use super::link_author::refuse_unanswerable_link_author;
-use super::links::{attach_links, resolve_link_keys};
+use super::links::{attach_links, hydration_link_predicates, resolve_link_keys};
 use super::projection::resolve_projections;
 use super::relations::{resolve_includes_recursive, resolve_reverse_relations};
 use super::sparql_builder::{
-    all_where_pushable, build_count_sparql, build_instance_sparql, level_limits,
-    link_status_filter, local_status_filter, per_anchor_limit, proof_valid_filter, LinkGuard,
-    ANCHOR_VAR,
+    all_where_pushable, build_count_sparql, build_instance_sparql, link_status_filter,
+    local_status_filter, per_anchor_limit, proof_valid_filter, LinkGuard, ANCHOR_VAR,
 };
 use super::types::{
     InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, Scope,
     ScopeDirection, ShapeResolver, SortKey, SparqlPagination, WhereCondition,
 };
-use super::utils::{validate_iri, values_or_str_filter, MAX_INCLUDE_DEPTH};
+use super::utils::{parse_literal_value, validate_iri, values_or_str_filter, MAX_INCLUDE_DEPTH};
 use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
 use anyhow::Error;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-/// The anchors, predicate and direction a `levels` walk starts from.
+/// One hop of a bounded level walk: the predicate to follow and the
+/// per-anchor breadth `levels` sets — `None` under `path`, which bounds
+/// none.
+type WalkHop = (String, Option<usize>);
+
+/// The walk a scope asks the executor to make, as `(anchors, direction,
+/// hops)` — one [`WalkHop`] per level: `levels` names both over one
+/// predicate, `path` names the predicates and bounds none.
 ///
-/// `None` for any scope that is not a traversal over a predicate — the walk is meaningless without
-/// a relation to follow, and the caller falls back to asking once. (A containment traversal with
-/// `levels` is refused before this is asked.)
-fn walk_roots(query: &ModelQueryInput) -> Option<(Vec<String>, String, ScopeDirection)> {
+/// `None` for any scope that does not describe a bounded level walk —
+/// including a `Traverse` with none of `levels`/`path`, which the store
+/// answers in one step.
+fn walk_spec(query: &ModelQueryInput) -> Option<(Vec<String>, ScopeDirection, Vec<WalkHop>)> {
     match &query.parent {
         Some(Scope::Traverse {
             ids,
             predicate: Some(predicate),
             direction,
+            levels: Some(levels),
             ..
-        }) => Some((ids.clone(), predicate.clone(), *direction)),
+        }) => Some((
+            ids.clone(),
+            *direction,
+            levels
+                .iter()
+                .map(|limit| (predicate.clone(), Some(*limit)))
+                .collect(),
+        )),
+        Some(Scope::Traverse {
+            ids,
+            direction,
+            path: Some(path),
+            ..
+        }) => Some((
+            ids.clone(),
+            *direction,
+            path.iter().map(|p| (p.clone(), None)).collect(),
+        )),
         _ => None,
     }
 }
@@ -296,7 +320,8 @@ fn slice_per_anchor(rows: &mut Vec<Value>, n: usize) {
     );
 }
 
-/// Walk a relation level by level, keeping `levels[depth]` results per anchor at each depth.
+/// Walk `hops` level by level — each hop its own predicate and per-anchor
+/// breadth (`None`: every link) — unioning what each level reaches.
 ///
 /// This is the whole reason the walk belongs in the executor. A caller can drive it — ask for one
 /// level, use the ids as the next level's anchors — but each step is then a network round trip, and
@@ -306,7 +331,9 @@ fn slice_per_anchor(rows: &mut Vec<Value>, n: usize) {
 /// one request and one hydration instead of three of each.
 ///
 /// Returns the ids in breadth-first order, which is also the order the caller's rows come back in.
-/// A node already seen is not walked again, so a cycle terminates rather than looping.
+/// A `levels` walk never walks a node twice, so a cycle terminates rather than looping; a `path`
+/// walk walks a node once per depth it is reached at — the hop that follows is a different
+/// predicate — and is bounded by the path's length.
 #[allow(clippy::too_many_arguments)]
 async fn walk_levels(
     stop: &EvalStop,
@@ -316,17 +343,25 @@ async fn walk_levels(
     resolver: &dyn ShapeResolver,
     pagination: &SparqlPagination,
     roots: Vec<String>,
-    predicate: &str,
     direction: ScopeDirection,
-    levels: &[usize],
+    hops: &[(String, Option<usize>)],
 ) -> Result<Vec<String>, Error> {
     let mut ordered: Vec<String> = Vec::new();
-    // Seeded with the roots so that a cycle back to an anchor neither returns
-    // the anchor as its own descendant nor walks it a second time.
+    // Two sets, two jobs. `seen` de-duplicates the OUTPUT — a node reachable
+    // by two routes is reported once, under whichever anchor the ordering
+    // reaches first — and is seeded with the roots so a cycle back to an
+    // anchor never returns the anchor as its own descendant. The `frontier`
+    // is what the next hop walks from, and they are not the same set: under
+    // `path` (whose hops carry no breadth — `limit.is_none()`) the next hop
+    // follows a different predicate, so a node reported at an earlier depth
+    // still holds the links that hop reads and must be walked again at this
+    // one. Under `levels` every hop is the same predicate, so a reported node
+    // was already walked through it and re-walking could only re-evaluate
+    // what the first walk already admitted or dropped.
     let mut seen: HashSet<String> = roots.iter().cloned().collect();
     let mut frontier = roots;
 
-    for (depth, limit) in levels.iter().enumerate() {
+    for (depth, (predicate, limit)) in hops.iter().enumerate() {
         if frontier.is_empty() {
             break;
         }
@@ -335,18 +370,20 @@ async fn walk_levels(
         let mut level_input = query_input.clone();
         level_input.parent = Some(Scope::Traverse {
             ids: frontier.clone(),
-            predicate: Some(predicate.to_string()),
+            predicate: Some(predicate.clone()),
             transitive: false,
             direction,
-            limit_per_anchor: Some(*limit),
+            limit_per_anchor: *limit,
             levels: None,
             max_depth: None,
+            path: None,
         });
         // Paging belongs to the caller's whole result, not to a level of the walk.
         level_input.limit = None;
         level_input.offset = None;
 
-        let plan = build_instance_sparql(shape, &level_input, Some(pagination), Some(resolver));
+        let plan =
+            build_instance_sparql(shape, &level_input, Some(pagination), Some(resolver), &[]);
         let InstanceQueryPlan::TwoPhase {
             pagination_subquery,
             ..
@@ -373,31 +410,67 @@ async fn walk_levels(
         // filling it with duplicates would return fewer distinct records than the caller asked for.
         let mut kept: HashMap<String, usize> = HashMap::new();
         let mut next = Vec::new();
+        let mut next_seen: HashSet<String> = HashSet::new();
+        // A `path` hop carries no breadth (`limit.is_none()`) and is an edge
+        // walk: every edge target carries the next hop, whether or not the
+        // queried class or `where` admits it — those filters decide only
+        // which nodes are returned. The scoped level query above cannot give
+        // this frontier (it already dropped the non-conforming rows), so the
+        // next depth comes from a one-hop guarded reach over the same
+        // frontier. `levels` keeps the opposite rule — its frontier is the
+        // rows the level query reported — so this runs only for `path`.
+        if limit.is_none() {
+            let edges = [ContainmentEdge {
+                predicate: predicate.clone(),
+                holder: None,
+            }];
+            let pairs = guarded_reach(
+                stop,
+                store,
+                &frontier,
+                &edges,
+                direction,
+                LinkGuard::of(query_input),
+                Some(1),
+            )?;
+            for (_, node) in pairs {
+                if next_seen.insert(node.clone()) {
+                    next.push(node);
+                }
+            }
+        }
         for row in &rows {
             let Some(id) = row["source"].as_str() else {
                 continue;
             };
-            // A node reachable by two routes is one node. Walking it twice would duplicate its
-            // subtree and, in a cycle, never finish.
-            if seen.contains(id) {
-                continue;
-            }
-            // A row with no anchor cannot be attributed to one, so it is kept rather than dropped:
-            // losing rows silently is worse than a slice that is occasionally too generous. (Same
-            // reading as `slice_per_anchor`, which the non-walking path still uses.)
-            if let Some(anchor) = row[ANCHOR_VAR].as_str() {
-                let used = kept.entry(anchor.to_string()).or_insert(0);
-                if *used >= *limit {
-                    continue;
+            let mut reported = false;
+            if !seen.contains(id) {
+                // A row with no anchor cannot be attributed to one, so it is kept rather than dropped:
+                // losing rows silently is worse than a slice that is occasionally too generous. (Same
+                // reading as `slice_per_anchor`, which the non-walking path still uses.)
+                if let Some(anchor) = row[ANCHOR_VAR].as_str() {
+                    let used = kept.entry(anchor.to_string()).or_insert(0);
+                    if limit.is_some_and(|limit| *used >= limit) {
+                        continue;
+                    }
+                    *used += 1;
                 }
-                *used += 1;
+                seen.insert(id.to_string());
+                ordered.push(id.to_string());
+                reported = true;
             }
-            seen.insert(id.to_string());
-            ordered.push(id.to_string());
-            next.push(id.to_string());
+            // The frontier is de-duplicated per depth, not per output: under
+            // `levels` a reported node was already walked through the hop's
+            // one predicate, so only newly reported nodes walk on. A `path`
+            // hop does not use these rows for its frontier at all — it walks
+            // the guarded edge reach above, so a node reported at an earlier
+            // depth still walks at the next (its hop predicates differ).
+            if limit.is_some() && reported && next_seen.insert(id.to_string()) {
+                next.push(id.to_string());
+            }
         }
         log::debug!(
-            "Walk depth {depth}: kept {} of {} rows across {} anchors at a breadth of {limit}",
+            "Walk depth {depth}: kept {} of {} rows across {} anchors at a breadth of {limit:?}",
             next.len(),
             rows.len(),
             kept.len()
@@ -552,7 +625,7 @@ pub(super) async fn select_ids(
     let query_input = walked_input.as_ref().unwrap_or(query_input);
     refuse_unanswerable_link_author(query_input, shape, resolver)?;
     if per_anchor_limit(query_input).is_some()
-        || level_limits(query_input).is_some()
+        || walk_spec(query_input).is_some()
         || !all_where_pushable(query_input, shape, Some(resolver))
     {
         return Ok(None);
@@ -566,7 +639,7 @@ pub(super) async fn select_ids(
     let InstanceQueryPlan::TwoPhase {
         pagination_subquery,
         ..
-    } = build_instance_sparql(shape, query_input, Some(&pagination), Some(resolver))
+    } = build_instance_sparql(shape, query_input, Some(&pagination), Some(resolver), &[])
     else {
         return Ok(None);
     };
@@ -601,6 +674,54 @@ pub(super) async fn execute_model_query_inner(
 
     refuse_unanswerable_scope(query_input)?;
 
+    // A `path` is its own way of saying what `predicate`, `levels` and
+    // `maxDepth` say: every combination is refused rather than read as one
+    // or the other.
+    if let Some(Scope::Traverse {
+        predicate,
+        transitive,
+        limit_per_anchor,
+        levels,
+        max_depth,
+        path: Some(path),
+        ..
+    }) = &query_input.parent
+    {
+        if path.is_empty() {
+            return Err(Error::msg(
+                "Traverse scope: `path` must name at least one predicate — an empty walk reaches \
+                 nothing, and the empty answer looks like an empty graph.",
+            ));
+        }
+        // Every hop is interpolated into the level walk's guarded SPARQL
+        // (`contains_patterns`), so each must be a valid IRI before the
+        // walk runs — refused, not answered with no rows, which a caller
+        // cannot tell from an empty graph.
+        if let Some(bad) = path.iter().find(|hop| validate_iri(hop).is_err()) {
+            return Err(Error::msg(format!(
+                "Traverse scope: `path` element `{bad}` is not a valid IRI."
+            )));
+        }
+        if predicate.is_some() || levels.is_some() {
+            return Err(Error::msg(
+                "Traverse scope: `path` names a predicate per hop, so it is mutually exclusive \
+                 with `predicate` and `levels`. Use one.",
+            ));
+        }
+        if *transitive || max_depth.is_some() {
+            return Err(Error::msg(
+                "Traverse scope: `path` bounds itself by length — `transitive` and `maxDepth` \
+                 have no place beside it.",
+            ));
+        }
+        if limit_per_anchor.is_some() {
+            return Err(Error::msg(
+                "Traverse scope: `path` follows every link at each hop. A per-anchor breadth \
+                 would need one per hop; use `levels` to bound a single-predicate walk.",
+            ));
+        }
+    }
+
     // A transitive scope over containment, bounded by `maxDepth`, or under a
     // guard that restricts links is walked here and handed to the builder as
     // pairs (see `ModelQueryInput::walked`), so the rows, the page and the
@@ -620,6 +741,12 @@ pub(super) async fn execute_model_query_inner(
         Some(requested) => resolve_link_keys(shape, requested)?,
         None => Vec::new(),
     };
+    // A `links` key on a predicate the instance query fetches is served from
+    // the hydration rows — `attach_links` then needs their provenance columns
+    // in every plan's row SELECT, which this flag carries through; the
+    // single plan binds them for those predicates only.
+    let link_predicates = hydration_link_predicates(shape, &link_keys);
+    let link_columns = !link_predicates.is_empty();
 
     // Fast path: COUNT-only
     //
@@ -629,6 +756,11 @@ pub(super) async fn execute_model_query_inner(
     // full pipeline was just taught not to report; leaving it here would mean the same walk answers
     // two different figures depending on whether the caller asked for rows alongside it, and
     // `count()` in TypeScript is exactly `limit: 0`. A walk has to be walked to be counted.
+    //
+    // Whether the store alone decides every `where` condition. Compiled once:
+    // it chooses the COUNT fast path, the pushed window, whether the
+    // post-hydration filter runs below, and where a per-anchor slice lands.
+    let where_pushable = all_where_pushable(query_input, shape, Some(resolver));
     let wants_count = query_input.count.unwrap_or(false);
     let is_count_only = query_input.limit == Some(0);
     if is_count_only && !wants_count {
@@ -642,12 +774,9 @@ pub(super) async fn execute_model_query_inner(
         Some(Scope::Traverse {
             levels: Some(_),
             ..
-        })
+        }) | Some(Scope::Traverse { path: Some(_), .. })
     );
-    if is_count_only
-        && count_only_can_skip_the_walk
-        && all_where_pushable(query_input, shape, Some(resolver))
-    {
+    if is_count_only && count_only_can_skip_the_walk && where_pushable {
         if let Some(sparql) = build_count_sparql(shape, query_input, Some(resolver)) {
             let result_json = store.query(stop, &sparql)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
@@ -669,8 +798,7 @@ pub(super) async fn execute_model_query_inner(
 
     // Full pipeline.
     let order_fully_pushable = order_fully_pushable(query_input, shape, resolver);
-    let can_push_pagination =
-        all_where_pushable(query_input, shape, Some(resolver)) && order_fully_pushable;
+    let can_push_pagination = where_pushable && order_fully_pushable;
 
     // A per-anchor limit forces the two-phase shape even with no global limit.
     // The whole value of slicing per anchor is that it happens on the id phase,
@@ -679,7 +807,7 @@ pub(super) async fn execute_model_query_inner(
     // away. No global LIMIT is emitted in that case — the ordering is what
     // matters, and the truncation is per anchor.
     let anchor_limit = per_anchor_limit(query_input);
-    let walk = level_limits(query_input).cloned();
+    let walk = walk_spec(query_input);
 
     // A per-anchor limit picks its N *in the store*, so the store has to be able to express the
     // order that decides which N. Only the first key is emitted, and a key the builder cannot
@@ -822,11 +950,20 @@ pub(super) async fn execute_model_query_inner(
         query_input,
         sparql_pagination.as_ref(),
         Some(resolver),
+        &link_predicates,
     );
 
     // Captures the source IRI order returned by the phase-1 pagination subquery
     // so we can restore it after hydration (which uses BTreeMap, alphabetical order).
     let mut pagination_source_order: Option<Vec<String>> = None;
+
+    // When the `where` filter cannot run fully in the store, a per-anchor
+    // slice taken at phase one would both count and cut rows the filter has
+    // not had a chance to remove — and the rows it kept from below the fold
+    // are gone by the time the filter runs. The (source, anchor) pairs are
+    // then kept here instead, so the slice lands after the post-hydration
+    // filter and the total counts what the filter kept, before the slice.
+    let mut anchor_rows: Option<Vec<Value>> = None;
 
     let raw_results: Vec<Value> = match query_plan {
         InstanceQueryPlan::Single(sparql) => {
@@ -840,8 +977,8 @@ pub(super) async fn execute_model_query_inner(
             // Phase one either asks once, or walks a level at a time — the difference being where
             // the ids come from. Phase two is the same either way: one hydration for whatever it
             // settled on, which is what keeps a three-level walk to a single pass over records.
-            let ordered_ids: Vec<String> = match (&walk, walk_roots(query_input)) {
-                (Some(levels), Some((roots, predicate, direction))) => {
+            let ordered_ids: Vec<String> = match &walk {
+                Some((roots, direction, hops)) => {
                     walk_levels(
                         stop,
                         store,
@@ -851,10 +988,9 @@ pub(super) async fn execute_model_query_inner(
                         sparql_pagination
                             .as_ref()
                             .expect("a walk forces the two-phase plan, which needs pagination"),
-                        roots,
-                        &predicate,
-                        direction,
-                        levels,
+                        roots.clone(),
+                        *direction,
+                        hops,
                     )
                     .await?
                 }
@@ -862,12 +998,18 @@ pub(super) async fn execute_model_query_inner(
                     let page_json = store.query_async(stop, &pagination_subquery).await?;
                     let mut page_results: Vec<Value> = serde_json::from_str(&page_json)?;
                     if let Some(n) = anchor_limit {
-                        slice_per_anchor(&mut page_results, n);
+                        if where_pushable {
+                            slice_per_anchor(&mut page_results, n);
+                        }
                     }
-                    page_results
+                    let ids = page_results
                         .iter()
                         .filter_map(|r| r["source"].as_str().map(|s| s.to_string()))
-                        .collect()
+                        .collect();
+                    if anchor_limit.is_some() && !where_pushable {
+                        anchor_rows = Some(page_results);
+                    }
+                    ids
                 }
             };
 
@@ -888,15 +1030,25 @@ pub(super) async fn execute_model_query_inner(
                     let local_status = local_status_filter(shape);
                     let link_status = link_status_filter(query_input.link_status.as_ref());
                     let proof_valid = proof_valid_filter(query_input.include_unverified);
+                    // The same provenance columns the single plan selects
+                    // under `link_columns` (see `build_instance_sparql`).
+                    let (link_select, link_optionals) = if link_columns {
+                        (
+                            " ?wireTarget ?proofKey ?proofSig ?proofValid ?rowStatus",
+                            "    OPTIONAL { ?_reifier <ad4m://ontology/proofKey> ?proofKey . }\n    OPTIONAL { ?_reifier <ad4m://ontology/proofSignature> ?proofSig . }\n    OPTIONAL { ?_reifier <ad4m://ontology/proofValid> ?proofValid . }\n    OPTIONAL { ?_reifier <ad4m://ontology/wireTarget> ?wireTarget . }\n    OPTIONAL { ?_reifier <ad4m://ontology/status> ?rowStatus . }\n",
+                        )
+                    } else {
+                        ("", "")
+                    };
                     let property_sparql = format!(
-                        r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
+                        r#"SELECT ?source ?predicate ?target ?author ?timestamp{link_select} WHERE {{
     {source_constraint}
 {predicate_filter}    ?source ?predicate ?target .
     ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
     FILTER(isIRI(?predicate))
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-{link_status}{proof_valid}{local_status}}}"#
+{link_status}{proof_valid}{link_optionals}{local_status}}}"#
                     );
                     let result_json = store.query_async(stop, &property_sparql).await?;
                     serde_json::from_str(&result_json)?
@@ -905,7 +1057,7 @@ pub(super) async fn execute_model_query_inner(
         }
     };
 
-    let grouped = group_results_by_source(&raw_results, shape);
+    let grouped = group_results_by_source(&raw_results, shape, link_columns);
     let mut instances = hydrate_instances(shape, &grouped);
 
     // group_results_by_source uses BTreeMap (alphabetical by source IRI), so
@@ -967,7 +1119,7 @@ pub(super) async fn execute_model_query_inner(
 
     // Apply post-hydration where-clause filters
     if let Some(ref where_clause) = query_input.where_clause {
-        if !all_where_pushable(query_input, shape, Some(resolver)) {
+        if !where_pushable {
             instances.retain(|inst| matches_where(inst, where_clause, shape));
         }
     }
@@ -1006,6 +1158,12 @@ pub(super) async fn execute_model_query_inner(
         None
     } else if walk.is_some() {
         Some(instances.len())
+    } else if anchor_rows.is_some() {
+        // The deferred per-anchor slice has not run yet, so `instances` here
+        // is the filtered set the slice draws from — the "how many match"
+        // the total reports. A store COUNT cannot give it: the pushed
+        // conditions alone admit rows the post-hydration filter removed.
+        Some(instances.len())
     } else if let Some(total) = page_total {
         Some(total)
     } else if sparql_pagination.is_some() {
@@ -1027,6 +1185,22 @@ pub(super) async fn execute_model_query_inner(
     } else {
         Some(instances.len())
     };
+
+    // The per-anchor slice deferred past the post-hydration filter lands
+    // here: the phase-one rows, in their order, cut to the instances the
+    // filter kept, then sliced as the pushed path slices them. The total
+    // above was taken before this cut — the filtered set the slice draws from.
+    if let Some(mut rows) = anchor_rows {
+        let limit = anchor_limit.expect("anchor rows exist only under a per-anchor limit");
+        let surviving: HashSet<&str> = instances
+            .iter()
+            .filter_map(|inst| inst["id"].as_str())
+            .collect();
+        rows.retain(|r| r["source"].as_str().is_some_and(|s| surviving.contains(s)));
+        slice_per_anchor(&mut rows, limit);
+        let kept: HashSet<&str> = rows.iter().filter_map(|r| r["source"].as_str()).collect();
+        instances.retain(|inst| inst["id"].as_str().is_some_and(|id| kept.contains(id)));
+    }
 
     // Apply ordering and pagination
     let mut paginated: Vec<Value> = if window_pushed {
@@ -1146,6 +1320,7 @@ pub(super) async fn execute_model_query_inner(
         &link_keys,
         query_input.link_status.as_ref(),
         query_input.include_unverified,
+        link_columns.then_some(grouped.as_slice()),
         &mut final_instances,
     )
     .await?;
@@ -1187,11 +1362,10 @@ pub(super) fn returned(query: &ModelQueryInput) -> Option<Vec<String>> {
     Some(keep)
 }
 
-/// Every property the `where` and the `order` name, read as [`matches_where`] and
-/// [`sort_instances`] read them: the values the post-hydration filter and sort need, so the ones a
-/// language holds are resolved before them. A name too many costs a fetch per row; a name missing
-/// would filter or sort on the undecoded value.
-fn read_before_window(query: &ModelQueryInput) -> HashSet<String> {
+/// The instance properties a `where` clause reads, through `OR`, `AND` and
+/// `NOT`. A relation quantifier's nested clause reads another class, so its
+/// key is the relation's name and its body is not walked.
+pub(crate) fn where_property_names(clause: &BTreeMap<String, WhereCondition>) -> HashSet<String> {
     fn walk(clause: &BTreeMap<String, WhereCondition>, names: &mut HashSet<String>) {
         for (name, condition) in clause {
             match (name.as_str(), condition) {
@@ -1209,10 +1383,21 @@ fn read_before_window(query: &ModelQueryInput) -> HashSet<String> {
             }
         }
     }
-    let mut names: HashSet<String> = HashSet::new();
-    if let Some(clause) = &query.where_clause {
-        walk(clause, &mut names);
-    }
+    let mut names = HashSet::new();
+    walk(clause, &mut names);
+    names
+}
+
+/// Every property the `where` and the `order` name, read as [`matches_where`] and
+/// [`sort_instances`] read them: the values the post-hydration filter and sort need, so the ones a
+/// language holds are resolved before them. A name too many costs a fetch per row; a name missing
+/// would filter or sort on the undecoded value.
+fn read_before_window(query: &ModelQueryInput) -> HashSet<String> {
+    let mut names = query
+        .where_clause
+        .as_ref()
+        .map(where_property_names)
+        .unwrap_or_default();
     // A dotted sort key (`file.name`) reads a field of the decoded `file`.
     names.extend(
         query
@@ -1277,6 +1462,14 @@ pub(super) async fn resolve_language_transforms(
             // directly — never re-interpreted as an expression URL.
             let is_expr = !prop.is_deterministic_literal();
             let resolved: Option<Value> = match &current {
+                // Hydration keeps a `resolveLanguage` target raw so this is
+                // where an envelope (`literal:string:...`) and an expression
+                // URL part ways: the envelope decodes without a fetch — the
+                // decoded text may itself look like `scheme://...` and must
+                // never be re-read as one.
+                Value::String(uri) if is_expr && uri.starts_with("literal:") => {
+                    Some(parse_literal_value(uri))
+                }
                 Value::String(uri) if is_expr && !uri.starts_with("literal:") => {
                     match crate::languages::LanguageController::parse_expr_url(uri) {
                         Ok((lang, expr_addr)) => {
@@ -1294,6 +1487,7 @@ pub(super) async fn resolve_language_transforms(
                                         prop.name,
                                         e
                                     );
+                                    mark_unresolved(instance, &prop.name);
                                     instance[&prop.name] = current;
                                     continue;
                                 }
@@ -1307,8 +1501,16 @@ pub(super) async fn resolve_language_transforms(
                                         _ => data,
                                     })
                                 }
-                                // Not a fetchable expression — fall back to the raw value
-                                _ => Some(current.clone()),
+                                // The expression is not there to serve — it
+                                // has not arrived or the language failed on
+                                // it. The raw target stays as the value;
+                                // marking it `__unresolved` is what lets a
+                                // consumer tell "URL kept for lack of a
+                                // fetch" from "URL is the value".
+                                _ => {
+                                    mark_unresolved(instance, &prop.name);
+                                    Some(current.clone())
+                                }
                             }
                         }
                         Err(_) => Some(current.clone()),
@@ -1328,4 +1530,21 @@ pub(super) async fn resolve_language_transforms(
         }
     }
     Ok(())
+}
+
+/// Record `name` under [`UNRESOLVED_KEY`](super::hydration::UNRESOLVED_KEY)
+/// on `instance`: the property's `resolveLanguage` fetch failed, so the raw
+/// target stands in for its value.
+fn mark_unresolved(instance: &mut Value, name: &str) {
+    let Value::Object(obj) = instance else {
+        return;
+    };
+    let entry = obj
+        .entry(super::hydration::UNRESOLVED_KEY.to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if let Value::Array(names) = entry {
+        if !names.iter().any(|n| n.as_str() == Some(name)) {
+            names.push(Value::String(name.to_string()));
+        }
+    }
 }

@@ -665,6 +665,7 @@ fn per_parent_query(
             None
         },
         levels: None,
+        path: None,
         max_depth: None,
     });
     query

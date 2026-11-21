@@ -1,4 +1,3 @@
-use super::write_log::{AddedLink, WriteDelta, WriteLog};
 use crate::languages::literal::RFC3986_COMPONENT_ENCODE;
 use crate::types::LinkStatus;
 use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link, LinkExpression};
@@ -763,38 +762,6 @@ fn make_direct_triple(link: &LinkExpression) -> (NamedNode, NamedNode, Term) {
     (source_iri, predicate_iri, target_term)
 }
 
-/// The [`WriteDelta`] of writing `links` in `tx`, read before the write:
-/// [`WriteDelta::Added`] when none of their reifiers is stored yet (or
-/// written twice in `links`). A link written again over its own reifier
-/// replaces its annotations, which may remove a value a reader matched.
-fn added_delta(tx: &Transaction<'_>, links: &[LinkExpression]) -> Result<WriteDelta, Error> {
-    let mut added = Vec::with_capacity(links.len());
-    let mut reifiers = std::collections::HashSet::new();
-    for link in links {
-        let reifier = make_reifier_iri(link);
-        let stored = tx
-            .quads_for_pattern(
-                Some(reifier.as_ref().into()),
-                None,
-                None,
-                Some(GraphNameRef::DefaultGraph),
-            )
-            .next()
-            .is_some();
-        if stored || !reifiers.insert(reifier.clone()) {
-            return Ok(WriteDelta::Other);
-        }
-        let (source, predicate, target) = make_direct_triple(link);
-        added.push(AddedLink {
-            source,
-            predicate,
-            target,
-            reifier,
-        });
-    }
-    Ok(WriteDelta::Added(added))
-}
-
 /// Which proof annotations an insert may write on `reifier` (#1146), as `tx`
 /// reads the store.
 ///
@@ -1198,20 +1165,12 @@ pub struct SparqlStore {
     writer: Arc<Mutex<()>>,
     /// The write generation: bumped after every committed write, shared
     /// across clones. A reader that keeps a query result can reuse it while
-    /// the generation it read before the query is unchanged, and can wait for
-    /// the next write ([`Self::watch_writes`]) instead of polling.
+    /// the generation it read before the query is unchanged.
     writes: Arc<tokio::sync::watch::Sender<u64>>,
-    /// What each recent write did, by the generation it ended, so a reader
-    /// that kept a result can read only what was added since
-    /// ([`Self::additions_since`]).
-    write_log: Arc<Mutex<WriteLog>>,
     /// Test-only: every read query's text, in order, shared across clones, so a test can
     /// assert which store queries a pipeline ran (see [`SparqlStore::queries_run`]).
     #[cfg(test)]
     query_log: Arc<Mutex<Vec<String>>>,
-    /// Test-only: each SELECT's text with the number of rows it returned.
-    #[cfg(test)]
-    query_rows: Arc<Mutex<Vec<(String, usize)>>>,
     /// Test-only: how many index scans `query_links` and
     /// `query_links_top_n_by_timestamp` ran, shared across clones. They do not
     /// go through the query log.
@@ -1280,11 +1239,8 @@ impl SparqlStore {
             store: Arc::new(store),
             writer: Arc::new(Mutex::new(())),
             writes: Arc::new(tokio::sync::watch::Sender::new(0)),
-            write_log: Arc::new(Mutex::new(WriteLog::default())),
             #[cfg(test)]
             query_log: Arc::new(Mutex::new(Vec::new())),
-            #[cfg(test)]
-            query_rows: Arc::new(Mutex::new(Vec::new())),
             #[cfg(test)]
             link_scans: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
@@ -1297,31 +1253,16 @@ impl SparqlStore {
         *self.writes.borrow()
     }
 
-    /// A receiver that sees each new write generation.
-    pub(crate) fn watch_writes(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.writes.subscribe()
-    }
-
-    /// Call after a write committed (or may have), with what it did: only
-    /// [`WriteDelta::Added`] when it removed nothing and every link's reifier
-    /// is new. The log entry and the new generation appear together, so a
-    /// reader that sees a generation finds every write up to it in the log.
-    fn note_write(&self, delta: WriteDelta) {
-        let mut log = self.write_log.lock().unwrap_or_else(|e| e.into_inner());
-        let generation = self.write_generation().wrapping_add(1);
-        log.record(generation, delta);
-        self.writes.send_modify(|g| *g = generation);
-    }
-
-    /// The links added after generation `from` up to `to` (read with
-    /// [`Self::write_generation`]), or `None` when a write in between did
-    /// more than add links or the log no longer reaches back to `from`: the
-    /// reader must then read everything again. See [`WriteLog`].
-    pub(crate) fn additions_since(&self, from: u64, to: u64) -> Option<Vec<AddedLink>> {
-        self.write_log
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .additions_since(from, to)
+    /// Bump the write generation after a write committed (or may have) and
+    /// return the generation it took. The commit paths report it on their
+    /// feed entries so a draining tick can prove every store write had one.
+    fn note_write(&self) -> u64 {
+        let mut generation = 0;
+        self.writes.send_modify(|g| {
+            *g = g.wrapping_add(1);
+            generation = *g;
+        });
+        generation
     }
 
     /// Returns the number of quads in the store (for diagnostics).
@@ -1345,16 +1286,21 @@ impl SparqlStore {
     /// crash before the commit, leaves none of them, and readers never see a
     /// direct triple without its reifier and annotations. Every link the
     /// store holds comes through here, so this is where a link in the store's
-    /// own metadata vocabulary is refused ([`is_link_metadata`]).
-    fn insert_link_triples(&self, link: &LinkExpression) -> Result<(), Error> {
-        self.write_link(link, false).map(|_| ())
+    /// own metadata vocabulary is refused ([`is_link_metadata`]). Returns the
+    /// write generation the write took.
+    fn insert_link_triples(&self, link: &LinkExpression) -> Result<u64, Error> {
+        // `skip_local` is off: the write either commits (its generation) or
+        // fails.
+        self.write_link(link, false)
+            .map(|g| g.expect("an unguarded insert commits"))
     }
 
     /// [`Self::insert_link_triples`]; with `skip_local`, a link this store
-    /// holds as `Local` is left alone and `false` returned (#1146). The
+    /// holds as `Local` is left alone and `None` returned (#1146). The
     /// check and the write are one transaction under the writer lock, so no
-    /// other write lands between them.
-    fn write_link(&self, link: &LinkExpression, skip_local: bool) -> Result<bool, Error> {
+    /// other write lands between them. `Some` carries the write generation
+    /// the write took, reported under that same lock.
+    fn write_link(&self, link: &LinkExpression, skip_local: bool) -> Result<Option<u64>, Error> {
         // Status must be decided by the caller, not defaulted here. A silent
         // `None => Shared` fallback would let any write path that forgot to
         // set it mislabel a local link as shared — the kind of quiet
@@ -1377,29 +1323,30 @@ impl SparqlStore {
             .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
         let mut tx = self.store.start_transaction()?;
         if skip_local && is_stored_local(&tx, link)? {
-            return Ok(false);
+            return Ok(None);
         }
-        let delta = added_delta(&tx, std::slice::from_ref(link))?;
         write_link_quads(&mut tx, link, status)?;
         tx.commit()?;
-        self.note_write(delta);
-        Ok(true)
+        Ok(Some(self.note_write()))
     }
 
-    /// Insert triples for a link into the store.
-    pub fn add_link(&self, link: &LinkExpression) -> Result<(), Error> {
+    /// Insert triples for a link into the store. Returns the write
+    /// generation the write took.
+    pub fn add_link(&self, link: &LinkExpression) -> Result<u64, Error> {
         self.insert_link_triples(link)
     }
 
     /// A link language's addition: insert `link` unless this store holds it
-    /// as `Local` (#1146). Returns whether it was inserted.
-    pub(crate) fn add_remote_link(&self, link: &LinkExpression) -> Result<bool, Error> {
+    /// as `Local` (#1146). Returns the write generation the write took, or
+    /// `None` when the link was skipped as stored `Local`.
+    pub(crate) fn add_remote_link(&self, link: &LinkExpression) -> Result<Option<u64>, Error> {
         self.write_link(link, true)
     }
 
     /// A link language's removal: remove `link` unless this store holds it
-    /// as `Local` (#1146). Returns whether it was applied.
-    pub(crate) fn remove_remote_link(&self, link: &LinkExpression) -> Result<bool, Error> {
+    /// as `Local` (#1146). Returns the write generation the write took, or
+    /// `None` when the link was skipped as stored `Local`.
+    pub(crate) fn remove_remote_link(&self, link: &LinkExpression) -> Result<Option<u64>, Error> {
         self.delete_link(link, true)
     }
 
@@ -1442,19 +1389,23 @@ impl SparqlStore {
         for quad in &quads {
             self.store.remove(quad)?;
         }
-        self.note_write(WriteDelta::Other);
+        self.note_write();
         Ok(())
     }
 
-    /// Remove all triples for a link from the store.
-    pub fn remove_link(&self, link: &LinkExpression) -> Result<(), Error> {
-        self.delete_link(link, false).map(|_| ())
+    /// Remove all triples for a link from the store. Returns the write
+    /// generation the write took.
+    pub fn remove_link(&self, link: &LinkExpression) -> Result<u64, Error> {
+        // `skip_local` is off: the write either commits or fails.
+        self.delete_link(link, false)
+            .map(|g| g.expect("an unguarded delete commits"))
     }
 
     /// [`Self::remove_link`]; with `skip_local`, a link this store holds as
-    /// `Local` is left alone and `false` returned (#1146), checked in the
-    /// same transaction as the removal.
-    fn delete_link(&self, link: &LinkExpression, skip_local: bool) -> Result<bool, Error> {
+    /// `Local` is left alone and `None` returned (#1146), checked in the
+    /// same transaction as the removal. `Some` carries the write generation
+    /// the write took.
+    fn delete_link(&self, link: &LinkExpression, skip_local: bool) -> Result<Option<u64>, Error> {
         // No link in the metadata vocabulary was stored, and removing one
         // would delete the annotation it names on another link's reifier.
         refuse_link_metadata(link)?;
@@ -1466,12 +1417,11 @@ impl SparqlStore {
             .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
         let mut tx = self.store.start_transaction()?;
         if skip_local && is_stored_local(&tx, link)? {
-            return Ok(false);
+            return Ok(None);
         }
         remove_link_quads(&mut tx, link)?;
         tx.commit()?;
-        self.note_write(WriteDelta::Other);
-        Ok(true)
+        Ok(Some(self.note_write()))
     }
 
     /// Apply a diff in one transaction, removals before additions. Removal
@@ -1479,12 +1429,13 @@ impl SparqlStore {
     /// would delete a link that is removed and re-added unchanged. Readers see
     /// the store before or after the whole diff. An addition without a status
     /// is skipped, as `add_link` refuses it; a link in the store's metadata
-    /// vocabulary fails the whole diff, as `add_link` and `remove_link` refuse it.
+    /// vocabulary fails the whole diff, as `add_link` and `remove_link` refuse
+    /// it. Returns the write generation the whole diff took.
     pub fn apply_diff(
         &self,
         removals: &[LinkExpression],
         additions: &[LinkExpression],
-    ) -> Result<(), Error> {
+    ) -> Result<u64, Error> {
         for link in removals.iter().chain(additions) {
             refuse_link_metadata(link)?;
         }
@@ -1493,16 +1444,6 @@ impl SparqlStore {
             .lock()
             .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
         let mut tx = self.store.start_transaction()?;
-        let delta = if removals.is_empty() {
-            let stored: Vec<LinkExpression> = additions
-                .iter()
-                .filter(|l| l.status.is_some())
-                .cloned()
-                .collect();
-            added_delta(&tx, &stored)?
-        } else {
-            WriteDelta::Other
-        };
         for link in removals {
             remove_link_quads(&mut tx, link)?;
         }
@@ -1519,8 +1460,7 @@ impl SparqlStore {
             write_link_quads(&mut tx, link, status)?;
         }
         tx.commit()?;
-        self.note_write(delta);
-        Ok(())
+        Ok(self.note_write())
     }
 
     /// Return all links in the store using a SPARQL 1.2 reifier query.
@@ -2015,8 +1955,9 @@ impl SparqlStore {
                 continue;
             };
             // A reifier's annotations can carry the same literal; they are
-            // not links.
-            if source.as_str().starts_with("link:") {
+            // not links. Told apart by predicate, as the store refuses them:
+            // a `link:` source alone is an IRI an application may write.
+            if is_link_metadata(quad.predicate.as_str()) {
                 continue;
             }
             out.push((
@@ -2224,11 +2165,6 @@ impl SparqlStore {
                     }
                     rows.push(Value::Object(row));
                 }
-                #[cfg(test)]
-                self.query_rows
-                    .lock()
-                    .map_err(|_| anyhow!("SPARQL store query log lock poisoned"))?
-                    .push((query_string.to_string(), rows.len()));
                 Ok(serde_json::to_string(&rows)?)
             }
             QueryResults::Boolean(b) => Ok(serde_json::to_string(&b)?),
@@ -2305,7 +2241,7 @@ impl SparqlStore {
             .lock()
             .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
         let cleared = self.store.clear();
-        self.note_write(WriteDelta::Other);
+        self.note_write();
         cleared?;
         Ok(())
     }
@@ -2432,7 +2368,7 @@ impl SparqlStore {
             write_link_quads_proof(&mut tx, link, status, true)?;
         }
         tx.commit()?;
-        self.note_write(WriteDelta::Other);
+        self.note_write();
         Ok(metadata_links.len())
     }
 
@@ -2440,25 +2376,6 @@ impl SparqlStore {
     #[cfg(test)]
     pub(crate) fn queries_run(&self) -> Vec<String> {
         self.query_log
-            .lock()
-            .map(|log| log.clone())
-            .unwrap_or_default()
-    }
-
-    /// Test-only: how many writes the write log holds.
-    #[cfg(test)]
-    pub(crate) fn write_log_entries(&self) -> usize {
-        self.write_log
-            .lock()
-            .map(|log| log.entry_count())
-            .unwrap_or_default()
-    }
-
-    /// Test-only: each SELECT this store (and its clones) ran so far, with the
-    /// number of rows it returned, in order.
-    #[cfg(test)]
-    pub(crate) fn query_rows_run(&self) -> Vec<(String, usize)> {
-        self.query_rows
             .lock()
             .map(|log| log.clone())
             .unwrap_or_default()
@@ -2487,7 +2404,7 @@ impl SparqlStore {
         let mut tx = self.store.start_transaction()?;
         write_link_quads(&mut tx, link, link.status.as_ref().unwrap())?;
         tx.commit()?;
-        self.note_write(WriteDelta::Other);
+        self.note_write();
         Ok(())
     }
 }
@@ -2559,6 +2476,39 @@ mod tests {
 
     fn new_service() -> SparqlStore {
         SparqlStore::new(None).unwrap()
+    }
+
+    /// `neighbours` reads application links only. A link whose source is a
+    /// `link:` IRI is one an application may write (a parent scope anchored
+    /// at `link:board`), so it is read; the reifier annotations on the same
+    /// node are not links, and are skipped by their predicate.
+    #[test]
+    fn neighbours_reads_a_link_from_a_link_iri_but_not_its_annotations() {
+        let svc = new_service();
+        let signer = TestSigner::generate();
+        svc.add_link(&make_link(&signer, "link:board", "we://child", "post://1"))
+            .unwrap();
+        svc.add_link(&make_link(
+            &signer,
+            "post://2",
+            "we://tag",
+            "literal:string:hot",
+        ))
+        .unwrap();
+
+        let around_post = svc.neighbours("post://1", None, 100).unwrap().unwrap();
+        assert_eq!(
+            around_post,
+            vec![("we://child".to_string(), "link:board".to_string())]
+        );
+        let around_value = svc
+            .neighbours("literal:string:hot", None, 100)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            around_value,
+            vec![("we://tag".to_string(), "post://2".to_string())]
+        );
     }
 
     /// `apply_diff` removes before it adds, so a link removed and re-added

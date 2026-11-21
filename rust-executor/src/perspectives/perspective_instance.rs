@@ -77,7 +77,7 @@ pub use shapes::{RegisterResult, ShapeSummary};
 mod subscriptions;
 pub(crate) use subscriptions::{result_json, SubscriptionIdTaken};
 // Which writes re-run a model subscription (#1237).
-mod subscription_triggers;
+pub(crate) mod subscription_triggers;
 // Registering this executor's owners with the link language.
 mod local_agents;
 // Committing a batch only if the links it expects still stand.
@@ -118,51 +118,100 @@ static QUERY_SUBSCRIPTION_CHECK_INTERVAL: u64 = 200; // 200ms
 /// that spent most of its budget waiting still has headroom to
 /// execute the query itself before the outer WS timeout fires.
 /// Local-only perspectives never enter the wait path.
-const MODEL_QUERY_SHAPE_WAIT: Duration = Duration::from_secs(20);
+pub(crate) const MODEL_QUERY_SHAPE_WAIT: Duration = Duration::from_secs(20);
 
 fn notification_pool_name(uuid: &str) -> String {
     format!("notification_{}", uuid)
 }
 
-/// True iff any addition or removal in the diff carries a triple
-/// that would alter a class's stored SHACL definition:
+/// Whether one link is a schema write — carries a triple that would alter a
+/// class's stored SHACL definition:
 ///   * a class's `ad4m://shape` index link,
 ///   * a class-level `rdf://type ad4m://SubjectClass` marker (only
 ///     that specific target — normal `rdf://type ns://SomeClass`
-///     application links must not flush the cache), or
+///     application links must not count), or
 ///   * any SHACL-vocabulary predicate (`sh://...`) which only
 ///     appears on property-shape triples written by the SHACL
 ///     writer, not on regular application data, or
-///   * an abstract-class marker or alias (#1435).
+///   * an abstract-class marker or alias (#1435), or
+///   * an edit of `ad4m://resolveLanguage`, `ad4m://transform` or
+///     `ad4m://getter` on a node an existing `sh://property` link names
+///     (`is_property_shape`). Those predicates decorate live application
+///     data too — a `@Property` decorator emits them onto every
+///     instance's property URI — so the source decides: on a property
+///     shape the link IS the stored shape, on an instance it is data
+///     that must not count.
 ///
-/// Used by `diff_from_link_language` to decide whether to
-/// invalidate the shape cache. The scan is one loop over
-/// (additions + removals) per inbound diff — cheap next to the
-/// SPARQL write. Kept intentionally narrow so that a chatty
-/// application (Flux message writes, etc.) doesn't churn the
-/// cache. `ad4m://resolveLanguage`, `getter`, `transform`,
-/// `interpretation_hint`, `identity` etc. also appear on live
-/// application data (a `@Property` decorator emits them onto every
-/// instance's property URI) and MUST NOT trigger invalidation.
-fn inbound_touches_shacl(diff: &DecoratedPerspectiveDiff) -> bool {
-    let iter = diff.additions.iter().chain(diff.removals.iter());
-    for decorated in iter {
-        let predicate = decorated.data.predicate.as_deref().unwrap_or("");
-        if predicate.starts_with("sh://") {
-            return true;
-        }
-        match predicate {
-            super::shacl_parser::SHAPE_PREDICATE => return true,
-            // The abstract-class marker and aliases (#1435) can sync apart
-            // from the rest of a shape.
-            super::shacl_parser::ABSTRACT_PREDICATE | super::shacl_parser::ALIAS_PREDICATE => {
-                return true
-            }
-            "rdf://type" if decorated.data.target == "ad4m://SubjectClass" => return true,
-            _ => {}
-        }
+/// The old name-index housekeeping links (`ad4m://has_subject_class`,
+/// `ad4m://sdna`, `ad4m://has_shacl`) do not count: the name index is no
+/// longer read, so they change no shape. `ad4m://interpretation_hint`,
+/// `identity` etc. also appear on live application data and must not
+/// trigger invalidation either. Kept intentionally narrow so that a
+/// chatty application (Flux message writes, etc.) doesn't churn what it
+/// guards.
+fn shacl_write_link(
+    source: &str,
+    predicate: &str,
+    target: &str,
+    is_property_shape: &dyn Fn(&str) -> bool,
+) -> bool {
+    if predicate.starts_with("sh://") {
+        return true;
     }
-    false
+    match predicate {
+        super::shacl_parser::SHAPE_PREDICATE => true,
+        // The abstract-class marker and aliases (#1435) can sync apart
+        // from the rest of a shape.
+        super::shacl_parser::ABSTRACT_PREDICATE | super::shacl_parser::ALIAS_PREDICATE => true,
+        "rdf://type" => target == "ad4m://SubjectClass",
+        "ad4m://resolveLanguage" | "ad4m://transform" | "ad4m://getter" => {
+            is_property_shape(source)
+        }
+        _ => false,
+    }
+}
+
+/// Whether `node` is the target of an existing `sh://property` link — a
+/// property shape, which a class's node shape names that way. The
+/// discriminator `shacl_write_link` applies to the predicates instance
+/// data also carries. A failed read counts as one: over-marking costs a
+/// shape re-parse, under-marking keeps a stale shape.
+pub(super) fn is_property_shape_node(
+    store: &crate::perspectives::sparql_store::SparqlStore,
+    node: &str,
+) -> bool {
+    store
+        .query_links(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            None,
+            Some("sh://property"),
+            Some(node),
+            None,
+            None,
+            Some(1),
+        )
+        .map_or(true, |links| !links.is_empty())
+}
+
+/// True iff any link is a schema write ([`shacl_write_link`]). Used by
+/// `diff_from_link_language` to decide whether to invalidate the shape
+/// cache. The scan is one loop — cheap next to the
+/// SPARQL write, and `is_property_shape` reads only on the predicates
+/// that need it. `Writes::touches_shacl` makes the same
+/// classification over a committed batch for the auto-processor's
+/// kept reads.
+pub(super) fn inbound_touches_shacl<'a>(
+    links: impl IntoIterator<Item = &'a Link>,
+    is_property_shape: &dyn Fn(&str) -> bool,
+) -> bool {
+    links.into_iter().any(|l| {
+        shacl_write_link(
+            &l.source,
+            l.predicate.as_deref().unwrap_or(""),
+            &l.target,
+            is_property_shape,
+        )
+    })
 }
 
 /// The error a live query that is not SPARQL gets. Live queries are SPARQL or
@@ -223,29 +272,53 @@ mod inbound_touches_shacl_tests {
         }
     }
 
+    /// The decorated diff as the link iterator the classifier takes.
+    fn touches(diff: &DecoratedPerspectiveDiff, is_shape: &dyn Fn(&str) -> bool) -> bool {
+        inbound_touches_shacl(
+            diff.additions
+                .iter()
+                .chain(diff.removals.iter())
+                .map(|l| &l.data),
+            is_shape,
+        )
+    }
+
+    /// No source in these diffs is a property shape — the vocabulary cases
+    /// never ask.
+    const NO_SHAPE: &dyn Fn(&str) -> bool = &|_| false;
+
     /// The abstract-class marker and an alias can arrive in a diff of their
     /// own; the cached abstract index must still be dropped (#1435).
     #[test]
     fn abstract_marker_and_alias_count_as_shacl() {
-        assert!(inbound_touches_shacl(&diff(vec![link(
-            "ns://TextContentShape",
-            crate::perspectives::shacl_parser::ABSTRACT_PREDICATE,
-            "literal:true",
-        )])));
-        assert!(inbound_touches_shacl(&diff(vec![link(
-            "ns://Message.body",
-            crate::perspectives::shacl_parser::ALIAS_PREDICATE,
-            "literal:string:%7B%7D",
-        )])));
+        assert!(touches(
+            &diff(vec![link(
+                "ns://TextContentShape",
+                crate::perspectives::shacl_parser::ABSTRACT_PREDICATE,
+                "literal:true",
+            )]),
+            NO_SHAPE
+        ));
+        assert!(touches(
+            &diff(vec![link(
+                "ns://Message.body",
+                crate::perspectives::shacl_parser::ALIAS_PREDICATE,
+                "literal:string:%7B%7D",
+            )]),
+            NO_SHAPE
+        ));
     }
 
     #[test]
     fn class_shape_assignment_triggers_invalidation() {
-        assert!(inbound_touches_shacl(&diff(vec![link(
-            "ad4m://InterpretationRun",
-            "ad4m://shape",
-            "ad4m://InterpretationRunShape",
-        )])));
+        assert!(touches(
+            &diff(vec![link(
+                "ad4m://InterpretationRun",
+                "ad4m://shape",
+                "ad4m://InterpretationRunShape",
+            )]),
+            NO_SHAPE
+        ));
     }
 
     /// The old name index is no longer read, so it changes no shape.
@@ -257,11 +330,14 @@ mod inbound_touches_shacl_tests {
             "ad4m://has_shacl",
         ] {
             assert!(
-                !inbound_touches_shacl(&diff(vec![link(
-                    "ad4m://self",
-                    predicate,
-                    "literal:string:Recipe"
-                )])),
+                !touches(
+                    &diff(vec![link(
+                        "ad4m://self",
+                        predicate,
+                        "literal:string:Recipe"
+                    )]),
+                    NO_SHAPE
+                ),
                 "predicate `{predicate}` must not invalidate"
             );
         }
@@ -269,11 +345,14 @@ mod inbound_touches_shacl_tests {
 
     #[test]
     fn class_marker_rdf_type_triggers_invalidation() {
-        assert!(inbound_touches_shacl(&diff(vec![link(
-            "ad4m://InterpretationRun",
-            "rdf://type",
-            "ad4m://SubjectClass",
-        )])));
+        assert!(touches(
+            &diff(vec![link(
+                "ad4m://InterpretationRun",
+                "rdf://type",
+                "ad4m://SubjectClass",
+            )]),
+            NO_SHAPE
+        ));
     }
 
     #[test]
@@ -281,11 +360,14 @@ mod inbound_touches_shacl_tests {
         // A normal application instance's rdf://type link (e.g. a Flux
         // message declaring its class) MUST NOT flush the cache — every
         // message send would churn it.
-        assert!(!inbound_touches_shacl(&diff(vec![link(
-            "flux://message/abc",
-            "rdf://type",
-            "ns://Message",
-        )])));
+        assert!(!touches(
+            &diff(vec![link(
+                "flux://message/abc",
+                "rdf://type",
+                "ns://Message",
+            )]),
+            NO_SHAPE
+        ));
     }
 
     #[test]
@@ -297,11 +379,10 @@ mod inbound_touches_shacl_tests {
             "sh://minCount",
         ] {
             assert!(
-                inbound_touches_shacl(&diff(vec![link(
-                    "ad4m://SomeShape.prop",
-                    predicate,
-                    "xsd:string"
-                )])),
+                touches(
+                    &diff(vec![link("ad4m://SomeShape.prop", predicate, "xsd:string")]),
+                    NO_SHAPE
+                ),
                 "predicate `{predicate}` should invalidate"
             );
         }
@@ -310,11 +391,10 @@ mod inbound_touches_shacl_tests {
     #[test]
     fn plain_data_link_does_not_invalidate() {
         // Application data — the common case, must not touch the cache.
-        assert!(!inbound_touches_shacl(&diff(vec![link(
-            "msg://hello",
-            "ns://body",
-            "literal:string:hi",
-        )])));
+        assert!(!touches(
+            &diff(vec![link("msg://hello", "ns://body", "literal:string:hi",)]),
+            NO_SHAPE
+        ));
     }
 
     #[test]
@@ -322,8 +402,8 @@ mod inbound_touches_shacl_tests {
         // `resolveLanguage`, `getter`, `interpretation_hint`, `identity`
         // appear on live property URIs on real instances (a @Property
         // decorator writes them per-instance). They must NOT invalidate
-        // the class-shape cache — the check keys off the SHACL writer's
-        // structural triples only.
+        // the class-shape cache — on instance data their source is no
+        // property shape.
         for predicate in [
             "ad4m://resolveLanguage",
             "ad4m://getter",
@@ -332,14 +412,68 @@ mod inbound_touches_shacl_tests {
             "ad4m://transform",
         ] {
             assert!(
-                !inbound_touches_shacl(&diff(vec![link(
-                    "flux://message/abc.body",
-                    predicate,
-                    "some-value"
-                )])),
+                !touches(
+                    &diff(vec![link(
+                        "flux://message/abc.body",
+                        predicate,
+                        "some-value"
+                    )]),
+                    NO_SHAPE
+                ),
                 "predicate `{predicate}` should NOT invalidate on plain instance data"
             );
         }
+    }
+
+    /// `resolveLanguage`, `transform` and `getter` also decorate instance
+    /// data, so the source decides: on a node an existing `sh://property`
+    /// link names, an edit to one alone still changes the stored shape
+    /// (#1795).
+    #[test]
+    fn shape_detail_edits_count_only_on_a_property_shape() {
+        let shape = |node: &str| node == "ns://Message.body";
+        for predicate in [
+            "ad4m://resolveLanguage",
+            "ad4m://transform",
+            "ad4m://getter",
+        ] {
+            assert!(
+                touches(
+                    &diff(vec![link(
+                        "ns://Message.body",
+                        predicate,
+                        "literal:string:x"
+                    )]),
+                    &shape
+                ),
+                "a `{predicate}` edit on a property shape must invalidate"
+            );
+            assert!(
+                !touches(
+                    &diff(vec![link(
+                        "flux://message/abc.body",
+                        predicate,
+                        "literal:string:x"
+                    )]),
+                    &shape
+                ),
+                "the same `{predicate}` edit on instance data must not invalidate"
+            );
+        }
+    }
+
+    /// A removal is an edit too: dropping a shape's `resolveLanguage`
+    /// changes what its queries decode.
+    #[test]
+    fn removing_a_shape_detail_counts() {
+        let shape = |node: &str| node == "ns://Message.body";
+        let mut diff = DecoratedPerspectiveDiff::default();
+        diff.removals.push(link(
+            "ns://Message.body",
+            "ad4m://resolveLanguage",
+            "literal:string:literal",
+        ));
+        assert!(touches(&diff, &shape));
     }
 
     #[test]
@@ -350,12 +484,12 @@ mod inbound_touches_shacl_tests {
             "ad4m://shape",
             "ad4m://oldShape",
         ));
-        assert!(inbound_touches_shacl(&diff));
+        assert!(touches(&diff, NO_SHAPE));
     }
 
     #[test]
     fn empty_diff_does_not_invalidate() {
-        assert!(!inbound_touches_shacl(&DecoratedPerspectiveDiff::default()));
+        assert!(!touches(&DecoratedPerspectiveDiff::default(), NO_SHAPE));
     }
 }
 
@@ -474,6 +608,20 @@ impl SubscribedQuery {
         }
     }
 }
+
+/// One committed diff's links as [`subscription_triggers::Writes`], for the
+/// auto-processor loops' trigger matching — `None` when a diff carried a
+/// predicate-less link, which no trigger can rule out. The `Writes` carries
+/// the write generations the diff's own store writes took
+/// ([`subscription_triggers::Writes::generations`]): a draining tick proves
+/// the feed covers the store's movement by them, so a `None` entry carries
+/// none — it stales every kept read as unclassifiable anyway.
+pub(crate) type CommitWrite = Option<Arc<subscription_triggers::Writes>>;
+
+/// How many committed diffs the `commit_writes` channel buffers while a
+/// watch loop is busy. A loop that lags past it wakes anyway (`Lagged`
+/// matches conservatively), so this only bounds memory.
+const COMMIT_WRITES_CAPACITY: usize = 256;
 
 /// A batch with its creation timestamp, for timeout-based cleanup.
 struct TimestampedBatch {
@@ -620,6 +768,13 @@ pub struct PerspectiveInstance {
     trigger_subscription_check: Arc<AtomicBool>,
     /// Predicates of links changed since last subscription check.
     changed_predicates: Arc<Mutex<ChangedPredicates>>,
+    /// Every committed diff's [`subscription_triggers::Writes`], broadcast for
+    /// the auto-processor watch loops (#1794): they test it against their
+    /// model-subscription triggers and wake only on a match. This is the same
+    /// per-commit batch `record_changed_predicates` feeds
+    /// `changed_predicates` — `None` when a diff carried a predicate-less
+    /// link, which no trigger can rule out — not a second write log.
+    pub(crate) commit_writes: tokio::sync::broadcast::Sender<CommitWrite>,
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
     immediate_commits_remaining: Arc<Mutex<usize>>,
     /// Held by `commit` from its pending-queue check until the diff is sent or
@@ -767,6 +922,7 @@ impl PerspectiveInstance {
             trigger_notification_check: Arc::new(AtomicBool::new(false)),
             trigger_subscription_check: Arc::new(AtomicBool::new(false)),
             changed_predicates: Arc::new(Mutex::new(ChangedPredicates::NoneRecorded)),
+            commit_writes: tokio::sync::broadcast::channel(COMMIT_WRITES_CAPACITY).0,
             commit_debounce_timer: Arc::new(Mutex::new(None)),
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
             commit_order: Arc::new(Mutex::new(())),
@@ -894,6 +1050,22 @@ impl PerspectiveInstance {
             cache: &self.shape_cache,
             store: &self.sparql_store,
         }
+    }
+
+    /// The refusals a model query over `shape` makes before it reads — a
+    /// store-only condition the store cannot finish, a comparison on a
+    /// language-backed property it cannot make, a malformed condition —
+    /// without reading. For a caller that registers a query to run later.
+    pub(crate) fn refuse_unanswerable_query(
+        &self,
+        shape: &ModelShape,
+        query: &crate::perspectives::model_query::ModelQueryInput,
+    ) -> Result<(), AnyError> {
+        crate::perspectives::model_query::refuse_unanswerable_link_author(
+            query,
+            shape,
+            &self.shape_resolver(),
+        )
     }
 
     pub async fn start_background_tasks(self) {
@@ -1927,7 +2099,14 @@ impl PerspectiveInstance {
         // remote registered (rename, added property, etc.); with it, a
         // peer that has never registered a class locally still picks up
         // the class the moment its SHACL arrives.
-        if inbound_touches_shacl(&decorated_diff) {
+        if inbound_touches_shacl(
+            decorated_diff
+                .additions
+                .iter()
+                .chain(decorated_diff.removals.iter())
+                .map(|l| &l.data),
+            &|node| is_property_shape_node(&self.sparql_store, node),
+        ) {
             self.clear_shape_cache();
         }
 
@@ -2074,7 +2253,14 @@ impl PerspectiveInstance {
         // aliases, which classes an abstract class reads (#1435) and which
         // class a bare name reads (the least IRI of that name), so any such
         // write drops every cached shape and what is derived from them.
-        if inbound_touches_shacl(decorated_diff) {
+        if inbound_touches_shacl(
+            decorated_diff
+                .additions
+                .iter()
+                .chain(decorated_diff.removals.iter())
+                .map(|l| &l.data),
+            &|node| is_property_shape_node(&self.sparql_store, node),
+        ) {
             self.clear_shape_cache();
         }
         // A `FlowInstance` minted by an agent this executor acts for gets its
@@ -3817,9 +4003,10 @@ impl PerspectiveInstance {
     }
 
     /// [`Self::model_query`] with the shape-wait budget as a parameter, so
-    /// tests can exercise its expiry without waiting the production 20 s.
-    #[cfg(test)]
-    async fn model_query_within(
+    /// callers that must not wait (the auto-processor tick, like a
+    /// subscription recheck) pass `Duration::ZERO`, and tests can exercise
+    /// its expiry without waiting the production 20 s.
+    pub(super) async fn model_query_within(
         &self,
         class_name: &str,
         query_json: &str,
@@ -3840,6 +4027,37 @@ impl PerspectiveInstance {
         query_json: &str,
         shape_wait: Duration,
     ) -> Result<String, deno_core::anyhow::Error> {
+        let result = self
+            .model_query_result_within(stop, classes, query_json, shape_wait)
+            .await?;
+        serde_json::to_string(&result).map_err(|e| {
+            deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
+        })
+    }
+
+    /// [`Self::model_query_within`] for a caller that reads the result
+    /// itself: the instances as the pipeline built them, never serialised to
+    /// a string and parsed back.
+    pub(super) async fn model_query_one_result_within(
+        &self,
+        class_name: &str,
+        query_json: &str,
+        shape_wait: Duration,
+    ) -> Result<super::model_query::ModelQueryResult, deno_core::anyhow::Error> {
+        let classes = super::model_query::QueryClasses::One(class_name.to_string());
+        self.model_query_result_within(&EvalStop::none(), &classes, query_json, shape_wait)
+            .await
+    }
+
+    /// The query behind every `model_query*` entry point, before the result
+    /// is serialised.
+    async fn model_query_result_within(
+        &self,
+        stop: &EvalStop,
+        classes: &super::model_query::QueryClasses,
+        query_json: &str,
+        shape_wait: Duration,
+    ) -> Result<super::model_query::ModelQueryResult, deno_core::anyhow::Error> {
         let mut query_input: super::model_query::ModelQueryInput = serde_json::from_str(query_json)
             .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
 
@@ -3882,12 +4100,9 @@ impl PerspectiveInstance {
             one => one.clone(),
         };
         if unstored_hardwired.iter().all(|u| *u) {
-            return serde_json::to_string(&super::model_query::ModelQueryResult {
+            return Ok(super::model_query::ModelQueryResult {
                 instances: vec![],
                 total_count: query_input.count.unwrap_or(false).then_some(0),
-            })
-            .map_err(|e| {
-                deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
             });
         }
         for class_name in classes.names() {
@@ -3909,12 +4124,9 @@ impl PerspectiveInstance {
         let named = classes;
         let classes = &targets.classes;
         if classes.names().is_empty() {
-            return serde_json::to_string(&super::model_query::ModelQueryResult {
+            return Ok(super::model_query::ModelQueryResult {
                 instances: vec![],
                 total_count: query_input.count.unwrap_or(false).then_some(0),
-            })
-            .map_err(|e| {
-                deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
             });
         }
         // A built-in's own rows (`Container`) are read through its view.
@@ -3960,12 +4172,9 @@ impl PerspectiveInstance {
             {
                 // No valid output survives; answer directly rather than
                 // handing the store an empty VALUES block.
-                return serde_json::to_string(&super::model_query::ModelQueryResult {
+                return Ok(super::model_query::ModelQueryResult {
                     instances: vec![],
                     total_count: query_input.count.unwrap_or(false).then_some(0),
-                })
-                .map_err(|e| {
-                    deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
                 });
             }
         }
@@ -4026,10 +4235,7 @@ impl PerspectiveInstance {
         let mut result = result;
         self.finish_container_rows(stop, named, &query_input, &mut result)
             .await?;
-
-        serde_json::to_string(&result).map_err(|e| {
-            deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
-        })
+        Ok(result)
     }
 
     /// Evaluate property getters for a batch of instances in-process.
@@ -4109,29 +4315,51 @@ impl PerspectiveInstance {
             .collect();
 
         // One store transaction for the whole diff, so a batch lands as one
-        // write. On failure nothing was written; fall back to one link at a
-        // time.
-        match self.sparql_store.apply_diff(&removals, &additions) {
-            Ok(()) => return Ok(effects),
-            Err(e) => log::warn!(
-                "Failed to apply link diff to SPARQL store in one transaction, \
-                 writing links one by one: {:?}",
-                e
-            ),
-        }
+        // write — one generation. On failure nothing was written; fall back
+        // to one link at a time, one generation each.
+        let generations = match self.sparql_store.apply_diff(&removals, &additions) {
+            Ok(g) => vec![g],
+            Err(e) => {
+                log::warn!(
+                    "Failed to apply link diff to SPARQL store in one transaction, \
+                     writing links one by one: {:?}",
+                    e
+                );
+                let mut generations = Vec::new();
+                // Removals first
+                for removal in &removals {
+                    match self.sparql_store.remove_link(removal) {
+                        Ok(g) => generations.push(g),
+                        Err(e) => {
+                            log::warn!("Failed to remove link from SPARQL store: {:?}", e)
+                        }
+                    }
+                }
+                // Additions after
+                for addition in &additions {
+                    match self.sparql_store.add_link(addition) {
+                        Ok(g) => generations.push(g),
+                        Err(e) => {
+                            log::warn!("Failed to add link to SPARQL store: {:?}", e)
+                        }
+                    }
+                }
+                generations
+            }
+        };
 
-        // Removals first
-        for removal in &removals {
-            if let Err(e) = self.sparql_store.remove_link(removal) {
-                log::warn!("Failed to remove link from SPARQL store: {:?}", e);
-            }
-        }
-        // Additions after
-        for addition in &additions {
-            if let Err(e) = self.sparql_store.add_link(addition) {
-                log::warn!("Failed to add link to SPARQL store: {:?}", e);
-            }
-        }
+        // The feed entry right after the write, with the generations this
+        // diff's own writes took: the draining tick can then prove the feed
+        // covers the store's movement. Its terms are the links the diff
+        // wrote — the removals with the retracted folded in, the additions
+        // without the covered — the same set the published diff carries
+        // after `fold_into`.
+        self.broadcast_commit_write(
+            subscription_triggers::writes_of_links(
+                removals.iter().chain(additions.iter()).map(|l| &l.data),
+            ),
+            generations,
+        );
 
         // EXPERIMENT: removed per-write flush. The fix-branch added a flush
         // call here to reclaim memtable memory, but flushing on EVERY single
@@ -4152,19 +4380,44 @@ impl PerspectiveInstance {
         Ok(effects)
     }
 
+    /// Broadcast one committed write batch to the auto-processor feed
+    /// ([`Self::commit_writes`]), right where its store writes commit — under
+    /// `persist_lock`, so an entry's place in the channel is its commit's
+    /// place in the write order and a draining tick can prove coverage by the
+    /// `generations` the batch's own writes took (`Some` entries only; a
+    /// predicate-less diff feeds `None` and stales every kept read as
+    /// unclassifiable). A tick that falls into the small window between a
+    /// write's `note_write` and this send sees a gap and stales all once —
+    /// conservative and rare. Ignored when no loop runs (no receivers):
+    /// `send` only fails then, and there is nothing to wake.
+    pub(crate) fn broadcast_commit_write(
+        &self,
+        writes: Option<subscription_triggers::Writes>,
+        generations: Vec<u64>,
+    ) {
+        let feed = writes.map(|mut w| {
+            w.generations = generations;
+            Arc::new(w)
+        });
+        let _ = self.commit_writes.send(feed);
+    }
+
     /// Record the links of a diff into `changed_predicates`. A link without a
-    /// predicate makes it `CheckAll` (check everything).
+    /// predicate makes it `CheckAll` (check everything). The `commit_writes`
+    /// feed the auto-processor loops match is sent earlier, at the write
+    /// itself (`broadcast_commit_write`); this spawned record only feeds the
+    /// subscription side, which has no coverage to prove.
     async fn record_changed_predicates(&self, diff: &DecoratedPerspectiveDiff) {
+        // Collect the diff's links; a predicate-less one means check everything.
+        let writes =
+            subscription_triggers::writes_of(diff.additions.iter().chain(diff.removals.iter()));
+
         let mut changed = self.changed_predicates.lock().await;
 
         // If already CheckAll, it's sticky — nothing to do
         if matches!(*changed, ChangedPredicates::CheckAll) {
             return;
         }
-
-        // Collect the diff's links; a predicate-less one means check everything.
-        let writes =
-            subscription_triggers::writes_of(diff.additions.iter().chain(diff.removals.iter()));
 
         let Some(writes) = writes else {
             *changed = ChangedPredicates::CheckAll;
@@ -4177,6 +4430,205 @@ impl PerspectiveInstance {
             ChangedPredicates::Specific(existing) => existing.extend(writes),
             ChangedPredicates::CheckAll => unreachable!(),
         }
+    }
+
+    /// Whether a committed write batch can create, complete or change an
+    /// in-scope instance of any declared processor (`watcher.triggers`), or
+    /// touches an `AutoProcessor` config node (its property predicates — a
+    /// config write or removal). This is the same `matches` call
+    /// [`Self::check_subscribed_queries`] makes, over the same batch, so a
+    /// write that could not change a processor's read never wakes its loop
+    /// nor queries the store.
+    pub(crate) fn auto_processor_writes_match(
+        &self,
+        watcher: &crate::perspectives::auto_processor::watcher::WatcherState,
+        writes: &subscription_triggers::Writes,
+    ) -> bool {
+        use crate::perspectives::auto_processor::config::config_write_predicates;
+        if writes
+            .predicates
+            .iter()
+            .any(|p| config_write_predicates().contains(p))
+            // A schema write can change every kept read (see
+            // `auto_processor_mark_stale`), so it wakes the loop like a
+            // config write rather than waiting out the idle fallback.
+            || writes.touches_shacl(&|node| is_property_shape_node(&self.sparql_store, node))
+        {
+            return true;
+        }
+        let mut lookups = subscription_triggers::StoreLookups::new(&self.sparql_store);
+        watcher
+            .triggers
+            .values()
+            .any(|t| t.matches(writes, &mut lookups))
+    }
+
+    /// Mark each processor's kept transcript stale when `writes` may change
+    /// what its scope returns: the processor's trigger matches, or the batch
+    /// carries a config predicate, is a schema write, or could not be
+    /// classified (`None` — a predicate-less diff, or a `Lagged` receiver
+    /// that missed one), which stales every declared processor; a schema
+    /// write and an unclassified one also drop the shape cache. A batch that
+    /// matches nothing leaves the kept reads valid though the write
+    /// generation moved, so a tick with turns pending does not re-read the
+    /// whole transcript after an unrelated write (#1795). Returns whether
+    /// the batch was a schema write or unclassified: the shape may have
+    /// moved.
+    fn auto_processor_mark_stale(
+        &self,
+        watcher: &mut crate::perspectives::auto_processor::watcher::WatcherState,
+        writes: Option<&subscription_triggers::Writes>,
+    ) -> bool {
+        use crate::perspectives::auto_processor::config::config_write_predicates;
+        let stale_all =
+            |watcher: &mut crate::perspectives::auto_processor::watcher::WatcherState| {
+                let ids: Vec<String> = watcher.triggers.keys().cloned().collect();
+                watcher.reads.mark_transcripts_stale(ids);
+            };
+        // A gap (`None`) is a write no entry classified: a peer's schema
+        // diff whose entry is not broadcast yet looks exactly like this, so
+        // it is treated as a schema write too.
+        let Some(writes) = writes
+            .filter(|w| !w.touches_shacl(&|node| is_property_shape_node(&self.sparql_store, node)))
+        else {
+            // A schema write matches no data predicate, yet the shape the
+            // kept reads were taken under is gone — the classification the
+            // shape cache is dropped by (`inbound_touches_shacl`). The
+            // triggers' predicate rules were compiled from that same shape,
+            // so rebuild them alongside the stale mark: `set_trigger_result`
+            // feeds new result nodes into the old rules, and a write to a
+            // predicate the new shape introduced would then neither wake nor
+            // stale. The shape cache goes first: the re-read this mark
+            // causes and the rebuilt triggers must both parse the new shape,
+            // and no write path is guaranteed to have dropped it before its
+            // feed entry was drained.
+            self.clear_shape_cache();
+            if let Some(configs) = watcher.reads.configs_snapshot() {
+                for cfg in configs.iter() {
+                    watcher
+                        .triggers
+                        .insert(cfg.processor_id.clone(), self.auto_processor_trigger(cfg));
+                }
+            }
+            stale_all(watcher);
+            return true;
+        };
+        if writes
+            .predicates
+            .iter()
+            .any(|p| config_write_predicates().contains(p))
+        {
+            stale_all(watcher);
+            return false;
+        }
+        let hits: Vec<String> = {
+            let mut lookups = subscription_triggers::StoreLookups::new(&self.sparql_store);
+            watcher
+                .triggers
+                .iter()
+                .filter(|(_, trigger)| trigger.matches(writes, &mut lookups))
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        watcher.reads.mark_transcripts_stale(hits);
+        false
+    }
+
+    /// Drain the tick's own feed of committed writes ([`Self::commit_writes`])
+    /// and mark the kept transcripts they can change stale, matched as the
+    /// loop's wait would match them. The watch loop drains its own receiver
+    /// to decide whether to wake at all; this feed is what marks a kept
+    /// transcript stale for a tick that got here another way (a test driving
+    /// `run_one_pass`, a base-rate poll). An entry's arrival is not proof of
+    /// coverage: coverage is proven when every write generation in
+    /// `(seen, generation]` came with an entry. `Lagged`, an unclassifiable
+    /// batch or a write no entry accounts for (a store write outside the
+    /// commit path) stales them all. Returns whether the shape may have
+    /// moved: a drained schema write, or such a gap.
+    fn drain_auto_processor_feed(
+        &self,
+        watcher: &mut crate::perspectives::auto_processor::watcher::WatcherState,
+        generation: u64,
+    ) -> bool {
+        // The receiver leaves `watcher` for the drain so the matcher can
+        // borrow it mutably to write the stale marks. `covered` starts with
+        // the generations an earlier drain proved above `seen` (a write that
+        // landed mid-tick); each drained entry adds the generations its own
+        // store writes took. A new feed subscribes after any entry already
+        // sent, so it cannot prove what came before it: its first drain is a
+        // gap, which drops a shape cached before a schema write whose writer
+        // has not dropped it yet.
+        let mut unclassifiable = watcher.commit_feed.is_none();
+        let (mut commits, mut seen, mut covered) =
+            watcher.commit_feed.take().unwrap_or_else(|| {
+                (
+                    self.commit_writes.subscribe(),
+                    generation,
+                    std::collections::BTreeSet::new(),
+                )
+            });
+        let mut drained = Vec::new();
+        loop {
+            use tokio::sync::broadcast::error::TryRecvError;
+            match commits.try_recv() {
+                Ok(write) => {
+                    match write.as_deref() {
+                        Some(w) => covered.extend(w.generations.iter().copied()),
+                        // A predicate-less batch: nothing to match on.
+                        None => unclassifiable = true,
+                    }
+                    drained.push(write);
+                }
+                // Entries the buffer dropped held generations the feed can
+                // no longer account for.
+                Err(TryRecvError::Lagged(_)) => unclassifiable = true,
+                Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
+            }
+        }
+        // `proven` is the highest generation the feed proves from `seen` up
+        // — possibly past `generation`, which is the mid-tick case: a fed
+        // write whose entry landed after the generation was read is still
+        // covered, and `seen` must not be parked below what the feed proved.
+        let covered_through = |up_to: u64| (seen + 1..=up_to).all(|g| covered.contains(&g));
+        let mut proven = seen;
+        while covered.contains(&(proven + 1)) {
+            proven += 1;
+        }
+        let shape_moved = if !unclassifiable && covered_through(generation) {
+            // Every store write arrived classified: mark only the
+            // transcripts a matching entry can change.
+            let mut schema = false;
+            for write in &drained {
+                schema |= self.auto_processor_mark_stale(watcher, write.as_deref());
+            }
+            seen = proven;
+            schema
+        } else {
+            // A gap: stale every kept transcript — the write no entry
+            // classified could have touched any scope. `seen` takes the
+            // larger of `generation` and what the feed still proves above it.
+            seen = generation.max(proven);
+            self.auto_processor_mark_stale(watcher, None)
+        };
+        // Generations proven above `seen` stay: the next drain must not ask
+        // for them again.
+        covered.retain(|g| *g > seen);
+        watcher.commit_feed = Some((commits, seen, covered));
+        shape_moved
+    }
+
+    /// The trigger a model subscription over `cfg`'s transcript scope would
+    /// build, fed the result of the last read for its `near`/`via` node set
+    /// (empty before the first read: `joins`/`scan`/`any` still catch writes
+    /// that create or complete an instance).
+    fn auto_processor_trigger(
+        &self,
+        cfg: &crate::perspectives::auto_processor::config::AutoProcessorConfig,
+    ) -> subscription_triggers::ModelTrigger {
+        let classes = crate::perspectives::model_query::QueryClasses::One(cfg.source_class.clone());
+        let query_json = cfg.transcript_query_json();
+        let targets = self.trigger_targets(&classes, &query_json);
+        self.build_model_trigger_for(&targets, &query_json, "")
     }
 
     fn spawn_prolog_facts_update(
@@ -6361,11 +6813,13 @@ impl PerspectiveInstance {
     /// (60 s, or when a deferral ends). A tick reuses the store reads of the
     /// one before while no write landed in between (`TickReads`), so an idle
     /// perspective costs no query at all, and after writes that only added
-    /// links it reads only the turns they add (`delta_read`). Each tick:
+    /// links it reads the scope's transcript in full — a model query has no
+    /// safe partial-read equivalent. Each tick:
     ///   1. Load every `AutoProcessorConfig` declared on this perspective's
     ///      shared graph (`load_processors`). Zero configs = no-op tick.
-    ///   2. Per config, run its `source_scope_query` to gather the current
-    ///      transcript (`?speaker` `?text` `?timestamp`), drop turns older
+    ///   2. Per config, run its transcript model query (`source_class` +
+    ///      `source_text` + `source_query`) to gather the current
+    ///      transcript, drop turns older
     ///      than `source_window_ms` when set, hash each remaining turn, and
     ///      skip IDs already in this processor's `InterpretationRun.sources`
     ///      (windowed by `ran_at` only when `source_window_ms` is set).
@@ -6393,7 +6847,10 @@ impl PerspectiveInstance {
 
         let uuid = self.uuid.clone();
         let mut watcher = WatcherState::new();
-        let mut writes = self.sparql_store.watch_writes();
+        // Committed diffs as `Writes`, tested against the processors'
+        // model-subscription triggers: the loop wakes only when a write can
+        // change what a processor reads (#1794).
+        let mut commits = self.commit_writes.subscribe();
         // The first pass runs after one base tick, whatever the store does.
         let mut wait = Some(AUTO_PROCESSOR_TICK_MS);
         // The last tick that found the store changed, so it read it, and its
@@ -6410,14 +6867,22 @@ impl PerspectiveInstance {
 
         loop {
             let end = match wait {
-                Some(ms) => wait_for_tick(&self.is_teardown, ms, None, None).await,
+                Some(ms) => wait_for_tick(&self.is_teardown, ms, None, None, |_| false).await,
                 None => {
                     let now_ms = chrono::Utc::now().timestamp_millis();
                     let ms = idle_wait_ms(&watcher, now_ms);
                     let models = models.as_mut().filter(|_| waiting_for_model);
-                    match wait_for_tick(&self.is_teardown, ms, Some(&mut writes), models).await {
+                    let matches = |w: &subscription_triggers::Writes| {
+                        self.auto_processor_writes_match(&watcher, w)
+                    };
+                    match wait_for_tick(&self.is_teardown, ms, Some(&mut commits), models, matches)
+                        .await
+                    {
                         // Let the rest of a burst of writes land first, and
-                        // keep the back-off since the last read.
+                        // keep the back-off since the last read. The batches
+                        // that woke the wait are matched again by the tick's
+                        // own feed (`commit_feed`), which marks only the
+                        // scopes they can actually change stale.
                         WaitEnd::Write => {
                             let since_read = last_read
                                 .map(|(_, at)| at.elapsed().as_millis() as u64)
@@ -6428,6 +6893,7 @@ impl PerspectiveInstance {
                                 floor.max(AUTO_PROCESSOR_TICK_MS),
                                 None,
                                 None,
+                                |_| false,
                             )
                             .await
                         }
@@ -6438,9 +6904,26 @@ impl PerspectiveInstance {
             if end == WaitEnd::Teardown {
                 break;
             }
+            // Every commit the receiver already holds: coalesce them before
+            // the generation is captured, since this tick's reads see them
+            // and the next wait must not wake on them again. Each is matched
+            // — a batch that could change a scope marks its kept transcript
+            // stale; `Lagged` or a predicate-less one stales them all.
+            loop {
+                use tokio::sync::broadcast::error::TryRecvError;
+                match commits.try_recv() {
+                    Ok(write) => {
+                        self.auto_processor_mark_stale(&mut watcher, write.as_deref());
+                    }
+                    Err(TryRecvError::Lagged(_)) => {
+                        self.auto_processor_mark_stale(&mut watcher, None);
+                    }
+                    Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
+                }
+            }
             // Writes up to here are seen by this tick; one landing during it
-            // (the pass's own, or a peer's) wakes the next.
-            let generation = *writes.borrow_and_update();
+            // (the pass's own, or a peer's) is matched by the next wait.
+            let generation = self.sparql_store.write_generation();
             if last_read.is_none_or(|(g, _)| g != generation) {
                 last_read = Some((generation, tokio::time::Instant::now()));
             }
@@ -6509,10 +6992,10 @@ impl PerspectiveInstance {
         use crate::perspectives::auto_processor::{
             config::load_processors,
             cursor::{load_processed_sources, processed_ids_in_window, turn_in_source_window},
-            delta_read::{delta_query, DeltaRead},
             events::{emit, AutoProcessorEvent, AutoProcessorStep},
             watcher::{
                 model_available, run_one_pass, CachedTurn, PassOutcome, PendingTurn, TickOutcome,
+                UNRESOLVED_TEXT_RETRY_MS,
             },
         };
 
@@ -6522,7 +7005,40 @@ impl PerspectiveInstance {
         let configs = match watcher.reads.configs(generation) {
             Some(cs) => cs,
             None => match load_processors(self).await {
-                Ok(cs) => watcher.reads.set_configs(generation, cs),
+                Ok(cs) => {
+                    let prev = watcher.reads.configs_snapshot();
+                    let cs = watcher.reads.set_configs(generation, cs);
+                    // (Re)build each processor's wake trigger from its scope.
+                    // Their `near`/`via` node sets are re-fed when a
+                    // transcript read next runs (`set_trigger_result`); a
+                    // generation move does not itself stale a kept read —
+                    // `auto_processor_mark_stale` decides that per write.
+                    watcher
+                        .triggers
+                        .retain(|id, _| cs.iter().any(|c| &c.processor_id == id));
+                    for cfg in cs.iter() {
+                        // A rebuilt trigger has no result nodes, so its
+                        // `near`/`via` rules cannot see a write that edits an
+                        // instance the kept transcript returned — and the
+                        // commit feed below is drained before any read could
+                        // re-feed it. Rebuild and stale the kept transcript
+                        // only when the config set actually changed or the
+                        // trigger is absent: an unrelated write's generation
+                        // move re-reads the same configs, and rebuilding then
+                        // would both drop the fed nodes and re-read a kept
+                        // transcript nothing could have changed.
+                        let changed = prev.as_ref().is_none_or(|p| !p.iter().any(|o| o == cfg));
+                        if changed || !watcher.triggers.contains_key(&cfg.processor_id) {
+                            watcher
+                                .triggers
+                                .insert(cfg.processor_id.clone(), self.auto_processor_trigger(cfg));
+                            watcher
+                                .reads
+                                .mark_transcripts_stale([cfg.processor_id.clone()]);
+                        }
+                    }
+                    cs
+                }
                 Err(e) => {
                     log::warn!(
                         "auto_processor_tick [{}]: load_processors failed: {e:#}",
@@ -6540,7 +7056,15 @@ impl PerspectiveInstance {
             return TickOutcome::Idle;
         }
 
+        // Stale what the writes since the last tick can change. Whether the
+        // shape moved is decided again before the drains, under the lock.
+        self.drain_auto_processor_feed(watcher, generation);
+
         // 1. Record new-since-last-processed turns per config (payload kept).
+        // A config whose reads fail keeps its pending queue as it is — the
+        // turns stay pending rather than draining a batch a failed read may
+        // have made stale.
+        let mut read_failed: std::collections::HashSet<String> = std::collections::HashSet::new();
         for cfg in configs.iter() {
             let processed_rows = match watcher.reads.processed(&cfg.processor_id, generation) {
                 Some(rows) => rows,
@@ -6554,6 +7078,7 @@ impl PerspectiveInstance {
                             cfg.processor_id,
                             uuid
                         );
+                        read_failed.insert(cfg.processor_id.clone());
                         continue;
                     }
                 },
@@ -6569,81 +7094,71 @@ impl PerspectiveInstance {
             // or past a batch cap) are checked again: a run may have consumed
             // them since, or they may have left the window.
             watcher.retain_pending(&cfg.processor_id, |t| queueable(&t.id, &t.timestamp));
-            // A kept read is reused unless a turn it keeps without text has
-            // become queueable (its run aged out of the window).
-            let kept = watcher.reads.transcript(cfg).filter(|(_, turns)| {
-                !turns.iter().any(|t| {
-                    matches!(t, CachedTurn::Consumed { .. }) && queueable(t.id(), t.timestamp())
-                })
+            // A kept read is reused while no matching write invalidated it
+            // (the loop's wake trigger marks `stale_transcripts`), unless a
+            // turn it keeps without text has become queueable (its run aged
+            // out of the window) or it dropped an unresolved text past its
+            // retry clock ([`UNRESOLVED_TEXT_RETRY_MS`]: an expression
+            // arriving is not a store write, so no write ever marks it).
+            let kept = watcher.reads.transcript(cfg).filter(|(_, turns, retry)| {
+                !watcher.reads.transcript_stale(&cfg.processor_id)
+                    && !retry.is_some_and(|due| now_ms >= due)
+                    && !turns.iter().any(|t| {
+                        matches!(t, CachedTurn::Consumed { .. }) && queueable(t.id(), t.timestamp())
+                    })
             });
-            // After writes that only added links, read what they can add to
-            // the kept read (late turns with old timestamps included, see
-            // `delta_read`). Anything else (no kept read, a removal or reload
-            // since, a log that no longer reaches back, a scope query a delta
-            // cannot follow) reads the whole transcript.
-            let delta = match &kept {
-                Some((kept_at, _)) if *kept_at == generation => None,
-                Some((kept_at, _)) => self
-                    .sparql_store
-                    .additions_since(*kept_at, generation)
-                    .map(|added| delta_query(&cfg.source_scope_query, &added))
-                    .filter(|d| *d != DeltaRead::Full),
-                None => None,
-            };
-            let transcript = match (kept, delta) {
-                (Some((kept_at, turns)), _) if kept_at == generation => turns,
-                (kept, Some(delta)) => {
-                    // Release the kept copy, so the merge can take it over.
-                    drop(kept);
-                    let gained = match delta {
-                        DeltaRead::Query(query) => {
-                            crate::perspectives::interpretation::gather_transcript_sparql(
-                                self, &query,
-                            )
-                            .await
-                        }
-                        _ => Ok(Vec::new()),
-                    };
-                    match gained {
-                        Ok(t) => watcher.reads.merge_transcript(
-                            cfg,
-                            generation,
-                            t.iter().map(PendingTurn::from_transcript).collect(),
-                            queueable,
-                        ),
-                        Err(e) => {
-                            log::warn!(
-                                "auto_processor `{}` [{}]: reading the turns added since the last \
-                                 tick failed: {e:#}",
-                                cfg.processor_id,
-                                uuid
-                            );
-                            continue;
-                        }
-                    }
-                }
-                _ => match crate::perspectives::interpretation::gather_transcript_sparql(
+            // An invalidated read re-runs the whole transcript: a model-query
+            // read has no partial-read equivalent.
+            let transcript = match kept {
+                Some((_, turns, _)) => turns,
+                _ => match crate::perspectives::interpretation::gather_transcript_model_within(
                     self,
-                    &cfg.source_scope_query,
+                    &cfg.source_class,
+                    &cfg.source_text,
+                    &cfg.transcript_query_json(),
+                    // A subscription recheck does not wait for a shape, and
+                    // neither does a tick: a missing shape fails this read,
+                    // which the next write that could deliver it wakes.
+                    Duration::ZERO,
                 )
                 .await
                 {
-                    Ok(t) => watcher.reads.set_transcript(
-                        cfg,
-                        generation,
-                        t.iter().map(PendingTurn::from_transcript).collect(),
-                        queueable,
-                    ),
+                    Ok(read) => {
+                        // Feed the read's nodes to the wake trigger, so a
+                        // write that edits an in-scope instance's links
+                        // (`near`/`via` rules) wakes the loop.
+                        watcher.set_trigger_result(&cfg.processor_id, &read.instances);
+                        watcher.reads.set_transcript(
+                            cfg,
+                            generation,
+                            read.turns
+                                .iter()
+                                .map(PendingTurn::from_transcript)
+                                .collect(),
+                            queueable,
+                            read.has_unresolved
+                                .then_some(now_ms + UNRESOLVED_TEXT_RETRY_MS),
+                        )
+                    }
                     Err(e) => {
                         log::warn!(
-                            "auto_processor `{}` [{}]: gather_transcript_sparql failed: {e:#}",
+                            "auto_processor `{}` [{}]: gather_transcript_model failed: {e:#}",
                             cfg.processor_id,
                             uuid
                         );
+                        read_failed.insert(cfg.processor_id.clone());
                         continue;
                     }
                 },
             };
+            // A pending turn that left the scope since it was queued — its
+            // parent link removed, its text unlinked — is not in this read:
+            // drop it before the drain rather than interpret it anyway.
+            if watcher.has_pending_for([cfg.processor_id.as_str()]) {
+                let live: std::collections::HashSet<&str> =
+                    transcript.iter().map(|t| t.id()).collect();
+                watcher.retain_pending(&cfg.processor_id, |t| live.contains(t.id.as_str()));
+            }
             for turn in transcript.iter() {
                 // A turn kept without text was not queueable at this tick's `now_ms` (checked above).
                 let CachedTurn::Full(pending) = turn else {
@@ -6658,7 +7173,15 @@ impl PerspectiveInstance {
             }
         }
 
-        let had_pending = watcher.has_pending_for(configs.iter().map(|c| c.processor_id.as_str()));
+        // Only a processor whose reads succeeded keeps the base-rate tick.
+        // A failed read's turns stay queued — but nothing in a failed read
+        // advances their clocks' inputs, so polling every 500 ms just to
+        // fail the same reads again is churn; the queue is kept, a matching
+        // write still wakes the loop, and the idle fallback still ticks.
+        let had_pending = configs.iter().any(|c| {
+            !read_failed.contains(&c.processor_id)
+                && watcher.has_pending_for([c.processor_id.as_str()])
+        });
         if !had_pending {
             return TickOutcome::Idle;
         }
@@ -6682,11 +7205,60 @@ impl PerspectiveInstance {
             watcher.waiting_for_model = false;
         }
 
-        // 2. Drain + run a pass per config.
-        for cfg in configs.iter() {
+        // 2. Drain + run a pass per config. A config whose reads failed this
+        // tick keeps its turns pending and skips the drain: the cursor rows
+        // that decide what is consumed could not be read.
+        //
+        // Every queue was recorded from reads at `generation`. A pass writes
+        // (its claim, its run, its output), and a peer may write while it
+        // runs: once the store moved, a later queue may hold a turn the write
+        // consumed or took out of scope. So the drains stop after a pass that
+        // moved it, and the next tick re-reads under the feed's stale marks
+        // before it drains the rest. The first drain does not wait for a
+        // quiet store, or a busy neighbourhood would hold every pass. The
+        // processor whose last pass is oldest drains first, so a processor
+        // that writes on every tick does not keep the others out.
+        //
+        // Before any drain, the feed is drained again under `persist_lock`.
+        // Every commit, local or a peer's diff applied link by link, writes
+        // and broadcasts its entry under that lock, so no diff is half
+        // applied there and the entries account for every write the reads
+        // above could have seen. If one of them moved the shape, those reads
+        // may have parsed half of it: nothing drains, and the next tick
+        // re-reads under the whole shape. A data write holds nothing.
+        let shape_moved = {
+            let _persisting = self
+                .persist_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.drain_auto_processor_feed(watcher, self.sparql_store.write_generation())
+        };
+        if shape_moved {
+            return TickOutcome::Pending;
+        }
+        let mut order: Vec<_> = configs.iter().collect();
+        order.sort_by_key(|cfg| {
+            watcher
+                .last_pass_ms
+                .get(&cfg.processor_id)
+                .copied()
+                .unwrap_or(i64::MIN)
+        });
+        let mut passed = false;
+        for cfg in order {
+            if passed && self.sparql_store.write_generation() != generation {
+                break;
+            }
+            if read_failed.contains(&cfg.processor_id) {
+                continue;
+            }
             let Some(batch) = watcher.drain_ready_batch(cfg, now_ms) else {
                 continue;
             };
+            passed = true;
+            watcher
+                .last_pass_ms
+                .insert(cfg.processor_id.clone(), now_ms);
             // Hoisted above the `BatchReady` emit so that signal can carry the batch key too.
             // It is the first event of a pass, so a consumer that could not key it would have to
             // buffer everything until the pass's second event told it what row to open.

@@ -339,14 +339,16 @@ pub(crate) fn refuse_union_reads(query: &ModelQueryInput) -> Result<(), Error> {
     if let Some(Scope::Traverse {
         limit_per_anchor,
         levels,
+        path,
         ..
     }) = &query.parent
     {
-        if limit_per_anchor.is_some() || levels.is_some() {
+        if limit_per_anchor.is_some() || levels.is_some() || path.is_some() {
             return Err(anyhow!(
-                "classNames / abstract class: a parent scope with `limitPerAnchor` or `levels` \
-                 is not supported over several classes — each class would slice its own rows \
-                 per anchor. Page the union with `limit`/`offset`, or query one class at a time."
+                "classNames / abstract class: a parent scope with `limitPerAnchor`, `levels` or \
+                 `path` is not supported over several classes — each class would slice or walk \
+                 its own rows per anchor. Page the union with `limit`/`offset`, or query one \
+                 class at a time."
             ));
         }
     }

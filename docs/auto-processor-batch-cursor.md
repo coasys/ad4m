@@ -4,6 +4,38 @@
 [`InterpretationRun`](interpretation-provenance-design.md) provenance node.
 Nothing in this doc is implemented yet.
 
+> **Superseded scope (issue #1794).** `source_scope_query` no longer
+> exists: a free SPARQL scope bypassed signature verification,
+> `resolveLanguage` decoding and class-shape conformance. The scope is
+> now a **model query** built by the processor from three config fields —
+> `source_class` (the message class), `source_text` (the class property
+> holding the message text) and optional `source_query` (a
+> `ModelQueryInput` restricted to `parent` + `where` keys). Each turn is
+> one class-conforming instance, read with default provenance (invalid
+> signatures withheld): `text` is the hydrated `source_text` value, and
+> `speaker`/`timestamp` are taken from the link row hydration actually
+> selected for that text — the signer and time of the *text link*, not
+> of the instance's earliest link. The gatherer requests `links` for
+> `source_text` (the model query's per-property link-provenance option);
+> a `links` predicate the instance query already fetches is served from
+> those same rows — one read, no second `links` query — so the last row
+> under the shared total order (timestamp, then target, then author,
+> then signature) is provably the link the text hydrated from, and an
+> instance with no such row is skipped rather than attributed to
+> its creator. Ordered by timestamp then id. Wherever this doc says “run
+> `source_scope_query`” or “the scope query binds `?speaker` `?text`
+> `?timestamp`”, read “run the model query”; speaker/timestamp semantics
+> are the reifier semantics this doc derived — they are the signer's DID
+> and link time, not an `ns://author` property. A turn whose `source_text`
+> `resolveLanguage` fails (the resolver marks the property under
+> `__unresolved`) is skipped: it is not queued, not recorded in the
+> cursor, and the transcript read that held it is not kept past the
+> watcher's unresolved-retry clock, so a later language install admits it
+> without a store write. The cursor (§3f query 2) is likewise a model
+> query — over the hard-wired `InterpretationRun` class — so an
+> unverifiable run link cannot mark a turn as processed; the `ran_at`
+> window semantics of `InterpretationRun.sources` are unchanged.
+
 Two related gaps in the polling watcher, fixed together:
 
 1. The watch tick hashes SPARQL rows into IDs and throws the rows away.
@@ -170,13 +202,21 @@ idempotency. Message URI would be stronger against clock-collision; we
 are not requiring `?id` in the scope query. Timestamp is the minimum
 extra identity that keeps content-hash IDs workable.
 
-`source_scope_query` therefore binds **`?speaker`, `?text`, and
-`?timestamp`**. The known-good query takes both speaker and timestamp
-from the body-link reifier (`ad4m://ontology/author` /
-`ad4m://ontology/timestamp`). A query that omits `?timestamp` is invalid
-for the AutoProcessor gatherer (fail the tick with a log, do not silently
-collapse). Apps may still bind `?speaker` from a model-specific author
-property if they need a logical author other than the link signer.
+Every turn therefore carries **`speaker`, `text`, and `timestamp`**.
+Speaker and timestamp are the reifier semantics
+(`ad4m://ontology/author` / `ad4m://ontology/timestamp` — the DID that
+signed the link and the link's time); under the model-query scope they
+are the signer and timestamp of the link the text was read from — so an
+edit lands at the moment the text was written, not when the instance was
+created — and the guarantee this section derived holds without an
+app-supplied binding. Upgraded processors keep their processed set
+only where the id inputs did not change: the same `(speaker, text,
+timestamp)` the scope query bound is what the model query's `__links`
+row carries — as the standard body-reifier scope did. A custom former
+`source_scope_query` that bound a different speaker (a logical author
+rather than the link's signer) or a transformed text produced
+different ids, so turns recorded under those are read as new and run
+again — replay is prevented per id, not per link.
 
 ### 3e. Bound both queries by a time window
 
@@ -198,9 +238,10 @@ the processor is not loaded.
 When set, the window is the engine-owned bound:
 
 - **Scope (in Rust, after gather):** drop rows whose `timestamp` is
-  older than `now - source_window_ms`. Apps should *also* `FILTER` in
-  SPARQL so Oxigraph never materialises the rest; the Rust drop is the
-  safety net when they don’t.
+  older than `now - source_window_ms`. Apps can *also* bound
+  `timestamp` in the scope's `where` (`source_query`) so the store
+  never materialises the rest; the Rust drop is the safety net when
+  they don't.
 - **Cursor:** only load `sources` from runs of this processor whose
   `ran_at >= now - source_window_ms`. `ran_at` is already on
   `InterpretationRun` (unix millis, stored as a string).
@@ -227,40 +268,37 @@ graph for provenance/audit. They simply are not read by the tick.
 
 ### 3f. How the tick reads it
 
-Two SPARQL queries per processor per tick (or on cache miss); subtract
-in Rust. Do **not** wrap the user’s `source_scope_query` with
-`FILTER NOT EXISTS` / SPARQL `SHA256`.
+Two model queries per processor per tick (or on cache miss — a kept read is
+kept only while the tick's commit-feed drain proves coverage: every write
+generation since the last drain must come with a feed entry, and only
+entries matching the processor's trigger stale its read; an unclassifiable
+entry, a `Lagged` hole or a write with no entry stales them all); subtract
+in Rust.
 
-**Known-good scope query** (copy this; a missing `?timestamp` fails the
-tick). Author and timestamp are **not** on the quoted triple. The store
-writes a reifier node (`sparql_store.rs`): direct `?m <ns://body> ?text`,
-plus `<link:HASH> rdf:reifies <<( ?m <ns://body> ?text )>>`, plus
-`ad4m://ontology/author` and `ad4m://ontology/timestamp` on that reifier
-(the same fields [`gather_transcript`] reads off the link expression).
-Reach them through `rdf:reifies`:
+Author and timestamp are **not** on the quoted triple. The store writes a
+reifier node (`sparql_store.rs`): direct `?m <ns://body> ?text`, plus
+`<link:HASH> rdf:reifies <<( ?m <ns://body> ?text )>>`, plus
+`ad4m://ontology/author` and `ad4m://ontology/timestamp` on that reifier.
+Query 1 is the model query the processor builds from `source_class` /
+`source_text` / `source_query`, plus `"links": [source_text]` so each
+instance carries the provenance rows of its text links (`__links`) —
+for `source_text` those rows ride the instance query itself (the read
+is one query, not a scope query plus a `links` query), so
+speaker/timestamp come off the same row the hydrated text does, under
+the deterministic last-row rule both reads share. Query 2 is engine-owned — a model query over the hard-wired
+`InterpretationRun` class, so signature verification applies to it too
+(the earlier raw-SPARQL read let a forged run link mark turns processed):
 
-```sparql
-# 1. Scope — from AutoProcessorConfig (app-owned).
-#    MUST bind ?speaker ?text ?timestamp.
-#    SHOULD FILTER ?timestamp to the recent window.
-SELECT ?speaker ?text ?timestamp WHERE {
-  ?m <ns://body> ?text .
-  ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?m <ns://body> ?text )>> .
-  ?r <ad4m://ontology/author> ?speaker .
-  ?r <ad4m://ontology/timestamp> ?timestamp .
-  FILTER (?timestamp >= "…rfc3339 of now - source_window_ms…")
-}
-
-# 2. Cursor — engine-owned. `ran_at` is OPTIONAL because it only matters
-#    when a window is set, and is filtered in Rust: the stored value is a
-#    `literal:string:` IRI, so `xsd:integer(?ran_at)` does not apply to it.
-SELECT ?id ?ran_at WHERE {
-  ?run <ad4m://type> <ad4m://interpretation-run> .
-  ?run <ad4m://interp/processor> <ad4m://autoprocessor/{processor_id}> .
-  ?run <ad4m://interp/sources> ?id .
-  OPTIONAL { ?run <ad4m://interp/ran_at> ?ran_at }
-}
+```json
+{ "properties": ["ranAt", "sources"],
+  "where": { "processor": "ad4m://autoprocessor/{processor_id}" } }
 ```
+
+If the `InterpretationRun` class has never been registered on the
+perspective (no run was ever written), the cursor is empty — there is no
+shape to query and nothing is processed. `ranAt` is requested but applied
+in Rust: the stored value is a `literal:string:` IRI, so it is parsed per
+run, not filtered in the query.
 
 With a window set, a row whose `ran_at` is missing or unparseable is
 **dropped** rather than kept. The cursor is a suppression list, so the
@@ -286,8 +324,8 @@ Tick:
 4. Drain a ready batch of `PendingTurn`s → `run_one_pass` (no re-gather).
 5. On Won, write `processor` + `sources` on the new `InterpretationRun`.
 
-`source_scope_query` stays an app concern (which conversation, plus a
-time filter). Processed state stays engine bookkeeping. Apps do not
+`sourceQuery` (`parent` and `where` over `sourceClass`) stays an app
+concern: which conversation, and which of its instances count. Processed state stays engine bookkeeping. Apps do not
 write `FILTER NOT EXISTS { processed }`.
 
 ---
@@ -315,7 +353,7 @@ are the durable watermark after the lock expires.
 2. **Processed IDs live only on `InterpretationRun.sources`.** No
    denormalized `AutoProcessor.processed` collection. **Decided.**
 3. **`InterpretationRun.processor`** links a run to its AutoProcessor so
-   the cursor SPARQL is scoped. Manual interpretation omits it and does
+   the cursor query is scoped. Manual interpretation omits it and does
    **not** suppress a watching AutoProcessor (§3b). **Decided.**
 4. **Write sources only on Won.** BackedOff waits for synced sources or
    claim TTL + retry. Size `claim_ttl_ms` ≳ sync latency + pass runtime
@@ -356,7 +394,7 @@ are the durable watermark after the lock expires.
 4. Extend `InterpretationRun` SDNA with `processor` (optional, single)
    and `sources` (collection). Wire both on AutoProcessor Won. Cursor
    query uses `ad4m://type` / `ad4m://interpretation-run`.
-5. Replace `processed_per_processor` with the cursor SPARQL.
+5. Replace `processed_per_processor` with the cursor query.
 6. Tests: restart-equivalent empty RAM set still skips in-window sourced
    IDs; two processors do not share a cursor; `[m1,m2]` then `[m1,m2,m3]`
    only interprets `m3`; `batch_max` is the LLM transcript length;

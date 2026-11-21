@@ -1,6 +1,6 @@
 use super::super::shacl_parser::class_name_of;
 use super::shape::parse_shape_from_json;
-use super::types::{InstanceLinks, ModelShape, ShapeProperty, ShapeResolver};
+use super::types::{InstanceLinkRow, InstanceLinks, ModelShape, ShapeProperty, ShapeResolver};
 use anyhow::{anyhow, Error};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -213,13 +213,12 @@ pub fn inst_links_at(source: &str, links: Vec<(&str, &str, &str)>) -> InstanceLi
         source: source.to_string(),
         links: links
             .into_iter()
-            .map(|(pred, tgt, ts)| {
-                (
-                    pred.to_string(),
-                    tgt.to_string(),
-                    "did:key:testauthor".to_string(),
-                    ts.to_string(),
-                )
+            .map(|(pred, tgt, ts)| InstanceLinkRow {
+                predicate: pred.to_string(),
+                target: tgt.to_string(),
+                author: "did:key:testauthor".to_string(),
+                timestamp: ts.to_string(),
+                provenance: None,
             })
             .collect(),
     }
@@ -232,13 +231,12 @@ pub fn inst_links(source: &str, links: Vec<(&str, &str)>) -> InstanceLinks {
         links: links
             .into_iter()
             .enumerate()
-            .map(|(i, (pred, tgt))| {
-                (
-                    pred.to_string(),
-                    tgt.to_string(),
-                    "did:key:testauthor".to_string(),
-                    format!("2026-01-01T00:00:{i:02}.000Z"),
-                )
+            .map(|(i, (pred, tgt))| InstanceLinkRow {
+                predicate: pred.to_string(),
+                target: tgt.to_string(),
+                author: "did:key:testauthor".to_string(),
+                timestamp: format!("2026-01-01T00:00:{i:02}.000Z"),
+                provenance: None,
             })
             .collect(),
     }

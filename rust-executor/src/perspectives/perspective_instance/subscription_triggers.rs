@@ -23,7 +23,10 @@
 //!    sort reads it on every linked target, flagged or not).
 //! 2. **`joins`**: a flag predicate written (or removed) with one of the
 //!    flag values of a class the subscription scans. This is how a new
-//!    record enters, and how a deleted one leaves the count.
+//!    record enters, and how a deleted one leaves the count. Under a
+//!    one-hop parent scope the flagged node must also sit inside it —
+//!    linked to an anchor through the scope's edge — since a record under
+//!    another parent can never be in the result (#1795).
 //! 3. **`near`**: a predicate read on records in the result, written on a
 //!    node that is in the last result or is a parent-scope anchor. For a node
 //!    in the last result this is a fast path: `scan` (a top-level record
@@ -59,12 +62,13 @@ use serde_json::Value;
 
 use crate::perspectives::model_query::containment::{watched_predicates, ContainmentEdge};
 use crate::perspectives::model_query::types::{ScopeDirection, ShapeProperty};
+use crate::perspectives::model_query::utils::validate_iri;
 use crate::perspectives::model_query::{
     conformance_predicates, IncludeValue, ModelQueryInput, ModelShape, Scope, ShapeResolver,
     WhereCondition,
 };
 use crate::perspectives::sparql_store::{canonical_target, stored_as_literal, SparqlStore};
-use crate::types::DecoratedLinkExpression;
+use crate::types::{DecoratedLinkExpression, Link};
 
 /// Past this many distinct links in one batch, a batch keeps only its
 /// predicates and every model subscription falls back to predicate matching.
@@ -77,15 +81,25 @@ const MAX_TRACKED_LINKS: usize = 10_000;
 /// query it might save.
 const MAX_NEIGHBOURS: usize = 2_000;
 
-/// The writes of one subscription-check batch.
+/// The writes of one subscription-check batch. `pub(crate)`: the
+/// auto-processor watch loops name it in their wake-feed receiver
+/// (#1794); its internals stay `pub(super)`.
 #[derive(Debug, Clone, Default)]
-pub(super) struct Writes {
+pub(crate) struct Writes {
     /// Every predicate written or removed. Raw SPARQL subscriptions match on
     /// these alone.
     pub(super) predicates: HashSet<String>,
     /// Each link written or removed, or `None` once the batch passed
     /// [`MAX_TRACKED_LINKS`].
     links: Option<HashSet<Written>>,
+    /// The write generations this batch's own store writes took: one for a
+    /// diff committed in a single transaction, one per link on the
+    /// link-by-link fallback. The feed entry it rides lets a draining tick
+    /// prove the feed covers the store's movement — every generation since
+    /// the last proven one must have an entry — so it is filled by the
+    /// commit path, not by `writes_of`. Empty for a `Writes` built outside
+    /// a commit (subscription checks, tests).
+    pub(crate) generations: Vec<u64>,
 }
 
 /// One written or removed link, with what every subscription's check needs
@@ -107,6 +121,7 @@ impl Writes {
         Writes {
             predicates: HashSet::new(),
             links: Some(HashSet::new()),
+            generations: Vec::new(),
         }
     }
 
@@ -131,11 +146,43 @@ impl Writes {
     /// Fold another batch's writes into this one.
     pub(super) fn extend(&mut self, other: Writes) {
         self.predicates.extend(other.predicates);
+        self.generations.extend(other.generations);
         match (&mut self.links, other.links) {
             (Some(mine), Some(theirs)) if mine.len() + theirs.len() <= MAX_TRACKED_LINKS => {
                 mine.extend(theirs)
             }
             _ => self.links = None,
+        }
+    }
+
+    /// Whether the batch wrote `predicate`, for tests that must check the
+    /// matcher saw one specific batch — not whatever the feed carried first.
+    #[cfg(test)]
+    pub(crate) fn wrote(&self, predicate: &str) -> bool {
+        self.predicates.contains(predicate)
+    }
+
+    /// Whether the batch is a schema write — the classification
+    /// `inbound_touches_shacl` makes over a diff for the shape cache, made
+    /// over these links. A kept transcript read under the old shape is stale
+    /// on such a batch whatever its data predicates are, so the
+    /// auto-processor marks every processor stale (`auto_processor_mark_stale`).
+    /// With per-link detail gone (a batch past [`MAX_TRACKED_LINKS`]) a
+    /// predicate whose link *could* be a schema write reads as one —
+    /// `&|_| true` answers the source question yes there:
+    /// over-marking costs a re-read, under-marking keeps a stale read.
+    /// `is_property_shape` tells whether a link's source is a node an
+    /// existing `sh://property` link names; `super::shacl_write_link`
+    /// needs it for the predicates instance data also carries.
+    pub(super) fn touches_shacl(&self, is_property_shape: &dyn Fn(&str) -> bool) -> bool {
+        match &self.links {
+            Some(links) => links.iter().any(|l| {
+                super::shacl_write_link(&l.source, &l.predicate, &l.target, is_property_shape)
+            }),
+            None => self
+                .predicates
+                .iter()
+                .any(|p| super::shacl_write_link("", p, "ad4m://SubjectClass", &|_| true)),
         }
     }
 }
@@ -147,19 +194,27 @@ impl From<HashSet<String>> for Writes {
         Writes {
             predicates,
             links: None,
+            generations: Vec::new(),
         }
     }
 }
 
 /// Collect a diff's links into [`Writes`]. `None` when a link has no
 /// predicate, which leaves nothing to match on: check every subscription.
-pub(super) fn writes_of<'a>(
+pub(crate) fn writes_of<'a>(
     links: impl IntoIterator<Item = &'a DecoratedLinkExpression>,
 ) -> Option<Writes> {
+    writes_of_links(links.into_iter().map(|l| &l.data))
+}
+
+/// [`writes_of`] over `Link`s, the store's plain form: a `PerspectiveDiff`
+/// (`LinkExpression`) or a mixed applied-plus-retracted set maps to them by
+/// `&l.data` and feeds the feed entry the same terms.
+pub(crate) fn writes_of_links<'a>(links: impl IntoIterator<Item = &'a Link>) -> Option<Writes> {
     let mut writes = Writes::new();
     for link in links {
-        let predicate = link.data.predicate.as_deref()?;
-        writes.record(&link.data.source, predicate, &link.data.target);
+        let predicate = link.predicate.as_deref()?;
+        writes.record(&link.source, predicate, &link.target);
     }
     Some(writes)
 }
@@ -235,11 +290,33 @@ pub(super) struct TriggerRules {
     /// A parent scope whose predicate is not known (`Scope::Model` without a
     /// `field`): any write touching an anchor re-runs.
     anchors_any_predicate: bool,
+    /// A one-hop parent scope narrows `joins` (a flag write) to nodes
+    /// already linked to an anchor through the scope's edge: a record under
+    /// another parent can never be in the result, so its create or delete
+    /// cannot change it. The edge predicates the scope follows; `All` when
+    /// it follows any (`Scope::Model` without a `field`). `None` when the
+    /// query has no parent — or when the scope's membership is deeper than
+    /// one link (transitive / `levels`) and one neighbour read cannot decide
+    /// it, so flag writes stay ungated.
+    scoped: Option<Predicates>,
     /// A containment step in from the anchors: predicate a holder class is
     /// recognised by → the edge predicates that class holds through. A write
     /// of one re-runs when its source links an anchor through one of them:
     /// the node just became (or stopped being) a holder of an anchor.
     holders: HashMap<String, Predicates>,
+    /// The subscribed class's own flag links, in both the flag value's and
+    /// its canonical spelling. Only these are gated by `scoped` (`joins`,
+    /// `scan`): a flag of a class the query scans through a `where`
+    /// quantifier belongs to records that are not scope members themselves —
+    /// one enters the result by linking to a member, not to an anchor, so
+    /// the parent-edge gate would miss it (#1795).
+    direct_flags: HashSet<Flag>,
+    /// The flags of the classes a `where` quantifier scans, in both
+    /// spellings. A flag here is never gated, even when the subscribed
+    /// class carries it too: a self-referential quantifier (`Comment` with
+    /// `replies: { some: … }`) reads records of the same flag that enter
+    /// the result by linking to a member, not by sitting under an anchor.
+    quantified_flags: HashSet<Flag>,
 }
 
 impl TriggerRules {
@@ -293,9 +370,26 @@ impl TriggerRules {
         }
         self.anchors.extend(other.anchors);
         self.anchors_any_predicate |= other.anchors_any_predicate;
+        // The merged trigger gates flag writes only when every class's
+        // scope does; a class without one admits them from anywhere.
+        self.scoped = match (self.scoped.take(), other.scoped) {
+            (Some(mut a), Some(b)) => {
+                a.extend(b);
+                Some(a)
+            }
+            _ => None,
+        };
         for (predicate, edges) in other.holders {
             self.holders.entry(predicate).or_default().extend(edges);
         }
+        self.direct_flags.extend(other.direct_flags);
+        self.quantified_flags.extend(other.quantified_flags);
+    }
+
+    /// Whether the parent-scope gate applies to a write of `flag`: it is
+    /// the subscribed class's own, and no quantified class shares it.
+    fn gated(&self, flag: &Flag) -> bool {
+        self.direct_flags.contains(flag) && !self.quantified_flags.contains(flag)
     }
 }
 
@@ -387,15 +481,19 @@ impl super::PerspectiveInstance {
         trigger_predicates.sort();
         trigger_predicates.dedup();
 
-        let trigger_sparql = if trigger_predicates.is_empty() {
+        // A predicate is interpolated as `<{p}>`: one that is not a valid IRI
+        // can never match a stored link — and must not be spliced into the
+        // SPARQL text either.
+        let patterns: Vec<String> = trigger_predicates
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| validate_iri(p).is_ok())
+            .map(|(i, p)| format!("{{ ?s <{}> ?o{} . }}", p, i))
+            .collect();
+        let trigger_sparql = if patterns.is_empty() {
             // Fallback: match any triple (always re-check)
             "SELECT ?s ?p ?o WHERE { ?s ?p ?o . } LIMIT 1".to_string()
         } else {
-            let patterns: Vec<String> = trigger_predicates
-                .iter()
-                .enumerate()
-                .map(|(i, p)| format!("{{ ?s <{}> ?o{} . }}", p, i))
-                .collect();
             format!(
                 "SELECT ?s ?p ?o WHERE {{ {} }} LIMIT 1",
                 patterns.join(" UNION ")
@@ -479,7 +577,7 @@ pub(super) fn build_rules(
         containment,
     };
     walk.rules.any.extend(extra_any);
-    walk.scan_class(&shape, query.where_clause.as_ref());
+    walk.scan_class(&shape, query.where_clause.as_ref(), true);
     walk.query(&shape, &query);
     if let Some(parent) = &query.parent {
         walk.parent(parent);
@@ -551,12 +649,15 @@ impl Walk<'_> {
     }
 
     /// A class whose records can enter the result through a write on the
-    /// record itself: the subscribed class, and every class a `where`
-    /// quantifier reads.
+    /// record itself: the subscribed class (`direct`), and every class a
+    /// `where` quantifier reads. Only the subscribed class's flags are
+    /// remembered in `direct_flags`: the parent-scope gate proves a member
+    /// out of scope, and a quantified class's records are not members.
     fn scan_class(
         &mut self,
         shape: &ModelShape,
         where_clause: Option<&std::collections::BTreeMap<String, WhereCondition>>,
+        direct: bool,
     ) {
         self.watch_class(shape);
         let flags: Vec<Flag> = shape
@@ -570,6 +671,18 @@ impl Walk<'_> {
                 })
             })
             .collect();
+        let recorded = if direct {
+            &mut self.rules.direct_flags
+        } else {
+            &mut self.rules.quantified_flags
+        };
+        for flag in &flags {
+            recorded.insert(flag.clone());
+            recorded.insert(Flag {
+                predicate: flag.predicate.clone(),
+                value: canonical_target(&flag.value),
+            });
+        }
         if flags.is_empty() {
             // No flag, so instance-ness is not a one-triple lookup: any write
             // to the class's predicates re-runs, as before #1237.
@@ -622,7 +735,7 @@ impl Walk<'_> {
                         return;
                     };
                     for inner in [&ops.some, &ops.none].into_iter().flatten() {
-                        self.scan_class(&target, Some(inner));
+                        self.scan_class(&target, Some(inner), false);
                     }
                 }
                 _ => {}
@@ -787,12 +900,19 @@ impl Walk<'_> {
             Scope::Raw { id, predicate } => {
                 self.rules.anchors.insert(id.clone());
                 self.rules.near.add(predicate);
+                self.rules.scoped = Some(Predicates::Some([predicate.clone()].into()));
             }
             Scope::Model { id, field, .. } => {
                 self.rules.anchors.insert(id.clone());
                 match field {
-                    Some(field) => self.rules.near.add(field),
-                    None => self.rules.anchors_any_predicate = true,
+                    Some(field) => {
+                        self.rules.near.add(field);
+                        self.rules.scoped = Some(Predicates::Some([field.clone()].into()));
+                    }
+                    None => {
+                        self.rules.anchors_any_predicate = true;
+                        self.rules.scoped = Some(Predicates::All);
+                    }
                 }
             }
             Scope::Traverse {
@@ -801,6 +921,7 @@ impl Walk<'_> {
                 transitive,
                 levels,
                 direction,
+                path,
                 ..
             } => {
                 // One step in: the rows hold an anchor. A node that becomes a
@@ -810,6 +931,7 @@ impl Walk<'_> {
                 if predicate.is_none()
                     && !*transitive
                     && levels.is_none()
+                    && path.is_none()
                     && *direction == ScopeDirection::In
                 {
                     for edge in self.containment {
@@ -828,31 +950,86 @@ impl Walk<'_> {
                 self.rules.anchors.extend(ids.iter().cloned());
                 // A containment traversal follows every edge's predicate, and
                 // a node that becomes a holder changes it too (see
-                // `Scope::Contained` below).
-                let followed: Vec<String> = match predicate {
-                    Some(predicate) => vec![predicate.clone()],
-                    None => watched_predicates(self.containment),
+                // `Scope::Contained` below). The scope gate below takes only
+                // the edges — a `recognised_by` flag links a holder to its
+                // flag value, not a member to an anchor.
+                let edges: Vec<String> = self
+                    .containment
+                    .iter()
+                    .map(|e| e.predicate.clone())
+                    .collect();
+                let followed: Vec<String> = match (predicate, path) {
+                    (Some(predicate), _) => vec![predicate.clone()],
+                    (None, Some(path)) => path.clone(),
+                    // A containment scope's edges are same-level alternatives
+                    // — every one is the scope's one edge read, not a deeper
+                    // hop, so the `hop > 0` below must not see them as a
+                    // path. And they are not `watched_predicates`: a holder
+                    // flag's predicate is no edge.
+                    (None, None) => edges.clone(),
                 };
-                for predicate in &followed {
-                    if *transitive || levels.is_some() {
-                        // Below the first level, a link's ends are neither
-                        // anchors nor (when a level limit cut them) result
-                        // nodes.
+                for (hop, predicate) in followed.iter().enumerate() {
+                    if *transitive || levels.is_some() || (path.is_some() && hop > 0) {
+                        // Below the first level of a `path` — and anywhere
+                        // under a scope deeper than one link — a link's ends
+                        // are neither anchors nor (when a level limit cut
+                        // them) result nodes.
                         self.rules.any.insert(predicate.clone());
                     } else {
                         self.rules.near.add(predicate);
+                    }
+                }
+                // A holder class's flag is not an edge the scope follows,
+                // but a write of one still moves the result: on the anchor
+                // (a holder under `direction: "out"`), on a result node, or —
+                // `direction: "in"`, one hop out — on a node linked to an
+                // anchor through that class's edge (the `holders` rule
+                // above). Deeper than one hop, none of those reads decides
+                // it, so it re-runs outright.
+                if predicate.is_none() && path.is_none() {
+                    for edge in self.containment {
+                        let Some(holder) = &edge.holder else {
+                            continue;
+                        };
+                        for recognised_by in holder.recognised_by() {
+                            if *transitive || levels.is_some() {
+                                self.rules.any.insert(recognised_by);
+                            } else {
+                                self.rules.near.add(&recognised_by);
+                            }
+                        }
+                    }
+                }
+                // A single hop: scope membership is one neighbour read.
+                if !*transitive && levels.is_none() {
+                    let edges = match (predicate, path) {
+                        (Some(predicate), _) => vec![predicate.clone()],
+                        // Only a one-hop path is provable by one lookup; a
+                        // longer one's flags could sit on unseen intermediates.
+                        (None, Some(path)) if path.len() == 1 => path.clone(),
+                        (None, Some(_)) => Vec::new(),
+                        (None, None) => edges,
+                    };
+                    if !edges.is_empty() {
+                        self.rules.scoped = Some(Predicates::Some(edges.into_iter().collect()));
                     }
                 }
             }
             // Every edge's predicate on the anchor, and the predicates its
             // holder classes are recognised by: a flag written on the anchor
             // turns its existing links on that class's predicate into
-            // containment.
+            // containment. The gate takes only the edge predicates.
             Scope::Contained(c) => {
                 self.rules.anchors.insert(c.id.clone());
                 for predicate in watched_predicates(self.containment) {
                     self.rules.near.add(&predicate);
                 }
+                self.rules.scoped = Some(Predicates::Some(
+                    self.containment
+                        .iter()
+                        .map(|e| e.predicate.clone())
+                        .collect(),
+                ));
             }
         }
     }
@@ -869,8 +1046,10 @@ fn has_quantifier(clause: &std::collections::BTreeMap<String, WhereCondition>) -
 
 /// A model subscription's trigger: its rules, and the nodes of its last
 /// result. Cheap to clone; [`ModelTrigger::with_result`] replaces the nodes.
+/// `pub(crate)`: the auto-processor watch loops keep one per processor,
+/// built exactly as a model subscription's is (#1794).
 #[derive(Debug, Clone)]
-pub(super) struct ModelTrigger {
+pub(crate) struct ModelTrigger {
     rules: Arc<TriggerRules>,
     /// Every `id` in the last result, at any depth, in both the spelling the
     /// result used and its canonical link-target spelling.
@@ -886,10 +1065,22 @@ impl ModelTrigger {
     }
 
     /// The same rules, watching the nodes of `result`.
-    pub(super) fn with_result(&self, result: &str) -> Self {
+    pub(crate) fn with_result(&self, result: &str) -> Self {
         ModelTrigger {
             rules: self.rules.clone(),
             nodes: Arc::new(result_nodes(result)),
+        }
+    }
+
+    /// [`Self::with_result`] for a result's instances already parsed.
+    pub(crate) fn with_instances(&self, instances: &[Value]) -> Self {
+        let mut nodes = HashSet::new();
+        for instance in instances {
+            nodes.extend(value_nodes(instance));
+        }
+        ModelTrigger {
+            rules: self.rules.clone(),
+            nodes: Arc::new(nodes),
         }
     }
 
@@ -931,7 +1122,30 @@ impl ModelTrigger {
             .get(predicate)
             .is_some_and(|values| values.contains(target) || values.contains(canonical))
         {
-            return true;
+            // Under a one-hop parent scope the flag counts only when the
+            // node is already in it: a class flag under another parent
+            // cannot change a result that reads only this scope (#1795).
+            // Its edge write is `near` the anchor and wakes on its own.
+            // The gate proves a scope MEMBER out of scope, so it applies
+            // only to the subscribed class's own flags: a quantified class's
+            // record enters the result by linking to a member, not by
+            // sitting under an anchor.
+            let direct = [target, canonical].iter().any(|value| {
+                rules.gated(&Flag {
+                    predicate: predicate.clone(),
+                    value: (*value).clone(),
+                })
+            });
+            match &rules.scoped {
+                None => return true,
+                _ if !direct || self.nodes.contains(source) || rules.anchors.contains(source) => {
+                    return true;
+                }
+                Some(edges) if store.linked_through(source, edges, &rules.anchors) => {
+                    return true;
+                }
+                Some(_) => {}
+            }
         }
         if rules.anchors_any_predicate && spellings.iter().any(|e| rules.anchors.contains(*e)) {
             return true;
@@ -959,10 +1173,24 @@ impl ModelTrigger {
         let both = [source, target];
         let ends = if *literal { &both[..1] } else { &both[..] };
         if let Some(flags) = rules.scan.get(predicate) {
-            if ends
-                .iter()
-                .any(|e| flags.iter().any(|f| store.has_flag(e, f)))
-            {
+            // `scan` reads "a node of the queried class" — under a one-hop
+            // scope that still has to mean in scope: a flagged node under
+            // another parent is a Post, but not one this result reads. The
+            // gate decides membership of the QUERIED class only; a
+            // quantifier-scanned class's flag skips it for the reason
+            // `joins` gives above.
+            if ends.iter().any(|e| {
+                flags.iter().any(|f| {
+                    store.has_flag(e, f)
+                        && (self.nodes.contains(*e)
+                            || rules.anchors.contains(*e)
+                            || !rules.gated(f)
+                            || match &rules.scoped {
+                                None => true,
+                                Some(edges) => store.linked_through(e, edges, &rules.anchors),
+                            })
+                })
+            }) {
                 return true;
             }
         }
@@ -978,6 +1206,13 @@ impl ModelTrigger {
 /// Every `id` in a model result, at any depth. Included records carry their
 /// `id` like top-level ones do.
 fn result_nodes(result: &str) -> HashSet<String> {
+    serde_json::from_str::<Value>(result)
+        .map(|v| value_nodes(&v))
+        .unwrap_or_default()
+}
+
+/// [`result_nodes`] over a result that is already parsed.
+fn value_nodes(result: &Value) -> HashSet<String> {
     fn walk(v: &Value, out: &mut HashSet<String>) {
         match v {
             Value::Object(map) => {
@@ -996,9 +1231,7 @@ fn result_nodes(result: &str) -> HashSet<String> {
         }
     }
     let mut out = HashSet::new();
-    if let Ok(v) = serde_json::from_str::<Value>(result) {
-        walk(&v, &mut out);
-    }
+    walk(result, &mut out);
     out
 }
 

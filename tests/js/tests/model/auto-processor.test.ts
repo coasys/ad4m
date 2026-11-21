@@ -27,19 +27,14 @@ import { expect } from "chai";
 import { Ad4mClient, Link, PerspectiveProxy } from "@coasys/ad4m";
 import type { AutoProcessorEvent, AutoProcessorStep } from "@coasys/ad4m";
 import { addE2eLlm, E2E_PASS_TIMEOUT_MS, startAgent, waitUntil } from "../../helpers/index.js";
-import { ConversationSubgroup } from "./auto-processor-models.js";
+import { ChannelMessage, ConversationSubgroup } from "./auto-processor-models.js";
 
-// Speaker and timestamp come off the body link's reifier, not an app-level
-// `ns://author` predicate: `?timestamp` is required (it is what makes a turn
-// identifiable to the processed-turn cursor) and only the reifier carries it.
-// So `?speaker` is the DID that *signed* the link, not the `ns://author` target.
-const SCOPE_QUERY = `SELECT ?speaker ?text ?timestamp WHERE {
-  ?m <ns://body> ?text .
-  ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?m <ns://body> ?text )>> .
-  ?r <ad4m://ontology/author> ?speaker .
-  ?r <ad4m://ontology/timestamp> ?timestamp .
-}
-ORDER BY ?timestamp`;
+// The transcript scope is a model query now (#1794): the processor reads the
+// `ns://Message` class and takes each turn's speaker and timestamp from the
+// instance's own link metadata — the DID that *signed* its links and their
+// time — so links whose signature does not verify never reach the pass.
+const SOURCE_CLASS = "ns://Message";
+const SOURCE_TEXT = "body";
 
 const SUBGROUP_CLASS = "ns://ConversationSubgroup";
 
@@ -82,6 +77,7 @@ describeIfLLM("perspective.addAutoProcessor (WS + LLM)", function () {
     seq += 1;
     p = await ad4m.perspective.add(`auto-processor-${seq}`);
     await ConversationSubgroup.register(p);
+    await ChannelMessage.register(p);
     events = [];
     p.on("auto-processor-event", (e) => events.push(e));
   });
@@ -92,9 +88,14 @@ describeIfLLM("perspective.addAutoProcessor (WS + LLM)", function () {
 
   // ── helpers ───────────────────────────────────────────────────────────────
 
-  /** Post one channel message. The body link's reifier supplies speaker+timestamp. */
+  /** Post one channel message — a conforming `ns://Message` instance. Its
+   *  link metadata supplies speaker+timestamp. */
   async function say(text: string) {
     const uri = `msg://${seq}/${Math.random().toString(36).slice(2)}`;
+    await p.add(
+      new Link({ source: uri, predicate: "ns://type", target: "ns://message" }),
+      "local",
+    );
     await p.add(
       new Link({ source: uri, predicate: "ns://body", target: `literal:string:${text}` }),
       "local",
@@ -104,7 +105,8 @@ describeIfLLM("perspective.addAutoProcessor (WS + LLM)", function () {
   async function addProcessor(overrides: Record<string, unknown> = {}) {
     await p.addAutoProcessor({
       processorId: `proc-${seq}`,
-      sourceScopeQuery: SCOPE_QUERY,
+      sourceClass: SOURCE_CLASS,
+      sourceText: SOURCE_TEXT,
       interpretationClasses: [SUBGROUP_CLASS],
       debounceMs: 100,
       batchMin: 1,

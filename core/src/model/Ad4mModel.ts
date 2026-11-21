@@ -1182,6 +1182,25 @@ export class Ad4mModel {
       if (t.levels !== undefined) traverse.levels = t.levels;
       if (t.maxDepth !== undefined) traverse.maxDepth = t.maxDepth;
       queryInput.parent = traverse;
+    } else if (query.parent && isTraverseScope(query.parent) && 'path' in query.parent && query.parent.path) {
+      // A path names its predicate at each hop; none is resolved here.
+      const t = query.parent;
+      const traverse: Record<string, unknown> = {
+        ids: t.ids,
+        path: t.path,
+      };
+      if (t.direction !== undefined) traverse.direction = t.direction;
+      // The fields a path refuses travel too: typed `never` they arrive only
+      // from a cast or a plain object, and dropping them would run the walk
+      // the caller did not mean (`{ids, path, limitPerAnchor: 1}` read
+      // unlimited). The executor's mutual-exclusion check refuses them, as
+      // it does on the other traverse forms.
+      if (t.predicate !== undefined) traverse.predicate = t.predicate;
+      if (t.transitive !== undefined) traverse.transitive = t.transitive;
+      if (t.limitPerAnchor !== undefined) traverse.limitPerAnchor = t.limitPerAnchor;
+      if (t.levels !== undefined) traverse.levels = t.levels;
+      if (t.maxDepth !== undefined) traverse.maxDepth = t.maxDepth;
+      queryInput.parent = traverse;
     } else if (query.parent) {
       const parentPredicate = resolveParentPredicate(query.parent, this);
       // A traversal keeps its own shape on the wire: the executor reads `ids`,

@@ -406,6 +406,231 @@ async fn test_where_clause_literal_prop_with_raw_uri_value() {
 }
 
 // -----------------------------------------------------------------------
+// A `where` comparison over a `resolveLanguage` property can compare only
+// the raw expression IRI in the store — never the resolved value — so it is
+// never pushed. The post-hydration check decides the row: the exact-count
+// fast path and the pushed window must both stay off, or the answer covers
+// rows the filter would have dropped (#1795).
+// -----------------------------------------------------------------------
+
+const EXPR_WHERE_SHAPE_JSON: &str = r#"{
+    "className": "Msg",
+    "properties": {
+        "type": {
+            "predicate": "ns://type",
+            "required": true,
+            "flag": true,
+            "initial": "ns://msg"
+        },
+        "body": {
+            "predicate": "ns://body",
+            "required": false,
+            "resolveLanguage": "QmWherePagedLang"
+        }
+    },
+    "relations": {}
+}"#;
+
+/// Two conforming rows: `msg://keep` whose body is a decodable literal that
+/// contains `needle`, and `msg://drop` whose body is a raw expression URL —
+/// which the test language resolves to a body the condition excludes.
+/// `msg://drop` has the earlier type timestamp so a pushed `LIMIT 1` would
+/// pick it.
+async fn seed_expr_where_store() -> SparqlStore {
+    use crate::agent::signatures::TestSigner;
+    use crate::perspectives::interpretation_test_support::serve_test_language;
+
+    let store = SparqlStore::new(None).unwrap();
+    for (source, predicate, target, ts) in [
+        ("msg://drop", "ns://type", "ns://msg", "1700000000000"),
+        (
+            "msg://drop",
+            "ns://body",
+            "QmWherePagedLang://expr",
+            "1700000000001",
+        ),
+        ("msg://keep", "ns://type", "ns://msg", "1700000000002"),
+        (
+            "msg://keep",
+            "ns://body",
+            "literal:string:needle",
+            "1700000000003",
+        ),
+    ] {
+        store
+            .add_link(&make_link(source, predicate, target, ts))
+            .unwrap();
+    }
+    let expression = serde_json::to_string(&TestSigner::generate().sign("other words"))
+        .expect("expression json");
+    serve_test_language("QmWherePagedLang", expression).await;
+    store
+}
+
+fn contains_where(prop: &str, needle: &str) -> BTreeMap<String, WhereCondition> {
+    let mut clause = BTreeMap::new();
+    clause.insert(
+        prop.to_string(),
+        serde_json::from_value::<WhereCondition>(json!({ "contains": needle })).unwrap(),
+    );
+    clause
+}
+
+#[tokio::test]
+async fn test_where_on_resolved_language_values_filters_the_count() {
+    use crate::perspectives::interpretation_test_support::stop_test_language;
+
+    let store = seed_expr_where_store().await;
+    let query = ModelQueryInput {
+        where_clause: Some(contains_where("body", "needle")),
+        limit: Some(0),
+        count: Some(true),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Msg", &query, EXPR_WHERE_SHAPE_JSON)
+        .await
+        .unwrap();
+    stop_test_language("QmWherePagedLang").await;
+
+    assert!(
+        result.instances.is_empty(),
+        "a count-only query returns no rows"
+    );
+    assert_eq!(
+        result.total_count,
+        Some(1),
+        "the count must not include a candidate whose resolved value fails the `where`"
+    );
+}
+
+#[tokio::test]
+async fn test_where_on_resolved_language_values_filters_the_pushed_window() {
+    use crate::perspectives::interpretation_test_support::stop_test_language;
+
+    let store = seed_expr_where_store().await;
+    let query = ModelQueryInput {
+        where_clause: Some(contains_where("body", "needle")),
+        limit: Some(1),
+        count: Some(true),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Msg", &query, EXPR_WHERE_SHAPE_JSON)
+        .await
+        .unwrap();
+    stop_test_language("QmWherePagedLang").await;
+
+    assert_eq!(
+        result.instances.len(),
+        1,
+        "the window must not keep a candidate whose resolved value fails the `where`"
+    );
+    assert_eq!(result.instances[0]["id"], json!("msg://keep"));
+    assert_eq!(result.total_count, Some(1));
+}
+
+/// `limitPerAnchor` slices per anchor at the id phase — but a `where` the
+/// store cannot fully answer is still open then, so both the slice and the
+/// count wait for the post-hydration filter. One row resolves to a body the
+/// condition keeps, the other to one it drops: the total is the filtered 1,
+/// not the 2 the pushed conditions alone admit, and the slice takes from
+/// the filtered rows (#1795 item 14). The limit is 1 with `msg://drop`
+/// sorting first, so a slice that ran before the filter would keep it and
+/// return nothing.
+#[tokio::test]
+async fn test_limit_per_anchor_counts_after_the_resolved_value_filter() {
+    use crate::agent::signatures::TestSigner;
+    use crate::perspectives::interpretation_test_support::{
+        serve_test_language, stop_test_language,
+    };
+
+    let store = SparqlStore::new(None).unwrap();
+    for (source, predicate, target, ts) in [
+        ("we://conv", "ns://child", "msg://drop", "1700000000000"),
+        ("we://conv", "ns://child", "msg://keep", "1700000000001"),
+        ("msg://drop", "ns://type", "ns://msg", "1700000000002"),
+        (
+            "msg://drop",
+            "ns://body",
+            "QmWherePagedLang://expr",
+            "1700000000003",
+        ),
+        ("msg://keep", "ns://type", "ns://msg", "1700000000004"),
+        (
+            "msg://keep",
+            "ns://body",
+            "literal:string:needle",
+            "1700000000005",
+        ),
+    ] {
+        store
+            .add_link(&make_link(source, predicate, target, ts))
+            .unwrap();
+    }
+    let expression = serde_json::to_string(&TestSigner::generate().sign("other words"))
+        .expect("expression json");
+    serve_test_language("QmWherePagedLang", expression).await;
+
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://conv".to_string()],
+            predicate: Some("ns://child".to_string()),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: Some(1),
+            levels: None,
+            max_depth: None,
+            path: None,
+        }),
+        where_clause: Some(contains_where("body", "needle")),
+        count: Some(true),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Msg", &query, EXPR_WHERE_SHAPE_JSON)
+        .await
+        .unwrap();
+    stop_test_language("QmWherePagedLang").await;
+
+    assert_eq!(
+        result.total_count,
+        Some(1),
+        "the count is of filtered rows, not pushed candidates"
+    );
+    assert_eq!(result.instances.len(), 1);
+    assert_eq!(result.instances[0]["id"], json!("msg://keep"));
+}
+
+/// A `path` element is interpolated into the level walk's guarded SPARQL,
+/// so a malformed one — here a `>` that would break out of the IRI — is
+/// refused rather than executed or silently answered with no rows (#1795 A).
+#[tokio::test]
+async fn test_traverse_path_rejects_a_non_iri_element() {
+    let store = SparqlStore::new(None).unwrap();
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://conv".to_string()],
+            predicate: None,
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: None,
+            max_depth: None,
+            path: Some(vec![
+                "ns://child".to_string(),
+                "ns://bad>inject".to_string(),
+            ]),
+        }),
+        ..Default::default()
+    };
+    let err = fixture_query_from_json(&store, "Msg", &query, EXPR_WHERE_SHAPE_JSON)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("not a valid IRI"),
+        "unexpected error: {err}"
+    );
+}
+
+// -----------------------------------------------------------------------
 // Integration test: shared predicate across multiple @HasMany relations
 //
 // This simulates the real Channel model from Flux where 8+ relations
@@ -3018,7 +3243,7 @@ async fn test_build_instance_sparql_scalar_only_model_uses_values_clause() {
         scalar_prop("description", "flux://description", false, false),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, &[]).into_single();
 
     assert!(
         sparql.contains("VALUES ?predicate"),
@@ -3052,7 +3277,7 @@ async fn test_build_instance_sparql_excludes_getter_backed_collections() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, &[]).into_single();
 
     assert!(
         sparql.contains("VALUES ?predicate"),
@@ -3086,7 +3311,7 @@ async fn test_build_instance_sparql_retains_raw_predicate_collections() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, &[]).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     assert!(sparql.contains("<flux://entry_type>"));
@@ -3117,7 +3342,7 @@ async fn test_build_instance_sparql_shared_predicate_mixed_getter() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, &[]).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     // ad4m://has_child should appear because raw_children needs it
@@ -3133,7 +3358,7 @@ async fn test_build_instance_sparql_empty_shape_falls_back_to_wildcard() {
     // unrestricted wildcard (no VALUES clause).
     let shape = make_shape(vec![]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, &[]).into_single();
 
     assert!(
         !sparql.contains("VALUES ?predicate"),
@@ -3153,7 +3378,7 @@ async fn test_build_instance_sparql_values_clause_is_deduplicated() {
         scalar_prop("name", "ns://name", false, false),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, &[]).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     // Count occurrences of the shared predicate in the VALUES clause
@@ -8188,6 +8413,7 @@ fn traverse_scope(
         limit_per_anchor,
         levels: None,
         max_depth: None,
+        path: None,
     }
 }
 
@@ -8466,6 +8692,7 @@ async fn walk(store: &SparqlStore, levels: Vec<usize>) -> Vec<String> {
             limit_per_anchor: None,
             levels: Some(levels),
             max_depth: None,
+            path: None,
         }),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
@@ -8567,6 +8794,7 @@ async fn a_level_walk_survives_a_where_clause_it_cannot_push_down() {
             limit_per_anchor: None,
             levels: Some(vec![3, 2, 1]),
             max_depth: None,
+            path: None,
         }),
         where_clause: Some(where_clause),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
@@ -8587,6 +8815,441 @@ async fn a_level_walk_survives_a_where_clause_it_cannot_push_down() {
         "every level should still be walked, got {ids:?}"
     );
     assert_eq!(ids.iter().filter(|id| id.starts_with("we://c")).count(), 6);
+}
+
+// ---------------------------------------------------------------------------
+// `path`: a different predicate at each hop (the WE reply scope)
+// ---------------------------------------------------------------------------
+
+/// The WE transcript shape: TextBlocks that are children of a conversation
+/// through `we://children`, plus one hop of replies below them through
+/// `we://thread` — two predicates on one walk.
+///
+/// ```text
+/// conv ──children──> block1 ──thread──> reply1 ──thread──> deep (out of scope)
+///      └──children──> block2 ──thread──> reply2
+///      └──children──> block3
+/// stray ──children──> orphan  (under another parent)
+/// ```
+///
+/// `we://deep` hangs a hop further off reply1 than the path reaches: the
+/// scope's length is the depth. `orphan` shares both predicates but no
+/// anchor.
+fn text_block_store() -> SparqlStore {
+    let store = SparqlStore::new(None).unwrap();
+    let edges = [
+        ("we://conv", "we://children", "we://block1"),
+        ("we://conv", "we://children", "we://block2"),
+        ("we://conv", "we://children", "we://block3"),
+        ("we://block1", "we://thread", "we://reply1"),
+        ("we://block2", "we://thread", "we://reply2"),
+        ("we://reply1", "we://thread", "we://deep"),
+        ("we://stray", "we://children", "we://orphan"),
+    ];
+    let mut t = 1000;
+    for (source, predicate, target) in edges {
+        t += 1;
+        store
+            .add_link(&make_link(
+                source,
+                predicate,
+                target,
+                &format!("2026-01-01T00:00:{t:04}Z"),
+            ))
+            .unwrap();
+    }
+    let sources = [
+        ("we://block1", "spoken"),
+        ("we://block2", "typed"),
+        ("we://block3", "edited"),
+        ("we://reply1", "spoken"),
+        ("we://reply2", "edited"),
+        ("we://deep", "spoken"),
+        ("we://orphan", "spoken"),
+    ];
+    for (id, source) in sources {
+        t += 1;
+        store
+            .add_link(&make_link(
+                id,
+                "ad4m://type",
+                "we://TextBlock",
+                &format!("2026-01-01T00:00:{t:04}Z"),
+            ))
+            .unwrap();
+        t += 1;
+        store
+            .add_link(&make_link(
+                id,
+                "we://text_source",
+                &format!("literal:string:{source}"),
+                &format!("2026-01-01T00:00:{t:04}Z"),
+            ))
+            .unwrap();
+    }
+    store
+}
+
+const TEXT_BLOCK_SHAPE_JSON: &str = r#"{
+    "className": "TextBlock",
+    "properties": {
+        "type": {
+            "predicate": "ad4m://type",
+            "required": true,
+            "flag": true,
+            "initial": "we://TextBlock"
+        },
+        "source": {
+            "predicate": "we://text_source",
+            "required": false
+        }
+    },
+    "relations": {}
+}"#;
+
+async fn path_walk(
+    store: &SparqlStore,
+    where_clause: Option<BTreeMap<String, WhereCondition>>,
+) -> Vec<String> {
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://conv".to_string()],
+            predicate: None,
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: None,
+            max_depth: None,
+            path: Some(vec!["we://children".to_string(), "we://thread".to_string()]),
+        }),
+        where_clause,
+        ..Default::default()
+    };
+    let mut ids: Vec<String> =
+        fixture_query_from_json(store, "TextBlock", &query, TEXT_BLOCK_SHAPE_JSON)
+            .await
+            .expect("path walk should execute")
+            .instances
+            .iter()
+            .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
+            .collect();
+    ids.sort();
+    ids
+}
+
+/// The path reaches each hop through its own predicate — the union of both
+/// levels, not the union of one predicate twice.
+#[tokio::test]
+async fn a_path_walk_reaches_each_hop_through_its_own_predicate() {
+    let store = text_block_store();
+    let ids = path_walk(&store, None).await;
+
+    assert_eq!(
+        ids,
+        vec![
+            "we://block1",
+            "we://block2",
+            "we://block3",
+            "we://reply1",
+            "we://reply2"
+        ],
+        "both hops, neither `deep` (a hop too far) nor `orphan` (no anchor): {ids:?}"
+    );
+}
+
+/// The `where` filter still applies to whatever the walk returned — the WE
+/// source filter over both hops.
+#[tokio::test]
+async fn a_path_walk_filters_every_hop_with_where() {
+    let store = text_block_store();
+    let mut where_clause = BTreeMap::new();
+    // An array value is "any of" — the where grammar's set membership.
+    where_clause.insert(
+        "source".to_string(),
+        WhereCondition::StringArray(vec!["spoken".to_string(), "typed".to_string()]),
+    );
+
+    let ids = path_walk(&store, Some(where_clause)).await;
+    assert_eq!(
+        ids,
+        vec!["we://block1", "we://block2", "we://reply1"],
+        "the edited block and reply drop out at both hops: {ids:?}"
+    );
+}
+
+/// `where` is a filter on the returned nodes, not on the walk: `block2` is
+/// not `"edited"`, yet the path still reaches through it to `reply2`, which
+/// is. The class-conformance twin is
+/// [`a_path_walk_passes_through_a_non_conforming_intermediate`].
+#[tokio::test]
+async fn a_path_walk_passes_through_a_where_failing_intermediate() {
+    let store = text_block_store();
+    let mut where_clause = BTreeMap::new();
+    where_clause.insert(
+        "source".to_string(),
+        WhereCondition::String("edited".to_string()),
+    );
+
+    let ids = path_walk(&store, Some(where_clause)).await;
+    assert_eq!(
+        ids,
+        vec!["we://block3", "we://reply2"],
+        "`block2` fails `where` yet still carries the path on to `reply2`: {ids:?}"
+    );
+}
+
+/// Every field that answers the same question another way is refused beside
+/// `path`, not silently preferred.
+#[tokio::test]
+async fn a_path_walk_refuses_every_competing_shape() {
+    let store = text_block_store();
+    let traverse = |predicate: Option<&str>,
+                    transitive: bool,
+                    limit_per_anchor: Option<usize>,
+                    levels: Option<Vec<usize>>,
+                    max_depth: Option<usize>,
+                    path: Option<Vec<String>>| Scope::Traverse {
+        ids: vec!["we://conv".to_string()],
+        predicate: predicate.map(str::to_string),
+        transitive,
+        direction: ScopeDirection::Out,
+        limit_per_anchor,
+        levels,
+        max_depth,
+        path,
+    };
+    let thread_path = || Some(vec!["we://children".to_string(), "we://thread".to_string()]);
+    let run = |scope: Scope| {
+        let store = &store;
+        async move {
+            let query = ModelQueryInput {
+                parent: Some(scope),
+                ..Default::default()
+            };
+            fixture_query_from_json(store, "TextBlock", &query, TEXT_BLOCK_SHAPE_JSON).await
+        }
+    };
+
+    for (label, scope) in [
+        (
+            "path + predicate",
+            traverse(
+                Some("we://children"),
+                false,
+                None,
+                None,
+                None,
+                thread_path(),
+            ),
+        ),
+        (
+            "path + transitive",
+            traverse(None, true, None, None, None, thread_path()),
+        ),
+        (
+            "path + maxDepth",
+            traverse(None, false, None, None, Some(2), thread_path()),
+        ),
+        (
+            "path + levels",
+            traverse(None, false, None, Some(vec![10, 10]), None, thread_path()),
+        ),
+        (
+            "path + limitPerAnchor",
+            traverse(None, false, Some(2), None, None, thread_path()),
+        ),
+        (
+            "empty path",
+            traverse(None, false, None, None, None, Some(vec![])),
+        ),
+    ] {
+        run(scope)
+            .await
+            .expect_err(&format!("{label} must be refused"));
+    }
+}
+
+/// The graph where one `seen` set serves two jobs breaks:
+///
+/// ```text
+/// root ──p──> a ──q──> b ──s──> c
+///      └────p────────^
+/// ```
+///
+/// `b` is in the result from hop 1 (`p`), and hop 2 reaches it again through
+/// `q`. When reporting it again also meant not walking it, hop 3 had nobody
+/// to follow `s` from and `c` was lost — output de-duplication is not
+/// frontier membership.
+fn shared_node_store() -> SparqlStore {
+    let store = SparqlStore::new(None).unwrap();
+    let mut t = 1000;
+    for (source, predicate, target) in [
+        ("we://root", "we://p", "we://a"),
+        ("we://root", "we://p", "we://b"),
+        ("we://a", "we://q", "we://b"),
+        ("we://b", "we://s", "we://c"),
+    ] {
+        t += 1;
+        store
+            .add_link(&make_link(
+                source,
+                predicate,
+                target,
+                &format!("2026-01-01T00:00:{t:04}Z"),
+            ))
+            .unwrap();
+    }
+    for id in ["we://a", "we://b", "we://c"] {
+        t += 1;
+        store
+            .add_link(&make_link(
+                id,
+                "ad4m://type",
+                "we://TextBlock",
+                &format!("2026-01-01T00:00:{t:04}Z"),
+            ))
+            .unwrap();
+    }
+    store
+}
+
+async fn shared_node_walk(
+    store: &SparqlStore,
+    anchor: &str,
+    direction: ScopeDirection,
+) -> Vec<String> {
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec![anchor.to_string()],
+            predicate: None,
+            transitive: false,
+            direction,
+            limit_per_anchor: None,
+            levels: None,
+            max_depth: None,
+            path: Some(vec![
+                "we://p".to_string(),
+                "we://q".to_string(),
+                "we://s".to_string(),
+            ]),
+        }),
+        ..Default::default()
+    };
+    let mut ids: Vec<String> =
+        fixture_query_from_json(store, "TextBlock", &query, TEXT_BLOCK_SHAPE_JSON)
+            .await
+            .expect("path walk should execute")
+            .instances
+            .iter()
+            .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
+            .collect();
+    ids.sort();
+    ids
+}
+
+#[tokio::test]
+async fn a_path_walk_walks_a_node_it_reported_at_an_earlier_depth() {
+    let store = shared_node_store();
+    let ids = shared_node_walk(&store, "we://root", ScopeDirection::Out).await;
+    assert_eq!(
+        ids,
+        vec!["we://a", "we://b", "we://c"],
+        "`b` is reported once but walked at both depths, so `s` reaches `c`: {ids:?}"
+    );
+}
+
+/// The twin in `In` direction: `x` is reported at depth 1 and reached again
+/// at depth 2 (through `q`, pointing at `b`), and only walking it again gets
+/// `r` at depth 3.
+///
+/// ```text
+/// z <──p── x ──q──> b        (x points p into z, q into b)
+///   <──p── b                 (b points p into z)
+///            r ──s──> x      (r points s into x)
+/// ```
+#[tokio::test]
+async fn a_path_walk_walks_a_node_it_reported_at_an_earlier_depth_in_reverse() {
+    let store = SparqlStore::new(None).unwrap();
+    let mut t = 1000;
+    for (source, predicate, target) in [
+        ("we://x", "we://p", "we://z"),
+        ("we://b", "we://p", "we://z"),
+        ("we://x", "we://q", "we://b"),
+        ("we://r", "we://s", "we://x"),
+    ] {
+        t += 1;
+        store
+            .add_link(&make_link(
+                source,
+                predicate,
+                target,
+                &format!("2026-01-01T00:00:{t:04}Z"),
+            ))
+            .unwrap();
+    }
+    for id in ["we://x", "we://b", "we://r"] {
+        t += 1;
+        store
+            .add_link(&make_link(
+                id,
+                "ad4m://type",
+                "we://TextBlock",
+                &format!("2026-01-01T00:00:{t:04}Z"),
+            ))
+            .unwrap();
+    }
+    let ids = shared_node_walk(&store, "we://z", ScopeDirection::In).await;
+    assert_eq!(
+        ids,
+        vec!["we://b", "we://r", "we://x"],
+        "`x` is reported once but walked at both depths, so `s` reaches `r`: {ids:?}"
+    );
+}
+
+/// A `path` read is an edge walk: class conformance decides only which
+/// reached nodes are returned, never which are walked through. `b` without
+/// its flag link still carries the walk on to `c` — and `c`, conforming, is
+/// returned. `levels` answers differently on purpose: every hop's rows are
+/// the scoped query's rows, so there `b` would end the walk.
+#[tokio::test]
+async fn a_path_walk_passes_through_a_non_conforming_intermediate() {
+    let store = SparqlStore::new(None).unwrap();
+    let mut t = 1000;
+    for (source, predicate, target) in [
+        ("we://root", "we://p", "we://a"),
+        ("we://root", "we://p", "we://b"),
+        ("we://a", "we://q", "we://b"),
+        ("we://b", "we://s", "we://c"),
+    ] {
+        t += 1;
+        store
+            .add_link(&make_link(
+                source,
+                predicate,
+                target,
+                &format!("2026-01-01T00:00:{t:04}Z"),
+            ))
+            .unwrap();
+    }
+    // `b` never gets its `we://TextBlock` flag: it is walked through but not
+    // returned. `a` and `c` conform, so both are returned.
+    for id in ["we://a", "we://c"] {
+        t += 1;
+        store
+            .add_link(&make_link(
+                id,
+                "ad4m://type",
+                "we://TextBlock",
+                &format!("2026-01-01T00:00:{t:04}Z"),
+            ))
+            .unwrap();
+    }
+    let ids = shared_node_walk(&store, "we://root", ScopeDirection::Out).await;
+    assert_eq!(
+        ids,
+        vec!["we://a", "we://c"],
+        "`b` fails conformance yet still carries the path on to `c`: {ids:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -8694,6 +9357,7 @@ async fn the_window_applies_to_the_walks_union_not_to_each_level() {
             limit_per_anchor: None,
             levels: Some(vec![3, 2]),
             max_depth: None,
+            path: None,
         }),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         offset: Some(1),
@@ -8731,6 +9395,7 @@ async fn a_walk_refuses_the_combinations_its_docs_rule_out() {
             limit_per_anchor: None,
             levels: Some(vec![3]),
             max_depth: None,
+            path: None,
         }),
         ..Default::default()
     };
@@ -8748,6 +9413,7 @@ async fn a_walk_refuses_the_combinations_its_docs_rule_out() {
             limit_per_anchor: Some(2),
             levels: Some(vec![3]),
             max_depth: None,
+            path: None,
         }),
         ..Default::default()
     };
@@ -8784,6 +9450,7 @@ async fn a_level_walk_through_a_cycle_terminates_and_excludes_the_anchor() {
             limit_per_anchor: None,
             levels: Some(vec![10, 10, 10]),
             max_depth: None,
+            path: None,
         }),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
@@ -8824,6 +9491,7 @@ async fn an_anchor_named_below_another_is_not_also_reported_as_its_child() {
             limit_per_anchor: None,
             levels: Some(vec![10, 10]),
             max_depth: None,
+            path: None,
         }),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
@@ -8868,7 +9536,7 @@ const LOOSE_SHAPE_JSON: &str = r#"{
 fn lopsided_property_store() -> SparqlStore {
     let store = SparqlStore::new(None).unwrap();
     let mut t = 1000;
-    let mut link = |s: &str, p: &str, o: &str, t: &mut i32| {
+    let link = |s: &str, p: &str, o: &str, t: &mut i32| {
         *t += 1;
         store
             .add_link(&make_link(s, p, o, &format!("2026-01-01T00:00:{:04}Z", t)))
@@ -8901,6 +9569,7 @@ async fn a_per_anchor_limit_counts_instances_not_timestamp_rows() {
             limit_per_anchor: Some(2),
             levels: None,
             max_depth: None,
+            path: None,
         }),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
@@ -8973,6 +9642,7 @@ async fn a_traverse_scope_with_an_unwritable_predicate_matches_nothing() {
             limit_per_anchor: None,
             levels: None,
             max_depth: None,
+            path: None,
         }),
         ..Default::default()
     };
@@ -9112,6 +9782,7 @@ async fn a_walk_totals_the_walk_rather_than_one_step_of_it() {
             limit_per_anchor: None,
             levels: Some(vec![1, 1]),
             max_depth: None,
+            path: None,
         }),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
@@ -9151,6 +9822,7 @@ async fn a_count_only_walk_totals_the_walk_too() {
             limit_per_anchor: None,
             levels: Some(vec![1, 1]),
             max_depth: None,
+            path: None,
         }),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         limit: Some(0),
@@ -9212,6 +9884,7 @@ async fn a_node_reached_twice_does_not_consume_the_second_anchor_s_slot() {
             limit_per_anchor: None,
             levels: Some(vec![2, 1]),
             max_depth: None,
+            path: None,
         }),
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
@@ -9579,6 +10252,96 @@ async fn a_member_is_dated_and_attributed_by_its_own_link() {
         rows[0]["data"]["predicate"],
         json!("role://member"),
         "a name resolves to the predicate the shape declares"
+    );
+}
+
+/// The instance query binds the provenance columns only for the predicates
+/// a `links` key serves: the class's other rows (the flag, `name`) join no
+/// reifier annotation. The rows a key reads are the same full signed links
+/// either way, and an instance's own fields do not move.
+#[tokio::test]
+async fn links_provenance_is_bound_for_the_requested_predicates_only() {
+    let store = SparqlStore::new(None).unwrap();
+    let role = "role://instance/1";
+    let alice = "did:key:zAlice";
+    let bob = "did:key:zBob";
+    seed_role(&store, role, alice, false);
+    store
+        .add_link(&link_by(
+            "did:key:zMallory",
+            role,
+            "role://member",
+            bob,
+            ROLE_T2,
+        ))
+        .unwrap();
+
+    let plain = fixture_query_from_json(
+        &store,
+        "Reviewer",
+        &ModelQueryInput::default(),
+        ROLE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+
+    let before = store.queries_run().len();
+    let result = fixture_query_from_json(
+        &store,
+        "Reviewer",
+        &links_query(&["members"]),
+        ROLE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+    let issued = store.queries_run().split_off(before);
+    let hydration: Vec<&String> = issued.iter().filter(|q| q.contains("?proofKey")).collect();
+    assert_eq!(
+        hydration.len(),
+        1,
+        "one query carries provenance: {issued:?}"
+    );
+    let sparql = hydration[0];
+    let (served, rest) = sparql.split_once("UNION").expect("the rows split in two");
+    assert!(served.contains("<role://member>") && served.contains("OPTIONAL"));
+    assert!(
+        !rest.contains("<role://member>")
+            && rest.contains("<role://name>")
+            && !rest.contains("OPTIONAL"),
+        "the other predicates bind no provenance column: {rest}"
+    );
+
+    let inst = &result.instances[0];
+    let rows = inst["__links"]["members"].as_array().expect("member rows");
+    let parsed: Vec<LinkExpression> = rows
+        .iter()
+        .map(|r| serde_json::from_value(r.clone()).expect("LinkExpression"))
+        .collect();
+    assert_eq!(
+        parsed,
+        vec![
+            link_by(ROLE_ADMIN, role, "role://member", alice, ROLE_T1),
+            link_by("did:key:zMallory", role, "role://member", bob, ROLE_T2),
+        ]
+    );
+    let mut stripped = inst.clone();
+    stripped.as_object_mut().unwrap().remove("__links");
+    assert_eq!(stripped, plain.instances[0], "the instance is unchanged");
+
+    // Every fetched predicate asked for: nothing to split off.
+    let before = store.queries_run().len();
+    fixture_query_from_json(
+        &store,
+        "Reviewer",
+        &links_query(&["members", "name", "type"]),
+        ROLE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+    let issued = store.queries_run().split_off(before);
+    assert!(
+        issued.iter().all(|q| !q.contains("UNION")),
+        "no predicate is left over: {issued:?}"
     );
 }
 
