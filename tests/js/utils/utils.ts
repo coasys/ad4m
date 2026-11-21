@@ -1,6 +1,6 @@
 import { ChildProcess, exec, ExecException, execSync, spawn } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
 import os from "node:os";
 import path from "path";
 import { fileURLToPath } from 'url';
@@ -362,6 +362,33 @@ export function executorBinary(): string {
 }
 
 /**
+ * The storage secret every test executor opens its data with: a file of 64 hex characters
+ * (mode 0600) in the OS temp dir, made once for this user and kept, so a test data folder a
+ * later test process reuses opens under the same keyring. Test data folders sit on the same
+ * disk, so the executors get `AD4M_ALLOW_SECRET_ON_DATA_DISK` too; without a secret an
+ * executor starts sealed and answers nothing but the storage status and the unlock.
+ */
+export function testStorageSecretEnv(): Record<string, string> {
+    const user = typeof process.getuid === "function" ? process.getuid() : os.userInfo().username;
+    const file = path.join(os.tmpdir(), `ad4m-test-storage-secret-${user}`);
+    if (!existsSync(file)) {
+        // Written beside it, then linked into place: of two test processes starting together,
+        // one link wins and neither reads a half-written file.
+        const draft = `${file}.${process.pid}`;
+        writeFileSync(draft, `${randomBytes(32).toString("hex")}\n`, { mode: 0o600 });
+        try {
+            linkSync(draft, file);
+        } catch (e: any) {
+            if (e?.code !== "EEXIST") throw e;
+        } finally {
+            rmSync(draft, { force: true });
+        }
+    }
+    chmodSync(file, 0o600);
+    return { AD4M_STORAGE_SECRET_FILE: file, AD4M_ALLOW_SECRET_ON_DATA_DISK: "true" };
+}
+
+/**
  * Spawns `ad4m-executor <args>` and resolves once the RPC port (and MCP, if
  * `enableMcp`) logs that it is listening; rejects if the process exits
  * first. `env` is added to this process's environment.
@@ -389,7 +416,8 @@ export async function spawnExecutor(
         // SIGKILLed or cancelled job, or mocha --exit past a test that never stopped its
         // executor, otherwise leaves it running on the runner. An executor too old to know the
         // variable ignores it.
-        env: { ...process.env, AD4M_EXIT_WITH_PARENT: 'true', ...env },
+        // The storage secret comes before `env`, so a test can start an executor sealed.
+        env: { ...process.env, AD4M_EXIT_WITH_PARENT: 'true', ...testStorageSecretEnv(), ...env },
     });
     if (stdinFirstLine !== undefined) {
         executorProcess.stdin!.end(`${stdinFirstLine}\n`);

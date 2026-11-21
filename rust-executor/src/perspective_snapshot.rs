@@ -1,9 +1,30 @@
 //! Directory-level snapshots of the OxiGraph/RocksDB perspective store.
 //!
-//! Periodically archives `{data}/perspectives/` as a tar.gz and uploads it
-//! to the platform backend via HMAC-presigned URLs. On startup in shared
-//! mode, downloads and extracts the latest snapshot so OxiGraph opens with
-//! the restored data.
+//! Periodically checkpoints every perspective's SPARQL store and archives each checkpoint as
+//! its own tar.gz, sealed under that perspective's store key
+//! (`at_rest::archive::seal_archive_under`); a tar of those parts is sealed again under the
+//! executor store's key (`at_rest::archive`: the checkpoints are plain, so the archive never
+//! leaves unsealed, and no part's name is readable) and uploaded to the platform backend via
+//! HMAC-presigned URLs. Destroying a perspective's store key (a person's deletion) shreds its
+//! part of every snapshot already taken: a restore skips a part whose key is gone (the contents;
+//! the outer manifest, opened with the executor's key, still names the uuid and the part's
+//! size). A part whose store is alive but whose key *version* was retired is not a shred: the
+//! restore fails naming the perspective. A store's re-encryption therefore replaces the
+//! snapshot before it retires a version (`at_rest::rotation`).
+//! On startup in shared mode, downloads, opens and extracts the latest
+//! snapshot so OxiGraph opens with the restored data. If that restore fails (the platform is
+//! unreachable, the snapshot does not open under this keyring, a part is under a retired key
+//! version), the executor still starts, but with no perspectives it must not upload: the
+//! first snapshot would replace the remote one, the only backup. So every snapshot upload is
+//! refused, with an error logged each time, until the executor restarts and its restore
+//! succeeds (or finds no snapshot). An operator fixes the cause named in the restore error
+//! (restore connectivity, the keyring that sealed the snapshot) and restarts; nothing is
+//! uploaded meanwhile, so the remote snapshot stays as it was. Every upload also holds one
+//! lock ([`snapshot_lock`]) from sealing to the end of the PUT, so no older snapshot lands
+//! after a newer one. A snapshot uploaded
+//! before snapshots were sealed (a plain tar.gz) is restored once and replaced
+//! by a sealed one; after this executor has uploaded a sealed snapshot, a
+//! plain one is refused.
 //!
 //! The presign endpoint lives at `{platform_base}/internal/snapshots/presign`.
 //! Platform base URL derives from `wallet_backend_url` config.
@@ -16,8 +37,13 @@ use flate2::Compression;
 use std::path::{Path, PathBuf};
 use tar::{Archive, Builder};
 
+use crate::at_rest::archive;
+use crate::at_rest::data_keys::DataKeys;
 use crate::config::Ad4mConfig;
 use crate::perspectives::sparql_store::SparqlStore;
+
+/// The first bytes of a gzip stream: a plain snapshot from before snapshots were sealed.
+const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
 
 // ── Path helpers ───────────────────────────────────────────────────────────────
 
@@ -69,6 +95,11 @@ fn internal_token(config: &Ad4mConfig) -> Result<String, AnyError> {
 /// Returns the compressed bytes. Each perspective UUID subdirectory
 /// (containing `sparql_store/` RocksDB files) gets included recursively.
 pub fn create_snapshot(perspectives_path: &Path) -> Result<Vec<u8>, AnyError> {
+    tar_gz("perspectives", perspectives_path)
+}
+
+/// A tar.gz of the directory `dir`, its entries named under `prefix`.
+fn tar_gz(prefix: &str, perspectives_path: &Path) -> Result<Vec<u8>, AnyError> {
     if !perspectives_path.exists() {
         return Err(anyhow!(
             "Perspectives directory does not exist: {:?}",
@@ -84,7 +115,7 @@ pub fn create_snapshot(perspectives_path: &Path) -> Result<Vec<u8>, AnyError> {
         // Append the entire perspectives directory, preserving the tree structure.
         // Use "perspectives" as the archive prefix so restore extracts cleanly.
         archive
-            .append_dir_all("perspectives", perspectives_path)
+            .append_dir_all(prefix, perspectives_path)
             .map_err(|e| anyhow!("Failed to build snapshot archive: {}", e))?;
 
         let encoder = archive
@@ -171,7 +202,7 @@ fn upload(url: &str, data: Vec<u8>) -> Result<(), AnyError> {
 
     let resp = client
         .put(url)
-        .header("Content-Type", "application/gzip")
+        .header("Content-Type", "application/octet-stream")
         .body(data)
         .send()
         .map_err(|e| anyhow!("Snapshot upload failed: {}", e))?;
@@ -243,14 +274,73 @@ fn missing_stores(
         .collect()
 }
 
-/// Backup all perspective data to the platform backend.
+/// Uploads a snapshot taken now in place of the last one, where the periodic backup runs
+/// (shared mode); elsewhere there is no snapshot to replace. A perspective's re-encryption
+/// calls it before it retires a key version (`at_rest::rotation`, the snapshot rule).
+///
+/// The caller must hold [`snapshot_lock`]: `rotation::finish` takes it before it calls this and
+/// keeps it until the retirement is done. This function does not take it (the lock is not
+/// re-entrant), unlike [`backup_perspectives`].
+pub fn replace_snapshot() -> Result<(), String> {
+    let config = crate::config::get_global_config();
+    if config.wallet_backend.as_deref() != Some("shared") {
+        return Ok(());
+    }
+    backup_locked(&config).map_err(|e| e.to_string())
+}
+
+/// The one lock of snapshot uploads: whoever seals a snapshot holds it until its upload is
+/// done, so an older snapshot cannot land after a newer one (a snapshot sealed under a key
+/// version that a re-encryption has retired since would replace the one that replaced it).
+/// Producers: [`backup_perspectives`] (periodic and shutdown) and `rotation::finish`, which
+/// holds it across [`replace_snapshot`] and the retirement of the versions.
+///
+/// Lock order: this lock first, then the languages' files lock (`lang_storage::exclusive`),
+/// which `rotation::finish` takes inside it to retire. Nothing that holds the files lock
+/// takes this one, and a snapshot never takes the files lock: no cycle.
+pub fn snapshot_lock() -> std::sync::MutexGuard<'static, ()> {
+    static SNAPSHOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SNAPSHOT.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Set when this start's restore of the remote snapshot failed: the executor does not know
+/// what the remote snapshot holds and has none of it, so any upload would replace the only
+/// backup with a partial or empty set. It stays set until the executor restarts with a restore
+/// that succeeds (or finds no snapshot).
+static RESTORE_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Notes the outcome of a startup restore for [`backup_perspectives`].
+fn record_restore(result: Result<Restored, AnyError>) -> Result<Restored, AnyError> {
+    RESTORE_FAILED.store(result.is_err(), std::sync::atomic::Ordering::SeqCst);
+    result
+}
+
+/// Backup all perspective data to the platform backend, holding [`snapshot_lock`] from the
+/// checkpoints to the end of the upload. Refuses, with an error logged each time, while this
+/// start's restore has failed.
 ///
 /// 1. Checkpoint every open SPARQL store into a staging directory next to
 ///    `perspectives/` (same filesystem, so the checkpoints hard-link).
 /// 2. Create tar.gz of the checkpoints, then remove the staging directory.
-/// 3. Presign a PUT URL from the platform backend.
-/// 4. Upload the archive.
+/// 3. Seal the archive under the keyring; refuse while the keyring is sealed.
+/// 4. Presign a PUT URL from the platform backend and upload the sealed archive.
 pub fn backup_perspectives(config: &Ad4mConfig) -> Result<(), AnyError> {
+    let _snapshot = snapshot_lock();
+    backup_locked(config)
+}
+
+/// [`backup_perspectives`] with [`snapshot_lock`] already held by the caller.
+fn backup_locked(config: &Ad4mConfig) -> Result<(), AnyError> {
+    if RESTORE_FAILED.load(std::sync::atomic::Ordering::SeqCst) {
+        log::error!(
+            "Snapshot upload refused: this start could not restore the remote snapshot, so \
+             uploading would replace it. Fix the cause named in the restore error above and \
+             restart the executor; the remote snapshot is untouched"
+        );
+        return Err(anyhow!(
+            "Snapshot upload refused: the restore of the remote snapshot failed at start"
+        ));
+    }
     let did = crate::agent::did();
     let persp_dir = perspectives_dir(config)?;
 
@@ -258,6 +348,8 @@ pub fn backup_perspectives(config: &Ad4mConfig) -> Result<(), AnyError> {
         log::info!("No perspectives directory — skipping backup");
         return Ok(());
     }
+    let keys = crate::at_rest::agent_passphrase::keys()
+        .ok_or_else(|| anyhow!("Skipping snapshot: the storage is sealed"))?;
 
     let stores: Vec<_> = crate::perspectives::all_perspectives()
         .into_iter()
@@ -277,71 +369,239 @@ pub fn backup_perspectives(config: &Ad4mConfig) -> Result<(), AnyError> {
             loading.join(", ")
         ));
     }
-    // A unique name, so a shutdown backup and a periodic one cannot collide.
-    let staging = persp_dir
-        .parent()
-        .unwrap_or(&persp_dir)
-        .join(format!(".snapshot-{}", uuid::Uuid::new_v4()));
-    let data = checkpoint_stores(&stores, &staging).and_then(|dir| create_snapshot(&dir));
-    if let Err(e) = std::fs::remove_dir_all(&staging) {
-        log::warn!("Failed to remove snapshot staging {:?}: {}", staging, e);
-    }
-    let data = data?;
-    log::info!("Snapshot created: {} bytes", data.len());
-
-    let presign_resp = presign(config, "put", &did)?;
-    upload(&presign_resp.url, data)?;
-
+    upload_sealed_snapshot(config, &did, &keys, &stores, &persp_dir)?;
     log::info!("Snapshot uploaded for DID {}", did);
     Ok(())
 }
 
+/// What a restore found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Restored {
+    /// No remote snapshot.
+    Nothing,
+    /// A sealed snapshot, opened and extracted.
+    Sealed,
+    /// A plain snapshot uploaded before snapshots were sealed, extracted: the next
+    /// snapshot must be uploaded sealed soon, so the plain one does not stay.
+    Plain,
+}
+
 /// Restore perspective data from the platform backend, if available.
 ///
-/// Called before perspective initialisation in shared mode.
-/// Downloads the tar.gz and extracts to the data directory.
-/// Returns Ok(true) if data was restored, Ok(false) if no snapshot existed.
-pub fn restore_perspectives(config: &Ad4mConfig) -> Result<bool, AnyError> {
+/// Called before perspective initialisation in shared mode, once the keyring
+/// is open. Downloads the snapshot, opens it under the keyring and extracts it
+/// to the data directory.
+pub fn restore_perspectives(config: &Ad4mConfig) -> Result<Restored, AnyError> {
+    record_restore(try_restore(config))
+}
+
+fn try_restore(config: &Ad4mConfig) -> Result<Restored, AnyError> {
     let did = crate::agent::did();
     let data_path = config
         .app_data_path
         .as_ref()
         .ok_or_else(|| anyhow!("app_data_path not configured"))?;
+    let keys = crate::at_rest::agent_passphrase::keys()
+        .ok_or_else(|| anyhow!("the storage is sealed: a snapshot cannot be opened"))?;
+    download_and_restore(config, &did, &keys, Path::new(data_path))
+}
 
-    let presign_resp = presign(config, "get", &did)?;
+/// Checkpoints `stores`, archives the checkpoints, seals the archive under `keys` and uploads
+/// it for `did`. The staging directory is made next to `persp_dir` and removed again. After
+/// the upload, a plain snapshot is no longer restored on this executor. The caller holds
+/// [`snapshot_lock`].
+fn upload_sealed_snapshot(
+    config: &Ad4mConfig,
+    did: &str,
+    keys: &DataKeys,
+    stores: &[(String, std::sync::Arc<SparqlStore>)],
+    persp_dir: &Path,
+) -> Result<(), AnyError> {
+    let sealed = seal_snapshot(keys, stores, persp_dir)?;
+    put_snapshot(config, did, keys, sealed)
+}
+
+/// The sealed archive of a snapshot of `stores` (the first half of [`upload_sealed_snapshot`]).
+fn seal_snapshot(
+    keys: &DataKeys,
+    stores: &[(String, std::sync::Arc<SparqlStore>)],
+    persp_dir: &Path,
+) -> Result<Vec<u8>, AnyError> {
+    // A unique name, so a shutdown backup and a periodic one cannot collide.
+    let staging = persp_dir
+        .parent()
+        .unwrap_or(persp_dir)
+        .join(format!(".snapshot-{}", uuid::Uuid::new_v4()));
+    let data = checkpoint_stores(stores, &staging).and_then(|dir| seal_parts(keys, &dir));
+    if let Err(e) = std::fs::remove_dir_all(&staging) {
+        log::warn!("Failed to remove snapshot staging {:?}: {}", staging, e);
+    }
+    let sealed = archive::seal_archive(keys, &data?)
+        .map_err(|e| anyhow!("Failed to seal the snapshot: {}", e))?;
+    log::info!("Snapshot sealed: {} bytes", sealed.len());
+    Ok(sealed)
+}
+
+/// Uploads a sealed snapshot in place of the remote one (the second half of
+/// [`upload_sealed_snapshot`]).
+fn put_snapshot(
+    config: &Ad4mConfig,
+    did: &str,
+    keys: &DataKeys,
+    sealed: Vec<u8>,
+) -> Result<(), AnyError> {
+    let presign_resp = presign(config, "put", did)?;
+    upload(&presign_resp.url, sealed)?;
+    if let Err(e) = archive::mark_sealed_only(keys) {
+        log::warn!("Failed to record that snapshots are sealed: {}", e);
+    }
+    Ok(())
+}
+
+/// The snapshot's plain archive: a tar of one entry per perspective, named by its uuid, that
+/// holds the perspective's checkpoint as a tar.gz sealed under the perspective's own store
+/// key. A perspective with no store key in the keyring (or a name that is no uuid) is an
+/// error: its part would not be shreddable, so no snapshot is made.
+fn seal_parts(keys: &DataKeys, persp_dir: &Path) -> Result<Vec<u8>, AnyError> {
+    let mut archive = Builder::new(Vec::new());
+    let mut names: Vec<String> = std::fs::read_dir(persp_dir)
+        .map_err(|e| anyhow!("Failed to read {:?}: {}", persp_dir, e))?
+        .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<_, _>>()?;
+    names.sort();
+    for name in names {
+        let store = part_store(&name)?;
+        let part = tar_gz(&format!("perspectives/{name}"), &persp_dir.join(&name))?;
+        let sealed = archive::seal_archive_under(keys, &store, &part)
+            .map_err(|e| anyhow!("Failed to seal the snapshot part of {name}: {e}"))?;
+        let mut header = tar::Header::new_gnu();
+        header.set_size(sealed.len() as u64);
+        header.set_mode(0o600);
+        archive
+            .append_data(&mut header, &name, &sealed[..])
+            .map_err(|e| anyhow!("Failed to build snapshot archive: {}", e))?;
+    }
+    archive
+        .into_inner()
+        .map_err(|e| anyhow!("Failed to finalise archive: {}", e))
+}
+
+/// The store a snapshot part named `name` is sealed under.
+fn part_store(name: &str) -> Result<crate::at_rest::keyring_file::StoreId, AnyError> {
+    uuid::Uuid::parse_str(name)
+        .map(crate::at_rest::keyring_file::StoreId::Perspective)
+        .map_err(|_| anyhow!("{name:?} is not a perspective uuid"))
+}
+
+/// Opens every part of a snapshot [`seal_parts`] made. A part whose perspective's key is
+/// destroyed is left out: that is the shred. Nothing is extracted unless every other part
+/// opens.
+fn open_parts(keys: &DataKeys, plain: &[u8]) -> Result<Vec<Vec<u8>>, AnyError> {
+    let mut parts = Vec::new();
+    let mut archive = Archive::new(plain);
+    for entry in archive
+        .entries()
+        .map_err(|e| anyhow!("The snapshot is not a snapshot archive: {}", e))?
+    {
+        let mut entry = entry.map_err(|e| anyhow!("The snapshot is damaged: {}", e))?;
+        let name = entry.path()?.to_string_lossy().into_owned();
+        let store = part_store(&name)?;
+        let mut sealed = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut sealed)?;
+        match archive::open_archive_under(keys, &store, &sealed) {
+            Ok(part) => parts.push(part),
+            Err(archive::ArchiveError::Keyring(
+                crate::at_rest::data_keys::KeyringError::UnknownStore,
+            )) => log::info!("The snapshot's part {name} is left out: its key was destroyed"),
+            // The perspective is alive, its key version is not: the part is lost to a
+            // rotation, not shredded. Leaving it out would restore without the perspective.
+            Err(archive::ArchiveError::Keyring(
+                e @ crate::at_rest::data_keys::KeyringError::VersionRetired { .. },
+            )) => {
+                return Err(anyhow!(
+                    "The snapshot's part of perspective {name} cannot be opened: {e}"
+                ))
+            }
+            Err(e) => return Err(anyhow!("The snapshot does not open: {}", e)),
+        }
+    }
+    Ok(parts)
+}
+
+/// Downloads the snapshot of `did` and extracts it into `data_path`: a sealed one opened
+/// under `keys`; a plain one only while this executor has not uploaded a sealed one. Nothing
+/// is extracted from a snapshot that does not open.
+fn download_and_restore(
+    config: &Ad4mConfig,
+    did: &str,
+    keys: &DataKeys,
+    data_path: &Path,
+) -> Result<Restored, AnyError> {
+    let presign_resp = presign(config, "get", did)?;
     let data = download(&presign_resp.url)?;
 
     if data.is_empty() {
         log::info!("No remote snapshot for DID {} — starting fresh", did);
-        return Ok(false);
+        return Ok(Restored::Nothing);
     }
-
     log::info!(
         "Downloaded {} byte snapshot for DID {} — restoring",
         data.len(),
         did
     );
-    restore_snapshot(Path::new(data_path), &data)?;
-    Ok(true)
+
+    let (plain, restored) = if archive::is_sealed_archive(&data) {
+        let plain = archive::open_archive(keys, &data)
+            .map_err(|e| anyhow!("The snapshot does not open: {}", e))?;
+        for part in open_parts(keys, &plain)? {
+            restore_snapshot(data_path, &part)?;
+        }
+        return Ok(Restored::Sealed);
+    } else if data.starts_with(&GZIP_MAGIC) {
+        if archive::is_sealed_only(keys) {
+            return Err(anyhow!(
+                "Refusing a plain snapshot: this executor has uploaded sealed snapshots"
+            ));
+        }
+        log::warn!(
+            "The remote snapshot is a plain archive from before snapshots were sealed: \
+             restoring it once; a sealed snapshot replaces it"
+        );
+        (data, Restored::Plain)
+    } else {
+        return Err(anyhow!("The remote snapshot is not a snapshot archive"));
+    };
+    restore_snapshot(data_path, &plain)?;
+    Ok(restored)
 }
 
 /// Spawn a background task that periodically backs up perspectives to the platform backend.
 ///
-/// Runs every `snapshot_interval_secs` (default 300 = 5 minutes).
+/// Runs every `snapshot_interval_secs` (default 300 = 5 minutes). With `reseal_first` (the
+/// start restored a plain snapshot) it first uploads a sealed snapshot as soon as every
+/// perspective is open, even with the periodic snapshots off, so the plain one is replaced.
 /// Logs errors but does not propagate — backup failure must not crash the executor.
-pub fn spawn_periodic_backup(config: Ad4mConfig) {
+pub fn spawn_periodic_backup(config: Ad4mConfig, reseal_first: bool) {
     let interval_secs = config.snapshot_interval_secs.unwrap_or(300);
     if interval_secs == 0 {
         log::info!("Periodic perspective snapshots disabled (interval = 0)");
-        return;
+        if !reseal_first {
+            return;
+        }
+    } else {
+        log::info!(
+            "Starting periodic perspective snapshot every {}s",
+            interval_secs
+        );
     }
 
-    log::info!(
-        "Starting periodic perspective snapshot every {}s",
-        interval_secs
-    );
-
     tokio::task::spawn(async move {
+        if reseal_first {
+            reseal(&config).await;
+        }
+        if interval_secs == 0 {
+            return;
+        }
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         // Skip the first tick (fires immediately on creation)
         interval.tick().await;
@@ -359,6 +619,30 @@ pub fn spawn_periodic_backup(config: Ad4mConfig) {
             }
         }
     });
+}
+
+/// How often, and how many times, the start tries to replace a restored plain snapshot.
+const RESEAL_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+const RESEAL_ATTEMPTS: u32 = 120;
+
+/// Uploads a sealed snapshot in place of the plain one the start restored: retried while
+/// perspectives are still loading or the upload fails, for up to ten minutes.
+async fn reseal(config: &Ad4mConfig) {
+    for attempt in 1..=RESEAL_ATTEMPTS {
+        tokio::time::sleep(RESEAL_RETRY).await;
+        let config_clone = config.clone();
+        match tokio::task::spawn_blocking(move || backup_perspectives(&config_clone)).await {
+            Ok(Ok(())) => {
+                log::info!("The plain snapshot is replaced by a sealed one");
+                return;
+            }
+            Ok(Err(e)) if attempt == RESEAL_ATTEMPTS => {
+                log::error!("The plain snapshot is still the remote one: {}", e)
+            }
+            Ok(Err(e)) => log::debug!("Sealed snapshot not uploaded yet: {}", e),
+            Err(e) => log::warn!("Sealed snapshot task panic: {}", e),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -477,6 +761,587 @@ mod tests {
             missing_stores(&[handle("uuid-a"), handle("uuid-b")], &open),
             vec!["uuid-b".to_string()]
         );
+    }
+
+    /// A local stand-in for the platform's presign endpoint and object store: presigns one
+    /// object URL, keeps what is PUT there and serves it to GET (404 before any PUT).
+    struct PresignStub {
+        base: String,
+        object: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    }
+
+    impl PresignStub {
+        fn start() -> Self {
+            use std::io::{BufRead, BufReader, Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let object = std::sync::Arc::new(std::sync::Mutex::new(None::<Vec<u8>>));
+            let (stored, object_url) = (object.clone(), format!("{base}/object"));
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { continue };
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut request_line = String::new();
+                    reader.read_line(&mut request_line).unwrap();
+                    let mut length = 0usize;
+                    let mut authorised = false;
+                    loop {
+                        let mut line = String::new();
+                        reader.read_line(&mut line).unwrap();
+                        let line = line.trim_end();
+                        if line.is_empty() {
+                            break;
+                        }
+                        let lower = line.to_ascii_lowercase();
+                        if let Some(v) = lower.strip_prefix("content-length:") {
+                            length = v.trim().parse().unwrap();
+                        }
+                        if lower == "authorization: bearer internal-token" {
+                            authorised = true;
+                        }
+                    }
+                    let mut body = vec![0u8; length];
+                    reader.read_exact(&mut body).unwrap();
+                    let mut parts = request_line.split_whitespace();
+                    let (method, path) = (parts.next().unwrap(), parts.next().unwrap());
+                    let (status, reply): (&str, Vec<u8>) = match (method, path) {
+                        ("POST", "/internal/snapshots/presign") if authorised => (
+                            "200 OK",
+                            serde_json::json!({ "url": object_url, "token": "t", "key": "k" })
+                                .to_string()
+                                .into_bytes(),
+                        ),
+                        ("POST", _) => ("401 Unauthorized", Vec::new()),
+                        ("PUT", "/object") => {
+                            *stored.lock().unwrap() = Some(body);
+                            ("200 OK", Vec::new())
+                        }
+                        ("GET", "/object") => match stored.lock().unwrap().clone() {
+                            Some(bytes) => ("200 OK", bytes),
+                            None => ("404 Not Found", Vec::new()),
+                        },
+                        _ => ("404 Not Found", Vec::new()),
+                    };
+                    let head = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        reply.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.write_all(&reply);
+                }
+            });
+            PresignStub { base, object }
+        }
+
+        fn config(&self) -> Ad4mConfig {
+            Ad4mConfig {
+                wallet_backend_url: Some(format!("{}/internal/wallet", self.base)),
+                internal_api_token: Some(crate::secret::Secret::from("internal-token")),
+                ..Default::default()
+            }
+        }
+
+        fn uploaded(&self) -> Vec<u8> {
+            self.object
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("an uploaded object")
+        }
+
+        fn put(&self, bytes: Vec<u8>) {
+            *self.object.lock().unwrap() = Some(bytes);
+        }
+    }
+
+    const DID: &str = "did:key:z6MkSnapshotTest";
+    const UUID_A: &str = "6f1c2f0e-6b0e-4a6b-9a53-0d1a1f0f0a0a";
+    const UUID_B: &str = "7a2d3a1f-7c1f-4b7c-8b64-1e2b2a1a1b1b";
+    const MARKERS: [&str; 2] = ["marker-link-source-4b1d", "marker-link-target-9e7c"];
+
+    fn open_keys(data: &Path) -> std::sync::Arc<DataKeys> {
+        let keys = DataKeys::load(crate::at_rest::keyring_file::path_in(data)).unwrap();
+        keys.unlock(zeroize::Zeroizing::new([9u8; 32])).unwrap();
+        for uuid in [UUID_A, UUID_B] {
+            keys.create_store(perspective_store(uuid), &[]).unwrap();
+        }
+        std::sync::Arc::new(keys)
+    }
+
+    fn perspective_store(uuid: &str) -> crate::at_rest::keyring_file::StoreId {
+        part_store(uuid).unwrap()
+    }
+
+    /// Two perspectives under `data/perspectives`, their links carrying [`MARKERS`].
+    fn stores_with_markers(data: &Path) -> Vec<(String, std::sync::Arc<SparqlStore>)> {
+        use crate::agent::signatures::TestSigner;
+        use crate::types::{Link, LinkExpression, LinkStatus};
+
+        let signer = TestSigner::generate();
+        let mut stores = Vec::new();
+        for (uuid, count) in [(UUID_A, 3), (UUID_B, 4)] {
+            let dir = data.join("perspectives").join(uuid);
+            let store = std::sync::Arc::new(SparqlStore::new(Some(dir.to_str().unwrap())).unwrap());
+            for i in 0..count {
+                let signed = signer.sign(
+                    Link {
+                        source: format!("literal://string:{}-{i}", MARKERS[0]),
+                        predicate: Some("ad4m://p".to_string()),
+                        target: format!("literal://string:{}-{i}", MARKERS[1]),
+                    }
+                    .normalize(),
+                );
+                store
+                    .add_link(&LinkExpression {
+                        author: signed.author,
+                        timestamp: signed.timestamp,
+                        data: signed.data,
+                        proof: signed.proof,
+                        status: Some(LinkStatus::Shared),
+                    })
+                    .unwrap();
+            }
+            stores.push((uuid.to_string(), store));
+        }
+        stores
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    fn tar_names(tar_gz: &[u8]) -> Vec<String> {
+        Archive::new(GzDecoder::new(tar_gz))
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The uploaded snapshot is sealed as a whole: it starts with the archive magic, no tar
+    /// header, file name or gzip stream in it is readable, and it holds none of the link
+    /// markers the (plain) checkpoints hold.
+    #[test]
+    fn the_uploaded_snapshot_is_sealed_and_holds_no_link() {
+        let stub = PresignStub::start();
+        let data = TempDir::new().unwrap();
+        let keys = open_keys(data.path());
+        let stores = stores_with_markers(data.path());
+        let persp_dir = data.path().join("perspectives");
+
+        upload_sealed_snapshot(&stub.config(), DID, &keys, &stores, &persp_dir).unwrap();
+        let object = stub.uploaded();
+
+        assert!(object.starts_with(b"AD4MARCH"));
+        assert!(!object.starts_with(&GZIP_MAGIC));
+        for readable in [
+            &b"ustar"[..],
+            b"perspectives",
+            b"sparql_store",
+            UUID_A.as_bytes(),
+        ] {
+            assert!(!contains(&object, readable), "{:?}", readable);
+        }
+        for marker in MARKERS {
+            assert!(!contains(&object, marker.as_bytes()), "{marker}");
+        }
+        assert!(Archive::new(GzDecoder::new(&object[..]))
+            .entries()
+            .and_then(|mut e| e.next().transpose())
+            .is_err());
+        // The staging directory is gone.
+        let left: Vec<_> = fs::read_dir(data.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".snapshot-"))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+
+        // Opened, it is one part per perspective, each sealed under that perspective's own key
+        // and holding its checkpoint: the seal is what kept them unread.
+        let plain = archive::open_archive(&keys, &object).unwrap();
+        let parts = open_parts(&keys, &plain).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert!(tar_names(&parts[0])
+            .iter()
+            .any(|n| n.starts_with(&format!("perspectives/{UUID_A}/sparql_store"))));
+    }
+
+    /// Deleting a person destroys its perspectives' keys, and a snapshot taken before that no
+    /// longer yields their data: the part of a perspective whose key is gone is left out of a
+    /// restore, while the other perspectives restore with every link.
+    #[test]
+    fn a_snapshot_taken_before_a_perspective_key_was_destroyed_no_longer_holds_it() {
+        use crate::at_rest::data_keys::DestroyReason;
+        let stub = PresignStub::start();
+        let live = TempDir::new().unwrap();
+        let keys = open_keys(live.path());
+        let stores = stores_with_markers(live.path());
+        let config = stub.config();
+        upload_sealed_snapshot(
+            &config,
+            DID,
+            &keys,
+            &stores,
+            &live.path().join("perspectives"),
+        )
+        .unwrap();
+        let object = stub.uploaded();
+
+        // The snapshot restores both while the keys are there.
+        let before = TempDir::new().unwrap();
+        download_and_restore(&config, DID, &keys, before.path()).unwrap();
+        assert!(before
+            .path()
+            .join(format!("perspectives/{UUID_A}/sparql_store"))
+            .exists());
+
+        keys.destroy_store(
+            &perspective_store(UUID_A),
+            DestroyReason::PerspectiveRemoved,
+        )
+        .unwrap();
+        let after = TempDir::new().unwrap();
+        assert_eq!(
+            download_and_restore(&config, DID, &keys, after.path()).unwrap(),
+            Restored::Sealed
+        );
+        assert!(
+            !after.path().join(format!("perspectives/{UUID_A}")).exists(),
+            "the destroyed perspective's part is not extracted"
+        );
+        let dir = after.path().join(format!("perspectives/{UUID_B}"));
+        let store = SparqlStore::new(Some(dir.to_str().unwrap())).unwrap();
+        assert_eq!(
+            store
+                .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+                .unwrap()
+                .len(),
+            4,
+            "another perspective restores"
+        );
+        // The uploaded object is the same: this keyring opens only the other perspective's part.
+        let plain = archive::open_archive(&keys, &object).unwrap();
+        assert_eq!(open_parts(&keys, &plain).unwrap().len(), 1);
+    }
+
+    /// No rows: the store's data is its SPARQL store, which a snapshot holds.
+    struct NoRows;
+
+    impl crate::at_rest::rotation::SealedRows for NoRows {
+        fn reseal(
+            &self,
+            _: &crate::at_rest::keyring_file::StoreId,
+        ) -> Result<crate::db::sealed::ResealReport, String> {
+            Ok(Default::default())
+        }
+        fn count_not_under(
+            &self,
+            _: &crate::at_rest::keyring_file::StoreId,
+            _: ad4m_keyring::KeyVersion,
+        ) -> Result<usize, String> {
+            Ok(0)
+        }
+    }
+
+    /// A perspective's re-encryption retires the key version its part of the uploaded snapshot
+    /// is sealed under. The snapshot the restore reads must still hold that perspective: the
+    /// rotation replaces the snapshot before it retires, so the restore gives every link.
+    #[test]
+    fn a_rotation_does_not_drop_a_live_perspective_from_the_snapshot() {
+        let _serial = crate::at_rest::rotation::tests::serial();
+        let stub = PresignStub::start();
+        let live = TempDir::new().unwrap();
+        let keys = open_keys(live.path());
+        let stores = stores_with_markers(live.path());
+        let config = stub.config();
+        let persp_dir = live.path().join("perspectives");
+        upload_sealed_snapshot(&config, DID, &keys, &stores, &persp_dir).unwrap();
+
+        let report = crate::at_rest::rotation::reencrypt(
+            &keys,
+            &NoRows,
+            // The executor's snapshot step, for the keyring and stores of the test.
+            &|| {
+                upload_sealed_snapshot(&config, DID, &keys, &stores, &persp_dir)
+                    .map_err(|e| e.to_string())
+            },
+            &live.path().join("languages"),
+            &perspective_store(UUID_A),
+        )
+        .unwrap();
+        assert_eq!(report.retired.len(), 1, "the old version is retired");
+
+        let restored = TempDir::new().unwrap();
+        assert_eq!(
+            download_and_restore(&config, DID, &keys, restored.path()).unwrap(),
+            Restored::Sealed
+        );
+        for (uuid, count) in [(UUID_A, 3), (UUID_B, 4)] {
+            let dir = restored.path().join("perspectives").join(uuid);
+            assert!(dir.exists(), "{uuid} is in the restore");
+            let store = SparqlStore::new(Some(dir.to_str().unwrap())).unwrap();
+            assert_eq!(
+                store
+                    .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+                    .unwrap()
+                    .len(),
+                count,
+                "{uuid}"
+            );
+        }
+    }
+
+    /// A snapshot sealed under version 1 and still uploading while the perspective is
+    /// re-encrypted: the re-encryption waits for the snapshot lock, so the old upload lands
+    /// first, the replacement (under version 2) after it, and the restore finds the
+    /// perspective. Without the lock the old upload lands last and the restore fails.
+    #[test]
+    fn an_old_upload_does_not_land_after_the_rotation_that_retired_its_version() {
+        let _serial = crate::at_rest::rotation::tests::serial();
+        use std::sync::mpsc::{channel, RecvTimeoutError};
+        let stub = PresignStub::start();
+        let live = TempDir::new().unwrap();
+        let keys = open_keys(live.path());
+        let stores = stores_with_markers(live.path());
+        let config = stub.config();
+        let persp_dir = live.path().join("perspectives");
+        let store = perspective_store(UUID_A);
+
+        // The periodic snapshot holds the lock from sealing under version 1 to the end of its
+        // upload, and its upload is slow.
+        let snapshot = snapshot_lock();
+        let old = seal_snapshot(&keys, &stores, &persp_dir).unwrap();
+        // The re-encryption: version 2 becomes current, the replacement is uploaded and
+        // version 1 retires.
+        let (version, resumed) = keys.begin_store_rotation(&store).unwrap();
+        let (done_tx, done_rx) = channel::<()>();
+        std::thread::scope(|scope| {
+            let rotation = scope.spawn(|| {
+                let report = crate::at_rest::rotation::finish(
+                    &keys,
+                    &NoRows,
+                    &|| {
+                        upload_sealed_snapshot(&config, DID, &keys, &stores, &persp_dir)
+                            .map_err(|e| e.to_string())
+                    },
+                    &live.path().join("languages"),
+                    &store,
+                    version,
+                    resumed,
+                )
+                .unwrap();
+                done_tx.send(()).unwrap();
+                report
+            });
+            // With the lock the rotation is still waiting for the old upload when the
+            // timeout ends; without it, it is done long before.
+            match done_rx.recv_timeout(std::time::Duration::from_secs(1)) {
+                Ok(()) | Err(RecvTimeoutError::Timeout) => {}
+                Err(e) => panic!("{e}"),
+            }
+            put_snapshot(&config, DID, &keys, old).unwrap();
+            drop(snapshot);
+            assert_eq!(rotation.join().unwrap().retired.len(), 1);
+        });
+
+        let restored = TempDir::new().unwrap();
+        assert_eq!(
+            download_and_restore(&config, DID, &keys, restored.path()).unwrap(),
+            Restored::Sealed
+        );
+        assert!(restored
+            .path()
+            .join(format!("perspectives/{UUID_A}"))
+            .exists());
+    }
+
+    /// A restore that failed at start blocks every snapshot upload, so the executor never
+    /// replaces the remote snapshot with the empty set it started with; a restore that
+    /// succeeds (the next start) lifts the block.
+    #[test]
+    fn a_failed_restore_blocks_the_next_snapshot_upload() {
+        let stub = PresignStub::start();
+        let data = TempDir::new().unwrap();
+        let keys = open_keys(data.path());
+        let config = stub.config();
+        stub.put(b"the remote backup".to_vec());
+
+        let failed = record_restore(download_and_restore(&config, DID, &keys, data.path()));
+        assert!(failed.is_err());
+        let err = backup_perspectives(&config).unwrap_err().to_string();
+        assert!(err.contains("restore"), "{err}");
+        assert_eq!(
+            stub.uploaded(),
+            b"the remote backup",
+            "the remote snapshot is untouched"
+        );
+
+        // The next start: no snapshot is a restore that succeeded.
+        stub.object.lock().unwrap().take();
+        assert_eq!(
+            record_restore(download_and_restore(&config, DID, &keys, data.path())).unwrap(),
+            Restored::Nothing
+        );
+        assert!(!RESTORE_FAILED.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// A snapshot whose part is sealed under a version the keyring retired, of a perspective
+    /// that is alive, does not restore quietly without it: the restore fails naming the
+    /// perspective and the version.
+    #[test]
+    fn a_part_under_a_retired_version_of_a_live_perspective_is_a_loud_error() {
+        let stub = PresignStub::start();
+        let live = TempDir::new().unwrap();
+        let keys = open_keys(live.path());
+        let stores = stores_with_markers(live.path());
+        let config = stub.config();
+        upload_sealed_snapshot(
+            &config,
+            DID,
+            &keys,
+            &stores,
+            &live.path().join("perspectives"),
+        )
+        .unwrap();
+        // The version retires with no snapshot after it (a rotation that did not replace it).
+        let store = perspective_store(UUID_A);
+        keys.begin_store_rotation(&store).unwrap();
+        keys.retire_store_versions(&store).unwrap();
+
+        let restored = TempDir::new().unwrap();
+        let err = download_and_restore(&config, DID, &keys, restored.path()).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains(UUID_A), "{message}");
+        assert!(message.contains("version 1"), "{message}");
+        assert!(
+            !restored.path().join("perspectives").exists(),
+            "nothing is extracted from a snapshot that does not open"
+        );
+    }
+
+    /// A sealed snapshot restores under the keyring that sealed it, with every link.
+    #[test]
+    fn a_sealed_snapshot_restores_its_stores() {
+        let stub = PresignStub::start();
+        let live = TempDir::new().unwrap();
+        let keys = open_keys(live.path());
+        let stores = stores_with_markers(live.path());
+        let config = stub.config();
+        upload_sealed_snapshot(
+            &config,
+            DID,
+            &keys,
+            &stores,
+            &live.path().join("perspectives"),
+        )
+        .unwrap();
+
+        let restored = TempDir::new().unwrap();
+        assert_eq!(
+            download_and_restore(&config, DID, &keys, restored.path()).unwrap(),
+            Restored::Sealed
+        );
+        for (uuid, count) in [(UUID_A, 3), (UUID_B, 4)] {
+            let dir = restored.path().join("perspectives").join(uuid);
+            let store = SparqlStore::new(Some(dir.to_str().unwrap())).unwrap();
+            assert_eq!(
+                store
+                    .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+                    .unwrap()
+                    .len(),
+                count,
+                "{uuid}"
+            );
+        }
+    }
+
+    /// Another keyring cannot open the snapshot, and nothing is extracted.
+    #[test]
+    fn a_snapshot_of_another_keyring_restores_nothing() {
+        let stub = PresignStub::start();
+        let live = TempDir::new().unwrap();
+        let keys = open_keys(live.path());
+        let stores = stores_with_markers(live.path());
+        let config = stub.config();
+        upload_sealed_snapshot(
+            &config,
+            DID,
+            &keys,
+            &stores,
+            &live.path().join("perspectives"),
+        )
+        .unwrap();
+
+        let elsewhere = TempDir::new().unwrap();
+        let other = open_keys(elsewhere.path());
+        let err = download_and_restore(&config, DID, &other, elsewhere.path()).unwrap_err();
+        assert!(err.to_string().contains("does not open"), "{err}");
+        assert!(!elsewhere.path().join("perspectives").exists());
+    }
+
+    /// A plain snapshot from before snapshots were sealed restores once: after this executor
+    /// uploaded a sealed one, a plain one is refused.
+    #[test]
+    fn a_plain_snapshot_restores_until_a_sealed_one_was_uploaded() {
+        let stub = PresignStub::start();
+        let config = stub.config();
+        let old = TempDir::new().unwrap();
+        let stores = stores_with_markers(old.path());
+        let staging = old.path().join(".snapshot-old");
+        let plain = create_snapshot(&checkpoint_stores(&stores, &staging).unwrap()).unwrap();
+        stub.put(plain.clone());
+
+        let data = TempDir::new().unwrap();
+        let keys = open_keys(data.path());
+        assert_eq!(
+            download_and_restore(&config, DID, &keys, data.path()).unwrap(),
+            Restored::Plain
+        );
+        let dir = data.path().join(format!("perspectives/{UUID_B}"));
+        let store = std::sync::Arc::new(SparqlStore::new(Some(dir.to_str().unwrap())).unwrap());
+        assert_eq!(
+            store
+                .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+                .unwrap()
+                .len(),
+            4
+        );
+
+        // The reseal: the sealed snapshot replaces the plain one.
+        upload_sealed_snapshot(
+            &config,
+            DID,
+            &keys,
+            &[(UUID_B.to_string(), store)],
+            &data.path().join("perspectives"),
+        )
+        .unwrap();
+        assert!(stub.uploaded().starts_with(b"AD4MARCH"));
+
+        // A plain snapshot put back in its place is refused, and nothing is extracted.
+        stub.put(plain);
+        let again = TempDir::new().unwrap();
+        let err = download_and_restore(&config, DID, &keys, again.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("Refusing a plain snapshot"),
+            "{err}"
+        );
+        assert!(!again.path().join("perspectives").exists());
+    }
+
+    #[test]
+    fn no_remote_snapshot_restores_nothing_and_junk_is_refused() {
+        let stub = PresignStub::start();
+        let config = stub.config();
+        let data = TempDir::new().unwrap();
+        let keys = open_keys(data.path());
+        assert_eq!(
+            download_and_restore(&config, DID, &keys, data.path()).unwrap(),
+            Restored::Nothing
+        );
+        stub.put(b"not a snapshot".to_vec());
+        assert!(download_and_restore(&config, DID, &keys, data.path()).is_err());
     }
 
     #[test]

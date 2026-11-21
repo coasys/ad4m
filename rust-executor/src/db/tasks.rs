@@ -8,7 +8,7 @@
 use rusqlite::{params, OptionalExtension};
 
 use super::Ad4mDb;
-use crate::types::{AIPromptExamples, AITask};
+use crate::types::AITask;
 
 impl Ad4mDb {
     /// Owner of task `id`, by agent DID: `None` when no such task exists, `Some(None)` for a
@@ -29,31 +29,15 @@ impl Ad4mDb {
         agent_did: Option<&str>,
     ) -> Result<Vec<AITask>, rusqlite::Error> {
         // `IS` also matches NULL to NULL, which `=` never does.
-        let mut stmt = self.conn.prepare(
-            "SELECT id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at
-             FROM tasks WHERE agent_did IS ?1",
-        )?;
-        let tasks = stmt.query_map(params![agent_did], |row| {
-            let prompt_examples: Vec<AIPromptExamples> =
-                serde_json::from_str(&row.get::<_, String>(4)?).map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        4,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    )
-                })?;
-            Ok(AITask {
-                task_id: row.get(0)?,
-                name: row.get(1)?,
-                model_id: row.get(2)?,
-                system_prompt: row.get(3)?,
-                prompt_examples,
-                meta_data: row.get(5)?,
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
-            })
-        })?;
-        tasks.collect()
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM tasks WHERE agent_did IS ?1",
+            Self::TASK_COLUMNS
+        ))?;
+        let mut tasks = Vec::new();
+        for task in stmt.query_map(params![agent_did], |row| self.task_from_row(row))? {
+            tasks.extend(super::sealed::readable("tasks", task)?);
+        }
+        Ok(tasks)
     }
 }
 

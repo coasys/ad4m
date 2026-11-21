@@ -143,7 +143,14 @@ impl HolochainService {
 
             tokio::task::block_in_place(|| {
                 rt.block_on(async move {
-                    let service = HolochainService::new(local_config).await.unwrap();
+                    let service = match HolochainService::new(local_config).await {
+                        Ok(service) => service,
+                        Err(e) => {
+                            let _ = response_sender
+                                .send(HolochainServiceResponse::InitComplete(Err(e)));
+                            return;
+                        }
+                    };
                     let conductor_clone = service.conductor.clone();
 
                     // Spawn a new task to forward items from the stream to the receiver
@@ -331,20 +338,19 @@ impl HolochainService {
         let passphrase_locked_array =
             sodoken::LockedArray::from(local_config.passphrase.as_bytes().to_vec());
         let passphrase = Arc::new(std::sync::Mutex::new(passphrase_locked_array));
+        // A wrong passphrase does not open the keystore: an error for the caller, which keeps
+        // the executor up without Holochain, not a panic that ends it.
         let conductor = ConductorBuilder::new()
             .config(config)
             .passphrase(Some(passphrase))
             .build()
-            .await;
-
-        if let Err(e) = conductor {
-            info!("Could not start holochain conductor: {:#?}", e);
-            panic!("Could not start holochain conductor: {:#?}", e);
-        }
+            .await
+            .map_err(|e| {
+                error!("Could not start holochain conductor: {e:#?}");
+                anyhow!("Could not start the Holochain conductor: {e}")
+            })?;
 
         info!("Started holochain conductor");
-
-        let conductor = conductor.unwrap();
 
         let interface = conductor
             .clone()
@@ -1088,6 +1094,53 @@ mod tests {
         assert_eq!(
             super::normalize_relay_scheme("http://bootstrap.ad4m.dev:4433/relay"),
             "http://bootstrap.ad4m.dev:4433/relay"
+        );
+    }
+
+    /// A conductor whose keystore another passphrase made does not start: `new` answers an
+    /// error, where it used to panic and take the executor with it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_wrong_passphrase_is_an_error_not_a_panic() {
+        use super::*;
+        crate::test_utils::init_v8_platform();
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let tmp = tempfile::tempdir().unwrap();
+        let conductor_path = tmp.path().join("conductor");
+        std::fs::create_dir_all(&conductor_path).unwrap();
+        let config = |passphrase: &str| LocalConductorConfig {
+            passphrase: passphrase.into(),
+            conductor_path: conductor_path.to_string_lossy().into(),
+            data_path: tmp.path().to_string_lossy().into(),
+            use_bootstrap: false,
+            use_proxy: false,
+            use_local_proxy: false,
+            use_mdns: false,
+            proxy_url: "ws://localhost:4444".into(),
+            bootstrap_url: "http://localhost:4445".into(),
+            relay_url: None,
+            app_port: 0,
+        };
+        let first = HolochainService::new(config("the-right-passphrase"))
+            .await
+            .expect("the first start makes the keystore");
+        first
+            .conductor
+            .keystore()
+            .new_sign_keypair_random()
+            .await
+            .unwrap();
+        first.shutdown().await.unwrap();
+        drop(first);
+
+        let wrong = HolochainService::new(config("another-passphrase")).await;
+        let error = wrong
+            .err()
+            .expect("a wrong passphrase does not start the conductor");
+        assert!(
+            error
+                .to_string()
+                .starts_with("Could not start the Holochain conductor"),
+            "{error}"
         );
     }
 

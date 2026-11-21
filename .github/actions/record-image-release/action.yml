@@ -1,0 +1,59 @@
+# Records a pushed image's digest in the GitHub release of its tag (made here if the tag has
+# none). Deploys name the digest, not the moving `:<version>` tag, so the release says which
+# digest a tag published. The release is never marked latest: the repository's latest release
+# stays the ADAM one.
+
+name: Record an image's digest in its release
+description: Writes the release notes of an image tag with the image's digest and how to pull it.
+
+inputs:
+  tag:
+    description: The git tag that published the image, e.g. identity-store-v0.1.0.
+    required: true
+  image:
+    description: The image without a tag, e.g. ghcr.io/coasys/identity-store.
+    required: true
+  version:
+    description: The image's version tag.
+    required: true
+  digest:
+    description: The pushed image's digest (sha256:...).
+    required: true
+  token:
+    description: A token that may write this repository's releases.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Write the digest into the tag's release
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        GH_REPO: ${{ github.repository }}
+        TAG: ${{ inputs.tag }}
+        IMAGE: ${{ inputs.image }}
+        VERSION: ${{ inputs.version }}
+        DIGEST: ${{ inputs.digest }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        COMMIT: ${{ github.sha }}
+      run: |
+        set -euo pipefail
+        if ! printf '%s' "$DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+          echo "::error::not an image digest: '$DIGEST'"
+          exit 1
+        fi
+        notes="$(mktemp)"
+        {
+          printf 'Container image `%s` %s, built from %s by %s.\n\n' "$IMAGE" "$VERSION" "$COMMIT" "$RUN_URL"
+          printf 'Digest: `%s`\n\n' "$DIGEST"
+          printf 'Deploy it by digest, which names exactly this image (the `:%s` tag can be moved):\n\n' "$VERSION"
+          printf '```\ndocker pull %s@%s\n```\n' "$IMAGE" "$DIGEST"
+        } > "$notes"
+        if gh release view "$TAG" >/dev/null 2>&1; then
+          gh release edit "$TAG" --notes-file "$notes"
+        else
+          gh release create "$TAG" --verify-tag --latest=false \
+            --title "$IMAGE $VERSION" --notes-file "$notes"
+        fi
+        cat "$notes"

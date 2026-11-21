@@ -400,7 +400,10 @@ async fn generate_agent(params: Value, _ctx: Arc<RequestContext>) -> Result<Valu
     let body: GenerateAgentRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let mut agent = AgentService::with_mutable_global_instance(|agent_service| {
+    // With the keyring open the agent's passphrase comes from it (derived from the root
+    // key), and the one the caller sent is not used: nobody types it again.
+    let keys = crate::at_rest::agent_passphrase::keys();
+    let (agent, passphrase) = AgentService::with_mutable_global_instance(|agent_service| {
         // Inside the lock so a concurrent generate cannot slip between the
         // check and the write: re-generating would replace the agent's keys
         // (and its DID) under a caller that only found it uninitialised a
@@ -410,6 +413,11 @@ async fn generate_agent(params: Value, _ctx: Arc<RequestContext>) -> Result<Valu
                 "the agent is already initialised; unlock it with agent.unlock instead",
             ));
         }
+        let passphrase =
+            crate::at_rest::agent_passphrase::for_new_agent(keys.as_deref(), &body.passphrase)
+                .map_err(|e| {
+                    WsRpcError::internal(format!("no agent passphrase from the keyring: {e}"))
+                })?;
         agent_service.create_new_keys();
 
         let dm_language = crate::runtime_service::RuntimeService::with_global_instance(|rt| {
@@ -419,20 +427,19 @@ async fn generate_agent(params: Value, _ctx: Arc<RequestContext>) -> Result<Valu
             agent.direct_message_language = Some(dm_language);
         }
 
-        agent_service.save(body.passphrase.clone());
-        agent_service.passphrase = Some(body.passphrase.clone());
+        agent_service.save(passphrase.to_string());
+        agent_service.passphrase = Some(passphrase.to_string());
 
-        Ok(agent_service.dump().clone())
-    })?
-    .with_identity()
-    .await;
+        Ok((agent_service.dump().clone(), passphrase))
+    })?;
+    let mut agent = agent.with_identity().await;
 
     let mut init_errors: Vec<String> = Vec::new();
     let config = crate::config::get_global_config();
     let language_language_only = config.language_language_only.unwrap_or(false);
 
     if config.run_holochain.unwrap_or(true) {
-        let startup = spawn_conductor_startup(body.passphrase.clone());
+        let startup = spawn_conductor_startup(passphrase.to_string());
         if let Err(e) = startup.load_core_languages(language_language_only).await {
             log::error!("Error loading system languages: {:?}", e);
             init_errors.push(format!("Failed to load system languages: {}", e));
@@ -503,7 +510,9 @@ async fn unlock_agent(params: Value, _ctx: Arc<RequestContext>) -> Result<Value,
 /// locked or a service failed to start.
 pub(crate) async fn unlock_main_agent(passphrase: String) -> Result<AgentStatus, WsRpcError> {
     let agent_instance = AgentService::global_instance();
-    {
+    // The agent file's passphrase, which Holochain's keystore shares: the keyring's when it
+    // gives one, not necessarily the one the caller sent.
+    let passphrase = {
         let mut agent_service = agent_instance
             .lock()
             .map_err(|_| WsRpcError::internal("Agent service unavailable"))?;
@@ -513,7 +522,8 @@ pub(crate) async fn unlock_main_agent(passphrase: String) -> Result<AgentStatus,
         agent_ref
             .unlock(passphrase.clone())
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
-    }
+        agent_ref.passphrase.clone().unwrap_or(passphrase)
+    };
 
     let mut init_errors: Vec<String> = Vec::new();
 

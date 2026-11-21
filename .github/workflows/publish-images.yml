@@ -1,0 +1,199 @@
+name: Publish images
+
+# The identity store and the link server as container images, one tag each:
+#
+#   identity-store-v<version>  ->  ghcr.io/coasys/identity-store:<version>
+#   link-server-v<version>     ->  ghcr.io/coasys/link-server:<version>
+#
+# A tag runs the service's tests, builds the image for linux/amd64, pushes it and writes its
+# digest into the tag's GitHub release. Deploys name the digest, never a moving tag, so no
+# `latest` is pushed. The tag's version must be the service's own (identity-store/Cargo.toml,
+# link-server/package.json).
+#
+# A pull request that touches a service's sources runs the same tests and image build, and
+# pushes nothing.
+#
+# Pushing uses this run's GITHUB_TOKEN (`packages: write`); no other secret.
+
+on:
+  push:
+    tags:
+      - 'identity-store-v*'
+      - 'link-server-v*'
+  pull_request:
+    paths:
+      - 'identity-store/**'
+      - 'ad4m-hash-chain/**'
+      - 'ad4m-identity-core/**'
+      - 'ad4m-ldk/rust/**'
+      - 'link-server/**'
+      - 'Cargo.lock'
+      - '.github/workflows/publish-images.yml'
+      - '.github/actions/record-image-release/**'
+
+concurrency:
+  group: publish-images-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  identity-store:
+    if: github.event_name == 'pull_request' || startsWith(github.ref_name, 'identity-store-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # the tag's release, which records the digest
+      packages: write # ghcr.io/coasys/identity-store
+    env:
+      IMAGE: ghcr.io/coasys/identity-store
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: The image's version
+        env:
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          crate="$(sed -n 's/^version = "\(.*\)"$/\1/p' identity-store/Cargo.toml | head -1)"
+          if [ "$EVENT" = push ]; then
+            version="${TAG#identity-store-v}"
+            if [ "$version" != "$crate" ]; then
+              echo "::error::tag $TAG names $version, but identity-store/Cargo.toml is at $crate"
+              exit 1
+            fi
+          else
+            version="$crate"
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+
+      # The Dockerfile's `test` stage: `cargo test` on the image's own one-member workspace,
+      # with the image's toolchain. The image build below reuses its build stage from the cache.
+      - name: identity-store tests
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: identity-store/Dockerfile
+          target: test
+          platforms: linux/amd64
+          cache-from: type=gha,scope=identity-store
+          cache-to: type=gha,mode=max,scope=identity-store
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build the image (and push it, on a tag)
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: identity-store/Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ env.IMAGE }}:${{ env.VERSION }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.title=identity-store
+          cache-from: type=gha,scope=identity-store
+
+      - name: Record the digest in the release
+        if: github.event_name == 'push'
+        uses: ./.github/actions/record-image-release
+        with:
+          tag: ${{ github.ref_name }}
+          image: ${{ env.IMAGE }}
+          version: ${{ env.VERSION }}
+          digest: ${{ steps.image.outputs.digest }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  link-server:
+    if: github.event_name == 'pull_request' || startsWith(github.ref_name, 'link-server-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # the tag's release, which records the digest
+      packages: write # ghcr.io/coasys/link-server
+    env:
+      IMAGE: ghcr.io/coasys/link-server
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: The image's version
+        env:
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          package="$(node -p "require('./link-server/package.json').version")"
+          if [ "$EVENT" = push ]; then
+            version="${TAG#link-server-v}"
+            if [ "$version" != "$package" ]; then
+              echo "::error::tag $TAG names $version, but link-server/package.json is at $package"
+              exit 1
+            fi
+          else
+            version="$package"
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      # The Node major of the image (link-server/Dockerfile, node:22-slim).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: link-server/package-lock.json
+
+      - name: link-server tests
+        working-directory: link-server
+        run: |
+          npm ci
+          npm run build
+          npm test
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build the image (and push it, on a tag)
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: link-server
+          file: link-server/Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ env.IMAGE }}:${{ env.VERSION }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.title=link-server
+          cache-from: type=gha,scope=link-server
+          cache-to: type=gha,mode=max,scope=link-server
+
+      - name: Record the digest in the release
+        if: github.event_name == 'push'
+        uses: ./.github/actions/record-image-release
+        with:
+          tag: ${{ github.ref_name }}
+          image: ${{ env.IMAGE }}
+          version: ${{ env.VERSION }}
+          digest: ${{ steps.image.outputs.digest }}
+          token: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,50 @@
+{
+  "description": "Room keys sealed by sealToDid in bootstrap-languages/server-link-language/src/encryption.ts (noble), with the ephemeral secret and nonce passed in. ad4m-keyring's seal must give the same envelope from the same inputs, and open it.",
+  "vectors": [
+    {
+      "ed25519Seed": "0101010101010101010101010101010101010101010101010101010101010101",
+      "ed25519Public": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+      "did": "did:key:z6Mkon3Necd6NkkyfoGoHxid2znGc59LU3K7mubaRcFbLfLX",
+      "x25519Public": "1b1b58dd50ea14b60da17b790cd02754d970c9bab864ebb3c0f3016fe51d3f57",
+      "x25519Secret": "58e86efb75fa4e2c410f46e16de9f6acae1a1703528651b69bc176c088bef36e",
+      "roomKey": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "ephemeralSecret": "0202020202020202020202020202020202020202020202020202020202020202",
+      "nonce": "030303030303030303030303",
+      "sealed": {
+        "ephemeralPublicKey": "ce8d3ad1ccb633ec7b70c17814a5c76ecd029685050d344745ba05870e587d59",
+        "nonce": "030303030303030303030303",
+        "ciphertext": "70dcaca5f3ca981bf53507f55bf5bc471ef532b8cfcf853333d69458b12904eb59f3f9637ec8023811af1c548446b29f"
+      }
+    },
+    {
+      "ed25519Seed": "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
+      "ed25519Public": "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
+      "did": "did:key:z6MkgAnvkP45uNxwCKeNdt6wrYkEjpYX4f7Nrd8MQqFL8Fbn",
+      "x25519Public": "55c0506c70233f01c32633ba683b9099c4d4adb209a046c3470b78788ec3c13f",
+      "x25519Secret": "f00a2613bdbcce990d0a124d6fc4bf97319d0cccf3f67a2c3fe575b5b9986452",
+      "roomKey": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "ephemeralSecret": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "nonce": "000102030405060708090a0b",
+      "sealed": {
+        "ephemeralPublicKey": "8f40c5adb68f25624ae5b214ea767a6ec94d829d3d7b5e1ad1ba6f3e2138285f",
+        "nonce": "000102030405060708090a0b",
+        "ciphertext": "32ddd6829226c5116a87d12bdc36ba142fdd4cefedb363762eae4576b81fa428fc8d706efcfc8b9d99074f9b3be847bc"
+      }
+    },
+    {
+      "ed25519Seed": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "ed25519Public": "2543b92ff1095511476adc8369db6ddc933665a11978dda1404ee1066ca9559d",
+      "did": "did:key:z6Mkgxj2R3HLtQRpPnvfvpuKEceSqf3tZHBjdmZ3fFz3JHGG",
+      "x25519Public": "f14b5173130a1b80687f273d49e8f4740a793a949b83b105837f2a61e8fee14f",
+      "x25519Secret": "6028d4276d036d787ba4df5803e7d15ae9165e486417ad3ae5e48b49290cd656",
+      "roomKey": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+      "ephemeralSecret": "fefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefe",
+      "nonce": "ffffffffffffffffffffffff",
+      "sealed": {
+        "ephemeralPublicKey": "823ffa5082d8cd43eff42af39423dd18fa9245c711e9ec38b863801490447a06",
+        "nonce": "ffffffffffffffffffffffff",
+        "ciphertext": "0c26268a78e75847440857b94d274c2d316e1e73cc75c1659deec4928c90e2cbcbb757cbdbfee3e97a7b75d97955b7d7"
+      }
+    }
+  ]
+}

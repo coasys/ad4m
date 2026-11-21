@@ -33,6 +33,7 @@ pub mod perspective_instances_ws;
 pub mod perspectives_ws;
 pub mod runtime_ws;
 pub mod sfu_ws;
+pub mod storage_ws;
 pub mod users_ws;
 pub mod ws_handler;
 

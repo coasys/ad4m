@@ -23,6 +23,11 @@ COPY identity-store identity-store
 RUN printf '[workspace]\nresolver = "2"\nmembers = ["identity-store"]\nexclude = ["ad4m-ldk/rust"]\n' > Cargo.toml \
     && cargo build --release -p identity-store --bin identity-store
 
+# The store's tests on the same one-member workspace and toolchain. A plain build skips this
+# stage; `docker build --target test` runs it, and the image workflow does before it publishes.
+FROM build AS test
+RUN cargo test --release -p identity-store
+
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends libsqlite3-0 ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
