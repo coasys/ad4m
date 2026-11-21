@@ -1,0 +1,6 @@
+{
+  "name": "@coasys/web-executor-js",
+  "private": true,
+  "type": "module",
+  "description": "The host and Worker sides of the web executor: WorkerSocket for Ad4mClient. Erasable TypeScript: Node runs it as it is."
+}
