@@ -112,7 +112,7 @@ fi
 echo "$verdict"
 case "$verdict" in
   "skip: "*)
-    echo "Heavy suites skipped. To run them: mark the PR ready and target dev, add the full-ci label, or put [full-ci] in the commit message; then rerun the workflow."
+    echo "Heavy suites skipped. To run them: mark the PR ready and target dev, or add the full-ci label (heavy-suites.yml then starts a new pipeline), or put [full-ci] in the commit message."
     exit 10
     ;;
 esac

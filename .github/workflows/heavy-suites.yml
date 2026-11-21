@@ -1,0 +1,63 @@
+name: Heavy suites
+
+# The GitHub side of CircleCI's heavy_gate (.circleci/scripts/should-run-heavy.sh).
+# heavy_gate halts rust-tests and the integration suites green on a draft PR, a
+# PR whose base is not dev, or a branch with no PR. CircleCI starts a pipeline on
+# a push only, so a PR that later got ready or was retargeted to dev kept green
+# checks for suites that never ran. On each PR event below,
+# .github/scripts/heavy-suites-pr.sh:
+#
+# - sets the commit status `ci/heavy-suites` on the head commit: pending while
+#   the gate skips the suites there, success when they run;
+# - when the PR got ready, was reopened, retargeted to dev or labeled full-ci
+#   (no push), starts a new CircleCI pipeline for its branch, whose gate then
+#   runs the suites.
+#
+# Secrets and settings (none of them is required for the status):
+# - secret CIRCLECI_API_TOKEN: a CircleCI personal API token that can trigger
+#   pipelines in the project. Without it no pipeline starts: the log says so and
+#   the status stays pending until the CircleCI workflow is rerun by hand.
+# - variable CIRCLECI_PIPELINE_DEFINITION_ID: Project Settings → Pipelines in
+#   CircleCI. Optional while the project has one pipeline definition.
+#
+# A fork PR gets nothing: its token is read-only and it has no secrets. The
+# script says so in the log.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
+jobs:
+  status:
+    # A title or body edit, or a label other than full-ci, changes nothing. A
+    # Dependabot PR gets a read-only token, like a fork.
+    if: >-
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      (github.event.action != 'edited' || github.event.changes.base) &&
+      ((github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'full-ci')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # One run per PR at a time; a newer event replaces a waiting one, and a
+    # started run finishes (it may be starting a pipeline).
+    concurrency:
+      group: heavy-suites-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    steps:
+      # The merge commit and its parents: the scripts, and the head commit's
+      # message for [full-ci].
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Status and CircleCI pipeline
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CIRCLECI_API_TOKEN: ${{ secrets.CIRCLECI_API_TOKEN }}
+          CIRCLECI_PIPELINE_DEFINITION_ID: ${{ vars.CIRCLECI_PIPELINE_DEFINITION_ID }}
+        run: bash .github/scripts/heavy-suites-pr.sh
