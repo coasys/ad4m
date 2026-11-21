@@ -1043,6 +1043,7 @@ async fn three_executors() -> (
             &vault,
             &did,
             OfferKind::Node,
+            None,
             STORE_URL,
             &SystemClock,
             &OsRandom,
