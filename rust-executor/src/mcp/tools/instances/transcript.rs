@@ -113,13 +113,14 @@ impl Ad4mMcpHandler {
             "limit": limit,
             "count": true,
         });
-        let (mut instances, total) =
-            match run_model_query_stopped(&gate.stop(), &perspective, TEXT_CONTENT_URI, &query)
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => return error_json(format!("Error reading TextContent instances: {e}")),
-            };
+        let result =
+            run_model_query_stopped(&gate.stop(), &perspective, TEXT_CONTENT_URI, &query).await;
+        // The query ends here: the author lookups below are no query time.
+        drop(gate);
+        let (mut instances, total) = match result {
+            Ok(v) => v,
+            Err(e) => return error_json(format!("Error reading TextContent instances: {e}")),
+        };
         if instances.is_empty() {
             return format!("(no TextContent instances under {parent})");
         }
