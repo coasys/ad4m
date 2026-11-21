@@ -275,6 +275,7 @@ pub(super) fn undeclared_relation(
         max_count: (kind == "belongsToOne").then_some(1),
         target_class_name: String::new(),
         target_class_uri: String::new(),
+        target_class: String::new(),
         polymorphic: true,
     })
 }

@@ -133,7 +133,7 @@ async fn an_undeclared_reverse_link_is_read_through_the_predicate_it_names() {
     let from = &by_id(&result, "bot://item/1")["extractedFrom"];
     assert_eq!(from["id"], "we://c/1", "{from}");
     // Hydrated as the class it is, since the reader names none.
-    assert_eq!(from["__subjectClass"], "CollectionBlock");
+    assert_eq!(from["__subjectClass"], "we://models/CollectionBlock");
     // With the fields of that class, which the reading class knows nothing about.
     assert!(
         from["name"]
