@@ -29,6 +29,20 @@ fn spawn_runtime(name: &str) -> (LanguageRuntimeHandle, tempfile::TempDir) {
     (handle, dir)
 }
 
+/// The CPU time this process has used, user and system.
+fn process_cpu_time() -> Duration {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    // SAFETY: getrusage fills the struct it is given.
+    let usage = unsafe {
+        assert_eq!(libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()), 0);
+        usage.assume_init()
+    };
+    let time = |t: libc::timeval| {
+        Duration::from_secs(t.tv_sec as u64) + Duration::from_micros(t.tv_usec as u64)
+    };
+    time(usage.ru_utime) + time(usage.ru_stime)
+}
+
 /// Drops the last handle and waits for the runtime to end: the runtime holds
 /// its clone of the running request until `process_requests` returns.
 async fn drop_and_await_end(handle: LanguageRuntimeHandle) {
@@ -989,7 +1003,16 @@ async fn a_stalled_import_in_a_concurrent_call_does_not_free_the_ordered_call() 
                 .await
         })
     };
+    // The loop now has nothing to do but report the stall: it waits for the
+    // next request instead of polling again (`EventLoopFuture`), so the
+    // process stays idle rather than spinning a core.
+    let cpu_before = process_cpu_time();
     tokio::time::sleep(Duration::from_millis(1000)).await;
+    let cpu_idle = process_cpu_time() - cpu_before;
+    assert!(
+        cpu_idle < Duration::from_millis(500),
+        "the runtime spun on the stall: {cpu_idle:?} of CPU in 1 s idle"
+    );
 
     // The stall ended neither call: the ordered one still holds its slot, so
     // the queued call has not started, and the stalled call's own promise is
@@ -1010,11 +1033,16 @@ async fn a_stalled_import_in_a_concurrent_call_does_not_free_the_ordered_call() 
     assert!(!stalled.is_finished(), "the call that stalled answered");
     assert!(!behind.is_finished(), "the queued call answered");
 
-    // A concurrent call resolves the global the ordered call awaits: it ends
-    // with its own result, then the queued call runs.
-    concurrent(&handle, "(globalThis.__resolveOrdered(), 0)".into())
-        .await
-        .unwrap();
+    // A concurrent call starts a timer that resolves the global the ordered
+    // call awaits, and returns: the timer still fires after the stall, with
+    // no call sent to drive the loop. The ordered call ends with its own
+    // result, then the queued call runs.
+    concurrent(
+        &handle,
+        "(setTimeout(() => globalThis.__resolveOrdered(), 300), 0)".into(),
+    )
+    .await
+    .unwrap();
     let ordered = within(Duration::from_secs(10), "the ordered call", ordered)
         .await
         .unwrap();
