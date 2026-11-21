@@ -3,24 +3,26 @@
 //!
 //! One SQLite file holds the hash-chain module's tables (`chain_heads`, `chain_entries`,
 //! `chain_forks`, type `coasys:kel`) and the store's own (`logs`, `heads`, `keys`, `agents`,
-//! `nonces`, `feed`, `offers`, `claims`, `fork_signers`, `inbox`, `records`, `requests`,
-//! `buckets`). The store replays every event with the identity core before it appends, and
+//! `nonces`, `pow_seen`, `feed`, `offers`, `claims`, `fork_signers`, `inbox`, `records`,
+//! `requests`, `buckets`, `brake`, `notes`). The store replays every event with the identity core before it appends, and
 //! commits each append with its head, key-index rows, feed items, the claim it spends and the
 //! inbox messages and requests it ends in one transaction (the one-transaction rule of
 //! `identity-store/AGENTS.md`). It can withhold an event, never forge one: every client checks
 //! the events' own signatures again. Of inbox messages and records it keeps only ciphertext.
 //!
-//! The store has no brake buckets, vouching notes or sign-up pairing yet:
-//! see [`log::admit_new_log`] for where the brake attaches.
+//! A new log is admitted by the brake (`brake.rs`: buckets per address and store-wide, a
+//! failure bucket and the proof of work, all before any signature replay) or by a vouching note
+//! the store redeems at the platform (`vouch.rs`). The store has no sign-up pairing yet.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{watch, Notify};
 
 pub mod agents;
+pub mod brake;
 pub mod db;
 pub mod error;
 pub mod head;
@@ -33,6 +35,7 @@ pub mod private;
 pub mod request;
 pub mod request_box;
 pub mod routes;
+pub mod vouch;
 
 pub use error::ApiError;
 pub use head::StoreKey;
@@ -54,9 +57,38 @@ pub fn system_clock() -> Clock {
 /// What an operator configures.
 #[derive(Clone, Debug)]
 pub struct Settings {
-    /// `POW_BITS`: the proof-of-work cost published at `GET /v1/pow` (default 22). Without a
-    /// brake a new log needs no proof; a proof that is sent must meet it.
+    /// `POW_BITS`: the proof-of-work cost published at `GET /v1/pow` (default 22) that a new log
+    /// with no vouching note must meet (`brake.rs`). Each challenge carries the bits it was issued at, so after a
+    /// change a challenge in flight keeps its old bits until it expires (300 s).
     pub pow_bits: u8,
+    /// `BRAKE_GLOBAL_PER_HOUR`: no-note logs store-wide per hour, the global bucket's size and
+    /// hourly refill (default 120).
+    pub brake_global_per_hour: u32,
+    /// `BRAKE_ADDR_BURST`: no-note logs per address at once, the address bucket's size
+    /// (default 3).
+    pub brake_addr_burst: u32,
+    /// `BRAKE_ADDR_PER_DAY`: what the address bucket refills per 24 h (default 3).
+    pub brake_addr_per_day: u32,
+    /// `TRUSTED_PROXIES`: comma-separated addresses or ranges (`10.0.0.0/8`) of the proxies in
+    /// front of the store. Only a request whose socket peer is one of them is read for its
+    /// client's address, from the one header `client_ip_header` names. Default none —
+    /// required when the store runs behind a proxy: without it every client counts as the
+    /// proxy's one address for the brake, and the store says so on the first request that
+    /// carries a proxy header (`Store::note_untrusted_proxy_headers`).
+    pub trusted_proxies: Vec<brake::Cidr>,
+    /// `CLIENT_IP_HEADER`: the one header a trusted proxy fills with the client's address:
+    /// `x-forwarded-for` (default) or `cf-connecting-ip` (Cloudflare ingress). The other is
+    /// never read: a proxy that passes it through would let a caller choose its own address.
+    pub client_ip_header: brake::ClientIpHeader,
+    /// `VOUCH_URL`: the vouching service's base URL (`POST {VOUCH_URL}/api/vouch/redeem`). None:
+    /// every token gets `503 vouch-unavailable`.
+    pub vouch_url: Option<String>,
+    /// `VOUCH_CREDENTIAL`: the store's own credential at the vouching service, sent as a bearer
+    /// token with every redeem.
+    pub vouch_credential: Option<vouch::Credential>,
+    /// `VOUCH_KEYS`: comma-separated multikeys of the vouching keys whose notes the store takes
+    /// and reads as `vouched` (`GET {VOUCH_URL}/api/vouch/key` answers the current one).
+    pub vouch_keys: Vec<String>,
     /// `FEED_TOKEN`: the mirror token of `GET /v1/feed`. None: the feed answers `401` to all.
     pub feed_token: Option<String>,
     /// `CORS_ORIGINS`: the origins allowed to call from a browser (the auth domain, the web app).
@@ -87,6 +119,14 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             pow_bits: 22,
+            brake_global_per_hour: 120,
+            brake_addr_burst: 3,
+            brake_addr_per_day: 3,
+            trusted_proxies: Vec::new(),
+            client_ip_header: brake::ClientIpHeader::default(),
+            vouch_url: None,
+            vouch_credential: None,
+            vouch_keys: Vec::new(),
             feed_token: None,
             cors_origins: Vec::new(),
             identity_burst: 10,
@@ -110,6 +150,84 @@ pub const DEFAULT_HELD_LOG_BYTES: usize = 256 << 20;
 pub const DEFAULT_LOG_FOLD_BYTES: usize = 16 << 20;
 
 impl Settings {
+    /// The settings of the configuration `get` reads (`std::env::var` for `serve`): each key
+    /// that is unset keeps its default (`Settings::default`). Refuses a value that does not
+    /// parse, and settings [`Settings::check`] refuses.
+    pub fn from_config(get: impl Fn(&str) -> Option<String>) -> Result<Settings, String> {
+        fn number<T: std::str::FromStr>(
+            get: &impl Fn(&str) -> Option<String>,
+            name: &str,
+            default: T,
+        ) -> Result<T, String> {
+            match get(name) {
+                Some(v) => v
+                    .trim()
+                    .parse::<T>()
+                    .map_err(|_| format!("{name}={v} is not a whole number in range")),
+                None => Ok(default),
+            }
+        }
+        let list = |name: &str| -> Vec<String> {
+            get(name)
+                .map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let text = |name: &str| {
+            get(name)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let defaults = Settings::default();
+        let trusted_proxies = list("TRUSTED_PROXIES")
+            .iter()
+            .map(|s| {
+                s.parse::<brake::Cidr>()
+                    .map_err(|e| format!("TRUSTED_PROXIES: {e}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let client_ip_header = match text("CLIENT_IP_HEADER") {
+            Some(v) => v
+                .parse::<brake::ClientIpHeader>()
+                .map_err(|e| format!("CLIENT_IP_HEADER: {e}"))?,
+            None => defaults.client_ip_header,
+        };
+        let vouch_keys = list("VOUCH_KEYS");
+        if let Some(bad) = vouch_keys
+            .iter()
+            .find(|k| !ad4m_identity_core::is_ed25519_multikey(k))
+        {
+            return Err(format!("VOUCH_KEYS: {bad} is no Ed25519 multikey"));
+        }
+        let settings = Settings {
+            pow_bits: number(&get, "POW_BITS", defaults.pow_bits)?,
+            brake_global_per_hour: number(
+                &get,
+                "BRAKE_GLOBAL_PER_HOUR",
+                defaults.brake_global_per_hour,
+            )?,
+            brake_addr_burst: number(&get, "BRAKE_ADDR_BURST", defaults.brake_addr_burst)?,
+            brake_addr_per_day: number(&get, "BRAKE_ADDR_PER_DAY", defaults.brake_addr_per_day)?,
+            trusted_proxies,
+            client_ip_header,
+            vouch_url: text("VOUCH_URL"),
+            vouch_credential: text("VOUCH_CREDENTIAL").map(vouch::Credential),
+            vouch_keys,
+            feed_token: text("FEED_TOKEN"),
+            cors_origins: list("CORS_ORIGINS"),
+            identity_burst: number(&get, "IDENTITY_BURST", defaults.identity_burst)?,
+            identity_refill_s: number(&get, "IDENTITY_REFILL_S", defaults.identity_refill_s)?,
+            held_log_bytes: number(&get, "HELD_LOG_BYTES", defaults.held_log_bytes)?,
+            log_fold_bytes: number(&get, "LOG_FOLD_BYTES", defaults.log_fold_bytes)?,
+        };
+        settings.check()?;
+        Ok(settings)
+    }
+
     /// Refuses settings under which an accepted log could not be held: a held bound below the
     /// per-log whole-fold bound (twice `LOG_FOLD_BYTES`) would fold such a log on every use.
     pub fn check(&self) -> Result<(), String> {
@@ -143,10 +261,17 @@ pub struct Store {
     pub settings: Settings,
     /// The folded logs held in memory (`held.rs`).
     pub held: held::HeldLogs,
+    /// The client of the vouching service.
+    http: reqwest::Client,
     clock: Clock,
     started_at: u64,
     waits: Mutex<Waits>,
     fault: AtomicU8,
+    /// [`brake::GLOBAL_EMPTY_WARNING`] was logged and no log has been admitted since
+    /// (one line per empty episode of the global bucket).
+    global_empty_logged: AtomicBool,
+    /// The untrusted-proxy-headers warning was logged once already.
+    untrusted_proxy_warned: AtomicBool,
 }
 
 impl Store {
@@ -155,12 +280,15 @@ impl Store {
         Arc::new(Store {
             db,
             key,
+            http: vouch::client(),
             held: held::HeldLogs::new(settings.held_log_bytes),
             settings,
             clock,
             started_at,
             waits: Mutex::new(Waits::default()),
             fault: AtomicU8::new(Fault::None as u8),
+            global_empty_logged: AtomicBool::new(false),
+            untrusted_proxy_warned: AtomicBool::new(false),
         })
     }
 
@@ -182,9 +310,69 @@ impl Store {
         (self.clock)()
     }
 
-    /// When the store started (the `changedAt` of `GET /v1/pow`).
+    /// When the store started.
     pub fn started_at(&self) -> u64 {
         self.started_at
+    }
+
+    /// A fresh challenge for `GET /v1/pow`'s next proof (`brake::challenge`), tagged with the
+    /// configured `POW_BITS`: one use, good until `expires`.
+    pub fn pow_challenge(&self) -> ad4m_ldk::identity::PowChallenge {
+        brake::challenge(
+            &self.key.pow_challenge_key(),
+            self.settings.pow_bits,
+            self.now(),
+        )
+    }
+
+    /// Logs [`brake::GLOBAL_EMPTY_WARNING`] when the global bucket is empty: once per empty
+    /// episode, so an alert can match the one line without a log line per refused request.
+    /// The flag resets on the next log the brake admits (`log.rs`), so the next empty episode
+    /// logs it again.
+    pub(crate) fn notice_global_empty(&self) {
+        if !self.global_empty_logged.swap(true, Ordering::SeqCst) {
+            eprintln!(
+                "identity-store: warning: {} ({} no-note logs an hour); new logs without a \
+                 vouching note get 429 global",
+                brake::GLOBAL_EMPTY_WARNING,
+                self.settings.brake_global_per_hour
+            );
+        }
+    }
+
+    /// For tests: the empty-global-bucket line was logged and no log has been admitted since.
+    pub fn global_empty_logged(&self) -> bool {
+        self.global_empty_logged.load(Ordering::SeqCst)
+    }
+
+    /// Resets the one-line-per-episode flag after the brake admitted a log.
+    pub(crate) fn clear_global_empty_logged(&self) {
+        self.global_empty_logged.store(false, Ordering::SeqCst);
+    }
+
+    /// Logs once when a request carries `CF-Connecting-IP` or `X-Forwarded-For` but
+    /// `TRUSTED_PROXIES` is empty: behind a proxy every client then counts as the proxy's one
+    /// address for the brake (`brake::Sender`).
+    pub(crate) fn note_untrusted_proxy_headers(&self) {
+        if !self.untrusted_proxy_warned.swap(true, Ordering::SeqCst) {
+            eprintln!(
+                "identity-store: warning: a request carried proxy headers but TRUSTED_PROXIES \
+                 is empty; behind a proxy set TRUSTED_PROXIES to the proxy's address or \
+                 range, or every client counts as the proxy's one address for the brake"
+            );
+        }
+    }
+
+    /// For tests: the untrusted-proxy-headers warning was logged.
+    pub fn untrusted_proxy_warned(&self) -> bool {
+        self.untrusted_proxy_warned.load(Ordering::SeqCst)
+    }
+
+    /// `GET /v1/metrics`: each brake bucket's level, one per line (`brake::metrics`).
+    pub fn metrics(&self) -> Result<String, ApiError> {
+        let now = self.now();
+        let conn = self.db.lock()?;
+        brake::metrics(&conn, &self.settings, now)
     }
 
     /// Wakes the reads waiting on `topics` after a committed write that concerns them (the
@@ -298,6 +486,7 @@ impl Store {
         gone += conn.execute("DELETE FROM requests WHERE expires <= ?1", [now])?;
         let window = db::to_sql(request::NONCE_WINDOW_S)?;
         gone += conn.execute("DELETE FROM nonces WHERE seen_at <= ?1 - ?2", [now, window])?;
+        gone += conn.execute("DELETE FROM pow_seen WHERE expires <= ?1", [now])?;
         Ok(gone)
     }
 }

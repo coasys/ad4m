@@ -1540,7 +1540,7 @@ async fn the_bucket_size_and_refill_come_from_the_settings() {
     let t = TestStore::with_settings(identity_store::Settings {
         identity_burst: 2,
         identity_refill_s: 10,
-        ..identity_store::Settings::default()
+        ..TestStore::settings()
     });
     let alice = Person::new("alice");
     t.publish(&alice).await;

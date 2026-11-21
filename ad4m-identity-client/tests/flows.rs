@@ -87,6 +87,10 @@ impl TestStore {
                 // within a second (one test runs 200 removals); the store's bucket is not under
                 // test here.
                 identity_burst: 1000,
+                // Every test's identities come from one address; the brake is not under test
+                // here, its proof of work is (`identity.powParams`, the create flow's solve).
+                brake_addr_burst: 100_000,
+                brake_global_per_hour: 100_000,
                 ..Settings::default()
             },
         );
@@ -168,6 +172,7 @@ fn record_scid(request: &SignedRequest, method: &str) -> Result<String, RpcError
         .strip_prefix("/v1/private/")
         .filter(|_| request.req.method == method)
         .ok_or(RpcError {
+            data: None,
             code: 400,
             message: "invalid: the request is not for this identity's record".into(),
         })?;
@@ -253,6 +258,7 @@ impl TestExecutor {
 
     fn refused(code: u16, body: &Value) -> RpcError {
         RpcError {
+            data: None,
             code,
             message: body.to_string(),
         }
@@ -290,6 +296,7 @@ impl TestExecutor {
     /// store signed.
     async fn position(&self) -> Result<(String, String, KelChain, Value), RpcError> {
         let no_identity = || RpcError {
+            data: None,
             code: 409,
             message: "no-identity".into(),
         };
@@ -432,8 +439,10 @@ impl TestExecutor {
                 let scid = self.identity.borrow().clone();
                 let mut key_id = None;
                 let mut revoked = None;
+                let mut vouched = false;
                 if let Some(scid) = &scid {
                     let page = self.log(scid).await?;
+                    vouched = page["vouched"].as_bool().unwrap_or(false);
                     let events: Vec<Event> = page["events"]
                         .as_array()
                         .unwrap()
@@ -457,11 +466,20 @@ impl TestExecutor {
                     "fork": null,
                     "storeBehind": null,
                     "store": { "url": STORE_URL, "trusted": true },
+                    "vouched": vouched,
                 }))
+            }
+            "identity.powParams" => {
+                let (code, body) = self.store.send("GET", "/v1/pow", None, None).await;
+                match code {
+                    200 => Ok(body),
+                    _ => Err(Self::refused(code, &body)),
+                }
             }
             "identity.cosignIncept" => {
                 if self.identity.borrow().is_some() {
                     return Err(RpcError {
+                        data: None,
                         code: 409,
                         message: "identity-exists".into(),
                     });
@@ -469,6 +487,7 @@ impl TestExecutor {
                 let mut event = Event::from_json(&p["event"]).unwrap();
                 let Op::Incept { add, .. } = &event.op else {
                     return Err(RpcError {
+                        data: None,
                         code: 400,
                         message: "not an incept".into(),
                     });
@@ -479,6 +498,7 @@ impl TestExecutor {
                     .iter()
                     .find(|d| d.sign == self.device_key())
                     .ok_or(RpcError {
+                        data: None,
                         code: 400,
                         message: "not-listed".into(),
                     })?;
@@ -510,6 +530,7 @@ impl TestExecutor {
                 let scid = events[0].scid.clone();
                 if self.refuse_publish.replace(false) {
                     return Err(RpcError {
+                        data: None,
                         code: 503,
                         message: "unavailable: the store did not answer".into(),
                     });
@@ -520,7 +541,8 @@ impl TestExecutor {
                     .send(
                         "POST",
                         &format!("/v1/logs/{scid}/events"),
-                        Some(&json!({ "events": p["events"] })),
+                        // As the executor does: the proof of work goes to the store unchanged.
+                        Some(&json!({ "events": p["events"], "pow": p["pow"] })),
                         None,
                     )
                     .await;
@@ -553,6 +575,7 @@ impl TestExecutor {
                 self.record_if_listed(&scid).await?;
                 if self.lose_publish_answer.replace(false) {
                     return Err(RpcError {
+                        data: None,
                         code: 503,
                         message: "the connection closed".into(),
                     });
@@ -625,12 +648,14 @@ impl TestExecutor {
                     (true, Some(enc)) => enc.to_string(),
                     (true, None) => {
                         return Err(RpcError {
+                            data: None,
                             code: 400,
                             message: "no-custody-enc".into(),
                         })
                     }
                     (false, Some(_)) => {
                         return Err(RpcError {
+                            data: None,
                             code: 400,
                             message: "enc: only with canKeepMaster".into(),
                         })
@@ -682,6 +707,7 @@ impl TestExecutor {
                     .find(|(o, _)| o == offer_id)
                     .map(|(_, s)| s.clone())
                     .ok_or(RpcError {
+                        data: None,
                         code: 404,
                         message: "not-found".into(),
                     })?;
@@ -711,6 +737,7 @@ impl TestExecutor {
             "identity.inboxPut" => {
                 if self.refuse_inbox_put.replace(false) {
                     return Err(RpcError {
+                        data: None,
                         code: 503,
                         message: "unavailable: the store is down".into(),
                     });
@@ -802,6 +829,7 @@ impl TestExecutor {
                     self.refuse_record_puts
                         .set(self.refuse_record_puts.get().saturating_sub(1));
                     return Err(RpcError {
+                        data: None,
                         code: 503,
                         message: "unavailable: the store is down".into(),
                     });
@@ -814,6 +842,7 @@ impl TestExecutor {
                 // key is signed by it.
                 let mut sealed: record_core::SealedRecord =
                     serde_json::from_value(p["record"].clone()).map_err(|e| RpcError {
+                        data: None,
                         code: 400,
                         message: e.to_string(),
                     })?;
@@ -821,6 +850,7 @@ impl TestExecutor {
                     let (_, key_id, chain, _) = self.position().await?;
                     if sealed.signer != key_id {
                         return Err(RpcError {
+                            data: None,
                             code: 400,
                             message: format!("signer: not this device's key {key_id}"),
                         });
@@ -858,6 +888,7 @@ impl TestExecutor {
                     &self.enc_secret(),
                 )
                 .map_err(|e| RpcError {
+                    data: None,
                     code: 400,
                     message: format!("open: {e}"),
                 })?;
@@ -915,6 +946,7 @@ impl TestExecutor {
                 }
             }
             other => Err(RpcError {
+                data: None,
                 code: 404,
                 message: format!("the test executor has no {other}"),
             }),
@@ -1335,6 +1367,48 @@ async fn create_finishes_with_the_same_words_after_a_lost_publish_answer() {
         Signer::key(kept.signer(0).unwrap()),
         Signer::key(&words::master_key(&seed, 0).unwrap())
     );
+}
+
+/// The brake: the store refuses a new log without a proof of work (`403 pow`), and a headless
+/// `create` solves one at the cost the store asks for (`identity.powParams`), so it passes.
+#[tokio::test]
+async fn create_solves_the_proof_of_work_the_store_asks_for() {
+    use ad4m_identity_core::{DeviceKey, KeyLife};
+    let store = TestStore::new();
+    let a = custody(&store, 1);
+    let params = a.pow_params().await.unwrap();
+    assert_eq!(params.bits, 8);
+
+    // An incept published with no proof is refused, and nothing is stored.
+    let status = a.status().await.unwrap();
+    let master = SigningKey::from_bytes(&[91; 32]);
+    let next =
+        ad4m_identity_core::commitment(&Signer::key(&SigningKey::from_bytes(&[92; 32])), "salt");
+    let incept = ad4m_identity_core::build::incept_human(
+        &master,
+        next,
+        vec![DeviceKey {
+            id: "d1".into(),
+            sign: status.device_key.clone(),
+            enc: status.device_enc.clone(),
+            life: KeyLife::Standing,
+        }],
+    )
+    .unwrap();
+    let cosigned = a.cosign_incept(&incept).await.unwrap();
+    let bare = a.publish(std::slice::from_ref(&cosigned), None).await;
+    assert!(
+        matches!(&bare, Err(e) if e.code == 403 && e.message.contains("pow")),
+        "{bare:?}"
+    );
+    assert!(a.status().await.unwrap().did.is_none());
+
+    // A create solves the proof and passes the brake; no note, so not vouched.
+    let vault = MemoryVault::new();
+    let did = create(&a, &vault, 13).await;
+    let status = a.status().await.unwrap();
+    assert_eq!(status.did.as_deref(), Some(did.as_str()));
+    assert!(!status.vouched);
 }
 
 #[tokio::test]
@@ -2619,6 +2693,7 @@ impl ExecutorRpc for AlwaysStale<'_> {
     async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         if method == "identity.recordPut" {
             return Err(RpcError {
+                data: None,
                 code: 400,
                 message: "invalid: version".into(),
             });
@@ -4536,6 +4611,7 @@ impl ExecutorRpc for RefusingPublish<'_> {
     async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         if method == "identity.publish" {
             return Err(RpcError {
+                data: None,
                 code: 400,
                 message: "invalid: refused".into(),
             });
@@ -5123,6 +5199,7 @@ impl ExecutorRpc for RefusingClaim<'_> {
     async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         if method == "identity.claimOffer" && self.refuse.get() {
             return Err(RpcError {
+                data: None,
                 code: 503,
                 message: "the store did not answer".into(),
             });
@@ -5398,6 +5475,7 @@ impl ExecutorRpc for RefusingDelete<'_> {
     async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         if method == "identity.deleteRequest" {
             return Err(RpcError {
+                data: None,
                 code: 503,
                 message: "the store did not answer".into(),
             });
@@ -9418,6 +9496,7 @@ impl ExecutorRpc for Phased<'_> {
                 self.phase.set(1);
                 self.until(2).await;
                 Err(RpcError {
+                    data: None,
                     code: 503,
                     message: "the store went away".into(),
                 })
@@ -10195,6 +10274,7 @@ impl Nested<'_> {
 
     fn gone() -> RpcError {
         RpcError {
+            data: None,
             code: 503,
             message: "the store went away".into(),
         }

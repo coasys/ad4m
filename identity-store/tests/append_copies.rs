@@ -70,9 +70,8 @@ fn next_event(prev: &Event, op: Op, signer: Option<(&str, &ed25519_dalek::Signin
 #[tokio::test]
 async fn an_append_on_a_held_log_copies_its_fold_once_whether_taken_or_refused_late() {
     let t = TestStore::with_settings(Settings {
-        pow_bits: 8,
         log_fold_bytes: 8 << 20,
-        ..Settings::default()
+        ..TestStore::settings()
     });
     let mut alice = Person::new("alice");
     t.publish(&alice).await;

@@ -25,10 +25,9 @@ use common::{Reply, TestStore};
 
 fn store_with(held_log_bytes: usize, log_fold_bytes: usize) -> TestStore {
     TestStore::with_settings(Settings {
-        pow_bits: 8,
         held_log_bytes,
         log_fold_bytes,
-        ..Settings::default()
+        ..TestStore::settings()
     })
 }
 

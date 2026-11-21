@@ -115,7 +115,7 @@ pub(crate) async fn revoke_with<R: ExecutorRpc>(
     random: &dyn Random,
 ) -> Result<Revoked, ClientError> {
     let event = revoke_event(chain, signer, key_ids, since)?;
-    let head = executor.publish(std::slice::from_ref(&event)).await?;
+    let head = executor.publish(std::slice::from_ref(&event), None).await?;
     let record = record::write(executor, vault, did, &[], random).await;
     Ok(Revoked { head, record })
 }

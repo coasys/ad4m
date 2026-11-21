@@ -26,6 +26,7 @@ pub mod link;
 pub mod pow;
 pub mod record;
 pub mod requests;
+pub mod vouch;
 
 #[cfg(feature = "build")]
 pub mod build;
@@ -51,6 +52,9 @@ pub use keys::{
 };
 pub use policy::{FoldError, FormatError, KelPolicy};
 pub use state::{KeyRecord, KeyState};
+#[cfg(feature = "build")]
+pub use vouch::sign_note;
+pub use vouch::{verify_note, VouchNote, VOUCH_DOMAIN};
 
 /// The format identifier every event carries.
 pub const FORMAT: &str = "coasys/1";

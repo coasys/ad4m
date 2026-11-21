@@ -72,6 +72,10 @@ pub struct IdentityStatus {
     /// The identity store this executor uses (the config's, else its network seed's), and
     /// whether it trusts a key for it; `null` when it has none (a network without a store).
     pub store: Option<StoreInfo>,
+    /// The store keeps a vouching note for the identity that verifies (`LogPage.vouched` of
+    /// the page that holds the head, at the cache's last read from the store). `false` with no
+    /// identity, and until a read sees the note.
+    pub vouched: bool,
 }
 
 /// The identity store an executor uses (`identity.status`).
@@ -167,13 +171,78 @@ pub struct CosignInceptParams {
     pub event: Value,
 }
 
-/// `identity.publish` params. No vouching token or proof of work: the store has no brake yet
-/// and admits a new log without one.
+/// `identity.publish` params. The executor passes `pow` to the store unchanged: the party that
+/// builds event #0 solves the proof (the custody service, an app), and the store checks it
+/// when the events start a log that has no vouching note (`GET /v1/pow`, `identity.powParams`).
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishParams {
     /// Signed events that continue the log's head (or start a log), as JSON.
     pub events: Vec<Value>,
+    /// The proof of work for event #0 of a new log; `null` for any other append.
+    pub pow: Option<Pow>,
+}
+
+/// A proof of work over a SCID and the store's challenge (`ad4m_identity_core::pow`):
+/// `sha256("coasys:pow" ‖ scid ‖ challenge ‖ nonce)` starts with `bits` zero bits.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct Pow {
+    /// 16 bytes, base58btc.
+    pub nonce: String,
+    pub bits: u8,
+    /// The `nonce` of the `PowChallenge` the proof commits to; left out reads as empty, which
+    /// the store refuses.
+    #[serde(default)]
+    pub challenge: String,
+}
+
+/// The one-use challenge `GET /v1/pow` mints for the next proof.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PowChallenge {
+    /// The token the proof's `challenge` carries and hashes over.
+    pub nonce: String,
+    /// Unix seconds the token is good until; a proof that arrives past it is refused.
+    #[ts(type = "number")]
+    pub expires: u64,
+}
+
+/// `identity.powParams`: the cost of a proof of work the store asks for now (`GET /v1/pow`).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PowParams {
+    /// The leading zero bits a proof must have: the cost the challenge below was issued at,
+    /// which the store checks the proof against whatever its cost is by then.
+    pub bits: u8,
+    /// A fresh challenge for the next proof; the caller solves over `challenge.nonce` and must
+    /// fetch again for another log (the store spends each challenge once and at most to
+    /// `expires`).
+    pub challenge: PowChallenge,
+}
+
+/// `identity.attachNote` params.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachNoteParams {
+    /// The one-use token the vouching service gave after its check (an email check).
+    pub token: String,
+}
+
+/// A vouching note: the vouching service's signature (`coasys:vouch`) that it checked the
+/// identity `did` by `method` at `time`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct VouchNote {
+    pub did: String,
+    /// `email`.
+    pub method: String,
+    /// Unix seconds.
+    #[ts(type = "number")]
+    pub time: u64,
+    /// The `did:key` of the vouching key.
+    pub voucher: String,
+    pub sig: String,
 }
 
 /// What an offer is for: `node` is an executor.

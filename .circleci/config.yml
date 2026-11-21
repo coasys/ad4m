@@ -207,10 +207,10 @@ commands:
           # The identity suite's tools: the integration runners compile no Rust.
           # One invocation with `ad4m`: the holder reaches the executor through rust-client,
           # whose TLS needs OpenSSL, and only `ad4m`'s graph vendors it (no system OpenSSL here).
-          name: Build identity-store and the identity test holder
+          name: Build identity-store, the identity test holder and the test vouching service
           command: |
             cargo build --release -p ad4m -p identity-store -p ad4m-identity-client \
-              --bin identity-store --example holder \
+              --bin identity-store --example holder --example vouch_service \
               --features ad4m-identity-client/ws,ad4m-identity-client/test-vault
           no_output_timeout: 30m
 
@@ -251,14 +251,15 @@ commands:
             set -eo pipefail
             CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
             src="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}"
-            for bin in ad4m ad4m-executor identity-store holder; do
+            for bin in ad4m ad4m-executor identity-store holder vouch_service; do
               test -s "$src/$bin" || { echo "missing $src/$bin: rerun build"; exit 1; }
             done
             mkdir -p target/release/examples
             # Remove before copy: unlinking avoids ETXTBSY if a previous executor still holds the binary
-            rm -f target/release/ad4m target/release/ad4m-executor target/release/identity-store target/release/examples/holder
+            rm -f target/release/ad4m target/release/ad4m-executor target/release/identity-store target/release/examples/holder target/release/examples/vouch_service
             cp "$src/ad4m" "$src/ad4m-executor" "$src/identity-store" target/release/
             cp "$src/holder" target/release/examples/holder
+            cp "$src/vouch_service" target/release/examples/vouch_service
 
   restore_integration_inputs:
     description: "Restore the JS build outputs and hc toolchain that build produced (bootstrap languages, link-server, core, ALDK)"
@@ -436,7 +437,7 @@ jobs:
             CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
             dst="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}"
             mkdir -p "$dst"
-            for bin in ad4m ad4m-executor identity-store examples/holder; do
+            for bin in ad4m ad4m-executor identity-store examples/holder examples/vouch_service; do
               # `a && b` inside a loop does not stop the step under bash -e.
               name="$(basename "$bin")"
               cp "target/release/$bin" "$dst/$name.tmp" || exit 1

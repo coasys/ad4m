@@ -1,8 +1,10 @@
 //! The brake's proof of work for a new log with no vouching note (section 14 of
 //! `docs-src/identity/did-scid-coasys-1.md`, host policy: verifiers never check it): a 16-byte
-//! `nonce` such that `sha256("coasys:pow" ‖ scid ‖ nonce)` has at least `bits` leading zero
-//! bits. The proof binds to the SCID, which covers master #0, the next-key commitment and every
-//! listed device key, so one proof admits one log. The store keeps no state for a proof.
+//! `nonce` such that `sha256("coasys:pow" ‖ scid ‖ challenge ‖ nonce)` has at least `bits`
+//! leading zero bits. The proof binds to the SCID, which covers master #0, the next-key
+//! commitment and every listed device key, so one proof admits one log. The `challenge` is a
+//! short-lived, one-use token the host issues (the identity store mints one per `GET
+//! /v1/pow`), so a proof cannot be made ahead of time or reused.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -17,18 +19,24 @@ pub const NONCE_LEN: usize = 16;
 const NONCE_TEXT_MAX: usize = 22;
 
 /// A proof of work, as `AppendRequest.pow` carries it. `nonce` is base58btc (no multibase
-/// prefix) of 16 bytes; `bits` is the cost the solver aimed at. The checker states its own
-/// `bits` and does not trust this one.
+/// prefix) of 16 bytes; `bits` is the cost the solver aimed at; `challenge` is the host's
+/// challenge the proof commits to. The checker states its own `bits` and does not trust this
+/// one.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Pow {
     pub nonce: String,
     pub bits: u8,
+    /// The host's challenge the proof commits to (the `nonce` of `GET /v1/pow`'s `challenge`).
+    /// Empty on a request that names none, which a host checking challenges refuses.
+    #[serde(default)]
+    pub challenge: String,
 }
 
-/// `sha256("coasys:pow" ‖ scid ‖ nonce)`; `scid` enters as its UTF-8 text.
-pub fn pow_hash(scid: &str, nonce: &[u8; NONCE_LEN]) -> [u8; 32] {
-    let mut hasher = prefix(scid);
+/// `sha256("coasys:pow" ‖ scid ‖ challenge ‖ nonce)`; `scid` and `challenge` enter as their
+/// UTF-8 text.
+pub fn pow_hash(scid: &str, challenge: &str, nonce: &[u8; NONCE_LEN]) -> [u8; 32] {
+    let mut hasher = prefix(scid, challenge);
     hasher.update(nonce);
     hasher.finalize().into()
 }
@@ -46,10 +54,11 @@ pub fn leading_zero_bits(hash: &[u8; 32]) -> u32 {
     bits
 }
 
-fn prefix(scid: &str) -> Sha256 {
+fn prefix(scid: &str, challenge: &str) -> Sha256 {
     let mut hasher = Sha256::new();
     hasher.update(POW_LABEL.as_bytes());
     hasher.update(scid.as_bytes());
+    hasher.update(challenge.as_bytes());
     hasher
 }
 
@@ -60,8 +69,8 @@ fn nonce_of(n: u128) -> [u8; NONCE_LEN] {
 
 /// Tries the nonces `start`, `start + 1`, … for at most `tries` of them and gives the first
 /// that meets `bits`. A caller that shows progress calls it in rounds.
-pub fn solve_range(scid: &str, bits: u8, start: u128, tries: u64) -> Option<Pow> {
-    let base = prefix(scid);
+pub fn solve_range(scid: &str, challenge: &str, bits: u8, start: u128, tries: u64) -> Option<Pow> {
+    let base = prefix(scid, challenge);
     let mut n = start;
     for _ in 0..tries {
         let nonce = nonce_of(n);
@@ -72,6 +81,7 @@ pub fn solve_range(scid: &str, bits: u8, start: u128, tries: u64) -> Option<Pow>
             return Some(Pow {
                 nonce: bs58::encode(nonce).into_string(),
                 bits,
+                challenge: challenge.to_string(),
             });
         }
         n = n.wrapping_add(1);
@@ -79,22 +89,23 @@ pub fn solve_range(scid: &str, bits: u8, start: u128, tries: u64) -> Option<Pow>
     None
 }
 
-/// Finds a proof for `scid` at `bits`. Deterministic: the first nonce counted from 0.
-/// About 2^bits hashes on average; the store's default is 22 bits. It does not return until it
-/// finds one, so a caller that takes `bits` from a store (`GET /v1/pow`) refuses a value it
-/// cannot afford first: a hostile store that asks for 200 bits would otherwise hang it.
-pub fn solve(scid: &str, bits: u8) -> Pow {
+/// Finds a proof for `scid` over `challenge` at `bits`. Deterministic: the first nonce
+/// counted from 0. About 2^bits hashes on average; the store's default is 22 bits. It does
+/// not return until it finds one, so a caller that takes `bits` from a store (`GET /v1/pow`)
+/// refuses a value it cannot afford first: a hostile store that asks for 200 bits would
+/// otherwise hang it.
+pub fn solve(scid: &str, challenge: &str, bits: u8) -> Pow {
     let mut start = 0u128;
     loop {
-        if let Some(pow) = solve_range(scid, bits, start, 1 << 20) {
+        if let Some(pow) = solve_range(scid, challenge, bits, start, 1 << 20) {
             return pow;
         }
         start = start.wrapping_add(1 << 20);
     }
 }
 
-/// True when `pow.nonce` is 16 bytes of base58btc and `sha256("coasys:pow" ‖ scid ‖ nonce)`
-/// has at least `bits` leading zero bits. `pow.bits` is not read.
+/// True when `pow.nonce` is 16 bytes of base58btc and `sha256("coasys:pow" ‖ scid ‖
+/// `pow.challenge` ‖ nonce)` has at least `bits` leading zero bits. `pow.bits` is not read.
 pub fn check(scid: &str, pow: &Pow, bits: u8) -> bool {
     if pow.nonce.len() > NONCE_TEXT_MAX {
         return false;
@@ -105,5 +116,5 @@ pub fn check(scid: &str, pow: &Pow, bits: u8) -> bool {
     let Ok(nonce) = <[u8; NONCE_LEN]>::try_from(bytes) else {
         return false;
     };
-    leading_zero_bits(&pow_hash(scid, &nonce)) >= u32::from(bits)
+    leading_zero_bits(&pow_hash(scid, &pow.challenge, &nonce)) >= u32::from(bits)
 }

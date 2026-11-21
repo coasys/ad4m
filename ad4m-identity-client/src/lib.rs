@@ -31,6 +31,8 @@
 //! - [`flows::master`] also removes the master key from a device that is not its only holder,
 //!   and gets a device whose key a rotation replaced the new one.
 //! - [`record`]: the private details record, opened, merged and written in one place.
+//! - [`pow`]: the proof of work for a new log with no vouching note, at the cost the store
+//!   asks for (`identity.powParams`); [`flows::create`] solves it before the publish.
 //!
 //! No custody key: no service keeps a copy of a master key for the person. The library has no
 //! clock, randomness or network of its own: [`Clock`], [`Random`] and [`executor::ExecutorRpc`]
@@ -39,6 +41,7 @@
 pub mod enc;
 pub mod executor;
 pub mod flows;
+pub mod pow;
 pub mod record;
 mod request;
 pub mod secret;
@@ -209,6 +212,10 @@ pub enum ClientError {
     /// note writes nothing.
     #[error("this device's custody note changed under the mark")]
     CustodyNoteMoved,
+    /// The store asks for a proof of work above [`pow::MAX_POW_BITS`]: the client does not
+    /// solve it, as a hostile store could ask for a proof that never ends.
+    #[error("the store asks for a proof of work of {0} bits, above {max}", max = pow::MAX_POW_BITS)]
+    PowTooCostly(u8),
     #[error("{0}")]
     Protocol(String),
 }

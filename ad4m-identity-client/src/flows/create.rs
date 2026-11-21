@@ -5,7 +5,8 @@
 //!    the seed stays for the flow.
 //! 3. Master #0 and the commitment to master #1 from the seed; an `incept` listing the
 //!    executor's device key as `d1` with its `enc` key (`identity.status`); the executor adds
-//!    its proof (`identity.cosignIncept`); the client folds the event; `identity.publish`.
+//!    its proof (`identity.cosignIncept`); the client folds the event; `identity.publish`
+//!    with the proof of work at the store's cost (`identity.powParams`, [`crate::pow`]).
 //! 4. The vault keeps master #0 and the co-signed incept *before* the publish: a vault that
 //!    refuses (a cancelled prompt, no screen lock) leaves nothing in the store, and a
 //!    published identity always has its master key on this surface.
@@ -322,7 +323,13 @@ async fn publish_kept<R: ExecutorRpc>(
     let device_key_id = listed_id(&incept, &status.device_key).ok_or_else(|| {
         ClientError::Protocol("the kept incept does not list this executor's key".into())
     })?;
-    let head = executor.publish(std::slice::from_ref(&incept)).await?;
+    // The brake: a new log with no vouching note carries a proof of work over a challenge the
+    // store just issued (`identity.powParams`), so a resume solves a fresh one; a store that
+    // holds the log already answers the repeat with its head without reading the proof.
+    let pow = crate::pow::solve_for(executor, &incept.scid).await?;
+    let head = executor
+        .publish(std::slice::from_ref(&incept), Some(&pow))
+        .await?;
     vault.incept_published(&incept.scid)?;
     Ok(Created {
         did,

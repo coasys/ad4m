@@ -263,6 +263,12 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   `did:scid` record verifies). A different event at a held seq that holds on the prefix
   records a fork, keeps the history and fires `identity-fork`; a store answering a shorter log
   is behind (or an unverified conflict), records nothing, and the cache answers.
+  The executor never builds event #0 and never solves a proof of work: the party that
+  builds #0 (an app through `ad4m-identity-client`) reads `identity.powParams` (the store's
+  `GET /v1/pow`), solves, and `identity.publish {events, pow}` sends that `pow` unchanged.
+  `identity.attachNote {token}` asks the store for a vouching note for the main agent's
+  identity (the device key signs the request, through the agent language) and answers the
+  `VouchNote`; `identity.status.vouched` is the store's `vouched` on the page at the head.
   `ad4m-executor init --operator <did:scid>` records the operator (`operator_record`, never
   replaced by `init`); `identity.claimOffer` (operator only) claims with the main wallet key and
   refuses `already-linked` / `no-operator` / `first-link` inside

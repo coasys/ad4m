@@ -46,7 +46,10 @@ pub const CUSTODY_METHODS: &[&str] = &[
     // A restore from the 12 words finds the identity that lists their `m0`: a read.
     "identity.keyOwner",
     "identity.cosignIncept",
+    // The custody service builds event #0 and solves its proof of work at these parameters.
+    "identity.powParams",
     "identity.publish",
+    "identity.attachNote",
     "identity.openOffer",
     "identity.offers",
     "identity.claimOffer",

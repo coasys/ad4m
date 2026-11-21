@@ -16,15 +16,15 @@ use crate::agent::capabilities::{
 };
 use crate::agent::AgentContext;
 use crate::identity::types::{
-    AcceptJoinParams, CancelJoinParams, ClaimOfferParams, ClaimOfferResult, CosignInceptParams,
-    DeleteRequestParams, DeviceKeys, DeviceRequest, DeviceView, DidResolutionResult,
-    EndPreparedParams, IdentityLog, IdentityStatus, InboxAckParams, InboxEntry, InboxPutParams,
-    InboxStored, JoinAccepted, JoinCancelled, JoinStatus, JoinStatusParams, KeyOwner,
-    KeyOwnerParams, LogParams, OfferListing, OfferOpened, OffersParams, OpenOfferParams,
-    PostRequestParams, PrepareDeviceParams, PreparedDevice, PreparedEnded, PublishParams,
-    RecordKey, RecordParams, RecordPutParams, RecordStored, RequestPosted, RequestsParams,
-    ResetLogParams, ResolveParams, SealedInboxMessage, SignedHead, StoredRecord,
-    UnwrapRecordKeyParams,
+    AcceptJoinParams, AttachNoteParams, CancelJoinParams, ClaimOfferParams, ClaimOfferResult,
+    CosignInceptParams, DeleteRequestParams, DeviceKeys, DeviceRequest, DeviceView,
+    DidResolutionResult, EndPreparedParams, IdentityLog, IdentityStatus, InboxAckParams,
+    InboxEntry, InboxPutParams, InboxStored, JoinAccepted, JoinCancelled, JoinStatus,
+    JoinStatusParams, KeyOwner, KeyOwnerParams, LogParams, OfferListing, OfferOpened, OffersParams,
+    OpenOfferParams, PostRequestParams, PowParams, PrepareDeviceParams, PreparedDevice,
+    PreparedEnded, PublishParams, RecordKey, RecordParams, RecordPutParams, RecordStored,
+    RequestPosted, RequestsParams, ResetLogParams, ResolveParams, SealedInboxMessage, SignedHead,
+    StoredRecord, UnwrapRecordKeyParams, VouchNote,
 };
 use crate::types::RequestContext;
 
@@ -135,6 +135,19 @@ async fn publish(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpc
     answer(
         crate::identity::service()?
             .publish(&ctx.acts_as(), &p)
+            .await?,
+    )
+}
+
+async fn pow_params(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    answer(crate::identity::service()?.pow_params().await?)
+}
+
+async fn attach_note(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let p: AttachNoteParams = parse(params)?;
+    answer(
+        crate::identity::service()?
+            .attach_note(&ctx.acts_as(), &p)
             .await?,
     )
 }
@@ -388,6 +401,14 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .guard(Guard::UserOrOperator(AGENT_SIGN_CAPABILITY.clone()));
     map.method::<PublishParams, SignedHead>("identity.publish", publish)
         .guard(Guard::UserOrOperator(AGENT_UPDATE_CAPABILITY.clone()));
+    // The cost of the proof of work a new log without a note needs: public, as `GET /v1/pow`.
+    map.method::<NoParams, PowParams>("identity.powParams", pow_params)
+        .read()
+        .guard(Guard::Cap(AGENT_READ_CAPABILITY.clone()));
+    // Speaks for the identity with the agent's own device key (the store keeps the note for
+    // good, and the token is spent): the guard of publish.
+    map.method::<AttachNoteParams, VouchNote>("identity.attachNote", attach_note)
+        .guard(Guard::UserOrOperator(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<OpenOfferParams, OfferOpened>("identity.openOffer", open_offer)
         .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<OffersParams, Vec<OfferListing>>("identity.offers", offers)
@@ -559,6 +580,10 @@ mod tests {
         let user_or_operator = |c: &Capability| format!("{:?}", Guard::UserOrOperator(c.clone()));
         let expected = [
             ("identity.acceptJoin", format!("{:?}", Guard::Operator)),
+            (
+                "identity.attachNote",
+                user_or_operator(&AGENT_UPDATE_CAPABILITY),
+            ),
             ("identity.cancelJoin", format!("{:?}", Guard::Operator)),
             ("identity.claimOffer", format!("{:?}", Guard::Operator)),
             (
@@ -585,6 +610,7 @@ mod tests {
                 "identity.postRequest",
                 user_or_operator(&AGENT_UPDATE_CAPABILITY),
             ),
+            ("identity.powParams", cap(&AGENT_READ_CAPABILITY)),
             ("identity.prepareDevice", format!("{:?}", Guard::Operator)),
             (
                 "identity.publish",
@@ -632,6 +658,7 @@ mod tests {
                 serde_json::json!({ "body": { "kind": "send-master" } }),
             ),
             ("identity.deleteRequest", serde_json::json!({ "id": "r" })),
+            ("identity.attachNote", serde_json::json!({ "token": "t" })),
         ] {
             let refused = map
                 .dispatch(method, params.clone(), app.clone())
@@ -670,6 +697,7 @@ mod tests {
                 "identity.keyOwner",
                 "identity.log",
                 "identity.offers",
+                "identity.powParams",
                 "identity.record",
                 "identity.requests",
                 "identity.resolve",

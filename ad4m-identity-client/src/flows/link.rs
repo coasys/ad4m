@@ -458,7 +458,10 @@ impl<'a, R: ExecutorRpc> LinkFlow<'a, R> {
             let chain = fold(&events)?;
             let signer = self.unlocked.signer(self.clock.now())?;
             let event = add_claimed(&chain, signer, &self.offer, &claimed.claim)?;
-            let head = self.executor.publish(std::slice::from_ref(&event)).await?;
+            let head = self
+                .executor
+                .publish(std::slice::from_ref(&event), None)
+                .await?;
             let (events, chain) = log_of(self.executor, &self.did).await?;
             (head, events, chain)
         };

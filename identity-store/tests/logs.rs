@@ -830,42 +830,82 @@ async fn a_signed_request_of_one_identity_is_refused_on_another_identitys_route(
 }
 
 #[tokio::test]
-async fn a_new_log_with_no_note_passes_without_a_proof_and_a_sent_proof_must_meet_the_bits() {
+async fn a_new_log_with_no_note_needs_a_proof_that_meets_the_bits() {
     let t = TestStore::new();
     let alice = Person::new("alice");
     let path = format!("/v1/logs/{}/events", alice.scid());
     let events = json!([alice.json(0)]);
 
     // Token and proof together: 400.
-    let proof = pow::solve(&alice.scid(), 8);
-    let both =
-        json!({ "events": events, "vouch": "tok", "pow": { "nonce": proof.nonce, "bits": 8 } });
+    let proof = t.pow_for(&alice.scid());
+    let both = json!({ "events": events, "vouch": "tok", "pow": proof });
     let reply = t.post(&path, &both).await;
     assert_eq!(reply.status, StatusCode::BAD_REQUEST);
     assert_eq!(reply.body["error"], "vouch-and-pow");
-    // A token: no vouching service exists yet, nothing committed.
+    // A token on a store with no `VOUCH_URL`: nothing committed.
     let reply = t
         .post(&path, &json!({ "events": events, "vouch": "tok" }))
         .await;
     assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(reply.body["error"], "vouch-unavailable");
     assert_eq!(t.count("chain_entries"), 0);
-    // A proof for another SCID: 403 pow.
-    let bob = Person::new("bob");
-    let wrong = pow::solve(&bob.scid(), 8);
+    // No proof at all: 403 pow.
+    let reply = t.post(&path, &json!({ "events": events })).await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    assert_eq!(reply.body["error"], "pow");
+    assert_eq!(t.count("logs"), 0);
+    // A proof made ahead of time, with no challenge from `GET /v1/pow`: 403 pow.
+    let ahead = pow::solve(&alice.scid(), "", 8);
     let reply = t
         .post(
             &path,
-            &json!({ "events": events, "pow": { "nonce": wrong.nonce, "bits": 8 } }),
+            &json!({ "events": events, "pow": { "nonce": ahead.nonce, "bits": 8 } }),
         )
         .await;
     assert_eq!(reply.status, StatusCode::FORBIDDEN);
     assert_eq!(reply.body["error"], "pow");
     assert_eq!(t.count("logs"), 0);
+    // A proof over a challenge that is not the store's (a token made up by the client,
+    // or another store's): 403 pow.
+    let forged = pow::solve(&alice.scid(), &bs58::encode([9u8; 40]).into_string(), 8);
+    let reply = t
+        .post(&path, &json!({ "events": events, "pow": forged }))
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    assert_eq!(reply.body["error"], "pow");
+    let other = t.store.pow_challenge();
+    let other_store = TestStore::with_key([9; 32]);
+    let foreign = pow::solve(&alice.scid(), &other_store.store.pow_challenge().nonce, 8);
+    let reply = t
+        .post(&path, &json!({ "events": events, "pow": foreign }))
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    assert_eq!(reply.body["error"], "pow");
+    // A proof over an expired challenge: 403 pow.
+    let stale = pow::solve(&alice.scid(), &other.nonce, 8);
+    t.set_now(other.expires + 1);
+    let reply = t
+        .post(&path, &json!({ "events": events, "pow": stale }))
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    assert_eq!(reply.body["error"], "pow");
+    t.set_now(T0);
+    assert_eq!(t.count("logs"), 0);
+    // A proof for another SCID over a good challenge: 403 pow.
+    let bob = Person::new("bob");
+    let wrong = t.pow_for(&bob.scid());
+    let reply = t
+        .post(&path, &json!({ "events": events, "pow": wrong }))
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    assert_eq!(reply.body["error"], "pow");
+    assert_eq!(t.count("logs"), 0);
     // A proof below the store's bits that names its own `bits`: the store checks its own, 403.
+    let challenge = t.store.pow_challenge().nonce;
     let mut start = 0u128;
     let weak = loop {
-        let p = pow::solve_range(&alice.scid(), 1, start, 1 << 16).expect("a 1-bit proof");
+        let p =
+            pow::solve_range(&alice.scid(), &challenge, 1, start, 1 << 16).expect("a 1-bit proof");
         if !pow::check(&alice.scid(), &p, 8) {
             break p;
         }
@@ -877,39 +917,58 @@ async fn a_new_log_with_no_note_passes_without_a_proof_and_a_sent_proof_must_mee
         start = u128::from_be_bytes(bytes) + 1;
     };
     let reply = t
-        .post(
-            &path,
-            &json!({ "events": events, "pow": { "nonce": weak.nonce, "bits": 1 } }),
-        )
+        .post(&path, &json!({ "events": events, "pow": weak }))
         .await;
     assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
     assert_eq!(reply.body["error"], "pow");
     assert_eq!(t.count("logs"), 0);
-    // A proof that meets the bits: 200.
+    // A proof that meets the bits over a fresh challenge: 200, and it spends the challenge.
     let reply = t
-        .post(
-            &path,
-            &json!({ "events": events, "pow": { "nonce": proof.nonce, "bits": 8 } }),
-        )
+        .post(&path, &json!({ "events": events, "pow": proof }))
         .await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
-    // No proof at all: 200 (the store has no brake yet).
-    t.publish(&bob).await;
-    let page = t.get(&format!("/v1/logs/{}", bob.scid())).await.body;
+    let page = t.get(&format!("/v1/logs/{}", alice.scid())).await.body;
     assert_eq!(page["vouched"], false);
-    // A proof on a log that exists: 400.
+    assert_eq!(page["note"], Value::Null);
+    assert_eq!(t.admitted_by(&alice.scid()), "brake");
+    // Its challenge is spent: a proof over it for a new log is refused too.
+    let carol = Person::new("carol");
+    let spent = pow::solve(&carol.scid(), proof["challenge"].as_str().unwrap(), 8);
     let reply = t
         .post(
-            &path,
-            &json!({ "events": events, "pow": { "nonce": proof.nonce, "bits": 8 } }),
+            &format!("/v1/logs/{}/events", carol.scid()),
+            &json!({ "events": [carol.json(0)], "pow": spent }),
         )
         .await;
-    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    assert_eq!(reply.body["error"], "pow");
+    assert_eq!(t.count("logs"), 1);
+    // A repeat of #0 with its proof (a resumed create): the conflict of any repeat, 409.
+    let reply = t
+        .post(&path, &json!({ "events": events, "pow": proof }))
+        .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(reply.body["error"], "conflict");
+    assert_eq!(reply.body["head"]["seq"], 0);
+    // A proof with a later event: 400, before any replay.
+    let mut later = alice.json(0);
+    later["seq"] = json!(1);
+    let reply = t
+        .post(&path, &json!({ "events": [later], "pow": proof }))
+        .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert_eq!(reply.body["error"], "malformed");
+    assert!(
+        reply.body["detail"]
+            .as_str()
+            .is_some_and(|m| m.contains("only with event #0")),
+        "{}",
+        reply.body
+    );
+    assert_eq!(t.count("logs"), 1);
 
     let pow_params = t.get("/v1/pow").await.body;
     assert_eq!(pow_params["bits"], 8);
-    assert_eq!(pow_params["previousBits"], 8);
-    assert_eq!(pow_params["changedAt"], T0);
 }
 
 #[tokio::test]
@@ -940,7 +999,7 @@ async fn a_malformed_event_or_a_wrong_scid_is_400_and_an_unknown_log_is_404() {
     let reply = t
         .post(
             &format!("/v1/logs/{}/events", alice.scid()),
-            &json!({ "events": [unsigned] }),
+            &json!({ "events": [unsigned], "pow": t.pow_for(&alice.scid()) }),
         )
         .await;
     assert_eq!(reply.status, StatusCode::BAD_REQUEST);
@@ -975,7 +1034,8 @@ async fn an_event_that_names_a_member_twice_is_400_duplicate_member_and_appends_
     );
     assert_eq!(t.count("chain_entries"), 0);
     // The same event once: stored.
-    let body = format!(r#"{{"events":[{text}]}}"#);
+    let pow = t.pow_for(&alice.scid());
+    let body = format!(r#"{{"events":[{text}],"pow":{pow}}}"#);
     let reply = t.send("POST", &path, Some(body.into_bytes()), None).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
 }
@@ -1528,12 +1588,13 @@ async fn an_unknown_log_is_not_stored_by_caches() {
 #[tokio::test]
 async fn logs_and_heads_are_readable_from_any_origin_and_writes_only_from_the_configured_ones() {
     let t = TestStore::with_settings(Settings {
-        pow_bits: 8,
         cors_origins: vec!["https://app.example".into()],
-        ..Settings::default()
+        ..TestStore::settings()
     });
     let alice = Person::new("alice");
-    let incept = serde_json::to_vec(&json!({ "events": [alice.json(0)] })).unwrap();
+    let incept =
+        serde_json::to_vec(&json!({ "events": [alice.json(0)], "pow": t.pow_for(&alice.scid()) }))
+            .unwrap();
 
     // A write from another origin carries no CORS grant; the store still answers it.
     let write = t

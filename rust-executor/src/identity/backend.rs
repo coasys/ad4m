@@ -12,9 +12,9 @@ use std::time::Duration;
 use ad4m_ldk::identity::{
     AgentRecord, AppendRequest, Claim, ClaimReceipt, DeviceRequest, ForbiddenReason,
     IdentityErrorCode, InboxAddress, InboxAuth, InboxMessage, InboxStored, InboxWrite,
-    KeyIndexEntry, LogPage, OfferListing, OfferOpened, OfferProgress, PostedRequest,
+    KeyIndexEntry, LogPage, OfferListing, OfferOpened, OfferProgress, PostedRequest, PowParams,
     RateLimitScope, RecordStored, RequestPosted, SealedRecord, SignedHead, SignedOffer,
-    SignedRequest, StoredRecord,
+    SignedRequest, StoredRecord, VouchNote,
 };
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
@@ -101,6 +101,17 @@ pub trait IdentityBackend: Send + Sync {
         wait_s: u8,
     ) -> Result<Option<KeyIndexEntry>, IdentityError>;
     async fn append(&self, did: &str, req: &AppendRequest) -> Result<SignedHead, IdentityError>;
+    /// The cost of a proof of work the store asks for now (`GET /v1/pow`).
+    async fn pow_params(&self) -> Result<PowParams, IdentityError>;
+    /// Redeems a vouching token for `did` and keeps the note beside its log
+    /// (`POST /v1/notes/{scid}`), with a request a key of the identity signed over the body
+    /// `{"token": token}`.
+    async fn attach_note(
+        &self,
+        did: &str,
+        token: &str,
+        req: &SignedRequest,
+    ) -> Result<VouchNote, IdentityError>;
     /// Writes an agent record (`PUT /v1/agents/{did}`); a `did:scid` record comes with a
     /// signed request of that identity.
     async fn put_agent(
@@ -348,6 +359,23 @@ impl IdentityBackend for AgentLanguageBackend {
     async fn append(&self, did: &str, req: &AppendRequest) -> Result<SignedHead, IdentityError> {
         self.call(Capability::IdentityAppend, &[did.into(), json(req)?])
             .await
+    }
+
+    async fn pow_params(&self) -> Result<PowParams, IdentityError> {
+        self.call(Capability::IdentityPowParams, &[]).await
+    }
+
+    async fn attach_note(
+        &self,
+        did: &str,
+        token: &str,
+        req: &SignedRequest,
+    ) -> Result<VouchNote, IdentityError> {
+        self.call(
+            Capability::IdentityAttachNote,
+            &[did.into(), token.into(), json(req)?],
+        )
+        .await
     }
 
     async fn put_agent(
