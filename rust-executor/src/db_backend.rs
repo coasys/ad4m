@@ -404,6 +404,11 @@ macro_rules! ad4m_db_methods {
             fn local_identities(&self) -> Ad4mDbResult<Vec<String>>;
             fn add_join(&self, join: &JoinRow) -> Ad4mDbResult<()>;
             fn join(&self, offer_id: &str) -> Ad4mDbResult<Option<JoinRow>>;
+            // The pending unlinks of local agents' device keys (`identity.unlinkSelf`)
+            fn set_unlink_intent(&self, agent_did: &str, scid: &str, set_at: u64) -> Ad4mDbResult<()>;
+            fn unlink_intent(&self, agent_did: &str) -> Ad4mDbResult<Option<String>>;
+            fn unlink_intents(&self) -> Ad4mDbResult<Vec<(String, String)>>;
+            fn clear_unlink_intent(&self, agent_did: &str) -> Ad4mDbResult<()>;
 
             // Re-key of the main agent: the rows that move to its new DID (`db/rekey.rs`)
             fn move_notification_owner(&self, old: &str, new: &str) -> Ad4mDbResult<usize>;
