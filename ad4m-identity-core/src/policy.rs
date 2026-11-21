@@ -75,6 +75,8 @@ pub enum FoldError {
     UnknownKey(KeyId),
     #[error("RevokedKey: {0}")]
     RevokedKey(KeyId),
+    #[error("UnlinkedKey: {0}")]
+    UnlinkedKey(KeyId),
     #[error("DuplicateKey: {0} is already in the log")]
     DuplicateKey(Multikey),
     #[error("KeyIdOrder: key id {got}, expected {want}")]
@@ -137,6 +139,7 @@ impl FoldError {
             FoldError::BadProof(_) => "BadProof",
             FoldError::UnknownKey(_) => "UnknownKey",
             FoldError::RevokedKey(_) => "RevokedKey",
+            FoldError::UnlinkedKey(_) => "UnlinkedKey",
             FoldError::DuplicateKey(_) => "DuplicateKey",
             FoldError::KeyIdOrder { .. } => "KeyIdOrder",
             FoldError::NotABot(_) => "NotABot",
@@ -245,6 +248,8 @@ fn genesis(event: &Event, replay: Replay) -> Result<(ChainId, KeyState), FoldErr
             enc: None,
             added: 0,
             revoked: None,
+            unlinked: None,
+            revoked_since: None,
             scopes: Vec::new(),
         }],
         next: Some(next.clone()),
@@ -278,12 +283,35 @@ fn apply(state: &mut KeyState, event: &Event, replay: Replay) -> Result<(), Fold
             require_master(state, event, replay)?;
             insert_key(state, key, seq, replay)?;
         }
-        Op::Revoke { revoke } => {
+        Op::Revoke { revoke, since } => {
             if revoke.is_empty() {
                 return Err(FormatError::EmptyRevoke.into());
             }
             require_master(state, event, replay)?;
-            revoke_keys(state, revoke, seq)?;
+            revoke_keys(state, revoke, seq, *since)?;
+        }
+        Op::Unlink { unlink } => {
+            let record = state
+                .keys
+                .get(unlink)
+                .ok_or_else(|| FoldError::UnknownKey(unlink.clone()))?;
+            if record.revoked.is_some() {
+                return Err(FoldError::RevokedKey(unlink.clone()));
+            }
+            if record.unlinked.is_some() {
+                return Err(FoldError::UnlinkedKey(unlink.clone()));
+            }
+            let method = format!("{}#{unlink}", state.did);
+            if event.proof.iter().any(|p| p.verification_method == method) {
+                // the key unlinks itself: its proof only
+                let signer = (unlink.clone(), record.sign.clone());
+                check_signers(&state.did, event, &[signer], replay)?;
+            } else {
+                require_master(state, event, replay)?;
+            }
+            if let Some(record) = state.keys.get_mut(unlink) {
+                record.unlinked = Some(seq);
+            }
         }
         Op::Rotate {
             master,
@@ -306,7 +334,7 @@ fn apply(state: &mut KeyState, event: &Event, replay: Replay) -> Result<(), Fold
             }
             let id = state.next_master_id();
             check_signers(&state.did, event, &[(id.clone(), master.clone())], replay)?;
-            revoke_keys(state, revoke, seq)?;
+            revoke_keys(state, revoke, seq, None)?;
             if let Some(old) = state.masters.last_mut() {
                 old.revoked = Some(seq);
             }
@@ -316,6 +344,8 @@ fn apply(state: &mut KeyState, event: &Event, replay: Replay) -> Result<(), Fold
                 enc: None,
                 added: seq,
                 revoked: None,
+                unlinked: None,
+                revoked_since: None,
                 scopes: Vec::new(),
             });
             state.next = next.clone();
@@ -336,6 +366,9 @@ fn apply(state: &mut KeyState, event: &Event, replay: Replay) -> Result<(), Fold
                 .ok_or_else(|| FoldError::UnknownKey(key.clone()))?;
             if record.revoked.is_some() {
                 return Err(FoldError::RevokedKey(key.clone()));
+            }
+            if record.unlinked.is_some() {
+                return Err(FoldError::UnlinkedKey(key.clone()));
             }
             if record.scopes.is_empty() {
                 return Err(FoldError::NotABot(key.clone()));
@@ -424,13 +457,20 @@ fn insert_key(
             enc: Some(key.enc.clone()),
             added: seq,
             revoked: None,
+            unlinked: None,
+            revoked_since: None,
             scopes,
         },
     );
     Ok(())
 }
 
-fn revoke_keys(state: &mut KeyState, ids: &[KeyId], seq: u64) -> Result<(), FoldError> {
+fn revoke_keys(
+    state: &mut KeyState,
+    ids: &[KeyId],
+    seq: u64,
+    since: Option<u64>,
+) -> Result<(), FoldError> {
     for id in ids {
         let record = state
             .keys
@@ -440,6 +480,7 @@ fn revoke_keys(state: &mut KeyState, ids: &[KeyId], seq: u64) -> Result<(), Fold
             return Err(FoldError::RevokedKey(id.clone()));
         }
         record.revoked = Some(seq);
+        record.revoked_since = since;
     }
     Ok(())
 }

@@ -106,14 +106,32 @@
     },
     {
       "format": "coasys/1",
-      "op": "revoke",
+      "op": "unlink",
       "prev": "QmWa1oi3x68BNmsi82VLivJsFkWGnnQ8Djy9594KPm3xmg",
       "proof": [
         {
           "cryptosuite": "eddsa-jcs-2022",
           "domain": "coasys:kel",
           "proofPurpose": "assertionMethod",
-          "proofValue": "z65sPdnvZi7p8mmCxuq7FyXFDeKZc3SLz8pNSnPWvzDQGuxpNYzjkyXpJiq5q436vTXZiwxEAGXL2jQSUwNzxZnsB",
+          "proofValue": "z45zhg2R7wMsaXpP8HKyFejyJ5q1erk8d8F1Jg2yUSQ2fUZMmecQZKMKvFyabZNpX3wTRQtEQ5A2bTc8F1M68jRxJ",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c#m0"
+        }
+      ],
+      "scid": "QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
+      "seq": 3,
+      "unlink": "d2"
+    },
+    {
+      "format": "coasys/1",
+      "op": "revoke",
+      "prev": "QmUBeDyY2Rfichm5UPJTfFyLUjF42quxwEJTBLX5rRtXCv",
+      "proof": [
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z3xUiRtGCaym3hst4uGbW6CQyAeUMDDsTG6hB72W9tZAoFhcBkvzmopCaAGdXjBq69WYnZxm7DYPU3sVakzNQJD2Z",
           "type": "DataIntegrityProof",
           "verificationMethod": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c#m0"
         }
@@ -122,20 +140,21 @@
         "d2"
       ],
       "scid": "QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
-      "seq": 3
+      "seq": 4,
+      "since": 1700000000000
     },
     {
       "format": "coasys/1",
       "master": "z6Mko91TaXkMdgzgpaQXWcwqQJCYz6rHsopLB4fScGjwWhQK",
       "next": "QmVvFnLYvMzZ2XJuoBvyZsqt9qn6hZo4MUTMC8Fj9aHJXd",
       "op": "rotate",
-      "prev": "Qmc4VKEGNbhSGEogtEMEHP38fWHrfQo2tRys5AwPKfP9UU",
+      "prev": "QmbYd7W38d96vENnmnLevdBMM1NAcT3r8huXXNpDK6fKQG",
       "proof": [
         {
           "cryptosuite": "eddsa-jcs-2022",
           "domain": "coasys:kel",
           "proofPurpose": "assertionMethod",
-          "proofValue": "z3GyVVUsHhtebpYsHYFYHTPdyLMcNnv2Y7jPqCxHorWBuneXxJbbi4poKsP8YesCuzcQsuqWfV9t44SzTk8dR1o2W",
+          "proofValue": "zEGYYKRDxG8EtLyQMts8oWuuF1ugjr7kGadyb5AnnTzJ8xL5HHsGo8aRA91eX71eWyijbByxbSumda6cs4tZVyvg",
           "type": "DataIntegrityProof",
           "verificationMethod": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c#m1"
         }
@@ -145,7 +164,7 @@
       ],
       "salt": "7DqbanfBGH8JLz4xeScbj2",
       "scid": "QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
-      "seq": 4
+      "seq": 5
     },
     {
       "add": [
@@ -159,49 +178,50 @@
       "format": "coasys/1",
       "offer": "offer-1",
       "op": "add",
-      "prev": "QmdLnz6wErfLi1KgfPjmkw3hfLWWhFFGJDT4CbVfq7AP2v",
+      "prev": "QmbuZW5E3NQh8KUpN1H4Neu9ByUX1EdbMgetSEoK9f4U4c",
       "proof": [
         {
           "cryptosuite": "eddsa-jcs-2022",
           "domain": "coasys:kel",
           "proofPurpose": "assertionMethod",
-          "proofValue": "z4PknqHEvDhexYoMafxLKUgVYpQit8A5iPeCGCTkkkUtVVNzvPAqh3CYHfA3SbTk76L8zuTDncKqU8hRPJy2pamCe",
+          "proofValue": "z3mvpMFSLMGW6L48VKocvmXVte5Bk2fV5P1U9ebMiLdGKVSz5jmh19aohLmDBEN5Zqdz6c8FDgsURbNK2Q1mGeo4b",
           "type": "DataIntegrityProof",
           "verificationMethod": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c#m1"
         }
       ],
       "scid": "QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
-      "seq": 5
+      "seq": 6
     },
     {
       "format": "coasys/1",
       "master": "z6MkiHTZ9xT973Yj5KJCXbHKw8j7XyzYYEW5BZTmzppkKEoP",
       "next": null,
       "op": "rotate",
-      "prev": "QmSTq2YGAFQWbN3xwABNq3fTq58NCvrW9pwxFiRbptjynW",
+      "prev": "QmNkRHSG48baLHguazUAn4QcAeJCkTkp1Kodj92pAiTL51",
       "proof": [
         {
           "cryptosuite": "eddsa-jcs-2022",
           "domain": "coasys:kel",
           "proofPurpose": "assertionMethod",
-          "proofValue": "zbYhsNr4fkCLJskFJ3TMUyfqJdJjxChNu6vtEhu585yY5UHvic7t5PrffugTVzeV3gaTW1pguEufg68ZtqwX3Vxx",
+          "proofValue": "zJx5knjk2Ay3uqb8XoJ7dHmJ8tE5XXyUsPtSHr6ZqUwC64kGEXvmpnCAyF7WgFmWS9Vk883niymSVXPJPua8shxE",
           "type": "DataIntegrityProof",
           "verificationMethod": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c#m2"
         }
       ],
       "salt": "RAGdryeF4Mik4njDvU79Wb",
       "scid": "QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
-      "seq": 6
+      "seq": 7
     }
   ],
   "hashes": [
     "QmSM5HpZtRFmwMrFcfUMd9uMCc11HHRLFLWsh7i7hrzBG5",
     "QmbtyNNC6sTJRt8jVwnbGjARHBoC9mEjf73igmvKUGVp6p",
     "QmWa1oi3x68BNmsi82VLivJsFkWGnnQ8Djy9594KPm3xmg",
-    "Qmc4VKEGNbhSGEogtEMEHP38fWHrfQo2tRys5AwPKfP9UU",
-    "QmdLnz6wErfLi1KgfPjmkw3hfLWWhFFGJDT4CbVfq7AP2v",
-    "QmSTq2YGAFQWbN3xwABNq3fTq58NCvrW9pwxFiRbptjynW",
-    "QmNyifeGUhjSKXTxKXFkaJduPzfoa8LfdVsqBnMikJPHCE"
+    "QmUBeDyY2Rfichm5UPJTfFyLUjF42quxwEJTBLX5rRtXCv",
+    "QmbYd7W38d96vENnmnLevdBMM1NAcT3r8huXXNpDK6fKQG",
+    "QmbuZW5E3NQh8KUpN1H4Neu9ByUX1EdbMgetSEoK9f4U4c",
+    "QmNkRHSG48baLHguazUAn4QcAeJCkTkp1Kodj92pAiTL51",
+    "QmQBbhT5XQ5MjzYMMEQEmGXnfzovJ5q2ipq7XjNetmNRJR"
   ],
   "scid": "QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
   "state": {
@@ -212,23 +232,28 @@
         "added": 0,
         "enc": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
         "id": "d1",
-        "revoked": 4,
+        "revoked": 5,
+        "revokedSince": null,
         "scopes": [],
-        "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+        "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ",
+        "unlinked": null
       },
       "d2": {
         "added": 0,
         "enc": "z6LSc4sHQ2fVcPSLNdN3FhYDveHwwy42eSWE3nfowN14k15n",
         "id": "d2",
-        "revoked": 3,
+        "revoked": 4,
+        "revokedSince": 1700000000000,
         "scopes": [],
-        "sign": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr"
+        "sign": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr",
+        "unlinked": 3
       },
       "d3": {
         "added": 1,
         "enc": "z6LSckrdiKrtfit19uPRwAK3WA7DLCaaUBrZGDLdTXkBSprp",
         "id": "d3",
-        "revoked": 6,
+        "revoked": 7,
+        "revokedSince": null,
         "scopes": [
           [
             1,
@@ -250,15 +275,18 @@
             }
           ]
         ],
-        "sign": "z6Mkmu4QQQajcBEcm7r2iumaUyNZ45t5tUuojTUUSzdX3kYr"
+        "sign": "z6Mkmu4QQQajcBEcm7r2iumaUyNZ45t5tUuojTUUSzdX3kYr",
+        "unlinked": null
       },
       "d4": {
-        "added": 5,
+        "added": 6,
         "enc": "z6LSg48mscT2aR7KbSouwbP26ne6LKsPegK9fdUbEJKatcCD",
         "id": "d4",
-        "revoked": 6,
+        "revoked": 7,
+        "revokedSince": null,
         "scopes": [],
-        "sign": "z6MkqSRMEYA6z9ToJjGrH8vYKtjjnRseu48jLPdYDXN8brSa"
+        "sign": "z6MkqSRMEYA6z9ToJjGrH8vYKtjjnRseu48jLPdYDXN8brSa",
+        "unlinked": null
       }
     },
     "kind": "human",
@@ -267,25 +295,31 @@
         "added": 0,
         "enc": null,
         "id": "m0",
-        "revoked": 4,
+        "revoked": 5,
+        "revokedSince": null,
         "scopes": [],
-        "sign": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq"
+        "sign": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+        "unlinked": null
       },
       {
-        "added": 4,
+        "added": 5,
         "enc": null,
         "id": "m1",
-        "revoked": 6,
+        "revoked": 7,
+        "revokedSince": null,
         "scopes": [],
-        "sign": "z6Mko91TaXkMdgzgpaQXWcwqQJCYz6rHsopLB4fScGjwWhQK"
+        "sign": "z6Mko91TaXkMdgzgpaQXWcwqQJCYz6rHsopLB4fScGjwWhQK",
+        "unlinked": null
       },
       {
-        "added": 6,
+        "added": 7,
         "enc": null,
         "id": "m2",
-        "revoked": 6,
+        "revoked": 7,
+        "revokedSince": null,
         "scopes": [],
-        "sign": "z6MkiHTZ9xT973Yj5KJCXbHKw8j7XyzYYEW5BZTmzppkKEoP"
+        "sign": "z6MkiHTZ9xT973Yj5KJCXbHKw8j7XyzYYEW5BZTmzppkKEoP",
+        "unlinked": null
       }
     ],
     "next": null,
@@ -352,26 +386,26 @@
       "key": "m0",
       "now": 1700000000,
       "seq": 4,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "m0",
+      "now": 1850000000,
+      "seq": 4,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "m0",
+      "now": 1700000000,
+      "seq": 5,
       "validAt": false,
       "validAtTime": false
     },
     {
       "key": "m0",
       "now": 1850000000,
-      "seq": 4,
-      "validAt": false,
-      "validAtTime": false
-    },
-    {
-      "key": "m0",
-      "now": 1700000000,
-      "seq": 5,
-      "validAt": false,
-      "validAtTime": false
-    },
-    {
-      "key": "m0",
-      "now": 1850000000,
       "seq": 5,
       "validAt": false,
       "validAtTime": false
@@ -391,6 +425,20 @@
       "validAtTime": false
     },
     {
+      "key": "m0",
+      "now": 1700000000,
+      "seq": 7,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m0",
+      "now": 1850000000,
+      "seq": 7,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
       "key": "m1",
       "now": 1700000000,
       "seq": 0,
@@ -450,41 +498,55 @@
       "key": "m1",
       "now": 1700000000,
       "seq": 4,
-      "validAt": true,
-      "validAtTime": true
-    },
-    {
-      "key": "m1",
-      "now": 1850000000,
-      "seq": 4,
-      "validAt": true,
-      "validAtTime": true
-    },
-    {
-      "key": "m1",
-      "now": 1700000000,
-      "seq": 5,
-      "validAt": true,
-      "validAtTime": true
-    },
-    {
-      "key": "m1",
-      "now": 1850000000,
-      "seq": 5,
-      "validAt": true,
-      "validAtTime": true
-    },
-    {
-      "key": "m1",
-      "now": 1700000000,
-      "seq": 6,
       "validAt": false,
       "validAtTime": false
     },
     {
       "key": "m1",
       "now": 1850000000,
+      "seq": 4,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m1",
+      "now": 1700000000,
+      "seq": 5,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "m1",
+      "now": 1850000000,
+      "seq": 5,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "m1",
+      "now": 1700000000,
       "seq": 6,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "m1",
+      "now": 1850000000,
+      "seq": 6,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "m1",
+      "now": 1700000000,
+      "seq": 7,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m1",
+      "now": 1850000000,
+      "seq": 7,
       "validAt": false,
       "validAtTime": false
     },
@@ -587,6 +649,20 @@
       "validAtTime": false
     },
     {
+      "key": "m2",
+      "now": 1700000000,
+      "seq": 7,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "m2",
+      "now": 1850000000,
+      "seq": 7,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
       "key": "d1",
       "now": 1700000000,
       "seq": 0,
@@ -646,26 +722,26 @@
       "key": "d1",
       "now": 1700000000,
       "seq": 4,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d1",
+      "now": 1850000000,
+      "seq": 4,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d1",
+      "now": 1700000000,
+      "seq": 5,
       "validAt": false,
       "validAtTime": false
     },
     {
       "key": "d1",
       "now": 1850000000,
-      "seq": 4,
-      "validAt": false,
-      "validAtTime": false
-    },
-    {
-      "key": "d1",
-      "now": 1700000000,
-      "seq": 5,
-      "validAt": false,
-      "validAtTime": false
-    },
-    {
-      "key": "d1",
-      "now": 1850000000,
       "seq": 5,
       "validAt": false,
       "validAtTime": false
@@ -685,6 +761,20 @@
       "validAtTime": false
     },
     {
+      "key": "d1",
+      "now": 1700000000,
+      "seq": 7,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d1",
+      "now": 1850000000,
+      "seq": 7,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
       "key": "d2",
       "now": 1700000000,
       "seq": 0,
@@ -783,6 +873,20 @@
       "validAtTime": false
     },
     {
+      "key": "d2",
+      "now": 1700000000,
+      "seq": 7,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d2",
+      "now": 1850000000,
+      "seq": 7,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
       "key": "d3",
       "now": 1700000000,
       "seq": 0,
@@ -870,13 +974,27 @@
       "key": "d3",
       "now": 1700000000,
       "seq": 6,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d3",
+      "now": 1850000000,
+      "seq": 6,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d3",
+      "now": 1700000000,
+      "seq": 7,
       "validAt": false,
       "validAtTime": false
     },
     {
       "key": "d3",
       "now": 1850000000,
-      "seq": 6,
+      "seq": 7,
       "validAt": false,
       "validAtTime": false
     },
@@ -954,27 +1072,41 @@
       "key": "d4",
       "now": 1700000000,
       "seq": 5,
-      "validAt": true,
-      "validAtTime": true
-    },
-    {
-      "key": "d4",
-      "now": 1850000000,
-      "seq": 5,
-      "validAt": true,
-      "validAtTime": true
-    },
-    {
-      "key": "d4",
-      "now": 1700000000,
-      "seq": 6,
       "validAt": false,
       "validAtTime": false
     },
     {
       "key": "d4",
       "now": 1850000000,
+      "seq": 5,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d4",
+      "now": 1700000000,
       "seq": 6,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d4",
+      "now": 1850000000,
+      "seq": 6,
+      "validAt": true,
+      "validAtTime": true
+    },
+    {
+      "key": "d4",
+      "now": 1700000000,
+      "seq": 7,
+      "validAt": false,
+      "validAtTime": false
+    },
+    {
+      "key": "d4",
+      "now": 1850000000,
+      "seq": 7,
       "validAt": false,
       "validAtTime": false
     }
