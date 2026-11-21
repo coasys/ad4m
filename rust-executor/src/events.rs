@@ -52,6 +52,7 @@ pub enum Topic {
     InboxMessage,
     StorageStateChanged,
     StorageMigrationProgress,
+    IndexListingChanged,
     TenantUsageChanged,
     TenantJoined,
     TenantLeft,
@@ -60,7 +61,7 @@ pub enum Topic {
 
 impl Topic {
     /// Every topic, in the order of `events_ws::event_specs`.
-    pub const ALL: [Topic; 39] = [
+    pub const ALL: [Topic; 40] = [
         Topic::AiSessionChanged,
         Topic::AgentStatusChanged,
         Topic::AgentUpdated,
@@ -96,6 +97,7 @@ impl Topic {
         Topic::InboxMessage,
         Topic::StorageStateChanged,
         Topic::StorageMigrationProgress,
+        Topic::IndexListingChanged,
         Topic::TenantUsageChanged,
         Topic::TenantJoined,
         Topic::TenantLeft,
@@ -141,6 +143,7 @@ impl Topic {
             Topic::InboxMessage => "inbox-message",
             Topic::StorageStateChanged => "storage-state-changed",
             Topic::StorageMigrationProgress => "storage-migration-progress",
+            Topic::IndexListingChanged => "index-listing-changed",
             Topic::TenantUsageChanged => "tenant-usage-changed",
             Topic::TenantJoined => "tenant-joined",
             Topic::TenantLeft => "tenant-left",
@@ -174,6 +177,8 @@ impl Topic {
             | Topic::ConfigChanged
             | Topic::StorageStateChanged
             | Topic::StorageMigrationProgress
+            // `index.status` is the operator's: the listing's state goes to the operator only.
+            | Topic::IndexListingChanged
             | Topic::LinkTicket
             | Topic::InboxMessage
             // The host's own events (AR-05 4.13.2): `host.tenants` and `host.policy` are the

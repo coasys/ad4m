@@ -1,13 +1,15 @@
 //! API module — WebSocket RPC + minimal HTTP endpoints.
 //!
 //! All SDK operations go through the WebSocket at `/api/v1/ws`.
-//! The only HTTP routes are health, info, and binary audio feed.
+//! The only HTTP routes are health, info, `POST /api/v1/rpc` (the open methods) and the
+//! binary audio feed.
 
 pub mod auth;
 pub mod errors;
 pub mod event_interest;
 pub mod events_ws;
 pub mod guards;
+pub mod http_rpc;
 pub mod internal;
 pub mod openai_compat;
 pub mod types;
@@ -28,6 +30,7 @@ pub mod expressions_ws;
 pub mod host_ws;
 pub mod hosting_ws;
 pub mod identity_ws;
+pub mod index_ws;
 pub mod key_login_ws;
 pub mod languages_ws;
 pub mod neighbourhoods_ws;
@@ -108,6 +111,11 @@ pub fn api_router(state: AppState) -> Router {
         Router::new()
             // ── WebSocket RPC (primary client transport) ──
             .route("/ws", get(ws_rpc::ws_rpc))
+            // ── The open methods over HTTP, for callers that cannot open a socket ──
+            .route(
+                "/rpc",
+                post(http_rpc::http_rpc).layer(DefaultBodyLimit::max(http_rpc::MAX_BODY_BYTES)),
+            )
             // ── HTTP-only: binary transcription feed (can't go through WS JSON) ──
             .route(
                 "/ai/transcription/feed",

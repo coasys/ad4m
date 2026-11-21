@@ -8,6 +8,7 @@ REST/WS shim. Split plan: spec item 6.
 | Route | Handler | Notes |
 |---|---|---|
 | `GET /api/v1/ws` | `ws_rpc.rs` | JSON-RPC-ish: `{type, id, ...params}` → `HandlerMap::dispatch`. Auth once at upgrade (`auth.rs`). Per-request cancel token (`request.cancel`). An `identity.publish` or `identity.cosignIncept` frame whose event names a member twice, or that repeats `params`, `events` or `event`, is refused from the frame's text (`identity_ws::duplicate_member_refusal`, 400 `invalid: DuplicateMember`): the params `Value` keeps only the last. The refusal comes after `HandlerMap::admit`, so a caller the guard refuses gets the access answer. **Also carries events** (`events_ws::build_event_stream`, filtered by `events.watch`) and the connection's live query updates; the only event socket |
+| `POST /api/v1/rpc` | `http_rpc.rs` | `{method, params}` → `{result}` or `{error: {code, message}}`. Runs only methods whose guard is `Open` through the same handler map, as an anonymous caller (never the loopback operator): any other method is 403 `forbidden`, an unknown one 404 `not-found`, a body that is not JSON 400, a body over 64 KiB 413. `code` is the method's own (`error.data.code`, e.g. `not-a-host` from `host.join`), else its status's name. No token or session is read; the global CORS layer (any origin) covers it, which is harmless since it reads no credentials and runs only what any anonymous socket may. Exists for server-side callers (the hosting index's health check) that cannot open a WebSocket |
 | `GET /health`, `POST /internal/shutdown` | `internal.rs` | `INTERNAL_API_TOKEN` |
 | `/v1/*`, `/api/v1/openai/v1/*` | `openai_compat/router.rs` | chat/completions, embeddings, audio (`audio/transcriptions` passes through to the model's endpoint), realtime WS (`input_audio_buffer.commit` = one utterance) |
 
@@ -204,7 +205,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-287 methods: Cap 93, CapAnyPointer 3, Executor 48, Open 13, Operator 49, Owns 76, UserOrOperator 5. Local only (the operator on this machine): 17.
+291 methods: Cap 93, CapAnyPointer 3, Executor 48, Open 13, Operator 53, Owns 76, UserOrOperator 5. Local only (the operator on this machine): 17.
 
 | Method | Guard |
 |---|---|
@@ -334,6 +335,10 @@ the guard checked:
 | `identity.resolve` | `Cap(agent:READ)` |
 | `identity.status` | `Cap(agent:READ)` |
 | `identity.unwrapRecordKey` | `Operator`, local only |
+| `index.configure` | `Operator` |
+| `index.publish` | `Operator` |
+| `index.status` | `Operator` |
+| `index.withdraw` | `Operator` |
 | `language.all` | `Cap(language:READ)` |
 | `language.applyTemplate` | `Cap(language:CREATE)` |
 | `language.get` | `Cap(language:READ)` |

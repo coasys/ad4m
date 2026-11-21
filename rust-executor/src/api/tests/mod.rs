@@ -21,6 +21,8 @@ pub mod handler_table_tests;
 #[cfg(test)]
 pub mod held_tenant_tests;
 #[cfg(test)]
+pub mod http_rpc_tests;
+#[cfg(test)]
 pub mod link_status_ws_tests;
 #[cfg(test)]
 pub mod live_query_tests;

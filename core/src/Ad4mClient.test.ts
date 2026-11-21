@@ -45,6 +45,10 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'identity.status': { did: 'did:scid:coasys:1:QmTest', deviceKey: 'z6MkTest', deviceEnc: 'z6LSTest', keyId: 'd1', revoked: null, head: null, fork: null, storeBehind: null, store: { url: 'https://store.ad4m.dev', trusted: true }, vouched: false },
     'identity.publish': { seq: 0, hash: 'QmHead', time: 1, sig: 'z' },
     'identity.powParams': { bits: 22, challenge: { nonce: 'Challenge1', expires: 300 } },
+    'index.configure': (p: Record<string, unknown>) => p,
+    'index.status': { config: { url: 'https://index.example/v1/index', enabled: true }, scid: 'did:scid:coasys:1:QmTest', executorDid: 'did:key:z6MkTest', allowed: true, listing: null },
+    'index.publish': (p: Record<string, unknown>) => ({ listingId: 'l1', ...p, state: 'listed', reason: null }),
+    'index.withdraw': true,
     'identity.attachNote': (p: Record<string, unknown>) => ({ did: 'did:scid:coasys:1:QmTest', method: 'email', time: 1, voucher: 'did:key:z6MkVoucher', sig: String(p.token) }),
     'identity.claimOffer': (p: Record<string, unknown>) => ({ did: 'did:scid:coasys:1:QmTest', offerId: 'offer', matchCode: 'R7K Q2M', kind: 'node', expires: 1, needsAccept: false, echo: p }),
     'identity.acceptJoin': { accepted: true },
@@ -54,6 +58,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'identity.devices': [],
     'identity.rekey': { sign: 'did:key:z6MkNew', enc: 'z6LSNew' },
     // ── Host ──
+    'host.info': { multiUser: true, signup: 'anyone', name: 'Home', runByCoasys: false, full: false, operatorDid: 'did:scid:coasys:1:QmTest', executorDid: 'did:key:z6MkTest', admitsGuests: true, freeAccess: true, version: '1' },
     'host.join': { joinHandle: 'h1', tenantId: 't1', deviceDid: 'did:key:z6MkTenant', rejoin: false },
     'host.joinStatus': { state: 'active', reason: null },
     'host.leave': (p: Record<string, unknown>) => ({ kept: p.keepData, removedPerspectives: 0, leftSharedPerspectives: 0, keyDestroyedAt: null, shreddedEverywhereAt: null }),
@@ -1401,6 +1406,14 @@ describe('RuntimeClient', () => {
 // ===================== IDENTITY TESTS =====================
 // ===================== HOST TESTS =====================
 describe('HostClient', () => {
+    test('info() reads what the hosting index reads', async () => {
+        const info = await ad4m.host.info();
+        expect(lastRpcCall!.type).toBe('host.info');
+        expect(info.signup).toBe('anyone');
+        expect(info.operatorDid).toBe('did:scid:coasys:1:QmTest');
+        expect(info.executorDid).toBe('did:key:z6MkTest');
+    });
+
     test('join() sends the identity, the offer and the invite secret', async () => {
         const joined = await ad4m.host.join('did:scid:coasys:1:QmTest', 'coasys:offer:1:x', 'c2VjcmV0');
         expect(lastRpcCall!.type).toBe('host.join');
@@ -1616,6 +1629,50 @@ describe('IdentityClient', () => {
 });
 
 // ===================== AI TESTS =====================
+describe('HostingIndexClient', () => {
+    test('configure() sends the url and the switch', async () => {
+        const config = { url: 'https://index.example/v1/index', enabled: true };
+        expect(await ad4m.hostingIndex.configure(config)).toEqual(config);
+        expect(lastRpcCall!.type).toBe('index.configure');
+        expect(lastRpcCall!.params).toEqual(config);
+    });
+
+    test('status() reads the listing through the executor', async () => {
+        const status = await ad4m.hostingIndex.status();
+        expect(lastRpcCall!.type).toBe('index.status');
+        expect(lastRpcCall!.params).toEqual({});
+        expect(status.allowed).toBe(true);
+        expect(status.listing).toBeNull();
+    });
+
+    test('publish() sends only the operator text', async () => {
+        const text = { name: 'Home', description: 'A host', location: 'Berlin', url: 'https://host.example.org' };
+        const listing = await ad4m.hostingIndex.publish(text);
+        expect(lastRpcCall!.type).toBe('index.publish');
+        expect(lastRpcCall!.params).toEqual(text);
+        expect(listing.state).toBe('listed');
+    });
+
+    test('withdraw() calls index.withdraw', async () => {
+        expect(await ad4m.hostingIndex.withdraw()).toBe(true);
+        expect(lastRpcCall!.type).toBe('index.withdraw');
+    });
+
+    test('onListingChanged() receives the listing of an index-listing-changed event', async () => {
+        const freshClient = newClient();
+        const callback = jest.fn();
+        const unsubscribe = freshClient.hostingIndex.onListingChanged(callback);
+        const listing = { state: 'delisted', reason: 'charging' } as any;
+        lastOf(MockWebSocket.instances).emit(event('index-listing-changed', listing));
+        expect(callback).toHaveBeenCalledTimes(1);
+        expect(callback.mock.calls[0][0]).toMatchObject(listing);
+        unsubscribe();
+        lastOf(MockWebSocket.instances).emit(event('index-listing-changed', listing));
+        expect(callback).toHaveBeenCalledTimes(1);
+    });
+
+});
+
 describe('AIClient', () => {
     test('getModels() returns models', async () => {
         const models = await ad4m.ai.getModels();

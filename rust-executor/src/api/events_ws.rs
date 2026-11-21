@@ -151,6 +151,7 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<crate::identity::types::InboxMessageEvent>(InboxMessage, false),
         EventSpec::of::<crate::at_rest::StorageStatus>(StorageStateChanged, false),
         EventSpec::of::<crate::at_rest::StorageMigrationProgress>(StorageMigrationProgress, false),
+        EventSpec::of::<crate::hosting::index_client::OwnListing>(IndexListingChanged, false),
         EventSpec::of::<crate::hosting::TenantUsageChangedEvent>(TenantUsageChanged, false),
         EventSpec::of::<crate::hosting::TenantJoinedEvent>(TenantJoined, false),
         EventSpec::of::<crate::hosting::TenantLeftEvent>(TenantLeft, false),
@@ -359,6 +360,7 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
         | Topic::InboxMessage
         | Topic::StorageStateChanged
         | Topic::StorageMigrationProgress
+        | Topic::IndexListingChanged
         | Topic::TenantUsageChanged
         | Topic::TenantJoined
         | Topic::TenantLeft
@@ -915,6 +917,12 @@ mod audience_matrix_tests {
             (
                 "storage-migration-progress".into(),
                 event(Topic::StorageMigrationProgress, Audience::Operator),
+                vec!["operator"],
+            ),
+            // The hosting index's view of this executor's listing: the operator only.
+            (
+                "index-listing-changed".into(),
+                event(Topic::IndexListingChanged, Audience::Operator),
                 vec!["operator"],
             ),
         ];
@@ -2593,6 +2601,30 @@ mod event_spec_tests {
                     stores_done: 2,
                     stores_total: 4,
                     store: Some("language:QmLanguage".into()),
+                }),
+            ),
+            (
+                Topic::IndexListingChanged,
+                serde_json::to_value(crate::hosting::index_client::OwnListing {
+                    listing_id: "l".into(),
+                    name: "n".into(),
+                    description: String::new(),
+                    location: "l".into(),
+                    url: "https://h.example".into(),
+                    executor_did: "did:key:z6Mk".into(),
+                    operator_did: "did:scid:coasys:1:Qm".into(),
+                    run_by_coasys: false,
+                    ai_models: vec![],
+                    rates: vec![],
+                    signup: "anyone".into(),
+                    admits_guests: true,
+                    free_access: true,
+                    full: false,
+                    approval: serde_json::json!({ "kind": "approved", "since": "2026-11-01" }),
+                    last_seen_at: "2026-11-20T00:00:00Z".into(),
+                    version: "0.1".into(),
+                    state: "listed".into(),
+                    reason: None,
                 }),
             ),
             (

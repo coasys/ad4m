@@ -1103,6 +1103,7 @@ pub(crate) mod tests {
             ai_endpoints: None,
             ai_models: None,
             ai_defaults: None,
+            hosting_index: None,
             host: None,
         };
         let file_json = serde_json::to_value(&file).unwrap();
