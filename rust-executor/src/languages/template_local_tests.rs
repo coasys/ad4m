@@ -8,6 +8,7 @@ use super::language_runtime::{LanguageOperation, LanguageRuntimeRequest};
 use super::language_runtime_handle::LanguageRuntimeHandle;
 use super::mount_tests::interact;
 use super::LanguageController;
+use crate::utils::languages_directory;
 use serde_json::{json, Map, Value as JsonValue};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -207,4 +208,42 @@ async fn an_unknown_source_is_not_found() {
         .unwrap_err();
 
     assert!(matches!(error, LanguageError::NotFound { .. }), "{error}");
+}
+
+#[tokio::test]
+async fn a_source_that_is_not_a_plain_address_is_refused() {
+    let controller = setup();
+    // A bundle outside the languages directory, which a path in the address could reach.
+    let outside = languages_directory()
+        .parent()
+        .expect("languages directory has a parent")
+        .join(format!("outside-{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(
+        outside.join("bundle.js"),
+        "//!@ad4m-template-variable\nconst seed = \"\";\n",
+    )
+    .unwrap();
+    let escape = format!("../{}", outside.file_name().unwrap().to_string_lossy());
+
+    for address in [
+        escape.as_str(),
+        outside.to_str().unwrap(),
+        "Qm/sub",
+        "Qm\\sub",
+        "..",
+        "",
+        "Qm abc",
+    ] {
+        let error = controller
+            .apply_template_local(address, template_data(&[("seed", "x")]))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, LanguageError::InvalidBundle { .. })
+                && error.to_string().contains("plain language address"),
+            "{address:?}: {error}"
+        );
+    }
+    std::fs::remove_dir_all(&outside).unwrap();
 }
