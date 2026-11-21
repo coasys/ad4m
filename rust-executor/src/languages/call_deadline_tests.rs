@@ -29,6 +29,21 @@ fn spawn_runtime(name: &str) -> (LanguageRuntimeHandle, tempfile::TempDir) {
     (handle, dir)
 }
 
+/// Waits until `globalThis.__log`, read by a concurrent call, is `expected`:
+/// the calls that push to it have started.
+async fn log_reaches(handle: &LanguageRuntimeHandle, expected: &str) {
+    within(Duration::from_secs(10), expected, async {
+        loop {
+            let log = concurrent(handle, "JSON.stringify(globalThis.__log)".into()).await;
+            if log.expect("the log check answers").trim() == expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+}
+
 /// The CPU time this process has used, user and system.
 fn process_cpu_time() -> Duration {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
@@ -987,16 +1002,21 @@ async fn a_stalled_import_in_a_concurrent_call_does_not_free_the_ordered_call() 
                 .await
         })
     };
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    log_reaches(&handle, r#"["ordered"]"#).await;
 
     // Concurrent: its `import()` stalls on the module's top-level await — the
     // event loop reports the stall as an isolate-level error.
     let stalled = {
         let handle = handle.clone();
         tokio::spawn(async move {
-            concurrent(&handle, format!(r#"await import("{stalled_url}")"#)).await
+            concurrent(
+                &handle,
+                format!(r#"(globalThis.__log.push("stalled"), await import("{stalled_url}"))"#),
+            )
+            .await
         })
     };
+    log_reaches(&handle, r#"["ordered","stalled"]"#).await;
     // Queued behind the ordered call: starts only when it ends.
     let behind = {
         let handle = handle.clone();
@@ -1026,7 +1046,7 @@ async fn a_stalled_import_in_a_concurrent_call_does_not_free_the_ordered_call() 
     .await;
     assert_eq!(
         log.expect("the check answers").trim(),
-        r#"["ordered"]"#,
+        r#"["ordered","stalled"]"#,
         "a call ran before the ordered call's promise settled"
     );
     assert!(
