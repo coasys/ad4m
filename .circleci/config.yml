@@ -610,9 +610,8 @@ jobs:
             mv "$dst.tmp" "$dst"
             ls -l "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/"
 
-  # Clippy and the Rust tests outside rust-executor. They run here, beside rust-tests,
-  # because rust-executor's single-threaded suite alone fills rust-tests; both jobs are
-  # required checks. Each test step runs even if an earlier step failed.
+  # Clippy and the Rust tests outside rust-executor. They run here, beside rust-tests;
+  # both jobs are required checks. Each test step runs even if an earlier step failed.
   clippy:
     machine: true
     resource_class: coasys/marvin
@@ -678,31 +677,14 @@ jobs:
           name: cargo fmt --check
           command: cargo fmt --check
 
+  # rust-executor's tests under cargo-nextest: one process per test, in parallel
+  # (.config/nextest.toml, profile `ci`). On these runners the run took 23 s where the
+  # serial `cargo test` run takes about 8 min. The profile leaves out 18 tests that need a
+  # global another test set up (they run in rust-tests-serial) and nextest runs no
+  # doc-tests (rust-executor has 9, all ignored). The JUnit report gives per-test times in
+  # the job's Tests tab. nextest is a pinned release, checked against its SHA-256, kept
+  # in the runner's workdir (not the shared ~/.cargo/bin).
   rust-tests:
-    machine: true
-    resource_class: coasys/marvin
-    steps:
-      - fix_workdir
-      - checkout
-      - heavy_gate
-      - setup_env
-      - restore_rust_compile_inputs
-      - run:
-          # Unit tests, the crate's integration tests and doc-tests; the same command as
-          # the crate's `pnpm test` script.
-          name: rust-executor tests
-          command: cd rust-executor && cargo test --release -- --test-threads=1
-          no_output_timeout: 30m
-
-  # Trial, not a required check: the same suite under cargo-nextest, one process per
-  # test, in parallel (.config/nextest.toml, profile `ci`). On one box it took about 30 s
-  # against about 6 min for rust-tests. It runs beside rust-tests for a few days so the
-  # two can be compared on these runners; rust-tests stays the gate. The profile leaves
-  # out 18 tests that need a global another test set up (they run in rust-tests) and
-  # nextest runs no doc-tests (rust-executor has 9, all ignored). The JUnit report gives
-  # per-test times in the job's Tests tab. nextest is a pinned release, checked against
-  # its SHA-256, kept in the runner's workdir (not the shared ~/.cargo/bin).
-  rust-tests-nextest:
     machine: true
     resource_class: coasys/marvin
     steps:
@@ -726,11 +708,32 @@ jobs:
             fi
             echo "export PATH=\"$bin:\$PATH\"" >> "$BASH_ENV"
       - run:
+          # --lib: every test of the crate is in the lib. Without it cargo also compiles
+          # the crate a second time, without cfg(test), to link the test binary of the
+          # generate_snapshot bin, which holds no test. rust-tests-serial builds all targets.
           name: rust-executor tests (nextest, profile ci)
-          command: cd rust-executor && cargo nextest run --release --profile ci
+          command: cd rust-executor && cargo nextest run --release --lib --profile ci
           no_output_timeout: 30m
       - store_test_results:
           path: target/nextest/ci/junit.xml
+
+  # The same suite in one process, one test after the other: the crate's `pnpm test`
+  # script. It runs on dev, staging and main only (see the workflow), not on PR branches,
+  # and is not a required check. It runs the 18 tests the nextest profile leaves out, and
+  # it is the run that shows a test that passes or fails only because of what another
+  # test left in a global.
+  rust-tests-serial:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - fix_workdir
+      - checkout
+      - setup_env
+      - restore_rust_compile_inputs
+      - run:
+          name: rust-executor tests (serial, one process)
+          command: cd rust-executor && cargo test --release -- --test-threads=1
+          no_output_timeout: 30m
 
   # The Rust client: unit tests plus its real-executor integration test.
   # ad4m-executor comes from the build job's stash; AD4M_REQUIRE_EXECUTOR
@@ -1425,10 +1428,16 @@ workflows:
       - rust-tests:
           requires:
             - build
-      # Trial beside rust-tests; not a required check (see the job).
-      - rust-tests-nextest:
+      # After a merge only; not a required check (see the job).
+      - rust-tests-serial:
           requires:
             - build
+          filters:
+            branches:
+              only:
+                - dev
+                - staging
+                - main
       - rust-client-tests:
           requires:
             - build
