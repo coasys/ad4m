@@ -4236,8 +4236,8 @@ mod tests {
         assert_eq!(links.len(), 1);
         assert_eq!(
             svc.quad_count(),
-            9,
-            "direct triple, rdf:reifies, 7 annotations"
+            10,
+            "direct triple, rdf:reifies, 8 annotations (the judgement version among them)"
         );
 
         svc.remove_link(&link).unwrap();
