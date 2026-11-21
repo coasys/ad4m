@@ -239,10 +239,24 @@ export class NeighbourhoodClient {
         return this.#apiClient.onNetworkChange(callback)
     }
 
+    /** Ask the SFU to send the session `participantId`'s pending offer and the
+     *  room's roster again, after this client's socket came back. An executor
+     *  older than `sfu.callResume` refuses it with 404 "Unknown type". */
+    async sfuCallResume(neighbourhoodUrl: string, roomName: string, participantId: string): Promise<boolean> {
+        // Not in the generated method table until the executor that has it regenerates it.
+        const call = this.#apiClient.call as unknown as (method: string, params: unknown) => Promise<boolean>
+        return call.call(this.#apiClient, "sfu.callResume", { neighbourhoodUrl, roomName, participantId })
+    }
+
+    /** Fires after the client's socket opened again after a drop. See {@link ApiClient.onReconnect}. */
+    onReconnect(callback: () => void): () => void {
+        return this.#apiClient.onReconnect(callback)
+    }
+
     /** Check the client's socket now: one that says nothing within a
      *  deadline is treated as a network change. See {@link ApiClient.checkConnection}. */
-    checkConnection(): void {
-        this.#apiClient.checkConnection()
+    checkConnection(deadlineMs?: number): void {
+        this.#apiClient.checkConnection(deadlineMs)
     }
 
     async sfuGetConfig(neighbourhoodUrl: string): Promise<SfuConfig> {

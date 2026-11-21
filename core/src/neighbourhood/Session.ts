@@ -33,6 +33,11 @@ export type SessionEvent =
      * that join took it over: this session's call has ended, and it is idle again.
      */
     | "replaced"
+    /**
+     * `(SfuCallEnded)` — the SFU call ended on its own: it could not be rebuilt
+     * (`reason: "gave-up"`). The session is idle; show the reason and offer to join again.
+     */
+    | "call-ended"
     | "error"
 
 export type SessionEventCallback = (...args: any[]) => void
@@ -569,6 +574,16 @@ export function createSession(config: SessionImplConfig): Session {
         sfu.on("stream-removed", (stream: MediaStream, track: MediaStreamTrack) => {
             if (!current()) return
             emit("stream-removed", stream, track)
+        })
+        // The call could not be kept up and ended (the rebuild budget ran out).
+        // The manager has stopped; the session is idle and may join again.
+        sfu.on("call-ended", (event: unknown) => {
+            if (sfuManager !== sfu) return
+            if (dataUnsubscribe) { dataUnsubscribe(); dataUnsubscribe = null }
+            sfuManager = null
+            // Idle before listeners hear it: one may join again at once.
+            setState("idle")
+            emit("call-ended", event)
         })
         // Another tab on this device took the call over. The manager has stopped
         // and will not rejoin; the session is idle and may join again.
