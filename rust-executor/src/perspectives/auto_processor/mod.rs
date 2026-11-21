@@ -20,8 +20,12 @@
 pub mod claim;
 pub mod config;
 pub mod cursor;
+pub(crate) mod delta_read;
 pub mod events;
 pub mod watcher;
+
+#[cfg(test)]
+mod event_driven_tests;
 
 /// Render a hydrated `model_query` scalar as a `String`. Both classes write
 /// their scalars as `literal:string:` targets, but a value that hydrates to a

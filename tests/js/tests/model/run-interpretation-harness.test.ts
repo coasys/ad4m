@@ -17,11 +17,11 @@
  * provider (query + propose_* + propose_link_child) → OpenAI-compat bridge
  * → real LLM → buffered ops → overlay gate → real links.
  *
- * Requires a reachable LLM (Ollama over OpenAI-compatible API). On the
- * self-hosted CI runner (Marvin) it is local; from a dev box, tunnel it.
- * Endpoint + model are env-overridable (identical to the single-shot test):
- *   INTERPRETATION_E2E_BASE_URL (default http://localhost:11434/v1)
- *   INTERPRETATION_E2E_MODEL    (default gemma3:12b)
+ * Requires staging's llama-server. Endpoint + model are env-overridable
+ * (identical to the single-shot test, via `addE2eLlm`):
+ *   INTERPRETATION_E2E_BASE_URL (default http://127.0.0.1:12460/v1)
+ *   INTERPRETATION_E2E_MODEL    (default qwen3.8-27b-ud-q4_k_m)
+ *   INTERPRETATION_E2E_ENDPOINT_KIND (default LLAMA_SERVER)
  *
  * Run with (from tests/js, executor built + `pnpm run prepare-test` once):
  *   LLM_E2E=1 pnpm ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/model/run-interpretation-harness.test.ts
@@ -30,15 +30,12 @@
 import { expect } from "chai";
 import { Ad4mClient, LinkQuery, PerspectiveProxy } from "@coasys/ad4m";
 import type { AutoProcessorEvent } from "@coasys/ad4m";
-import { startAgent } from "../../helpers/index.js";
+import { addE2eLlm, startAgent } from "../../helpers/index.js";
 import { ExtBelief, ExtIntention } from "./interpretation-models.js";
-
-const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
-const MODEL = process.env.INTERPRETATION_E2E_MODEL || "gemma3:12b";
 
 // LLM E2E gate — these suites drive the executor's real LLM path. Skipped by
 // default (unset `LLM_E2E`); the nightly `llm-e2e` workflow on `dev` runs them
-// against Marvin's Ollama. Run locally with `LLM_E2E=1`, or the umbrella
+// against the host's llama-server. Run locally with `LLM_E2E=1`, or the umbrella
 // `./scripts/run-llm-e2e.sh` at the repo root.
 const describeIfLLM: Mocha.SuiteFunction = (process.env.LLM_E2E === "1"
   ? describe
@@ -52,7 +49,7 @@ const MAX_TOOL_CALLS = 15;
 // the link step. This mirrors the Rust e2e's 8-attempt guard in
 // `interpretation_test_support::run_harness_e2e_until` — the harness *can*
 // produce the target graph state; we just don't require it on the first draw
-// against a small local model at Ollama-default temperature.
+// against the local model at its default temperature.
 const HARNESS_E2E_MAX_ATTEMPTS = Number(process.env.HARNESS_E2E_MAX_ATTEMPTS ?? "8");
 
 async function targetsOf(p: PerspectiveProxy, source: string, predicate: string): Promise<string[]> {
@@ -105,7 +102,8 @@ async function purgeGenerated(
 }
 
 describeIfLLM("perspective.runInterpretationWithHarness (WS + real LLM)", function () {
-  this.timeout(1_200_000);
+  // A harness pass is several requests, and each may queue on the one slot.
+  this.timeout(2_400_000);
 
   let ad4m: Ad4mClient;
   let stop: (() => Promise<void>) | null = null;
@@ -113,22 +111,16 @@ describeIfLLM("perspective.runInterpretationWithHarness (WS + real LLM)", functi
   let seededBeliefUris: Set<string>;
 
   before(async function () {
-    // Ollama-backed default LLM. On the Marvin CI runner MODEL is
-    // pre-installed; from a dev box, tunnel to it. Match the classic
-    // `run-interpretation.test.ts` approach: `addModel` sets up the
-    // provider record and any subsequent LLM call either works or fails
-    // loudly. No pre-flight probe / skip — a missing model on a runner
-    // that's supposed to have it is a real regression to surface, not
-    // silently pass (Nico's PR #911 review, 2026-08-25).
+    // llama-server default LLM. `addE2eLlm` registers the endpoint the way
+    // the executor expects (LLAMA_SERVER, native tools). No pre-flight
+    // probe / skip — a missing model on a runner that's supposed to have
+    // it is a real regression to surface, not silently pass (Nico's PR
+    // #911 review, 2026-08-25).
     const agent = await startAgent("run-interpretation-harness");
     ad4m = agent.client;
     stop = agent.stop;
 
-    const modelId = await ad4m.ai.addModel({
-      name: "harness-llm",
-      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OPEN_AI" },
-      modelType: "LLM",
-    } as any);
+    const modelId = await addE2eLlm(ad4m, "harness-llm");
     await ad4m.ai.setDefaultModel("LLM", modelId);
 
     p = await ad4m.perspective.add("run-interpretation-harness-test");
@@ -298,7 +290,8 @@ describeIfLLM("perspective.runInterpretationWithHarness (WS + real LLM)", functi
  * are HasMany relations to the same target class).
  */
 describeIfLLM("perspective.runInterpretationWithHarness — relation interpretation hints", function () {
-  this.timeout(1_200_000);
+  // A harness pass is several requests, and each may queue on the one slot.
+  this.timeout(2_400_000);
 
   let ad4m: Ad4mClient;
   let stop: (() => Promise<void>) | null = null;
@@ -313,11 +306,7 @@ describeIfLLM("perspective.runInterpretationWithHarness — relation interpretat
     ad4m = agent.client;
     stop = agent.stop;
 
-    const modelId = await ad4m.ai.addModel({
-      name: "harness-llm",
-      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OPEN_AI" },
-      modelType: "LLM",
-    } as any);
+    const modelId = await addE2eLlm(ad4m, "harness-llm");
     await ad4m.ai.setDefaultModel("LLM", modelId);
 
     p = await ad4m.perspective.add("run-interpretation-harness-relation-hints-test");
@@ -487,7 +476,8 @@ describeIfLLM("perspective.runInterpretationWithHarness — relation interpretat
  * (`ExtBelief_create` or `ExtBelief_query`).
  */
 describeIfLLM("perspective.runInterpretationWithHarness — tool-call events", function () {
-  this.timeout(1_200_000);
+  // A harness pass is several requests, and each may queue on the one slot.
+  this.timeout(2_400_000);
 
   let ad4m: Ad4mClient;
   let stop: (() => Promise<void>) | null = null;
@@ -500,11 +490,7 @@ describeIfLLM("perspective.runInterpretationWithHarness — tool-call events", f
     ad4m = agent.client;
     stop = agent.stop;
 
-    const modelId = await ad4m.ai.addModel({
-      name: "harness-llm",
-      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OPEN_AI" },
-      modelType: "LLM",
-    } as any);
+    const modelId = await addE2eLlm(ad4m, "harness-llm");
     await ad4m.ai.setDefaultModel("LLM", modelId);
 
     p = await ad4m.perspective.add("run-interpretation-harness-events-test");

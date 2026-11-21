@@ -1,0 +1,527 @@
+{
+  "schemaVersion": 1,
+  "runId": "aaaaf035",
+  "startedAt": "2026-11-03T04:40:37.217Z",
+  "finishedAt": "2026-11-03T04:41:20.234Z",
+  "hardwareClass": "amd-igpu-uma-128",
+  "fingerprint": {
+    "os": "linux",
+    "osVersion": "Ubuntu 26.04 LTS",
+    "kernel": "7.0.0-38-generic",
+    "arch": "x64",
+    "cpu": {
+      "model": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cores": 16,
+      "threads": 32
+    },
+    "memoryBytes": 131891142656,
+    "gpus": [
+      {
+        "vendor": "amd",
+        "name": "Advanced Micro Devices, Inc. [AMD/ATI] Strix Halo [Radeon Graphics / Radeon 8050S Graphics / Radeon 8060S Graphics]",
+        "vramBytes": 536870912,
+        "gttBytes": 65945571328,
+        "unified": true,
+        "pciId": "0000:c2:00.0"
+      }
+    ],
+    "backends": [
+      "cpu",
+      "rocm",
+      "vulkan"
+    ],
+    "gpuBudgetBytes": 66482442240,
+    "drivers": {
+      "rocm": "10.0.0",
+      "amdgpu": "in-kernel 7.0.0-38-generic"
+    },
+    "id": "d9d043fd"
+  },
+  "executor": {
+    "commit": "cf70b3b1b",
+    "binary": "ad4m-executor",
+    "version": "ad4m 0.13.1-staging.6",
+    "harnessCommit": "3d1bf4809afcd0a05f94d17fb4b6f50fb7c2b6df"
+  },
+  "options": {
+    "repeat": 3,
+    "concurrency": [
+      1,
+      4
+    ],
+    "providers": [
+      "nemo-speech"
+    ],
+    "services": [
+      "stt"
+    ],
+    "direct": true
+  },
+  "providers": {
+    "nemo-speech": {
+      "status": "available",
+      "builds": [
+        "linux-x64-vulkan",
+        "linux-x64-cpu"
+      ],
+      "mode": "spawned",
+      "version": "0.3.0"
+    }
+  },
+  "cells": [
+    {
+      "provider": "nemo-speech",
+      "service": "stt",
+      "status": "pass",
+      "model": {
+        "modelId": "parakeet-tdt-0.6b-v3-q8_0",
+        "remoteModel": "parakeet-tdt-0.6b-v3-q8_0",
+        "sizeBytes": 713975456,
+        "memoryBytes": 800000000,
+        "license": "CC-BY-4.0",
+        "params": "0.6B",
+        "source": "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3/resolve/541d1f99c6b0c3cd0b11a95167540bb8edefd82b/parakeet-tdt-0.6b-v3.q8_0.gguf"
+      },
+      "runtimeBuild": "linux-x64-vulkan",
+      "backend": "vulkan",
+      "endpointKind": "OPEN_AI_AUDIO",
+      "serverFlags": [
+        "--device",
+        "vulkan",
+        "--no-ui"
+      ],
+      "checks": [
+        {
+          "name": "transcribes recording (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes recording (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes meeting (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes meeting (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather-noisy (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.071: \"The forecast of light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0.071,
+          "threshold": 0.5
+        },
+        {
+          "name": "transcribes weather-noisy (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.071: \"The forecast of light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0.071,
+          "threshold": 0.5
+        },
+        {
+          "name": "model runs on the GPU (vulkan)",
+          "pass": true,
+          "detail": "1.62 GB of GPU memory held for a 0.71 GB model",
+          "value": 1618468864,
+          "threshold": ">= half the model size"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 144,
+        "noisyLanguage": "not reported",
+        "noisyNoHintWer": 0.071,
+        "noisyNoHintText": "The forecast of light rain in the morning, clearing to sunshine by the evening.",
+        "wer": {
+          "n": 4,
+          "median": 0,
+          "p95": 0.061,
+          "min": 0,
+          "max": 0.071,
+          "mean": 0.018
+        },
+        "werMean": 0.018,
+        "streamWerMean": 0.018,
+        "rtf": {
+          "n": 12,
+          "median": 0.02,
+          "p95": 0.025,
+          "min": 0.014,
+          "max": 0.029,
+          "mean": 0.02
+        },
+        "latencyMs": {
+          "n": 12,
+          "median": 90.281,
+          "p95": 138.4,
+          "min": 60.528,
+          "max": 165.2,
+          "mean": 95.518
+        },
+        "streamLatencyMs": {
+          "n": 4,
+          "median": 104.2,
+          "p95": 160.5,
+          "min": 78.714,
+          "max": 168.7,
+          "mean": 114
+        },
+        "audioSec": 18.99,
+        "directLatencyMs": {
+          "n": 12,
+          "median": 74.428,
+          "p95": 103.6,
+          "min": 53.805,
+          "max": 111.5,
+          "mean": 76.251
+        },
+        "executorOverheadMs": 15.9,
+        "peakRssBytes": 142987264,
+        "peakGpuBytes": 1618468864,
+        "serverReadyMs": 766,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 800000000,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 3995
+    },
+    {
+      "provider": "nemo-speech",
+      "service": "stt",
+      "status": "fail",
+      "reason": "serving the model failed: nemo-speech linux-x64-vulkan nemotron-3.5-asr-streaming-0.6b-q8_0 exited before it answered (ECONNREFUSED)",
+      "model": {
+        "modelId": "nemotron-3.5-asr-streaming-0.6b-q8_0",
+        "remoteModel": "nemotron-3.5-asr-streaming-0.6b-q8_0",
+        "sizeBytes": 742090464,
+        "memoryBytes": 800000000,
+        "license": "OpenMDW-1.1",
+        "params": "0.6B",
+        "source": "https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b/resolve/ea30d66debe3740a08b573244286791d423d6b3e/nemotron-3.5-asr-streaming-0.6b.q8_0.gguf"
+      },
+      "runtimeBuild": "linux-x64-vulkan",
+      "backend": "vulkan",
+      "endpointKind": "OPEN_AI_AUDIO",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "nemo-speech",
+      "service": "stt",
+      "status": "pass",
+      "model": {
+        "modelId": "parakeet-tdt-0.6b-v3-q8_0",
+        "remoteModel": "parakeet-tdt-0.6b-v3-q8_0",
+        "sizeBytes": 713975456,
+        "memoryBytes": 800000000,
+        "license": "CC-BY-4.0",
+        "params": "0.6B",
+        "source": "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3/resolve/541d1f99c6b0c3cd0b11a95167540bb8edefd82b/parakeet-tdt-0.6b-v3.q8_0.gguf"
+      },
+      "runtimeBuild": "linux-x64-cpu",
+      "backend": "cpu",
+      "endpointKind": "OPEN_AI_AUDIO",
+      "serverFlags": [
+        "--device",
+        "cpu",
+        "--no-ui"
+      ],
+      "checks": [
+        {
+          "name": "transcribes recording (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes recording (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes meeting (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes meeting (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather-noisy (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.071: \"The forecast of light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0.071,
+          "threshold": 0.5
+        },
+        {
+          "name": "transcribes weather-noisy (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.071: \"The forecast of light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0.071,
+          "threshold": 0.5
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 172,
+        "noisyLanguage": "not reported",
+        "noisyNoHintWer": 0.071,
+        "noisyNoHintText": "The forecast of light rain in the morning, clearing to sunshine by the evening.",
+        "wer": {
+          "n": 4,
+          "median": 0,
+          "p95": 0.061,
+          "min": 0,
+          "max": 0.071,
+          "mean": 0.018
+        },
+        "werMean": 0.018,
+        "streamWerMean": 0.018,
+        "rtf": {
+          "n": 12,
+          "median": 0.049,
+          "p95": 0.053,
+          "min": 0.033,
+          "max": 0.054,
+          "mean": 0.047
+        },
+        "latencyMs": {
+          "n": 12,
+          "median": 219.2,
+          "p95": 286.7,
+          "min": 164.3,
+          "max": 289.2,
+          "mean": 222.7
+        },
+        "streamLatencyMs": {
+          "n": 4,
+          "median": 206.9,
+          "p95": 253.6,
+          "min": 173.1,
+          "max": 260.7,
+          "mean": 211.9
+        },
+        "audioSec": 18.99,
+        "directLatencyMs": {
+          "n": 12,
+          "median": 204.7,
+          "p95": 335.4,
+          "min": 163.9,
+          "max": 364.8,
+          "mean": 225.9
+        },
+        "executorOverheadMs": 14.5,
+        "peakRssBytes": 756543488,
+        "peakGpuBytes": 0,
+        "serverReadyMs": 256,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 800000000,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 7625
+    },
+    {
+      "provider": "nemo-speech",
+      "service": "stt",
+      "status": "pass",
+      "model": {
+        "modelId": "nemotron-3.5-asr-streaming-0.6b-q8_0",
+        "remoteModel": "nemotron-3.5-asr-streaming-0.6b-q8_0",
+        "sizeBytes": 742090464,
+        "memoryBytes": 800000000,
+        "license": "OpenMDW-1.1",
+        "params": "0.6B",
+        "source": "https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b/resolve/ea30d66debe3740a08b573244286791d423d6b3e/nemotron-3.5-asr-streaming-0.6b.q8_0.gguf"
+      },
+      "runtimeBuild": "linux-x64-cpu",
+      "backend": "cpu",
+      "endpointKind": "OPEN_AI_AUDIO",
+      "serverFlags": [
+        "--device",
+        "cpu",
+        "--no-ui"
+      ],
+      "checks": [
+        {
+          "name": "transcribes recording (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes recording (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes meeting (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes meeting (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather-noisy (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.357: \"The pool happens like rain in the morning, clear into sunshine by the evening.\"",
+          "value": 0.357,
+          "threshold": 0.5
+        },
+        {
+          "name": "transcribes weather-noisy (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.357: \"The pool happens like rain in the morning, clear into sunshine by the evening.\"",
+          "value": 0.357,
+          "threshold": 0.5
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 308,
+        "noisyLanguage": "en-US",
+        "noisyNoHintWer": 0.357,
+        "noisyNoHintText": "The pool happens like rain in the morning, clear into sunshine by the evening.",
+        "wer": {
+          "n": 4,
+          "median": 0,
+          "p95": 0.304,
+          "min": 0,
+          "max": 0.357,
+          "mean": 0.089
+        },
+        "werMean": 0.089,
+        "streamWerMean": 0.089,
+        "rtf": {
+          "n": 12,
+          "median": 0.09,
+          "p95": 0.137,
+          "min": 0.05,
+          "max": 0.142,
+          "mean": 0.093
+        },
+        "latencyMs": {
+          "n": 12,
+          "median": 408.6,
+          "p95": 597.5,
+          "min": 247.1,
+          "max": 600.6,
+          "mean": 439.4
+        },
+        "streamLatencyMs": {
+          "n": 4,
+          "median": 372.5,
+          "p95": 520.2,
+          "min": 258.3,
+          "max": 538.5,
+          "mean": 385.4
+        },
+        "audioSec": 18.99,
+        "directLatencyMs": {
+          "n": 12,
+          "median": 461.1,
+          "p95": 598.3,
+          "min": 324.1,
+          "max": 636,
+          "mean": 458.5
+        },
+        "executorOverheadMs": -52.5,
+        "peakRssBytes": 1124302848,
+        "peakGpuBytes": 0,
+        "serverReadyMs": 1772,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 800000000,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 16227
+    }
+  ]
+}

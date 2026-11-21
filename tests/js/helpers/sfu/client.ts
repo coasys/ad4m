@@ -34,6 +34,8 @@ export class InstrumentedClient {
   private requestId = 0;
   /** The device this client joins calls from: one per client, as a browser profile is one. */
   private readonly deviceId = randomUUID();
+  /** The session key of this client's joins: each rejoin acts as a rebuild of its session. */
+  private readonly sessionKey = randomUUID();
   /** The session each room's last join on this client returned, by `url\nroom`. */
   private sessions = new Map<string, string>();
   private pendingRequests = new Map<
@@ -111,6 +113,7 @@ export class InstrumentedClient {
       // caller that says so.
       if (params.acceptRedirect === undefined) params = { ...params, acceptRedirect: true };
       if (params.deviceId === undefined) params = { ...params, deviceId: this.deviceId };
+      if (params.sessionKey === undefined) params = { ...params, sessionKey: this.sessionKey };
       const session = await this.wsCall<any>(method, params);
       if (session?.participantId) this.sessions.set(room, session.participantId);
       return session as T;

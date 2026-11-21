@@ -1,0 +1,2729 @@
+{
+  "schemaVersion": 1,
+  "runId": "e3c7b302",
+  "startedAt": "2026-11-03T01:58:49.213Z",
+  "finishedAt": "2026-11-03T02:09:43.806Z",
+  "hardwareClass": "amd-igpu-uma-128",
+  "fingerprint": {
+    "os": "linux",
+    "osVersion": "Ubuntu 26.04 LTS",
+    "kernel": "7.0.0-38-generic",
+    "arch": "x64",
+    "cpu": {
+      "model": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cores": 16,
+      "threads": 32
+    },
+    "memoryBytes": 131891142656,
+    "gpus": [
+      {
+        "vendor": "amd",
+        "name": "Advanced Micro Devices, Inc. [AMD/ATI] Strix Halo [Radeon Graphics / Radeon 8050S Graphics / Radeon 8060S Graphics]",
+        "vramBytes": 536870912,
+        "gttBytes": 65945571328,
+        "unified": true,
+        "pciId": "0000:c2:00.0"
+      }
+    ],
+    "backends": [
+      "cpu",
+      "rocm",
+      "vulkan"
+    ],
+    "gpuBudgetBytes": 66482442240,
+    "drivers": {
+      "rocm": "10.0.0",
+      "amdgpu": "in-kernel 7.0.0-38-generic"
+    },
+    "id": "d9d043fd"
+  },
+  "executor": {
+    "commit": "cf70b3b1be7e9ad68d97c387a2e9c2230ce0a688",
+    "binary": "ad4m-executor",
+    "version": "ad4m 0.13.1-staging.6",
+    "harnessCommit": "8143b2b1212e6e80a801d9c24e23e97fb174904c"
+  },
+  "options": {
+    "repeat": 3,
+    "concurrency": [
+      1,
+      4
+    ],
+    "providers": [
+      "ollama",
+      "llama-server",
+      "vllm",
+      "whisper-server",
+      "speaches"
+    ],
+    "services": [
+      "llm",
+      "completion",
+      "embeddings",
+      "stt",
+      "tts"
+    ],
+    "direct": true
+  },
+  "providers": {
+    "ollama": {
+      "status": "available",
+      "builds": [],
+      "mode": "spawned",
+      "version": "0.34.0"
+    },
+    "llama-server": {
+      "status": "available",
+      "builds": [
+        "linux-x64-vulkan",
+        "linux-x64-rocm"
+      ],
+      "mode": "spawned",
+      "version": "b11669"
+    },
+    "vllm": {
+      "status": "available",
+      "builds": [],
+      "mode": "docker",
+      "version": "0.33.0+strix",
+      "image": "kyuz0/vllm-therock-gfx1151:rocm10.0.0-torch2.11.0-vllm0.33.0"
+    },
+    "whisper-server": {
+      "status": "available",
+      "builds": [
+        "linux-x64-cpu"
+      ],
+      "mode": "spawned",
+      "version": "b5454"
+    },
+    "speaches": {
+      "status": "available",
+      "builds": [],
+      "mode": "docker",
+      "version": "image created 2025-09-19",
+      "image": "ghcr.io/speaches-ai/speaches:latest-cpu"
+    }
+  },
+  "cells": [
+    {
+      "provider": "ollama",
+      "service": "stt",
+      "status": "unsupported",
+      "reason": "Ollama serves no transcription API (/v1/audio/transcriptions)",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "ollama",
+      "service": "tts",
+      "status": "unsupported",
+      "reason": "Ollama serves no speech API (/v1/audio/speech)",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "ollama",
+      "service": "llm",
+      "status": "pass",
+      "model": {
+        "remoteModel": "qwen3.5:0.8b",
+        "sizeBytes": 1322069043,
+        "license": "Apache-2.0",
+        "params": "0.8B",
+        "source": "https://ollama.com/library/qwen3.5",
+        "memoryBytes": 1322069043
+      },
+      "backend": "vulkan",
+      "endpointKind": "OLLAMA",
+      "checks": [
+        {
+          "name": "factual answer (/v1/chat/completions)",
+          "pass": true,
+          "detail": "\"Paris\"",
+          "value": "Paris"
+        },
+        {
+          "name": "task prompt (SDK ai.prompt)",
+          "pass": true,
+          "detail": "\"Paris\""
+        },
+        {
+          "name": "tool call (/v1/chat/completions, tools)",
+          "pass": true,
+          "detail": "get_weather({\"city\":\"Paris\"})"
+        },
+        {
+          "name": "streaming (/v1/chat/completions, stream)",
+          "pass": true,
+          "detail": "19 chunks, \"one, two, three, four, five, six, seven, eight, nine, ten\"",
+          "value": 19,
+          "threshold": "> 1 chunk"
+        },
+        {
+          "name": "model runs on the GPU (vulkan)",
+          "pass": true,
+          "detail": "11.60 GB of GPU memory held for a 1.32 GB model",
+          "value": 11601362944,
+          "threshold": ">= half the model size"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 2926,
+        "ttftMs": {
+          "n": 3,
+          "median": 42.08,
+          "p95": 43.877,
+          "min": 40.858,
+          "max": 44.077,
+          "mean": 42.338
+        },
+        "decodeTps": {
+          "n": 3,
+          "median": 113.6,
+          "p95": 119.6,
+          "min": 113.2,
+          "max": 120.3,
+          "mean": 115.7
+        },
+        "prefillTps": {
+          "n": 3,
+          "median": 5004.6,
+          "p95": 5020.6,
+          "min": 4948,
+          "max": 5022.3,
+          "mean": 4991.7
+        },
+        "latencyMs": {
+          "n": 3,
+          "median": 58.291,
+          "p95": 64.009,
+          "min": 52.682,
+          "max": 64.645,
+          "mean": 58.539
+        },
+        "tokenCountSource": "usage",
+        "directLatencyMs": {
+          "n": 3,
+          "median": 59.677,
+          "p95": 62.051,
+          "min": 53.977,
+          "max": 62.315,
+          "mean": 58.656
+        },
+        "executorOverheadMs": -1.4,
+        "throughputTpsC1": {
+          "n": 2,
+          "median": 110.7,
+          "p95": 117.2,
+          "min": 103.4,
+          "max": 117.9,
+          "mean": 110.7
+        },
+        "throughputTpsC4": {
+          "n": 2,
+          "median": 106.2,
+          "p95": 110,
+          "min": 102.1,
+          "max": 110.4,
+          "mean": 106.2
+        },
+        "peakRssBytes": 4489248768,
+        "peakGpuBytes": 11601362944,
+        "pullMs": 1372,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 1322069043,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 26869
+    },
+    {
+      "provider": "ollama",
+      "service": "completion",
+      "status": "fail",
+      "reason": "continuation (/v1/completions): \"\"",
+      "model": {
+        "remoteModel": "qwen3.5:0.8b",
+        "sizeBytes": 1322069043,
+        "license": "Apache-2.0",
+        "params": "0.8B",
+        "source": "https://ollama.com/library/qwen3.5",
+        "memoryBytes": 1322069043
+      },
+      "backend": "vulkan",
+      "endpointKind": "OLLAMA",
+      "checks": [
+        {
+          "name": "continuation (/v1/completions)",
+          "pass": false,
+          "detail": "\"\""
+        },
+        {
+          "name": "model runs on the GPU (vulkan)",
+          "pass": true,
+          "detail": "11.64 GB of GPU memory held for a 1.32 GB model",
+          "value": 11638308864,
+          "threshold": ">= half the model size"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 147,
+        "latencyMs": {
+          "n": 3,
+          "median": 114,
+          "p95": 115.6,
+          "min": 107.4,
+          "max": 115.8,
+          "mean": 112.4
+        },
+        "directLatencyMs": {
+          "n": 3,
+          "median": 116.8,
+          "p95": 121.8,
+          "min": 116.5,
+          "max": 122.4,
+          "mean": 118.5
+        },
+        "executorOverheadMs": -2.8,
+        "peakRssBytes": 4778721280,
+        "peakGpuBytes": 11638308864,
+        "pullMs": 1372,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 1322069043,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 856
+    },
+    {
+      "provider": "ollama",
+      "service": "llm",
+      "status": "pass",
+      "model": {
+        "remoteModel": "qwen3.5:2b",
+        "sizeBytes": 2683396637,
+        "license": "Apache-2.0",
+        "params": "2B",
+        "source": "https://ollama.com/library/qwen3.5",
+        "memoryBytes": 2683396637
+      },
+      "backend": "vulkan",
+      "endpointKind": "OLLAMA",
+      "checks": [
+        {
+          "name": "factual answer (/v1/chat/completions)",
+          "pass": true,
+          "detail": "\"Paris\"",
+          "value": "Paris"
+        },
+        {
+          "name": "task prompt (SDK ai.prompt)",
+          "pass": true,
+          "detail": "\"Paris\""
+        },
+        {
+          "name": "tool call (/v1/chat/completions, tools)",
+          "pass": true,
+          "detail": "get_weather({\"city\":\"Paris\"})"
+        },
+        {
+          "name": "streaming (/v1/chat/completions, stream)",
+          "pass": true,
+          "detail": "20 chunks, \"One, two, three, four, five, six, seven, eight, nine, ten.\"",
+          "value": 20,
+          "threshold": "> 1 chunk"
+        },
+        {
+          "name": "model runs on the GPU (vulkan)",
+          "pass": true,
+          "detail": "13.07 GB of GPU memory held for a 2.68 GB model",
+          "value": 13073506304,
+          "threshold": ">= half the model size"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 2535,
+        "ttftMs": {
+          "n": 3,
+          "median": 52.203,
+          "p95": 54.1,
+          "min": 49.578,
+          "max": 54.31,
+          "mean": 52.03
+        },
+        "decodeTps": {
+          "n": 3,
+          "median": 81.098,
+          "p95": 81.782,
+          "min": 79.778,
+          "max": 81.858,
+          "mean": 80.911
+        },
+        "prefillTps": {
+          "n": 3,
+          "median": 3669,
+          "p95": 3690.9,
+          "min": 3604.7,
+          "max": 3693.3,
+          "mean": 3655.7
+        },
+        "latencyMs": {
+          "n": 3,
+          "median": 66.549,
+          "p95": 69.022,
+          "min": 65.019,
+          "max": 69.296,
+          "mean": 66.955
+        },
+        "tokenCountSource": "usage",
+        "directLatencyMs": {
+          "n": 3,
+          "median": 64.174,
+          "p95": 65.609,
+          "min": 61.269,
+          "max": 65.768,
+          "mean": 63.737
+        },
+        "executorOverheadMs": 2.4,
+        "throughputTpsC1": {
+          "n": 2,
+          "median": 78.364,
+          "p95": 78.663,
+          "min": 78.032,
+          "max": 78.696,
+          "mean": 78.364
+        },
+        "throughputTpsC4": {
+          "n": 2,
+          "median": 78.458,
+          "p95": 78.645,
+          "min": 78.25,
+          "max": 78.666,
+          "mean": 78.458
+        },
+        "peakRssBytes": 3185053696,
+        "peakGpuBytes": 13073506304,
+        "pullMs": 2022,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 2683396637,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 32598
+    },
+    {
+      "provider": "ollama",
+      "service": "llm",
+      "status": "pass",
+      "model": {
+        "remoteModel": "qwen3.5:4b",
+        "sizeBytes": 3324173757,
+        "license": "Apache-2.0",
+        "params": "4B",
+        "source": "https://ollama.com/library/qwen3.5",
+        "memoryBytes": 3324173757
+      },
+      "backend": "vulkan",
+      "endpointKind": "OLLAMA",
+      "checks": [
+        {
+          "name": "factual answer (/v1/chat/completions)",
+          "pass": true,
+          "detail": "\"Paris\"",
+          "value": "Paris"
+        },
+        {
+          "name": "task prompt (SDK ai.prompt)",
+          "pass": true,
+          "detail": "\"Paris\""
+        },
+        {
+          "name": "tool call (/v1/chat/completions, tools)",
+          "pass": true,
+          "detail": "get_weather({\"city\":\"Paris\"})"
+        },
+        {
+          "name": "streaming (/v1/chat/completions, stream)",
+          "pass": true,
+          "detail": "19 chunks, \"one, two, three, four, five, six, seven, eight, nine, ten\"",
+          "value": 19,
+          "threshold": "> 1 chunk"
+        },
+        {
+          "name": "model runs on the GPU (vulkan)",
+          "pass": true,
+          "detail": "25.51 GB of GPU memory held for a 3.32 GB model",
+          "value": 25508044800,
+          "threshold": ">= half the model size"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 3087,
+        "ttftMs": {
+          "n": 3,
+          "median": 103.7,
+          "p95": 106.2,
+          "min": 97.338,
+          "max": 106.5,
+          "mean": 102.5
+        },
+        "decodeTps": {
+          "n": 3,
+          "median": 53.806,
+          "p95": 55.394,
+          "min": 36.204,
+          "max": 55.571,
+          "mean": 48.527
+        },
+        "prefillTps": {
+          "n": 3,
+          "median": 1372.5,
+          "p95": 1384.2,
+          "min": 1263.5,
+          "max": 1385.5,
+          "mean": 1340.5
+        },
+        "latencyMs": {
+          "n": 3,
+          "median": 133.5,
+          "p95": 170.8,
+          "min": 129.7,
+          "max": 175,
+          "mean": 146.1
+        },
+        "tokenCountSource": "usage",
+        "directLatencyMs": {
+          "n": 3,
+          "median": 163.9,
+          "p95": 169.9,
+          "min": 124.8,
+          "max": 170.6,
+          "mean": 153.1
+        },
+        "executorOverheadMs": -30.4,
+        "throughputTpsC1": {
+          "n": 2,
+          "median": 45.964,
+          "p95": 48.283,
+          "min": 43.388,
+          "max": 48.541,
+          "mean": 45.964
+        },
+        "throughputTpsC4": {
+          "n": 2,
+          "median": 44.728,
+          "p95": 45.677,
+          "min": 43.672,
+          "max": 45.783,
+          "mean": 44.728
+        },
+        "peakRssBytes": 4432793600,
+        "peakGpuBytes": 25508044800,
+        "pullMs": 1179,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 3324173757,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 52305
+    },
+    {
+      "provider": "ollama",
+      "service": "embeddings",
+      "status": "pass",
+      "model": {
+        "remoteModel": "nomic-embed-text",
+        "sizeBytes": 274302030,
+        "license": "Apache-2.0",
+        "params": "137M",
+        "source": "https://ollama.com/library/nomic-embed-text",
+        "memoryBytes": 274302030
+      },
+      "backend": "vulkan",
+      "endpointKind": "OLLAMA",
+      "checks": [
+        {
+          "name": "embeds a batch (/v1/embeddings)",
+          "pass": true,
+          "detail": "6 vectors for 6 inputs"
+        },
+        {
+          "name": "embeds queries one at a time",
+          "pass": true,
+          "detail": "6 query vectors"
+        },
+        {
+          "name": "dimension is consistent",
+          "pass": true,
+          "detail": "768 dimensions",
+          "value": 768
+        },
+        {
+          "name": "retrieval ranks the expected passage first",
+          "pass": true,
+          "detail": "6/6 top-1, MRR 1.000",
+          "value": 6,
+          "threshold": 6
+        },
+        {
+          "name": "SDK ai.embed matches /v1",
+          "pass": true,
+          "detail": "768 dims, cosine 1.0000 to the /v1 vector",
+          "value": 1,
+          "threshold": "> 0.99"
+        },
+        {
+          "name": "model runs on the GPU (vulkan)",
+          "pass": true,
+          "detail": "1.06 GB of GPU memory held for a 0.27 GB model",
+          "value": 1056874496,
+          "threshold": ">= half the model size"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 1005,
+        "dimension": 768,
+        "mrr": 1,
+        "batchLatencyMs": {
+          "n": 3,
+          "median": 221.8,
+          "p95": 223,
+          "min": 221.2,
+          "max": 223.1,
+          "mean": 222
+        },
+        "textsPerSec": {
+          "n": 3,
+          "median": 144.3,
+          "p95": 144.6,
+          "min": 143.4,
+          "max": 144.6,
+          "mean": 144.1
+        },
+        "singleLatencyMs": {
+          "n": 3,
+          "median": 10.581,
+          "p95": 12.164,
+          "min": 8.163,
+          "max": 12.34,
+          "mean": 10.361
+        },
+        "directBatchLatencyMs": {
+          "n": 3,
+          "median": 227.6,
+          "p95": 229.1,
+          "min": 220.7,
+          "max": 229.3,
+          "mean": 225.9
+        },
+        "executorOverheadMs": -5.8,
+        "peakRssBytes": 503521280,
+        "peakGpuBytes": 1056874496,
+        "pullMs": 1933,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 274302030,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 4410
+    },
+    {
+      "provider": "llama-server",
+      "service": "stt",
+      "status": "unsupported",
+      "reason": "llama-server serves no transcription API (/v1/audio/transcriptions)",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "llama-server",
+      "service": "tts",
+      "status": "unsupported",
+      "reason": "llama-server b11669 has no speech route: it lists no --model-vocoder option and no /tts or /v1/audio/speech path; OuteTTS runs only in the llama-tts CLI",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "llama-server",
+      "service": "llm",
+      "status": "pass",
+      "model": {
+        "modelId": "qwen3.5-0.8b-q8_0",
+        "remoteModel": "qwen3.5-0.8b-q8_0",
+        "sizeBytes": 811843840,
+        "memoryBytes": 2800000000,
+        "license": "Apache-2.0",
+        "params": "0.8B",
+        "source": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q8_0.gguf"
+      },
+      "runtimeBuild": "linux-x64-vulkan",
+      "backend": "vulkan",
+      "endpointKind": "LLAMA_SERVER",
+      "serverFlags": [
+        "-c",
+        "8192",
+        "-ngl",
+        "999",
+        "--reasoning",
+        "off"
+      ],
+      "checks": [
+        {
+          "name": "factual answer (/v1/chat/completions)",
+          "pass": true,
+          "detail": "\"Paris\"",
+          "value": "Paris"
+        },
+        {
+          "name": "task prompt (SDK ai.prompt)",
+          "pass": true,
+          "detail": "\"Paris\""
+        },
+        {
+          "name": "tool call (/v1/chat/completions, tools)",
+          "pass": true,
+          "detail": "get_weather({\"city\":\"Paris\"})"
+        },
+        {
+          "name": "streaming (/v1/chat/completions, stream)",
+          "pass": true,
+          "detail": "19 chunks, \"one, two, three, four, five, six, seven, eight, nine, ten\"",
+          "value": 19,
+          "threshold": "> 1 chunk"
+        },
+        {
+          "name": "model runs on the GPU (vulkan)",
+          "pass": true,
+          "detail": "2.75 GB of GPU memory held for a 0.81 GB model",
+          "value": 2745106432,
+          "threshold": ">= half the model size"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 58,
+        "ttftMs": {
+          "n": 3,
+          "median": 59.455,
+          "p95": 62.849,
+          "min": 55.214,
+          "max": 63.226,
+          "mean": 59.298
+        },
+        "decodeTps": {
+          "n": 3,
+          "median": 165.3,
+          "p95": 165.8,
+          "min": 163.5,
+          "max": 165.9,
+          "mean": 164.9
+        },
+        "prefillTps": {
+          "n": 3,
+          "median": 5521.3,
+          "p95": 5652.2,
+          "min": 5054.2,
+          "max": 5666.7,
+          "mean": 5414.1
+        },
+        "latencyMs": {
+          "n": 3,
+          "median": 71.648,
+          "p95": 75.628,
+          "min": 68.875,
+          "max": 76.07,
+          "mean": 72.198
+        },
+        "tokenCountSource": "usage",
+        "directLatencyMs": {
+          "n": 3,
+          "median": 68.468,
+          "p95": 75.918,
+          "min": 63.881,
+          "max": 76.745,
+          "mean": 69.698
+        },
+        "executorOverheadMs": 3.2,
+        "throughputTpsC1": {
+          "n": 2,
+          "median": 156.2,
+          "p95": 159,
+          "min": 153.1,
+          "max": 159.3,
+          "mean": 156.2
+        },
+        "throughputTpsC4": {
+          "n": 2,
+          "median": 313.4,
+          "p95": 348.9,
+          "min": 273.9,
+          "max": 352.9,
+          "mean": 313.4
+        },
+        "peakRssBytes": 1360588800,
+        "peakGpuBytes": 2745106432,
+        "serverReadyMs": 1011,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 2800000000,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 9714
+    },
+    {
+      "provider": "llama-server",
+      "service": "completion",
+      "status": "pass",
+      "model": {
+        "modelId": "qwen3.5-0.8b-q8_0",
+        "remoteModel": "qwen3.5-0.8b-q8_0",
+        "sizeBytes": 811843840,
+        "memoryBytes": 2800000000,
+        "license": "Apache-2.0",
+        "params": "0.8B",
+        "source": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q8_0.gguf"
+      },
+      "runtimeBuild": "linux-x64-vulkan",
+      "backend": "vulkan",
+      "endpointKind": "LLAMA_SERVER",
+      "serverFlags": [
+        "-c",
+        "8192",
+        "-ngl",
+        "999",
+        "--reasoning",
+        "off"
+      ],
+      "checks": [
+        {
+          "name": "continuation (/v1/completions)",
+          "pass": true,
+          "detail": "\"Paris.\\nThe capital city of France is Paris.\\nThe capital city of\""
+        },
+        {
+          "name": "model runs on the GPU (vulkan)",
+          "pass": true,
+          "detail": "2.75 GB of GPU memory held for a 0.81 GB model",
+          "value": 2745106432,
+          "threshold": ">= half the model size"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 581,
+        "latencyMs": {
+          "n": 3,
+          "median": 214.7,
+          "p95": 411.2,
+          "min": 213.5,
+          "max": 433,
+          "mean": 287.1
+        },
+        "directLatencyMs": {
+          "n": 3,
+          "median": 215.2,
+          "p95": 221.5,
+          "min": 212.2,
+          "max": 222.2,
+          "mean": 216.6
+        },
+        "executorOverheadMs": -0.5,
+        "peakRssBytes": 1758048256,
+        "peakGpuBytes": 2745106432,
+        "serverReadyMs": 1011,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 2800000000,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 2105
+    },
+    {
+      "provider": "llama-server",
+      "service": "llm",
+      "status": "pass",
+      "model": {
+        "modelId": "qwen3.5-2b-q4_k_m",
+        "remoteModel": "qwen3.5-2b-q4_k_m",
+        "sizeBytes": 1280835840,
+        "memoryBytes": 4100000000,
+        "license": "Apache-2.0",
+        "params": "2B",
+        "source": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf"
+      },
+      "runtimeBuild": "linux-x64-vulkan",
+      "backend": "vulkan",
+      "endpointKind": "LLAMA_SERVER",
+      "serverFlags": [
+        "-c",
+        "8192",
+        "-ngl",
+        "999",
+        "--reasoning",
+        "off"
+      ],
+      "checks": [
+        {
+          "name": "factual answer (/v1/chat/completions)",
+          "pass": true,
+          "detail": "\"Paris\"",
+          "value": "Paris"
+        },
+        {
+          "name": "task prompt (SDK ai.prompt)",
+          "pass": true,
+          "detail": "\"Paris\""
+        },
+        {
+          "name": "tool call (/v1/chat/completions, tools)",
+          "pass": true,
+          "detail": "get_weather({\"city\":\"Paris\"})"
+        },
+        {
+          "name": "streaming (/v1/chat/completions, stream)",
+          "pass": true,
+          "detail": "20 chunks, \"One, two, three, four, five, six, seven, eight, nine, ten.\"",
+          "value": 20,
+          "threshold": "> 1 chunk"
+        },
+        {
+          "name": "model runs on the GPU (vulkan)",
+          "pass": true,
+          "detail": "4.01 GB of GPU memory held for a 1.28 GB model",
+          "value": 4008910848,
+          "threshold": ">= half the model size"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 196,
+        "ttftMs": {
+          "n": 3,
+          "median": 133.2,
+          "p95": 141.6,
+          "min": 124.6,
+          "max": 142.5,
+          "mean": 133.5
+        },
+        "decodeTps": {
+          "n": 3,
+          "median": 100,
+          "p95": 100.8,
+          "min": 99.943,
+          "max": 100.8,
+          "mean": 100.3
+        },
+        "prefillTps": {
+          "n": 3,
+          "median": 2137.7,
+          "p95": 2280.5,
+          "min": 1920,
+          "max": 2296.4,
+          "mean": 2118
+        },
+        "latencyMs": {
+          "n": 3,
+          "median": 146,
+          "p95": 154.6,
+          "min": 129.2,
+          "max": 155.6,
+          "mean": 143.6
+        },
+        "tokenCountSource": "usage",
+        "directLatencyMs": {
+          "n": 3,
+          "median": 145.9,
+          "p95": 152,
+          "min": 135.6,
+          "max": 152.7,
+          "mean": 144.7
+        },
+        "executorOverheadMs": 0.1,
+        "throughputTpsC1": {
+          "n": 2,
+          "median": 90.924,
+          "p95": 94.969,
+          "min": 86.43,
+          "max": 95.418,
+          "mean": 90.924
+        },
+        "throughputTpsC4": {
+          "n": 2,
+          "median": 193.5,
+          "p95": 212.3,
+          "min": 172.5,
+          "max": 214.4,
+          "mean": 193.5
+        },
+        "peakRssBytes": 1360134144,
+        "peakGpuBytes": 4008910848,
+        "serverReadyMs": 2277,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 4100000000,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 16825
+    },
+    {
+      "provider": "llama-server",
+      "service": "llm",
+      "status": "pass",
+      "model": {
+        "modelId": "qwen3.5-4b-q4_k_m",
+        "remoteModel": "qwen3.5-4b-q4_k_m",
+        "sizeBytes": 2740937888,
+        "memoryBytes": 7900000000,
+        "license": "Apache-2.0",
+        "params": "4B",
+        "source": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf"
+      },
+      "runtimeBuild": "linux-x64-vulkan",
+      "backend": "vulkan",
+      "endpointKind": "LLAMA_SERVER",
+      "serverFlags": [
+        "-c",
+        "8192",
+        "-ngl",
+        "999",
+        "--reasoning",
+        "off"
+      ],
+      "checks": [
+        {
+          "name": "factual answer (/v1/chat/completions)",
+          "pass": true,
+          "detail": "\"Paris\"",
+          "value": "Paris"
+        },
+        {
+          "name": "task prompt (SDK ai.prompt)",
+          "pass": true,
+          "detail": "\"Paris\""
+        },
+        {
+          "name": "tool call (/v1/chat/completions, tools)",
+          "pass": true,
+          "detail": "get_weather({\"city\":\"Paris\"})"
+        },
+        {
+          "name": "streaming (/v1/chat/completions, stream)",
+          "pass": true,
+          "detail": "19 chunks, \"one, two, three, four, five, six, seven, eight, nine, ten\"",
+          "value": 19,
+          "threshold": "> 1 chunk"
+        },
+        {
+          "name": "model runs on the GPU (vulkan)",
+          "pass": true,
+          "detail": "7.82 GB of GPU memory held for a 2.74 GB model",
+          "value": 7819993088,
+          "threshold": ">= half the model size"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 170,
+        "ttftMs": {
+          "n": 3,
+          "median": 157.5,
+          "p95": 158.5,
+          "min": 137.1,
+          "max": 158.6,
+          "mean": 151.1
+        },
+        "decodeTps": {
+          "n": 3,
+          "median": 63.249,
+          "p95": 63.463,
+          "min": 62.904,
+          "max": 63.487,
+          "mean": 63.213
+        },
+        "prefillTps": {
+          "n": 3,
+          "median": 1591,
+          "p95": 1687.5,
+          "min": 1582.9,
+          "max": 1698.2,
+          "mean": 1624
+        },
+        "latencyMs": {
+          "n": 3,
+          "median": 179.7,
+          "p95": 181.1,
+          "min": 153.9,
+          "max": 181.2,
+          "mean": 171.6
+        },
+        "tokenCountSource": "usage",
+        "directLatencyMs": {
+          "n": 3,
+          "median": 158.2,
+          "p95": 171.9,
+          "min": 156.4,
+          "max": 173.5,
+          "mean": 162.7
+        },
+        "executorOverheadMs": 21.5,
+        "throughputTpsC1": {
+          "n": 2,
+          "median": 59.168,
+          "p95": 59.786,
+          "min": 58.481,
+          "max": 59.855,
+          "mean": 59.168
+        },
+        "throughputTpsC4": {
+          "n": 2,
+          "median": 131.3,
+          "p95": 136,
+          "min": 126,
+          "max": 136.5,
+          "mean": 131.3
+        },
+        "peakRssBytes": 3018297344,
+        "peakGpuBytes": 7819993088,
+        "serverReadyMs": 1766,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 7900000000,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 22957
+    },
+    {
+      "provider": "llama-server",
+      "service": "embeddings",
+      "status": "pass",
+      "model": {
+        "modelId": "nomic-embed-text-v1.5-q8_0",
+        "remoteModel": "nomic-embed-text-v1.5-q8_0",
+        "sizeBytes": 146146432,
+        "memoryBytes": 800000000,
+        "license": "Apache-2.0",
+        "params": "137M",
+        "source": "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q8_0.gguf"
+      },
+      "runtimeBuild": "linux-x64-vulkan",
+      "backend": "vulkan",
+      "endpointKind": "LLAMA_SERVER",
+      "serverFlags": [
+        "-c",
+        "8192",
+        "-ngl",
+        "999",
+        "--embeddings"
+      ],
+      "checks": [
+        {
+          "name": "embeds a batch (/v1/embeddings)",
+          "pass": true,
+          "detail": "6 vectors for 6 inputs"
+        },
+        {
+          "name": "embeds queries one at a time",
+          "pass": true,
+          "detail": "6 query vectors"
+        },
+        {
+          "name": "dimension is consistent",
+          "pass": true,
+          "detail": "768 dimensions",
+          "value": 768
+        },
+        {
+          "name": "retrieval ranks the expected passage first",
+          "pass": true,
+          "detail": "6/6 top-1, MRR 1.000",
+          "value": 6,
+          "threshold": 6
+        },
+        {
+          "name": "SDK ai.embed matches /v1",
+          "pass": true,
+          "detail": "768 dims, cosine 0.9999 to the /v1 vector",
+          "value": 0.9999,
+          "threshold": "> 0.99"
+        },
+        {
+          "name": "model runs on the GPU (vulkan)",
+          "pass": true,
+          "detail": "0.39 GB of GPU memory held for a 0.15 GB model",
+          "value": 390176768,
+          "threshold": ">= half the model size"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 23,
+        "dimension": 768,
+        "mrr": 1,
+        "batchLatencyMs": {
+          "n": 3,
+          "median": 64.704,
+          "p95": 69.15,
+          "min": 62.244,
+          "max": 69.644,
+          "mean": 65.531
+        },
+        "textsPerSec": {
+          "n": 3,
+          "median": 494.6,
+          "p95": 512.1,
+          "min": 459.5,
+          "max": 514.1,
+          "mean": 489.4
+        },
+        "singleLatencyMs": {
+          "n": 3,
+          "median": 6.352,
+          "p95": 6.561,
+          "min": 5.587,
+          "max": 6.584,
+          "mean": 6.174
+        },
+        "directBatchLatencyMs": {
+          "n": 3,
+          "median": 59.897,
+          "p95": 62.764,
+          "min": 59.842,
+          "max": 63.082,
+          "mean": 60.94
+        },
+        "executorOverheadMs": 4.8,
+        "peakRssBytes": 120115200,
+        "peakGpuBytes": 390176768,
+        "serverReadyMs": 255,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 800000000,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 736
+    },
+    {
+      "provider": "llama-server",
+      "service": "llm",
+      "status": "pass",
+      "model": {
+        "modelId": "qwen3.5-0.8b-q8_0",
+        "remoteModel": "qwen3.5-0.8b-q8_0",
+        "sizeBytes": 811843840,
+        "memoryBytes": 2800000000,
+        "license": "Apache-2.0",
+        "params": "0.8B",
+        "source": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q8_0.gguf"
+      },
+      "runtimeBuild": "linux-x64-rocm",
+      "backend": "rocm",
+      "endpointKind": "LLAMA_SERVER",
+      "serverFlags": [
+        "-c",
+        "8192",
+        "-ngl",
+        "999",
+        "--reasoning",
+        "off"
+      ],
+      "checks": [
+        {
+          "name": "factual answer (/v1/chat/completions)",
+          "pass": true,
+          "detail": "\"Paris\"",
+          "value": "Paris"
+        },
+        {
+          "name": "task prompt (SDK ai.prompt)",
+          "pass": true,
+          "detail": "\"Paris\""
+        },
+        {
+          "name": "tool call (/v1/chat/completions, tools)",
+          "pass": true,
+          "detail": "get_weather({\"city\":\"Paris\"})"
+        },
+        {
+          "name": "streaming (/v1/chat/completions, stream)",
+          "pass": true,
+          "detail": "19 chunks, \"one, two, three, four, five, six, seven, eight, nine, ten\"",
+          "value": 19,
+          "threshold": "> 1 chunk"
+        },
+        {
+          "name": "model runs on the GPU (rocm)",
+          "pass": true,
+          "detail": "2.51 GB of GPU memory held for a 0.81 GB model",
+          "value": 2513158144,
+          "threshold": ">= half the model size"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 52,
+        "ttftMs": {
+          "n": 3,
+          "median": 33.357,
+          "p95": 36.341,
+          "min": 32.332,
+          "max": 36.672,
+          "mean": 34.12
+        },
+        "decodeTps": {
+          "n": 3,
+          "median": 159.4,
+          "p95": 161.3,
+          "min": 157.8,
+          "max": 161.5,
+          "mean": 159.6
+        },
+        "prefillTps": {
+          "n": 3,
+          "median": 7110.2,
+          "p95": 7217,
+          "min": 6775.2,
+          "max": 7228.8,
+          "mean": 7038.1
+        },
+        "latencyMs": {
+          "n": 3,
+          "median": 49.771,
+          "p95": 58.867,
+          "min": 48.712,
+          "max": 59.878,
+          "mean": 52.787
+        },
+        "tokenCountSource": "usage",
+        "directLatencyMs": {
+          "n": 3,
+          "median": 51.963,
+          "p95": 52.937,
+          "min": 46.364,
+          "max": 53.045,
+          "mean": 50.457
+        },
+        "executorOverheadMs": -2.2,
+        "throughputTpsC1": {
+          "n": 2,
+          "median": 152.4,
+          "p95": 152.6,
+          "min": 152.2,
+          "max": 152.6,
+          "mean": 152.4
+        },
+        "throughputTpsC4": {
+          "n": 2,
+          "median": 377.3,
+          "p95": 395.1,
+          "min": 357.6,
+          "max": 397,
+          "mean": 377.3
+        },
+        "peakRssBytes": 2046394368,
+        "peakGpuBytes": 2513158144,
+        "serverReadyMs": 1264,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 2800000000,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 8686
+    },
+    {
+      "provider": "llama-server",
+      "service": "completion",
+      "status": "pass",
+      "model": {
+        "modelId": "qwen3.5-0.8b-q8_0",
+        "remoteModel": "qwen3.5-0.8b-q8_0",
+        "sizeBytes": 811843840,
+        "memoryBytes": 2800000000,
+        "license": "Apache-2.0",
+        "params": "0.8B",
+        "source": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q8_0.gguf"
+      },
+      "runtimeBuild": "linux-x64-rocm",
+      "backend": "rocm",
+      "endpointKind": "LLAMA_SERVER",
+      "serverFlags": [
+        "-c",
+        "8192",
+        "-ngl",
+        "999",
+        "--reasoning",
+        "off"
+      ],
+      "checks": [
+        {
+          "name": "continuation (/v1/completions)",
+          "pass": true,
+          "detail": "\"Paris.\\nThe capital city of France is Paris.\\nThe capital city of\""
+        },
+        {
+          "name": "model runs on the GPU (rocm)",
+          "pass": true,
+          "detail": "2.51 GB of GPU memory held for a 0.81 GB model",
+          "value": 2512764928,
+          "threshold": ">= half the model size"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 223,
+        "latencyMs": {
+          "n": 3,
+          "median": 126.5,
+          "p95": 128.6,
+          "min": 27.138,
+          "max": 128.8,
+          "mean": 94.142
+        },
+        "directLatencyMs": {
+          "n": 3,
+          "median": 129.7,
+          "p95": 130.2,
+          "min": 126.3,
+          "max": 130.2,
+          "mean": 128.7
+        },
+        "executorOverheadMs": -3.2,
+        "peakRssBytes": 2359169024,
+        "peakGpuBytes": 2512764928,
+        "serverReadyMs": 1264,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 2800000000,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 900
+    },
+    {
+      "provider": "llama-server",
+      "service": "llm",
+      "status": "pass",
+      "model": {
+        "modelId": "qwen3.5-2b-q4_k_m",
+        "remoteModel": "qwen3.5-2b-q4_k_m",
+        "sizeBytes": 1280835840,
+        "memoryBytes": 4100000000,
+        "license": "Apache-2.0",
+        "params": "2B",
+        "source": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf"
+      },
+      "runtimeBuild": "linux-x64-rocm",
+      "backend": "rocm",
+      "endpointKind": "LLAMA_SERVER",
+      "serverFlags": [
+        "-c",
+        "8192",
+        "-ngl",
+        "999",
+        "--reasoning",
+        "off"
+      ],
+      "checks": [
+        {
+          "name": "factual answer (/v1/chat/completions)",
+          "pass": true,
+          "detail": "\"Paris\"",
+          "value": "Paris"
+        },
+        {
+          "name": "task prompt (SDK ai.prompt)",
+          "pass": true,
+          "detail": "\"Paris\""
+        },
+        {
+          "name": "tool call (/v1/chat/completions, tools)",
+          "pass": true,
+          "detail": "get_weather({\"city\":\"Paris\"})"
+        },
+        {
+          "name": "streaming (/v1/chat/completions, stream)",
+          "pass": true,
+          "detail": "20 chunks, \"One, two, three, four, five, six, seven, eight, nine, ten.\"",
+          "value": 20,
+          "threshold": "> 1 chunk"
+        },
+        {
+          "name": "model runs on the GPU (rocm)",
+          "pass": true,
+          "detail": "3.62 GB of GPU memory held for a 1.28 GB model",
+          "value": 3618709504,
+          "threshold": ">= half the model size"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 72,
+        "ttftMs": {
+          "n": 3,
+          "median": 44.598,
+          "p95": 53.766,
+          "min": 39.407,
+          "max": 54.785,
+          "mean": 46.263
+        },
+        "decodeTps": {
+          "n": 3,
+          "median": 115.7,
+          "p95": 115.7,
+          "min": 115.4,
+          "max": 115.7,
+          "mean": 115.6
+        },
+        "prefillTps": {
+          "n": 3,
+          "median": 3670.2,
+          "p95": 3704.5,
+          "min": 3222.4,
+          "max": 3708.3,
+          "mean": 3533.6
+        },
+        "latencyMs": {
+          "n": 3,
+          "median": 57.473,
+          "p95": 60.891,
+          "min": 56.198,
+          "max": 61.271,
+          "mean": 58.314
+        },
+        "tokenCountSource": "usage",
+        "directLatencyMs": {
+          "n": 3,
+          "median": 49.739,
+          "p95": 55.539,
+          "min": 49.327,
+          "max": 56.183,
+          "mean": 51.75
+        },
+        "executorOverheadMs": 7.7,
+        "throughputTpsC1": {
+          "n": 2,
+          "median": 112,
+          "p95": 112.8,
+          "min": 111.1,
+          "max": 112.9,
+          "mean": 112
+        },
+        "throughputTpsC4": {
+          "n": 2,
+          "median": 255.2,
+          "p95": 260.7,
+          "min": 249.2,
+          "max": 261.3,
+          "mean": 255.2
+        },
+        "peakRssBytes": 2228912128,
+        "peakGpuBytes": 3618709504,
+        "serverReadyMs": 1517,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 4100000000,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 12026
+    },
+    {
+      "provider": "llama-server",
+      "service": "llm",
+      "status": "pass",
+      "model": {
+        "modelId": "qwen3.5-4b-q4_k_m",
+        "remoteModel": "qwen3.5-4b-q4_k_m",
+        "sizeBytes": 2740937888,
+        "memoryBytes": 7900000000,
+        "license": "Apache-2.0",
+        "params": "4B",
+        "source": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf"
+      },
+      "runtimeBuild": "linux-x64-rocm",
+      "backend": "rocm",
+      "endpointKind": "LLAMA_SERVER",
+      "serverFlags": [
+        "-c",
+        "8192",
+        "-ngl",
+        "999",
+        "--reasoning",
+        "off"
+      ],
+      "checks": [
+        {
+          "name": "factual answer (/v1/chat/completions)",
+          "pass": true,
+          "detail": "\"Paris\"",
+          "value": "Paris"
+        },
+        {
+          "name": "task prompt (SDK ai.prompt)",
+          "pass": true,
+          "detail": "\"Paris\""
+        },
+        {
+          "name": "tool call (/v1/chat/completions, tools)",
+          "pass": true,
+          "detail": "get_weather({\"city\":\"Paris\"})"
+        },
+        {
+          "name": "streaming (/v1/chat/completions, stream)",
+          "pass": true,
+          "detail": "19 chunks, \"one, two, three, four, five, six, seven, eight, nine, ten\"",
+          "value": 19,
+          "threshold": "> 1 chunk"
+        },
+        {
+          "name": "model runs on the GPU (rocm)",
+          "pass": true,
+          "detail": "7.25 GB of GPU memory held for a 2.74 GB model",
+          "value": 7248314368,
+          "threshold": ">= half the model size"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 112,
+        "ttftMs": {
+          "n": 3,
+          "median": 124.3,
+          "p95": 141.3,
+          "min": 123.5,
+          "max": 143.2,
+          "mean": 130.3
+        },
+        "decodeTps": {
+          "n": 3,
+          "median": 59.614,
+          "p95": 59.645,
+          "min": 59.24,
+          "max": 59.649,
+          "mean": 59.501
+        },
+        "prefillTps": {
+          "n": 3,
+          "median": 1645,
+          "p95": 1684.8,
+          "min": 1508.5,
+          "max": 1689.2,
+          "mean": 1614.2
+        },
+        "latencyMs": {
+          "n": 3,
+          "median": 172.7,
+          "p95": 173.1,
+          "min": 148.1,
+          "max": 173.1,
+          "mean": 164.6
+        },
+        "tokenCountSource": "usage",
+        "directLatencyMs": {
+          "n": 3,
+          "median": 168.9,
+          "p95": 171.7,
+          "min": 143.2,
+          "max": 172,
+          "mean": 161.3
+        },
+        "executorOverheadMs": 3.8,
+        "throughputTpsC1": {
+          "n": 2,
+          "median": 56.043,
+          "p95": 56.243,
+          "min": 55.821,
+          "max": 56.266,
+          "mean": 56.043
+        },
+        "throughputTpsC4": {
+          "n": 2,
+          "median": 139,
+          "p95": 143.1,
+          "min": 134.4,
+          "max": 143.6,
+          "mean": 139
+        },
+        "peakRssBytes": 4018561024,
+        "peakGpuBytes": 7248314368,
+        "serverReadyMs": 1533,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 7900000000,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 22000
+    },
+    {
+      "provider": "llama-server",
+      "service": "embeddings",
+      "status": "pass",
+      "model": {
+        "modelId": "nomic-embed-text-v1.5-q8_0",
+        "remoteModel": "nomic-embed-text-v1.5-q8_0",
+        "sizeBytes": 146146432,
+        "memoryBytes": 800000000,
+        "license": "Apache-2.0",
+        "params": "137M",
+        "source": "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q8_0.gguf"
+      },
+      "runtimeBuild": "linux-x64-rocm",
+      "backend": "rocm",
+      "endpointKind": "LLAMA_SERVER",
+      "serverFlags": [
+        "-c",
+        "8192",
+        "-ngl",
+        "999",
+        "--embeddings"
+      ],
+      "checks": [
+        {
+          "name": "embeds a batch (/v1/embeddings)",
+          "pass": true,
+          "detail": "6 vectors for 6 inputs"
+        },
+        {
+          "name": "embeds queries one at a time",
+          "pass": true,
+          "detail": "6 query vectors"
+        },
+        {
+          "name": "dimension is consistent",
+          "pass": true,
+          "detail": "768 dimensions",
+          "value": 768
+        },
+        {
+          "name": "retrieval ranks the expected passage first",
+          "pass": true,
+          "detail": "6/6 top-1, MRR 1.000",
+          "value": 6,
+          "threshold": 6
+        },
+        {
+          "name": "SDK ai.embed matches /v1",
+          "pass": true,
+          "detail": "768 dims, cosine 1.0000 to the /v1 vector",
+          "value": 1,
+          "threshold": "> 0.99"
+        },
+        {
+          "name": "model runs on the GPU (rocm)",
+          "pass": true,
+          "detail": "0.71 GB of GPU memory held for a 0.15 GB model",
+          "value": 710213632,
+          "threshold": ">= half the model size"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 62,
+        "dimension": 768,
+        "mrr": 1,
+        "batchLatencyMs": {
+          "n": 3,
+          "median": 57.114,
+          "p95": 57.461,
+          "min": 56.68,
+          "max": 57.499,
+          "mean": 57.098
+        },
+        "textsPerSec": {
+          "n": 3,
+          "median": 560.3,
+          "p95": 564.1,
+          "min": 556.5,
+          "max": 564.6,
+          "mean": 560.5
+        },
+        "singleLatencyMs": {
+          "n": 3,
+          "median": 6.107,
+          "p95": 6.198,
+          "min": 6.009,
+          "max": 6.208,
+          "mean": 6.108
+        },
+        "directBatchLatencyMs": {
+          "n": 3,
+          "median": 54.545,
+          "p95": 55.175,
+          "min": 53.404,
+          "max": 55.245,
+          "mean": 54.398
+        },
+        "executorOverheadMs": 2.6,
+        "peakRssBytes": 580091904,
+        "peakGpuBytes": 710213632,
+        "serverReadyMs": 508,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 800000000,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 982
+    },
+    {
+      "provider": "vllm",
+      "service": "tts",
+      "status": "unsupported",
+      "reason": "vLLM serves no speech API (/v1/audio/speech)",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "vllm",
+      "service": "llm",
+      "status": "pass",
+      "model": {
+        "remoteModel": "Qwen/Qwen3.5-0.8B",
+        "sizeBytes": 1769980465,
+        "license": "Apache-2.0",
+        "params": "0.8B",
+        "source": "https://huggingface.co/Qwen/Qwen3.5-0.8B",
+        "memoryBytes": 1769980465
+      },
+      "backend": "rocm",
+      "endpointKind": "VLLM",
+      "serverFlags": [
+        "--max-model-len",
+        "8192",
+        "--gpu-memory-utilization",
+        "0.15"
+      ],
+      "checks": [
+        {
+          "name": "factual answer (/v1/chat/completions)",
+          "pass": true,
+          "detail": "\"Paris\"",
+          "value": "Paris"
+        },
+        {
+          "name": "task prompt (SDK ai.prompt)",
+          "pass": true,
+          "detail": "\"Paris\""
+        },
+        {
+          "name": "tool call (/v1/chat/completions, tools)",
+          "pass": true,
+          "detail": "get_weather({\"city\":\"Paris\"})"
+        },
+        {
+          "name": "streaming (/v1/chat/completions, stream)",
+          "pass": true,
+          "detail": "19 chunks, \"one, two, three, four, five, six, seven, eight, nine, ten\"",
+          "value": 19,
+          "threshold": "> 1 chunk"
+        },
+        {
+          "name": "model runs on the GPU (rocm)",
+          "pass": true,
+          "detail": "18.98 GB of GPU memory held for a 1.77 GB model",
+          "value": 18975334400,
+          "threshold": ">= half the model size"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 43,
+        "ttftMs": {
+          "n": 3,
+          "median": 25.986,
+          "p95": 43.722,
+          "min": 25.278,
+          "max": 45.692,
+          "mean": 32.319
+        },
+        "decodeTps": {
+          "n": 3,
+          "median": 124.2,
+          "p95": 127.1,
+          "min": 123.6,
+          "max": 127.4,
+          "mean": 125.1
+        },
+        "prefillTps": {
+          "n": 3,
+          "median": 10347.7,
+          "p95": 10438.9,
+          "min": 10098.6,
+          "max": 10449,
+          "mean": 10298.4
+        },
+        "latencyMs": {
+          "n": 3,
+          "median": 33.262,
+          "p95": 36.194,
+          "min": 33.208,
+          "max": 36.519,
+          "mean": 34.33
+        },
+        "tokenCountSource": "usage",
+        "directLatencyMs": {
+          "n": 3,
+          "median": 33.397,
+          "p95": 34.007,
+          "min": 31.409,
+          "max": 34.075,
+          "mean": 32.96
+        },
+        "executorOverheadMs": -0.1,
+        "throughputTpsC1": {
+          "n": 2,
+          "median": 120.8,
+          "p95": 120.8,
+          "min": 120.7,
+          "max": 120.8,
+          "mean": 120.8
+        },
+        "throughputTpsC4": {
+          "n": 2,
+          "median": 393.9,
+          "p95": 397.9,
+          "min": 389.4,
+          "max": 398.4,
+          "mean": 393.9
+        },
+        "peakRssBytes": 6306340864,
+        "peakGpuBytes": 18975334400,
+        "serverReadyMs": 256967,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 1769980465,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 266130
+    },
+    {
+      "provider": "vllm",
+      "service": "completion",
+      "status": "pass",
+      "model": {
+        "remoteModel": "Qwen/Qwen3.5-0.8B",
+        "sizeBytes": 1769980465,
+        "license": "Apache-2.0",
+        "params": "0.8B",
+        "source": "https://huggingface.co/Qwen/Qwen3.5-0.8B",
+        "memoryBytes": 1769980465
+      },
+      "backend": "rocm",
+      "endpointKind": "VLLM",
+      "serverFlags": [
+        "--max-model-len",
+        "8192",
+        "--gpu-memory-utilization",
+        "0.15"
+      ],
+      "checks": [
+        {
+          "name": "continuation (/v1/completions)",
+          "pass": true,
+          "detail": "\"Paris.\\nThe capital city of France is Paris.\\nThe capital city of\""
+        },
+        {
+          "name": "model runs on the GPU (rocm)",
+          "pass": true,
+          "detail": "18.98 GB of GPU memory held for a 1.77 GB model",
+          "value": 18975334400,
+          "threshold": ">= half the model size"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 141,
+        "latencyMs": {
+          "n": 3,
+          "median": 139.9,
+          "p95": 140.3,
+          "min": 139.9,
+          "max": 140.3,
+          "mean": 140
+        },
+        "directLatencyMs": {
+          "n": 3,
+          "median": 140.4,
+          "p95": 142,
+          "min": 138.5,
+          "max": 142.1,
+          "mean": 140.4
+        },
+        "executorOverheadMs": -0.5,
+        "peakRssBytes": 6306344960,
+        "peakGpuBytes": 18975334400,
+        "serverReadyMs": 256967,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 1769980465,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 991
+    },
+    {
+      "provider": "whisper-server",
+      "service": "llm",
+      "status": "unsupported",
+      "reason": "whisper-server only transcribes",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "whisper-server",
+      "service": "completion",
+      "status": "unsupported",
+      "reason": "whisper-server only transcribes",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "whisper-server",
+      "service": "embeddings",
+      "status": "unsupported",
+      "reason": "whisper-server only transcribes",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "whisper-server",
+      "service": "tts",
+      "status": "unsupported",
+      "reason": "whisper-server only transcribes",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "whisper-server",
+      "service": "stt",
+      "status": "pass",
+      "model": {
+        "modelId": "whisper-base.en-q5_1",
+        "remoteModel": "whisper-base.en-q5_1",
+        "sizeBytes": 59721011,
+        "memoryBytes": 300000000,
+        "license": "MIT",
+        "params": "74M",
+        "source": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin"
+      },
+      "runtimeBuild": "linux-x64-cpu",
+      "backend": "cpu",
+      "endpointKind": "OPEN_AI_AUDIO",
+      "serverFlags": [
+        "--request-path",
+        "/v1/audio",
+        "--inference-path",
+        "/transcriptions",
+        "-t",
+        "8"
+      ],
+      "checks": [
+        {
+          "name": "transcribes recording (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes recording (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes meeting (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes meeting (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather-noisy (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.357: \"The full passage like rain in the morning, hearing the sunshine by the evening.\"",
+          "value": 0.357,
+          "threshold": 0.5
+        },
+        {
+          "name": "transcribes weather-noisy (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.357: \"The full passage like rain in the morning, hearing the sunshine by the evening.\"",
+          "value": 0.357,
+          "threshold": 0.5
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 255,
+        "wer": {
+          "n": 4,
+          "median": 0,
+          "p95": 0.304,
+          "min": 0,
+          "max": 0.357,
+          "mean": 0.089
+        },
+        "werMean": 0.089,
+        "rtf": {
+          "n": 12,
+          "median": 0.059,
+          "p95": 0.071,
+          "min": 0.047,
+          "max": 0.073,
+          "mean": 0.059
+        },
+        "latencyMs": {
+          "n": 12,
+          "median": 274.6,
+          "p95": 298.1,
+          "min": 241.1,
+          "max": 306.5,
+          "mean": 273.7
+        },
+        "streamLatencyMs": {
+          "n": 4,
+          "median": 280.2,
+          "p95": 345.6,
+          "min": 247,
+          "max": 355.2,
+          "mean": 290.6
+        },
+        "audioSec": 18.99,
+        "directLatencyMs": {
+          "n": 12,
+          "median": 282.8,
+          "p95": 300.9,
+          "min": 259.5,
+          "max": 305.4,
+          "mean": 279.9
+        },
+        "executorOverheadMs": -8.2,
+        "peakRssBytes": 240848896,
+        "peakGpuBytes": 0,
+        "serverReadyMs": 254,
+        "endpointHealth": "UNREACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 300000000,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 9576
+    },
+    {
+      "provider": "whisper-server",
+      "service": "stt",
+      "status": "pass",
+      "model": {
+        "modelId": "whisper-small-q5_1",
+        "remoteModel": "whisper-small-q5_1",
+        "sizeBytes": 190085487,
+        "memoryBytes": 500000000,
+        "license": "MIT",
+        "params": "244M",
+        "source": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin"
+      },
+      "runtimeBuild": "linux-x64-cpu",
+      "backend": "cpu",
+      "endpointKind": "OPEN_AI_AUDIO",
+      "serverFlags": [
+        "--request-path",
+        "/v1/audio",
+        "--inference-path",
+        "/transcriptions",
+        "-t",
+        "8"
+      ],
+      "checks": [
+        {
+          "name": "transcribes recording (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes recording (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes meeting (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes meeting (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather-noisy (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.214: \"the forecast said light rain in the moon, clearing to sunshine by evening.\"",
+          "value": 0.214,
+          "threshold": 0.5
+        },
+        {
+          "name": "transcribes weather-noisy (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.214: \"the forecast said light rain in the moon, clearing to sunshine by evening.\"",
+          "value": 0.214,
+          "threshold": 0.5
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 953,
+        "wer": {
+          "n": 4,
+          "median": 0,
+          "p95": 0.182,
+          "min": 0,
+          "max": 0.214,
+          "mean": 0.054
+        },
+        "werMean": 0.054,
+        "rtf": {
+          "n": 12,
+          "median": 0.219,
+          "p95": 0.242,
+          "min": 0.177,
+          "max": 0.242,
+          "mean": 0.215
+        },
+        "latencyMs": {
+          "n": 12,
+          "median": 1002.5,
+          "p95": 1047.1,
+          "min": 971.6,
+          "max": 1061.3,
+          "mean": 1006.3
+        },
+        "streamLatencyMs": {
+          "n": 4,
+          "median": 991,
+          "p95": 1002.5,
+          "min": 935.2,
+          "max": 1003.3,
+          "mean": 980.1
+        },
+        "audioSec": 18.99,
+        "directLatencyMs": {
+          "n": 12,
+          "median": 1020.9,
+          "p95": 1084.6,
+          "min": 965.8,
+          "max": 1097.4,
+          "mean": 1025.3
+        },
+        "executorOverheadMs": -18.4,
+        "peakRssBytes": 434806784,
+        "peakGpuBytes": 0,
+        "serverReadyMs": 255,
+        "endpointHealth": "UNREACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 500000000,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 33501
+    },
+    {
+      "provider": "speaches",
+      "service": "llm",
+      "status": "unsupported",
+      "reason": "speaches serves only audio (transcription and speech)",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "speaches",
+      "service": "completion",
+      "status": "unsupported",
+      "reason": "speaches serves only audio (transcription and speech)",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "speaches",
+      "service": "embeddings",
+      "status": "unsupported",
+      "reason": "speaches serves only audio (transcription and speech)",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "speaches",
+      "service": "stt",
+      "status": "pass",
+      "model": {
+        "remoteModel": "Systran/faster-whisper-base.en",
+        "sizeBytes": 147772310,
+        "license": "MIT",
+        "params": "74M",
+        "source": "https://huggingface.co/Systran/faster-whisper-base.en",
+        "memoryBytes": 147772310
+      },
+      "backend": "cpu",
+      "endpointKind": "OPEN_AI_AUDIO",
+      "checks": [
+        {
+          "name": "transcribes recording (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes recording (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes meeting (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes meeting (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather-noisy (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.286: \"The forecast is light raining in the morning, hearing the sunshine by the evening.\"",
+          "value": 0.286,
+          "threshold": 0.5
+        },
+        {
+          "name": "transcribes weather-noisy (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.286: \"The forecast is light raining in the morning, hearing the sunshine by the evening.\"",
+          "value": 0.286,
+          "threshold": 0.5
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 1064,
+        "wer": {
+          "n": 4,
+          "median": 0,
+          "p95": 0.243,
+          "min": 0,
+          "max": 0.286,
+          "mean": 0.071
+        },
+        "werMean": 0.071,
+        "rtf": {
+          "n": 12,
+          "median": 0.11,
+          "p95": 0.131,
+          "min": 0.093,
+          "max": 0.132,
+          "mean": 0.111
+        },
+        "latencyMs": {
+          "n": 12,
+          "median": 506.5,
+          "p95": 563.3,
+          "min": 484.2,
+          "max": 575.3,
+          "mean": 517.9
+        },
+        "streamLatencyMs": {
+          "n": 4,
+          "median": 486.9,
+          "p95": 531.6,
+          "min": 475.8,
+          "max": 539.4,
+          "mean": 497.3
+        },
+        "audioSec": 18.99,
+        "directLatencyMs": {
+          "n": 12,
+          "median": 505.3,
+          "p95": 565.8,
+          "min": 463.7,
+          "max": 567.7,
+          "mean": 517
+        },
+        "executorOverheadMs": 1.2,
+        "peakRssBytes": 777977856,
+        "peakGpuBytes": 0,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 147772310,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 17123
+    },
+    {
+      "provider": "speaches",
+      "service": "stt",
+      "status": "fail",
+      "reason": "transcribes weather-noisy (SDK transcription stream): WER 1.000: \"Mae'r ffordd o'r Llywodraeth Llywodraeth Cymru, sy'n gweithio'r gweithio'r Llywodraeth Cymru.\"",
+      "model": {
+        "remoteModel": "Systran/faster-whisper-small",
+        "sizeBytes": 486215847,
+        "license": "MIT",
+        "params": "244M",
+        "source": "https://huggingface.co/Systran/faster-whisper-small",
+        "memoryBytes": 486215847
+      },
+      "backend": "cpu",
+      "endpointKind": "OPEN_AI_AUDIO",
+      "checks": [
+        {
+          "name": "transcribes recording (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes recording (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes meeting (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes meeting (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather-noisy (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.071: \"the forecast says light rain in the moon, clearing to sunshine by the evening.\"",
+          "value": 0.071,
+          "threshold": 0.5
+        },
+        {
+          "name": "transcribes weather-noisy (SDK transcription stream)",
+          "pass": false,
+          "detail": "WER 1.000: \"Mae'r ffordd o'r Llywodraeth Llywodraeth Cymru, sy'n gweithio'r gweithio'r Llywodraeth Cymru.\"",
+          "value": 1,
+          "threshold": 0.5
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 1918,
+        "wer": {
+          "n": 4,
+          "median": 0,
+          "p95": 0.061,
+          "min": 0,
+          "max": 0.071,
+          "mean": 0.018
+        },
+        "werMean": 0.018,
+        "rtf": {
+          "n": 12,
+          "median": 0.328,
+          "p95": 0.431,
+          "min": 0.239,
+          "max": 0.44,
+          "mean": 0.332
+        },
+        "latencyMs": {
+          "n": 12,
+          "median": 1511,
+          "p95": 1807.1,
+          "min": 1176.2,
+          "max": 1840.5,
+          "mean": 1549
+        },
+        "streamLatencyMs": {
+          "n": 4,
+          "median": 2589.6,
+          "p95": 3408.8,
+          "min": 1940,
+          "max": 3515.2,
+          "mean": 2658.6
+        },
+        "audioSec": 18.99,
+        "directLatencyMs": {
+          "n": 12,
+          "median": 1524.4,
+          "p95": 1857.7,
+          "min": 1178,
+          "max": 1898.5,
+          "mean": 1560.2
+        },
+        "executorOverheadMs": -13.4,
+        "peakRssBytes": 1997635584,
+        "peakGpuBytes": 0,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 486215847,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 54896
+    },
+    {
+      "provider": "speaches",
+      "service": "tts",
+      "status": "pass",
+      "model": {
+        "remoteModel": "speaches-ai/Kokoro-82M-v1.0-ONNX-int8",
+        "sizeBytes": 120577468,
+        "license": "Apache-2.0",
+        "params": "82M",
+        "source": "https://huggingface.co/speaches-ai/Kokoro-82M-v1.0-ONNX-int8",
+        "voice": "af_heart",
+        "memoryBytes": 120577468
+      },
+      "backend": "cpu",
+      "endpointKind": "OPEN_AI_AUDIO",
+      "checks": [
+        {
+          "name": "speaks text 1 (/v1/audio/speech)",
+          "pass": true,
+          "detail": "4.27 s at 24000 Hz for 15 words (expected 2.3-19.5 s), RMS 0.072",
+          "value": 4.27,
+          "threshold": "2.3-19.5 s"
+        },
+        {
+          "name": "round trip of text 1 through STT (whisper-server/whisper-base.en-q5_1)",
+          "pass": true,
+          "detail": "WER 0.000: \"The library opens at 9 in the morning and closes at 6 in the evening.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "speaks text 2 (/v1/audio/speech)",
+          "pass": true,
+          "detail": "3.61 s at 24000 Hz for 12 words (expected 1.8-15.9 s), RMS 0.075",
+          "value": 3.61,
+          "threshold": "1.8-15.9 s"
+        },
+        {
+          "name": "round trip of text 2 through STT (whisper-server/whisper-base.en-q5_1)",
+          "pass": true,
+          "detail": "WER 0.000: \"Remember to water the tomato plants before you leave for the airport.\"",
+          "value": 0,
+          "threshold": 0.25
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 4275,
+        "rtf": {
+          "n": 6,
+          "median": 0.742,
+          "p95": 0.844,
+          "min": 0.709,
+          "max": 0.867,
+          "mean": 0.759
+        },
+        "ttfbMs": {
+          "n": 6,
+          "median": 2852.7,
+          "p95": 3598.8,
+          "min": 2591.2,
+          "max": 3697.5,
+          "mean": 2994.7
+        },
+        "latencyMs": {
+          "n": 6,
+          "median": 2852.9,
+          "p95": 3599.2,
+          "min": 2591.4,
+          "max": 3697.8,
+          "mean": 2994.9
+        },
+        "roundTripWer": {
+          "n": 2,
+          "median": 0,
+          "p95": 0,
+          "min": 0,
+          "max": 0,
+          "mean": 0
+        },
+        "roundTripStt": "whisper-server/whisper-base.en-q5_1",
+        "directLatencyMs": {
+          "n": 6,
+          "median": 2993.5,
+          "p95": 3369.5,
+          "min": 2632.6,
+          "max": 3410.9,
+          "mean": 3004
+        },
+        "executorOverheadMs": -140.6,
+        "peakRssBytes": 2194477056,
+        "peakGpuBytes": 0,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 120577468,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 43790
+    }
+  ]
+}

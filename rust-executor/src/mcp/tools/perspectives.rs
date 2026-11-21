@@ -2,10 +2,11 @@
 //!
 //! Tools for managing perspectives (knowledge graphs) and raw links. Each tool calls the RPC
 //! method that does its job (`perspective.all`, `.create`, `.addLink`, `.queryLinks`,
-//! `.addSdna`) through the handler map, so the method's guard decides who may call it.
+//! `.registerShapes`) through the handler map, so the method's guard decides who may call it.
 
 use super::instances::{normalize_legacy_literal, other_literal_spelling};
 use super::{labelled, method_error, Ad4mMcpHandler};
+use crate::perspectives::perspective_instance::RegisterResult;
 use crate::types::{DecoratedLinkExpression, PerspectiveHandle};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
@@ -53,7 +54,7 @@ pub struct QueryLinksParams {
     pub target: Option<String>,
 }
 
-/// Parameters for adding SDNA (subject class definition) to a perspective
+/// Parameters for registering a model (subject class) in a perspective
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct AddModelParams {
     /// Perspective UUID
@@ -81,20 +82,21 @@ fn local_class_name(target_class: &str) -> &str {
 /// looks fine in `describe_perspective` but whose property setters are never
 /// found, so every write fails with "read-only". Rejecting the mismatch up
 /// front turns a silent broken registration into an actionable error.
-fn validate_class_name(class_name: &str, shacl_json: &str) -> Result<(), String> {
+fn validate_class_name(class_name: &str, shacl_json: &str) -> Result<serde_json::Value, String> {
     let shape: serde_json::Value = serde_json::from_str(shacl_json)
         .map_err(|e| format!("Error: shacl_json is not valid JSON: {}", e))?;
 
     let target_class = shape
         .get("target_class")
         .and_then(|v| v.as_str())
+        .map(str::to_string)
         .ok_or_else(|| {
             "Error: shacl_json has no `target_class` field. Every SHACL shape must declare \
              the class URI it describes, e.g. \"target_class\": \"board://Task\"."
                 .to_string()
         })?;
 
-    let expected = local_class_name(target_class);
+    let expected = local_class_name(&target_class);
     if class_name != expected {
         return Err(format!(
             "Error: class_name '{}' does not match the SHACL target_class '{}'. \
@@ -105,7 +107,7 @@ fn validate_class_name(class_name: &str, shacl_json: &str) -> Result<(), String>
         ));
     }
 
-    Ok(())
+    Ok(shape)
 }
 
 /// The link filters `query_links` should try, in order.
@@ -330,25 +332,42 @@ impl Ad4mMcpHandler {
     pub async fn add_model(&self, params: Parameters<AddModelParams>) -> String {
         let p = &params.0;
 
-        if let Err(message) = validate_class_name(&p.class_name, &p.shacl_json) {
-            return message;
+        // The method's guard answers before the caller's own arguments are read: a
+        // perspective the caller may not write is refused, not validated against.
+        // Admission checks the params against the method's contract too, so it gets
+        // the call's form with no shape yet.
+        if let Err(e) = self
+            .admit_method(
+                "perspective.registerShapes",
+                &json!({ "uuid": p.perspective_id, "shapes": [] }),
+            )
+            .await
+        {
+            return method_error(e);
         }
 
+        let shape = match validate_class_name(&p.class_name, &p.shacl_json) {
+            Ok(shape) => shape,
+            Err(message) => return message,
+        };
         let params = json!({
             "uuid": p.perspective_id,
-            "name": p.class_name,
-            "sdnaType": "subject_class",
-            "shaclJson": p.shacl_json,
+            "shapes": [shape],
         });
-        let added = self
-            .call::<serde_json::Value>("perspective.addSdna", params, labelled("Error adding SDNA"))
+        let registered = self
+            .call::<RegisterResult>(
+                "perspective.registerShapes",
+                params,
+                labelled("Error registering model"),
+            )
             .await;
-        match added {
-            Ok(_) => {
+        match registered {
+            Ok(registered) => {
                 let result = json!({
                     "success": true,
                     "perspective_id": p.perspective_id,
                     "class_name": p.class_name,
+                    "changed": !registered.written.is_empty(),
                 });
                 serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
             }
@@ -364,7 +383,9 @@ impl Ad4mMcpHandler {
 mod guard_tests {
     use super::*;
     use crate::agent::capabilities::{perspective_query_capability, perspective_update_capability};
-    use crate::mcp::tools::test_support::{app, handler_as, operator, perspective, setup, status};
+    use crate::mcp::tools::test_support::{
+        app, handler_as, operator, perspective, setup, status, user,
+    };
 
     // Writes checked PERSPECTIVE_CREATE on every perspective; the method checks the update
     // capability on the one it names.
@@ -402,6 +423,40 @@ mod guard_tests {
         }
     }
 
+    /// `add_model` registers through `perspective.registerShapes`: the guard answers before
+    /// the shape is read (a caller who may not write the perspective gets 403, not a
+    /// validation error), then the class is written once and a second call changes nothing.
+    #[tokio::test]
+    async fn add_model_is_admitted_before_its_shape_is_read() {
+        setup();
+        let uuid = perspective(None).await;
+        let other = perspective(None).await;
+        let handler = handler_as(app(vec![perspective_update_capability(
+            vec![other.clone()],
+        )]));
+        let add = |perspective_id: &str, shacl_json: &str| AddModelParams {
+            perspective_id: perspective_id.to_string(),
+            class_name: "Note".into(),
+            shacl_json: shacl_json.to_string(),
+        };
+
+        let refused = handler.add_model(Parameters(add(&uuid, "{"))).await;
+        assert_eq!(status(&refused), Some(403), "{refused}");
+
+        let shape = r#"{"target_class": "test://Note", "properties": [
+            {"path": "test://title", "name": "title", "datatype": "xsd:string", "max_count": 1}
+        ]}"#;
+        for changed in [true, false] {
+            let added = handler.add_model(Parameters(add(&other, shape))).await;
+            let added: serde_json::Value = serde_json::from_str(&added).expect(&added);
+            assert_eq!(added["success"], true, "{added}");
+            assert_eq!(added["changed"], changed, "{added}");
+        }
+        for uuid in [uuid, other] {
+            crate::perspectives::remove_perspective(&uuid).await;
+        }
+    }
+
     // The operator saw only the unowned and the main agent's perspectives, as an app does.
     #[tokio::test]
     async fn the_operator_lists_every_perspective() {
@@ -421,6 +476,79 @@ mod guard_tests {
             .await;
         assert_eq!(status(&refused), Some(403), "{refused}");
         crate::perspectives::remove_perspective(&users).await;
+    }
+
+    /// READ on one perspective's uuid admits the call (`perspective.all` is
+    /// `Guard::CapAnyPointer`), and the answer narrows to the pointers the caller may read;
+    /// `*` keeps the answer it had. The matrix pins the admission; this pins the narrowing.
+    /// (No substring checks: a refusal's error text echoes the caller's pointers.)
+    #[tokio::test]
+    async fn a_caller_scoped_to_one_perspective_lists_only_it() {
+        setup();
+        let a = perspective(None).await;
+        let b = perspective(None).await;
+        let uuids = |answer: &str| -> Vec<String> {
+            let listed: Vec<serde_json::Value> =
+                serde_json::from_str(answer).unwrap_or_else(|_| panic!("a list: {answer}"));
+            listed
+                .iter()
+                .map(|p| p["uuid"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let caller = |caps| handler_as(app(caps));
+
+        // READ on [a]: admitted, and only A is in the answer.
+        let scoped = caller(vec![perspective_query_capability(vec![a.clone()])])
+            .list_perspectives(Parameters(ListPerspectivesParams {}))
+            .await;
+        let scoped = uuids(&scoped);
+        assert!(scoped.contains(&a), "A is listed: {scoped:?}");
+        assert!(!scoped.contains(&b), "B is not: {scoped:?}");
+
+        // READ on `*`: both, as before.
+        let all = caller(vec![perspective_query_capability(vec!["*".into()])])
+            .list_perspectives(Parameters(ListPerspectivesParams {}))
+            .await;
+        let all = uuids(&all);
+        assert!(all.contains(&a), "{all:?}");
+        assert!(all.contains(&b), "{all:?}");
+
+        // No perspective READ: refused, as before.
+        let refused = caller(vec![])
+            .list_perspectives(Parameters(ListPerspectivesParams {}))
+            .await;
+        assert_eq!(status(&refused), Some(403), "{refused}");
+
+        // The same narrowing for a user, within the ownership filter: theirs is not theirs
+        // to see whatever the capability says, and a `*` user sees only its own.
+        let did = "did:key:mcp-scoped-lister";
+        let mine = perspective(Some(vec![did.into()])).await;
+        let theirs = perspective(Some(vec!["did:key:mcp-scoped-other".into()])).await;
+        let users = handler_as(user(
+            did,
+            vec![perspective_query_capability(vec![mine.clone()])],
+        ))
+        .list_perspectives(Parameters(ListPerspectivesParams {}))
+        .await;
+        let users = uuids(&users);
+        assert!(users.contains(&mine), "{users:?}");
+        assert!(!users.contains(&theirs), "{users:?}");
+        let wide = handler_as(user(
+            did,
+            vec![perspective_query_capability(vec!["*".into()])],
+        ))
+        .list_perspectives(Parameters(ListPerspectivesParams {}))
+        .await;
+        let wide = uuids(&wide);
+        assert!(wide.contains(&mine), "{wide:?}");
+        assert!(
+            !wide.contains(&theirs),
+            "another user's stays out, `*` or not: {wide:?}"
+        );
+
+        for uuid in [a, b, mine, theirs] {
+            crate::perspectives::remove_perspective(&uuid).await;
+        }
     }
 }
 

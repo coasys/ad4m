@@ -17,6 +17,7 @@ use serde_json::Value;
 /// (`agent-updated`): the one list of wire names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Topic {
+    AiSessionChanged,
     AgentStatusChanged,
     AgentUpdated,
     AppsChanged,
@@ -32,7 +33,9 @@ pub enum Topic {
     RuntimeNotificationTriggered,
     ExceptionOccurred,
     AiTranscriptionText,
-    AiModelLoadingStatus,
+    AiModelStatus,
+    AiEndpointStatus,
+    AiLocalProgress,
     PerspectiveQuerySubscription,
     AutoProcessorEvent,
     AutoProcessorNeighbourhoodState,
@@ -43,11 +46,13 @@ pub enum Topic {
     SfuSessionReplaced,
     FlowStateChanged,
     IdentityFork,
+    ConfigChanged,
 }
 
 impl Topic {
     /// Every topic, in the order of `events_ws::event_specs`.
-    pub const ALL: [Topic; 26] = [
+    pub const ALL: [Topic; 30] = [
+        Topic::AiSessionChanged,
         Topic::AgentStatusChanged,
         Topic::AgentUpdated,
         Topic::AppsChanged,
@@ -63,7 +68,9 @@ impl Topic {
         Topic::RuntimeNotificationTriggered,
         Topic::ExceptionOccurred,
         Topic::AiTranscriptionText,
-        Topic::AiModelLoadingStatus,
+        Topic::AiModelStatus,
+        Topic::AiEndpointStatus,
+        Topic::AiLocalProgress,
         Topic::PerspectiveQuerySubscription,
         Topic::AutoProcessorEvent,
         Topic::AutoProcessorNeighbourhoodState,
@@ -74,12 +81,14 @@ impl Topic {
         Topic::SfuSessionReplaced,
         Topic::FlowStateChanged,
         Topic::IdentityFork,
+        Topic::ConfigChanged,
     ];
 
     /// The event type on the wire: the `type` field of the socket message and the key
     /// of `events.watch` params.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Topic::AiSessionChanged => "ai-session-changed",
             Topic::AgentStatusChanged => "agent-status-changed",
             Topic::AgentUpdated => "agent-updated",
             Topic::AppsChanged => "apps-changed",
@@ -95,7 +104,9 @@ impl Topic {
             Topic::RuntimeNotificationTriggered => "notification-triggered",
             Topic::ExceptionOccurred => "exception-occurred",
             Topic::AiTranscriptionText => "transcription-text",
-            Topic::AiModelLoadingStatus => "model-loading-status",
+            Topic::AiModelStatus => "model-status",
+            Topic::AiEndpointStatus => "ai-endpoint-status",
+            Topic::AiLocalProgress => "ai-local-progress",
             Topic::PerspectiveQuerySubscription => "query-subscription-update",
             Topic::AutoProcessorEvent => "auto-processor-event",
             Topic::AutoProcessorNeighbourhoodState => "auto-processor-neighbourhood-state",
@@ -106,6 +117,7 @@ impl Topic {
             Topic::SfuSessionReplaced => "sfu-session-replaced",
             Topic::FlowStateChanged => "flow-state-changed",
             Topic::IdentityFork => "identity-fork",
+            Topic::ConfigChanged => "config-changed",
         }
     }
 
@@ -122,10 +134,13 @@ impl Topic {
         let on_perspective = || vec![perspective.unwrap_or(caps::WILD_CARD).to_string()];
         // No `_` arm: a new topic does not compile until someone chooses its capability.
         match self {
-            // `agent.status`, `agent.get`; a fork shows in `identity.status`.
-            Topic::AgentStatusChanged | Topic::AgentUpdated | Topic::IdentityFork => {
-                caps::AGENT_READ_CAPABILITY.clone()
-            }
+            // `agent.status`, `agent.get`; a fork shows in `identity.status`. `runtime.config`
+            // has the operator guard and checks no capability: the operator audience of
+            // `config-changed` keeps it from every other session.
+            Topic::AgentStatusChanged
+            | Topic::AgentUpdated
+            | Topic::IdentityFork
+            | Topic::ConfigChanged => caps::AGENT_READ_CAPABILITY.clone(),
             // An app approval: the sessions that approve apps for the agent (`agent.permitCapability`).
             Topic::AppsChanged => caps::AGENT_PERMIT_CAPABILITY.clone(),
             // `hosting.info`; the main agent's copy needs RUNTIME_USER_MANAGEMENT_READ instead
@@ -163,8 +178,15 @@ impl Topic {
             Topic::ExceptionOccurred => caps::RUNTIME_EXCEPTION_SUBSCRIBE_CAPABILITY.clone(),
             // `ai.transcriptionOpen`.
             Topic::AiTranscriptionText => caps::AI_TRANSCRIBE_CAPABILITY.clone(),
-            // `ai.modelLoadingStatus`.
-            Topic::AiModelLoadingStatus => caps::AI_READ_CAPABILITY.clone(),
+            // `ai.modelStatus`, `ai.models`, the `ai.session*` reads; `ai.endpoints` (an
+            // operator-only event: published to the main agent's sessions, as
+            // `Guard::Executor` admits).
+            Topic::AiSessionChanged | Topic::AiModelStatus | Topic::AiEndpointStatus => {
+                caps::AI_READ_CAPABILITY.clone()
+            }
+            // `ai.localStatus`; published to the operator only, as `ai.localInstall` is
+            // the operator's.
+            Topic::AiLocalProgress => caps::AI_READ_CAPABILITY.clone(),
             // The `sfu.*` reads check NEIGHBOURHOOD_READ (#712 gave the SFU streams the same).
             // A call names its neighbourhood by URL, not by perspective, so on every
             // perspective.
@@ -362,20 +384,19 @@ impl Event {
         Event::new(Topic::SfuData, Audience::Dids(recipients), message)
     }
 
-    /// `sfu-room-roster`: who is in a call room now, to the agents it lists
-    /// (once each, however many sessions an agent has) and, on departure, the
-    /// departed session's DID so that session can see it is no longer listed.
-    /// The departed DID is a recipient, not a member of the payload's roster.
-    pub fn sfu_room_roster(roster: &crate::sfu::SfuRoomRoster, departed: Option<&str>) -> Event {
-        let mut dids: Vec<String> = roster
-            .participants
-            .iter()
-            .map(|p| p.agent_did.clone())
-            .chain(departed.map(str::to_string))
-            .collect();
-        dids.sort();
-        dids.dedup();
-        Event::new(Topic::SfuRoomRoster, Audience::Dids(dids), roster)
+    /// `sfu-room-roster`: who is in a call room now, to `recipients` (once
+    /// each). The caller picks them: this executor's sessions in the room and,
+    /// on departure, the departed session's DID so that session can see it is
+    /// no longer listed. Sessions of other cascade nodes are in the payload but
+    /// never recipients: their own executor tells them, and an announce must
+    /// not choose who here hears about the room.
+    pub fn sfu_room_roster(
+        roster: &crate::sfu::SfuRoomRoster,
+        mut recipients: Vec<String>,
+    ) -> Event {
+        recipients.sort();
+        recipients.dedup();
+        Event::new(Topic::SfuRoomRoster, Audience::Dids(recipients), roster)
     }
 
     /// `sfu-session-replaced`: a later join from the same device took one of `targetDid`'s
@@ -526,7 +547,7 @@ mod tests {
                         },
                     ],
                 },
-                None,
+                vec!["did:alice".into(), "did:bob".into()],
             ),
             Event::sfu_data(
                 &SfuDataMessage::new(

@@ -33,7 +33,7 @@ use std::sync::Arc;
 use ts_rs::TS;
 
 use crate::agent::capabilities::{NEIGHBOURHOOD_READ_CAPABILITY, NEIGHBOURHOOD_UPDATE_CAPABILITY};
-use crate::sfu::{get_sfu_service, CallSessionInfo, SfuConfig, SfuRoomInfo};
+use crate::sfu::{get_sfu_service, CallJoinError, CallSessionInfo, SfuConfig, SfuRoomInfo};
 use crate::types::RequestContext;
 
 use super::guards::Guard;
@@ -46,6 +46,7 @@ use super::ws_handler::{HandlerMap, NoParams, WsRpcError};
 /// unless they raced the boot sequence.
 fn service() -> Result<Arc<crate::sfu::SfuService>, WsRpcError> {
     get_sfu_service().ok_or_else(|| WsRpcError {
+        data: None,
         code: 503,
         message: "SFU service not yet available".to_string(),
     })
@@ -70,7 +71,6 @@ fn parse<P: DeserializeOwned>(params: Value) -> Result<P, WsRpcError> {
 fn caller_did(ctx: &RequestContext) -> Result<String, WsRpcError> {
     ctx.session
         .acts_as_did()
-        .map(str::to_string)
         .ok_or_else(|| WsRpcError::unauthorized("Caller DID not resolved"))
 }
 
@@ -168,17 +168,27 @@ async fn list_rooms(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 async fn call_join(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let p: SfuCallJoinParams = parse(params)?;
     let agent_did = member_did(&ctx, &p.neighbourhood_url)?;
+    // The join outlives this future (cancel safe), so it asks the session
+    // itself, before it changes the room, whether the token still holds: a
+    // revocation stops it, a client that stops waiting does not.
+    let caller = ctx.session.clone();
     let session = service()?
         .call_join(
             &p.neighbourhood_url,
             &p.room_name,
             &agent_did,
             &p.device_id,
+            &p.session_key,
             &p.sdp_offer,
             p.accept_redirect.unwrap_or(false),
+            move || caller.check().is_ok(),
         )
         .await
-        .map_err(map_room_err)?;
+        .map_err(|e| match e {
+            CallJoinError::Replaced(m) => WsRpcError::conflict(m),
+            CallJoinError::Unauthorized(m) => WsRpcError::unauthorized(m),
+            CallJoinError::Failed(m) => WsRpcError::internal(m),
+        })?;
     Ok(serde_json::to_value(session)?)
 }
 
@@ -374,10 +384,8 @@ async fn send_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 
 /// Whether every member of a neighbourhood is hosted on this executor, so all
 /// of them can join its SFU. A call's `auto` topology uses the SFU only then:
-/// a member on another executor could not join the same room. Members are the
-/// DIDs the neighbourhood's link language knows plus its local owners
-/// (`PerspectiveInstance::others`); hosted are the main agent and the managed
-/// users. A neighbourhood with no known member answers `false`.
+/// a member on another executor could not join the same room. See
+/// [`crate::sfu::config_store::hosts_every_member`].
 async fn serves_all_members(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let perspective = super::perspectives_ws::guarded_perspective(&params).await?;
     let shared_url = perspective
@@ -389,22 +397,10 @@ async fn serves_all_members(params: Value, ctx: Arc<RequestContext>) -> Result<V
         .ok_or_else(|| WsRpcError::bad_request("Not a neighbourhood".to_string()))?;
     member_did(&ctx, &shared_url)?;
     service()?;
-    let members = perspective
-        .others()
+    let hosted = crate::sfu::config_store::hosts_every_member(&perspective)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
-    let mut hosted: Vec<String> = crate::db_backend::db_backend()
-        .list_users()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|user| user.did)
-        .collect();
-    hosted.extend(crate::agent::did_for_context(&crate::agent::AgentContext::main_agent()).ok());
-    Ok(Value::Bool(all_hosted(&members, &hosted)))
-}
-
-fn all_hosted(members: &[String], hosted: &[String]) -> bool {
-    !members.is_empty() && members.iter().all(|did| hosted.contains(did))
+    Ok(Value::Bool(hosted))
 }
 
 /// Read-only query: SFU service status including public reachability.
@@ -598,6 +594,11 @@ pub struct SfuCallJoinParams {
     /// The caller's session from the same device is replaced; one from
     /// another device stays beside it.
     pub device_id: String,
+    /// The client's random key for this call session (1 to 128 characters,
+    /// never published). A rebuild of the session sends it again and
+    /// replaces its own dead session; a join whose key a later join from the
+    /// same device replaced is refused with 409: that session must stop.
+    pub session_key: String,
     /// The caller can reach other cascade nodes, so a busy room may answer
     /// with `redirectTo` instead of a session. Off by default: an SDK client
     /// reaches only this executor.
@@ -755,15 +756,6 @@ pub struct SfuParticipantQualityPreference {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn serves_all_members_only_when_every_member_is_hosted() {
-        let s = |v: &[&str]| v.iter().map(|d| d.to_string()).collect::<Vec<_>>();
-        let hosted = s(&["did:main", "did:alice", "did:bob"]);
-        assert!(super::all_hosted(&s(&["did:alice", "did:bob"]), &hosted));
-        assert!(!super::all_hosted(&s(&["did:alice", "did:carol"]), &hosted));
-        assert!(!super::all_hosted(&[], &hosted));
-    }
-
     use super::*;
     use crate::api::tests::support::admin_ctx;
     use crate::api::ws_handler::build_handler_map;
@@ -807,10 +799,14 @@ mod tests {
                 "sfu.sendData",
                 json!({ "neighbourhoodUrl": "n", "roomName": "r", "channelLabel": "c", "data": "x" }),
             ),
-            // A join names its device.
+            // A join names its device and its session key.
             (
                 "sfu.callJoin",
-                json!({ "neighbourhoodUrl": "n", "roomName": "r", "sdpOffer": "{}" }),
+                json!({ "neighbourhoodUrl": "n", "roomName": "r", "sdpOffer": "{}", "sessionKey": "k" }),
+            ),
+            (
+                "sfu.callJoin",
+                json!({ "neighbourhoodUrl": "n", "roomName": "r", "sdpOffer": "{}", "deviceId": "d" }),
             ),
             ("sfu.setConfig", json!({ "neighbourhoodUrl": "n" })),
             (
@@ -930,5 +926,26 @@ mod tests {
         );
         let alice = RequestContext::user_for_test("did:alice", all());
         assert_eq!(caller_did(&alice).unwrap(), "did:alice");
+    }
+
+    /// A browser ends trickle with an empty candidate and null line index.
+    /// The RPC keeps `candidate` a string. The classifier drops that string.
+    #[test]
+    fn an_empty_end_of_candidates_trickle_is_accepted() {
+        let params: SfuAddIceCandidateParams = serde_json::from_value(json!({
+            "neighbourhoodUrl": "n",
+            "roomName": "r",
+            "participantId": "P1",
+            "candidate": "",
+            "sdpMid": null,
+            "sdpMLineIndex": null
+        }))
+        .unwrap();
+        assert_eq!(params.candidate, "");
+        assert!(
+            crate::sfu::server::parse_trickle_candidate(&params.candidate)
+                .unwrap()
+                .is_none()
+        );
     }
 }

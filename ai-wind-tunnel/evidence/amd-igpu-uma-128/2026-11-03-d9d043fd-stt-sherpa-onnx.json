@@ -1,0 +1,216 @@
+{
+  "schemaVersion": 1,
+  "runId": "89eecca9",
+  "startedAt": "2026-11-03T04:41:22.028Z",
+  "finishedAt": "2026-11-03T04:41:42.819Z",
+  "hardwareClass": "amd-igpu-uma-128",
+  "fingerprint": {
+    "os": "linux",
+    "osVersion": "Ubuntu 26.04 LTS",
+    "kernel": "7.0.0-38-generic",
+    "arch": "x64",
+    "cpu": {
+      "model": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cores": 16,
+      "threads": 32
+    },
+    "memoryBytes": 131891142656,
+    "gpus": [
+      {
+        "vendor": "amd",
+        "name": "Advanced Micro Devices, Inc. [AMD/ATI] Strix Halo [Radeon Graphics / Radeon 8050S Graphics / Radeon 8060S Graphics]",
+        "vramBytes": 536870912,
+        "gttBytes": 65945571328,
+        "unified": true,
+        "pciId": "0000:c2:00.0"
+      }
+    ],
+    "backends": [
+      "cpu",
+      "rocm",
+      "vulkan"
+    ],
+    "gpuBudgetBytes": 66482442240,
+    "drivers": {
+      "rocm": "10.0.0",
+      "amdgpu": "in-kernel 7.0.0-38-generic"
+    },
+    "id": "d9d043fd"
+  },
+  "executor": {
+    "commit": "cf70b3b1b",
+    "binary": "ad4m-executor",
+    "version": "ad4m 0.13.1-staging.6",
+    "harnessCommit": "3d1bf4809afcd0a05f94d17fb4b6f50fb7c2b6df"
+  },
+  "options": {
+    "repeat": 3,
+    "concurrency": [
+      1,
+      4
+    ],
+    "providers": [
+      "sherpa-onnx"
+    ],
+    "services": [
+      "stt"
+    ],
+    "direct": true
+  },
+  "providers": {
+    "sherpa-onnx": {
+      "status": "available",
+      "builds": [
+        "linux-x64-cpu"
+      ],
+      "mode": "spawned",
+      "version": "v2.0.1"
+    }
+  },
+  "cells": [
+    {
+      "provider": "sherpa-onnx",
+      "service": "stt",
+      "status": "pass",
+      "model": {
+        "modelId": "parakeet-tdt-0.6b-v3-int8-onnx",
+        "remoteModel": "parakeet-tdt-0.6b-v3-int8-onnx",
+        "sizeBytes": 670478772,
+        "memoryBytes": 2000000000,
+        "license": "CC-BY-4.0",
+        "params": "0.6B",
+        "source": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/2bda32ec70b097a55adaa07d9a7173915b43cc78/encoder.int8.onnx"
+      },
+      "runtimeBuild": "linux-x64-cpu",
+      "backend": "cpu",
+      "endpointKind": "OPEN_AI_AUDIO",
+      "serverFlags": [
+        "--provider=cpu",
+        "--num-threads=8",
+        "--num-work-threads=1",
+        "--max-batch-size=1"
+      ],
+      "checks": [
+        {
+          "name": "transcribes recording (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes recording (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"If you can read this, transcription is working.\"",
+          "value": 0,
+          "threshold": 0.25
+        },
+        {
+          "name": "transcribes meeting (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes meeting (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"Please move the weekly planning meeting to Thursday afternoon and invite the design team.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.000: \"The forecast says light rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0,
+          "threshold": 0.2
+        },
+        {
+          "name": "transcribes weather-noisy (/v1/audio/transcriptions)",
+          "pass": true,
+          "detail": "WER 0.143: \"The forecast that might rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0.143,
+          "threshold": 0.5
+        },
+        {
+          "name": "transcribes weather-noisy (SDK transcription stream)",
+          "pass": true,
+          "detail": "WER 0.143: \"The forecast that might rain in the morning, clearing to sunshine by the evening.\"",
+          "value": 0.143,
+          "threshold": 0.5
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 143,
+        "noisyLanguage": "not reported",
+        "noisyNoHintWer": 0.143,
+        "noisyNoHintText": "The forecast that might rain in the morning, clearing to sunshine by the evening.",
+        "wer": {
+          "n": 4,
+          "median": 0,
+          "p95": 0.121,
+          "min": 0,
+          "max": 0.143,
+          "mean": 0.036
+        },
+        "werMean": 0.036,
+        "streamWerMean": 0.036,
+        "rtf": {
+          "n": 12,
+          "median": 0.026,
+          "p95": 0.031,
+          "min": 0.024,
+          "max": 0.031,
+          "mean": 0.026
+        },
+        "latencyMs": {
+          "n": 12,
+          "median": 120.6,
+          "p95": 151.4,
+          "min": 99.726,
+          "max": 152.8,
+          "mean": 125.1
+        },
+        "streamLatencyMs": {
+          "n": 4,
+          "median": 136,
+          "p95": 167.6,
+          "min": 103.2,
+          "max": 168.6,
+          "mean": 135.9
+        },
+        "audioSec": 18.99,
+        "directLatencyMs": {
+          "n": 12,
+          "median": 115.9,
+          "p95": 158.5,
+          "min": 95.769,
+          "max": 176.9,
+          "mean": 121
+        },
+        "executorOverheadMs": 4.7,
+        "peakRssBytes": 1609871360,
+        "peakGpuBytes": 0,
+        "serverReadyMs": 7916,
+        "adapter": "OpenAI-shaped front: /v1/audio/transcriptions -> sherpa-onnx offline WebSocket",
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 2000000000,
+        "budgetBytes": 65408700416,
+        "gpuBudgetBytes": 66482442240,
+        "ramBytes": 131891142656
+      },
+      "durationMs": 12159
+    }
+  ]
+}

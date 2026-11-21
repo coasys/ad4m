@@ -97,6 +97,7 @@ class FakePeerConnection {
     constructor(init: RTCSessionDescriptionInit) { Object.assign(this, init) }
 }
 
+import { RpcError } from "../apiClient"
 import { defaultDeviceId, SfuManager, type SfuNeighbourhoodApi, type SfuParticipantState } from "./SfuManager"
 import type {
     CallSessionInfo,
@@ -631,7 +632,7 @@ test("a failed connection leaves, then joins this executor again", async () => {
         "subscribe-roster",
         "sfuCallJoin",
     ])
-    expect(api.sfuCallJoin).toHaveBeenLastCalledWith(URL, ROOM, expect.any(String), expect.any(String))
+    expect(api.sfuCallJoin).toHaveBeenLastCalledWith(URL, ROOM, expect.any(String), expect.any(String), expect.any(String))
     expect(FakePeerConnection.instances).toHaveLength(2)
 })
 
@@ -1010,6 +1011,51 @@ test("replaced while a reconnect waits between leave and join: it stops, and nev
     expect(api.replacedHandlers.size).toBe(0)
 })
 
+test("a rebuild's join refused as replaced stops the call, says so, and never joins again", async () => {
+    // The replaced notice was missed (the socket was down): only the refusal
+    // tells this tab that another tab of the device took the call.
+    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL, undefined, undefined, DEVICE)
+        const replacedEvents: unknown[] = []
+        const errors: unknown[] = []
+        manager.on("replaced", (event: unknown) => replacedEvents.push(event))
+        manager.on("error", (e: unknown) => errors.push(e))
+        await manager.join(fakeStream())
+        api.sfuCallLeave.mockResolvedValueOnce(false)
+        api.sfuCallJoin.mockRejectedValueOnce(new RpcError(409, "This call session was replaced"))
+
+        await iceState("failed")
+        await flush()
+        await jest.advanceTimersByTimeAsync(180_000)
+
+        expect(replacedEvents).toEqual([replaced(MINE)])
+        expect(errors).toEqual([])
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+        expect(manager.getState().participantId).toBeNull()
+        expect(manager.getState().peerConnection).toBeNull()
+        expect(api.offerHandlers.size + api.rosterHandlers.size + api.replacedHandlers.size).toBe(0)
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a rebuild joins with the session key of its call; a new join takes a new key", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL, undefined, undefined, DEVICE)
+    await manager.join(fakeStream())
+    await iceState("failed")
+    await manager.leave()
+    await manager.join(fakeStream())
+
+    const keys = (api.sfuCallJoin.mock.calls as unknown as string[][]).map((call) => call[4])
+    expect(keys).toHaveLength(3)
+    expect(keys[0]).toEqual(expect.any(String))
+    expect(keys[1]).toBe(keys[0])
+    expect(keys[2]).not.toBe(keys[0])
+})
+
 test("replaced while a reconnect's join is out: the session that join got is left", async () => {
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL, undefined, undefined, DEVICE)
@@ -1073,7 +1119,7 @@ test("the join sends the device id; every later call names the participant id th
     await manager.sendData("chat", "hi")
     await manager.leave()
 
-    expect(api.sfuCallJoin).toHaveBeenCalledWith(URL, ROOM, expect.any(String), DEVICE)
+    expect(api.sfuCallJoin).toHaveBeenCalledWith(URL, ROOM, expect.any(String), DEVICE, expect.any(String))
     expect(api.sfuAddIceCandidate.mock.calls).toEqual([
         [URL, ROOM, MINE, "early"],
         [URL, ROOM, MINE, "late"],
@@ -1318,7 +1364,7 @@ describe("the default device id", () => {
         g.localStorage = fakeLocalStorage()
         const api = fakeApi()
         await new SfuManager(api, ROOM, ME, URL, undefined, undefined, "electron-main").join(fakeStream())
-        expect(api.sfuCallJoin).toHaveBeenCalledWith(URL, ROOM, expect.any(String), "electron-main")
+        expect(api.sfuCallJoin).toHaveBeenCalledWith(URL, ROOM, expect.any(String), "electron-main", expect.any(String))
         expect(g.localStorage.items.size).toBe(0)
     })
 })
@@ -1378,7 +1424,57 @@ test("ICE disconnected also checks the executor socket once, with the restart", 
     }
 })
 
-test("a restart that has not brought the connection back after 5 s falls back to a rebuild", async () => {
+test("a lost restart offer stays open until the executor can resend it", async () => {
+    // ICE drops, the offer is lost, and signaling returns 2 s later. The
+    // executor resends that offer at 10 s. The restart stays open through
+    // that resend, then long enough for ICE to finish.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        await iceState("connected")
+        api.log.length = 0
+
+        await iceState("disconnected")
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+        await jest.advanceTimersByTimeAsync(2_000)
+        api.emitNetworkChange()
+        await flush()
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
+
+        // t = 7 s. A 5 s window started at t = 2 s would rebuild here.
+        await jest.advanceTimersByTimeAsync(5_000)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        // t = 10 s. The executor's first resend is due. Still no rebuild.
+        await jest.advanceTimersByTimeAsync(3_000)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+
+        // The original peer must apply the resent offer and post its answer
+        // before ICE recovery. `connected` clears the restart timer on its own.
+        const peer = currentPc()
+        api.emitOffer(offer("restart-offer"))
+        await flush()
+        expect(peer.remoteSdps()).toContain("restart-offer")
+        expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledWith(
+            URL,
+            ROOM,
+            MINE,
+            JSON.stringify({ type: "answer", sdp: "local-answer" }),
+        )
+
+        await iceState("connected")
+        await jest.advanceTimersByTimeAsync(30_000)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        expect(FakePeerConnection.instances).toHaveLength(1)
+        expect(manager.getState().peerConnection).toBe(FakePeerConnection.instances[0])
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a restart that has not brought the connection back after 15 s falls back to a rebuild", async () => {
     fakeTimers()
     try {
         const api = fakeApi()
@@ -1387,7 +1483,7 @@ test("a restart that has not brought the connection back after 5 s falls back to
         await iceState("connected")
 
         await iceState("disconnected")
-        await jest.advanceTimersByTimeAsync(4_900)
+        await jest.advanceTimersByTimeAsync(14_900)
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
         await jest.advanceTimersByTimeAsync(200)
         expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
@@ -1412,7 +1508,9 @@ test("a refused restart also waits for the timeout before rebuilding", async () 
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
 
         await iceState("disconnected")
-        await jest.advanceTimersByTimeAsync(5_000)
+        await jest.advanceTimersByTimeAsync(14_900)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        await jest.advanceTimersByTimeAsync(200)
         expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
     } finally {
         jest.useRealTimers()
@@ -1431,7 +1529,7 @@ test("a network change restarts ICE even while the connection still looks connec
         await flush()
         expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
         // Still connected when the timeout comes: nothing to rebuild.
-        await jest.advanceTimersByTimeAsync(10_000)
+        await jest.advanceTimersByTimeAsync(15_000)
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
     } finally {
         jest.useRealTimers()
@@ -1514,7 +1612,7 @@ test("a roster that lists this agent during a restart lets the restart finish in
 
 test("a roster that leaves this agent out during a restart rebuilds after its grace, once", async () => {
     // The server dropped the session: the restart cannot heal it, so the
-    // roster's grace (3 s) ends it before the restart's timeout (5 s).
+    // roster's grace (3 s) ends it before the restart's timeout (15 s).
     fakeTimers()
     try {
         const api = fakeApi()

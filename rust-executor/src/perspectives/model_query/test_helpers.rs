@@ -1,6 +1,7 @@
+use super::super::shacl_parser::class_name_of;
 use super::shape::parse_shape_from_json;
 use super::types::{InstanceLinks, ModelShape, ShapeProperty, ShapeResolver};
-use deno_core::anyhow::{anyhow, Error};
+use anyhow::{anyhow, Error};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -23,6 +24,7 @@ pub fn prop(name: &str, predicate: &str) -> ShapeProperty {
         transform: None,
         interpretation_hint: None,
         identity: false,
+        in_values: None,
         local: false,
         ordering: None,
     }
@@ -48,6 +50,7 @@ pub fn relation(name: &str, predicate: &str) -> ShapeProperty {
         transform: None,
         interpretation_hint: None,
         identity: false,
+        in_values: None,
         local: false,
         ordering: None,
     }
@@ -93,6 +96,7 @@ pub fn flag(name: &str, predicate: &str, initial: &str) -> ShapeProperty {
         transform: None,
         interpretation_hint: None,
         identity: false,
+        in_values: None,
         local: false,
         ordering: None,
     }
@@ -148,11 +152,14 @@ impl StaticShapeResolver {
 }
 
 impl ShapeResolver for StaticShapeResolver {
+    /// The shape registered under `class_name`, else (for a target class IRI,
+    /// as classification asks) the one registered under its name: the
+    /// fixtures hold one class per name.
     fn get_shape(&self, class_name: &str) -> Result<Arc<ModelShape>, Error> {
-        self.shapes
-            .read()
-            .unwrap()
+        let shapes = self.shapes.read().unwrap();
+        shapes
             .get(class_name)
+            .or_else(|| shapes.get(&class_name_of(class_name)))
             .cloned()
             .ok_or_else(|| {
                 anyhow!(
@@ -185,7 +192,13 @@ pub fn evaluate_getters_batch_from_json(
     shape_json: &str,
 ) -> Result<serde_json::Value, Error> {
     let shape = parse_shape_from_json(shape_json, class_name)?;
-    super::getters::evaluate_getters_batch(store, &shape, instance_ids, property_names)
+    super::getters::evaluate_getters_batch(
+        &crate::perspectives::sparql_store::EvalStop::none(),
+        store,
+        &shape,
+        instance_ids,
+        property_names,
+    )
 }
 
 /// Helper: build an InstanceLinks entry with explicit per-link timestamps.

@@ -17,11 +17,14 @@ use crate::types::RequestContext;
 // ── Error type ──────────────────────────────────────────────────────────────
 
 /// Error returned by WS RPC handlers.
-/// Maps directly to the `{ "error": { "code": N, "message": "..." } }` wire format.
+/// Maps directly to the `{ "error": { "code": N, "message": "...", "data"?: ... } }` wire format.
 #[derive(Debug)]
 pub struct WsRpcError {
     pub code: u16,
     pub message: String,
+    /// Structured detail a client can read (`error.data` on the wire), e.g. the validation
+    /// errors of a refused instance write. Absent from the reply when `None`.
+    pub data: Option<Value>,
 }
 
 impl WsRpcError {
@@ -29,49 +32,76 @@ impl WsRpcError {
         Self {
             code: 400,
             message: msg.into(),
+            data: None,
         }
     }
     pub fn unauthorized(msg: impl Into<String>) -> Self {
         Self {
             code: 401,
             message: msg.into(),
+            data: None,
         }
     }
     pub fn forbidden(msg: impl Into<String>) -> Self {
         Self {
             code: 403,
             message: msg.into(),
+            data: None,
         }
     }
     pub fn not_found(msg: impl Into<String>) -> Self {
         Self {
             code: 404,
             message: msg.into(),
+            data: None,
         }
     }
+    /// 409: the call does not fit the executor's state (`no-config-file`, `no-log-file`, an
+    /// `agent.generate` on an agent that is already initialised).
     pub fn conflict(msg: impl Into<String>) -> Self {
         Self {
             code: 409,
             message: msg.into(),
+            data: None,
         }
     }
     pub fn too_many_requests(msg: impl Into<String>) -> Self {
         Self {
             code: 429,
             message: msg.into(),
+            data: None,
         }
     }
     pub fn internal(msg: impl Into<String>) -> Self {
         Self {
             code: 500,
             message: msg.into(),
+            data: None,
         }
     }
     pub fn not_implemented(msg: impl Into<String>) -> Self {
         Self {
             code: 501,
             message: msg.into(),
+            data: None,
         }
+    }
+}
+
+impl WsRpcError {
+    /// The same error, carrying `data` for the client.
+    pub fn with_data(mut self, data: Value) -> Self {
+        self.data = Some(data);
+        self
+    }
+
+    /// The reply's `error` member: `{ code, message }`, plus `data` when there is some.
+    pub fn to_wire(&self) -> Value {
+        let mut wire = serde_json::json!({ "code": self.code, "message": self.message });
+        if let Some(data) = &self.data {
+            wire["data"] = data.clone();
+        }
+        wire
     }
 }
 
@@ -269,6 +299,8 @@ struct Entry {
     guard: Option<Guard>,
     /// [`MethodFlags::or_null`]: answer `null` where the method would answer 404.
     or_null: bool,
+    /// [`MethodFlags::local_only`]: only the operator on this machine may call it.
+    local_only: bool,
     /// [`MethodFlags::opens`].
     opens: bool,
 }
@@ -318,6 +350,27 @@ impl MethodFlags<'_> {
             entry: Some(entry),
         }
     }
+
+    /// Only the operator on this machine may call the method: the admin credential, or no token
+    /// on an executor without one, on a loopback listener
+    /// ([`Session::is_operator_on_this_machine`]). The dispatcher checks it after the guard;
+    /// every other caller, a grant with every capability and the admin credential on a
+    /// network listener included, gets 403 [`super::guards::LOCAL_ONLY`]. For calls that
+    /// replace, open or use the executor's own keys, files or process.
+    ///
+    /// [`Session::is_operator_on_this_machine`]: crate::agent::session::Session::is_operator_on_this_machine
+    pub fn local_only(self) -> Self {
+        let name = &self.spec.name;
+        let entry = self
+            .entry
+            .unwrap_or_else(|| panic!("'{name}' is not dispatched through the map: no local_only"));
+        entry.local_only = true;
+        MethodFlags {
+            spec: self.spec,
+            entry: Some(entry),
+        }
+    }
+
     /// Who may call the method. The dispatcher runs the guard after the params deserialize
     /// and before the handler.
     pub fn guard(self, guard: Guard) -> Self {
@@ -389,6 +442,7 @@ impl HandlerMap {
             result: check::<R>,
             guard: None,
             or_null: false,
+            local_only: false,
             opens: false,
         });
         MethodFlags {
@@ -429,6 +483,18 @@ impl HandlerMap {
             .handlers
             .iter()
             .filter(|(_, entry)| entry.or_null)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The methods flagged [`MethodFlags::local_only`], sorted by name.
+    pub fn local_only_methods(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .handlers
+            .iter()
+            .filter(|(_, entry)| entry.local_only)
             .map(|(name, _)| name.as_str())
             .collect();
         names.sort();
@@ -500,7 +566,13 @@ impl HandlerMap {
             WsRpcError::bad_request(format!("Invalid params for {}: {}", msg_type, e))
         })?;
         match &entry.guard {
-            Some(guard) => guard.admit(msg_type, params, ctx).await,
+            Some(guard) => {
+                guard.admit(msg_type, params, ctx).await?;
+                if entry.local_only && !ctx.session.is_operator_on_this_machine() {
+                    return Err(WsRpcError::forbidden(super::guards::LOCAL_ONLY));
+                }
+                Ok(())
+            }
             // `require_guards` stops a map with such a method at start-up; a map built
             // without it still refuses the call.
             None => Err(WsRpcError::internal(format!(
@@ -543,8 +615,11 @@ pub fn build_handler_map() -> HandlerMap {
     let mut map = HandlerMap::new();
     super::agent_ws::register_ws_handlers(&mut map);
     super::perspectives_ws::register_ws_handlers(&mut map);
+    super::perspective_instances_ws::register_ws_handlers(&mut map);
     super::agent_session_ws::register_ws_handlers(&mut map);
+    super::ai_sessions_ws::register_ws_handlers(&mut map);
     super::runtime_ws::register_ws_handlers(&mut map);
+    super::config_ws::register_ws_handlers(&mut map);
     super::languages_ws::register_ws_handlers(&mut map);
     super::expressions_ws::register_ws_handlers(&mut map);
     super::ai_ws::register_ws_handlers(&mut map);

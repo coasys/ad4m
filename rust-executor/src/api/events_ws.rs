@@ -34,7 +34,9 @@
 //! | `notification-triggered`      | `notification` + `perspectiveUuid` | the notification owner's DID | Notification triggered |
 //! | `exception-occurred`          | `exception`   | approval requests: the agent asked, AGENT_PERMIT; else everyone | Exception occurred |
 //! | `transcription-text`          | (inline)      | the stream owner's DID | AI transcription text                |
-//! | `model-loading-status`        | (inline)      | everyone               | AI model loading status              |
+//! | `model-status`                | (inline)      | everyone               | An upstream model's status, e.g. `ai.pullModel` progress |
+//! | `ai-endpoint-status`          | (inline)      | the main agent's DID   | An AI endpoint's health or capabilities changed |
+//! | `ai-local-progress`           | (inline)      | the operator           | `ai.localInstall` progress: bytes per item, phase |
 //! | `query-subscription-update`   | (inline)      | the subscriber among the owners, on its own connection (passes `events.watch`) | Live query delta update, or `{ lagged: true }` |
 //! | `auto-processor-event`        | (inline)      | the pass owner, if it reads the perspective | Auto-processor pass step signal |
 //! | `auto-processor-neighbourhood-state` | (inline) | owners                | Coarse-grained neighbourhood view of "someone is auto-processing" |
@@ -44,6 +46,7 @@
 //! | `sfu-room-roster`             | (inline)      | listed DIDs and the departed DID | Who is in a call room now         |
 //! | `flow-state-changed`          | (inline)      | `agentDid` if it reads the perspective; else the main agent's to `Operator` | A flow instance's state moved on that agent's replica (#1424) |
 //! | `identity-fork`               | (inline)      | the local agents that speak for the identity | The key-log cache found two logs (a different valid event at a held seq) and kept its own (a store answering a shorter log raises none) |
+//! | `config-changed`              | (inline)      | the operator           | `runtime.setConfig` wrote keys to the config file; they take effect at the next start |
 //!
 //! Every session also needs the event's capability (`Event::capability`).
 
@@ -58,8 +61,8 @@ use crate::events::{Event, Topic};
 use crate::pubsub::get_global_pubsub;
 
 use crate::types::{
-    AIModelLoadingStatus, Agent, AgentStatus, Apps, ExceptionInfo, HostingUserInfo,
-    NeighbourhoodSignalFilter, NotificationTriggeredEvent, PerspectiveEvent, PerspectiveLinkEvent,
+    Agent, AgentStatus, Apps, ExceptionInfo, HostingUserInfo, NeighbourhoodSignalFilter,
+    NotificationTriggeredEvent, PerspectiveEvent, PerspectiveLinkEvent,
     PerspectiveLinkUpdatedEvent, PerspectiveRemovedEvent, PerspectiveStateFilter,
     QuerySubscriptionUpdateEvent, TranscriptionTextFilter,
 };
@@ -111,6 +114,7 @@ pub fn event_specs() -> Vec<EventSpec> {
     use crate::perspectives::flow_instance::replica_state::FlowStateChangedEvent;
     use Topic::*;
     vec![
+        EventSpec::of::<crate::ai_sessions::types::AiSessionChanged>(AiSessionChanged, false),
         EventSpec::of::<AgentStatusChangedEvent>(AgentStatusChanged, false),
         EventSpec::of::<AgentUpdatedEvent>(AgentUpdated, false),
         EventSpec::of::<Apps>(AppsChanged, false),
@@ -126,7 +130,9 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<NotificationTriggeredEvent>(RuntimeNotificationTriggered, true),
         EventSpec::of::<ExceptionOccurredEvent>(ExceptionOccurred, false),
         EventSpec::of::<TranscriptionTextFilter>(AiTranscriptionText, false),
-        EventSpec::of::<AIModelLoadingStatus>(AiModelLoadingStatus, false),
+        EventSpec::of::<crate::types::ModelStatusEvent>(AiModelStatus, false),
+        EventSpec::of::<crate::types::AiEndpointStatusEvent>(AiEndpointStatus, false),
+        EventSpec::of::<crate::ai_service::local::ProgressEvent>(AiLocalProgress, false),
         EventSpec::of::<QuerySubscriptionUpdateEvent>(PerspectiveQuerySubscription, true),
         EventSpec::of::<AutoProcessorEvent>(AutoProcessorEvent, true),
         EventSpec::of::<AutoProcessorNeighbourhoodState>(AutoProcessorNeighbourhoodState, true),
@@ -137,6 +143,7 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<crate::sfu::SfuSessionReplaced>(SfuSessionReplaced, false),
         EventSpec::of::<FlowStateChangedEvent>(FlowStateChanged, true),
         EventSpec::of::<crate::identity::types::IdentityForkEvent>(IdentityFork, false),
+        EventSpec::of::<crate::config_rpc::ConfigChanged>(ConfigChanged, false),
     ]
 }
 
@@ -245,7 +252,8 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
         Topic::AgentStatusChanged | Topic::AgentUpdated => Some("agent"),
         Topic::ExceptionOccurred => Some("exception"),
         // No `_` arm: a new topic does not compile until someone picks its shape.
-        Topic::AppsChanged
+        Topic::AiSessionChanged
+        | Topic::AppsChanged
         | Topic::HostingUserInfoChanged
         | Topic::PerspectiveAdded
         | Topic::PerspectiveRemoved
@@ -257,7 +265,9 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
         | Topic::NeighbourhoodSignal
         | Topic::RuntimeNotificationTriggered
         | Topic::AiTranscriptionText
-        | Topic::AiModelLoadingStatus
+        | Topic::AiModelStatus
+        | Topic::AiEndpointStatus
+        | Topic::AiLocalProgress
         | Topic::PerspectiveQuerySubscription
         | Topic::AutoProcessorEvent
         | Topic::AutoProcessorNeighbourhoodState
@@ -267,7 +277,8 @@ fn payload_key(topic: Topic) -> Option<&'static str> {
         | Topic::SfuRoomRoster
         | Topic::SfuSessionReplaced
         | Topic::FlowStateChanged
-        | Topic::IdentityFork => None,
+        | Topic::IdentityFork
+        | Topic::ConfigChanged => None,
     }
 }
 
@@ -697,11 +708,11 @@ mod audience_matrix_tests {
     }
 
     /// Publishes `payload` as a fence that reaches every stream of [`open_all`]: as
-    /// `model-loading-status` (AI_READ) and as `link-added` on P (the P reader's only
+    /// `model-status` (AI_READ) and as `link-added` on P (the P reader's only
     /// capability). A stream stops reading at the first one it gets.
     async fn publish_fence(payload: serde_json::Value) {
         let pubsub = get_global_pubsub().await;
-        let model = Event::new(Topic::AiModelLoadingStatus, Audience::Everyone, &payload);
+        let model = Event::new(Topic::AiModelStatus, Audience::Everyone, &payload);
         pubsub.publish_event(model);
         let link = Event::new(Topic::LinkAdded, Audience::Everyone, &payload).for_perspective(P);
         pubsub.publish_event(link);
@@ -739,7 +750,11 @@ mod audience_matrix_tests {
             .acts_as_did()
             .expect("the main agent has a DID");
         let main = main.to_string();
-        assert_eq!(sessions[1].1.acts_as_did(), Some(main.as_str()), "app");
+        assert_eq!(
+            sessions[1].1.acts_as_did().as_deref(),
+            Some(main.as_str()),
+            "app"
+        );
 
         // The sessions that hold a user token's capabilities, or every capability.
         let readers = ["operator", "app", "permit app", "user A", "user B"];
@@ -751,7 +766,7 @@ mod audience_matrix_tests {
             // The AI app holds AI_READ; the P reader and anonymous callers do not.
             (
                 "everyone".into(),
-                event(Topic::AiModelLoadingStatus, Audience::Everyone),
+                event(Topic::AiModelStatus, Audience::Everyone),
                 vec![
                     "operator",
                     "app",
@@ -799,6 +814,12 @@ mod audience_matrix_tests {
                 "no-did".into(),
                 event(Topic::AgentUpdated, Audience::Dids(vec![])),
                 vec![],
+            ),
+            // `runtime.setConfig` wrote the config file: the operator only.
+            (
+                "config-changed".into(),
+                event(Topic::ConfigChanged, Audience::Operator),
+                vec!["operator"],
             ),
         ];
         // Agent topics go to the agent the payload names (`matches_agent_did` before), or to
@@ -1440,8 +1461,9 @@ mod audience_matrix_tests {
     // `send_signal` and `send_broadcast` deliver to this executor's own agents in a
     // neighbourhood through `event_recipients`: a signal to an owner is published here (once,
     // naming it), a signal to anyone else goes to the link language; a broadcast reaches every
-    // owner but the main agent when the main agent sent it. Without a link language the
-    // remote part fails after the local delivery.
+    // owner, its sender too, without loopback: the main agent like any managed agent, so two
+    // clients of one agent hear each other. Without a link language the remote part fails
+    // after the local delivery.
     #[tokio::test]
     async fn signals_to_this_executors_agents_are_delivered_here() {
         use crate::perspectives::perspective_instance::PerspectiveInstance;
@@ -1500,16 +1522,24 @@ mod audience_matrix_tests {
             author: main.clone(),
             ..Default::default()
         };
+        let mut expected = vec![to(A), to(&main)];
+        expected.sort_by(|x, y| x.1.cmp(&y.1));
         let _ = with_main.send_broadcast(from_main, false).await;
-        assert_eq!(signals(), vec![to(A)], "the main agent sent it");
+        assert_eq!(
+            signals(),
+            expected,
+            "the main agent gets the broadcast it sent, as any owner does"
+        );
         let from_a = PerspectiveExpression {
             author: A.into(),
             ..Default::default()
         };
         let _ = with_main.send_broadcast(from_a, false).await;
-        let mut expected = vec![to(A), to(&main)];
-        expected.sort_by(|x, y| x.1.cmp(&y.1));
-        assert_eq!(signals(), expected);
+        assert_eq!(
+            signals(),
+            expected,
+            "a managed agent gets its own broadcast"
+        );
     }
 
     // A triggered notification carries `triggerMatch`, query results from its perspective. It
@@ -1815,7 +1845,7 @@ mod audience_matrix_tests {
             Arc::new(app("expired", vec![AI_READ_CAPABILITY.clone()]).expiring_at(an_hour_ago));
         let mut stream = open(expired).await;
         get_global_pubsub().await.publish_event(Event::new(
-            Topic::AiModelLoadingStatus,
+            Topic::AiModelStatus,
             Audience::Everyone,
             json_case("expired"),
         ));
@@ -2067,7 +2097,7 @@ mod token_expiry_tests {
         let all = event_interest::watching_all();
         let mut stream = build_event_stream(Arc::new(session), all, None).await;
         get_global_pubsub().await.publish_event(Event::new(
-            Topic::AiModelLoadingStatus,
+            Topic::AiModelStatus,
             crate::events::Audience::Everyone,
             serde_json::json!({ "model": "m", "status": "loading" }),
         ));
@@ -2185,6 +2215,15 @@ mod event_spec_tests {
     fn unscoped_payloads_name_no_perspective() {
         let payloads = [
             (
+                Topic::AiSessionChanged,
+                serde_json::to_value(crate::ai_sessions::types::AiSessionChanged {
+                    session_id: "s".into(),
+                    kind: "message".into(),
+                    session: None,
+                    message: None,
+                }),
+            ),
+            (
                 Topic::AgentStatusChanged,
                 serde_json::to_value(AgentStatus::default()),
             ),
@@ -2203,8 +2242,36 @@ mod event_spec_tests {
                 serde_json::to_value(TranscriptionTextFilter::default()),
             ),
             (
-                Topic::AiModelLoadingStatus,
-                serde_json::to_value(AIModelLoadingStatus::default()),
+                Topic::AiModelStatus,
+                serde_json::to_value(crate::types::ModelStatusEvent {
+                    endpoint_id: "e".into(),
+                    remote_model: "m".into(),
+                    status: crate::types::ModelStatus {
+                        state: crate::types::ModelState::Pulling,
+                        progress: Some(1.0),
+                        detail: None,
+                    },
+                }),
+            ),
+            (
+                Topic::AiEndpointStatus,
+                serde_json::to_value(crate::types::AiEndpointStatusEvent {
+                    endpoint_id: "e".into(),
+                    health: Default::default(),
+                    capabilities: vec![],
+                }),
+            ),
+            (
+                Topic::AiLocalProgress,
+                serde_json::to_value(crate::ai_service::local::ProgressEvent {
+                    phase: "download".into(),
+                    item: Some("llama.cpp".into()),
+                    item_done_bytes: 1,
+                    item_total_bytes: 2,
+                    done_bytes: 1,
+                    total_bytes: 4,
+                    detail: None,
+                }),
             ),
             (
                 Topic::SfuCallRenegotiationOffer,
@@ -2265,6 +2332,13 @@ mod event_spec_tests {
                     seq: 1,
                     ours: "QmA".into(),
                     theirs: "QmB".into(),
+                }),
+            ),
+            (
+                Topic::ConfigChanged,
+                serde_json::to_value(crate::config_rpc::ConfigChanged {
+                    keys: vec!["mcp_port".into()],
+                    restart_pending: true,
                 }),
             ),
         ];

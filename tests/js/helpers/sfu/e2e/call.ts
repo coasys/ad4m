@@ -12,12 +12,24 @@ import { Participant } from "./participant.js";
 import type { JoinOptions, Size, Snapshot } from "./protocol.js";
 import type { World } from "./world.js";
 
-export type Check = (snapshots: Map<string, Snapshot>) => string[];
+/**
+ * `holding`: the check runs inside `holds`, on a call that already worked,
+ * rather than in `eventually`, waiting for it to work.
+ */
+export type Check = (snapshots: Map<string, Snapshot>, holding?: boolean) => string[];
 
 /** Every one of `checks`. */
 export function all(...checks: Check[]): Check {
-  return (snapshots) => checks.flatMap((check) => check(snapshots));
+  return (snapshots, holding) => checks.flatMap((check) => check(snapshots, holding));
 }
+
+/**
+ * A participant process that stood still this long sent no tone for as long
+ * (its source is a timer on that loop) and took in no audio: on a loaded
+ * host, a fresh process can stall for a second. Half a second without the
+ * tone is what a receiver calls silence, so a shorter pause cannot explain it.
+ */
+const PAUSE_MS = 250;
 
 export class Call {
   readonly participants: Participant[] = [];
@@ -129,7 +141,7 @@ export class Call {
     const started = Date.now();
     let problems: string[] = [];
     for (;;) {
-      problems = check(await this.snapshots());
+      problems = check(await this.snapshots(), false);
       if (problems.length === 0) return Date.now() - started;
       if (Date.now() - started > timeoutMs) break;
       await new Promise((r) => setTimeout(r, 500));
@@ -142,7 +154,7 @@ export class Call {
   async holds(check: Check, durationMs: number, label: string): Promise<void> {
     const until = Date.now() + durationMs;
     while (Date.now() < until) {
-      const problems = check(await this.snapshots());
+      const problems = check(await this.snapshots(), true);
       if (problems.length) throw new Error(`${label}: broke — ${problems.slice(0, 12).join("; ")}`);
       await new Promise((r) => setTimeout(r, 500));
     }
@@ -157,13 +169,13 @@ export class Call {
   }
 
   /** For every present participant, every other present participant: `test` returns a problem or null. */
-  private pairs(test: (snapshot: Snapshot, other: string, me: string) => string | null): Check {
-    return (snapshots) => {
+  private pairs(test: (snapshot: Snapshot, other: string, me: string, snapshots: Map<string, Snapshot>, holding: boolean) => string | null): Check {
+    return (snapshots, holding = false) => {
       const problems: string[] = [];
       for (const [me, snapshot] of snapshots) {
         for (const other of this.present) {
           if (other === me) continue;
-          const problem = test(snapshot, other, me);
+          const problem = test(snapshot, other, me, snapshots, holding);
           if (problem) problems.push(`${me} ${problem}`);
         }
       }
@@ -189,17 +201,26 @@ export class Call {
   /**
    * Audio arriving now from every other participant, carrying *that* participant's tone,
    * on one of the participants the SDK attributes to their agent.
+   *
+   * In a hold, silence or nothing from a participant is not held against the
+   * call while the sender's or the receiver's process has just stood still
+   * (`pausedMs`): the harness, not the call, made no sound or heard none. A
+   * wrong tone always counts, and so does silence still there once the pause
+   * has passed out of the participants' window.
    */
   hearsEveryone(): Check {
-    return this.pairs((snapshot, other) => {
+    return this.pairs((snapshot, other, me, snapshots, holding) => {
       const theirs = snapshot.sessions.filter((s) => s.agentDid === this.did(other) && s.audioRecent > 0);
-      if (theirs.length === 0) return `hears nothing from ${other}`;
       const expected = this.tones.get(other);
-      if (!theirs.some((s) => s.tone === expected)) {
-        const heard = theirs.map((s) => (s.tone == null ? "silence" : `${s.tone} Hz (${this.toneOwner(s.tone)})`)).join(", ");
-        return `hears ${heard} from ${other}, who sends ${expected} Hz`;
+      const wrongTone = theirs.some((s) => s.tone != null && s.tone !== expected);
+      if (theirs.some((s) => s.tone === expected)) return null;
+      if (holding && !wrongTone) {
+        const paused = [me, other].filter((name) => (snapshots.get(name)?.pausedMs ?? 0) >= PAUSE_MS);
+        if (paused.length) return null;
       }
-      return null;
+      if (theirs.length === 0) return `hears nothing from ${other}`;
+      const heard = theirs.map((s) => (s.tone == null ? "silence" : `${s.tone} Hz (${this.toneOwner(s.tone)})`)).join(", ");
+      return `hears ${heard} from ${other}, who sends ${expected} Hz`;
     });
   }
 

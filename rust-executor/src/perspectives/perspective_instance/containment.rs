@@ -3,6 +3,7 @@
 //! rule lives in `model_query::containment`; this module caches and wires it,
 //! as a child of `perspective_instance` to reach its private state.
 
+use super::super::sparql_store::EvalStop;
 use deno_core::error::AnyError;
 use std::sync::Arc;
 
@@ -48,6 +49,7 @@ impl PerspectiveInstance {
     /// the edge set says the row holds.
     pub(super) async fn finish_container_rows(
         &self,
+        stop: &EvalStop,
         classes: &QueryClasses,
         query: &ModelQueryInput,
         result: &mut ModelQueryResult,
@@ -61,6 +63,7 @@ impl PerspectiveInstance {
             .as_ref()
             .is_none_or(|p| p.iter().any(|k| k == "children"));
         containment::fill_container_rows(
+            stop,
             &self.sparql_store,
             &mut result.instances,
             &edges,
@@ -77,6 +80,7 @@ impl PerspectiveInstance {
     /// `containment::resolve_children_where`).
     pub(super) async fn resolve_container_children(
         &self,
+        stop: &EvalStop,
         classes: &QueryClasses,
         query: &mut ModelQueryInput,
     ) -> Result<(), AnyError> {
@@ -84,7 +88,7 @@ impl PerspectiveInstance {
             return Ok(());
         }
         let edges = self.containment_edges()?;
-        containment::resolve_children_where(&self.sparql_store, query, &edges).await
+        containment::resolve_children_where(stop, &self.sparql_store, query, &edges).await
     }
 }
 

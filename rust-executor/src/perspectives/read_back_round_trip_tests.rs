@@ -41,7 +41,9 @@ fn signed(signer: &TestSigner, source: &str, target: &str) -> LinkExpression {
 /// return the targets store B did not verify. Also checks the control: A's
 /// own verdict, computed on insert from the original bytes, is `true`.
 fn not_verified_after_read_back(a: &SparqlStore) -> Vec<String> {
-    let read_back = a.get_all_links().unwrap();
+    let read_back = a
+        .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+        .unwrap();
     assert!(!read_back.is_empty());
     for l in &read_back {
         assert_eq!(
@@ -55,7 +57,7 @@ fn not_verified_after_read_back(a: &SparqlStore) -> Vec<String> {
     for l in read_back {
         b.add_link(&LinkExpression::from(l)).unwrap();
     }
-    b.get_all_links()
+    b.get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
         .unwrap()
         .into_iter()
         .filter(|l| l.proof.valid != Some(true))
@@ -87,9 +89,26 @@ fn assert_round_trip(targets: &[String]) {
         .map(|(i, t)| (format!("rt://s/{i}"), t.clone()))
         .collect();
     expected.sort();
-    assert_eq!(targets_of(a.get_all_links().unwrap()), expected);
     assert_eq!(
-        targets_of(a.query_links(None, None, None, None, None, None).unwrap()),
+        targets_of(
+            a.get_all_links(&crate::perspectives::sparql_store::EvalStop::none(),)
+                .unwrap()
+        ),
+        expected
+    );
+    assert_eq!(
+        targets_of(
+            a.query_links(
+                &crate::perspectives::sparql_store::EvalStop::none(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            )
+            .unwrap()
+        ),
         expected
     );
 
@@ -162,29 +181,31 @@ fn a_second_valid_encoding_keeps_the_first_wire_target() {
     })
     .unwrap();
 
-    let read_back = a.get_all_links().unwrap();
+    let read_back = a
+        .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+        .unwrap();
     assert_eq!(read_back.len(), 1, "same reifier, one link");
     assert_eq!(read_back[0].data.target, "literal:string:Write the guide");
     assert_eq!(read_back[0].proof.signature, raw.proof.signature);
     assert_eq!(not_verified_after_read_back(&a), Vec::<String>::new());
 }
 
-/// The SHACL links `add_sdna` writes through `parse_shacl_to_links` (setter,
+/// The SHACL links `register_shapes` writes through `shape_links` (setter,
 /// adder, constructor, interpretation-hint JSON under `literal:string:`)
 /// verify after a read-back.
 #[tokio::test]
-async fn shacl_add_sdna_links_verify_after_a_read_back() {
+async fn registered_shape_links_verify_after_a_read_back() {
     let (perspective, _, _) =
         setup_perspective_no_llm(&[("Belief", BELIEF_SDNA), ("Task", TASK_WITH_RELATION_SDNA)])
             .await;
     let store = &perspective.sparql_store;
     assert!(
         store
-            .get_all_links()
+            .get_all_links(&crate::perspectives::sparql_store::EvalStop::none(),)
             .unwrap()
             .iter()
             .any(|l| l.data.predicate.as_deref() == Some("ad4m://setter")),
-        "setup: add_sdna wrote setter links"
+        "setup: registration wrote setter links"
     );
     assert_eq!(not_verified_after_read_back(store), Vec::<String>::new());
 }
