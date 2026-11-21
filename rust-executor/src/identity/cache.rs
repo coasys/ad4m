@@ -2027,7 +2027,7 @@ pub(crate) mod tests {
 
         /// Appends a `revoke` of d1 signed by m0.
         pub fn revoke_d1(&mut self) {
-            let event = revoke(&self.chain(), &self.master, &["d1".to_string()]).unwrap();
+            let event = revoke(&self.chain(), &self.master, &["d1".to_string()], None).unwrap();
             self.events.push(event);
         }
     }
@@ -2171,6 +2171,7 @@ pub(crate) mod tests {
                     key_id: "d1".into(),
                     added: 0,
                     revoked: None,
+                    unlinked: None,
                     bot: None,
                     expires: None,
                     paused: false,
@@ -2181,6 +2182,7 @@ pub(crate) mod tests {
                     key_id: record.id,
                     added: record.added,
                     revoked: record.revoked,
+                    unlinked: record.unlinked,
                     bot: None,
                     expires: record.scopes.last().map(|(_, scope)| scope.expires),
                     paused: false,
@@ -2715,7 +2717,7 @@ pub(crate) mod tests {
         for extra in ["d1", "d2"] {
             let mut other = log.events[1].clone();
             other.proof.clear();
-            if let ad4m_identity_core::Op::Revoke { revoke } = &mut other.op {
+            if let ad4m_identity_core::Op::Revoke { revoke, .. } = &mut other.op {
                 revoke.push(extra.into());
             }
             assert!(matches!(
@@ -2876,7 +2878,7 @@ pub(crate) mod tests {
 
         // A rival the master signed that breaks a rule of the log (it revokes no key the log
         // holds), served 200 times over: one step, and why it does not hold.
-        let broken = revoke(&at_incept, &log.master, &["d9".to_string()]).unwrap();
+        let broken = revoke(&at_incept, &log.master, &["d9".to_string()], None).unwrap();
         let fork = ForkEvidence {
             theirs: ad4m_identity_core::event_hash(&broken).unwrap(),
             ..fork

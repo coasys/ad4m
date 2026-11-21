@@ -48,6 +48,8 @@ pub enum InvalidReason {
     NotYetValid,
     /// The key was revoked at or before the anchor.
     Revoked,
+    /// The key was unlinked at or before the anchor.
+    Unlinked,
     /// A bot key's scope is past its `expires` by the executor's clock.
     Expired,
 }
@@ -60,6 +62,7 @@ impl InvalidReason {
             InvalidReason::MasterKey => "masterKey",
             InvalidReason::NotYetValid => "notYetValid",
             InvalidReason::Revoked => "revoked",
+            InvalidReason::Unlinked => "unlinked",
             InvalidReason::Expired => "expired",
         }
     }
@@ -71,6 +74,7 @@ impl InvalidReason {
             InvalidReason::MasterKey,
             InvalidReason::NotYetValid,
             InvalidReason::Revoked,
+            InvalidReason::Unlinked,
             InvalidReason::Expired,
         ]
         .into_iter()
@@ -143,6 +147,9 @@ pub struct LinkFacts<'a> {
     /// `Some(false)` when this store already counted the link as `Valid` before the
     /// revocation reached the key map.
     pub entered_after_revoke: Option<bool>,
+    /// When this executor first received the link (unix ms); `None` for a link stored before
+    /// the executor kept it. Read only against a revoke's `since`.
+    pub received_at: Option<u64>,
     /// The executor's clock (unix seconds), for bot scopes only.
     pub now: u64,
 }
@@ -156,11 +163,14 @@ pub struct LinkFacts<'a> {
 /// 4. With an anchor: no log lists the signer, `Invalid(NotListed)`; nothing known, or the
 ///    anchor past the trusted seq, `CantCheck`; a master key, `Invalid(MasterKey)`; the key not
 ///    added yet at the anchor, `Invalid(NotYetValid)`; revoked at or before it,
-///    `Invalid(Revoked)`; past an expiry, `Invalid(Expired)`.
+///    `Invalid(Revoked)`; unlinked at or before it, `Invalid(Unlinked)`; past an expiry,
+///    `Invalid(Expired)`.
 /// 5. Revoked after the anchor (at or below the trusted seq): `Valid` only when the link is
 ///    known to have entered the space's history before the revocation did
 ///    (`entered_after_revoke == Some(false)` — the store counted it before the revocation
-///    reached the key map), else `Flagged`. With no order known, whoever still holds the revoked key could sign today and name an anchor
+///    reached the key map), else `Flagged`. A revoke that names a `since` also flags a link
+///    this executor first received at or after it (`received_at`), whatever it counted before;
+///    a link with no `received_at` is judged without that rule. With no order known, whoever still holds the revoked key could sign today and name an anchor
 ///    before the revocation (or no anchor at all), so the link is shown with its verdict
 ///    and does not count.
 pub fn judge(facts: &LinkFacts) -> LinkVerdict {
@@ -202,11 +212,22 @@ pub fn judge(facts: &LinkFacts) -> LinkVerdict {
     if revoked.is_some_and(|r| r <= at) {
         return Invalid(InvalidReason::Revoked);
     }
+    if record.unlinked.is_some_and(|u| u <= trusted && u <= at) {
+        return Invalid(InvalidReason::Unlinked);
+    }
     if !state.key_valid_at_time(id, at, facts.now) {
         return Invalid(InvalidReason::Expired);
     }
-    if revoked.is_some() && facts.entered_after_revoke != Some(false) {
-        return Flagged;
+    if revoked.is_some() {
+        // A revoke with a `since` flags what this executor first received at or after it,
+        // even a link it counted before.
+        let late = record
+            .revoked_since
+            .zip(facts.received_at)
+            .is_some_and(|(since, received)| received >= since);
+        if late || facts.entered_after_revoke != Some(false) {
+            return Flagged;
+        }
     }
     Valid
 }
@@ -238,6 +259,7 @@ pub fn replaces(stored: Option<&LinkVerdict>, new: &LinkVerdict) -> bool {
 pub enum KeyVerdict {
     Valid,
     Revoked,
+    Unlinked,
     Expired,
     NotInLog,
 }
@@ -258,6 +280,9 @@ pub fn key_verdict(state: &KeyState, trusted: u64, key: &str, now: u64) -> KeyVe
     };
     if record.revoked.is_some_and(|r| r <= trusted) {
         return KeyVerdict::Revoked;
+    }
+    if record.unlinked.is_some_and(|u| u <= trusted) {
+        return KeyVerdict::Unlinked;
     }
     if state.key_valid_at_time(&record.id, trusted, now) {
         KeyVerdict::Valid
@@ -281,6 +306,7 @@ mod tests {
             anchor,
             log,
             entered_after_revoke: None,
+            received_at: None,
             now: NOW,
         }
     }
@@ -423,6 +449,79 @@ mod tests {
     }
 
     #[test]
+    fn an_unlinked_keys_link_is_valid_below_the_unlink_and_invalid_from_it() {
+        let (mut state, device, _) = log_with(None);
+        state.keys.get_mut("d1").expect("d1").unlinked = Some(2);
+        let listed = SignerLog::Listed {
+            state: &state,
+            trusted: 3,
+        };
+        for anchor in [0, 1] {
+            assert_eq!(
+                judge(&facts(listed, &device, Some(anchor))),
+                LinkVerdict::Valid,
+                "anchored at {anchor}, below the unlink"
+            );
+        }
+        for anchor in [2, 3] {
+            assert_eq!(
+                judge(&facts(listed, &device, Some(anchor))),
+                LinkVerdict::Invalid(InvalidReason::Unlinked),
+                "anchored at {anchor}, at or after the unlink"
+            );
+        }
+        // An unlink past the trusted seq does not count yet.
+        let early = SignerLog::Listed {
+            state: &state,
+            trusted: 1,
+        };
+        assert_eq!(judge(&facts(early, &device, Some(1))), LinkVerdict::Valid);
+    }
+
+    #[test]
+    fn a_revoke_with_a_since_flags_a_link_first_received_at_or_after_it() {
+        let (mut state, device, _) = log_with(Some(1));
+        state.keys.get_mut("d1").expect("d1").revoked_since = Some(5_000);
+        let listed = SignerLog::Listed {
+            state: &state,
+            trusted: 1,
+        };
+        let mut f = facts(listed, &device, Some(0));
+        // Stored `valid` before the revocation reached the key map.
+        f.entered_after_revoke = Some(false);
+        f.received_at = Some(5_000);
+        assert_eq!(judge(&f), LinkVerdict::Flagged, "received at since");
+        f.received_at = Some(9_000);
+        assert_eq!(judge(&f), LinkVerdict::Flagged, "received after since");
+        f.received_at = Some(4_999);
+        assert_eq!(judge(&f), LinkVerdict::Valid, "received before since");
+        f.received_at = None;
+        assert_eq!(
+            judge(&f),
+            LinkVerdict::Valid,
+            "no received time: today's rule"
+        );
+
+        // Anchored at or after the revoke stays invalid, whatever the time.
+        f.anchor = Some(1);
+        f.received_at = Some(1);
+        assert_eq!(judge(&f), LinkVerdict::Invalid(InvalidReason::Revoked));
+    }
+
+    #[test]
+    fn a_revoke_without_a_since_ignores_the_received_time() {
+        let (state, device, _) = log_with(Some(1));
+        let listed = SignerLog::Listed {
+            state: &state,
+            trusted: 1,
+        };
+        let mut f = facts(listed, &device, Some(0));
+        f.entered_after_revoke = Some(false);
+        f.received_at = Some(u64::MAX);
+        assert_eq!(judge(&f), LinkVerdict::Valid);
+    }
+
+    #[test]
     fn a_key_added_after_the_anchor_is_not_yet_valid() {
         let (mut state, device, _) = log_with(None);
         state.keys.get_mut("d1").expect("d1").added = 2;
@@ -545,6 +644,10 @@ mod tests {
         let (state, device, _) = log_with(Some(1));
         assert_eq!(key_verdict(&state, 0, &device, NOW), KeyVerdict::Valid);
         assert_eq!(key_verdict(&state, 1, &device, NOW), KeyVerdict::Revoked);
+        let (mut state, device, _) = log_with(None);
+        state.keys.get_mut("d1").expect("d1").unlinked = Some(1);
+        assert_eq!(key_verdict(&state, 0, &device, NOW), KeyVerdict::Valid);
+        assert_eq!(key_verdict(&state, 1, &device, NOW), KeyVerdict::Unlinked);
         assert_eq!(
             key_verdict(&state, 1, "z6MkUnknown", NOW),
             KeyVerdict::NotInLog

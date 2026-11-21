@@ -315,6 +315,10 @@ const ONT_LINK_VERDICT: &str = "ad4m://ontology/linkVerdict";
 /// The derived person of a valid link: the `did:scid` its signer's key speaks for. This
 /// executor's index only; the link never carries it.
 const ONT_PERSON: &str = "ad4m://ontology/person";
+/// When this executor first stored the link (unix ms). Set by the link's first write, never
+/// changed by a re-check or a re-write; a link stored before this has none. The judge reads it
+/// against a revoke's `since`. This executor's index only; the link never carries it.
+const ONT_RECEIVED_AT: &str = "ad4m://ontology/receivedAt";
 const ONT_STATUS: &str = "ad4m://ontology/status";
 /// The target exactly as the link was signed, kept only when it differs from
 /// what [`storage_term_to_target_string`] renders for the stored term. See
@@ -1089,10 +1093,20 @@ fn write_link_quads_proof(
         .iter()
         .any(|v| v == "valid");
     let entered = counted_before.then_some(false);
-    let checked = if own {
-        link.check_own_entered(entered)
+    // The first write stamps the time; a link stored before this has none and stays without.
+    let first_write = annotation_values(tx, &reifier_iri, ONT_AUTHOR)?.is_empty();
+    let stamp = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let received_at = if first_write {
+        Some(stamp)
     } else {
-        link.check_entered(entered)
+        annotation_values(tx, &reifier_iri, ONT_RECEIVED_AT)?
+            .first()
+            .and_then(|v| v.parse().ok())
+    };
+    let checked = if own {
+        link.check_own_entered(entered, received_at)
+    } else {
+        link.check_entered(entered, received_at)
     };
     // A stored `valid` is not replaced by `cantCheck` ([`replaces`]): the stored judgement
     // (`proofValid`, the verdict, the person) stays as it is, and with it the order above.
@@ -1113,6 +1127,10 @@ fn write_link_quads_proof(
         (ONT_TIMESTAMP, Some(&link.timestamp)),
         (ONT_STATUS, Some(status_str(status))),
     ];
+    let received_str = stamp.to_string();
+    if first_write {
+        annotations.push((ONT_RECEIVED_AT, Some(received_str.as_str())));
+    }
     let write = if repair {
         ProofWrite::Whole
     } else {
@@ -1604,6 +1622,26 @@ impl SparqlStore {
         self.write_link(link, false, false).map(|_| ())
     }
 
+    /// When this store first stored `link` (unix ms); `None` for a link stored before the
+    /// store kept it.
+    pub(crate) fn received_at(&self, link: &LinkExpression) -> Result<Option<u64>, Error> {
+        let reifier_iri = make_reifier_iri(link);
+        let quad = self
+            .store
+            .quads_for_pattern(
+                Some(reifier_iri.as_ref().into()),
+                Some(NamedNodeRef::new_unchecked(ONT_RECEIVED_AT)),
+                None,
+                Some(GraphNameRef::DefaultGraph),
+            )
+            .next()
+            .transpose()?;
+        Ok(quad.and_then(|q| match q.object {
+            Term::Literal(l) => l.value().parse().ok(),
+            _ => None,
+        }))
+    }
+
     /// A link language's removal: remove `link` unless this store holds it
     /// as `Local` (#1146). Returns whether it was applied.
     pub(crate) fn remove_remote_link(&self, link: &LinkExpression) -> Result<bool, Error> {
@@ -1617,6 +1655,13 @@ impl SparqlStore {
     #[cfg(test)]
     pub(crate) fn remove_proof_valid_annotation(&self, link: &LinkExpression) -> Result<(), Error> {
         self.remove_reifier_annotation(link, ONT_PROOF_VALID)
+    }
+
+    /// Drop the `receivedAt` quad from a link's reifier, so the store looks like one written
+    /// before the store kept the first-received time.
+    #[cfg(test)]
+    pub(crate) fn remove_received_at_annotation(&self, link: &LinkExpression) -> Result<(), Error> {
+        self.remove_reifier_annotation(link, ONT_RECEIVED_AT)
     }
 
     /// Drop the `ad4m://ontology/wireTarget` quad from a link's reifier, so
@@ -3382,9 +3427,10 @@ mod tests {
             );
         }
 
-        // Should have: 1 direct triple + 1 reifier + 7 metadata (no anchor, no person for
-        // a link without an anchor whose key no log lists) = 9 quads
-        assert_eq!(all_quads.len(), 9, "Expected 9 quads total");
+        // Should have: 1 direct triple + 1 reifier + 8 metadata (the first-received time
+        // among them; no anchor, no person for a link without an anchor whose key no log
+        // lists) = 10 quads
+        assert_eq!(all_quads.len(), 10, "Expected 10 quads total");
     }
 
     /// The canonical storage model needs no migration: a `literal:*` wire target
@@ -3835,6 +3881,36 @@ mod tests {
 
         let all = svc.get_all_links(&EvalStop::none()).unwrap();
         assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn the_first_received_time_is_set_once_and_never_changed() {
+        let signer = TestSigner::generate();
+        let svc = new_service();
+        let link = make_link(&signer, "literal:string:a", "p://x", "literal:string:b");
+        assert_eq!(svc.received_at(&link).unwrap(), None, "nothing stored yet");
+        let before = chrono::Utc::now().timestamp_millis() as u64;
+        svc.add_link(&link).unwrap();
+        let first = svc
+            .received_at(&link)
+            .unwrap()
+            .expect("stamped by the first write");
+        assert!(first >= before);
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        svc.add_link(&link).unwrap();
+        svc.rejudge_link(&link).unwrap();
+        assert_eq!(
+            svc.received_at(&link).unwrap(),
+            Some(first),
+            "a re-write keeps it"
+        );
+
+        // A link stored before the store kept the time stays without one.
+        svc.remove_received_at_annotation(&link).unwrap();
+        svc.add_link(&link).unwrap();
+        svc.rejudge_link(&link).unwrap();
+        assert_eq!(svc.received_at(&link).unwrap(), None);
     }
 
     #[test]
@@ -4385,7 +4461,10 @@ mod tests {
 
         // The log leaves the key map: the link alone would judge `cantCheck` now.
         map.forget(&log.scid());
-        assert_eq!(link.check_entered(None).verdict, LinkVerdict::CantCheck);
+        assert_eq!(
+            link.check_entered(None, None).verdict,
+            LinkVerdict::CantCheck
+        );
         assert!(svc.add_remote_link(&link).unwrap());
         assert_eq!(judged(&svc), counted, "the stored valid stays");
         svc.rejudge_link(&link).unwrap();

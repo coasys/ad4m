@@ -426,7 +426,13 @@ mod tests {
 
         // Revoked at the trusted seq: the key speaks for no one there, so only the did:key
         // profile goes out.
-        let event = revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        let event = revoke(
+            &world.log.chain(),
+            &world.log.master,
+            &["d2".to_string()],
+            None,
+        )
+        .unwrap();
         world.log.events.push(event);
         accept_signed(&world.service.cache, &world.log.events).await;
         let (result, _) = world.publish(false).await;
@@ -452,7 +458,13 @@ mod tests {
             Some(world.did())
         );
 
-        let event = revoke(&world.log.chain(), &world.log.master, &["d2".to_string()]).unwrap();
+        let event = revoke(
+            &world.log.chain(),
+            &world.log.master,
+            &["d2".to_string()],
+            None,
+        )
+        .unwrap();
         world.log.events.push(event);
         accept_signed(&world.service.cache, &world.log.events).await;
         assert_eq!(world.service.identity_of(&world.agent_did).await, None);
