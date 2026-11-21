@@ -120,6 +120,7 @@ async fn an_append_on_a_held_log_copies_its_fold_once_whether_taken_or_refused_l
     }
     let revoke = Op::Revoke {
         revoke: vec!["d1".into()],
+        since: None,
     };
     batch.push(next_event(batch.last().unwrap(), revoke, None));
     let refs: Vec<_> = batch.iter().collect();

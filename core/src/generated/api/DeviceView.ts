@@ -6,7 +6,7 @@ import type { BotView } from "./BotView";
  * are in the private record, which only an app opens (the executor never does): the app
  * joins its entries to these by `keyId`.
  */
-export type DeviceView = { keyId: string, sign: string, bot: BotView | null, expires: number | null, addedSeq: number, revokedSeq: number | null, 
+export type DeviceView = { keyId: string, sign: string, bot: BotView | null, expires: number | null, addedSeq: number, revokedSeq: number | null, unlinkedSeq: number | null, 
 /**
  * The key is this agent's device key.
  */

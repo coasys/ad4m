@@ -363,7 +363,7 @@ async fn a_rival_event_no_master_signed_replays_nothing() {
     let prefix = ad4m_identity_core::fold(&alice.events[..at]).unwrap();
     // A revocation of d1 at seq 63, where the log holds a rotation, signed by another key in
     // place of the master current there.
-    let mut rival = build::revoke_unsigned(&prefix, &["d1".to_string()]).unwrap();
+    let mut rival = build::revoke_unsigned(&prefix, &["d1".to_string()], None).unwrap();
     let master_id = prefix.state().current_master().unwrap().id.clone();
     build::cosign(&mut rival, &master_id, &key("mallory")).unwrap();
     assert_eq!(rival.seq, at as u64);
@@ -375,7 +375,7 @@ async fn a_rival_event_no_master_signed_replays_nothing() {
 
     // The same rival signed by the master current there (m62, retired since): a fork, found by
     // one replay of the prefix.
-    let rival = build::revoke(&prefix, &alice.master(62), &["d1".to_string()]).unwrap();
+    let rival = build::revoke(&prefix, &alice.master(62), &["d1".to_string()], None).unwrap();
     let reply = t.append(&alice.scid(), &[&rival]).await;
     assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
     assert_eq!(reply.body["error"], "forked", "{}", reply.body);
@@ -404,7 +404,7 @@ async fn a_signed_rival_that_does_not_replay_is_refused_on_the_held_fold_with_no
 
     // Signed by the master current at seq 63 (m62, retired by the stored rotation there), but
     // revoking a key the log never listed: a plain conflict, however often, and no replay.
-    let rival = build::revoke(&prefix, &alice.master(62), &["d9".to_string()]).unwrap();
+    let rival = build::revoke(&prefix, &alice.master(62), &["d9".to_string()], None).unwrap();
     for _ in 0..3 {
         let reply = t.append(&alice.scid(), &[&rival]).await;
         assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
@@ -446,7 +446,7 @@ async fn a_signed_rival_that_does_not_replay_is_refused_on_the_held_fold_with_no
     // again, it replays nothing.
     let t = t.restarted();
     assert!(!t.store.held.holds(&alice.scid()));
-    let rival = build::revoke(&prefix, &alice.master(62), &["d9".to_string()]).unwrap();
+    let rival = build::revoke(&prefix, &alice.master(62), &["d9".to_string()], None).unwrap();
     let folds = t.store.held.folds();
     for _ in 0..3 {
         let reply = t.append(&alice.scid(), &[&rival]).await;
@@ -472,7 +472,7 @@ async fn a_signed_rival_at_the_head_seq_that_does_not_replay_is_refused_with_no_
 
     // Signed by the master current at the head's seq (m63, retired by the stored rotation
     // there), revoking a key the log never listed: a plain conflict, however often.
-    let rival = build::revoke(&prefix, &alice.master(63), &["d9".to_string()]).unwrap();
+    let rival = build::revoke(&prefix, &alice.master(63), &["d9".to_string()], None).unwrap();
     assert_eq!(rival.seq, at);
     for _ in 0..3 {
         let reply = t.append(&alice.scid(), &[&rival]).await;
