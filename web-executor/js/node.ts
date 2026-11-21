@@ -39,7 +39,13 @@ export async function startWebExecutor(options: WebExecutorOptions = {}): Promis
   worker.on('error', (error) => host.died(`web executor Worker failed: ${error.message}`))
   worker.on('exit', (code) => host.died(`web executor Worker exited with code ${code}`))
   host.boot(options.config ?? {}, options.logLevel)
-  await host.ready
+  try {
+    await host.ready
+  } catch (error) {
+    // The caller gets no handle to a Worker that did not boot: stop it here.
+    await worker.terminate()
+    throw error
+  }
   return {
     WorkerSocket: host.WorkerSocket,
     dead: host.dead,

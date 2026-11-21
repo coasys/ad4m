@@ -30,7 +30,13 @@ export async function startWebExecutor(options: WebExecutorOptions = {}): Promis
   worker.addEventListener('message', (event) => host.receive(event.data))
   worker.addEventListener('error', (event) => host.died(`web executor Worker failed: ${event.message}`))
   host.boot(options.config ?? {}, options.logLevel)
-  await host.ready
+  try {
+    await host.ready
+  } catch (error) {
+    // The caller gets no handle to a Worker that did not boot: stop it here.
+    worker.terminate()
+    throw error
+  }
   return {
     WorkerSocket: host.WorkerSocket,
     dead: host.dead,

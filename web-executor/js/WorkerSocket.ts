@@ -106,6 +106,17 @@ export class WorkerHost {
   }
 }
 
+/** Calls `listener`; an error it throws goes to the global error handler, not to the caller. */
+function callListener(listener: Listener, self: unknown, event: object): void {
+  try {
+    listener.call(self, event)
+  } catch (error) {
+    const report = (globalThis as { reportError?: (error: unknown) => void }).reportError
+    if (typeof report === 'function') report(error)
+    else queueMicrotask(() => { throw error })
+  }
+}
+
 function makeWorkerSocket(host: WorkerHost) {
   return class WorkerSocket {
     static readonly CONNECTING = 0
@@ -187,10 +198,12 @@ function makeWorkerSocket(host: WorkerHost) {
       this.#emit('close', { type: 'close', code, reason, wasClean })
     }
 
+    // As in a real socket, a listener that throws stops neither the other listeners nor the
+    // caller (the host closing every socket at a death): its error is reported on its own.
     #emit(type: string, event: object): void {
       const handler = (this as any)['on' + type]
-      if (typeof handler === 'function') handler.call(this, event)
-      for (const listener of [...this.#listeners.get(type) ?? []]) listener.call(this, event)
+      if (typeof handler === 'function') callListener(handler, this, event)
+      for (const listener of [...this.#listeners.get(type) ?? []]) callListener(listener, this, event)
     }
   } as unknown as new (url: string, protocols?: string | string[]) => WebSocket
 }
