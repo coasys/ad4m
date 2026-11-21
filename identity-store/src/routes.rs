@@ -39,14 +39,21 @@ type Answer = Result<Response, ApiError>;
 
 /// The store's routes on `store`.
 pub fn router(store: Arc<Store>) -> Router {
-    let origins: Vec<HeaderValue> = store
-        .settings
-        .cors_origins
-        .iter()
-        .filter_map(|o| HeaderValue::from_str(o).ok())
-        .collect();
+    // `*` allows any origin: an agent language in a browser (the web executor) writes from
+    // whatever page hosts it. No route reads a cookie, so the origin grants nothing.
+    let origins = &store.settings.cors_origins;
+    let allow_origin = if origins.iter().any(|o| o == "*") {
+        AllowOrigin::any()
+    } else {
+        AllowOrigin::list(
+            origins
+                .iter()
+                .filter_map(|o| HeaderValue::from_str(o).ok())
+                .collect::<Vec<_>>(),
+        )
+    };
     let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::list(origins))
+        .allow_origin(allow_origin)
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
         .allow_headers([
             header::CONTENT_TYPE,
