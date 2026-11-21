@@ -32,6 +32,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 echo "$method $url $body" >> "$FAKE_LOG"
+echo $(( $(cat "$FAKE_CLOCK") + ${FAKE_CURL_SECS:-0} )) > "$FAKE_CLOCK"
 answer() { [ -n "${2:-}" ] && exit 22; printf '%s' "$1"; exit 0; }
 fixture() { # <key> <fail>
   [ -n "${2:-}" ] && exit 22
@@ -61,11 +62,21 @@ esac
 echo "fake curl: no answer for $url" >&2
 exit 22
 EOF
+# Fake sleep: advances the fake clock. FAKE_SLEEP_TERM=1 sends TERM to the
+# script instead, as a cancelled or timed-out Actions job does.
 cat > "$TMP/bin/sleep" <<'EOF'
 #!/usr/bin/env bash
 echo "sleep $*" >> "$FAKE_LOG"
+[ -n "${FAKE_SLEEP_TERM:-}" ] && kill -TERM "$PPID"
+echo $(( $(cat "$FAKE_CLOCK") + $1 )) > "$FAKE_CLOCK"
 EOF
-chmod +x "$TMP/bin/curl" "$TMP/bin/sleep"
+# Fake date: `date +%s` reads the fake clock. Each curl adds FAKE_CURL_SECS.
+cat > "$TMP/bin/date" <<'EOF'
+#!/usr/bin/env bash
+[ "$*" = +%s ] && exec cat "$FAKE_CLOCK"
+exec /usr/bin/date "$@"
+EOF
+chmod +x "$TMP/bin/curl" "$TMP/bin/sleep" "$TMP/bin/date"
 
 SHA=0123456789abcdef0123456789abcdef01234567
 OTHER=89abcdef0123456789abcdef0123456789abcdef
@@ -146,9 +157,11 @@ check() {
   local name="$1" want_rc="$2" want_out="$3"
   shift 3
   : > "$TMP/curl.log"
+  echo 1000000 > "$TMP/clock"
   rm -f "$TMP"/fx/*.count
   local out rc=0
   out="$(env -i PATH="$TMP/bin:$PATH" HOME="$TMP" FAKE_LOG="$TMP/curl.log" FAKE_DIR="$TMP/fx" FAKE_SHA="$SHA" \
+    FAKE_CLOCK="$TMP/clock" \
     GITHUB_EVENT_PATH="$TMP/event.json" GITHUB_REPOSITORY=coasys/ad4m GITHUB_TOKEN=ghs_test \
     GITHUB_SERVER_URL=https://github.com GITHUB_RUN_ID=77 \
     HEAVY_GATE_COMMIT_MSG="feat: something" HEAVY_SUITES_WAIT_SECS=600 HEAVY_SUITES_POLL_SECS=60 \
