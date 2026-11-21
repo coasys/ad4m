@@ -406,14 +406,17 @@ commands:
             # Write to a temp name and rename: a rerun of build for the same
             # SHA must not hand a half-written file to an integration job
             # that is restoring from the earlier run (mv is atomic on one fs).
+            # The temp name is this job's own, so two jobs that stash the same
+            # SHA at once (a build rerun, a tier job) do not share one.
             CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
             dst="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}"
             mkdir -p "$dst"
             for bin in ad4m ad4m-executor identity-store examples/holder; do
               # `a && b` inside a loop does not stop the step under bash -e.
               name="$(basename "$bin")"
-              cp "target/release/$bin" "$dst/$name.tmp" || exit 1
-              mv "$dst/$name.tmp" "$dst/$name"
+              tmp="$dst/$name.tmp.${CIRCLE_BUILD_NUM:-$$}"
+              cp "target/release/$bin" "$tmp" || exit 1
+              mv "$tmp" "$dst/$name"
             done
 
   stash_integration_inputs:
@@ -446,7 +449,8 @@ commands:
             << parameters.guard >>
             CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
             dst="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/integration-inputs.tar"
-            tar -cf "$dst.tmp" \
+            tmp="$dst.tmp.${CIRCLE_BUILD_NUM:-$$}"
+            tar -cf "$tmp" \
               bootstrap-languages/*/build \
               bootstrap-languages/local/dist \
               bootstrap-languages/*/hc-dna/workdir/*.dna \
@@ -458,7 +462,7 @@ commands:
               .hc-toolchain/bin/kitsune2-bootstrap-srv \
               .hc-toolchain/.installed_rev \
               .hc-toolchain/.installed_kitsune_version
-            mv "$dst.tmp" "$dst"
+            mv "$tmp" "$dst"
             ls -l "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/"
 
   test_artifacts_dir:
@@ -564,6 +568,12 @@ commands:
                       echo "export DEV_TIER_NO_ISSUE='build of $CIRCLE_SHA1 is red: the suite did not run'" >> "$BASH_ENV"
                       exit 1
                       ;;
+                    13)
+                      # Another build of this commit (the push pipeline's, or another
+                      # tier job's) is still running: no second build beside it.
+                      echo "export DEV_TIER_NO_ISSUE='another build of $CIRCLE_SHA1 still running: the suite did not run'" >> "$BASH_ENV"
+                      exit 1
+                      ;;
                     *)
                       echo 'export DEV_TIER_BUILD=true' >> "$BASH_ENV"
                       echo "export DEV_TIER_NO_ISSUE='building $CIRCLE_SHA1 in this job failed: the suite did not run'" >> "$BASH_ENV"
@@ -610,6 +620,16 @@ commands:
                   if [ "${DEV_TIER_BUILD:-}" = true ]; then
                     echo 'unset DEV_TIER_NO_ISSUE' >> "$BASH_ENV"
                     echo "built and stashed $CIRCLE_SHA1 in this job"
+                  fi
+            - run:
+                # dev-tier.sh stash took the lock for this job; release it whether the
+                # build passed or failed, so the next tier run need not wait it out.
+                name: Release the build lock of this commit
+                when: always
+                command: |
+                  lock="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}/${CIRCLE_SHA1}/.dev-tier-build"
+                  if [ "${DEV_TIER_BUILD:-}" = true ] && [ "$(cat "$lock/owner" 2>/dev/null)" = "$CIRCLE_BUILD_NUM" ]; then
+                    rm -rf "$lock" && echo "released $lock"
                   fi
       - run:
           name: Install dependencies

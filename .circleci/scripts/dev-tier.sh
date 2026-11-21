@@ -189,17 +189,42 @@ build_state() {
 if [ "$mode" = stash ]; then
   [ -z "$sha" ] && { echo "build here: no CIRCLE_SHA1"; exit 12; }
   dir="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}/$sha"
+  lock="$dir/.dev-tier-build"
   wait_secs="${DEV_TIER_WAIT_SECS:-2700}"
   poll="${DEV_TIER_POLL_SECS:-30}"
   grace="${DEV_TIER_NONE_GRACE_SECS:-300}"
+  stale="${DEV_TIER_LOCK_STALE_SECS:-5400}"
   start=$SECONDS
   said=""
-  while :; do
+  stash_missing() {
     missing=""
     for f in ad4m ad4m-executor identity-store holder integration-inputs.tar; do
       [ -s "$dir/$f" ] || missing="$missing $f"
     done
-    [ -z "$missing" ] && { echo "stash: $dir has build's outputs of $sha"; exit 0; }
+    [ -n "$missing" ]
+  }
+  # Build here, unless the stash landed meanwhile or another tier job builds this
+  # commit: the three tier jobs share the stash, so one of them builds it. The
+  # lock is a directory (mkdir is atomic); a holder that died leaves it, and it
+  # counts as stale after DEV_TIER_LOCK_STALE_SECS. Returns when another job holds it.
+  build_here() {
+    stash_missing || { echo "stash: $dir has build's outputs of $sha"; exit 0; }
+    mkdir -p "$dir" 2>/dev/null
+    if [ -d "$lock" ] && [ $(( $(date +%s) - $(stat -c %Y "$lock" 2>/dev/null || date +%s) )) -ge "$stale" ]; then
+      echo "taking over a stale build lock of tier job $(cat "$lock/owner" 2>/dev/null || echo '?')"
+      rm -rf "$lock"
+    fi
+    if mkdir "$lock" 2>/dev/null; then
+      echo "${CIRCLE_BUILD_NUM:-$$}" > "$lock/owner"
+      echo "build here: $1"
+      exit 12
+    fi
+    holder="$(cat "$lock/owner" 2>/dev/null || echo '?')"
+    note="tier job $holder is building ${sha:0:12} here"
+  }
+  while :; do
+    stash_missing || { echo "stash: $dir has build's outputs of $sha"; exit 0; }
+    holder=""
     read -r state rest <<<"$(build_state)"
     case "$state" in
       running) note="build of ${sha:0:12} is running (${rest:-})" ;;
@@ -208,21 +233,24 @@ if [ "$mode" = stash ]; then
         exit 11
         ;;
       done)
-        echo "build here: build of ${sha:0:12} finished (${rest:-}) but its stash is gone (missing:$missing; build deletes stashes older than 12 hours)"
-        exit 12
+        build_here "build of ${sha:0:12} finished (${rest:-}) but its stash is gone (missing:$missing; build deletes stashes older than 12 hours)"
         ;;
       none)
         note="no build of ${sha:0:12} on $branch in the last 500 jobs"
         if [ $((SECONDS - start)) -ge "$grace" ]; then
-          echo "build here: $note, and no stash (missing:$missing)"
-          exit 12
+          build_here "$note, and no stash (missing:$missing)"
         fi
         ;;
       *) note="cannot tell whether a build of ${sha:0:12} is running (CircleCI lookup failed)" ;;
     esac
     if [ $((SECONDS - start)) -ge "$wait_secs" ]; then
-      echo "build here: waited ${wait_secs}s for the stash of ${sha:0:12} (missing:$missing); $note"
-      exit 12
+      if [ "$state" = running ]; then
+        echo "no build here: build of ${sha:0:12} still running after ${wait_secs}s (${rest:-}); the next tier run uses its stash"
+        exit 13
+      fi
+      [ -z "$holder" ] && build_here "waited ${wait_secs}s for the stash of ${sha:0:12} (missing:$missing); $note"
+      echo "no build here: $note, still after ${wait_secs}s; the next tier run uses its stash"
+      exit 13
     fi
     [ "$said" != "$note" ] && { echo "waiting for$missing in $dir: $note"; said="$note"; }
     sleep "$poll"
