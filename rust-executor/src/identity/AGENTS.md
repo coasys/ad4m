@@ -17,9 +17,10 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 | `operator.rs` | `admits_first_link`, `first_link_check`, `main_incept_check`, `record_operator_at_init` (`ad4m-executor init --operator`) |
 | `custody.rs` | The custody channel's guard `admit` (the admin credential on a loopback listener of an executor started with `--custody-channel`; else 403 `no-custody-channel`) and `main_device_keys`; `identity.custodyStatus` is its one call so far |
 | `rekey.rs` | `identity.rekey` (`.local_only()`): a new main wallet key, nothing in a log; the table of every place that holds the main agent's DID and how each moves. One re-key at a time, in its own task (a dropped caller does not stop it); owners move from every retired main key, so the next re-key repairs what an earlier one left |
+| `unlink.rs` | `identity.unlinkSelf` (`UserOrOperator(agent:UPDATE)`): the device key unlinks itself from its identity, signed with its own wallet key (the core's `build::unlink_self`), no master key; then the key is dead here: the main agent re-keys (`rekey::rekey_main`), a managed agent's key is retired (`AgentService::retire_managed_key`) and its grants revoked. Refused with 409 `no-identity`, `not-listed` or `key-dead` (already unlinked or revoked). One at a time. `end_sessions_of`: when the cache learns that a key of an agent here was unlinked or revoked in its log (by another device, with the master key), that agent's grants end (the device is signed out); its key stays in the wallet until `identity.rekey`. Reacts to the live `VerdictChange`s and to the keys found at start; a change the receiver lagged past is not replayed |
 | `person.rs` | the person's profile: `person_record` (the agent record under the `did:scid` and its signed request, by the device key at the trusted head), `IdentityService::publish_person_profile` |
 | `claim.rs` | `ClaimService::claim_for_main` (`already-linked`, first-link rule, claim with the main wallet key, never `canKeepMaster`), `join_status` (the main agent's claims only) |
-| `service.rs` | `IdentityService`: status, log, resetLog, cosignIncept, publish, openOffer, offers, devices; error mapping |
+| `service.rs` | `IdentityService`: status (`revoked` and `unlinked` of the device key), log, resetLog, cosignIncept, publish, openOffer, offers, devices; error mapping |
 | `types.rs` | the RPC contracts (ts-rs) mirroring `ad4m_ldk::identity`'s JSON, `IdentityForkEvent`, `AgentWithIdentity` |
 
 Rows in `db/identity.rs`, reached through `db_backend()` (`service::db`): `operator_record`, `identity_agents` (agent `did:key` → SCID),
@@ -225,7 +226,7 @@ the offer's state).
   `agent.get` carry it as `identity` only while the agent speaks for it
   (`IdentityService::identity_of`: `key_speaks_for` at the trusted seq, no store read), so after
   a revocation of its key reaches the trusted seq they answer `identity: null` while
-  `identity.status` still shows the binding with `revoked`. `did` stays the device `did:key` (and
+  `identity.status` still shows the binding with `revoked` (or `unlinked`). `did` stays the device `did:key` (and
   `agent.status().didDocument` the device's did:key document; `identity.resolve` serves the
   person's).
 - **An agent that speaks for a person publishes the person's profile** under the `did:scid`

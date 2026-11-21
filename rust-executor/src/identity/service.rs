@@ -208,6 +208,7 @@ impl IdentityService {
             device_enc: enc,
             key_id: None,
             revoked: None,
+            unlinked: None,
             head: None,
             fork: None,
             store_behind: None,
@@ -220,11 +221,9 @@ impl IdentityService {
         if let Some(chain) = self.refreshed_or_cached(&scid).await? {
             let state = chain.state();
             status.key_id = state.key_id_of(&key).cloned();
-            status.revoked = status
-                .key_id
-                .as_ref()
-                .and_then(|id| state.keys.get(id))
-                .and_then(|record| record.revoked);
+            let record = status.key_id.as_ref().and_then(|id| state.keys.get(id));
+            status.revoked = record.and_then(|record| record.revoked);
+            status.unlinked = record.and_then(|record| record.unlinked);
         }
         if let Some(head) = self.cache.accepted_head(&scid).map_err(cache_error)? {
             status.head = Some(mirror_head(&head)?);
@@ -1546,6 +1545,238 @@ mod tests {
         assert_eq!(
             db(|db| db.agent_identity(&main_did)).unwrap(),
             Some(incept.scid.clone())
+        );
+    }
+    // ---- `identity.unlinkSelf` ----
+
+    /// A signed-in agent on `agent`: a grant that the sign-out must end.
+    fn grant_on(agent: &AgentContext) -> Arc<crate::agent::grants::LiveGrant> {
+        crate::agent::grants::mint(
+            agent.clone(),
+            crate::agent::capabilities::AuthInfo {
+                app_name: "an app".into(),
+                ..Default::default()
+            },
+            Some(format!("unlink-{}", uuid::Uuid::new_v4())),
+            3600,
+        )
+        .expect("a grant")
+        .1
+    }
+
+    /// An agent service with a passphrase and its files in a fresh directory, as a re-key and a
+    /// key retirement need.
+    fn unlocked_agent_service() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ad4m")).unwrap();
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        crate::AgentService::init_global_instance(dir.path().to_string_lossy().into_owned());
+        crate::AgentService::with_mutable_global_instance(|svc| {
+            svc.create_new_keys();
+            svc.passphrase = Some("unlink".into());
+            svc.store_agent_profile();
+            svc.save("unlink".into());
+        });
+        dir
+    }
+
+    /// `agent` bound to a new person (master seed `seed`) in `service`'s store.
+    async fn linked(service: &IdentityService, agent: &AgentContext, seed: u8) -> String {
+        let incept = service
+            .cosign_incept(agent, &incept_listing(agent, seed))
+            .await
+            .unwrap();
+        let scid = Event::from_json(&incept).unwrap().scid;
+        service
+            .publish(
+                agent,
+                &PublishParams {
+                    events: vec![incept],
+                },
+            )
+            .await
+            .unwrap();
+        let (agent_did, _) = device_key(agent).unwrap();
+        assert_eq!(
+            db(|db| db.agent_identity(&agent_did)).unwrap(),
+            Some(scid.clone())
+        );
+        scid
+    }
+
+    fn user_agent(tag: &str) -> AgentContext {
+        AgentContext::managed(crate::test_utils::create_test_user(&format!(
+            "{tag}-{}@example.org",
+            uuid::Uuid::new_v4().simple()
+        )))
+    }
+
+    /// A user's device unlinks itself: the `unlink` reaches the store signed by the device key
+    /// (no master key), the key leaves the wallet's working keys, the agent's grants end, and
+    /// `identity.status` shows the key `unlinked`. A second call is refused: the key is dead.
+    #[tokio::test]
+    async fn a_device_unlinks_itself_and_its_key_is_dead_here() {
+        let _dir = unlocked_agent_service();
+        let agent = user_agent("unlink");
+        let (agent_did, key) = device_key(&agent).unwrap();
+        let backend = Arc::new(RecordingStore::new(vec![], false));
+        let service = service_on(backend.clone());
+        linked(&service, &agent, 70).await;
+        let grant = grant_on(&agent);
+        let other = grant_on(&user_agent("other"));
+
+        let head = service.unlink_self(&agent).await.expect("unlinked");
+
+        let held = backend.inner.events.lock().unwrap().clone();
+        let unlink = held.last().unwrap();
+        assert_eq!(unlink.seq, head.seq);
+        assert!(matches!(unlink.op, Op::Unlink { .. }), "{:?}", unlink.op);
+        assert_eq!(unlink.proof.len(), 1);
+        assert!(
+            unlink.proof[0].verification_method.ends_with("d1"),
+            "signed by the device key itself: {}",
+            unlink.proof[0].verification_method
+        );
+        assert_eq!(held.len(), 2);
+        assert!(grant.is_ended(), "the agent is signed out");
+        assert!(!other.is_ended(), "another agent is not");
+        assert!(crate::AgentService::wallet_key_for_did(&agent_did).is_err());
+        let retired = crate::wallet::wallet_backend()
+            .get_did_document(&crate::agent::rekey::retired_managed_key_name(&agent_did))
+            .expect("the key is kept for history");
+        assert_eq!(retired.id, agent_did);
+        let status = service.status(&agent).await.unwrap();
+        assert_eq!(status.unlinked, Some(head.seq));
+        assert_eq!(status.revoked, None);
+        assert_eq!(status.device_key, key);
+
+        let again = service.unlink_self(&agent).await.expect_err("dead");
+        assert_eq!(again.code, 409);
+        assert!(again.message.starts_with("key-dead"), "{}", again.message);
+        assert_eq!(backend.appends.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// The main agent that unlinks itself gets a new key (`identity.rekey`'s move) and its apps
+    /// are signed out.
+    #[tokio::test]
+    async fn the_main_agent_that_unlinks_itself_gets_a_new_key() {
+        let _dir = unlocked_agent_service();
+        let main = AgentContext::main_agent();
+        Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
+        let old = crate::agent::did();
+        let backend = Arc::new(RecordingStore::new(vec![], false));
+        let service = service_on(backend.clone());
+        linked(&service, &main, 71).await;
+        let grant = grant_on(&main);
+
+        let head = service.unlink_self(&main).await.expect("unlinked");
+
+        assert_eq!(head.seq, 1);
+        assert!(grant.is_ended());
+        assert_ne!(crate::agent::did(), old, "a new did:key");
+        assert!(crate::wallet::wallet_backend()
+            .key_exists(&crate::agent::rekey::retired_key_name(&old)));
+        let status = service.status(&main).await.unwrap();
+        assert_eq!(status.did, None, "the new key speaks for no identity");
+    }
+
+    /// An agent with no identity has nothing to unlink: refused before the store is asked.
+    #[tokio::test]
+    async fn unlinking_is_refused_for_an_agent_with_no_identity() {
+        let _dir = unlocked_agent_service();
+        let backend = Arc::new(RecordingStore::new(vec![], false));
+        let service = service_on(backend.clone());
+        let alone = user_agent("alone");
+
+        let refused = service.unlink_self(&alone).await.expect_err("no identity");
+
+        assert_eq!(refused.code, 409);
+        assert!(
+            refused.message.starts_with("no-identity"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(backend.appends.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// A key the person's master key revoked is dead already: `unlinkSelf` refuses it.
+    #[tokio::test]
+    async fn a_revoked_key_cannot_unlink_itself() {
+        let _dir = unlocked_agent_service();
+        let agent = user_agent("revoked");
+        let backend = Arc::new(RecordingStore::new(vec![], false));
+        let service = service_on(backend.clone());
+        let scid = linked(&service, &agent, 74).await;
+        let master = ed25519_dalek::SigningKey::from_bytes(&[74; 32]);
+        let chain = service.cache.chain(&scid).await.unwrap().unwrap();
+        let revoke = ad4m_identity_core::build::revoke(&chain, &master, &["d1".to_string()], None)
+            .expect("a revoke");
+        backend.inner.events.lock().unwrap().push(revoke);
+
+        let refused = service.unlink_self(&agent).await.expect_err("dead");
+
+        assert_eq!(refused.code, 409);
+        assert!(
+            refused.message.starts_with("key-dead"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(backend.appends.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// An `unlink` of this executor's key by the master key (another device) ends the key here
+    /// the same way: the cache's verdict change signs the agent out, and `identity.status` shows
+    /// `unlinked`. A change for a key no agent here holds, or one that does not end a key, does
+    /// nothing.
+    #[tokio::test]
+    async fn a_key_unlinked_by_another_device_signs_the_agent_out() {
+        use crate::identity::verdict::{KeyVerdict, VerdictChange};
+        let _dir = unlocked_agent_service();
+        let agent = user_agent("remote");
+        let (_, key) = device_key(&agent).unwrap();
+        let backend = Arc::new(RecordingStore::new(vec![], false));
+        let service = service_on(backend.clone());
+        let scid = linked(&service, &agent, 75).await;
+        let grant = grant_on(&agent);
+        let mut changes = service.cache.subscribe();
+
+        let master = ed25519_dalek::SigningKey::from_bytes(&[75; 32]);
+        let chain = service.cache.chain(&scid).await.unwrap().unwrap();
+        let unlink = ad4m_identity_core::build::unlink(&chain, &master, &"d1".to_string()).unwrap();
+        backend.inner.events.lock().unwrap().push(unlink);
+        service
+            .cache
+            .refresh(backend.as_ref(), &scid)
+            .await
+            .unwrap();
+
+        let change = std::iter::from_fn(|| changes.try_recv().ok())
+            .find(|c| c.key == key)
+            .expect("the cache fires a verdict change for the key");
+        assert_eq!(change.verdict, KeyVerdict::Unlinked);
+        let wrong_scid = VerdictChange {
+            scid: "another".into(),
+            ..change.clone()
+        };
+        let expired = VerdictChange {
+            verdict: KeyVerdict::Expired,
+            ..change.clone()
+        };
+        crate::identity::unlink::end_sessions_of(&wrong_scid);
+        crate::identity::unlink::end_sessions_of(&expired);
+        assert!(!grant.is_ended());
+
+        crate::identity::unlink::end_sessions_of(&change);
+
+        assert!(grant.is_ended(), "the agent is signed out");
+        let status = service.status(&agent).await.unwrap();
+        assert_eq!(status.unlinked, Some(1));
+        let refused = service.unlink_self(&agent).await.expect_err("dead");
+        assert!(
+            refused.message.starts_with("key-dead"),
+            "{}",
+            refused.message
         );
     }
 }

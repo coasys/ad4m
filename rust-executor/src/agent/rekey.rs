@@ -29,6 +29,12 @@ pub fn retired_key_name(did: &str) -> String {
     format!("retired-main:{did}")
 }
 
+/// The wallet name of the managed agent's key `did` once its device unlinked itself
+/// (`identity.unlinkSelf`).
+pub fn retired_managed_key_name(did: &str) -> String {
+    format!("retired-agent:{did}")
+}
+
 /// Retires the main key `old_did` and makes a new `main` key. When the new key cannot be made,
 /// the old key is `main` again.
 fn replace_main_key(backend: &dyn WalletBackend, old_did: &str) -> Result<(), AnyError> {
@@ -51,6 +57,31 @@ fn put_old_main_key_back(backend: &dyn WalletBackend, old_did: &str) -> Result<(
 }
 
 impl AgentService {
+    /// Takes the key of the managed agent `did` out of use: it moves to its retired name
+    /// ([`retired_managed_key_name`]), so nothing signs with it again, and the agent file is
+    /// saved. When the file cannot be saved, the key is back. Needs an unlocked agent whose
+    /// passphrase is in memory and a wallet that can rename keys.
+    pub fn retire_managed_key(&self, did: &str) -> Result<(), AnyError> {
+        self.signing_checks()?;
+        let passphrase = self.passphrase.clone().ok_or_else(|| {
+            anyhow!("the agent's passphrase is not in memory: unlock the agent first")
+        })?;
+        let backend = wallet_backend();
+        if !backend.can_rename_keys() {
+            return Err(anyhow!("this wallet backend cannot keep a retired key"));
+        }
+        let name = Self::wallet_key_for_did(did)?;
+        let retired = retired_managed_key_name(did);
+        backend.retire_key(&name, &retired)?;
+        super::forget_managed_key_names();
+        if let Err(e) = self.try_save(&passphrase) {
+            backend.retire_key(&retired, &name)?;
+            super::forget_managed_key_names();
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// Gives the main agent a new wallet key and keeps the old one under its retired name.
     /// Moves this service's own copies of the DID: the DID, its document, the signing key id
     /// and the profile (the profile's DID; its links stay as signed), and saves the agent

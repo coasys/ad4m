@@ -20,6 +20,7 @@ pub mod resolver;
 pub mod service;
 pub mod src_fetch;
 pub mod types;
+pub mod unlink;
 pub mod verdict;
 
 use std::collections::BTreeSet;
@@ -294,10 +295,12 @@ async fn run_recheck(
                 let mut lagged = false;
                 match change {
                     Ok(change) => {
+                        unlink::end_sessions_of(&change);
                         signers.insert(format!("did:key:{}", change.key));
                         loop {
                             match changes.try_recv() {
                                 Ok(change) => {
+                                    unlink::end_sessions_of(&change);
                                     signers.insert(format!("did:key:{}", change.key));
                                 }
                                 Err(TryRecvError::Lagged(_)) => lagged = true,
