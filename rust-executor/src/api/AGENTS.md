@@ -7,7 +7,7 @@ REST/WS shim. Split plan: spec item 6.
 
 | Route | Handler | Notes |
 |---|---|---|
-| `GET /api/v1/ws` | `ws_rpc.rs` | JSON-RPC-ish: `{type, id, ...params}` → `HandlerMap::dispatch`. Auth once at upgrade (`auth.rs`). Per-request cancel token (`request.cancel`). An `identity.publish` or `identity.cosignIncept` frame whose event names a member twice, or that repeats `params`, `events` or `event`, is refused from the frame's text (`identity_ws::duplicate_member_refusal`, 400 `invalid: DuplicateMember`): the params `Value` keeps only the last. The refusal comes after `HandlerMap::admit`, so a caller the guard refuses gets the access answer. **Also carries events** (`events_ws::build_event_stream`, filtered by `events.watch`) and the connection's live query updates; the only event socket |
+| `GET /api/v1/ws` | `ws_rpc.rs` (the axum socket) + `rpc_session.rs` (the connection loop: `Connection`, `serve`) | JSON-RPC-ish: `{type, id, ...params}` → `HandlerMap::dispatch`. Auth once at upgrade (`auth.rs`). Per-request cancel token (`request.cancel`). An `identity.publish` or `identity.cosignIncept` frame whose event names a member twice, or that repeats `params`, `events` or `event`, is refused from the frame's text (`identity_ws::duplicate_member_refusal`, 400 `invalid: DuplicateMember`): the params `Value` keeps only the last. The refusal comes after `HandlerMap::admit`, so a caller the guard refuses gets the access answer. **Also carries events** (`events_ws::build_event_stream`, filtered by `events.watch`) and the connection's live query updates; the only event socket |
 | `GET /health`, `POST /internal/shutdown` | `internal.rs` | `INTERNAL_API_TOKEN` |
 | `/v1/*`, `/api/v1/openai/v1/*` | `openai_compat/router.rs` | chat/completions, embeddings, audio (`audio/transcriptions` passes through to the model's endpoint), realtime WS (`input_audio_buffer.commit` = one utterance) |
 
@@ -443,7 +443,7 @@ them against those two guards.
   stream drops an event whose connection is not its own before `may_receive` runs, so the update
   needs both its connection and its audience. The key is not on the wire. When a socket's stream
   lags it sends `{ "type": "query-subscription-update", "lagged": true }` and `LiveQuery` resyncs.
-  Closing the socket disposes its subscriptions (`ws_rpc::serve`).
+  Closing the socket disposes its subscriptions (`rpc_session::serve`).
 - One event path. A publisher calls `pubsub.publish_event(Event::new(Topic, Audience, payload))`
   (`src/events.rs`); there is no default audience. Wire names live in `Topic::as_str` only;
   `events_ws::event_specs()` is keyed by `Topic`. A socket's stream
@@ -577,8 +577,8 @@ them against those two guards.
   update topic lags, the socket gets one `{ type: 'query-subscription-update', lagged: true }` and
   the client resyncs every live query.
 - A live query belongs to the RPC connection that opened it (`RequestContext::connection_id`, set
-  by `ws_rpc::serve` next to the connection's `Session`): only that socket gets its updates (they
-  bypass `events.watch`), and `ws_rpc::serve` ends them when the socket closes, and again as each
+  by `rpc_session::serve` next to the connection's `Session`): only that socket gets its updates (they
+  bypass `events.watch`), and `rpc_session::serve` ends them when the socket closes, and again as each
   call still in flight ends (a late subscribe). No keepalive; subscribing without a connection
   (REST) is a 400.
 - Opening a live query (the methods registered `.opens()`: `subscribeQuery` / `modelSubscribe`,
@@ -592,7 +592,8 @@ them against those two guards.
   result has none (#1595). The SDK cancels an `OPENS_METHODS` call that timed out or was
   aborted, then disposes its id (`PerspectiveClient`): `request.cancel` is handled inline, before
   the dispose is dispatched, so whichever wins, nothing stays registered.
-- `ws_rpc::serve` runs one RPC connection over any text stream; `tests/connection_tests.rs` drives
+- `rpc_session::serve` runs one RPC connection over any text stream (no axum, builds on wasm32: the web
+  executor's Worker feeds it from `postMessage`, `web/session.rs`); `tests/connection_tests.rs` drives
   it through channels in place of a WebSocket.
 - Contracts: each handler registers its params and result types (`map.method::<P, R>`), and
   `event_specs()` in `events_ws.rs` types every event payload. `tests/handler_table_tests.rs`
