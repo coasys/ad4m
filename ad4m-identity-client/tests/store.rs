@@ -714,6 +714,7 @@ async fn a_phone_links_another_device_and_revokes_it() {
         &phone_vault,
         &did,
         &["d3".to_string()],
+        None,
         &SystemClock,
         &OsRandom,
     )
