@@ -759,3 +759,77 @@ fn one_build_takes_one_snapshot_across_its_calls() {
     assert_eq!(store.scope_index_readiness(&rule), Readiness::Ready);
     assert_eq!(store.scope_reader().count(&rule.class_scope()).unwrap(), 3);
 }
+
+/// A build whose unlocked read sees phase 1 while the writer-locked read
+/// sees phase 0 — the class was registered under another rule and back
+/// between the two — drops the phase-1 snapshot it kept: the phase that
+/// follows takes a new one, which holds a member whose flag was written
+/// under the other rule.
+#[test]
+fn a_phase_0_seen_under_the_lock_takes_a_new_snapshot() {
+    let s = TestSigner::generate();
+    let store = SparqlStore::new(None).unwrap();
+    // Flag links written before registration are subjects of phase 1's
+    // snapshot, not members of the class scope.
+    for i in 0..3u64 {
+        store
+            .add_link(&flag_link(&s, &format!("si://m/{i}"), T0 + i))
+            .unwrap();
+    }
+    let (rule, _) = store
+        .scope_index_register(&message_shape())
+        .unwrap()
+        .unwrap();
+    let mut run = build::BuildRun::default();
+    // Phase 0 (an empty class scope), then one member of phase 1: the mark
+    // is in phase 1 and `run` holds its snapshot {m/0, m/1, m/2}.
+    assert_eq!(
+        store
+            .scope_index_build_run(&rule, Some(2), ONE_MEMBER, &mut run)
+            .unwrap(),
+        BuildProgress::Paused
+    );
+    assert_eq!(run.scans(), 1);
+    // As a re-registration racing the next call does: another rule is
+    // installed, a member's flag is written under it, and `rule` is
+    // installed again — all between the unlocked read and the writer lock.
+    let swapped = std::cell::Cell::new(false);
+    let store2 = store.clone();
+    build::BETWEEN_READS.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move || {
+            if swapped.replace(true) {
+                return;
+            }
+            store2
+                .scope_index_register(&shape_with_flag("si://Other"))
+                .unwrap();
+            store2.add_link(&flag_link(&s, "si://m/x", T0)).unwrap();
+            store2.scope_index_register(&message_shape()).unwrap();
+        }));
+    });
+    let all = BatchLimits {
+        time: Duration::from_secs(60),
+        pause: Duration::ZERO,
+    };
+    assert_eq!(
+        store
+            .scope_index_build_run(&rule, None, all, &mut run)
+            .unwrap(),
+        BuildProgress::Done
+    );
+    build::BETWEEN_READS.with(|h| *h.borrow_mut() = None);
+    assert_eq!(
+        run.scans(),
+        2,
+        "phase 1 after the phase 0 it raced takes a new snapshot"
+    );
+    assert!(
+        store
+            .scope_reader()
+            .contains(&rule.class_scope(), "si://m/x")
+            .unwrap(),
+        "a member flagged under the other rule is in the class scope"
+    );
+    assert_eq!(store.scope_reader().count(&rule.class_scope()).unwrap(), 4);
+    assert_consistent(&store);
+}

@@ -169,6 +169,18 @@ pub(super) fn index_page(
         _ => None,
     };
     #[cfg(test)]
+    after_reads(store);
+    // The guards above ran before the reads. A write during them may have
+    // committed a flag time outside the executor's form, or installed and
+    // built another rule of the class: then what was read does not answer
+    // this query, and the caller's SPARQL id phase does.
+    if reader.noncanonical(&rule.class)? != 0
+        || store.scope_index_rule(&rule.class).as_ref() != Some(&rule)
+        || store.scope_index_readiness(&rule) != Readiness::Ready
+    {
+        return Ok(None);
+    }
+    #[cfg(test)]
     PAGES_SERVED.with(|n| n.set(n.get() + 1));
     Ok(Some(IndexPage { ids, total }))
 }
@@ -178,6 +190,20 @@ thread_local! {
     /// Pages [`index_page`] gave on this thread, so a test can tell which
     /// path answered a query.
     pub(super) static PAGES_SERVED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Fires in [`index_page`] after its reads and before the guards re-check
+    /// them, so a test can commit what a concurrent write would.
+    pub(super) static AFTER_READS: std::cell::RefCell<Option<Box<dyn FnOnce(&SparqlStore)>>> =
+        std::cell::RefCell::new(None);
+}
+
+/// Fire the hook a test armed (see [`AFTER_READS`]).
+#[cfg(test)]
+fn after_reads(store: &SparqlStore) {
+    AFTER_READS.with(|h| {
+        if let Some(hook) = h.borrow_mut().take() {
+            hook(store);
+        }
+    });
 }
 
 /// The first `need` entries of `scope` in the order asked, plus every later

@@ -299,6 +299,25 @@ pub fn build_class_with(
     )
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Fires in [`build_class_in`] between its unlocked read of the build
+    /// mark and the writer lock, so a test can commit what a concurrent
+    /// registration would.
+    pub(crate) static BETWEEN_READS: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        std::cell::RefCell::new(None);
+}
+
+/// Fire the hook a test armed (see [`BETWEEN_READS`]).
+#[cfg(test)]
+fn between_reads() {
+    BETWEEN_READS.with(|h| {
+        if let Some(hook) = h.borrow_mut().as_mut() {
+            hook();
+        }
+    });
+}
+
 /// What one build of a class keeps between calls of [`build_class_in`]:
 /// phase 1's snapshot of flag subjects. A build that runs in calls of a few
 /// batches (the worker's) then scans and sorts the subjects once, not once
@@ -359,6 +378,8 @@ pub fn build_class_in(
             run.subjects = Some(flag_subjects(store, rule)?);
             run.scans += 1;
         }
+        #[cfg(test)]
+        between_reads();
         let _writer = writer
             .lock()
             .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
@@ -377,6 +398,12 @@ pub fn build_class_in(
             }
             BuildState::Building { phase, cursor } => (phase, cursor),
         };
+        if phase == 0 {
+            // Phase 0 under this hold — a new mark came between the unlocked
+            // read and the lock: the phase 1 that follows takes a new
+            // snapshot.
+            run.subjects = None;
+        }
         if phase == 1 && run.subjects.is_none() {
             // Phase 0 ended under another hold of the lock: take the snapshot
             // outside it.

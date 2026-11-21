@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 use super::containment::{ContainmentEdge, ContainmentEdges, Holder, HAS_CHILD};
-use super::index_path::{index_page, PAGES_SERVED};
+use super::index_path::{index_page, AFTER_READS, PAGES_SERVED};
 use super::query::execute_model_query;
 use super::shape::parse_shape_from_json;
 use super::test_helpers::StaticShapeResolver;
@@ -673,4 +673,65 @@ fn a_stopped_query_fails_on_the_index_path() {
     )
     .expect_err("a stopped query fails");
     assert!(err.to_string().contains("query cancelled"), "{err}");
+}
+
+/// The `Message` shape with another flag's initial value.
+fn shape_with_flag(flag: &str) -> ModelShape {
+    let mut shape = message_shape();
+    for p in &mut shape.properties {
+        if p.is_flag {
+            p.initial_value = Some(flag.to_string());
+        }
+    }
+    shape
+}
+
+/// A flag whose time is outside the executor's form, committed while the
+/// page's entries and count were read, is caught by the guard after them:
+/// the class goes to SPARQL, whose string order the page could not match.
+#[test]
+fn a_noncanonical_time_committed_during_the_reads_goes_to_sparql() {
+    let world = small_world(5);
+    let s = TestSigner::generate();
+    let mut odd = flag_link(&s, "si://m/odd", T0 + 10);
+    odd.timestamp = odd.timestamp.replace(".010Z", ".01Z");
+    assert!(odd.compute_proof_valid(), "the timestamp still verifies");
+    AFTER_READS.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move |store: &SparqlStore| {
+            store.add_link(&odd).unwrap();
+        }));
+    });
+    let page = index_page(
+        &EvalStop::none(),
+        &world.indexed,
+        &world.shape,
+        &query(json!({})),
+        &newest_first(0, 3),
+    )
+    .unwrap();
+    assert_eq!(page, None);
+}
+
+/// Another rule of the class installed while the page's entries and count
+/// were read is caught by the guard after them: what was read can hold the
+/// other rule's members, so the query goes to SPARQL.
+#[test]
+fn a_new_rule_during_the_reads_goes_to_sparql() {
+    let world = small_world(5);
+    AFTER_READS.with(|h| {
+        *h.borrow_mut() = Some(Box::new(|store: &SparqlStore| {
+            store
+                .scope_index_register(&shape_with_flag("si://Other"))
+                .unwrap();
+        }));
+    });
+    let page = index_page(
+        &EvalStop::none(),
+        &world.indexed,
+        &world.shape,
+        &query(json!({})),
+        &newest_first(0, 3),
+    )
+    .unwrap();
+    assert_eq!(page, None);
 }
