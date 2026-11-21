@@ -207,12 +207,23 @@ if [ "$mode" = stash ]; then
   # commit: the three tier jobs share the stash, so one of them builds it. The
   # lock is a directory (mkdir is atomic); a holder that died leaves it, and it
   # counts as stale after DEV_TIER_LOCK_STALE_SECS. Returns when another job holds it.
+  lock_age() { echo $(( $(date +%s) - $(stat -c %Y "$1" 2>/dev/null || date +%s) )); }
   build_here() {
     stash_missing || { echo "stash: $dir has build's outputs of $sha"; exit 0; }
     mkdir -p "$dir" 2>/dev/null
-    if [ -d "$lock" ] && [ $(( $(date +%s) - $(stat -c %Y "$lock" 2>/dev/null || date +%s) )) -ge "$stale" ]; then
-      echo "taking over a stale build lock of tier job $(cat "$lock/owner" 2>/dev/null || echo '?')"
-      rm -rf "$lock"
+    if [ -d "$lock" ] && [ "$(lock_age "$lock")" -ge "$stale" ]; then
+      # mv is atomic: of two jobs that found the same stale lock, one moves it
+      # aside. The other may then move the fresh lock the first one just made, so
+      # it checks the age of what it moved and puts a fresh lock back.
+      aside="$lock.stale.${CIRCLE_BUILD_NUM:-$$}"
+      if mv -T "$lock" "$aside" 2>/dev/null; then
+        if [ "$(lock_age "$aside")" -ge "$stale" ]; then
+          echo "took over a stale build lock of tier job $(cat "$aside/owner" 2>/dev/null || echo '?')"
+          rm -rf "$aside"
+        else
+          mv -T "$aside" "$lock" 2>/dev/null || rm -rf "$aside"
+        fi
+      fi
     fi
     if mkdir "$lock" 2>/dev/null; then
       echo "${CIRCLE_BUILD_NUM:-$$}" > "$lock/owner"

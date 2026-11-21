@@ -320,6 +320,7 @@ rm -rf "$TMP/stash"; mkdir -p "$STASH/.dev-tier-build"; echo 76 > "$STASH/.dev-t
 touch -d '3 hours ago' "$STASH/.dev-tier-build"
 check "stash: a stale lock (holder died): take it, build here" 12 '^build here: build of .* finished \(success' stash "${STASH_ENV[@]}" CIRCLE_BUILD_NUM=77
 assert "the stale lock is now this job's" grep -qx 77 "$STASH/.dev-tier-build/owner"
+assert "nothing of the stale lock is left aside" bash -c "! ls -d '$STASH'/.dev-tier-build.stale.* 2>/dev/null"
 # The stash lands while build_state asks CircleCI: recheck before choosing to build.
 stash_check "stash: the stash lands during the lookup: use it, no build" 0 "^stash: " stash "${STASH_ENV[@]}" \
   FAKE_ON_CALL="mkdir -p '$STASH'; for f in ad4m ad4m-executor identity-store holder integration-inputs.tar; do echo x > '$STASH/'\$f; done"
