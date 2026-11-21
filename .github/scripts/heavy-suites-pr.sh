@@ -197,6 +197,8 @@ post() { # <state> <description>
   echo "$1: $desc"
 }
 
+# Every pending names what clears it; this is the one that always does.
+rerun="re-run the Heavy suites workflow (Details)."
 RERUN="Re-run the Heavy suites workflow (Details)."
 
 if [ "$verdict" = skip ]; then
@@ -230,13 +232,13 @@ for (( i = 1; i <= tries; i++ )); do
           exit 0
         fi
         if [ "$st" = stopped ] && [ "$n" = "$mine_n" ]; then
-          post pending "CircleCI pipeline $mine_n stopped before the heavy suites. Push a fix, or re-run it in CircleCI, then $RERUN"
+          post pending "CircleCI pipeline $mine_n stopped before the heavy suites. Push a fix, or re-run it in CircleCI, then $rerun"
           exit 0
         fi
         # Not listed yet, or it did not start.
         p="$(cci "/pipeline/$mine")"
         if [ "$(jq -r '.state // empty' <<<"$p")" = errored ]; then
-          post pending "CircleCI pipeline $mine_n did not start (config error?). Fix and push, or $RERUN"
+          post pending "CircleCI pipeline $mine_n did not start (config error?). Fix and push, or $rerun"
           exit 0
         fi
         got="$(jq -r '.trigger_parameters.git.checkout_sha // .vcs.revision // empty' <<<"$p")"
@@ -245,7 +247,7 @@ for (( i = 1; i <= tries; i++ )); do
           exit 0
         fi
       elif [ "$st" = stopped ]; then
-        post pending "CircleCI pipeline $n stopped before the heavy suites. Push a fix, or re-run it in CircleCI, then $RERUN"
+        post pending "CircleCI pipeline $n stopped before the heavy suites. Push a fix, or re-run it in CircleCI, then $rerun"
         exit 0
       elif [ "$st" = none ] && [ "$waited" -lt "$grace_s" ]; then
         : # CircleCI's own pipeline for a push may not be listed yet.
@@ -285,6 +287,9 @@ if [ "$verdict" = unsure ] && [ -z "$mine" ]; then
   post pending "PR state unknown ($reason). $RERUN"
   exit 0
 fi
-which="No CircleCI pipeline of this commit"
-if [ -n "$mine_n" ]; then which="CircleCI pipeline $mine_n"; elif [ -n "${n:-}" ]; then which="CircleCI pipeline $n"; fi
-post pending "$which did not reach the heavy suites in $(( wait_s / 60 )) min. $RERUN"
+which="${mine_n:-${n:-}}"
+if [ -n "$which" ]; then
+  post pending "CircleCI pipeline $which did not reach the heavy suites in $(( wait_s / 60 )) min. $RERUN"
+else
+  post pending "No CircleCI pipeline of this commit reached the heavy suites in $(( wait_s / 60 )) min. $RERUN"
+fi

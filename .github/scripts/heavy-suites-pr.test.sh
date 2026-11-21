@@ -189,11 +189,12 @@ recovery() {
   d="$(jq -r .description <<<"${d#* * }")"
   grep -qE "$1" <<<"$d" || { echo "  FAIL: description '$d' does not match '$1'"; FAILED=1; }
   ! grep -q "Rerun the CircleCI workflow before merging" <<<"$d" || { echo "  FAIL: dead-end recovery: $d"; FAILED=1; }
+  ! grep -qE "(, |then |or )Re-run" <<<"$d" || { echo "  FAIL: capital letter mid-sentence: $d"; FAILED=1; }
 }
 
 CCI=(CIRCLECI_API_TOKEN=cci_test CIRCLECI_PIPELINE_DEFINITION_ID=def-1)
 RUN_URL='^POST https://circleci.com/api/v2/project/circleci/VRkXSnZDyBKHhkHKBHTmLj/W84Q4MGGTeZwizersNwxB4/pipeline/run '
-RERUN='Re-run the Heavy suites workflow'
+RERUN='[Rr]e-run the Heavy suites workflow'
 NEW_RAN="$(jobs build:20:success rust-tests:21:running)"
 
 echo "heavy-suites-pr.sh"
@@ -427,7 +428,7 @@ statuses pending
 recovery "$RERUN"
 check "CircleCI answers without an id: pending" 0 '^pending: Could not start' \
   FAKE_PULLS="[$(pr 30 false dev)]" FAKE_CCI_RUN='{"message":"Permission denied"}' "${CCI[@]}"
-check "CircleCI reads fail: pending after the wait, no pipeline" 0 'pending: .*did not reach the heavy suites' \
+check "CircleCI reads fail: pending after the wait, no pipeline" 0 'pending: No CircleCI pipeline of this commit reached the heavy suites in 10 min' \
   FAKE_PULLS="[$(pr 30 false dev)]" FAKE_CCI_FAIL=1 "${CCI[@]}"
 not_logged "$RUN_URL" "started a pipeline blind"
 recovery "$RERUN"
