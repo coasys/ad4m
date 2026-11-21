@@ -87,31 +87,46 @@ fn assert_timed_out(result: &str, url: &str) {
     );
 }
 
+/// A server that never sends headers and one that stalls in the body both
+/// end in the timeout error. That error reaches the executor log and clients,
+/// so it names the host and path but never the URL's credentials or query
+/// string. Each stalled call waits the full `HTTP_FETCH_TIMEOUT_MS`, so the
+/// two run at the same time in one isolate.
 #[tokio::test]
-async fn http_fetch_times_out_when_the_server_never_sends_headers() {
+async fn http_fetch_times_out_when_the_server_stalls_and_redacts_the_url() {
     let (js, _dir) = language_isolate().await;
-    let (url, _hold) = serve_once(Reply::Nothing);
-    let (result, elapsed) = fetch(&js, &url).await;
-    assert_timed_out(&result, &url);
-    assert!(elapsed < SETTLE_BOUND, "took {elapsed:?}");
-}
-
-/// The timeout error reaches the executor log and clients, so it names the
-/// host and path but never the URL's credentials or query string.
-#[tokio::test]
-async fn http_fetch_timeout_error_redacts_credentials_and_query() {
-    let (js, _dir) = language_isolate().await;
-    let (url, _hold) = serve_once(Reply::Nothing);
+    let (no_headers_url, _hold_headers) = serve_once(Reply::Nothing);
     let secret_url = format!(
         "{}?token=SECRET",
-        url.replacen("http://", "http://user:hunter2@", 1)
+        no_headers_url.replacen("http://", "http://user:hunter2@", 1)
     );
-    let (result, _) = fetch(&js, &secret_url).await;
-    assert_timed_out(&result, &url);
+    let (stalled_body_url, _hold_body) = serve_once(Reply::Partial(
+        "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\npartial",
+    ));
+    let urls = serde_json::to_string(&[&secret_url, &stalled_body_url]).unwrap();
+    let script = format!(
+        r#"Promise.all({urls}.map(url => globalThis.__httpFetch(url, "GET", "", "").then(
+            r => "ok:" + JSON.stringify(r),
+            e => "err:" + (e && e.message)))).then(JSON.stringify)"#
+    );
+    let started = Instant::now();
+    let out = tokio::time::timeout(SETTLE_BOUND, js.execute(&script))
+        .await
+        .unwrap_or_else(|_| {
+            panic!("httpFetch did not settle within {SETTLE_BOUND:?}: no timeout in host.js")
+        })
+        .expect("script ran");
+    let elapsed = started.elapsed();
+    let results: Vec<String> = serde_json::from_str(&out).expect("a JSON list of results");
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert_timed_out(&results[0], &no_headers_url);
     assert!(
-        !result.contains("hunter2") && !result.contains("SECRET"),
-        "timeout error leaks URL credentials or query: {result}"
+        !results[0].contains("hunter2") && !results[0].contains("SECRET"),
+        "timeout error leaks URL credentials or query: {}",
+        results[0]
     );
+    assert_timed_out(&results[1], &stalled_body_url);
+    assert!(elapsed < SETTLE_BOUND, "took {elapsed:?}");
 }
 
 /// A fetch that fails for another reason names the redacted URL. The
@@ -156,16 +171,6 @@ async fn http_fetch_invalid_url_error_does_not_leak_credentials_or_query() {
         !result.contains("hunter2") && !result.contains("SECRET"),
         "fetch error leaks URL credentials or query: {result}"
     );
-}
-
-#[tokio::test]
-async fn http_fetch_times_out_when_the_body_stalls() {
-    let (js, _dir) = language_isolate().await;
-    let (url, _hold) = serve_once(Reply::Partial(
-        "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\npartial",
-    ));
-    let (result, _) = fetch(&js, &url).await;
-    assert_timed_out(&result, &url);
 }
 
 /// host.js's `HTTP_FETCH_MAX_BYTES`.
