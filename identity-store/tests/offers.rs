@@ -271,7 +271,8 @@ async fn rule_a7_fails_on_each_condition_alone() {
 #[tokio::test]
 async fn offers_by_a_device_key_by_an_old_master_or_at_a_moved_head_are_refused_and_a_sixth_open_offer_is_429(
 ) {
-    let t = TestStore::new();
+    // A bucket that does not run dry first: this test is about the open-offer cap.
+    let t = TestStore::with_identity_burst(100);
     let mut alice = Person::new("alice");
     t.publish(&alice).await;
 

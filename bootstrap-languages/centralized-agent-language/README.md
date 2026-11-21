@@ -27,7 +27,11 @@ serves the identity interface, both on the shared identity store (`identity-stor
   ignored.
 - `identityLog`, `identityHead`, `identityAppend`, `identityKeyOwner`, `identityPowParams`,
   `identityAttachNote`, `identityPutAgent`, `identityOpenOffer`, `identityListOffers`,
-  `identityCancelOffer`, `identityClaimOffer`, `identityOfferState`: one store route each.
+  `identityCancelOffer`, `identityClaimOffer`, `identityOfferState`, `identityInboxPut`,
+  `identityInboxList`, `identityInboxAck`, `identityGetRecord`, `identityPutRecord`,
+  `identityPostRequest`, `identityListRequests`, `identityDeleteRequest`: one store route each.
+  Inbox messages and private records are sealed; the language passes the ciphertext through
+  and opens nothing. A pre-join inbox read's `PreInboxAuth` travels in `X-Coasys-Inbox`.
   The language signs nothing; a `SignedRequest` (whose `req.store` names the store it is
   for; another store refuses it as `forbidden` `store`) travels in `X-Coasys-Request`; every body goes
   out as the argument's canonical JSON (so a signer hashes `JCS(body)`); HTTP statuses map one

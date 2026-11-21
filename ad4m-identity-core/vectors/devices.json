@@ -1,0 +1,224 @@
+{
+  "description": "The device inbox, the private record and the request box. HPKE base mode (RFC 9180): DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20-Poly1305, empty AAD; sealed = base64url(enc || ciphertext). An inbox seal's info is \"coasys:inbox\" || 0x00 || address (\"pre:<a>\" or \"<scid>/<keyId>\"); a record key's is \"coasys:record\" || 0x00 || scid. The record's aad is JCS({scid, version, recoveryKey}); its recoveryKey carries recoveryAttestation {keyId, sig}, the current master m0 over signing_bytes(\"coasys:recovery-key\", {scid, recoveryKey, keyId}); its envelope is signed by d1 over signing_bytes(\"coasys:private-record\", {scid, version, wrapped, recoveryKey, recoveryAttestation, nonce, ciphertext, signer}); the store's receipt for it is its head key over signing_bytes(\"coasys:record-receipt\", {scid, version, envelope, seq, store}), envelope the sha2-256 multihash of JCS(the signed envelope with scid and sig), seq the head when it accepted the write. The ephemeral keys and the record key come from the RNG stream sha256(seed || u64be(i)), 32 bytes per block, with the named seed. The X25519 secrets are sha256(\"enc secret d<n>\") and sha256(\"recovery secret\").",
+  "log": [
+    {
+      "add": [
+        {
+          "enc": "z6LSpN1iD3DmQmFTPxgSbytdShxSdeVHzuoySGUckYgDV3zR",
+          "id": "d1",
+          "sign": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+        },
+        {
+          "enc": "z6LSmZoeDUDhufp8YgsCayHjfL792R9bR4heHDyryJtehMou",
+          "id": "d2",
+          "sign": "z6MkkesFdL6qqCLG8gJ2PB4PaWF5j9YGxVgr7RfvX7WggnUr"
+        }
+      ],
+      "format": "coasys/1",
+      "kind": "human",
+      "master": "z6Mkpuq56j9kNo4YqZvGtWoxCzKZfbFK329q3zsYWQVjEqMq",
+      "next": "QmYGaczyoimbrQLjPtYTQYcQ4X6WvMuKQiWQ98jTuD3i6n",
+      "op": "incept",
+      "prev": null,
+      "proof": [
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z3H4w9CBtWMSAPjt37GcVszywnSGjmfAXZ8QSVrPfVM4aBtaroBQV58RpKVZX8E13EvkrJrFGtVT2NLgCWkVayxD3",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmNSNTN9zyBE5PXwnU64Uah9C6PeoQqm2wLUoWTuvbuKtL#m0"
+        },
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z5yximjy5L8mcQXqsaCbRL32c8oBzJJwb3VmhKnzz9D32R9aHp7yyMMcDzqEfZFWFQpwfiEhq3dP3c9tUq41pVHpB",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmNSNTN9zyBE5PXwnU64Uah9C6PeoQqm2wLUoWTuvbuKtL#d1"
+        },
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z3od9Cwra6WgQru43TTRAHMNt6GUnABZAJcJzYfcbUg9CEjP3BuEEZzRyFYvSBqNEUcUhBoqN8KWLLbpbJidMup4e",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmNSNTN9zyBE5PXwnU64Uah9C6PeoQqm2wLUoWTuvbuKtL#d2"
+        }
+      ],
+      "scid": "QmNSNTN9zyBE5PXwnU64Uah9C6PeoQqm2wLUoWTuvbuKtL",
+      "seq": 0
+    },
+    {
+      "add": [
+        {
+          "can": [
+            "read"
+          ],
+          "enc": "z6LSkEAbNEnQquHf2wrgW25kptXGoMpMCyDUiJfqEaPNX7Tk",
+          "expires": 1900000000,
+          "id": "d3",
+          "kind": "bot",
+          "sign": "z6Mkmu4QQQajcBEcm7r2iumaUyNZ45t5tUuojTUUSzdX3kYr"
+        }
+      ],
+      "coSig": "z3coSig",
+      "format": "coasys/1",
+      "offer": "offer-1",
+      "op": "add",
+      "prev": "QmbUyGdxZtiCXdK8AjqMZRUggzFp8cdev3Znw9up27pToh",
+      "proof": [
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z4K2Ww8mNPieyN3p9EJHCq9NmpFXEAUJgEtGVm6pfNVmKbpTTt1gHW65sFe3jY7jXgLn5dni9YjDQiFhtZx7kzN5D",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmNSNTN9zyBE5PXwnU64Uah9C6PeoQqm2wLUoWTuvbuKtL#m0"
+        }
+      ],
+      "scid": "QmNSNTN9zyBE5PXwnU64Uah9C6PeoQqm2wLUoWTuvbuKtL",
+      "seq": 1
+    }
+  ],
+  "now": 1700000000,
+  "payload": {
+    "signingBytes": "{\"body\":{\"did\":\"did:scid:coasys:1:QmNSNTN9zyBE5PXwnU64Uah9C6PeoQqm2wLUoWTuvbuKtL\",\"index\":0,\"secret\":\"FQUD8BGKkxox8Luckyda27Vzk9fmTa9FpK6uQGYBiaXg\",\"type\":\"master\"},\"by\":{\"kelHash\":\"Qmdnun2gHMNqTsU3Fgrs2H5Z646NS7PQ35ca5bcdT7wzU3\",\"kelSeq\":1,\"keyId\":\"m0\"},\"domain\":\"coasys:inbox\",\"sentAt\":1700000000,\"to\":\"z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ\"}",
+    "value": {
+      "body": {
+        "did": "did:scid:coasys:1:QmNSNTN9zyBE5PXwnU64Uah9C6PeoQqm2wLUoWTuvbuKtL",
+        "index": 0,
+        "secret": "FQUD8BGKkxox8Luckyda27Vzk9fmTa9FpK6uQGYBiaXg",
+        "type": "master"
+      },
+      "by": {
+        "kelHash": "Qmdnun2gHMNqTsU3Fgrs2H5Z646NS7PQ35ca5bcdT7wzU3",
+        "kelSeq": 1,
+        "keyId": "m0"
+      },
+      "sentAt": 1700000000,
+      "sig": "zYe4VwAUPdvZs2EFpyMiZDPJjsnink92LcWqC4KRqpk5eVSMgJnvxnwzMKSYtph4ChnFPmfYok9mSJnpFGPCNauX",
+      "to": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ"
+    }
+  },
+  "preAddress": {
+    "address": "CDdScsfauSSLrd95aeHuEPtcJctoAvohs3jrUkbJTKMp",
+    "hashInput": "{\"domain\":\"coasys:inbox\",\"r\":\"HEtkUQvb8LqPRpB1jE32Zs\",\"sign\":\"z6MkqSRMEYA6z9ToJjGrH8vYKtjjnRseu48jLPdYDXN8brSa\"}",
+    "r": "HEtkUQvb8LqPRpB1jE32Zs",
+    "sign": "z6MkqSRMEYA6z9ToJjGrH8vYKtjjnRseu48jLPdYDXN8brSa"
+  },
+  "preAuth": {
+    "signingBytes": "{\"address\":\"CDdScsfauSSLrd95aeHuEPtcJctoAvohs3jrUkbJTKMp\",\"domain\":\"coasys:inbox\",\"expires\":1700000060,\"method\":\"GET\",\"nonce\":\"Fr1A1hBxhyyzry4gpRN7dr\",\"path\":\"/v1/inbox/pre/CDdScsfauSSLrd95aeHuEPtcJctoAvohs3jrUkbJTKMp\",\"r\":\"HEtkUQvb8LqPRpB1jE32Zs\",\"sign\":\"z6MkqSRMEYA6z9ToJjGrH8vYKtjjnRseu48jLPdYDXN8brSa\",\"store\":\"did:key:z6MkvzigEXS3hLQEtP2bmc9qZh6YhUJJJypDfXZKquQyz5jQ\"}",
+    "value": {
+      "address": "CDdScsfauSSLrd95aeHuEPtcJctoAvohs3jrUkbJTKMp",
+      "expires": 1700000060,
+      "method": "GET",
+      "nonce": "Fr1A1hBxhyyzry4gpRN7dr",
+      "path": "/v1/inbox/pre/CDdScsfauSSLrd95aeHuEPtcJctoAvohs3jrUkbJTKMp",
+      "r": "HEtkUQvb8LqPRpB1jE32Zs",
+      "sig": "z53h7GoBUmktUukucigS4sQmBfMfYZBTMhQFcHTRzWwATufCiAWdrus5fD2qGRCffQsZeUeZKs8iTaBTfsHPo726p",
+      "sign": "z6MkqSRMEYA6z9ToJjGrH8vYKtjjnRseu48jLPdYDXN8brSa",
+      "store": "did:key:z6MkvzigEXS3hLQEtP2bmc9qZh6YhUJJJypDfXZKquQyz5jQ"
+    }
+  },
+  "record": {
+    "aad": "{\"recoveryKey\":\"z6LSmF5HQpuQ1up6UCoc152Pe3jhQrpJ5EA79q6Zx3gTfTtY\",\"scid\":\"QmNSNTN9zyBE5PXwnU64Uah9C6PeoQqm2wLUoWTuvbuKtL\",\"version\":1}",
+    "attestationSigningBytes": "{\"domain\":\"coasys:recovery-key\",\"keyId\":\"m0\",\"recoveryKey\":\"z6LSmF5HQpuQ1up6UCoc152Pe3jhQrpJ5EA79q6Zx3gTfTtY\",\"scid\":\"QmNSNTN9zyBE5PXwnU64Uah9C6PeoQqm2wLUoWTuvbuKtL\"}",
+    "plaintext": "{\"devices\":{\"d1\":{\"address\":null,\"holdsMaster\":true,\"kind\":\"desktop-app\",\"name\":\"MacBook Pro\",\"operator\":null,\"place\":null,\"runsExecutor\":true},\"d2\":{\"address\":null,\"holdsMaster\":\"offered\",\"kind\":\"phone-app\",\"name\":\"Pixel 8\",\"operator\":null,\"place\":null,\"runsExecutor\":false},\"d3\":{\"address\":null,\"holdsMaster\":false,\"kind\":\"bot\",\"name\":\"Helper\",\"operator\":null,\"place\":null,\"runsExecutor\":false}},\"pendingRevocations\":[{\"at\":1700000000,\"keyId\":\"d2\",\"reason\":\"account-deleted\"}],\"safeguards\":{},\"wordsCheckedAt\":1700000000}",
+    "receipt": {
+      "envelopeHashInput": "{\"ciphertext\":\"iCE03v92QXliRKPw9N2bcO2jt5GXKqVJTrqr7aAKLKoDtGG-76-wELhbWaC0UUjJ3kOQDXl7K0dSWCOvswGX40d7JchX89AEFIzby8hciIn5KASKrgqlvSKgyaBoYuv_FkdkBdGSu5QK3OgGDCIiWMOGAR_YhsBWiH0hTl6FH5btnyBKNgmO-Xq0Zvte__KilTECrPJ7-93jQ14MeS0Zympkp_JqjHBMaZc1eXm_sauHXJnv7qWpyHlde454voV5f0B0cBzkT6ZIOGALTbYGr6X0tGucFblmbfCgMOn-RES9G-D0laEcy30E0WpsWFDb-2ityd3lNDuvlMOnVdvmUAs_N3Fw1PRo8nNj5ipQVcHRCtjpf0fKDzhCLZoj6GD-iFDTmo28QPWEXPufZZmsarXPL0meCQaZdKXOgFGgGy1SJxpPZZEELmaR1DdAzcb6-s9Zpoz2-8xqhWgLI774xUAdqolxVZeoA1OdlYTJF58wd6nJ--5eFN-T3xd86ekXpMaaRBJun_JY7QOkYKA52vGfnKiKX9TZRKQ_9rjAZCPwrLPmXToI9_w4hxeuUV2Rs-Tvv5rA8mSrUcquQOUS9_fgALy_8rK949JY1avu-JM-CFwKS7NxX1x1ot-ofrek_cAkmBeZ7sB6PA1t36NgTkkJaTZbZJMw04FmNn8NB4cbdc2Yonoz2SZwKCOfPMT3-XbdAPn4Td7-I1I\",\"nonce\":\"5GSgyNsMpoxcm96F2TYcnFrZ4nPNBkULm\",\"recoveryAttestation\":{\"keyId\":\"m0\",\"sig\":\"zkwtqZPBXtUFwE358FKxvLL6yXj19wKDpzEj6eq45PvbLeUrh38Nx6JnVnPXoUMhD89wE3jgCed9qHnAQTWSk27T\"},\"recoveryKey\":\"z6LSmF5HQpuQ1up6UCoc152Pe3jhQrpJ5EA79q6Zx3gTfTtY\",\"scid\":\"QmNSNTN9zyBE5PXwnU64Uah9C6PeoQqm2wLUoWTuvbuKtL\",\"sig\":\"z4RLHAZdgpXnYRhcKLoUXZkuVFsdepaRMWpKyhPWUbtgMBfHe6asHsZRdW6b7GT9wLYS39Sx1haVjDGp7R4a1Z1av\",\"signer\":\"d1\",\"version\":1,\"wrapped\":{\"d1\":\"EyrPIKj_NYT9naPbhd1hG7NbIOo-vv2KxHzzC0iqCApvBuJ8hlyojvI3O924Y36OxsPqTCUJ22H-tV9AHBDrcPcbOdalYfH3jwj3TTezScQ\",\"d2\":\"-gaLNk8sFKPe5157ZTDIrOzN6Rq_vDbHKj8cXwfzWXfOIULDgX_GXowtU8zWrkFwrxJQduGJN49jDQV-14jYI8Ia6rmb87n4vtRa1QP4mCY\",\"recovery\":\"rVu9RPYFsyNLv6xFjORftDpMi-pVzeGl4R9VGaIIUjm-jXVFkCFrjhRbubWkjkvSI1pp0QN-TxMnril5d-9GnSRF74p42x8DQDesVXanqUc\"}}",
+      "signingBytes": "{\"domain\":\"coasys:record-receipt\",\"envelope\":\"QmenkU5MwiFPL9yf56wFWBBNcQnV97gQ9C3hJXCyqKMiRX\",\"scid\":\"QmNSNTN9zyBE5PXwnU64Uah9C6PeoQqm2wLUoWTuvbuKtL\",\"seq\":1,\"store\":\"did:key:z6MkkQyJA1YFVpesDiSauqmHDWyFkTUF7qdfWMPuRSezgV8z\",\"version\":1}",
+      "storeKey": "z6MkkQyJA1YFVpesDiSauqmHDWyFkTUF7qdfWMPuRSezgV8z",
+      "value": {
+        "envelope": "QmenkU5MwiFPL9yf56wFWBBNcQnV97gQ9C3hJXCyqKMiRX",
+        "scid": "QmNSNTN9zyBE5PXwnU64Uah9C6PeoQqm2wLUoWTuvbuKtL",
+        "seq": 1,
+        "sig": "z5YnvBYxaU6gsD5EuUiZ9nMFQjwZBwbaTe1bugtprLJfe53SC8nt3VYJFBGnmPFVESG27wGZcmvgzCD22FuQxnDLm",
+        "store": "did:key:z6MkkQyJA1YFVpesDiSauqmHDWyFkTUF7qdfWMPuRSezgV8z",
+        "version": 1
+      }
+    },
+    "recoverySecret": "9bd0a79ecad2b1b2152d77d6a9712d8b870cadda28eb248f44526b9a33db9ad6",
+    "rngSeed": "record seal",
+    "sealed": {
+      "ciphertext": "iCE03v92QXliRKPw9N2bcO2jt5GXKqVJTrqr7aAKLKoDtGG-76-wELhbWaC0UUjJ3kOQDXl7K0dSWCOvswGX40d7JchX89AEFIzby8hciIn5KASKrgqlvSKgyaBoYuv_FkdkBdGSu5QK3OgGDCIiWMOGAR_YhsBWiH0hTl6FH5btnyBKNgmO-Xq0Zvte__KilTECrPJ7-93jQ14MeS0Zympkp_JqjHBMaZc1eXm_sauHXJnv7qWpyHlde454voV5f0B0cBzkT6ZIOGALTbYGr6X0tGucFblmbfCgMOn-RES9G-D0laEcy30E0WpsWFDb-2ityd3lNDuvlMOnVdvmUAs_N3Fw1PRo8nNj5ipQVcHRCtjpf0fKDzhCLZoj6GD-iFDTmo28QPWEXPufZZmsarXPL0meCQaZdKXOgFGgGy1SJxpPZZEELmaR1DdAzcb6-s9Zpoz2-8xqhWgLI774xUAdqolxVZeoA1OdlYTJF58wd6nJ--5eFN-T3xd86ekXpMaaRBJun_JY7QOkYKA52vGfnKiKX9TZRKQ_9rjAZCPwrLPmXToI9_w4hxeuUV2Rs-Tvv5rA8mSrUcquQOUS9_fgALy_8rK949JY1avu-JM-CFwKS7NxX1x1ot-ofrek_cAkmBeZ7sB6PA1t36NgTkkJaTZbZJMw04FmNn8NB4cbdc2Yonoz2SZwKCOfPMT3-XbdAPn4Td7-I1I",
+      "nonce": "5GSgyNsMpoxcm96F2TYcnFrZ4nPNBkULm",
+      "recoveryAttestation": {
+        "keyId": "m0",
+        "sig": "zkwtqZPBXtUFwE358FKxvLL6yXj19wKDpzEj6eq45PvbLeUrh38Nx6JnVnPXoUMhD89wE3jgCed9qHnAQTWSk27T"
+      },
+      "recoveryKey": "z6LSmF5HQpuQ1up6UCoc152Pe3jhQrpJ5EA79q6Zx3gTfTtY",
+      "sig": "z4RLHAZdgpXnYRhcKLoUXZkuVFsdepaRMWpKyhPWUbtgMBfHe6asHsZRdW6b7GT9wLYS39Sx1haVjDGp7R4a1Z1av",
+      "signer": "d1",
+      "version": 1,
+      "wrapped": {
+        "d1": "EyrPIKj_NYT9naPbhd1hG7NbIOo-vv2KxHzzC0iqCApvBuJ8hlyojvI3O924Y36OxsPqTCUJ22H-tV9AHBDrcPcbOdalYfH3jwj3TTezScQ",
+        "d2": "-gaLNk8sFKPe5157ZTDIrOzN6Rq_vDbHKj8cXwfzWXfOIULDgX_GXowtU8zWrkFwrxJQduGJN49jDQV-14jYI8Ia6rmb87n4vtRa1QP4mCY",
+        "recovery": "rVu9RPYFsyNLv6xFjORftDpMi-pVzeGl4R9VGaIIUjm-jXVFkCFrjhRbubWkjkvSI1pp0QN-TxMnril5d-9GnSRF74p42x8DQDesVXanqUc"
+      }
+    },
+    "signingBytes": "{\"ciphertext\":\"iCE03v92QXliRKPw9N2bcO2jt5GXKqVJTrqr7aAKLKoDtGG-76-wELhbWaC0UUjJ3kOQDXl7K0dSWCOvswGX40d7JchX89AEFIzby8hciIn5KASKrgqlvSKgyaBoYuv_FkdkBdGSu5QK3OgGDCIiWMOGAR_YhsBWiH0hTl6FH5btnyBKNgmO-Xq0Zvte__KilTECrPJ7-93jQ14MeS0Zympkp_JqjHBMaZc1eXm_sauHXJnv7qWpyHlde454voV5f0B0cBzkT6ZIOGALTbYGr6X0tGucFblmbfCgMOn-RES9G-D0laEcy30E0WpsWFDb-2ityd3lNDuvlMOnVdvmUAs_N3Fw1PRo8nNj5ipQVcHRCtjpf0fKDzhCLZoj6GD-iFDTmo28QPWEXPufZZmsarXPL0meCQaZdKXOgFGgGy1SJxpPZZEELmaR1DdAzcb6-s9Zpoz2-8xqhWgLI774xUAdqolxVZeoA1OdlYTJF58wd6nJ--5eFN-T3xd86ekXpMaaRBJun_JY7QOkYKA52vGfnKiKX9TZRKQ_9rjAZCPwrLPmXToI9_w4hxeuUV2Rs-Tvv5rA8mSrUcquQOUS9_fgALy_8rK949JY1avu-JM-CFwKS7NxX1x1ot-ofrek_cAkmBeZ7sB6PA1t36NgTkkJaTZbZJMw04FmNn8NB4cbdc2Yonoz2SZwKCOfPMT3-XbdAPn4Td7-I1I\",\"domain\":\"coasys:private-record\",\"nonce\":\"5GSgyNsMpoxcm96F2TYcnFrZ4nPNBkULm\",\"recoveryAttestation\":{\"keyId\":\"m0\",\"sig\":\"zkwtqZPBXtUFwE358FKxvLL6yXj19wKDpzEj6eq45PvbLeUrh38Nx6JnVnPXoUMhD89wE3jgCed9qHnAQTWSk27T\"},\"recoveryKey\":\"z6LSmF5HQpuQ1up6UCoc152Pe3jhQrpJ5EA79q6Zx3gTfTtY\",\"scid\":\"QmNSNTN9zyBE5PXwnU64Uah9C6PeoQqm2wLUoWTuvbuKtL\",\"signer\":\"d1\",\"version\":1,\"wrapped\":{\"d1\":\"EyrPIKj_NYT9naPbhd1hG7NbIOo-vv2KxHzzC0iqCApvBuJ8hlyojvI3O924Y36OxsPqTCUJ22H-tV9AHBDrcPcbOdalYfH3jwj3TTezScQ\",\"d2\":\"-gaLNk8sFKPe5157ZTDIrOzN6Rq_vDbHKj8cXwfzWXfOIULDgX_GXowtU8zWrkFwrxJQduGJN49jDQV-14jYI8Ia6rmb87n4vtRa1QP4mCY\",\"recovery\":\"rVu9RPYFsyNLv6xFjORftDpMi-pVzeGl4R9VGaIIUjm-jXVFkCFrjhRbubWkjkvSI1pp0QN-TxMnril5d-9GnSRF74p42x8DQDesVXanqUc\"}}",
+    "value": {
+      "devices": {
+        "d1": {
+          "address": null,
+          "holdsMaster": true,
+          "kind": "desktop-app",
+          "name": "MacBook Pro",
+          "operator": null,
+          "place": null,
+          "runsExecutor": true
+        },
+        "d2": {
+          "address": null,
+          "holdsMaster": "offered",
+          "kind": "phone-app",
+          "name": "Pixel 8",
+          "operator": null,
+          "place": null,
+          "runsExecutor": false
+        },
+        "d3": {
+          "address": null,
+          "holdsMaster": false,
+          "kind": "bot",
+          "name": "Helper",
+          "operator": null,
+          "place": null,
+          "runsExecutor": false
+        }
+      },
+      "pendingRevocations": [
+        {
+          "at": 1700000000,
+          "keyId": "d2",
+          "reason": "account-deleted"
+        }
+      ],
+      "safeguards": {},
+      "wordsCheckedAt": 1700000000
+    },
+    "wrapInfo": "636f617379733a7265636f726400516d4e534e544e397a794245355058776e55363455616839433650656f51716d32774c556f5754757662754b744c"
+  },
+  "request": {
+    "body": "{\"body\":{\"keyIds\":[\"d2\"],\"kind\":\"confirm-revoke\",\"rotate\":true},\"expires\":1700604800}",
+    "value": {
+      "body": {
+        "keyIds": [
+          "d2"
+        ],
+        "kind": "confirm-revoke",
+        "rotate": true
+      },
+      "expires": 1700604800
+    }
+  },
+  "seal": {
+    "address": "QmNSNTN9zyBE5PXwnU64Uah9C6PeoQqm2wLUoWTuvbuKtL/d1",
+    "info": "636f617379733a696e626f7800516d4e534e544e397a794245355058776e55363455616839433650656f51716d32774c556f5754757662754b744c2f6431",
+    "recipientSecret": "15faf310109ef095e4790ed2dba8171b0aad934ff98a1c4d231aa36a398c8f6c",
+    "rngSeed": "inbox seal",
+    "sealed": "JypwWenIcoHGfBaQh88CkOLH-lXaF3uyzsaEsjvcey0kKIoJm9THGDZiOq9lNTHTWLOzhPJxMARH_5QsBOH3d4RGD2ZJKNPSRtZpjhsefYlntyqIbgRQ-cxSewkX7l23ccLEStYzgXhreA7SMf_KuZ9hfK58_wUYGuBu_-jvTc_1AqVIOhoyK1Jm0yVNtQ7YnfIwAOCoOaps1wEZWTuORKo2vwRCVv0VZsoKDF7-eB48Yzk2F3-k9Eqjjxl9KfA6YmWP3h6kPIcIdurtfBczJ7n7VnGR0vaMWSIOT58ZBWV_OnM7jx-FpuABQFVBqPYd9M_siS5EQjMmgiKTuNvEezv1wiCt3cIlFFPbTzn-P3k_Kif1nuMq8Ext9Wixw1kV-cajBqLRiAGn48oEbn9qknODUsHHGltSaDfguSWBcAm3ip2easpvE_0dT2t9L_fY3ITbyDsrc6BnpQcrcCigjYbh6Dqa2AnfMktLIEWFTG6VH5KwNc5FH0c8fSSrqHjxllo3K458Kc0fwYMb-o2zP2_Bv88LnceU_cntj-vEjdrDm6CNDH5Iyj6vOQstsKrW9u0W8EGT3uIbfa4sI_LZ1STkLkhijcWKuWf-M3hZvJcSXcIrDhD-Jr9vPRo",
+    "to": "z6LSpN1iD3DmQmFTPxgSbytdShxSdeVHzuoySGUckYgDV3zR"
+  }
+}

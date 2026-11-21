@@ -14,13 +14,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ad4m_hash_chain::{decode_ed25519_multikey, encode_ed25519_multikey, sha256};
 use ad4m_ldk::identity::{
-    AgentRecord, AgentRecordProof, AppendRequest, IdentityErrorCode, SignedRequest,
-    LOG_PAGE_EVENTS, MAX_LOG_PAGE_BYTES,
+    AgentRecord, AgentRecordProof, AppendRequest, DeviceRequestBody, ForbiddenReason,
+    IdentityErrorCode, InboxAddress, InboxAuth, InboxBind, InboxWrite, InboxWriter, PostedRequest,
+    PreInboxAuth, SealedRecord, SignedOffer, SignedRequest, StoredRecord, LOG_PAGE_EVENTS,
+    MAX_LOG_PAGE_BYTES,
 };
 use ad4m_ldk::prelude::{Expression, ExpressionProof, LanguageError, LanguageResult};
 use centralized_agent_language::agents::{self, AgentKey};
 use centralized_agent_language::store::{
-    encode_request, Http, HttpFailure, HttpReply, Store, MAX_REPLY_BYTES, REQUEST_HEADER,
+    encode_header, Http, HttpFailure, HttpReply, Store, MAX_REPLY_BYTES, PRE_INBOX_HEADER,
+    REQUEST_HEADER,
 };
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use futures::executor::block_on;
@@ -116,6 +119,9 @@ impl StoreProcess {
             .env("IDENTITY_STORE_KEY", dir.path().join("store-key"))
             .env("IDENTITY_STORE_LISTEN", "127.0.0.1:0")
             .env("POW_BITS", "8")
+            // The identity bucket has its own store tests; here it would only stop the cases
+            // that make many writes for one person.
+            .env("IDENTITY_BURST", "1000")
             .stdout(Stdio::piped())
             .spawn()
             .expect("identity-store starts");
@@ -1453,10 +1459,7 @@ fn bodies_are_the_inputs_canonical_json_and_the_signed_request_travels_unchanged
     );
     block_on(store.list_offers(did, &req, 0)).unwrap();
     let listed = host.last();
-    assert_eq!(
-        listed.headers[REQUEST_HEADER],
-        encode_request(&req).unwrap()
-    );
+    assert_eq!(listed.headers[REQUEST_HEADER], encode_header(&req).unwrap());
     assert_eq!(listed.body, "");
 }
 
@@ -1563,6 +1566,366 @@ fn a_log_page_over_the_stores_limits_is_refused() {
             "https://full.example/v1/logs/{}?from=0",
             did.rsplit(':').next().unwrap()
         )
+    );
+}
+
+// ----- The device inbox, the private record and the request box -----
+
+fn joined(scid: &str, key_id: &str) -> InboxAddress {
+    InboxAddress::Joined {
+        scid: scid.to_string(),
+        key_id: key_id.to_string(),
+    }
+}
+
+/// `value` sent as the request's body, unchanged: the JCS of the call's input.
+fn assert_body_is(host: &Host, value: &impl serde::Serialize) {
+    assert_eq!(
+        host.last().body,
+        ad4m_hash_chain::canonical_json(&serde_json::to_value(value).unwrap()).unwrap()
+    );
+}
+
+#[test]
+fn the_joined_inbox_calls_answer_and_refuse_as_the_store_does() {
+    let server = StoreProcess::start();
+    let mut apps = Apps::start();
+    let (host, store) = Host::on(&server.url);
+    let name = "nia inbox";
+    let p = person(&mut apps, &store, name);
+    let (did, scid) = (p["did"].as_str().unwrap(), p["scid"].as_str().unwrap());
+    link(&mut apps, &store, name, did, "nia phone");
+    let path = format!("/v1/inbox/{scid}/d2");
+
+    let sealed = apps.run("sealMaster", json!({ "name": name, "keyId": "d2" }));
+    let write = InboxWrite {
+        sealed: sealed.as_str().unwrap().to_string(),
+        bind: None,
+    };
+    let body = serde_json::to_value(&write).unwrap();
+    let req = apps.signed(&server, name, "master", None, "PUT", &path, Some(&body));
+    let stored = block_on(store.inbox_put(&joined(scid, "d2"), &write, &req)).unwrap();
+    assert_body_is(&host, &write);
+
+    // A device key does not write; an unknown key has no inbox.
+    let req = apps.signed(&server, name, "d1", Some("d1"), "PUT", &path, Some(&body));
+    assert_eq!(
+        refusal(block_on(store.inbox_put(&joined(scid, "d2"), &write, &req))),
+        IdentityErrorCode::Forbidden {
+            reason: ForbiddenReason::Writer
+        }
+    );
+    let missing = format!("/v1/inbox/{scid}/d9");
+    let req = apps.signed(&server, name, "master", None, "PUT", &missing, Some(&body));
+    assert_eq!(
+        refusal(block_on(store.inbox_put(&joined(scid, "d9"), &write, &req))),
+        IdentityErrorCode::NotFound
+    );
+
+    // Only d2 lists and acknowledges its inbox.
+    let req = apps.signed(&server, name, "nia phone", Some("d2"), "GET", &path, None);
+    let list = block_on(store.inbox_list(&joined(scid, "d2"), &InboxAuth::Request(req.clone()), 0))
+        .unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].id, stored.id);
+    assert_eq!(list[0].sealed, write.sealed);
+    assert_eq!(
+        host.last().headers[REQUEST_HEADER],
+        encode_header(&req).unwrap()
+    );
+    let req = apps.signed(&server, name, "d1", Some("d1"), "GET", &path, None);
+    assert_eq!(
+        refusal(block_on(store.inbox_list(
+            &joined(scid, "d2"),
+            &InboxAuth::Request(req),
+            0
+        ))),
+        IdentityErrorCode::Forbidden {
+            reason: ForbiddenReason::Signer
+        }
+    );
+    let ack = format!("{path}/{}", stored.id);
+    let req = apps.signed(&server, name, "nia phone", Some("d2"), "DELETE", &ack, None);
+    block_on(store.inbox_ack(&joined(scid, "d2"), &stored.id, &InboxAuth::Request(req))).unwrap();
+    let req = apps.signed(&server, name, "nia phone", Some("d2"), "DELETE", &ack, None);
+    assert_eq!(
+        refusal(block_on(store.inbox_ack(
+            &joined(scid, "d2"),
+            &stored.id,
+            &InboxAuth::Request(req)
+        ))),
+        IdentityErrorCode::NotFound
+    );
+}
+
+#[test]
+fn the_pre_join_inbox_calls_carry_the_ticket_and_the_devices_own_read() {
+    let server = StoreProcess::start();
+    let mut apps = Apps::start();
+    let (host, store) = Host::on(&server.url);
+    let name = "ola pre";
+    let p = person(&mut apps, &store, name);
+    let scid = p["scid"].as_str().unwrap();
+    let device = "ola desk";
+    let pre = apps.run("preAddress", json!({ "device": device }));
+    let answer = apps.run(
+        "offer",
+        json!({ "name": name, "kind": "device", "ttl": 300, "now": now_s(), "bound": device }),
+    );
+    let offer: SignedOffer = serde_json::from_value(answer["offer"].clone()).unwrap();
+    block_on(store.open_offer(&offer)).unwrap();
+    let sealed = apps.run(
+        "ticket",
+        json!({ "name": name, "device": device, "offer": offer, "s": answer["s"] }),
+    );
+    let a = pre["address"].as_str().unwrap().to_string();
+    let address = InboxAddress::Pre { pre: a.clone() };
+    let write = InboxWrite {
+        sealed: sealed.as_str().unwrap().to_string(),
+        bind: Some(InboxBind {
+            scid: scid.to_string(),
+            offer_id: offer.offer.offer_id.clone(),
+            sign: pre["sign"].as_str().unwrap().to_string(),
+            r: pre["r"].as_str().unwrap().to_string(),
+        }),
+    };
+    let path = format!("/v1/inbox/pre/{a}");
+    let body = serde_json::to_value(&write).unwrap();
+    let req = apps.signed(&server, name, "master", None, "PUT", &path, Some(&body));
+    let stored = block_on(store.inbox_put(&address, &write, &req)).unwrap();
+    assert_eq!(stored.expires, offer.offer.expires);
+    assert_body_is(&host, &write);
+
+    let read_at = |apps: &mut Apps, store: &str, method: &str, path: &str| -> PreInboxAuth {
+        serde_json::from_value(apps.run(
+            "preAuth",
+            json!({
+                "device": device, "store": store, "method": method, "path": path,
+                "expires": now_s() + 60,
+            }),
+        ))
+        .unwrap()
+    };
+    let read =
+        |apps: &mut Apps, method: &str, path: &str| read_at(apps, &server.did(), method, path);
+    // A read signed for another store is refused as a signed request for one is.
+    let elsewhere = read_at(&mut apps, "did:key:z6MkAnotherStore", "GET", &path);
+    assert_eq!(elsewhere.store, "did:key:z6MkAnotherStore");
+    assert_eq!(
+        refusal(block_on(store.inbox_list(
+            &address,
+            &InboxAuth::Pre(elsewhere),
+            0
+        ))),
+        IdentityErrorCode::Forbidden {
+            reason: ForbiddenReason::Store
+        }
+    );
+    let auth = read(&mut apps, "GET", &path);
+    assert_eq!(auth.store, server.did());
+    let list = block_on(store.inbox_list(&address, &InboxAuth::Pre(auth.clone()), 0)).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(
+        list[0].writer,
+        InboxWriter::Offer {
+            scid: scid.to_string(),
+            offer_id: offer.offer.offer_id.clone()
+        }
+    );
+    assert_eq!(
+        host.last().headers[PRE_INBOX_HEADER],
+        encode_header(&auth).unwrap()
+    );
+    // The same read again is a replay.
+    assert_eq!(
+        refusal(block_on(store.inbox_list(
+            &address,
+            &InboxAuth::Pre(auth),
+            0
+        ))),
+        IdentityErrorCode::Forbidden {
+            reason: ForbiddenReason::Signer
+        }
+    );
+    let ack = format!("{path}/{}", stored.id);
+    let auth = read(&mut apps, "DELETE", &ack);
+    block_on(store.inbox_ack(&address, &stored.id, &InboxAuth::Pre(auth))).unwrap();
+
+    // A write the store refuses: an unbound offer.
+    let (unbound, _) = apps.offer(name);
+    let unbound: SignedOffer = serde_json::from_value(unbound).unwrap();
+    block_on(store.open_offer(&unbound)).unwrap();
+    let mut wrong = write.clone();
+    wrong.bind.as_mut().unwrap().offer_id = unbound.offer.offer_id.clone();
+    let body = serde_json::to_value(&wrong).unwrap();
+    let req = apps.signed(&server, name, "master", None, "PUT", &path, Some(&body));
+    assert_eq!(
+        refusal(block_on(store.inbox_put(&address, &wrong, &req))),
+        IdentityErrorCode::Forbidden {
+            reason: ForbiddenReason::Writer
+        }
+    );
+}
+
+#[test]
+fn an_inbox_long_poll_answers_within_the_hosts_ten_seconds() {
+    let server = StoreProcess::start();
+    let mut apps = Apps::start();
+    let (_host, store) = Host::on(&server.url);
+    let name = "pia wait";
+    let p = person(&mut apps, &store, name);
+    let scid = p["scid"].as_str().unwrap().to_string();
+    let path = format!("/v1/inbox/{scid}/d1");
+
+    // An empty inbox answers at the end of its 8 seconds, inside the host's 10.
+    let req = apps.signed(&server, name, "d1", Some("d1"), "GET", &path, None);
+    let started = Instant::now();
+    let list =
+        block_on(store.inbox_list(&joined(&scid, "d1"), &InboxAuth::Request(req), 8)).unwrap();
+    assert!(list.is_empty());
+    let took = started.elapsed();
+    assert!(
+        took >= Duration::from_secs(7) && took < Duration::from_secs(10),
+        "{took:?}"
+    );
+
+    // A message that arrives during the wait answers at once.
+    let req = apps.signed(&server, name, "d1", Some("d1"), "GET", &path, None);
+    let url = server.url.clone();
+    let address = joined(&scid, "d1");
+    let waiting = std::thread::spawn(move || {
+        let (_host, store) = Host::on(&url);
+        let list = block_on(store.inbox_list(&address, &InboxAuth::Request(req), 8)).unwrap();
+        (list, Instant::now())
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    let sealed = apps.run("sealMaster", json!({ "name": name, "keyId": "d1" }));
+    let write = InboxWrite {
+        sealed: sealed.as_str().unwrap().to_string(),
+        bind: None,
+    };
+    let body = serde_json::to_value(&write).unwrap();
+    let req = apps.signed(&server, name, "master", None, "PUT", &path, Some(&body));
+    block_on(store.inbox_put(&joined(&scid, "d1"), &write, &req)).unwrap();
+    let written = Instant::now();
+    let (list, at) = waiting.join().unwrap();
+    assert_eq!(list.len(), 1);
+    assert!(at.duration_since(written) < Duration::from_secs(1));
+}
+
+#[test]
+fn the_record_calls_keep_the_record_byte_for_byte_and_refuse_a_stale_version() {
+    let server = StoreProcess::start();
+    let mut apps = Apps::start();
+    let (host, store) = Host::on(&server.url);
+    let name = "quin record";
+    let p = person(&mut apps, &store, name);
+    let (did, scid) = (p["did"].as_str().unwrap(), p["scid"].as_str().unwrap());
+    let path = format!("/v1/private/{scid}");
+
+    let req = apps.signed(&server, name, "d1", Some("d1"), "GET", &path, None);
+    assert_eq!(block_on(store.get_record(did, &req)).unwrap(), None);
+
+    let record: SealedRecord =
+        serde_json::from_value(apps.run("sealedRecord", json!({ "name": name, "version": 1 })))
+            .unwrap();
+    let body = serde_json::to_value(&record).unwrap();
+    let req = apps.signed(&server, name, "d1", Some("d1"), "PUT", &path, Some(&body));
+    let stored = block_on(store.put_record(did, &record, &req)).unwrap();
+    assert_eq!(stored.version, 1);
+    // The store's receipt for the write, by its head key.
+    assert_eq!(
+        (stored.receipt.scid.as_str(), stored.receipt.version),
+        (scid, 1)
+    );
+    assert_eq!(
+        stored.receipt.envelope,
+        ad4m_identity_core::record::envelope_hash(
+            scid,
+            &serde_json::from_value(body.clone()).unwrap()
+        )
+        .unwrap()
+    );
+    assert_body_is(&host, &record);
+    let req = apps.signed(&server, name, "master", None, "GET", &path, None);
+    assert_eq!(
+        block_on(store.get_record(did, &req)).unwrap(),
+        Some(StoredRecord {
+            record: record.clone(),
+            receipt: stored.receipt.clone(),
+        })
+    );
+
+    let req = apps.signed(&server, name, "d1", Some("d1"), "PUT", &path, Some(&body));
+    assert_eq!(
+        refusal(block_on(store.put_record(did, &record, &req))),
+        IdentityErrorCode::Invalid {
+            reason: "version".into()
+        }
+    );
+    // A record changed after its writer signed it (another key set): the signature fails.
+    let mut wrong = record.clone();
+    wrong.version = 2;
+    wrong.wrapped.insert("d9".into(), "AAAA".into());
+    let body = serde_json::to_value(&wrong).unwrap();
+    let req = apps.signed(&server, name, "d1", Some("d1"), "PUT", &path, Some(&body));
+    assert_eq!(
+        refusal(block_on(store.put_record(did, &wrong, &req))),
+        IdentityErrorCode::Invalid {
+            reason: "signature".into()
+        }
+    );
+}
+
+#[test]
+fn the_request_box_calls_post_list_and_delete() {
+    let server = StoreProcess::start();
+    let mut apps = Apps::start();
+    let (host, store) = Host::on(&server.url);
+    let name = "ria requests";
+    let p = person(&mut apps, &store, name);
+    let (did, scid) = (p["did"].as_str().unwrap(), p["scid"].as_str().unwrap());
+    let path = format!("/v1/requests/{scid}");
+
+    let post = PostedRequest {
+        body: DeviceRequestBody::ConfirmRevoke {
+            key_ids: vec!["d1".into()],
+            rotate: false,
+        },
+        expires: now_s() + 3600,
+    };
+    let body = serde_json::to_value(&post).unwrap();
+    let req = apps.signed(&server, name, "d1", Some("d1"), "POST", &path, Some(&body));
+    let posted = block_on(store.post_request(did, &post, &req)).unwrap();
+    assert_body_is(&host, &post);
+    // The master key posts none.
+    let req = apps.signed(&server, name, "master", None, "POST", &path, Some(&body));
+    assert_eq!(
+        refusal(block_on(store.post_request(did, &post, &req))),
+        IdentityErrorCode::Forbidden {
+            reason: ForbiddenReason::Signer
+        }
+    );
+
+    let req = apps.signed(&server, name, "master", None, "GET", &path, None);
+    let list = block_on(store.list_requests(did, 0, &req)).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].id, posted.id);
+    assert_eq!(list[0].body, post.body);
+    assert_eq!(list[0].by, "d1");
+    assert_eq!(
+        list[0].signed.req.body_hash,
+        ad4m_hash_chain::hash_bytes(ad4m_hash_chain::canonical_json(&body).unwrap().as_bytes())
+    );
+    assert!(host.last().url.ends_with("?since=0"));
+
+    let one = format!("{path}/{}", posted.id);
+    let req = apps.signed(&server, name, "master", None, "DELETE", &one, None);
+    block_on(store.delete_request(did, &posted.id, &req)).unwrap();
+    let req = apps.signed(&server, name, "master", None, "DELETE", &one, None);
+    assert_eq!(
+        refusal(block_on(store.delete_request(did, &posted.id, &req))),
+        IdentityErrorCode::NotFound
     );
 }
 

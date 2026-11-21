@@ -8,6 +8,7 @@
 use std::path::Path;
 
 use ad4m_hash_chain::{encode_ed25519_multikey, encode_proof_value, Multikey};
+use ad4m_identity_core::record::{sign_receipt, RecordError, RecordReceipt, SealedRecord};
 use ad4m_identity_core::HeadStatement;
 use ad4m_ldk::identity::SignedHead;
 use ed25519_dalek::SigningKey;
@@ -105,6 +106,17 @@ impl StoreKey {
             store,
             sig: encode_proof_value(&sig),
         }
+    }
+
+    /// The receipt for the record write `sealed` of `scid` the store accepted at head `seq`
+    /// (domain `coasys:record-receipt`): readers check the record's writer at `seq`.
+    pub fn sign_receipt(
+        &self,
+        scid: &str,
+        sealed: &SealedRecord,
+        seq: u64,
+    ) -> Result<RecordReceipt, RecordError> {
+        sign_receipt(scid, sealed, seq, &self.key)
     }
 }
 

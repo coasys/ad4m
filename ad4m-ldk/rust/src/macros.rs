@@ -226,6 +226,22 @@ macro_rules! __ad4m_cap {
             __ad4m_identity_claim_offer, identity_claim_offer, (did: String, offer_id: String), [claim: $crate::identity::Claim]);
         $crate::__ad4m_async_shim!($lang, IdentityCapability, "identityOfferState",
             __ad4m_identity_offer_state, identity_offer_state, (did: String, offer_id: String, key: String), [], default [wait_s: u8]);
+        $crate::__ad4m_async_shim!($lang, IdentityCapability, "identityInboxPut",
+            __ad4m_identity_inbox_put, identity_inbox_put, (), [address: $crate::identity::InboxAddress, write: $crate::identity::InboxWrite, req: $crate::identity::SignedRequest]);
+        $crate::__ad4m_async_shim!($lang, IdentityCapability, "identityInboxList",
+            __ad4m_identity_inbox_list, identity_inbox_list, (), [address: $crate::identity::InboxAddress, auth: $crate::identity::InboxAuth], default [wait_s: u8]);
+        $crate::__ad4m_async_shim!($lang, IdentityCapability, "identityInboxAck",
+            __ad4m_identity_inbox_ack, identity_inbox_ack, (), [address: $crate::identity::InboxAddress, id: String, auth: $crate::identity::InboxAuth]);
+        $crate::__ad4m_async_shim!($lang, IdentityCapability, "identityGetRecord",
+            __ad4m_identity_get_record, identity_get_record, (did: String), [req: $crate::identity::SignedRequest]);
+        $crate::__ad4m_async_shim!($lang, IdentityCapability, "identityPutRecord",
+            __ad4m_identity_put_record, identity_put_record, (did: String), [record: $crate::identity::SealedRecord, req: $crate::identity::SignedRequest]);
+        $crate::__ad4m_async_shim!($lang, IdentityCapability, "identityPostRequest",
+            __ad4m_identity_post_request, identity_post_request, (did: String), [post: $crate::identity::PostedRequest, req: $crate::identity::SignedRequest]);
+        $crate::__ad4m_async_shim!($lang, IdentityCapability, "identityListRequests",
+            __ad4m_identity_list_requests, identity_list_requests, (did: String), [since: u64, req: $crate::identity::SignedRequest]);
+        $crate::__ad4m_async_shim!($lang, IdentityCapability, "identityDeleteRequest",
+            __ad4m_identity_delete_request, identity_delete_request, (did: String, id: String), [req: $crate::identity::SignedRequest]);
     };
 
     (token, $lang:ty) => {
@@ -407,7 +423,9 @@ macro_rules! __ad4m_maybe_hc_signal {
         ) -> ::std::result::Result<(), ::wasm_bindgen::JsValue> {
             let s: ::serde_json::Value = ::serde_wasm_bindgen::from_value(signal)
                 .map_err($crate::errors::LanguageError::from)?;
-            __ad4m_with("handleHolochainSignal", |l| <$lang as $crate::traits::HolochainSignalHandler>::handle_holochain_signal(l, s))??;
+            __ad4m_with("handleHolochainSignal", |l| {
+                <$lang as $crate::traits::HolochainSignalHandler>::handle_holochain_signal(l, s)
+            })??;
             Ok(())
         }
     };

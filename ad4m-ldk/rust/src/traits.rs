@@ -12,7 +12,9 @@ use crate::types::*;
 pub trait Language: 'static {
     fn name() -> &'static str;
     fn version() -> &'static str;
-    fn is_public() -> bool { false }
+    fn is_public() -> bool {
+        false
+    }
     /// Async so that languages can register Holochain DNAs, await zome
     /// calls, or otherwise use any of the Promise-returning imports
     /// during initialization. Languages whose init logic is sync can
@@ -21,13 +23,17 @@ pub trait Language: 'static {
     fn init() -> impl std::future::Future<Output = LanguageResult<Self>>
     where
         Self: Sized;
-    fn teardown(&mut self) -> LanguageResult<()> { Ok(()) }
+    fn teardown(&mut self) -> LanguageResult<()> {
+        Ok(())
+    }
     /// Returns the interactions available for the given expression
     /// address. Spec §5.7 — the runtime calls this per expression to
     /// discover what actions can be performed against it. Languages
     /// that don't expose per-expression interactions can ignore the
     /// address argument and return a static list (or `Vec::new()`).
-    fn interactions(&self, _address: Address) -> Vec<Interaction> { Vec::new() }
+    fn interactions(&self, _address: Address) -> Vec<Interaction> {
+        Vec::new()
+    }
 
     /// Execute a named interaction against an expression. Spec §5.7 —
     /// Rust ALDK languages cannot return JS callables in `interactions()`
@@ -159,6 +165,64 @@ pub trait IdentityCapability: Language {
         key: String,
         wait_s: u8,
     ) -> impl std::future::Future<Output = LanguageResult<OfferProgress>>;
+    /// `PUT /v1/inbox/pre/{pre}` (the write carries `bind`) or `PUT /v1/inbox/{scid}/{keyId}`,
+    /// signed by the current master key.
+    fn identity_inbox_put(
+        &mut self,
+        address: InboxAddress,
+        write: InboxWrite,
+        req: SignedRequest,
+    ) -> impl std::future::Future<Output = LanguageResult<InboxStored>>;
+    /// `GET` of an inbox `?wait=` (0–8 seconds), with a pre-join read for `{pre}` or a signed
+    /// request by the device key for `{scid, keyId}`.
+    fn identity_inbox_list(
+        &mut self,
+        address: InboxAddress,
+        auth: InboxAuth,
+        wait_s: u8,
+    ) -> impl std::future::Future<Output = LanguageResult<Vec<InboxMessage>>>;
+    /// `DELETE` of message `id` of an inbox, authenticated as for a list.
+    fn identity_inbox_ack(
+        &mut self,
+        address: InboxAddress,
+        id: String,
+        auth: InboxAuth,
+    ) -> impl std::future::Future<Output = LanguageResult<()>>;
+    /// `GET /v1/private/{scid}`: the record with the store's receipt; `None` before the first
+    /// write.
+    fn identity_get_record(
+        &mut self,
+        did: String,
+        req: SignedRequest,
+    ) -> impl std::future::Future<Output = LanguageResult<Option<StoredRecord>>>;
+    /// `PUT /v1/private/{scid}`.
+    fn identity_put_record(
+        &mut self,
+        did: String,
+        record: SealedRecord,
+        req: SignedRequest,
+    ) -> impl std::future::Future<Output = LanguageResult<RecordStored>>;
+    /// `POST /v1/requests/{scid}`.
+    fn identity_post_request(
+        &mut self,
+        did: String,
+        post: PostedRequest,
+        req: SignedRequest,
+    ) -> impl std::future::Future<Output = LanguageResult<RequestPosted>>;
+    /// `GET /v1/requests/{scid}?since=`.
+    fn identity_list_requests(
+        &mut self,
+        did: String,
+        since: u64,
+        req: SignedRequest,
+    ) -> impl std::future::Future<Output = LanguageResult<Vec<DeviceRequest>>>;
+    /// `DELETE /v1/requests/{scid}/{id}`.
+    fn identity_delete_request(
+        &mut self,
+        did: String,
+        id: String,
+        req: SignedRequest,
+    ) -> impl std::future::Future<Output = LanguageResult<()>>;
 }
 
 /// `token` capability — the agent language's token interface

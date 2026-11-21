@@ -95,6 +95,24 @@ pub const SIGNING_DOMAINS: &[Domain] = &[
         scheme: Scheme::DomainField,
     },
     Domain {
+        name: "coasys:private-record",
+        signs: "private record envelopes, by a device key or the current master",
+        owner: "device linking",
+        scheme: Scheme::DomainField,
+    },
+    Domain {
+        name: "coasys:recovery-key",
+        signs: "the private record's recovery key, by the current master",
+        owner: "device linking",
+        scheme: Scheme::DomainField,
+    },
+    Domain {
+        name: "coasys:record-receipt",
+        signs: "the store's receipt for a private record write it accepted, by its head key",
+        owner: "device linking",
+        scheme: Scheme::DomainField,
+    },
+    Domain {
         name: "coasys:session",
         signs: "key statements for a login on an executor, and the executor's sign-in to the hosting index",
         owner: "executor hosting",
@@ -121,9 +139,9 @@ pub const SIGNING_DOMAINS: &[Domain] = &[
 ];
 
 /// The labels: strings that enter a hash or a key derivation. No key signs
-/// them as a domain. (`coasys:offer` is also used as a hash prefix, but it is a signing domain
-/// first, so it sits in [`SIGNING_DOMAINS`]; the HPKE `info` strings of the device inbox
-/// belong to device linking and carry no fixed name here.)
+/// them as a domain. (`coasys:offer` is also used as a hash prefix and `coasys:inbox` as the
+/// device inbox's HPKE `info` label, but both are signing domains first, so they sit in
+/// [`SIGNING_DOMAINS`]. `coasys:record` is the `info` label of a private record's wrapped key.)
 pub const LABELS: &[&str] = &[
     "coasys:pow",
     "coasys:pair-id:1",
@@ -131,6 +149,7 @@ pub const LABELS: &[&str] = &[
     "coasys:match",
     "coasys:wrap:1",
     "coasys:auth:1",
+    "coasys:record",
 ];
 
 /// Why a domain cannot serve a signature.
