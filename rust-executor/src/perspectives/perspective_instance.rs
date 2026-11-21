@@ -727,16 +727,29 @@ struct PerspectiveShapeResolver<'a> {
 
 impl<'a> ShapeResolver for PerspectiveShapeResolver<'a> {
     fn get_shape(&self, class_name: &str) -> Result<Arc<ModelShape>, AnyError> {
-        if let Some(shape) = self.cache.read().unwrap().get(class_name).cloned() {
-            return Ok(shape);
+        // The read guard is taken and released before the match: a scrutinee
+        // temporary lives for the whole match, and the `None` arm takes the
+        // write lock — it would wait on its own read guard forever.
+        let cached = self.cache.read().unwrap().get(class_name).cloned();
+        let shape = match cached {
+            Some(shape) => shape,
+            None => {
+                let shape = Arc::new(load_shape_from_store(self.store, class_name)?);
+                self.cache
+                    .write()
+                    .unwrap()
+                    .insert(class_name.to_string(), shape.clone());
+                shape
+            }
+        };
+        // A class with a flag gets a scope index (built in the background the
+        // first time, or when its flag changed). Its queries read it once it
+        // is ready; until then, or if this fails, they use SPARQL. On a
+        // cached shape this also restarts a build that failed.
+        if let Err(e) = self.store.scope_index_ensure(&shape) {
+            log::warn!("Scope index: could not register class '{class_name}': {e}");
         }
-        let shape = load_shape_from_store(self.store, class_name)?;
-        let arc = Arc::new(shape);
-        self.cache
-            .write()
-            .unwrap()
-            .insert(class_name.to_string(), arc.clone());
-        Ok(arc)
+        Ok(shape)
     }
 }
 
@@ -4112,7 +4125,7 @@ impl PerspectiveInstance {
         // write. On failure nothing was written; fall back to one link at a
         // time.
         match self.sparql_store.apply_diff(&removals, &additions) {
-            Ok(()) => return Ok(effects),
+            Ok(_) => return Ok(effects),
             Err(e) => log::warn!(
                 "Failed to apply link diff to SPARQL store in one transaction, \
                  writing links one by one: {:?}",
@@ -6859,6 +6872,35 @@ mod tests {
     use crate::types::PerspectiveState;
     use fake::{Fake, Faker};
     use uuid::Uuid;
+
+    /// A class registered but not built — as a failed background build
+    /// leaves it — gets a new build when its *cached* shape is asked for
+    /// again, not only when the shape is first loaded.
+    #[test]
+    fn a_cached_shape_retries_its_index_build() {
+        use crate::perspectives::scope_index::test_support::message_shape;
+        use crate::perspectives::scope_index::Readiness;
+        use crate::perspectives::sparql_store::SparqlStore;
+
+        let store = SparqlStore::new(None).unwrap();
+        let cache = std::sync::RwLock::new(std::collections::HashMap::new());
+        let resolver = PerspectiveShapeResolver {
+            cache: &cache,
+            store: &store,
+        };
+        let shape = Arc::new(message_shape());
+        let (rule, _) = store.scope_index_register(&shape).unwrap().unwrap();
+        cache.write().unwrap().insert("Message".to_string(), shape);
+        resolver.get_shape("Message").unwrap();
+        let start = std::time::Instant::now();
+        while store.scope_index_readiness(&rule) != Readiness::Ready {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(10),
+                "the cached shape did not restart the class's index build"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 
     /// `online_agents` reports co-located managed users with the same
     /// predicate and window as the auto-processor supervisor (#1070): a user

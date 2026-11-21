@@ -248,9 +248,17 @@ portpicker = "0.1.1"
 # leaving the op2-generated code seeing an unimplemented trait.
 deno_error = "0.7"
 thiserror = "2.0.12"
-oxigraph = { version = "0.5.13", features = ["rocksdb", "rdf-12"] }
-# The SPARQL algebra oxigraph parses with (same version), for rewriting a query.
-spargebra = { version = "0.4.8", features = ["sparql-12"] }
+# The coasys/oxigraph fork, tag v0.5.13-coasys.1: Oxigraph 0.5.13 plus the
+# `aux-kv` feature, the auxiliary key-value space that holds the scope index
+# (`perspectives/scope_index/`). Stores opened with it cannot be opened by an
+# oxigraph without the feature.
+oxigraph = { git = "https://github.com/coasys/oxigraph.git", tag = "v0.5.13-coasys.1", features = ["rocksdb", "rdf-12", "aux-kv"] }
+# Already in the lockfile as a transitive dependency: 128-bit scope and member
+# hashes of the scope index.
+blake3 = "1.8"
+# The SPARQL algebra oxigraph parses with, for rewriting a query: from the
+# same fork tag, so its terms are oxigraph's own `oxrdf` types.
+spargebra = { git = "https://github.com/coasys/oxigraph.git", tag = "v0.5.13-coasys.1", features = ["sparql-12"] }
 ts-rs = { version = "12.0.1", features = ["serde-compat", "no-serde-warnings", "serde-json-impl", "chrono-impl", "url-impl"] }
 tower-service = "0.3"
 
