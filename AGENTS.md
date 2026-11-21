@@ -110,6 +110,13 @@ between executors, the server-link suite (and, for p-diff-sync itself, the
 Holochain suite); such suites take a `LinkLangConfig` (`utils/linkLangConfig.ts`)
 so the same file runs on both link languages.
 
+`integration-tests-mcp` and `integration-tests-email-verification` do not run on
+PRs. They run with `integration-tests-sfu-e2e` in the 2-hourly dev tier
+(workflow `dev-2-hourly`, pipeline parameter `run-dev-2-hourly`), only when dev
+has moved. A red job there opens the GitHub issue `dev red: <job>`, or comments
+on it, with the PRs merged since the tier's last green commit
+(`.circleci/scripts/dev-tier.sh`). To run one on a PR, run its script locally.
+
 ### Nightly (`nightly-llm-e2e` workflow)
 
 A pipeline with `run-nightly-llm: true` runs only this workflow, on `coasys/marvin`.
@@ -186,7 +193,7 @@ This runs all four nightly jobs.
 
 | Suite | Languages | CI |
 |---|---|---|
-| `test-sfu-e2e`: single executor, end to end (about 4 min) | local, no Holochain: `pnpm run prepare-test-local` (`test-main-sfu-e2e` does both) | every push, `integration-tests-sfu-e2e` |
+| `test-sfu-e2e`: single executor, end to end (about 4 min) | local, no Holochain: `pnpm run prepare-test-local` (`test-main-sfu-e2e` does both) | `integration-tests-sfu-e2e`: on a PR only when it touches SFU files (path list in the job), on dev every 2 hours (`dev-2-hourly`) |
 | `test-sfu-browsers`: SFU and mesh calls in real Chromium, Firefox and WebKit, mixed (about 1 min past the world's start) | local, no Holochain: `pnpm run prepare-test-local` (`test-main-sfu-browsers` does both) | nightly, `integration-tests-sfu-browsers` |
 | `test-sfu`: `sfu-cascade`, `sfu-session` (T20, T21), `sfu-mesh` (network baselines) | Holochain: `pnpm run prepare-test` | nightly, `integration-tests-sfu` |
 

@@ -14,6 +14,11 @@ parameters:
   we-ref:
     type: string
     default: dev
+  # The 2-hourly dev tier (workflow `dev-2-hourly`). A scheduled pipeline on dev
+  # sets this true every 2 hours, like `run-nightly-llm`.
+  run-dev-2-hourly:
+    type: boolean
+    default: false
 
 references:
   ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
@@ -30,6 +35,11 @@ references:
 # `heavy_gate`: on a draft PR, a PR whose base is not dev, or a branch with no PR they halt
 # green at once (.circleci/scripts/should-run-heavy.sh). The full-ci label or [full-ci] in
 # the commit message runs them anyway.
+# Tiers (CI-PLAN section 3): integration-tests-sfu-e2e runs on a PR only when the PR
+# touches SFU files (.circleci/scripts/paths-changed.sh). It, integration-tests-mcp and
+# integration-tests-email-verification run on dev in workflow `dev-2-hourly`, every 2 hours
+# when dev has moved. A red run there opens the GitHub issue "dev red: <job>"
+# (.circleci/scripts/dev-tier.sh).
 
 commands:
   fix_workdir:
@@ -152,6 +162,20 @@ commands:
               circleci-agent step halt
             fi
             exit 0
+
+  dev_tier_report:
+    description: "Last steps of a 2-hourly dev tier job: open or comment the 'dev red: <job>' issue"
+    steps:
+      - run:
+          # GITHUB_TOKEN (Issues: write) comes from the dev-tier-github context. Without
+          # it the step prints the issue text and opens nothing.
+          name: 'Report a red run (GitHub issue "dev red: <job>")'
+          when: on_fail
+          command: bash .circleci/scripts/dev-tier.sh red "$CIRCLE_JOB"
+      - run:
+          name: Note a green run on an open "dev red" issue
+          when: on_success
+          command: bash .circleci/scripts/dev-tier.sh green "$CIRCLE_JOB"
 
   setup_env:
     description: "Set up build environment (Node, Rust, Deno, Go, pnpm)"
@@ -345,11 +369,74 @@ commands:
           may be gone.
         type: boolean
         default: false
+      paths_gate:
+        description: >-
+          Git pathspecs, space-separated. When set, the job halts green on a PR whose
+          own changes touch none of them, and on dev (the 2-hourly tier runs it there).
+        type: string
+        default: ""
+      dev_tier:
+        description: >-
+          This job runs in the 2-hourly dev tier: halt green when its commit already
+          passed the tier, and wait for build's stash of the commit.
+        type: boolean
+        default: false
     steps:
       - fix_workdir
       - checkout
+      - when:
+          condition: << parameters.dev_tier >>
+          steps:
+            - run:
+                # Any lookup failure runs the job. CIRCLECI_API_TOKEN comes from the
+                # nightly-llm-e2e context, as for llm-e2e's check.
+                name: Skip if this commit already passed the 2-hourly dev tier
+                command: |
+                  rc=0
+                  bash .circleci/scripts/dev-tier.sh moved "$CIRCLE_JOB" || rc=$?
+                  if [ "$rc" = 10 ]; then
+                    circleci-agent step halt
+                  fi
+                  exit 0
       - test_artifacts_dir
       - heavy_gate
+      - when:
+          condition: << parameters.paths_gate >>
+          steps:
+            - run:
+                # Anything but the script's "skip" answer runs the job.
+                name: Path gate (on a PR, run only when these paths changed)
+                command: |
+                  rc=0
+                  bash .circleci/scripts/paths-changed.sh << parameters.paths_gate >> || rc=$?
+                  if [ "$rc" = 10 ]; then
+                    circleci-agent step halt
+                  fi
+                  exit 0
+      - when:
+          condition: << parameters.dev_tier >>
+          steps:
+            - run:
+                # The scheduled pipeline has no `build` job; it tests dev's head, whose
+                # `build` (in the push pipeline) may still be running. When the stash never
+                # comes (that build failed, or the stash is older than 12 hours and gone),
+                # the job fails without opening a "dev red" issue: the suite did not run.
+                name: Wait for build's stash of this commit (up to 45 min)
+                no_output_timeout: 50m
+                command: |
+                  src="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}/${CIRCLE_SHA1}"
+                  for i in $(seq 1 90); do
+                    missing=""
+                    for f in ad4m ad4m-executor identity-store holder integration-inputs.tar; do
+                      test -s "$src/$f" || missing="$missing $f"
+                    done
+                    [ -z "$missing" ] && { echo "stash of $CIRCLE_SHA1 is there"; exit 0; }
+                    [ "$i" = 1 ] && echo "waiting for$missing in $src"
+                    sleep 30
+                  done
+                  echo "no build stash for $CIRCLE_SHA1 after 45 min (missing:$missing). Is build of this commit red?"
+                  echo "export DEV_TIER_NO_ISSUE='no build stash for $CIRCLE_SHA1 (build of this commit red or gone)'" >> "$BASH_ENV"
+                  exit 1
       - when:
           condition: << parameters.local >>
           steps:
@@ -446,6 +533,12 @@ jobs:
           # Fake curl with fixture PRs, no network; about a second. The heavy_gate decision.
           name: Test should-run-heavy.sh
           command: bash .circleci/scripts/should-run-heavy.test.sh
+      - run:
+          # Scratch git repos and a fake curl, no network; about two seconds.
+          name: Test paths-changed.sh and dev-tier.sh (sfu-e2e path gate, 2-hourly dev tier)
+          command: |
+            bash .circleci/scripts/paths-changed.test.sh
+            bash .circleci/scripts/dev-tier.test.sh
       - build_adam
       - build_integration_inputs
       - run:
@@ -816,12 +909,29 @@ jobs:
   # executor, local languages (no Holochain). About 4 minutes. E6 shapes the
   # loopback with `tc` for its own ports only (runners share the host), and
   # skips where passwordless sudo is missing.
+  # On a PR it runs only when the PR touches the paths below; on dev it runs in
+  # the 2-hourly tier. The paths: the SFU and its RPC in the executor, the SDK's
+  # call client (core/src/neighbourhood: SfuManager, MeshManager, Session and
+  # the NeighbourhoodClient/Proxy call methods), the suite and its helpers, the
+  # test package's dependencies (@roamhq/wrtc), and CI itself.
   integration-tests-sfu-e2e:
     machine: true
     resource_class: coasys/marvin
+    parameters:
+      dev_tier:
+        type: boolean
+        default: false
+      paths_gate:
+        # Empty in the 2-hourly tier: there the job always runs.
+        type: string
+        default: >-
+          rust-executor/src/sfu/ rust-executor/src/api/sfu_ws.rs core/src/neighbourhood/
+          tests/js/tests/sfu-e2e.test.ts tests/js/helpers/sfu/ tests/js/package.json .circleci/
     steps:
       - setup_integration_test_environment:
           local: true
+          dev_tier: << parameters.dev_tier >>
+          paths_gate: << parameters.paths_gate >>
       - run:
           name: Run SFU end-to-end tests (local languages, no Holochain)
           command: |
@@ -833,6 +943,10 @@ jobs:
           when: always
           path: test-artifacts
           destination: test-logs
+      - when:
+          condition: << parameters.dev_tier >>
+          steps:
+            - dev_tier_report
 
   # SFU and mesh calls in real Chromium, Firefox and WebKit, mixed, through the
   # SDK's browser build (tests/js/tests/sfu-browsers.test.ts). One executor,
@@ -991,27 +1105,47 @@ jobs:
           command: cd ./tests/js && ./test-multi-user-with-setup.sh
           no_output_timeout: 30m
 
+  # Runs only in the 2-hourly dev tier (workflow dev-2-hourly), not on PRs.
   integration-tests-email-verification:
     machine: true
     resource_class: coasys/marvin-light
+    parameters:
+      dev_tier:
+        type: boolean
+        default: false
     steps:
       - setup_integration_test_environment:
           local: true
+          dev_tier: << parameters.dev_tier >>
       - run:
           name: Run email-verification integration tests (local)
           command: cd ./tests/js && ./email-verification-test-with-setup.sh --local
           no_output_timeout: 30m
+      - when:
+          condition: << parameters.dev_tier >>
+          steps:
+            - dev_tier_report
 
+  # Runs only in the 2-hourly dev tier (workflow dev-2-hourly), not on PRs.
   integration-tests-mcp:
     machine: true
     resource_class: coasys/marvin-light
+    parameters:
+      dev_tier:
+        type: boolean
+        default: false
     steps:
       - setup_integration_test_environment:
           local: true
+          dev_tier: << parameters.dev_tier >>
       - run:
           name: Run MCP integration tests (local)
           command: cd ./tests/js && pnpm install && pnpm run test-mcp
           no_output_timeout: 30m
+      - when:
+          condition: << parameters.dev_tier >>
+          steps:
+            - dev_tier_report
 
   integration-tests-model:
     machine: true
@@ -1166,7 +1300,8 @@ jobs:
   # and network baselines, over Holochain. Several scenarios sleep on
   # purpose (30s media/RTT, 35s TTL). That is a nightly measurement, not a
   # merge check, so this job is only in `nightly-llm-e2e`; the single-executor
-  # calls run on every push in `integration-tests-sfu-e2e`. It builds its own
+  # calls run in `integration-tests-sfu-e2e` (PRs that touch SFU files, and dev
+  # every 2 hours). It builds its own
   # binaries: that pipeline has no `build` job, and `build` deletes stashes
   # older than 12 hours.
   integration-tests-sfu:
@@ -1397,7 +1532,9 @@ workflows:
   version: 2
   build-and-test:
     when:
-      not: << pipeline.parameters.run-nightly-llm >>
+      and:
+        - not: << pipeline.parameters.run-nightly-llm >>
+        - not: << pipeline.parameters.run-dev-2-hourly >>
     jobs:
       - build
       - plugin-ad4m-tests
@@ -1420,6 +1557,7 @@ workflows:
       - integration-tests-js:
           requires:
             - build
+      # On a PR only when SFU files change (the job's path gate); on dev in dev-2-hourly.
       - integration-tests-sfu-e2e:
           requires:
             - build
@@ -1435,12 +1573,7 @@ workflows:
       - integration-tests-multi-user-simple:
           requires:
             - build
-      - integration-tests-email-verification:
-          requires:
-            - build
-      - integration-tests-mcp:
-          requires:
-            - build
+      # integration-tests-email-verification and integration-tests-mcp run in dev-2-hourly.
       - integration-tests-model:
           requires:
             - build
@@ -1471,3 +1604,29 @@ workflows:
           serial-group: << pipeline.project.slug >>/nightly-sfu-browsers
       - coasys-spaces:
           serial-group: << pipeline.project.slug >>/nightly-llm
+
+  # The 2-hourly dev tier. A scheduled pipeline on dev (Project Settings → Triggers)
+  # sets `run-dev-2-hourly` every 2 hours; in-config cron does not reach this project.
+  # Each job halts green at once when its commit already passed this tier (dev has not
+  # moved). It has no `build` job: it uses the stash of the push pipeline's `build` of
+  # the same commit, and waits for it. A red job opens or comments the GitHub issue
+  # "dev red: <job>" (.circleci/scripts/dev-tier.sh). nightly-llm-e2e gives
+  # CIRCLECI_API_TOKEN (read-only) for the lookups; dev-tier-github gives GITHUB_TOKEN
+  # (Issues: write on coasys/ad4m) for the issue. Its own serial group per job, so a
+  # slow run and the next trigger do not overlap.
+  dev-2-hourly:
+    when: << pipeline.parameters.run-dev-2-hourly >>
+    jobs:
+      - integration-tests-sfu-e2e:
+          dev_tier: true
+          paths_gate: ""
+          context: [nightly-llm-e2e, dev-tier-github]
+          serial-group: << pipeline.project.slug >>/dev-2-hourly-sfu-e2e
+      - integration-tests-mcp:
+          dev_tier: true
+          context: [nightly-llm-e2e, dev-tier-github]
+          serial-group: << pipeline.project.slug >>/dev-2-hourly-mcp
+      - integration-tests-email-verification:
+          dev_tier: true
+          context: [nightly-llm-e2e, dev-tier-github]
+          serial-group: << pipeline.project.slug >>/dev-2-hourly-email-verification
