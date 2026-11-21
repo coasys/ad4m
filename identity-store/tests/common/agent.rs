@@ -233,7 +233,23 @@ impl Person {
     /// A `revoke` of `ids` (not pushed).
     pub fn revoke(&self, ids: &[&str]) -> Event {
         let ids: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
-        build::revoke(&self.chain, &self.current_master(), &ids).unwrap()
+        build::revoke(&self.chain, &self.current_master(), &ids, None).unwrap()
+    }
+
+    /// A `revoke` of `ids` with a `since` in ms (not pushed).
+    pub fn revoke_since(&self, ids: &[&str], since: u64) -> Event {
+        let ids: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
+        build::revoke(&self.chain, &self.current_master(), &ids, Some(since)).unwrap()
+    }
+
+    /// An `unlink` of `id` signed by the master (not pushed).
+    pub fn unlink(&self, id: &str) -> Event {
+        build::unlink(&self.chain, &self.current_master(), &id.to_string()).unwrap()
+    }
+
+    /// An `unlink` of key `id` signed by that key itself, `signer` (not pushed).
+    pub fn unlink_self(&self, id: &str, signer: &SigningKey) -> Event {
+        build::unlink_self(&self.chain, &id.to_string(), signer).unwrap()
     }
 
     /// The `rotate` to the next master (not pushed).

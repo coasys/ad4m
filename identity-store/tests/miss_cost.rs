@@ -259,6 +259,7 @@ async fn a_late_failing_batch_on_a_held_log_at_its_budget() {
         batch.last().unwrap(),
         Op::Revoke {
             revoke: vec!["d1".into()],
+            since: None,
         },
         "m0",
         &alice.master(0),
@@ -319,6 +320,7 @@ async fn a_rival_at_the_head_of_a_held_full_rotation_log_that_does_not_replay() 
         &events[at - 1],
         Op::Revoke {
             revoke: vec!["d99".into()],
+            since: None,
         },
         &format!("m{signer}"),
         &alice.master(signer),

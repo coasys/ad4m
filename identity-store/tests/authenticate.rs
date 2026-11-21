@@ -50,7 +50,7 @@ fn stripped(alice: &Person) -> Event {
 
 /// A revocation of d1 at alice's head with one proof naming `key_id`, made by `signer`.
 fn signed_as(alice: &Person, key_id: &str, signer: &ed25519_dalek::SigningKey) -> Event {
-    let mut event = build::revoke_unsigned(&alice.chain, &["d1".to_string()]).unwrap();
+    let mut event = build::revoke_unsigned(&alice.chain, &["d1".to_string()], None).unwrap();
     build::cosign(&mut event, key_id, signer).unwrap();
     event
 }
@@ -169,7 +169,7 @@ async fn cheap_logs_evict_a_victim_and_junk_still_replays_nothing() {
     }
     // A rival to a stored event and an event past the head, both unsigned: plain conflicts.
     let prefix = ad4m_identity_core::fold(&alice.events[..2]).unwrap();
-    let mut rival = build::revoke_unsigned(&prefix, &["d1".to_string()]).unwrap();
+    let mut rival = build::revoke_unsigned(&prefix, &["d1".to_string()], None).unwrap();
     build::cosign(&mut rival, "m0", &key("mallory")).unwrap();
     assert_eq!(rival.seq, 2);
     let reply = t.append(&alice.scid(), &[&rival]).await;

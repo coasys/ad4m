@@ -19,6 +19,11 @@ struct Model {
     masters: u32,
 }
 
+/// A key stops being valid at the first of its unlink, revoke and the end.
+fn stop(key: &mut ModelKey, seq: u64) {
+    key.2 = Some(key.2.map_or(seq, |at| at.min(seq)));
+}
+
 fn model(events: &[Event]) -> Model {
     let mut m = Model::default();
     for e in events {
@@ -42,11 +47,12 @@ fn model(events: &[Event]) -> Model {
                 m.keys
                     .insert(k.id.clone(), (k.sign.clone(), s, None, scopes));
             }
-            Op::Revoke { revoke } => {
+            Op::Revoke { revoke, .. } => {
                 for id in revoke {
-                    m.keys.get_mut(id).unwrap().2 = Some(s);
+                    stop(m.keys.get_mut(id).unwrap(), s);
                 }
             }
+            Op::Unlink { unlink } => stop(m.keys.get_mut(unlink).unwrap(), s),
             Op::Scope { key, expires, .. } => {
                 m.keys.get_mut(key).unwrap().3.push((s, *expires));
             }
@@ -62,7 +68,7 @@ fn model(events: &[Event]) -> Model {
                 m.masters += 1;
                 m.keys.insert(new, (master.clone(), s, None, vec![]));
                 for id in revoke {
-                    m.keys.get_mut(id).unwrap().2 = Some(s);
+                    stop(m.keys.get_mut(id).unwrap(), s);
                 }
                 if next.is_none() {
                     for k in m.keys.values_mut() {
@@ -75,12 +81,17 @@ fn model(events: &[Event]) -> Model {
     m
 }
 
-fn live_devices(log: &Log, bots_only: bool) -> Vec<String> {
+/// Device keys a revoke may name (`unlinked_too`) or that still sign (an unlink, a scope).
+fn live_devices(log: &Log, bots_only: bool, unlinked_too: bool) -> Vec<String> {
     log.chain
         .state()
         .keys
         .values()
-        .filter(|r| r.revoked.is_none() && (!bots_only || !r.scopes.is_empty()))
+        .filter(|r| {
+            r.revoked.is_none()
+                && (unlinked_too || r.unlinked.is_none())
+                && (!bots_only || !r.scopes.is_empty())
+        })
         .map(|r| r.id.clone())
         .collect()
 }
@@ -88,7 +99,7 @@ fn live_devices(log: &Log, bots_only: bool) -> Vec<String> {
 fn build_log(steps: &[(u8, u8, u8)], end: bool) -> Log {
     let mut log = Log::new();
     for &(kind, a, b) in steps {
-        match kind % 4 {
+        match kind % 5 {
             0 => {
                 let life = match b % 2 {
                     0 => KeyLife::Standing,
@@ -97,14 +108,14 @@ fn build_log(steps: &[(u8, u8, u8)], end: bool) -> Log {
                 log.add(life);
             }
             1 => {
-                let live = live_devices(&log, false);
+                let live = live_devices(&log, false, true);
                 if !live.is_empty() {
                     let id = &live[usize::from(a) % live.len()];
                     log.revoke(&[id]);
                 }
             }
             2 => {
-                let live = live_devices(&log, false);
+                let live = live_devices(&log, false, true);
                 if b % 2 == 1 && !live.is_empty() {
                     let id = live[usize::from(a) % live.len()].clone();
                     log.rotate(&[&id], false);
@@ -112,8 +123,15 @@ fn build_log(steps: &[(u8, u8, u8)], end: bool) -> Log {
                     log.rotate(&[], false);
                 }
             }
+            3 => {
+                let live = live_devices(&log, false, false);
+                if !live.is_empty() {
+                    let id = live[usize::from(a) % live.len()].clone();
+                    log.unlink(&id);
+                }
+            }
             _ => {
-                let bots = live_devices(&log, true);
+                let bots = live_devices(&log, true, false);
                 if !bots.is_empty() {
                     let id = bots[usize::from(a) % bots.len()].clone();
                     log.scope(&id, &["write"], 1_000 + u64::from(b) * 10);
