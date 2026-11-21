@@ -20,6 +20,8 @@ use crate::secret::Secret;
 use crate::types::*;
 
 use std::collections::HashMap;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -39,6 +41,10 @@ lazy_static! {
 }
 
 const CACHE_TTL_SECONDS: i64 = 300; // 5 minutes cache TTL
+
+/// Test seam: the next `users.last_seen` write returns an error, once.
+#[cfg(test)]
+static FAIL_NEXT_LAST_SEEN_WRITE: AtomicBool = AtomicBool::new(false);
 
 /// Who can connect to the listener a request arrived on.
 ///
@@ -185,8 +191,14 @@ pub async fn track_last_seen(agent_did: &str) {
 /// Record activity by the account that owns `agent_did` at `now` in `users.last_seen`, at most
 /// once per [`LAST_SEEN_WRITE_THROTTLE_S`](crate::presence::LAST_SEEN_WRITE_THROTTLE_S). Both the in-memory cache path and the DB path decide
 /// through [`last_seen_write_due`], the same rule the presence readers are tested against
-/// (#1070). The cache only avoids DB lookups: a cached value is never fresher than the DB, so it
-/// cannot suppress a write the DB path would make.
+/// (#1070). The cache stores the minimum of the DB value and `now` (#1675), and only for a
+/// read that does not write: a failed write stays uncached so the next request retries it.
+/// An entry is used only while `0 <= now - last_checked < CACHE_TTL_SECONDS`, so a clock
+/// that has stepped back does not treat a later fill as fresh. A future DB value must not
+/// stay in the cache: a direct write stamps server time and does not touch the cache, and
+/// the future value would skip a due write until the cache TTL. A cached value older than
+/// the DB only sends the decision on to the DB path. The write stores `now`, the instant
+/// the decision used.
 pub(crate) async fn track_last_seen_at(agent_did: &str, now: i64) {
     let agent_did = agent_did.to_string();
 
@@ -195,7 +207,9 @@ pub(crate) async fn track_last_seen_at(agent_did: &str, now: i64) {
         let cache = LAST_SEEN_CACHE.read().await;
         if let Some(entry) = cache.get(&agent_did) {
             let cache_age = now - entry.last_checked;
-            if cache_age < CACHE_TTL_SECONDS {
+            // A negative age is a clock step back: the fill is in the future
+            // relative to this request, so the DB has to be read again.
+            if (0..CACHE_TTL_SECONDS).contains(&cache_age) {
                 // Cache is fresh, check if update is needed based on cached value
                 if !last_seen_write_due(Some(entry.last_seen_value), now) {
                     // Still inside the throttle period, no need to update
@@ -255,25 +269,19 @@ pub(crate) async fn track_last_seen_at(agent_did: &str, now: i64) {
         }
     };
 
-    // Update cache with the value we got from DB
-    if let Some(last_seen_val) = last_seen_value {
-        let mut cache = LAST_SEEN_CACHE.write().await;
-        cache.insert(
-            agent_did.clone(),
-            LastSeenCacheEntry {
-                last_checked: now,
-                last_seen_value: last_seen_val,
-            },
-        );
-    }
-
     if should_update {
         log::debug!("Updating last_seen for agent: {}", agent_did);
 
-        // Perform the update in spawn_blocking
+        // Perform the update in spawn_blocking. The read is not cached first:
+        // a failed write has to be retried on the next request inside the TTL.
+        // Caching the clamped read would make that request look fresh.
         let agent_did_for_update = agent_did.clone();
         let update_result = tokio::task::spawn_blocking(move || {
-            crate::db_backend::db_backend().update_agent_last_seen(&agent_did_for_update)
+            #[cfg(test)]
+            if FAIL_NEXT_LAST_SEEN_WRITE.swap(false, Ordering::SeqCst) {
+                return Err(deno_core::anyhow::anyhow!("test: last_seen write failed"));
+            }
+            crate::db_backend::db_backend().update_agent_last_seen_at(&agent_did_for_update, now)
         })
         .await;
 
@@ -304,6 +312,17 @@ pub(crate) async fn track_last_seen_at(agent_did: &str, now: i64) {
                 );
             }
         }
+    } else if let Some(last_seen_val) = last_seen_value {
+        // A future DB value must not stay here. A direct write stamps server
+        // time and does not touch this cache (#1675).
+        let mut cache = LAST_SEEN_CACHE.write().await;
+        cache.insert(
+            agent_did,
+            LastSeenCacheEntry {
+                last_checked: now,
+                last_seen_value: last_seen_val.min(now),
+            },
+        );
     }
 }
 
@@ -689,6 +708,199 @@ mod tests {
             stored(),
             Some(t0),
             "one second past the throttle the writer must record the activity"
+        );
+    }
+
+    /// #1675. The cache stores the `last_seen` it read from the DB. A direct
+    /// write (`update_agent_last_seen`, the lease heartbeat and the watcher's
+    /// first touch) then stamps its own time and does not touch the cache. A
+    /// future DB value stays in the cache and, until `CACHE_TTL_SECONDS`, the
+    /// cache path says the write is not due. The DB path would write.
+    ///
+    /// The seeded value is inside the accepted skew, so the fill does not
+    /// write. A value past the skew is due, and the successful write replaces
+    /// the cache entry with `now`, which hides this. The check is one second
+    /// past the throttle: exactly one throttle is not due.
+    ///
+    /// Both persisted timestamps are fixed. A stall or a wall-clock step must
+    /// not move `direct` onto `future` or make the tracked write indistinguishable
+    /// from the direct one.
+    #[tokio::test]
+    async fn track_last_seen_writes_one_throttle_after_a_direct_write_replaces_a_future_value() {
+        use crate::db::Ad4mDb;
+        use crate::presence::{LAST_SEEN_CLOCK_SKEW_S, LAST_SEEN_WRITE_THROTTLE_S};
+        crate::perspectives::interpretation_test_support::ensure_db_init();
+
+        let email = "track-last-seen-future@test";
+        let did = "did:key:track-last-seen-future";
+        let now = 1_700_000_000_i64;
+        let future = now + LAST_SEEN_CLOCK_SKEW_S;
+        // Below `future`, and one throttle later is still inside the cache TTL
+        // counted from the fill at `now`.
+        let direct = future - 1;
+        let tracked = direct + LAST_SEEN_WRITE_THROTTLE_S + 1;
+        assert!(direct < future);
+        assert!(tracked != direct);
+        assert!(
+            (0..CACHE_TTL_SECONDS).contains(&(tracked - now)),
+            "the check must still hit the cache filled at {now} (check {tracked})"
+        );
+
+        Ad4mDb::with_global_instance(|db| {
+            db.import_from_json(
+                serde_json::json!({
+                    "users": [{
+                        "username": email,
+                        "did": did,
+                        "password_hash": "x",
+                        "last_seen": future,
+                    }]
+                }),
+                None,
+            )
+        })
+        .expect("seed user");
+        let stored = || {
+            Ad4mDb::with_global_instance(|db| db.get_user_by_did(did))
+                .expect("read user")
+                .expect("user")
+                .last_seen
+        };
+        assert_eq!(stored(), Some(future));
+
+        track_last_seen_at(did, now).await;
+        assert_eq!(
+            stored(),
+            Some(future),
+            "the future value is inside the skew, so filling the cache does not write"
+        );
+
+        crate::db_backend::db_backend()
+            .update_agent_last_seen_at(did, direct)
+            .expect("direct write");
+        assert_eq!(stored(), Some(direct));
+
+        track_last_seen_at(did, tracked).await;
+        assert_eq!(
+            stored(),
+            Some(tracked),
+            "one second past one throttle after the direct write must record that instant; \
+             a cache that kept the future DB value skips this write (#1675)"
+        );
+    }
+
+    /// A due repair whose write fails must be tried again on the next request
+    /// inside the TTL. Caching the clamped read before the write makes that
+    /// request look fresh and drops the retry.
+    #[tokio::test]
+    async fn track_last_seen_retries_a_failed_repair_inside_the_cache_ttl() {
+        use crate::db::Ad4mDb;
+        use crate::presence::LAST_SEEN_CLOCK_SKEW_S;
+        use std::sync::atomic::Ordering;
+        crate::perspectives::interpretation_test_support::ensure_db_init();
+
+        let email = "track-last-seen-retry@test";
+        let did = "did:key:track-last-seen-retry";
+        let now = 1_700_000_100_i64;
+        // Still past the skew one second later, so the second request is a
+        // repair of the same future value, not a value the clock has caught.
+        let seeded = now + LAST_SEEN_CLOCK_SKEW_S + 2;
+
+        struct ClearFail;
+        impl Drop for ClearFail {
+            fn drop(&mut self) {
+                FAIL_NEXT_LAST_SEEN_WRITE.store(false, Ordering::SeqCst);
+            }
+        }
+        let _clear = ClearFail;
+
+        Ad4mDb::with_global_instance(|db| {
+            db.import_from_json(
+                serde_json::json!({
+                    "users": [{
+                        "username": email,
+                        "did": did,
+                        "password_hash": "x",
+                        "last_seen": seeded,
+                    }]
+                }),
+                None,
+            )
+        })
+        .expect("seed user");
+        let stored = || {
+            Ad4mDb::with_global_instance(|db| db.get_user_by_did(did))
+                .expect("read user")
+                .expect("user")
+                .last_seen
+        };
+        assert_eq!(stored(), Some(seeded));
+
+        FAIL_NEXT_LAST_SEEN_WRITE.store(true, Ordering::SeqCst);
+        track_last_seen_at(did, now).await;
+        assert_eq!(
+            stored(),
+            Some(seeded),
+            "the first repair write failed, so the seeded future value stays"
+        );
+
+        track_last_seen_at(did, now + 1).await;
+        assert_eq!(
+            stored(),
+            Some(now + 1),
+            "the next request inside the TTL must attempt the repair again"
+        );
+    }
+
+    /// A cache entry filled ahead of this request (the clock stepped back) must
+    /// not suppress a repair. The DB value is one second past the accepted
+    /// skew at the stepped-back instant; the clamped cache value is not.
+    #[tokio::test]
+    async fn track_last_seen_repairs_when_the_cache_was_filled_ahead_of_now() {
+        use crate::db::Ad4mDb;
+        use crate::presence::LAST_SEEN_CLOCK_SKEW_S;
+        crate::perspectives::interpretation_test_support::ensure_db_init();
+
+        let email = "track-last-seen-step-back@test";
+        let did = "did:key:track-last-seen-step-back";
+        let filled_at = 1_700_000_200_i64;
+        let seeded = filled_at + LAST_SEEN_CLOCK_SKEW_S;
+        let stepped = filled_at - 1;
+
+        Ad4mDb::with_global_instance(|db| {
+            db.import_from_json(
+                serde_json::json!({
+                    "users": [{
+                        "username": email,
+                        "did": did,
+                        "password_hash": "x",
+                        "last_seen": seeded,
+                    }]
+                }),
+                None,
+            )
+        })
+        .expect("seed user");
+        let stored = || {
+            Ad4mDb::with_global_instance(|db| db.get_user_by_did(did))
+                .expect("read user")
+                .expect("user")
+                .last_seen
+        };
+        assert_eq!(stored(), Some(seeded));
+
+        track_last_seen_at(did, filled_at).await;
+        assert_eq!(
+            stored(),
+            Some(seeded),
+            "at the fill instant the seeded value is inside the skew, so nothing is written"
+        );
+
+        track_last_seen_at(did, stepped).await;
+        assert_eq!(
+            stored(),
+            Some(stepped),
+            "a cache fill ahead of this request must not hide a DB value that is now past the skew"
         );
     }
 
