@@ -602,8 +602,8 @@ async fn a_call_sent_after_a_slow_concurrent_call_does_not_wait_for_it() {
 /// the two — marker gone, result on its way — takes the delivered result, not
 /// "did not start" (a retried write would then apply twice). Played
 /// deterministically: the thread below holds the lock across the call's whole
-/// wait, then sends the result and releases — the state the waiter sees after
-/// `finish` — so the waiter's next check finds the marker gone, the deadline
+/// wait; the test sends the result, then the thread releases — the state the
+/// waiter sees after `finish` — so the waiter's next check finds the marker gone, the deadline
 /// (zero) past, and the result already there. Without the `try_recv`, the call
 /// would return the "did not start" error below.
 #[tokio::test(flavor = "multi_thread")]
@@ -614,10 +614,11 @@ async fn a_call_finished_as_its_deadline_passes_returns_its_result() {
     let running = handle.running_request();
 
     let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
-    std::thread::spawn(move || {
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
         let _guard = running.lock().unwrap();
         held_tx.send(()).unwrap();
-        std::thread::sleep(Duration::from_millis(300));
+        release_rx.recv().unwrap();
     });
     held_rx.recv().unwrap();
 
@@ -632,8 +633,10 @@ async fn a_call_finished_as_its_deadline_passes_returns_its_result() {
         .expect("the call is queued");
 
     // `finish` with the marker never set: the result sent under the lock the
-    // waiter blocks on, held past the deadline.
+    // waiter needs for its check, held past the deadline, then released.
     request.response_tx.send(Ok("2".to_string())).unwrap();
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
 
     let result = within(Duration::from_secs(10), "the call", call)
         .await
