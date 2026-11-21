@@ -100,7 +100,29 @@ impl AgentService {
             }
         }
         super::forget_managed_key_names();
-        self.try_save(&passphrase)
+        self.try_save(&passphrase)?;
+        self.remove_legacy_backup()
+    }
+
+    /// Removes the copy of the agent file that the first unlock of a legacy keystore made
+    /// (`legacy_backup_file`): it holds every secret the wallet held then, including the one just
+    /// destroyed. The backup only serves a passphrase fallback (the legacy key saw 24 bytes of the
+    /// passphrase), and the save above bound the agent file to the passphrase in memory, which is
+    /// what `unlock` does before it removes the backup itself, so nothing is lost but the copy.
+    /// A missing file is fine; any other failure is returned, so the caller does not treat the
+    /// secret as gone.
+    fn remove_legacy_backup(&self) -> Result<(), AnyError> {
+        match std::fs::remove_file(self.legacy_backup_file()) {
+            Ok(()) => {
+                log::info!("🔑 Removed the legacy keystore backup: it held a destroyed secret.");
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(anyhow!(
+                "could not remove the legacy keystore backup {}: {e}",
+                self.legacy_backup_file()
+            )),
+        }
     }
 
     /// Gives the main agent a new wallet key and keeps the old one under its retired name.

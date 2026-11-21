@@ -6,7 +6,9 @@
 //! surviving copy of its secret could still sign a link with an old anchor that validates. The
 //! key therefore does not stay in the wallet: its secret is deleted, and only the public key
 //! stays, under a retired name, so what the key signed still verifies and the key is still
-//! listed. What happens, in order:
+//! listed. The device seed also derives the key's X25519 key (its encryption key), so the
+//! deletion destroys that too: anything sealed only to the old `did:key` cannot be opened on
+//! this executor afterwards. What happens, in order:
 //!
 //! 1. an **intent** is stored (`identity_unlinks`) and the key is **fenced**
 //!    ([`crate::agent::fence`]): nothing signs with it any more, except the `unlink` itself;
@@ -19,15 +21,24 @@
 //! | the main agent | `identity.rekey`'s move (`rekey::rekey_main`): the key is retired, a new `did:key` takes its place, the agent's apps are signed out; then the retired key's secret is deleted |
 //! | a managed agent | its key is retired in the wallet (`AgentService::retire_managed_key`), its sessions and apps are signed out, and the retired key's secret is deleted; the user needs a new agent to be used again |
 //!
-//! 4. the intent is cleared and the fence lifted (the key holds no secret by then).
+//! 4. the intent is cleared and the fence lifted (the key holds no secret by then, in the
+//!    wallet, in the keystore file or in the legacy backup).
 //!
 //! What a failure leaves:
 //!
 //! | The publish | The intent and the fence |
 //! |---|---|
 //! | is accepted, or the log already holds an `unlink` of the key | the cleanup runs, then both go |
-//! | is refused for sure (a 4xx that does not show the key unlinked) | both go: the key works as before |
-//! | fails in a way that does not say whether the store committed (transport, timeout, 5xx) | both stay |
+//! | is refused for sure (the store answers 400, 403 or key-taken, or a check fails before anything is sent), the log read afresh shows no `unlink`, and this call made the intent | both go: the key works as before |
+//! | is refused for sure, but an earlier call left the intent (its answer may have been lost, so it may have committed) | both stay |
+//! | is refused for sure, but the log cannot be read afresh | both stay |
+//! | fails in a way that does not say whether the store committed (transport, timeout, 429, 5xx, a failure after the append such as the cache) | both stay |
+//!
+//! A remote end (`end_dead_key`) while the wallet is **locked** cannot tell a live key from an
+//! absent one, so it records the intent and fences the key; the unlock's `resume_pending` then
+//! destroys the key (re-key or retire, sign-out, secret). A destroyed secret also leaves
+//! nothing in the legacy keystore backup (`agent.json.legacy`): the deletion removes it, and
+//! the intent stays when that fails.
 //!
 //! A retry of `identity.unlinkSelf` finishes the job: a key the log shows unlinked or revoked
 //! but whose secret is still here is cleaned up (not refused as `key-dead`), and an intent
@@ -88,12 +99,6 @@ fn end(did: &str) {
     }
 }
 
-/// Whether `e` is a refusal by the store that says nothing was appended: a 4xx. Anything else
-/// (transport, timeout, 5xx, a failure after the commit) may have committed.
-fn is_definite_refusal(e: &WsRpcError) -> bool {
-    (400..500).contains(&e.code)
-}
-
 impl IdentityService {
     /// `identity.unlinkSelf`: publishes an `unlink` of `agent`'s device key signed by that key,
     /// then destroys the key on this executor (the table above). Answers the head after the
@@ -148,9 +153,12 @@ impl IdentityService {
 
         // The intent and the fence come before the append: from here on a copy of the event may
         // be in the store, and nothing may sign with the key beyond it.
+        // Only an intent this attempt makes is this attempt's to clear: an earlier attempt that
+        // left one may have committed.
+        let made_here = intent.is_none();
         begin(&agent_did, &scid)?;
         let published = self
-            .publish(
+            .publish_classified(
                 agent,
                 &PublishParams {
                     events: vec![serde_json::to_value(&event)?],
@@ -164,25 +172,32 @@ impl IdentityService {
                     .map_err(|e| still_in_wallet(head.seq, &e))?;
                 Ok(head)
             }
-            Err(e) if is_definite_refusal(&e) => {
+            Err(failure) if failure.refused => {
+                let e = failure.error;
                 // A refusal can also be the store saying the log moved on, past an `unlink` that
-                // is already in it.
-                let chain = self.refreshed_or_cached(&scid).await.ok().flatten();
-                let listed_dead = chain.is_some_and(|chain| {
-                    chain
-                        .state()
-                        .device_key_id_of(&key)
-                        .and_then(|id| chain.state().keys.get(id))
-                        .is_some_and(|r| r.unlinked.is_some() || r.revoked.is_some())
-                });
+                // is already in it, so the log is read afresh (not from the cache: a stale
+                // cache cannot show an `unlink` the store holds).
+                let Ok(chain) = self.cache.refresh(self.backend.as_ref(), &scid).await else {
+                    // The read failed: whether an `unlink` is in the log is not known.
+                    return Err(e);
+                };
+                let listed_dead = chain
+                    .state()
+                    .device_key_id_of(&key)
+                    .and_then(|id| chain.state().keys.get(id))
+                    .is_some_and(|r| r.unlinked.is_some() || r.revoked.is_some());
                 if listed_dead {
                     return self.clean_up_dead_key(agent, &agent_did, &scid).await;
                 }
-                end(&agent_did);
+                // The log shows no `unlink`, and the store said no. An intent an earlier attempt
+                // left stays (that attempt's answer may be lost: it may have committed).
+                if made_here {
+                    end(&agent_did);
+                }
                 Err(e)
             }
             // Maybe committed: the intent and the fence stay, and a retry finishes.
-            Err(e) => Err(e),
+            Err(failure) => Err(failure.error),
         }
     }
 
@@ -224,6 +239,15 @@ impl IdentityService {
         };
         for (did, _scid) in intents {
             let agent = agent_for(&did);
+            // An end recorded while the wallet was locked, or one whose key is gone already (a
+            // re-keyed or retired key): nothing is left to publish, the cleanup is what remains.
+            if crate::wallet::wallet_backend().is_unlocked() && !key_is_live(&agent) {
+                match finish_local(agent, did.clone()).await {
+                    Ok(()) => log::info!("identity: finished the pending end of {did}"),
+                    Err(e) => log::warn!("identity: the pending end of {did} is still open: {e}"),
+                }
+                continue;
+            }
             match self.unlink_self(&agent).await {
                 Ok(head) => log::info!(
                     "identity: finished the pending unlink of {did} (seq {})",
@@ -309,6 +333,22 @@ pub(crate) async fn end_dead_key(change: &VerdictChange) {
             change.verdict
         ),
         Err(e) => log::error!("identity: could not end the grants of {did}: {e:?}"),
+    }
+    if !crate::wallet::wallet_backend().is_unlocked() {
+        // A locked wallet shows no keys, so "not live" says nothing now. The end is recorded
+        // (the intent) and the key fenced; the unlock's `resume_pending` destroys it.
+        log::warn!(
+            "identity: the key of {did} is {:?} in its log, and the wallet is locked: it is \
+             fenced, and removed at the next unlock",
+            change.verdict
+        );
+        if let Err(e) = begin(&did, &change.scid) {
+            log::error!(
+                "identity: could not record the end of the key of {did}: {}",
+                e.message
+            );
+        }
+        return;
     }
     if !key_is_live(&agent) {
         return;

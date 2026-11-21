@@ -90,6 +90,20 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
     // The revocation neighbourhood, for the late-syncer test after it.
     let nhUrl = "";
     let nhOnB: PerspectiveProxy | null = null;
+    // B's device key (d2) before A revokes it: B's executor ends that key and re-keys when it
+    // learns of the revoke, so later tests look it up by this value.
+    let bOldKey = "";
+
+    /**
+     * Waits until B's executor has learned that A revoked d2 and has re-keyed: its main agent has
+     * a new did:key. identity.status reads the store's log, which is how B learns of the revoke.
+     */
+    async function bReKeyed(): Promise<void> {
+        await pollUntil(
+            async () => (await b.client.identity.status()).deviceKey !== bOldKey,
+            { timeoutMs: 60_000, intervalMs: 500, label: "B re-keys after the revoke of d2" },
+        );
+    }
 
     /**
      * Revokes B's key (d2) one time, through the holder. Before the revoke, it keeps a copy of
@@ -356,6 +370,7 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
             (await RevocationNote.findAll(readerProxy, { includeUnverified: true })).map((n) => n.id).sort();
 
         // 1. d2 signs L1 before the revocation. The reader counts it, for the person.
+        bOldKey = (await b.client.identity.status()).deviceKey;
         await b.client.perspective.addLink(onB.uuid, note("l1"));
         let l1 = await judgedOnReader("l1");
         expect(l1.verdict).to.deep.equal({ kind: "valid" });
@@ -392,28 +407,29 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         expect(await counted()).to.deep.equal(["rev://l1"]);
 
         // 5. B reads its log again (identity.status does), so the revocation gets to B's key
-        // map and B anchors its next link at the revoke. agent.status reads no store.
-        await pollUntil(
-            async () => (await b.client.identity.status()).revoked === 2
-                && (await b.client.agent.status()).identity === null,
-            { timeoutMs: 30_000, intervalMs: 500, label: "B's key no longer speaks for the person" },
-        );
-        // B still holds the revoked key and signs L2 with it. The anchor is at the revoke, so L2
-        // is invalid (revoked) on B.
+        // map. A key that its log revoked is dead on its executor: B ends the grants, re-keys
+        // (a new did:key for the main agent) and deletes the revoked key's secret. B can no longer
+        // sign with d2, so the rule "a link that the revoked key signs after the revoke is
+        // invalid (revoked)" is not testable end to end here; the verdict unit test
+        // `a_key_revoked_at_or_before_the_anchor_is_invalid` (rust-executor/src/identity/verdict.rs)
+        // pins it.
+        await bReKeyed();
+        const bNew = await b.client.identity.status();
+        expect(bNew.deviceKey).to.not.equal(bOldKey);
+        // The new key speaks for no identity: no binding, no key id, nothing revoked.
+        expect(bNew.did).to.be.null;
+        expect(bNew.keyId).to.be.null;
+        expect(bNew.revoked).to.be.null;
+        const bAgent = await b.client.agent.status();
+        expect(bAgent.did).to.equal(`did:key:${bNew.deviceKey}`);
+        expect(bAgent.identity).to.be.null;
+        // A link B signs now is the new key's: not anchored, no person, not part of the identity.
         const l2OnB = await b.client.perspective.addLink(onB.uuid, note("l2"), "local");
-        expect(l2OnB.proof.anchor).to.equal(2);
-        expect(l2OnB.verdict).to.deep.equal({ kind: "invalid", reason: "revoked" });
-        // The test gives L2, as B signed it, to the reader directly. (Through the link language,
-        // the reader does not store a remote link that is invalid, so no read shows it.) The
-        // reader also finds L2 invalid (revoked): a display read does not show it, and a logic
-        // read does not count it.
-        const l2 = await reader.client.perspective.addLinkExpression(onReader.uuid, l2OnB, "local");
-        expect(l2.proof.anchor).to.equal(2);
-        expect(l2.verdict).to.deep.equal({ kind: "invalid", reason: "revoked" });
-        expect(l2.proof.valid).to.equal(false);
-        expect(l2.person ?? null).to.be.null;
-        const l2Shown = await reader.client.perspective.queryLinks(onReader.uuid, new LinkQuery({ source: "rev://l2" }));
-        expect(l2Shown).to.have.length(0);
+        expect(l2OnB.proof.anchor ?? null).to.be.null;
+        expect(l2OnB.person ?? null).to.be.null;
+        expect(l2OnB.author).to.equal(`did:key:${bNew.deviceKey}`);
+        expect(l2OnB.author).to.not.equal(`did:key:${bOldKey}`);
+        // L2 stays on B (local): it is not the reader's to count.
         expect(await counted()).to.deep.equal(["rev://l1"]);
 
         // 6. A's device d1 is not revoked: its link L3, signed after the revocation, counts.
@@ -423,11 +439,11 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         expect(l3.proof.anchor).to.equal(2);
         expect(l3.person).to.equal(did);
 
-        // 7. At the end, the logic read counts L1 and L3, not the late link or L2. L1 is still
-        // valid. With includeUnverified, the late link and L2 are there too.
+        // 7. At the end, the logic read counts L1 and L3, not the late link. L1 is still
+        // valid. With includeUnverified, the late link is there too.
         expect((await onReaderLink("l1"))!.verdict).to.deep.equal({ kind: "valid" });
         expect(await counted()).to.deep.equal(["rev://l1", "rev://l3"]);
-        expect(await shown()).to.deep.equal(["rev://l1", "rev://l2", "rev://l3", "rev://late"]);
+        expect(await shown()).to.deep.equal(["rev://l1", "rev://l3", "rev://late"]);
     });
 
     it("flags a pre-revocation link for a reader that syncs after the revocation", async () => {
@@ -460,33 +476,40 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         expect(l1!.verdict).to.deep.equal({ kind: "flagged" });
         expect(l1!.proof.anchor).to.equal(1);
 
-        // A new link of the revoked key is invalid on the late reader, as it was on the
-        // early one.
+        // B's executor re-keyed when it learned of the revoke, so a new link of B is signed by
+        // its new did:key: not anchored, no person, not part of the identity. (B holds no copy of
+        // the revoked d2 any more; the rule that a link the revoked key signs after the revoke is
+        // invalid is pinned by the verdict unit test
+        // `a_key_revoked_at_or_before_the_anchor_is_invalid`.)
+        await bReKeyed();
         const l4OnB = await b.client.perspective.addLink(
             nhOnB!.uuid,
             { source: "rev://l4", predicate: "rev://type", target: "rev://note" },
             "local",
         );
-        expect(l4OnB.verdict).to.deep.equal({ kind: "invalid", reason: "revoked" });
+        expect(l4OnB.proof.anchor ?? null).to.be.null;
+        expect(l4OnB.person ?? null).to.be.null;
         const l4 = await lateReader.client.perspective.addLinkExpression(onLate.uuid, l4OnB, "local");
-        expect(l4.verdict).to.deep.equal({ kind: "invalid", reason: "revoked" });
-        const l4Shown = await lateReader.client.perspective.queryLinks(
-            onLate.uuid,
-            new LinkQuery({ source: "rev://l4" }),
-        );
-        expect(l4Shown).to.have.length(0);
+        expect(l4.proof.anchor ?? null).to.be.null;
+        expect(l4.person ?? null).to.be.null;
     });
 
     it("revokes B's key: B reports it revoked", async () => {
         // The test before revoked it (revokeD2 revokes one time).
         const revoked = await revokeD2();
         expect(revoked.seq).to.equal(2);
+        // B's executor ends the revoked key (grants, re-key, secret deleted) once it reads the
+        // log: its main agent has a new did:key that speaks for no identity, so identity.status
+        // shows no identity (did, keyId and revoked are null: `revoked` is the status of the
+        // current key, and the revoked d2 is not B's key any more).
+        await bReKeyed();
         const bStatus = await b.client.identity.status();
-        expect(bStatus.did).to.equal(did);
-        expect(bStatus.keyId).to.equal("d2");
-        expect(bStatus.revoked).to.equal(2);
-        // The binding stays, but B's key no longer speaks for the person: agent.status (and
-        // agent.get, which reads the same check) names no identity.
+        expect(bStatus.deviceKey).to.not.equal(bOldKey);
+        expect(bStatus.did).to.be.null;
+        expect(bStatus.keyId).to.be.null;
+        expect(bStatus.revoked).to.be.null;
+        // agent.status (and agent.get) name the new did:key and no identity.
+        expect((await b.client.agent.status()).did).to.equal(`did:key:${bStatus.deviceKey}`);
         expect((await b.client.agent.status()).identity).to.be.null;
         expect((await a.client.agent.status()).identity).to.equal(did);
         const devices = await a.client.identity.devices();
@@ -536,9 +559,10 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         expect(refused.didResolutionMetadata["coasys:skipped"]![0].src).to.equal("127.0.0.1:1");
         expect(refused.didResolutionMetadata["coasys:skipped"]![0].reason).to.match(/^refused/);
 
-        // B's revoked device key still names its person, through the store's key index.
-        const bKey = (await b.client.identity.status()).deviceKey;
-        const byKey = await d.client.identity.resolve(`did:key:${bKey}`);
+        // B's revoked device key (d2, captured before the revoke: B's executor holds a new key
+        // now) still names its person, through the store's key index.
+        expect(bOldKey).to.not.equal("");
+        const byKey = await d.client.identity.resolve(`did:key:${bOldKey}`);
         expect(byKey.didResolutionMetadata.error, byKey.didResolutionMetadata["coasys:message"]).to.be.undefined;
         expect(byKey.didDocument!.id).to.equal(did);
         expect(byKey.didResolutionMetadata["coasys:keyId"]).to.equal("d2");

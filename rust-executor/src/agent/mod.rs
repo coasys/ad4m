@@ -1079,7 +1079,7 @@ impl AgentService {
     /// file. The rewrite binds the file to whichever of them was typed. Until an unlock
     /// opens the rewritten file directly, a failed unlock on a locked executor falls back to
     /// this copy (`unlock_from_legacy_backup`).
-    fn legacy_backup_file(&self) -> String {
+    pub(crate) fn legacy_backup_file(&self) -> String {
         format!("{}.legacy", self.file)
     }
 
