@@ -367,12 +367,7 @@ pub(crate) mod pause {
 /// name with its properties. WE's own classes are named in its reference already; the bundle
 /// describes the others to the model in full.
 async fn models(perspective: &PerspectiveInstance) -> Vec<Value> {
-    let mut names = perspective
-        .get_subject_classes_from_shacl()
-        .await
-        .unwrap_or_default();
-    names.sort();
-    names.dedup();
+    let names = perspective.class_names().unwrap_or_default();
     names
         .iter()
         .filter_map(|name| {

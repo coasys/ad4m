@@ -35,6 +35,19 @@ const TASK_SHACL: &str = r#"{
   ]
 }"#;
 
+/// A second `Task` — same name as `ns://Task`, another target class IRI: two
+/// registered classes may share a name when their shapes sync in from peers.
+const OTHER_TASK_SHACL: &str = r#"{
+  "target_class": "other://Task",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"other://Task"}
+  ],
+  "properties": [
+    {"path":"other://task_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"other://task_title","target":"value"}]}
+  ]
+}"#;
+
 struct World {
     handlers: HandlerMap,
     uuid: String,
@@ -398,6 +411,49 @@ async fn collection_items_are_added_and_removed() {
     let tags = error_for(&validation_errors(&error), "tags").clone();
     assert_eq!(tags["problem"]["kind"], "unknownCollection", "{tags}");
     assert_eq!(world.link_count().await, before);
+}
+
+/// Two registered classes share the name `Task`: the bare name is refused
+/// `ambiguousClass` naming both IRIs (400), and each IRI writes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shared_class_name_is_refused_and_its_iri_resolves() {
+    let registered = registered_perspective(&[("Task", TASK_SHACL)]).await;
+    let mut perspective =
+        crate::perspectives::get_perspective(&registered.0).expect("registered perspective");
+    perspective
+        .register_shape_json(OTHER_TASK_SHACL, &crate::agent::AgentContext::main_agent())
+        .await
+        .expect("register the second Task");
+    let world = World {
+        handlers: build_handler_map(),
+        uuid: registered.0.clone(),
+        _registered: registered,
+    };
+
+    let error = world
+        .call(
+            "perspective.instanceCreate",
+            json!({ "className": "Task", "properties": { "title": "t" } }),
+        )
+        .await
+        .expect_err("a shared class name is refused");
+    assert_eq!(error.code, 400, "{}", error.message);
+    let data = error.data.as_ref().expect("the error carries data");
+    assert_eq!(data["kind"], "ambiguousClass", "{data}");
+    assert_eq!(
+        data["candidates"],
+        json!(["ns://Task", "other://Task"]),
+        "{data}"
+    );
+
+    // Each class key resolves: the shared name's IRIs write.
+    let created = world
+        .ok(
+            "perspective.instanceCreate",
+            json!({ "className": "other://Task", "properties": { "title": "t" } }),
+        )
+        .await;
+    assert!(created["baseUri"].as_str().is_some(), "{created}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -795,9 +851,9 @@ async fn a_user_cannot_write_instances_into_another_users_perspective() {
 
     executor
         .call(
-            "perspective.addSdna",
+            "perspective.registerShapes",
             with_uuid(json!({
-                "name": "Task", "sdnaCode": "", "sdnaType": "subject_class", "shaclJson": TASK_SHACL,
+                "shapes": [serde_json::from_str::<Value>(TASK_SHACL).unwrap()],
             })),
             &alice.session,
         )
