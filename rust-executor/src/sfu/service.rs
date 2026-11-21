@@ -1773,15 +1773,19 @@ impl SfuService {
     /// `maxMeshParticipants`) from its links, the rest from this executor.
     /// ICE servers stay empty: clients bring their own (`iceServers` on
     /// `createSession`).
-    pub async fn get_config(&self, neighbourhood_url: &str) -> SfuConfig {
-        SfuConfig {
+    /// Errors when the policy cannot be read and there is no earlier one to
+    /// answer (a failed membership check with nothing cached): an "unknown"
+    /// never becomes a silent "mesh".
+    pub async fn get_config(&self, neighbourhood_url: &str) -> Result<SfuConfig, String> {
+        Ok(SfuConfig {
             max_participants_per_node: Some(self.gossip.max_participants_per_node()),
             sfu_peers: self.cascade_peer_dids.clone(),
             preferred_sfu_did: self.preferred_node.clone(),
             ..config_store::read_policy(neighbourhood_url)
                 .await
+                .map_err(|e| e.to_string())?
                 .into_config()
-        }
+        })
     }
 
     /// Validate `config` and store its policy in the neighbourhood as a link
@@ -1800,31 +1804,44 @@ impl SfuService {
     /// The SFU node a client of this executor reaches under the
     /// neighbourhood's mode: this node itself for `designated`, the
     /// `"gateway"` sentinel for `gateway`, none otherwise.
-    pub async fn sfu_peer_for_neighbourhood(&self, neighbourhood_url: &str) -> Option<String> {
-        match config_store::read_policy(neighbourhood_url)
-            .await
-            .mode
-            .as_str()
-        {
-            "designated" => Some(self.gossip.local_did().to_string()),
-            "gateway" => Some("gateway".to_string()), // Sentinel — caller resolves gateway DID
-            _ => None,
-        }
+    /// Errors with `get_config` when the policy cannot be read: a peer
+    /// answered on a failed check could send a call to the wrong place.
+    pub async fn sfu_peer_for_neighbourhood(
+        &self,
+        neighbourhood_url: &str,
+    ) -> Result<Option<String>, String> {
+        Ok(
+            match config_store::read_policy(neighbourhood_url)
+                .await
+                .map_err(|e| e.to_string())?
+                .mode
+                .as_str()
+            {
+                "designated" => Some(self.gossip.local_did().to_string()),
+                "gateway" => Some("gateway".to_string()), // Sentinel — caller resolves gateway DID
+                _ => None,
+            },
+        )
     }
 
     /// The SFU nodes under the neighbourhood's mode: for `cascaded`, this
-    /// node and its configured cascade peers.
-    pub async fn sfu_peers_for_neighbourhood(&self, neighbourhood_url: &str) -> Vec<String> {
-        let policy = config_store::read_policy(neighbourhood_url).await;
+    /// node and its configured cascade peers. Errors as `get_config` does.
+    pub async fn sfu_peers_for_neighbourhood(
+        &self,
+        neighbourhood_url: &str,
+    ) -> Result<Vec<String>, String> {
+        let policy = config_store::read_policy(neighbourhood_url)
+            .await
+            .map_err(|e| e.to_string())?;
         let local = self.gossip.local_did().to_string();
-        match policy.mode.as_str() {
+        Ok(match policy.mode.as_str() {
             "cascaded" => std::iter::once(local)
                 .chain(self.cascade_peer_dids.iter().cloned())
                 .collect(),
             "designated" => vec![local],
             "gateway" => vec!["gateway".to_string()],
             _ => vec![],
-        }
+        })
     }
 
     /// Shut down the SFU service.

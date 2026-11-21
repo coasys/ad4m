@@ -231,7 +231,10 @@ async fn call_set_quality_preference(
 async fn get_config(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let p: SfuNeighbourhoodParams = parse(params)?;
     member_did(&ctx, &p.neighbourhood_url)?;
-    let cfg = service()?.get_config(&p.neighbourhood_url).await;
+    let cfg = service()?
+        .get_config(&p.neighbourhood_url)
+        .await
+        .map_err(map_room_err)?;
     Ok(serde_json::to_value(cfg)?)
 }
 
@@ -261,7 +264,8 @@ async fn sfu_peer_for_neighbourhood(
     member_did(&ctx, &p.neighbourhood_url)?;
     let peer = service()?
         .sfu_peer_for_neighbourhood(&p.neighbourhood_url)
-        .await;
+        .await
+        .map_err(map_room_err)?;
     Ok(serde_json::to_value(peer)?)
 }
 
@@ -273,7 +277,8 @@ async fn sfu_peers_for_neighbourhood(
     member_did(&ctx, &p.neighbourhood_url)?;
     let peers = service()?
         .sfu_peers_for_neighbourhood(&p.neighbourhood_url)
-        .await;
+        .await
+        .map_err(map_room_err)?;
     Ok(serde_json::to_value(peers)?)
 }
 
