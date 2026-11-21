@@ -10,6 +10,7 @@ pub mod events_ws;
 pub mod guards;
 pub mod internal;
 pub mod openai_compat;
+pub mod rpc_session;
 pub mod types;
 pub mod ws_rpc;
 
