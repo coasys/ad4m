@@ -731,7 +731,29 @@ async fn an_abandoned_rejoin_returns_to_detached_with_its_data() {
 // ---- Leave and removal ----------------------------------------------------------------------
 
 #[tokio::test]
-async fn leave_keep_ends_the_key_first_then_detaches_and_keeps_the_data() {
+async fn while_its_leave_runs_a_tenant_may_only_read() {
+    fresh();
+    open(SignupPolicy::Anyone);
+    let env = FakeEnv::new();
+    let joined = active(&env, "a").await;
+    let device = row_of(&joined.tenant_id).row.device_did.unwrap();
+    assert!(admit_call(&device, "perspective.addLink", false).is_ok());
+    leaving().lock().unwrap().insert(joined.tenant_id.clone());
+    assert_eq!(
+        admit_call(&device, "perspective.addLink", false),
+        Err(HostRefusal::NotAdmitted)
+    );
+    assert_eq!(
+        admit_call(&device, "host.leave", false),
+        Err(HostRefusal::NotAdmitted),
+        "no second leave"
+    );
+    assert!(admit_call(&device, "perspective.queryLinks", true).is_ok());
+    leaving().lock().unwrap().remove(&joined.tenant_id);
+}
+
+#[tokio::test]
+async fn leave_keep_detaches_and_keeps_the_data_then_ends_the_key() {
     fresh();
     open(SignupPolicy::Anyone);
     let env = FakeEnv::new();
@@ -741,7 +763,10 @@ async fn leave_keep_ends_the_key_first_then_detaches_and_keeps_the_data() {
     let calls = env.calls();
     let end = calls.iter().position(|c| c.starts_with("end ")).unwrap();
     let left = calls.iter().position(|c| c.starts_with("leave ")).unwrap();
-    assert!(end < left, "the key ends before the data is touched");
+    assert!(
+        left < end,
+        "the key and its sessions end last, so the leave call still answers"
+    );
     assert!(calls.contains(&format!("leave {} keep=true", joined.tenant_id)));
     assert_eq!(row_of(&joined.tenant_id).state, TenantState::Detached);
     assert!(!is_leaving(&joined.tenant_id));
