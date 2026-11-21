@@ -2609,6 +2609,24 @@ impl SparqlStore {
         Ok(())
     }
 
+    /// [`Self::clear`] up to the write it records, with the index not yet
+    /// emptied: a clear paused there. [`Self::finish_clear`] ends it.
+    #[cfg(test)]
+    pub(crate) fn begin_clear_for_test(&self) -> Result<(), Error> {
+        let _writer = self.writer.lock().unwrap();
+        self.scope_index.begin_clear(&self.store)?;
+        self.store.clear()?;
+        self.note_write(WriteDelta::Other);
+        Ok(())
+    }
+
+    /// The rest of a clear [`Self::begin_clear_for_test`] began.
+    #[cfg(test)]
+    pub(crate) fn finish_clear(&self) -> Result<(), Error> {
+        let _writer = self.writer.lock().unwrap();
+        self.scope_index.clear(&self.store)
+    }
+
     /// Flush pending writes to disk.
     /// This ensures RocksDB memtable data is written to SST files,
     /// allowing the memtable memory to be reclaimed.

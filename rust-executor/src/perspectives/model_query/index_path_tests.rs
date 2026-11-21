@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 use super::containment::{ContainmentEdge, ContainmentEdges, Holder, HAS_CHILD};
-use super::index_path::{index_page, AFTER_READS, PAGES_SERVED};
+use super::index_path::{index_page, AFTER_READS, BEFORE_READS, PAGES_SERVED};
 use super::query::execute_model_query;
 use super::shape::parse_shape_from_json;
 use super::test_helpers::StaticShapeResolver;
@@ -783,6 +783,34 @@ fn a_rule_replaced_and_restored_during_the_reads_goes_to_sparql() {
                 store.scope_index_build_now(&rule).unwrap();
                 assert_eq!(store.scope_index_readiness(&rule), Readiness::Ready);
             }
+        }));
+    });
+    let page = index_page(
+        &EvalStop::none(),
+        &world.indexed,
+        &world.shape,
+        &query(json!({})),
+        &newest_first(0, 3),
+    )
+    .unwrap();
+    assert_eq!(page, None);
+}
+
+/// A clear that raised the write generation but had not emptied the index
+/// when the page read it, and that ended before the last check: the reads
+/// hold entries of links the store no longer has, so the query goes to
+/// SPARQL.
+#[test]
+fn a_clear_that_ends_during_the_reads_goes_to_sparql() {
+    let world = small_world(5);
+    BEFORE_READS.with(|h| {
+        *h.borrow_mut() = Some(Box::new(|store: &SparqlStore| {
+            store.begin_clear_for_test().unwrap();
+        }));
+    });
+    AFTER_READS.with(|h| {
+        *h.borrow_mut() = Some(Box::new(|store: &SparqlStore| {
+            store.finish_clear().unwrap();
         }));
     });
     let page = index_page(

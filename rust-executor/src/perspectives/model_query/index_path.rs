@@ -108,23 +108,25 @@ pub(super) fn index_page(
     if let Some(err) = stop.stopped_err("query") {
         return Err(err);
     }
-    // Read before the rule is checked: installing a rule (and building it)
-    // raises the epoch and not the write generation.
+    // Both are read before the rule is checked, and compared after the reads.
+    // Installing a rule (and building it) raises the epoch and not the write
+    // generation. Every index write raises the generation before the writer
+    // lock is released (see `SparqlStore::settled_write_generation`); a clear
+    // raises it before it empties the index, after it marks every class not
+    // ready, so a clear the reads can see changes the generation after this.
     let Some(epoch) = store.scope_index_epoch() else {
         return Ok(None);
     };
+    let generation = store.write_generation();
     let Some(rule) = indexed_rule(store, shape, query, pagination) else {
         return Ok(None);
     };
     let Some(scopes) = scopes_of(stop, store, &rule, query)? else {
         return Ok(None);
     };
-    // Each read below takes its own snapshot of the store. Every index write
-    // raises the write generation before the writer lock is released, so an
-    // equal settled generation after the reads (see
-    // `SparqlStore::settled_write_generation`) means no write came between
-    // them; a write still in flight then sends the query to SPARQL.
-    let generation = store.write_generation();
+    #[cfg(test)]
+    before_reads(store);
+    // Each read below takes its own snapshot of the store.
     let reader = store.scope_reader();
     let noncanonical = reader.noncanonical(&rule.class)?;
     if noncanonical != 0 {
@@ -204,6 +206,20 @@ thread_local! {
     /// them, so a test can commit what a concurrent write would.
     pub(super) static AFTER_READS: std::cell::RefCell<Option<Box<dyn FnOnce(&SparqlStore)>>> =
         std::cell::RefCell::new(None);
+    /// Fires in [`index_page`] after the rule check and before its reads, so
+    /// a test can start what a concurrent write would.
+    pub(super) static BEFORE_READS: std::cell::RefCell<Option<Box<dyn FnOnce(&SparqlStore)>>> =
+        std::cell::RefCell::new(None);
+}
+
+/// Fire the hook a test armed (see [`BEFORE_READS`]).
+#[cfg(test)]
+fn before_reads(store: &SparqlStore) {
+    BEFORE_READS.with(|h| {
+        if let Some(hook) = h.borrow_mut().take() {
+            hook(store);
+        }
+    });
 }
 
 /// Fire the hook a test armed (see [`AFTER_READS`]).
