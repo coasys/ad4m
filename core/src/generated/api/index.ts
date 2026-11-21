@@ -9,7 +9,6 @@
 export type { AddLinkExpressionRequest } from "./AddLinkExpressionRequest";
 export type { AddLinkRequest } from "./AddLinkRequest";
 export type { AddLinksBulkRequest } from "./AddLinksBulkRequest";
-export type { AddSdnaRequest } from "./AddSdnaRequest";
 export type { AgentMessage } from "./AgentMessage";
 export type { AgentReply } from "./AgentReply";
 export type { AgentsByDidsRequest } from "./AgentsByDidsRequest";
@@ -214,6 +213,13 @@ export type { SessionRole } from "./SessionRole";
 export type { SignSessionStatementParams } from "./SignSessionStatementParams";
 export type { SignedKeyStatement } from "./SignedKeyStatement";
 export type { UnsignedKeyStatement } from "./UnsignedKeyStatement";
+// Class registration (perspective.registerShapes, perspective.shapes).
+export type { PropertyShapeJson } from "./PropertyShapeJson";
+export type { RegisterResult } from "./RegisterResult";
+export type { ShapeAction } from "./ShapeAction";
+export type { ShapeConformanceCondition } from "./ShapeConformanceCondition";
+export type { ShapeJson } from "./ShapeJson";
+export type { ShapeSummary } from "./ShapeSummary";
 // The validated instance writes (perspective.instance*): bodies, results, and the
 // error data of a refused write (RpcError.data).
 export type { InstanceCreate } from "./InstanceCreate";
