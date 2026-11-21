@@ -29,7 +29,9 @@
 //! Once the rotation is published, `finish` answers [`Restored`] whatever comes after: the
 //! rotation stands (*n*+1 is current) and the lock-out is revoked. A revoke that failed after
 //! the rotation is [`ClientError::RotatedNotRevoked`]: [`RestoreFlow::revoke_locked_out`]
-//! publishes it again on the same flow and then enrols. An enrolment that
+//! publishes only the revoke again on the same flow, with a `since` the caller may correct
+//! (the store refuses one before a key's add), and then enrols. Until it is published the lost
+//! devices are still valid, so [`RestoreFlow::enrol`] and `finish` refuse. An enrolment that
 //! failed (the vault, the link, the store) is [`Restored::enrolled`]'s error, and
 //! [`RestoreFlow::enrol`] retries it on the same flow, without the words typed again and
 //! without another rotation.
@@ -43,7 +45,7 @@ use ad4m_ldk::identity::SignedHead;
 
 use crate::executor::{ExecutorRpc, ViaExecutor};
 use crate::flows::link::LinkFlow;
-use crate::flows::revoke::{chain_head, check_since, publish_revoke};
+use crate::flows::revoke::{chain_head, check_since, publish_pending, PendingRevoke};
 use crate::flows::rotate::{
     current_index, hand_over, master_of, promote, publish_rotation, recovery_key_of, ThisDevice,
 };
@@ -127,10 +129,18 @@ pub struct RestoreFlow<'a, R: ExecutorRpc> {
 
 /// A lock-out waiting for its revoke.
 struct LockOut {
-    key_ids: Vec<KeyId>,
-    since: Option<u64>,
+    revoke: PendingRevoke,
     /// Rotations the flow built.
     tries: usize,
+}
+
+/// The refusal while the lock-out's revoke is not published.
+fn pending_revoke() -> ClientError {
+    ClientError::Protocol(
+        "the lost devices of this restore are not revoked yet; publish the revoke with \
+         revoke_locked_out first"
+            .into(),
+    )
 }
 
 /// The device keys of `chain` valid at its head, except `own` (this executor's device key),
@@ -239,13 +249,17 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
     /// ([`RestoreFlow::revoke_locked_out`] retries it). `since` later than now is refused
     /// before the rotation. Once the rotation and the revoke are published it answers
     /// [`Restored`], whose `enrolled` says whether the enrolment worked. Refused after a
-    /// rotation of this flow was published: retry the enrolment with [`RestoreFlow::enrol`].
+    /// rotation of this flow was published: retry the enrolment with [`RestoreFlow::enrol`],
+    /// or, while its revoke is pending, with [`RestoreFlow::revoke_locked_out`].
     pub async fn finish(
         &mut self,
         lock_out: &[KeyId],
         since: Option<u64>,
         this_device: DeviceEntry,
     ) -> Result<Restored, ClientError> {
+        if self.pending.is_some() {
+            return Err(pending_revoke());
+        }
         if let Some(index) = self.rotated {
             return Err(ClientError::Protocol(format!(
                 "this restore already made master #{index} current; enrol this device again"
@@ -272,20 +286,27 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
             self.random,
         )
         .await?;
-        self.rotated = Some(published.signer.index());
+        let index = published.signer.index();
+        self.rotated = Some(index);
         self.pending = Some(LockOut {
-            key_ids: lock_out.to_vec(),
-            since,
+            revoke: PendingRevoke {
+                index,
+                key_ids: lock_out.to_vec(),
+            },
             tries: published.tries,
         });
-        self.lock_out_and_enrol(published.head, this_device).await
+        self.lock_out_and_enrol(published.head, since, this_device)
+            .await
     }
 
-    /// Publishes the revoke of the lock-out of a [`RestoreFlow::finish`] whose rotation was
-    /// published and whose revoke was not ([`ClientError::RotatedNotRevoked`]), then enrols
-    /// this device. Refused when no revoke is pending.
+    /// Publishes only the revoke of the lock-out of a [`RestoreFlow::finish`] whose rotation was
+    /// published and whose revoke was not ([`ClientError::RotatedNotRevoked`]), with `since`
+    /// (ms; the caller may correct the one `finish` used, e.g. one the store refused for being
+    /// before a key's add), then enrols this device. Refused when no revoke is pending, and
+    /// as [`super::revoke::finish_revoke`] is.
     pub async fn revoke_locked_out(
         &mut self,
+        since: Option<u64>,
         this_device: DeviceEntry,
     ) -> Result<Restored, ClientError> {
         if self.pending.is_none() {
@@ -294,13 +315,14 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
             ));
         }
         let head = chain_head(self.executor, &self.did).await?;
-        self.lock_out_and_enrol(head, this_device).await
+        self.lock_out_and_enrol(head, since, this_device).await
     }
 
     /// Publishes the pending revoke (the new master, from the words, signs it), then enrols.
     async fn lock_out_and_enrol(
         &mut self,
         head: SignedHead,
+        since: Option<u64>,
         this_device: DeviceEntry,
     ) -> Result<Restored, ClientError> {
         let index = self.rotated.ok_or_else(|| {
@@ -311,26 +333,24 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
         let mut tries = 1;
         if let Some(lock) = &self.pending {
             tries = lock.tries;
-            if !lock.key_ids.is_empty() {
-                head = publish_revoke(
+            if !lock.revoke.key_ids.is_empty() {
+                head = publish_pending(
                     self.executor,
                     &self.did,
                     &self.seed,
-                    &lock.key_ids,
-                    lock.since,
+                    &lock.revoke,
+                    since,
+                    self.clock,
                 )
-                .await
-                .map_err(|e| ClientError::RotatedNotRevoked {
-                    index,
-                    cause: e.to_string(),
-                })?;
-                revoked = lock.key_ids.clone();
+                .await?;
+                revoked = lock.revoke.key_ids.clone();
             }
         }
         self.pending = None;
         // The rotation and the revoke are public from here: what fails after them is reported,
-        // not returned. The record write of the enrolment drops the revoked devices.
-        let enrolled = self.enrol(this_device).await;
+        // not returned. The record write of the enrolment drops the revoked devices, and the
+        // hand-over sends the new master to none of them.
+        let enrolled = self.enrol_excluding(this_device, &revoked).await;
         Ok(Restored {
             did: self.did.clone(),
             head,
@@ -346,9 +366,23 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
     /// vault keeps the new master (it promotes the staged key, or stores it again from the
     /// words this flow holds), this executor is linked as `this_device` when the log does not
     /// list it, the new master goes to the apps that kept the old one, and the record is
-    /// written. Refused before a rotation of this flow was published, and when the log's
-    /// current master is no longer the one this flow made current.
+    /// written. Refused before a rotation of this flow was published, while its lock-out
+    /// revoke is pending (the lost devices are valid until then, and would be sent the new
+    /// master: [`RestoreFlow::revoke_locked_out`]), and when the log's current master is no
+    /// longer the one this flow made current.
     pub async fn enrol(&self, this_device: DeviceEntry) -> Result<Enrolled, ClientError> {
+        if self.pending.is_some() {
+            return Err(pending_revoke());
+        }
+        self.enrol_excluding(this_device, &[]).await
+    }
+
+    /// [`RestoreFlow::enrol`] that sends the new master to none of `exclude` (the lock-out).
+    async fn enrol_excluding(
+        &self,
+        this_device: DeviceEntry,
+        exclude: &[KeyId],
+    ) -> Result<Enrolled, ClientError> {
         let index = self.rotated.ok_or_else(|| {
             ClientError::Protocol("this restore has published no rotation yet".into())
         })?;
@@ -401,7 +435,7 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
             }),
             Some(fence_epoch),
             &recovery_key_of(&self.seed),
-            &[],
+            exclude,
             self.clock,
             self.random,
         )

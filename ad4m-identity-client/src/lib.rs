@@ -149,11 +149,16 @@ pub enum ClientError {
     NotAKeeper(String),
     /// A rotation that precedes a revocation is published (master #`index` is current), and
     /// the revoke is not: the master key is replaced but the devices are not yet revoked.
-    /// Call again with the same words and keys: only the revoke is published.
+    /// `pending` names what is left: [`flows::revoke::finish_revoke`] publishes only the revoke,
+    /// with a `since` the caller may correct (a call that starts over would rotate again).
     #[error(
-        "the master key is replaced (master #{index}) but the devices are not yet revoked: {cause}"
+        "the master key is replaced (master #{}) but the devices are not yet revoked: {cause}",
+        pending.index
     )]
-    RotatedNotRevoked { index: u32, cause: String },
+    RotatedNotRevoked {
+        pending: flows::revoke::PendingRevoke,
+        cause: String,
+    },
     /// A request asks for a rotation, which needs the 12 words.
     #[error("the request asks for a rotation, which needs the 12 words")]
     NeedsWords,

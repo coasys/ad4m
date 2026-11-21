@@ -28,7 +28,7 @@ use ad4m_ldk::identity::{DeviceRequest, DeviceRequestBody, PostedRequest};
 
 use crate::executor::{ExecutorRpc, ViaExecutor};
 use crate::flows::master::{self, Sent};
-use crate::flows::revoke::{revoke_and_rotate, revoke_with, Revoked};
+use crate::flows::revoke::{finish_revoke, revoke_and_rotate, revoke_with, PendingRevoke, Revoked};
 use crate::flows::rotate::{master_of, Rotated};
 use crate::request::{
     body_bytes, chain_of, log_of, master_at_head, master_request, scid_of, store_of, MasterPosition,
@@ -172,7 +172,8 @@ pub async fn answer<R: ExecutorRpc>(
 /// *n*+1 ([`super::revoke::revoke_and_rotate`]; this device keeps *n*+1 and sends it to the apps
 /// that kept the master key, never to the keys being revoked), and the request is deleted with
 /// master *n*+1. A rotation that landed with a revoke that failed is `RotatedNotRevoked`, the
-/// request stays, and answering again publishes only the revoke. Any other request is answered as [`answer`] does.
+/// request stays, and [`finish_answer`] publishes only the revoke (answering again would rotate
+/// again). Any other request is answered as [`answer`] does.
 pub async fn answer_with_words<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
@@ -198,6 +199,31 @@ pub async fn answer_with_words<R: ExecutorRpc>(
     }
     .await;
     Ok(Answered::Rotated { rotated, deleted })
+}
+
+/// The resume of [`answer_with_words`] after `RotatedNotRevoked`: [`finish_revoke`] publishes
+/// only the revoke of `pending` (with `since`, which the caller may correct), then the request
+/// is deleted with master `pending.index`. The revoke stands whatever the delete says.
+#[allow(clippy::too_many_arguments)]
+pub async fn finish_answer<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+    did: &str,
+    request: &DeviceRequest,
+    words: &ad4m_identity_core::words::Words,
+    pending: &PendingRevoke,
+    since: Option<u64>,
+    clock: &dyn Clock,
+    random: &dyn Random,
+) -> Result<(Revoked, Result<(), ClientError>), ClientError> {
+    let revoked = finish_revoke(executor, vault, did, words, pending, since, clock, random).await?;
+    let deleted = async {
+        let signer = master_of(&ad4m_identity_core::words::seed(words), pending.index)?;
+        let chain = chain_of(executor, did).await?;
+        delete(executor, &chain, did, &signer, &request.id, clock, random).await
+    }
+    .await;
+    Ok((revoked, deleted))
 }
 
 /// The device's side: asks a holder for the current master key (a `send-master` request,
