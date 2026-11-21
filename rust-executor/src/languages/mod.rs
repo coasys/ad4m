@@ -1672,6 +1672,20 @@ impl LanguageController {
         source_language_hash: &str,
         mut template_data: serde_json::Map<String, JsonValue>,
     ) -> Result<String, LanguageError> {
+        // The address names a directory under the languages directory. Only a plain
+        // alphanumeric address may be joined: `..`, a separator or an absolute path
+        // would load a bundle.js from elsewhere on this machine.
+        if source_language_hash.is_empty()
+            || !source_language_hash
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric())
+        {
+            return Err(LanguageError::InvalidBundle {
+                message: format!(
+                    "applyTemplateLocal: {source_language_hash:?} is not a plain language address"
+                ),
+            });
+        }
         let bundle_path = languages_directory()
             .join(source_language_hash)
             .join("bundle.js");
