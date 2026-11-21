@@ -712,6 +712,38 @@ fn a_noncanonical_time_committed_during_the_reads_goes_to_sparql() {
     assert_eq!(page, None);
 }
 
+/// A flag outside the executor's form that is written and removed again
+/// while the page's entries and count were read leaves the noncanonical
+/// count at zero, but the reads may hold it: any write during the reads
+/// sends the query to SPARQL.
+#[test]
+fn a_noncanonical_time_written_and_removed_during_the_reads_goes_to_sparql() {
+    let world = small_world(5);
+    let s = TestSigner::generate();
+    let mut odd = flag_link(&s, "si://m/odd", T0 + 10);
+    odd.timestamp = odd.timestamp.replace(".010Z", ".01Z");
+    assert!(odd.compute_proof_valid(), "the timestamp still verifies");
+    AFTER_READS.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move |store: &SparqlStore| {
+            store.add_link(&odd).unwrap();
+            store.remove_link(&odd).unwrap();
+            assert_eq!(
+                store.scope_reader().noncanonical("si://Message").unwrap(),
+                0
+            );
+        }));
+    });
+    let page = index_page(
+        &EvalStop::none(),
+        &world.indexed,
+        &world.shape,
+        &query(json!({})),
+        &newest_first(0, 3),
+    )
+    .unwrap();
+    assert_eq!(page, None);
+}
+
 /// Another rule of the class installed while the page's entries and count
 /// were read is caught by the guard after them: what was read can hold the
 /// other rule's members, so the query goes to SPARQL.

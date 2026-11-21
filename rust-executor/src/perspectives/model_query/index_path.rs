@@ -114,6 +114,10 @@ pub(super) fn index_page(
     let Some(scopes) = scopes_of(stop, store, &rule, query)? else {
         return Ok(None);
     };
+    // Each read below takes its own snapshot of the store. Every index write
+    // raises the write generation before the writer lock is released, so an
+    // equal generation after the reads means no write came between them.
+    let generation = store.write_generation();
     let reader = store.scope_reader();
     let noncanonical = reader.noncanonical(&rule.class)?;
     if noncanonical != 0 {
@@ -170,11 +174,11 @@ pub(super) fn index_page(
     };
     #[cfg(test)]
     after_reads(store);
-    // The guards above ran before the reads. A write during them may have
-    // committed a flag time outside the executor's form, or installed and
-    // built another rule of the class: then what was read does not answer
-    // this query, and the caller's SPARQL id phase does.
-    if reader.noncanonical(&rule.class)? != 0
+    // The guards above ran before the reads. A write during them (a flag time
+    // outside the executor's form, even one removed again), or another rule
+    // of the class installed and built, means what was read may not answer
+    // this query: the caller's SPARQL id phase does.
+    if store.write_generation() != generation
         || store.scope_index_rule(&rule.class).as_ref() != Some(&rule)
         || store.scope_index_readiness(&rule) != Readiness::Ready
     {
