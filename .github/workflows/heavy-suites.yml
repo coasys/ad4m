@@ -24,7 +24,8 @@ name: Heavy suites
 #
 # Secrets and settings (none of them is required for the status):
 # - secret CIRCLECI_API_TOKEN: a CircleCI personal API token that can trigger
-#   pipelines in the project. Reads need no token (the project is public). Without it no
+#   pipelines in the project; also as a Dependabot secret of the same name for
+#   Dependabot PRs. Reads need no token (the project is public). Without it no
 #   pipeline starts and the status says so.
 # - variable CIRCLECI_PIPELINE_DEFINITION_ID: Project Settings → Pipelines in
 #   CircleCI. Optional while the project has one pipeline definition.
@@ -37,6 +38,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited, labeled, unlabeled]
 
+# Dependabot PRs get a read-only token unless the workflow asks; these ask.
 permissions:
   contents: read
   pull-requests: read
@@ -44,10 +46,8 @@ permissions:
 
 jobs:
   status:
-    # A title or body edit, or a label other than full-ci, changes nothing. A
-    # Dependabot PR gets a read-only token, like a fork.
+    # A title or body edit, or a label other than full-ci, changes nothing.
     if: >-
-      github.event.pull_request.user.login != 'dependabot[bot]' &&
       (github.event.action != 'edited' || github.event.changes.base) &&
       ((github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'full-ci')
     runs-on: ubuntu-latest
