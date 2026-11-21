@@ -391,7 +391,10 @@ the offer's state).
   again on a link language from the new DNA, its links copied), not a mixed-version
   rollout. See `bootstrap-languages/p-diff-sync/README.md`, "Link proofs".
 - **Reads.** Logic reads (model queries, flows, SHACL, SDNA facts) count only links with
-  `proofValid` `true`. The display reads `perspective.queryLinks` and `perspective.snapshot`
+  `proofValid` `true`; so does the shape registry (`shape_registry`, behind `shapes`,
+  `class_names`, `class_keys`, and the diff `register_shapes` makes), as `load_shape` does, so
+  a class a peer sent with links that do not count is no class and a counting copy is written
+  over it. The display reads `perspective.queryLinks` and `perspective.snapshot`
   (`get_links_shown`) leave out `invalid` links and return `cantCheck` and `flagged` ones with
   `verdict`; with `includeUnverified: true` on the `LinkQuery` they return `invalid` links too
   (so an owner can find and remove them; removal does not check the verdict).
