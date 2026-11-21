@@ -1293,6 +1293,7 @@ describe("ModelQueryBuilder subscribe callback timing", () => {
         return () => {}; // unsubscribe function
       }),
       onReconnect: jest.fn(() => () => {}),
+      onSubscriptionEnded: jest.fn(() => () => {}),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
 
@@ -1358,6 +1359,7 @@ describe("totalCount is asked for only by the readers of it (P3)", () => {
       }),
       onQueryUpdate: jest.fn(() => () => {}),
       onReconnect: jest.fn(() => () => {}),
+      onSubscriptionEnded: jest.fn(() => () => {}),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
     return {
@@ -1421,6 +1423,7 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
         return () => { if (listener === cb) listener = null; };
       }),
       onReconnect: jest.fn(() => () => {}),
+      onSubscriptionEnded: jest.fn(() => () => {}),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
     const mockPerspective = {
@@ -1652,6 +1655,7 @@ describe("ModelQueryBuilder reconnect", () => {
         reconnectListeners.add(cb);
         return () => reconnectListeners.delete(cb);
       }),
+      onSubscriptionEnded: jest.fn(() => () => {}),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
     const mockPerspective = {
@@ -3526,6 +3530,7 @@ describe("ModelQueryBuilder subscription ownership", () => {
       })),
       onQueryUpdate: jest.fn(() => () => {}),
       onReconnect: jest.fn(() => () => {}),
+      onSubscriptionEnded: jest.fn(() => () => {}),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
     const mockPerspective = {

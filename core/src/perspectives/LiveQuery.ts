@@ -34,10 +34,14 @@ export interface QueryLagged {
  *  reconnect or a failed resync: `reopening` after each failed attempt, with
  *  the delay before the next one, and `open` once a re-open succeeds after
  *  one failed. Until then the query is not live, even though its last result
- *  is still readable. */
+ *  is still readable. `ended` when the executor ended the subscription
+ *  (`subscription-ended`, `reason` e.g. `not-authorized` — its grant no
+ *  longer admits the read): the query holds no subscription and never
+ *  re-opens on its own; the owner resubscribes with {@link LiveQuery.resubscribe}. */
 export type LiveQueryStatus =
     | { state: 'reopening', error: unknown, retryInMs: number }
     | { state: 'open' }
+    | { state: 'ended', reason: string }
 
 /** Delay before the first retry of a failed re-open; it doubles per failure. */
 export const REOPEN_BASE_DELAY_MS = 1000
@@ -108,10 +112,14 @@ export class LiveQuery {
     #buffer: (QueryUpdate | QueryLagged)[] | null = null
     #unlisten: () => void
     #unreconnect: () => void
+    #unended: () => void
     // Aborts the subscribe call still in flight, for `dispose({ cancelOpening })`.
     #opening?: AbortController
     #retryTimer?: ReturnType<typeof setTimeout>
     #reopening = false
+    // The executor ended the subscription (`subscription-ended`): terminal until the owner
+    // calls `start()`/`resubscribe()`. No reconnect, retry or failed resync reopens it.
+    #terminated = false
     #statusListeners = new Set<(status: LiveQueryStatus) => void>()
 
     /** `open` subscribes on the executor; aborting its signal cancels the call. */
@@ -122,6 +130,7 @@ export class LiveQuery {
         this.#onResult = onResult
         this.#unlisten = client.onQueryUpdate(update => this.#receive(update))
         this.#unreconnect = client.onReconnect(() => this.#reopen())
+        this.#unended = client.onSubscriptionEnded(ended => this.#ended(ended))
     }
 
     get id(): string | undefined { return this.#id }
@@ -136,10 +145,38 @@ export class LiveQuery {
         return () => this.#statusListeners.delete(listener)
     }
 
+    /** Subscribe again after the executor ended this query's subscription
+     *  (`subscription-ended`, status `ended`): a fresh subscription and a
+     *  fresh baseline, no automatic polling — the owner decides when (e.g.
+     *  once a paused grant resumes). Answers the fresh first result. */
+    resubscribe(): Promise<any> {
+        return this.start()
+    }
+
+    /** A `subscription-ended` event: it names this query's subscription, so the
+     *  subscription is gone on the executor — the query holds no live id any
+     *  more, tells its owner why, and waits for {@link resubscribe} (never
+     *  re-opens on its own: a `not-authorized` retry would be refused). */
+    #ended(ended: { subscriptionIds: string[], perspectiveUuid: string, reason: string }) {
+        if (ended.perspectiveUuid !== this.#uuid || !this.#id) return
+        if (!ended.subscriptionIds.includes(this.#id)) return
+        this.#id = undefined
+        // Terminal: a resync or re-open already in flight belongs to a dead generation, a
+        // pending retry is dropped, and a reconnect does not reopen it (see `#reopen`).
+        this.#terminated = true
+        this.#generation++
+        this.#clearRetry()
+        this.#buffer = null
+        this.#reopening = false
+        this.#emit({ state: 'ended', reason: ended.reason })
+    }
+
     /** Open the subscription (again) and return its initial result. A start
      *  that a newer one overtakes resolves with the newer one's result. */
     start(): Promise<any> {
         this.#clearRetry()
+        // The owner asks for a subscription again: an ended query lives again, here only.
+        this.#terminated = false
         this.#latest = this.#start(++this.#generation)
         return this.#latest
     }
@@ -179,6 +216,7 @@ export class LiveQuery {
         this.#statusListeners.clear()
         this.#unlisten()
         this.#unreconnect()
+        this.#unended()
         if (options.cancelOpening) this.#opening?.abort()
         if (this.#id) this.#client.disposeQuerySubscription(this.#uuid, this.#id).catch(() => {})
     }
@@ -190,7 +228,7 @@ export class LiveQuery {
      *  client that reconnects to a restarted executor before the perspective
      *  is loaded gets "Perspective not found" (#1595). */
     #reopen(failures = 0) {
-        if (this.#disposed) return
+        if (this.#disposed || this.#terminated) return
         const reopened = this.start()
         const generation = this.#generation
         reopened.then(

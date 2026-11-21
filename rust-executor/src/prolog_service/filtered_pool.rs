@@ -802,6 +802,7 @@ mod tests {
                 status: None,
                 verdict: None,
                 person: None,
+                by_bot: None,
             },
             DecoratedLinkExpression {
                 author: "user2".to_string(),
@@ -821,6 +822,7 @@ mod tests {
                 status: None,
                 verdict: None,
                 person: None,
+                by_bot: None,
             },
             DecoratedLinkExpression {
                 author: "user1".to_string(),
@@ -840,6 +842,7 @@ mod tests {
                 status: None,
                 verdict: None,
                 person: None,
+                by_bot: None,
             },
         ]
     }
@@ -867,6 +870,7 @@ mod tests {
                 status: None,
                 verdict: None,
                 person: None,
+                by_bot: None,
             });
         }
         links

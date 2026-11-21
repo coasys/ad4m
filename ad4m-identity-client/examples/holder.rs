@@ -9,6 +9,8 @@
 //! {"cmd":"prepareDevice"}                                       -> {"deviceString",…}
 //! {"cmd":"create","name":"Home","kind":"desktop-app"}           -> {"did","scid","seq","words","record"}
 //! {"cmd":"open","did":"did:scid:…","store":"http://…"}           -> {"link","offerString","offerId"}
+//! {"cmd":"openBot","did":"…","store":"http://…","can":["read","write"],"expires":1900000000}
+//!                                                    -> {"link","offerString","offerId"}
 //! {"cmd":"scan","did":"…","store":"http://…","device":"coasys:device:1:…"} -> {"offerId"}
 //! {"cmd":"waitClaim"}                                -> {"matchCode","deviceKey","hint","canKeepMaster"}
 //! {"cmd":"confirm","name":"Desk","kind":"desktop-app","keepMaster":true}
@@ -71,7 +73,7 @@ use ad4m_identity_client::{
 };
 use ad4m_identity_core::link::{DeviceString, OfferKind};
 use ad4m_identity_core::record::{DeviceEntry, DeviceKind, HoldsMaster};
-use ad4m_identity_core::{words, X25519Secret};
+use ad4m_identity_core::{words, BotScope, X25519Secret};
 use ad4m_ldk::identity::DeviceRequestBody;
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -417,6 +419,39 @@ async fn main() {
                         "offerId": flow.offer_id(),
                     });
                     link = Some((flow, DeviceKind::Server));
+                    claimed = None;
+                    Ok(answer)
+                }
+                .await
+            }
+            Some("openBot") => {
+                async {
+                    let did = field(&command, "did")?;
+                    let store = field(&command, "store")?;
+                    let can = command["can"]
+                        .as_array()
+                        .ok_or("missing can")?
+                        .iter()
+                        .map(|a| a.as_str().map(str::to_string).ok_or("can holds strings"))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let expires = command["expires"].as_u64().ok_or("missing expires")?;
+                    let flow = LinkFlow::open_bot(
+                        &executor,
+                        &vault,
+                        did,
+                        BotScope { can, expires },
+                        store,
+                        &CLOCK,
+                        &RANDOM,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                    let answer = json!({
+                        "link": flow.link(),
+                        "offerString": flow.offer_string(),
+                        "offerId": flow.offer_id(),
+                    });
+                    link = Some((flow, DeviceKind::Bot));
                     claimed = None;
                     Ok(answer)
                 }

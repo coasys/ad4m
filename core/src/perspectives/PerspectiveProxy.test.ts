@@ -18,6 +18,7 @@ describe('QuerySubscriptionProxy', () => {
       subscribeQuery,
       onQueryUpdate: () => () => {},
       onReconnect: () => () => {},
+      onSubscriptionEnded: () => () => {},
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     } as any;
     return { client };
@@ -74,6 +75,7 @@ describe('QuerySubscriptionProxy', () => {
       subscribeQuery,
       onQueryUpdate: () => () => {},
       onReconnect: (cb: () => void) => { reconnects.add(cb); return () => reconnects.delete(cb); },
+      onSubscriptionEnded: () => () => {},
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     } as any;
     const errors = jest.spyOn(console, 'error').mockImplementation(() => {});

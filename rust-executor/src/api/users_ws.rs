@@ -100,11 +100,15 @@ async fn create_user(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
 
     let email = body.email.trim().to_lowercase();
 
-    if !um::is_multi_user_enabled() {
+    if let Err(error) = crate::config::may_add_managed_user(
+        crate::config::UserKind::Person,
+        crate::config::custody_channel_on(),
+        um::is_multi_user_enabled(),
+    ) {
         return Ok(serde_json::json!({
             "did": "",
             "success": false,
-            "error": "Multi-user mode is not enabled"
+            "error": error
         }));
     }
 

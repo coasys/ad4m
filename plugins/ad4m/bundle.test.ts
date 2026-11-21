@@ -142,6 +142,7 @@ describe("shipped bundle", () => {
     const client = {
       onQueryUpdate: vi.fn(() => () => {}),
       onReconnect: vi.fn(() => () => {}),
+      onSubscriptionEnded: vi.fn(() => () => {}),
       disposeQuerySubscription: vi.fn(() => Promise.resolve(true)),
       subscribeQuery: vi.fn(() => Promise.reject(new Error("SPARQL path"))),
       modelSubscribe: vi.fn(() =>

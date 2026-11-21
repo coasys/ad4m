@@ -31,6 +31,10 @@ pub struct RequestContext {
     /// per socket. Live queries belong to it and end when it closes. `None`
     /// outside the WS RPC socket (REST, `/api/v1/ws/events`, internal code).
     pub connection_id: Option<String>,
+    /// Why the caller makes this call, from the request's `meta.reason` (cut to
+    /// `bots::REASON_MAX` characters). A bot gives one with every write; its activity log
+    /// keeps it (`crate::bots`).
+    pub reason: Option<String>,
     /// The address the WS RPC connection comes from, as the listener saw it (a proxy's own
     /// address behind a reverse proxy). `None` outside the WS RPC socket, or on a server that
     /// keeps no connect info.
@@ -59,6 +63,7 @@ impl RequestContext {
             cancel_token: None,
             session: std::sync::Arc::new(session),
             connection_id: None,
+            reason: None,
             peer: None,
             query_slots: None,
         })
@@ -97,6 +102,7 @@ impl RequestContext {
             cancel_token: None,
             session: std::sync::Arc::new(session),
             connection_id: None,
+            reason: None,
             peer: None,
             query_slots: None,
         }
@@ -136,6 +142,12 @@ impl RequestContext {
     /// The same context, arriving on the RPC connection `id`.
     pub(crate) fn on_connection(mut self, id: &str) -> RequestContext {
         self.connection_id = Some(id.to_string());
+        self
+    }
+
+    /// The same context, with `reason` as the call's `meta.reason`.
+    pub(crate) fn with_reason(mut self, reason: &str) -> RequestContext {
+        self.reason = Some(reason.to_string());
         self
     }
 }
@@ -583,6 +595,7 @@ impl TryFrom<LinkExpressionInput> for DecoratedLinkExpression {
             status: input.status,
             verdict: None,
             person: None,
+            by_bot: None,
         })
     }
 }
@@ -1217,6 +1230,18 @@ pub struct QuerySubscriptionUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "any")]
     pub result: Option<serde_json::Value>,
+}
+
+/// `subscription-ended`: the executor ended these live query subscriptions on the
+/// connection that opened them (its grant no longer admits the read — e.g.
+/// `not-authorized`, `bot-paused`, `bot-expired`). Never a content event: the withheld
+/// update is not sent. The client resubscribes for a fresh baseline.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionEndedEvent {
+    pub subscription_ids: Vec<String>,
+    pub perspective_uuid: String,
+    pub reason: String,
 }
 
 /// The socket dropped updates, maybe for any of its live queries: every

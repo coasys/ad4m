@@ -441,7 +441,8 @@ fn settle_pool(
     });
 
     // One voter per participant (`Vote::voter`): the person the reader resolved the signer
-    // to, else the DID. Two devices of one person across two atoms are one voter here, as
+    // to, else the DID — and a bot's link resolves to the bot's own DID, never its owner.
+    // Two devices of one person across two atoms are one voter here, as
     // they are inside one atom; role eligibility was decided per DID before this.
     let mut voters: Vec<String> = Vec::new();
     let mut atom_uris: Vec<String> = Vec::new();
