@@ -2,13 +2,14 @@
 //! are real; the other handler modules register nothing, so their methods answer 404
 //! (method not found) in the web executor.
 //!
-//! Not here: `auth` and `ws_rpc` (the axum socket; S10 splits its frame loop out),
-//! `internal` and `openai_compat` (HTTP only).
+//! Not here: `auth` and `ws_rpc` (the axum socket; its connection loop is `rpc_session`, which
+//! the Worker feeds from `postMessage`), `internal` and `openai_compat` (HTTP only).
 
 pub mod errors;
 pub mod event_interest;
 pub mod events_ws;
 pub mod guards;
+pub mod rpc_session;
 pub mod types;
 
 // ── WS-native handler modules ──
@@ -35,10 +36,24 @@ no_handlers!(
     config_ws,
     expressions_ws,
     hosting_ws,
-    identity_ws,
     languages_ws,
     neighbourhoods_ws,
     runtime_ws,
     sfu_ws,
     users_ws,
 );
+
+/// `identity.*` is outside ring 2: no method is registered, so the frame check that
+/// `rpc_session` runs before dispatch has nothing to refuse.
+pub mod identity_ws {
+    pub fn register_ws_handlers(_map: &mut super::ws_handler::HandlerMap) {}
+
+    /// Native: an `identity.publish` / `identity.cosignIncept` frame that names a member
+    /// twice. Those methods answer 404 here, so there is never a refusal.
+    pub(crate) fn duplicate_member_refusal(
+        _method: &str,
+        _frame: &str,
+    ) -> Option<super::ws_handler::WsRpcError> {
+        None
+    }
+}

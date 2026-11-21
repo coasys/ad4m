@@ -9,7 +9,7 @@ wasm32-unknown-unknown`, which also gives the Wasm size.
   export that reaches less proves less.
 - `tests/`: wasm-bindgen tests of the executor as a whole crate, under Node (`check.sh`
   runs them): SQLite and Oxigraph open in memory, the handler map serves only `agent.*` and
-  `perspective.*`, Prolog reads answer empty matches, `rt::fs` keeps files in memory, the
+  `perspective.*`, Prolog reads answer empty matches, `rt::fs` keeps files in memory, `rt::JoinSet` reaps and aborts its tasks, the
   timers (`rt::time`) keep firing after many cancelled sleeps. The executor's own `--lib` tests do
   not build for wasm32 (its ring-2 test modules use native-only helpers), so tests that need
   the real crate on wasm32 go here.

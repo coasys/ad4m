@@ -4,6 +4,7 @@ pub mod boot;
 pub mod fs;
 pub mod rt;
 pub mod scryer_types;
+pub mod session;
 pub mod time;
 // `prolog_service/` is `crate::prolog_service`, declared by path in `lib_wasm.rs`.
 pub mod stubs;

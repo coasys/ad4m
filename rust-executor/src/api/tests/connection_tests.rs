@@ -13,9 +13,9 @@ use crate::agent::capabilities::{get_user_default_capabilities, ALL_CAPABILITY};
 use crate::agent::session::{Principal, Session};
 use crate::agent::AgentContext;
 use crate::api::events_ws::build_event_stream;
+use crate::api::rpc_session::{serve, Connection};
 use crate::api::tests::support::{admin_ctx, registered_perspective};
 use crate::api::ws_handler::{build_handler_map, HandlerMap};
-use crate::api::ws_rpc::{serve, Connection};
 use crate::events::{Audience, Event, Topic};
 use crate::pubsub::get_global_pubsub;
 use crate::types::RequestContext;
@@ -682,7 +682,7 @@ async fn closing_the_socket_cancels_a_live_query_still_opening() {
 
 #[tokio::test]
 async fn a_connection_runs_a_bounded_number_of_live_query_opens_at_once() {
-    use crate::api::ws_rpc::MAX_OPENING_LIVE_QUERIES;
+    use crate::api::rpc_session::MAX_OPENING_LIVE_QUERIES;
     let (started, mut starts) = mpsc::unbounded_channel();
     let (dropped, _drops) = mpsc::unbounded_channel();
     let socket = Socket::open_with_handlers(hanging_subscribe(started, dropped)).await;
@@ -713,7 +713,7 @@ async fn a_connection_runs_a_bounded_number_of_live_query_opens_at_once() {
 /// wait, so a client that gave up on it and disposed its id leaves nothing behind.
 #[tokio::test]
 async fn a_live_query_open_cancelled_while_it_waits_never_starts() {
-    use crate::api::ws_rpc::MAX_OPENING_LIVE_QUERIES;
+    use crate::api::rpc_session::MAX_OPENING_LIVE_QUERIES;
     let (started, mut starts) = mpsc::unbounded_channel();
     let (dropped, _drops) = mpsc::unbounded_channel();
     let mut socket = Socket::open_with_handlers(hanging_subscribe(started, dropped)).await;

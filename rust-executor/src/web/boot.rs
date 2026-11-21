@@ -1,4 +1,5 @@
-//! The web executor's start and its one way in: [`boot`], [`dispatch`], [`on_event`].
+//! The web executor's start, [`boot`], and its one-frame way in for tests, [`dispatch`]. The
+//! connections a page opens (the RPC socket's loop, events per connection) are `web::session`.
 //!
 //! `boot` does, in memory, the part of native `run()` (`lib_native.rs`) that ring 2 needs:
 //! the config, the database, the wallet, the agent service and the handler map. Nothing is
@@ -38,7 +39,7 @@ pub struct BootConfig {
 }
 
 struct Core {
-    handlers: HandlerMap,
+    handlers: Arc<HandlerMap>,
     operator: Arc<RequestContext>,
 }
 
@@ -79,17 +80,26 @@ pub fn boot(config_json: &str) -> Result<(), String> {
         .map_err(|e| format!("operator session: {e}"))?;
     debug_assert!(operator.is_operator());
     let core = Core {
-        handlers: build_handler_map(),
+        handlers: Arc::new(build_handler_map()),
         operator: Arc::new(operator),
     };
     CORE.with(|slot| *slot.borrow_mut() = Some(Rc::new(core)));
     Ok(())
 }
 
+/// The handler map, once booted: every connection dispatches through it.
+pub(crate) fn handlers() -> Option<Arc<HandlerMap>> {
+    CORE.with(|core| core.borrow().as_ref().map(|core| core.handlers.clone()))
+}
+
 /// One request frame in, its reply frame out, as on the RPC socket (`api/ws_rpc.rs`):
 /// `{"id", "type", "params"}` gives `{"id", "result"}` or `{"id", "error": {"code",
 /// "message", "data"?}}`. Never fails: a frame it cannot read, or a call before `boot`,
 /// answers with an error frame.
+///
+/// One frame, outside any connection: no `events.watch`, no `request.cancel`, and its context
+/// has no `connection_id`, so a live query opened here is bound to nothing. The smoke test's
+/// entry; a page uses `web::session::connect`.
 pub async fn dispatch(frame_json: String) -> String {
     let frame: Value = match serde_json::from_str(&frame_json) {
         Ok(frame) => frame,
@@ -116,37 +126,4 @@ pub async fn dispatch(frame_json: String) -> String {
 
 fn error_frame(id: &Value, code: u16, message: &str) -> String {
     json!({ "id": id, "error": { "code": code, "message": message } }).to_string()
-}
-
-/// Calls `callback` with every event the executor publishes, as the socket's event frame
-/// (`{"type": <event>, ...payload}`), from now until the Worker ends. Every event: the
-/// per-session filter (`events.watch`, audiences, live queries of one connection) is the
-/// transport's (S10).
-pub fn on_event(callback: impl Fn(String) + 'static) {
-    let mut events = crate::pubsub::get_global_pubsub_sync().subscribe_events();
-    wasm_bindgen_futures::spawn_local(async move {
-        use tokio::sync::broadcast::error::RecvError;
-        loop {
-            match events.recv().await {
-                Ok(event) => callback(event_frame(&event)),
-                Err(RecvError::Lagged(missed)) => {
-                    log::warn!("on_event: {missed} events dropped, the listener was too slow")
-                }
-                Err(RecvError::Closed) => break,
-            }
-        }
-    });
-}
-
-fn event_frame(event: &crate::events::Event) -> String {
-    let mut frame = match &event.payload {
-        Value::Object(fields) => fields.clone(),
-        other => {
-            let mut fields = serde_json::Map::new();
-            fields.insert("payload".to_string(), other.clone());
-            fields
-        }
-    };
-    frame.insert("type".to_string(), json!(event.topic.as_str()));
-    Value::Object(frame).to_string()
 }

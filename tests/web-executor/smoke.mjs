@@ -89,7 +89,17 @@ let passed = 0;
 const t0 = performance.now();
 core.boot('{}', process.env.SMOKE_LOG || 'error');
 console.log(`boot ${ms(performance.now() - t0)}`);
-core.on_event((frame) => events.push(JSON.parse(frame)));
+// The events: one connection of the core's own loop (`connect`), watching the three kinds the
+// calls cause. The calls themselves go through `dispatch`, one frame each.
+const watch = { 'agent-status-changed': null, 'perspective-added': null, 'link-added': null };
+await new Promise((resolve) => {
+  const conn = core.connect((frame) => {
+    const msg = JSON.parse(frame);
+    if (msg.id === 'watch') resolve();
+    else if (msg.type) events.push(msg);
+  }, () => {});
+  conn.send(JSON.stringify({ id: 'watch', type: 'events.watch', params: watch }));
+});
 for (const [type, params, check] of steps) {
   const start = performance.now();
   try {
@@ -114,6 +124,7 @@ if (idle > 0) {
   const delays = [...timers.byDelay].sort((a, b) => a[0] - b[0]).map(([d, n]) => `${n}×${d}ms`).join(', ');
   console.log(`idle ${idle} ms with ${perspectives} perspective(s): ${timers.count} timer wake-ups (${delays || 'none'})`);
 }
+await new Promise((r) => realSetTimeout(r, 50));
 console.log(`events: ${events.length} (${[...new Set(events.map((e) => e.type))].join(', ')})`);
 console.log(`${passed}/6 ok`);
 process.exit(passed === 6 ? 0 : 1);
