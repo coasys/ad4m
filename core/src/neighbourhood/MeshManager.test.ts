@@ -432,6 +432,42 @@ afterEach(async () => {
 
 const CALL_ID = "call:rec-abc"
 
+// ── Lifecycle ───────────────────────────────────────────────────────
+
+describe("a mesh destroyed while it joins", () => {
+    it("publishes nothing and starts no sweep or network watch once the channel listens", async () => {
+        jest.useFakeTimers()
+        try {
+            let listen!: () => void
+            const publish = jest.fn()
+            const onNetworkChange = jest.fn(() => () => {})
+            const mesh = new MeshManager({
+                channel: {
+                    publish,
+                    onMessage: () => () => {},
+                    listening: () => new Promise<void>((resolve) => { listen = resolve }),
+                },
+                callId: CALL_ID,
+                selfId: "did:alice",
+                onNetworkChange,
+                sweepMs: 1_000,
+                createPeerConnection: () => new FakePeerConnection() as unknown as RTCPeerConnection,
+            })
+
+            const joining = mesh.join(stream())
+            await mesh.destroy()
+            listen()
+            await joining
+
+            expect(publish).not.toHaveBeenCalled()
+            expect(onNetworkChange).not.toHaveBeenCalled()
+            expect(jest.getTimerCount()).toBe(0)
+        } finally {
+            jest.useRealTimers()
+        }
+    })
+})
+
 // ── Protocol ────────────────────────────────────────────────────────
 
 describe("parseCallMessage", () => {
@@ -479,6 +515,11 @@ describe("parseCallMessage", () => {
             binary: false,
         }
         expect(parseCallMessage(data)).toEqual(data)
+    })
+
+    it("accepts a beat", () => {
+        const beat = { v: CALL_PROTOCOL_VERSION, call: "room:x", kind: "beat" as const }
+        expect(parseCallMessage({ ...beat, to: "*" })).toEqual(beat)
     })
 
     it("coerces missing binary flag to false", () => {
@@ -2280,6 +2321,58 @@ describe("what a call is told about its own connections", () => {
 })
 
 // ── Signalling before the roster ────────────────────────────────────
+
+describe("beats", () => {
+    let bus: InMemoryBus
+
+    beforeEach(() => {
+        bus = new InMemoryBus()
+    })
+
+    it("sends a beat to every peer, which reports it from its sender whether the roster lists it or not", async () => {
+        const alice = await makeMesh(bus, "did:alice#laptop", CALL_ID)
+        const bob = await makeMesh(bus, "did:bob#phone", CALL_ID)
+        const heard: string[] = []
+        bob.mesh.on("beat", (peer: string) => heard.push(peer))
+
+        alice.mesh.beat()
+        await settle()
+        expect(alice.sent[alice.sent.length - 1]).toEqual({ v: CALL_PROTOCOL_VERSION, call: CALL_ID, to: "*", kind: "beat" })
+        expect(heard).toEqual(["did:alice#laptop"])
+
+        bob.mesh.setRoster(["did:alice#laptop", "did:bob#phone"])
+        alice.mesh.beat()
+        await settle()
+        expect(heard).toEqual(["did:alice#laptop", "did:alice#laptop"])
+        expect(bob.errors).toEqual([])
+    })
+
+    it("holds no beat for a peer the roster does not list: it is not signalling", async () => {
+        const alice = await makeMesh(bus, "did:alice", CALL_ID)
+        const bob = await makeMesh(bus, "did:bob", CALL_ID)
+        for (let n = 0; n < 5; n += 1) alice.mesh.beat()
+        await settle()
+        expect((bob.mesh as unknown as { pending: Map<string, unknown[]> }).pending.size).toBe(0)
+    })
+
+    it("reports no beat of another call", async () => {
+        const alice = await makeMesh(bus, "did:alice", "call:other")
+        const bob = await makeMesh(bus, "did:bob", CALL_ID)
+        const heard: string[] = []
+        bob.mesh.on("beat", (peer: string) => heard.push(peer))
+        alice.mesh.beat()
+        await settle()
+        expect(heard).toEqual([])
+    })
+
+    it("sends no beat once it has left", async () => {
+        const alice = await makeMesh(bus, "did:alice", CALL_ID)
+        await alice.mesh.leave()
+        const sent = alice.sent.length
+        alice.mesh.beat()
+        expect(alice.sent.length).toBe(sent)
+    })
+})
 
 describe("signalling that arrives before the roster", () => {
     /**

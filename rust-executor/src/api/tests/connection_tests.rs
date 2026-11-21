@@ -337,6 +337,7 @@ async fn a_closed_socket_ends_its_subscriptions_without_waiting_for_calls() {
                     let (id, _, _) = crate::perspectives::get_perspective(&uuid)
                         .unwrap()
                         .subscribe_and_query(
+                            &crate::perspectives::sparql_store::EvalStop::none(),
                             QUERY.into(),
                             uuid::Uuid::new_v4().to_string(),
                             ctx.connection_id.clone().unwrap(),

@@ -77,4 +77,9 @@ export interface Snapshot {
   recoveries: number;
   /** The remote address (`ip:port`) of each connection's selected candidate pair: where media goes. */
   selectedRemotes: string[];
+  /**
+   * The longest this participant's process stood still in the last 2 s, the
+   * current pause included: meanwhile it sent no tone and took in no audio.
+   */
+  pausedMs: number;
 }

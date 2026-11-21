@@ -70,7 +70,7 @@ describe("NeighbourhoodClient SFU calls", () => {
   it("names the device on join and the participant on every call about the session", async () => {
     const client = new NeighbourhoodClient("http://localhost:0", undefined, api);
     FakeWebSocket.sent = [];
-    await client.sfuCallJoin(url, "r", "{}", "laptop");
+    await client.sfuCallJoin(url, "r", "{}", "laptop", "K1");
     await client.sfuCallLeave(url, "r", "P1");
     await client.sfuCallAnswerServerOffer(url, "r", "P1", "{}");
     await client.sfuAddIceCandidate(url, "r", "P1", "candidate:1");
@@ -80,7 +80,7 @@ describe("NeighbourhoodClient SFU calls", () => {
 
     const sfu = FakeWebSocket.sent.filter((m) => m.type.startsWith("sfu."));
     expect(sfu).toEqual([
-      { type: "sfu.callJoin", params: { neighbourhoodUrl: url, roomName: "r", sdpOffer: "{}", deviceId: "laptop" } },
+      { type: "sfu.callJoin", params: { neighbourhoodUrl: url, roomName: "r", sdpOffer: "{}", deviceId: "laptop", sessionKey: "K1" } },
       { type: "sfu.callLeave", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1" } },
       { type: "sfu.callAnswerServerOffer", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1", sdpAnswer: "{}" } },
       { type: "sfu.addIceCandidate", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1", candidate: "candidate:1" } },

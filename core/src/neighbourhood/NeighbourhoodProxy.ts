@@ -78,12 +78,17 @@ export class NeighbourhoodProxy {
         return await this.#client.sendSignalU(this.#pID, remoteAgentDid, payload)
     }
 
-    /** Broadcast a signed signal to all agents in the neighbourhood. */
+    /**
+     * Broadcast a signed signal to all agents in the neighbourhood. The
+     * sender's own agent gets it too (its other clients hear it), so a handler
+     * that must not act on its own messages drops them by author or device;
+     * `loopback` adds a second copy for the sender's executor.
+     */
     async sendBroadcast(payload: Perspective, loopback: boolean = false): Promise<boolean> {
         return await this.#client.sendBroadcast(this.#pID, payload, loopback)
     }
 
-    /** Broadcast an unsigned signal to all agents in the neighbourhood. */
+    /** Broadcast an unsigned signal to all agents in the neighbourhood; delivered as {@link sendBroadcast}. */
     async sendBroadcastU(payload: PerspectiveUnsignedInput, loopback: boolean = false): Promise<boolean> {
         return await this.#client.sendBroadcastU(this.#pID, payload, loopback)
     }
@@ -205,8 +210,9 @@ export class NeighbourhoodProxy {
         roomName: string,
         sdpOffer: string,
         deviceId: string,
+        sessionKey: string,
     ): Promise<CallSessionInfo> {
-        return await this.#client.sfuCallJoin(neighbourhoodUrl, roomName, sdpOffer, deviceId)
+        return await this.#client.sfuCallJoin(neighbourhoodUrl, roomName, sdpOffer, deviceId, sessionKey)
     }
 
     /** Leave the session `participantId` (the join's). */

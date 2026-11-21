@@ -5,18 +5,17 @@
 //! Split into their own file (from the pure unit tests in `interpretation.rs`) so a
 //! reviewer can read *just this* to understand what the feature does end-to-end.
 //!
-//! They talk to an OpenAI-compatible endpoint (Ollama), NOT the embedded CUDA
-//! LLM — so no GPU build is needed, only a reachable model. Endpoint + model are
+//! They talk to staging's llama-server (OpenAI-shaped `/v1`), NOT an embedded
+//! CUDA LLM — so no GPU build is needed, only that server. Endpoint + model are
 //! env-overridable (`INTERPRETATION_E2E_BASE_URL` / `INTERPRETATION_E2E_MODEL` /
-//! `INTERPRETATION_E2E_API_KEY`); defaults hit Ollama at `localhost:11434` with
-//! `gemma3:12b` (fits the GPU, ~10s for the suite, Flux's summary model). On CI
-//! (self-hosted runner = Marvin) that endpoint is local; from a dev box, tunnel
-//! it (`ssh -L 11434:localhost:11434 marvin`).
+//! `INTERPRETATION_E2E_ENDPOINT_KIND` / `INTERPRETATION_E2E_API_KEY`); defaults
+//! are `http://127.0.0.1:12460/v1` and `qwen3.8-27b-ud-q4_k_m`. The nightly
+//! `llm-e2e` job points at the same server. It does not start one.
 //!
 //! Gated behind `#[ignore = "llm-e2e"]` so a `cargo test` on a dev box with no
 //! model reachable does not fail on the suite; regular CI skips it too. The
-//! nightly `llm-e2e` workflow on `dev` runs them all against Marvin's local
-//! Ollama.
+//! nightly `llm-e2e` workflow runs them against that llama-server. Embeddings
+//! (`nomic-embed-text`) stay on Ollama at `:11434`.
 //!
 //! Run this suite locally:
 //!   `cargo test --release --lib perspectives::interpretation_e2e -- --ignored
@@ -35,7 +34,7 @@ use super::model_query::types::ModelShape;
 use super::perspective_instance::PerspectiveInstance;
 use crate::types::Link;
 
-// ---- create_subject write path (no LLM — runs without Ollama) ---------------
+// ---- create_subject write path (no LLM call — runs without the server) ------
 
 /// The interpretation write path goes through `create_subject`. This proves the
 /// SDNA fixtures are real subject classes: constructor mints the type flag, the
@@ -135,8 +134,9 @@ async fn e2e_intention_and_belief() {
     );
 }
 
-/// Task-tracking conversation -> only Tasks, with owners. Three assignments in
-/// the transcript should yield 2–4 tasks (LLM may merge/split slightly).
+/// Task-tracking conversation -> only Tasks, with owners. Two explicit
+/// assignments plus James's acceptance-and-extension should yield 2–4 tasks
+/// (LLM may merge/split slightly).
 #[tokio::test]
 #[ignore = "llm-e2e"]
 async fn e2e_task_tracking_counts() {
@@ -152,8 +152,8 @@ async fn e2e_task_tracking_counts() {
                 "Yes, I'll wrap up the call module and port the transcription over.",
             ),
             (
-                "Josh",
-                "I'll set up the wind-tunnel Docker scenario for the agent test.",
+                "Nico",
+                "Josh, can you set up the wind-tunnel Docker scenario for the agent test?",
             ),
         ],
         3,
@@ -458,8 +458,13 @@ async fn e2e_does_not_recreate_existing_task() {
         ),
         // …and introduces a brand-new unrelated task. Deliberately in a
         // different topic area so the LLM cannot plausibly merge them into
-        // a single upsert on the seeded base.
-        ("Josh", "I'll update the CI documentation this evening."),
+        // a single upsert on the seeded base, and phrased as an assignment
+        // to Josh (first-person "I'll …" utterances are Intentions per the
+        // Task class hint, not Tasks).
+        (
+            "Nico",
+            "Josh, can you update the CI documentation this evening?",
+        ),
     ];
 
     let mut last: Option<(
@@ -1338,14 +1343,13 @@ async fn e2e_flux_grouping_scoped_incremental_lifecycle() {
 /// wording, then feeds a transcript that reintroduces the SAME task under
 /// different words + adds a genuinely new one. The default (`NormalizedString`)
 /// strategy would let the reworded duplicate through; the semantic strategy
-/// (via `nomic-embed-text` on the same Ollama base URL as the LLM) must catch
-/// it, so no fresh instance carries a title semantically equal to the seed.
+/// (via `nomic-embed-text` on Ollama, not on the llama-server the LLM uses) must
+/// catch it, so no fresh instance carries a title semantically equal to the seed.
 ///
-/// Requires `nomic-embed-text` to be pulled on the embeddings endpoint
-/// (`ollama pull nomic-embed-text` on Marvin). Base URL/model overridable via
-/// `INTERPRETATION_EMBED_BASE_URL` / `INTERPRETATION_EMBED_MODEL` (defaults
-/// hit `http://localhost:11434/v1` + `nomic-embed-text`, matching the LLM
-/// tunnel).
+/// Requires `nomic-embed-text` on the embeddings endpoint (Ollama at `:11434`).
+/// Base URL/model overridable via `INTERPRETATION_EMBED_BASE_URL` /
+/// `INTERPRETATION_EMBED_MODEL` (defaults `http://127.0.0.1:11434/v1` +
+/// `nomic-embed-text`).
 #[tokio::test]
 #[ignore = "llm-e2e"]
 async fn e2e_semantic_dedup_drops_reworded_duplicate() {
@@ -1353,7 +1357,7 @@ async fn e2e_semantic_dedup_drops_reworded_duplicate() {
 
     // Retry wrapper matches the pattern already used in this file for other
     // real-LLM tests (see `e2e_flux_grouping_creates_new_subgroup_on_topic_shift`
-    // and `e2e_flux_grouping_scoped_incremental_lifecycle`). Gemma3-12B is
+    // and `e2e_flux_grouping_scoped_incremental_lifecycle`). The model is
     // non-deterministic on the "extract two distinct tasks from two short
     // transcript lines" prompt: on the failing attempt the model emitted
     // zero placements ("e2e placements: 0 instance(s)"), so the new CI-docs
@@ -1365,8 +1369,8 @@ async fn e2e_semantic_dedup_drops_reworded_duplicate() {
     let mut last_err: Option<String> = None;
     for i in 1..=attempts {
         let (mut perspective, shapes, ctx) = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
-        // Semantic dedup embeds identity strings through AIService's own (local,
-        // CPU) embedding model — register it before the run.
+        // Semantic dedup embeds identity strings through AIService's embedding model
+        // (on INTERPRETATION_EMBED_BASE_URL when set) — register it before the run.
         super::interpretation_test_support::register_interpretation_embedding_model().await;
         let task_shape = &shapes[0];
 
@@ -1390,7 +1394,10 @@ async fn e2e_semantic_dedup_drops_reworded_duplicate() {
                     "Nico",
                     "Reminder: James still needs to wrap up the WebRTC calling module for the app.",
                 ),
-                ("Josh", "I'll update the CI documentation this evening."),
+                (
+                    "Nico",
+                    "Josh, can you update the CI documentation this evening?",
+                ),
             ],
             &ctx,
             &DedupStrategy::semantic_from_env(0.75),
@@ -2345,7 +2352,7 @@ async fn auto_processor_election_only_online_participants_process() {
 }
 
 /// Deterministic proof that the `DedupStrategy::Semantic` path — AIService's
-/// local Bert embeddings + cosine threshold — actually drops a paraphrased
+/// endpoint embeddings + cosine threshold — actually drops a paraphrased
 /// duplicate while keeping an unrelated item. The LLM-driven e2e above only
 /// exercises this when the model happens to re-propose the seeded item; this
 /// test removes that non-determinism by feeding hand-crafted proposals straight
@@ -2371,6 +2378,7 @@ async fn e2e_semantic_dedup_pure_drops_paraphrase_keeps_distinct() {
             title: "Finish the WebRTC call module".to_string(),
             class: "Task".to_string(),
             properties: BTreeMap::new(),
+            updated_at: String::new(),
         }],
     )]
     .into_iter()
@@ -2391,14 +2399,14 @@ async fn e2e_semantic_dedup_pure_drops_paraphrase_keeps_distinct() {
         mk("Update the CI documentation"),       // unrelated → keep
     ];
 
+    // The registered name follows `INTERPRETATION_EMBED_MODEL` when CI sets it
+    // (the remote tag, `nomic-embed-text`). A hardcoded `interpretation-embed`
+    // misses that model and the path compares strings, which keeps a paraphrase.
     let kept = filter_already_present_with_strategy(
         proposed,
         &existing,
         &identity_props,
-        &DedupStrategy::Semantic {
-            model: "interpretation-embed".to_string(),
-            threshold: 0.6,
-        },
+        &DedupStrategy::semantic_from_env(0.6),
     )
     .await
     .expect("semantic dedup");
@@ -2420,7 +2428,7 @@ async fn e2e_semantic_dedup_pure_drops_paraphrase_keeps_distinct() {
 /// Full `run_interpretation` e2e that actually exercises the parent-scope
 /// plumbing end-to-end (prompt build → LLM → dedup → write), not just the
 /// isolated `existing_instance_context` helper. One existing Task lives under
-/// parent B. A transcript restates it. Semantic dedup (Bert) removes wording
+/// parent B. A transcript restates it. Semantic dedup (embeddings) removes wording
 /// sensitivity so the assertions turn purely on *scope*:
 ///   - scoped to parent B (contains the seed): the restatement is deduped — no
 ///     fresh `ext/` task is minted (robust: holds whether or not the LLM
@@ -2467,10 +2475,9 @@ async fn e2e_run_interpretation_honours_parent_scope() {
         "Reminder for the team: we still need to provision the staging database — it's blocking QA."
             .to_string(),
     )];
-    let semantic = DedupStrategy::Semantic {
-        model: "interpretation-embed".to_string(),
-        threshold: 0.6,
-    };
+    // Same registered name as `register_interpretation_embedding_model`:
+    // `INTERPRETATION_EMBED_MODEL` when set, else `interpretation-embed`.
+    let semantic = DedupStrategy::semantic_from_env(0.6);
     let in_scope = Scope::Raw {
         id: "soa://parent/b".into(),
         predicate: "ns://contains".into(),

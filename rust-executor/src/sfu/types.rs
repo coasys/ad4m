@@ -192,6 +192,8 @@ pub struct SfuPipeRenegotiationOffer {
     pub room_id: String,
     /// JSON-encoded `RTCSessionDescriptionInit`.
     pub sdp_offer: String,
+    /// The session each new m-line carries, by this node's ids.
+    pub track_mapping: Vec<TrackMapEntry>,
 }
 
 /// Internal payload: the SFU event loop emits an SDP answer for a
@@ -237,8 +239,10 @@ pub struct SfuMigrateEvent {
 pub struct SfuRoomRoster {
     pub neighbourhood_url: String,
     pub room_name: String,
-    /// The room's sessions on this node, sorted by DID, then participant id.
-    /// An agent in the call from two devices is listed twice.
+    /// The room's sessions, sorted by DID, then participant id: this node's,
+    /// and those the other cascade nodes in the room announced, whose ids
+    /// name their node (`P3@did:key:...`). An agent in the call from two
+    /// devices is listed twice.
     pub participants: Vec<SfuRosterParticipant>,
 }
 

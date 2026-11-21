@@ -354,6 +354,11 @@ function finishRestoring(id: string): void {
   if (!_parkedSubscriptions.has(id)) _heldSeenMessages.delete(id);
 }
 
+/** A parked or restoring subscription saved under `id`. */
+function heldSubscription(id: string): WakerSubscription | undefined {
+  return _restoringSubscriptions.get(id) ?? _parkedSubscriptions.get(id);
+}
+
 /**
  * Restore the saved subscriptions in their saved order
  * ({@link restoreSavedSubscription}). Each one is held, with its seen set,
@@ -1044,6 +1049,11 @@ Notes:
       mentionQuery: data.mention_query ?? data.subscription?.mentionQuery,
       neighbourhood: data.neighbourhood,
     };
+    // A saved subscription re-derived at start keeps what the manager recorded
+    // of its text query: without it, the text query's opening result is taken
+    // as history, and a mention found only through its text while the waker was
+    // down would never wake.
+    if (heldSubscription(subscription.id)?.textHistoryRead) subscription.textHistoryRead = true;
 
     if (!subscription.query) {
       throw new Error(

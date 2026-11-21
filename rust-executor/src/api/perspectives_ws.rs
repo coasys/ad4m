@@ -14,8 +14,10 @@ use crate::perspectives::perspective_instance::{
 };
 use crate::perspectives::{
     add_perspective, get_perspective,
-    perspective_instance::{PerspectiveInstance, SdnaType},
-    remove_perspective, update_perspective_with,
+    perspective_instance::{PerspectiveInstance, RegisterResult, ShapeSummary},
+    remove_perspective,
+    shacl_parser::SHACLShape,
+    update_perspective_with,
     utils::prolog_resolution_to_string,
 };
 use crate::pubsub::mark_credits_dirty;
@@ -130,8 +132,9 @@ pub(crate) async fn get_perspective_with_access(
     Ok(perspective)
 }
 
-/// Refuses a write whose managed agent's account has no credits left. `agent_did` is the
-/// managed agent the request acts as; the main agent pays nothing.
+/// Refuses a request (a perspective write, an AI call) whose managed agent's account has no
+/// credits left. `agent_did` is the managed agent the request acts as; a caller without a
+/// managed agent (the main agent, the operator, an app) pays nothing.
 pub(super) fn check_credits(agent_did: Option<&str>) -> Result<(), WsRpcError> {
     if agent_did.is_none() {
         return Ok(());
@@ -197,12 +200,12 @@ const DEFAULT_LINK_WRITE: f64 = 0.25;
 /// fire-and-forget deduction that logs on `InsufficientCredits` but
 /// doesn't halt the loop. A pass that ends with zero bases used to be
 /// free regardless of how many completions it burned.
-pub(super) struct WsHarnessCreditGate {
+pub(crate) struct WsHarnessCreditGate {
     agent_did: Option<String>,
 }
 
 impl WsHarnessCreditGate {
-    pub(super) fn new(agent_did: Option<String>) -> Self {
+    pub(crate) fn new(agent_did: Option<String>) -> Self {
         Self { agent_did }
     }
 }
@@ -275,10 +278,18 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
         return Ok(serde_json::to_value(handles)?);
     }
 
+    // The guard admitted the caller for holding perspective READ on some pointer; when that
+    // is narrower than `*` — a session scoped to one perspective — the answer narrows to the
+    // pointers it names. `None` is `*`: every perspective, as before.
+    let readable = pointers_covered(&ctx.session.capabilities(), PERSPECTIVE, READ);
     let mut filtered: Vec<PerspectiveHandle> = Vec::new();
     for p in all {
         let handle = p.persisted.lock().await.clone();
-        if can_access_perspective_with_did(ctx.user_did(), &handle) {
+        if can_access_perspective_with_did(ctx.user_did(), &handle)
+            && readable
+                .as_ref()
+                .is_none_or(|allowed| allowed.contains(&handle.uuid))
+        {
             filtered.push(handle);
         }
     }
@@ -303,19 +314,23 @@ async fn get_perspective_handler(
     Ok(serde_json::to_value(handle)?)
 }
 
-async fn get_snapshot(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+async fn get_snapshot(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let perspective = guarded_perspective(&params).await?;
+    let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
     let links = perspective
-        .get_links(&LinkQuery {
-            source: None,
-            target: None,
-            predicate: None,
-            from_date: None,
-            until_date: None,
-            limit: None,
-        })
+        .get_links_stopped(
+            &gate.stop(),
+            &LinkQuery {
+                source: None,
+                target: None,
+                predicate: None,
+                from_date: None,
+                until_date: None,
+                limit: None,
+            },
+        )
         .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        .map_err(query_eval_error_ws)?;
     Ok(serde_json::to_value(crate::types::domain::Perspective {
         links,
     })?)
@@ -327,7 +342,7 @@ async fn publish_snapshot(_params: Value, _ctx: Arc<RequestContext>) -> Result<V
     ))
 }
 
-async fn query_links(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+async fn query_links(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let perspective = guarded_perspective(&params).await?;
 
     let query = LinkQuery {
@@ -346,10 +361,11 @@ async fn query_links(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
             .map(|v| v as i32),
     };
 
+    let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
     let links = perspective
-        .get_links(&query)
+        .get_links_stopped(&gate.stop(), &query)
         .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        .map_err(query_eval_error_ws)?;
     Ok(serde_json::to_value(links)?)
 }
 
@@ -597,8 +613,27 @@ async fn query_prolog(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     Ok(serde_json::to_value(prolog_resolution_to_string(res))?)
 }
 
-/// Server-side timeout for SPARQL queries (seconds).
-const SPARQL_QUERY_TIMEOUT_SECS: u64 = 30;
+/// The wire answer for a stopped evaluation: a cancelled one is 499, the
+/// same as `ws_rpc` gives a raced call; one that hit the query deadline is
+/// 504 and its message says which deadline passed. Other errors are 500.
+fn query_eval_error_ws(e: deno_core::anyhow::Error) -> WsRpcError {
+    let msg = e.to_string();
+    if msg.contains("query cancelled") {
+        WsRpcError {
+            data: None,
+            code: 499,
+            message: "Request cancelled by client".to_string(),
+        }
+    } else if msg.contains("SPARQL deadline") {
+        WsRpcError {
+            data: None,
+            code: 504,
+            message: msg,
+        }
+    } else {
+        WsRpcError::internal(msg)
+    }
+}
 
 /// Timeout for `run_interpretation` — an LLM interpretation pass includes
 /// prompt build + model call + planning + writes. Longer than the SPARQL
@@ -625,60 +660,19 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 
     match engine.as_str() {
         "sparql" => {
-            // Run the synchronous SPARQL query on a blocking thread with a
-            // hard timeout (so the executor doesn't hang indefinitely on
-            // a pathological query) and a soft cancellation token (so the
-            // client can abort with `request.cancel`).
-            //
-            // When `ctx.cancel_token` is present (always true under the
-            // WS dispatcher), we use `sparql_query_cancellable` which
-            // races the eval against `cancel.cancelled()`.  When it's
-            // None (internal callers / tests), fall back to the
-            // historical timeout + spawn_blocking shape.
-            let timeout = Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS);
-            let result = if let Some(cancel) = ctx.cancel_token.clone() {
-                tokio::time::timeout(timeout, perspective.sparql_query_cancellable(query, cancel))
-                    .await
-            } else {
-                let join = tokio::task::spawn_blocking(move || perspective.sparql_query(query));
-                tokio::time::timeout(timeout, async move {
-                    join.await
-                        .map_err(|e| deno_core::anyhow::anyhow!("Task join error: {}", e))?
-                })
+            // One gate per call: the configured query deadline, the
+            // request's cancel (`request.cancel`, or the connection closing
+            // — the call tokens are children of the connection's), one of
+            // the connection's running-query slots, and a stop the eval
+            // itself watches. Dropping the gate stops the eval too, so a
+            // call given up on does not keep its evaluation running.
+            let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
+            match perspective
+                .sparql_query_cancellable(gate.stop(), query)
                 .await
-            };
-
-            match result {
-                Ok(Ok(json)) => Ok(serde_json::to_value(json)?),
-                Ok(Err(e)) => {
-                    // Surface client cancellation as 499 so the dispatcher
-                    // doesn't have to special-case it — same wire shape as
-                    // the racing branch in `ws_rpc::handle_ws`.  Other
-                    // errors (anyhow string, including "query cancelled")
-                    // surface as 500 unless we recognise the cancel marker.
-                    let msg = e.to_string();
-                    if msg.contains("query cancelled") {
-                        Err(WsRpcError {
-                            code: 499,
-                            message: "Request cancelled by client".to_string(),
-                        })
-                    } else {
-                        Err(WsRpcError::internal(msg))
-                    }
-                }
-                Err(_) => {
-                    log::warn!(
-                        "SPARQL query timed out after {}s",
-                        SPARQL_QUERY_TIMEOUT_SECS
-                    );
-                    Err(WsRpcError {
-                        code: 408,
-                        message: format!(
-                            "SPARQL query timed out after {}s",
-                            SPARQL_QUERY_TIMEOUT_SECS
-                        ),
-                    })
-                }
+            {
+                Ok(json) => Ok(serde_json::to_value(json)?),
+                Err(e) => Err(query_eval_error_ws(e)),
             }
         }
         other => Err(WsRpcError::bad_request(format!(
@@ -688,56 +682,25 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     }
 }
 
-async fn add_sdna(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+async fn register_shapes(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: PerspectiveRegisterShapesParams = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     let mut perspective = guarded_perspective(&params).await?;
-    let agent_context = ctx.acts_as();
+    let result = perspective
+        .register_shapes(body.shapes, &ctx.acts_as())
+        .await
+        .map_err(|e| WsRpcError::bad_request(format!("{e:#}")))?;
+    Ok(serde_json::to_value(result)?)
+}
 
-    // Batch mode: entries array present
-    if let Some(entries_val) = params.get("entries") {
-        let entries: Vec<AddSdnaRequest> = serde_json::from_value(entries_val.clone())
-            .map_err(|e| WsRpcError::bad_request(format!("Invalid entries: {}", e)))?;
-
-        let batch: Vec<(String, String, SdnaType, Option<String>)> = entries
-            .into_iter()
-            .map(|entry| {
-                let sdna_type = SdnaType::from_string(&entry.sdna_type)
-                    .map_err(|e| WsRpcError::bad_request(format!("Invalid SDNA type: {}", e)))?;
-                Ok((
-                    entry.name,
-                    entry.sdna_code.unwrap_or_default(),
-                    sdna_type,
-                    entry.shacl_json,
-                ))
-            })
-            .collect::<Result<Vec<_>, WsRpcError>>()?;
-
-        let results = perspective
-            .add_sdna_batch(batch, &agent_context)
-            .await
-            .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-        Ok(serde_json::to_value(results)?)
-    } else {
-        // Single-entry mode (backward compatible)
-        let body: AddSdnaRequest = serde_json::from_value(params.clone())
-            .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-
-        let sdna_type = SdnaType::from_string(&body.sdna_type)
-            .map_err(|e| WsRpcError::bad_request(format!("Invalid SDNA type: {}", e)))?;
-
-        let result = perspective
-            .add_sdna(
-                body.name,
-                body.sdna_code.unwrap_or_default(),
-                sdna_type,
-                body.shacl_json,
-                &agent_context,
-            )
-            .await
-            .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-        Ok(Value::Bool(result))
-    }
+async fn shapes(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: PerspectiveShapesParams = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let perspective = guarded_perspective(&params).await?;
+    let shapes = perspective
+        .shapes(body.names)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::to_value(shapes)?)
 }
 
 async fn execute_commands(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -821,8 +784,10 @@ async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 
     let perspective = guarded_perspective(&params).await?;
 
+    let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
     let opened = perspective
         .subscribe_and_query(
+            &gate.stop(),
             body.query,
             client_subscription_id(body.subscription_id)?,
             connection_id.clone(),
@@ -878,7 +843,7 @@ async fn subscribed(
         if e.downcast_ref::<SubscriptionIdTaken>().is_some() {
             WsRpcError::conflict(e.to_string())
         } else {
-            WsRpcError::internal(e.to_string())
+            query_eval_error_ws(e)
         }
     })?;
     if ctx.cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
@@ -886,6 +851,7 @@ async fn subscribed(
             .dispose_query_subscription(&subscription_id, connection_id)
             .await;
         return Err(WsRpcError {
+            data: None,
             code: 499,
             message: "Request cancelled by client".to_string(),
         });
@@ -1055,7 +1021,7 @@ async fn get_subject_data(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 
 async fn subject_classes_of_handler(
     params: Value,
-    _ctx: Arc<RequestContext>,
+    ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
     // A malformed element cannot be dropped here. The result map omits URIs that
     // matched no class, so a silently discarded input would be indistinguishable
@@ -1075,69 +1041,45 @@ async fn subject_classes_of_handler(
 
     let perspective = guarded_perspective(&params).await?;
 
-    // Classification is synchronous SPARQL plus in-memory containment over every
-    // class × every URI, so it runs on a blocking thread with the same timeout as
-    // the other store-backed queries rather than holding a runtime worker.
-    let result = tokio::time::timeout(
-        Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
-        tokio::task::spawn_blocking(move || perspective.subject_classes_of(&uris)),
-    )
-    .await;
+    // The same gate every query call gets: deadline, cancel, connection
+    // close, one of the connection's running-query slots. Classification is
+    // synchronous SPARQL plus in-memory containment over every class × every
+    // URI, so it runs on a blocking thread under a clone of the gate's stop —
+    // a timeout here now ends the evaluation, not just the wait for it.
+    let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
+    let stop = gate.stop();
+    let result =
+        tokio::task::spawn_blocking(move || perspective.subject_classes_of_stopped(&stop, &uris))
+            .await;
 
     match result {
-        Ok(Ok(Ok(map))) => {
-            serde_json::to_value(map).map_err(|e| WsRpcError::internal(e.to_string()))
-        }
-        Ok(Ok(Err(e))) => Err(WsRpcError::internal(e.to_string())),
-        Ok(Err(e)) => Err(WsRpcError::internal(format!("Task join error: {}", e))),
-        Err(_) => {
-            log::warn!(
-                "Subject classification timed out after {}s",
-                SPARQL_QUERY_TIMEOUT_SECS
-            );
-            Err(WsRpcError {
-                code: 408,
-                message: format!(
-                    "Subject classification timed out after {}s",
-                    SPARQL_QUERY_TIMEOUT_SECS
-                ),
-            })
-        }
+        Ok(Ok(map)) => serde_json::to_value(map).map_err(|e| WsRpcError::internal(e.to_string())),
+        Ok(Err(e)) => Err(query_eval_error_ws(e)),
+        Err(e) => Err(WsRpcError::internal(format!("Task join error: {}", e))),
     }
 }
 
-async fn model_query_handler(
-    params: Value,
-    _ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
+async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let classes = query_classes(&params)?;
     let query_json = params.require_str("query_json")?;
 
     let perspective = guarded_perspective(&params).await?;
 
-    // Run async model query with timeout
-    let result = tokio::time::timeout(
-        Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
-        perspective.model_query_classes(&classes, &query_json),
-    )
-    .await;
-
-    match result {
-        Ok(Ok(json)) => Ok(Value::String(json)),
-        Ok(Err(e)) => Err(WsRpcError::internal(e.to_string())),
-        Err(_) => {
-            log::warn!("Model query timed out after {}s", SPARQL_QUERY_TIMEOUT_SECS);
-            Err(WsRpcError {
-                code: 408,
-                message: format!("Model query timed out after {}s", SPARQL_QUERY_TIMEOUT_SECS),
-            })
-        }
+    // The same gate every query call gets: deadline, cancel, connection
+    // close, one of the connection's running-query slots.
+    let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
+    match perspective
+        .model_query_classes_stopped(&gate.stop(), &classes, &query_json)
+        .await
+    {
+        Ok(json) => Ok(Value::String(json)),
+        Err(e) => Err(query_eval_error_ws(e)),
     }
 }
 
 async fn evaluate_getters_handler(
     params: Value,
-    _ctx: Arc<RequestContext>,
+    ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
     let class_name = params.require_str("class_name")?;
 
@@ -1164,33 +1106,25 @@ async fn evaluate_getters_handler(
 
     let perspective = guarded_perspective(&params).await?;
 
-    // Run synchronous getter evaluation on a blocking thread with timeout
-    // to avoid blocking the async runtime.
-    let result = tokio::time::timeout(
-        Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
-        tokio::task::spawn_blocking(move || {
-            perspective.evaluate_getters(&class_name, &instance_ids, property_names.as_deref())
-        }),
-    )
+    // The same gate every query call gets. The eval runs on a blocking
+    // thread under a clone of its stop, which the gate still owns: a
+    // cancel, the deadline, or this call's future dropped ends the eval.
+    let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
+    let stop = gate.stop();
+    let result = tokio::task::spawn_blocking(move || {
+        perspective.evaluate_getters_stopped(
+            &stop,
+            &class_name,
+            &instance_ids,
+            property_names.as_deref(),
+        )
+    })
     .await;
 
     match result {
-        Ok(Ok(Ok(json))) => Ok(Value::String(json)),
-        Ok(Ok(Err(e))) => Err(WsRpcError::internal(e.to_string())),
-        Ok(Err(e)) => Err(WsRpcError::internal(format!("Task join error: {}", e))),
-        Err(_) => {
-            log::warn!(
-                "Getter evaluation timed out after {}s",
-                SPARQL_QUERY_TIMEOUT_SECS
-            );
-            Err(WsRpcError {
-                code: 408,
-                message: format!(
-                    "Getter evaluation timed out after {}s",
-                    SPARQL_QUERY_TIMEOUT_SECS
-                ),
-            })
-        }
+        Ok(Ok(json)) => Ok(Value::String(json)),
+        Ok(Err(e)) => Err(query_eval_error_ws(e)),
+        Err(e) => Err(WsRpcError::internal(format!("Task join error: {}", e))),
     }
 }
 
@@ -1205,8 +1139,10 @@ async fn model_subscribe_handler(
     let connection_id = connection_id(&ctx)?;
     let perspective = guarded_perspective(&params).await?;
 
+    let gate = crate::perspectives::sparql_store::query_gate(&ctx).await;
     let opened = perspective
         .model_subscribe_and_query(
+            &gate.stop(),
             classes,
             query_json,
             subscription_id,
@@ -1239,8 +1175,7 @@ async fn run_interpretation_handler(
     let class_names = match &body.classes {
         Some(sel) if !sel.is_empty() => sel.clone(),
         _ => perspective
-            .get_subject_classes_from_shacl()
-            .await
+            .class_names()
             .map_err(|e| WsRpcError::internal(e.to_string()))?,
     };
     let mut shapes = Vec::with_capacity(class_names.len());
@@ -1363,9 +1298,19 @@ async fn run_interpretation_handler(
     // `model_query_handler` / `evaluate_getters_handler`, but with a longer
     // budget appropriate for the interpretation pass (see
     // `RUN_INTERPRETATION_TIMEOUT_SECS`).
+    // Same per-slice link as the watcher. A later half that fails has
+    // already committed earlier halves, and this handler only links after
+    // `Ok`. The trailing link below stays, and skips an edge already written.
+    let slice_link = body.mint_scope.as_ref().map(|mint_scope| {
+        crate::perspectives::interpretation::SliceScopeLink {
+            mint_scope,
+            pre_existing: &pre_existing_uris,
+            processor_id: "runInterpretation",
+        }
+    });
     let bases = match tokio::time::timeout(
         Duration::from_secs(RUN_INTERPRETATION_TIMEOUT_SECS),
-        crate::perspectives::interpretation::run_interpretation_observed(
+        crate::perspectives::interpretation::run_interpretation_observed_linked(
             &mut perspective,
             &shapes,
             &transcript,
@@ -1378,6 +1323,7 @@ async fn run_interpretation_handler(
             // pre-scope default that #883 originally added the plumbing for.
             body.existing_scope.as_ref(),
             emit_ctx.as_ref(),
+            slice_link.as_ref(),
         ),
     )
     .await
@@ -1408,6 +1354,7 @@ async fn run_interpretation_handler(
                 .await;
             }
             return Err(WsRpcError {
+                data: None,
                 code: 408,
                 message: format!(
                     "runInterpretation timed out after {}s",
@@ -1420,9 +1367,10 @@ async fn run_interpretation_handler(
     // Mint-scope child links: same rule as AutoProcessor — only freshly
     // created bases get an extra `mintScope.id --predicate--> new_base` edge
     // so upserts of pre-existing instances don't get re-parented into the
-    // caller's scope. Written outside the interpretation batch (the watcher
-    // takes the same approach): if this write fails the base is orphaned,
-    // but a subsequent call will upsert by identity and re-attempt.
+    // caller's scope. Written after the slice commits (the watcher takes
+    // the same approach). A failed link write leaves that base unlinked:
+    // the source is consumed and the next pass's snapshot treats the base
+    // as pre-existing, so nothing retries the link.
     if let Some(mint_scope) = body.mint_scope.as_ref() {
         let created = crate::perspectives::auto_processor::watcher::partition_created(
             &bases,
@@ -1504,8 +1452,7 @@ async fn run_interpretation_with_harness_handler(
     let class_names = match &body.classes {
         Some(sel) if !sel.is_empty() => sel.clone(),
         _ => perspective
-            .get_subject_classes_from_shacl()
-            .await
+            .class_names()
             .map_err(|e| WsRpcError::internal(e.to_string()))?,
     };
     let mut shapes = Vec::with_capacity(class_names.len());
@@ -1628,6 +1575,7 @@ async fn run_interpretation_with_harness_handler(
                 RUN_INTERPRETATION_HARNESS_TIMEOUT_SECS
             );
             return Err(WsRpcError {
+                data: None,
                 code: 408,
                 message: format!(
                     "runInterpretationWithHarness timed out after {}s",
@@ -2082,15 +2030,29 @@ async fn flow_states_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
     Ok(serde_json::to_value(entries)?)
 }
 
+/// Most instances one `perspective.flowFired` call may name: their marks are
+/// read under one database lock.
+pub(crate) const MAX_FLOW_FIRED_INSTANCES: usize = 200;
+
+/// `perspective.flowFired { instances }`: more than
+/// [`MAX_FLOW_FIRED_INSTANCES`] instances → 400.
 async fn flow_fired_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let instance = params.require_str("instance")?;
     let perspective = guarded_perspective(&params).await?;
+    let body: PerspectiveFlowFiredParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
+    if body.instances.len() > MAX_FLOW_FIRED_INSTANCES {
+        return Err(WsRpcError::bad_request(format!(
+            "`instances` holds {} entries; the limit is {}",
+            body.instances.len(),
+            MAX_FLOW_FIRED_INSTANCES
+        )));
+    }
     let agent_did = flow_bookkeeping_agent(&ctx)?;
     let fired =
-        crate::perspectives::flow_instance::replica_state::FlowReplicaState::fired_for_instance(
+        crate::perspectives::flow_instance::replica_state::FlowReplicaState::fired_for_instances(
             &perspective.uuid,
             &agent_did,
-            &instance,
+            &body.instances,
         )
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(serde_json::to_value(fired)?)
@@ -2119,357 +2081,26 @@ async fn mint_flow_receipt_handler(
     }))
 }
 
-// ── SHACL resolution endpoints ──
-//
-// These handlers move SHACL shape resolution from the TypeScript SDK (which paid
-// N×M queryLinks round trips per shape) into the executor, where link reads hit
-// the local SQLite store directly.  A perspective with 26 shapes that previously
-// generated ~261 WS-RPC round trips now resolves in a single call to
-// `perspective.getAllShacl`.
-
-/// Hard cap on the number of shapes `perspective.getAllShacl` will serialise
-/// in a single response. The endpoint returns the entire shape corpus in one
-/// WS message with no pagination — fine for the 26-shape WE dataset that
-/// motivates this PR, but a perspective with a few hundred shapes at ~10
-/// properties each is a multi-MB response inside one WS frame that either
-/// fails at the transport limit or (worse) silently truncates on some
-/// clients. Fail loudly at this ceiling until a paginated variant lands.
-/// See PR #935 review comment r3897752009.
-pub(crate) const MAX_SHACL_SHAPES_PER_RESPONSE: usize = 500;
-
-/// Helper: build a LinkQuery with only `source` and optionally `predicate` set.
-pub(crate) fn shacl_link_query(source: &str, predicate: Option<&str>) -> LinkQuery {
-    LinkQuery {
-        source: Some(source.to_string()),
-        predicate: predicate.map(|p| p.to_string()),
-        ..Default::default()
-    }
-}
-
-/// Simplified link triple returned by SHACL resolution endpoints.
-/// Matches the `{source, predicate, target}` shape that
-/// `SHACLShape.fromLinks()` in the TypeScript SDK expects.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, TS)]
-#[ts(export)]
-pub struct ShaclLinkTriple {
-    pub source: String,
-    pub predicate: String,
-    pub target: String,
-}
-
-/// Extract a SHACL shape name from a `has_shacl` link target.
-///
-/// The `has_shacl` target is a `literal:string:` URL. The TypeScript SDK
-/// writes it as `literal:string:shacl://<Name>` verbatim (via
-/// `Literal.fromUrl(...).toUrl()`), but the SPARQL store canonicalises
-/// every `literal:string:` target through the typed-literal round-trip
-/// — the payload lands as a URL-decoded `xsd:string` and is re-encoded
-/// on read (`storage_term_to_target_string`). That flips the wire form
-/// to `literal:string:shacl%3A%2F%2F<Name>`, so a plain
-/// `strip_prefix("literal:string:shacl://")` misses every entry.
-///
-/// Accept both shapes so this helper survives store canonicalisation and
-/// any future SDK write path that uses the un-encoded form directly.
-pub(crate) fn shape_name_from_has_shacl_target(target: &str) -> Option<String> {
-    let body = target.strip_prefix("literal:string:")?;
-    // Fast path: raw form, no encoding.
-    if let Some(name) = body.strip_prefix("shacl://") {
-        return Some(name.to_string());
-    }
-    // Canonicalised form: percent-decode then re-check the scheme prefix.
-    let decoded = percent_encoding::percent_decode_str(body)
-        .decode_utf8()
-        .ok()?;
-    decoded
-        .strip_prefix("shacl://")
-        .map(|name| name.to_string())
-}
-
-/// Enumerate every SHACL shape name registered on `ad4m://self` via
-/// `ad4m://has_shacl` links. Extracted so both the WS handler and the
-/// in-crate integration tests exercise the exact same walk.
-pub(crate) async fn resolve_shacl_names(
-    perspective: &PerspectiveInstance,
-) -> Result<Vec<String>, WsRpcError> {
-    let query = shacl_link_query("ad4m://self", Some("ad4m://has_shacl"));
-    let links = perspective
-        .get_links(&query)
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    let mut seen = std::collections::HashSet::new();
-    let names: Vec<String> = links
-        .iter()
-        .filter_map(|link| shape_name_from_has_shacl_target(&link.data.target))
-        .filter(|name| seen.insert(name.clone()))
-        .collect();
-    Ok(names)
-}
-
-/// Resolve a shape name to its `sh://targetClass` URI (or `None` when the
-/// name is unknown, or the shape has no target class). Returned as
-/// `Option` so callers can pin the wire representation (JSON `null` vs
-/// absent) at their own boundary.
-pub(crate) async fn resolve_shacl_target_class(
-    perspective: &PerspectiveInstance,
-    name: &str,
-) -> Result<Option<String>, WsRpcError> {
-    let literal_url = format!("literal:string:shacl://{}", name);
-    let uri_links = perspective
-        .get_links(&shacl_link_query(
-            &literal_url,
-            Some("ad4m://shacl_shape_uri"),
-        ))
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    let shape_uri = match uri_links.first() {
-        Some(link) => link.data.target.clone(),
-        None => return Ok(None),
-    };
-
-    let shape_links = perspective
-        .get_links(&shacl_link_query(&shape_uri, None))
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    let target_class = shape_links
-        .iter()
-        .find(|l| l.data.predicate.as_deref() == Some("sh://targetClass"))
-        .map(|l| l.data.target.clone());
-
-    Ok(target_class)
-}
-
-/// List the names of every SHACL shape stored in a perspective.
-/// Equivalent to the SDK's `PerspectiveProxy.getShaclNames()` but resolved
-/// in-process — one handler call replaces one `queryLinks` round trip, plus
-/// deduplication happens server-side.
-async fn get_shacl_names(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let perspective = guarded_perspective(&params).await?;
-    let names = resolve_shacl_names(&perspective).await?;
-    Ok(serde_json::to_value(names)?)
-}
-
-/// Resolve a shape's `sh:targetClass` by name without fetching its properties.
-/// Equivalent to the SDK's `PerspectiveProxy.getShaclTargetClass(name)` — two
-/// in-process link reads instead of two WS-RPC round trips.
-async fn get_shacl_target_class(
-    params: Value,
-    _ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
-    let name = params.require_str("name")?;
-    let perspective = guarded_perspective(&params).await?;
-    let target_class = resolve_shacl_target_class(&perspective, &name).await?;
-    // `null` when the shape (or its `sh://targetClass`) is absent — pins
-    // the wire contract the TS client already relies on
-    // (`PerspectiveProxy.getShaclTargetClass` maps this null to
-    // `undefined` at the proxy boundary).
-    Ok(serde_json::to_value(target_class)?)
-}
-
-/// Collect all link triples that define a shape and its property sub-shapes.
-/// Used by both `get_shacl` and `get_all_shacl` to avoid duplicating the
-/// multi-step resolution logic.
-pub(crate) async fn resolve_shacl_links(
-    perspective: &PerspectiveInstance,
-    name: &str,
-) -> Result<Option<(String, Vec<ShaclLinkTriple>)>, WsRpcError> {
-    // Step 1: name → shapeUri
-    let literal_url = format!("literal:string:shacl://{}", name);
-    let uri_links = perspective
-        .get_links(&shacl_link_query(
-            &literal_url,
-            Some("ad4m://shacl_shape_uri"),
-        ))
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    let shape_uri = match uri_links.first() {
-        Some(link) => link.data.target.clone(),
-        None => {
-            // Diagnostic for the race Nico flagged in review r3897752007:
-            // the caller enumerated this name from `has_shacl` but the
-            // `shacl_shape_uri` edge is gone by the time we resolve it
-            // (concurrent unlink between the two reads). Debug-level:
-            // expected-in-race behaviour, not a bug — the caller's
-            // returned list simply omits the vanished shape.
-            log::debug!(
-                "🔎 🔗 shacl: name={name} resolved to no shape uri, skipping (concurrent unlink?)"
-            );
-            return Ok(None);
-        }
-    };
-
-    // Step 2: get all links from the shape node (targetClass, properties, etc.)
-    let shape_links = perspective
-        .get_links(&shacl_link_query(&shape_uri, None))
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    // Step 3: find property shape URIs
-    let prop_uris: Vec<String> = shape_links
-        .iter()
-        .filter(|l| l.data.predicate.as_deref() == Some("sh://property"))
-        .map(|l| l.data.target.clone())
-        .collect();
-
-    // Step 4: fetch links from each property sub-shape. These reads are
-    // independent, so we drive them concurrently with `try_join_all` (the
-    // old TypeScript client used `Promise.all` for the same reason; the
-    // first cut of this handler regressed to sequential `.await`s and
-    // paid one round trip per property in serial). See PR #935 review
-    // (r3897752002).
-    //
-    // The queries are materialised into an owned Vec first so each future
-    // borrows a value that outlives the join; borrowing a temporary
-    // built inside `.map(|_| ...)` would fail E0515.
-    let prop_queries: Vec<LinkQuery> = prop_uris
-        .iter()
-        .map(|prop_uri| shacl_link_query(prop_uri, None))
-        .collect();
-    let all_prop_links: Vec<DecoratedLinkExpression> =
-        futures::future::try_join_all(prop_queries.iter().map(|q| perspective.get_links(q)))
-            .await
-            .map_err(|e| WsRpcError::internal(e.to_string()))?
-            .into_iter()
-            .flatten()
-            .collect();
-
-    // Step 5: merge shape links + property links, deduplicate
-    let mut seen = std::collections::HashSet::new();
-    let mut triples = Vec::new();
-    for link in shape_links.iter().chain(all_prop_links.iter()) {
-        let source = link.data.source.clone();
-        let predicate = link.data.predicate.clone().unwrap_or_default();
-        let target = link.data.target.clone();
-        let key = format!("{} {} {}", source, predicate, target);
-        if seen.insert(key) {
-            triples.push(ShaclLinkTriple {
-                source,
-                predicate,
-                target,
-            });
-        }
-    }
-
-    Ok(Some((shape_uri, triples)))
-}
-
-/// Retrieve a single SHACL shape by name.  Returns the shape URI and all link
-/// triples needed to reconstruct the shape via `SHACLShape.fromLinks()`.
-/// Equivalent to the SDK's `PerspectiveProxy.getShacl(name)` — one handler
-/// call replaces 3+N `queryLinks` round trips.
-async fn get_shacl(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let name = params.require_str("name")?;
-    let perspective = guarded_perspective(&params).await?;
-
-    match resolve_shacl_links(&perspective, &name).await? {
-        Some((shape_uri, links)) => {
-            Ok(serde_json::to_value(PerspectiveShacl { shape_uri, links })?)
-        }
-        None => Ok(Value::Null),
-    }
-}
-
-/// Retrieve all SHACL shapes in one call.  Returns an array of
-/// `{name, shapeUri, links}` objects — the client reconstructs each shape
-/// with `SHACLShape.fromLinks(entry.links, entry.shapeUri)`.  Equivalent to
-/// the SDK's `PerspectiveProxy.getAllShacl()` — one handler call replaces
-/// 1 + N×(3+M) `queryLinks` round trips (N shapes, M properties each).
-///
-/// Optional `names: string[]` restricts the reply to those shapes, in the
-/// perspective's order; unknown names are left out.
-async fn get_all_shacl(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let wanted = params.opt_str_set("names")?;
-
-    let perspective = guarded_perspective(&params).await?;
-
-    // Step 1: get all shape names
-    let query = shacl_link_query("ad4m://self", Some("ad4m://has_shacl"));
-    let name_links = perspective
-        .get_links(&query)
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    let mut seen_names = std::collections::HashSet::new();
-    let names: Vec<String> = name_links
-        .iter()
-        .filter_map(|link| shape_name_from_has_shacl_target(&link.data.target))
-        .filter(|name| seen_names.insert(name.clone()))
-        .filter(|name| wanted.as_ref().is_none_or(|w| w.contains(name)))
-        .collect();
-
-    // Step 2: resolve each shape's full link set. Concurrent per-shape
-    // walk — each `resolve_shacl_links` call is independent, so we let
-    // them race and preserve original name order after joining. Recovers
-    // the concurrency the old TS client had via `Promise.all` (review
-    // r3897752002).
-    // Cheap fail-loud gate before the fan-out: if the name enumeration
-    // already exceeds the response cap there's no point resolving every
-    // shape only to reject the serialisation. Post-walk check below
-    // catches the race where extra names arrive between enumeration and
-    // response (e.g. via subscription).
-    if names.len() > MAX_SHACL_SHAPES_PER_RESPONSE {
-        return Err(WsRpcError::bad_request(format!(
-            "getAllShacl exceeds MAX_SHACL_SHAPES_PER_RESPONSE ({} > {}), use paginated variant (TODO: not yet implemented)",
-            names.len(),
-            MAX_SHACL_SHAPES_PER_RESPONSE,
-        )));
-    }
-
-    let resolved = futures::future::try_join_all(
-        names
-            .iter()
-            .map(|name| resolve_shacl_links(&perspective, name)),
-    )
-    .await?;
-
-    let mut results: Vec<PerspectiveNamedShacl> = Vec::with_capacity(names.len());
-    for (name, maybe) in names.iter().zip(resolved.into_iter()) {
-        match maybe {
-            Some((shape_uri, links)) => results.push(PerspectiveNamedShacl {
-                name: name.clone(),
-                shape_uri,
-                links,
-            }),
-            None => {
-                // `resolve_shacl_links` already logged the specific
-                // per-name drop at debug level; nothing to add here —
-                // this arm is just the filter that keeps the bulk
-                // response array clean.
-            }
-        }
-    }
-
-    if results.len() > MAX_SHACL_SHAPES_PER_RESPONSE {
-        return Err(WsRpcError::bad_request(format!(
-            "getAllShacl exceeds MAX_SHACL_SHAPES_PER_RESPONSE ({} > {}), use paginated variant (TODO: not yet implemented)",
-            results.len(),
-            MAX_SHACL_SHAPES_PER_RESPONSE,
-        )));
-    }
-
-    Ok(serde_json::to_value(results)?)
-}
-
 // ── Registration ──
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
     use crate::perspectives::flow_instance::{
-        pass::FireOutcome, produced::ValidOutput, propose::ProposeOutcome,
-        replica_state::FlowStateEntry,
+        pass::FireOutcome,
+        produced::ValidOutput,
+        propose::ProposeOutcome,
+        replica_state::{FlowFiredEntry, FlowStateEntry},
     };
     use crate::perspectives::interpretation::overlay::OverlayView;
     let query = || Guard::perspective(perspective_query_capability);
     let update = || Guard::perspective(perspective_update_capability);
 
-    // Neither names one perspective: `all` lists the caller's own, `create` makes one that the
-    // caller's user owns (no owner for the operator and apps).
+    // Neither names one perspective: `all` lists the ones the caller may read (a caller
+    // holding READ on some pointers gets only those), `create` makes one that the caller's
+    // user owns (no owner for the operator and apps).
     map.method::<NoParams, Vec<PerspectiveHandle>>("perspective.all", list_perspectives)
         .read()
-        .guard(Guard::Cap(perspective_query_capability(vec![
-            WILD_CARD.to_string()
+        .guard(Guard::CapAnyPointer(perspective_query_capability(vec![
+            WILD_CARD.to_string(),
         ])));
     map.method::<PerspectiveUuidParams, Option<PerspectiveHandle>>(
         "perspective.get",
@@ -2544,11 +2175,14 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<PerspectiveSparqlParams, String>("perspective.querySparql", query_sparql)
         .read()
         .guard(query());
-    map.method::<PerspectiveAddSdnaParams, PerspectiveAddSdnaResult>(
-        "perspective.addSdna",
-        add_sdna,
+    map.method::<PerspectiveRegisterShapesParams, RegisterResult>(
+        "perspective.registerShapes",
+        register_shapes,
     )
     .guard(update());
+    map.method::<PerspectiveShapesParams, Vec<ShapeSummary>>("perspective.shapes", shapes)
+        .read()
+        .guard(query());
     map.method::<PerspectiveExecuteCommandsParams, ()>(
         "perspective.executeCommands",
         execute_commands,
@@ -2696,30 +2330,9 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     )
     .read()
     .guard(query());
-    map.method::<PerspectiveFlowFiredParams, Vec<String>>(
+    map.method::<PerspectiveFlowFiredParams, Vec<FlowFiredEntry>>(
         "perspective.flowFired",
         flow_fired_handler,
-    )
-    .read()
-    .guard(query());
-    map.method::<PerspectiveUuidParams, Vec<String>>("perspective.getShaclNames", get_shacl_names)
-        .read()
-        .guard(query());
-    map.method::<PerspectiveShaclNameParams, Option<String>>(
-        "perspective.getShaclTargetClass",
-        get_shacl_target_class,
-    )
-    .read()
-    .guard(query());
-    map.method::<PerspectiveShaclNameParams, Option<PerspectiveShacl>>(
-        "perspective.getShacl",
-        get_shacl,
-    )
-    .read()
-    .guard(query());
-    map.method::<PerspectiveGetAllShaclParams, Vec<PerspectiveNamedShacl>>(
-        "perspective.getAllShacl",
-        get_all_shacl,
     )
     .read()
     .guard(query());
@@ -2855,29 +2468,12 @@ pub struct PerspectiveSparqlParams {
     pub engine: Option<String>,
 }
 
-/// One SDNA entry (`entries` absent) or a batch of them.
+/// The shapes to register, each as the class of its target class.
 #[derive(Deserialize, TS)]
-#[serde(untagged)]
 #[ts(export)]
-pub enum PerspectiveAddSdnaParams {
-    Batch {
-        uuid: String,
-        entries: Vec<AddSdnaRequest>,
-    },
-    Single {
-        uuid: String,
-        #[serde(flatten)]
-        entry: AddSdnaRequest,
-    },
-}
-
-/// One flag per entry for a batch; one flag for a single entry.
-#[derive(Deserialize, TS)]
-#[serde(untagged)]
-#[ts(export)]
-pub enum PerspectiveAddSdnaResult {
-    Batch(Vec<bool>),
-    Single(bool),
+pub struct PerspectiveRegisterShapesParams {
+    pub uuid: String,
+    pub shapes: Vec<SHACLShape>,
 }
 
 #[derive(Deserialize, TS)]
@@ -2936,10 +2532,12 @@ pub struct PerspectiveDiscardBatchParams {
     pub body: DiscardBatchRequest,
 }
 
-/// `names` restricts the reply to those shapes; unknown names are left out.
+/// `names` restricts the reply to those classes, each named by its name
+/// (every class of that name) or its target class IRI; unknown ones are left
+/// out.
 #[derive(Deserialize, TS)]
 #[ts(export)]
-pub struct PerspectiveGetAllShaclParams {
+pub struct PerspectiveShapesParams {
     pub uuid: String,
     #[serde(default)]
     #[ts(optional)]
@@ -3197,13 +2795,13 @@ pub struct PerspectiveFlowStatesParams {
     pub instances: Option<Vec<String>>,
 }
 
-/// `perspective.flowFired`: the proposals of `instance` the calling agent's
-/// pass has recorded as fired, sorted.
+/// `perspective.flowFired`: for each of `instances`, in order, the proposals
+/// the calling agent's pass has recorded as fired, sorted.
 #[derive(Deserialize, TS)]
 #[ts(export)]
 pub struct PerspectiveFlowFiredParams {
     pub uuid: String,
-    pub instance: String,
+    pub instances: Vec<String>,
 }
 
 #[derive(Deserialize, TS)]
@@ -3232,30 +2830,6 @@ pub struct PerspectiveMintFlowReceiptResult {
     /// The serialized `FlowReceipt`. The receipt tree carries no TS types,
     /// so the wire keeps it opaque; pass it back to `verifyFlowReceipt`.
     pub receipt: Value,
-}
-
-#[derive(Deserialize, TS)]
-#[ts(export)]
-pub struct PerspectiveShaclNameParams {
-    pub uuid: String,
-    pub name: String,
-}
-
-#[derive(Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct PerspectiveShacl {
-    pub shape_uri: String,
-    pub links: Vec<ShaclLinkTriple>,
-}
-
-#[derive(Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct PerspectiveNamedShacl {
-    pub name: String,
-    pub shape_uri: String,
-    pub links: Vec<ShaclLinkTriple>,
 }
 
 #[cfg(test)]

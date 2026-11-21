@@ -70,6 +70,7 @@ async fn subscribe(p: &PerspectiveInstance, query: &str, count: usize) -> Vec<St
     for _ in 0..count {
         let (id, _, _) = p
             .subscribe_and_query(
+                &crate::perspectives::sparql_store::EvalStop::none(),
                 query.into(),
                 uuid::Uuid::new_v4().to_string(),
                 "c".into(),

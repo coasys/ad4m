@@ -310,13 +310,14 @@ async fn proof_valid_where_does_not_select_on_a_forged_value() {
         "Recipe",
         &ModelQueryInput {
             limit: Some(0),
+            count: Some(true),
             ..by_forged_name()
         },
         PV_SHAPE_JSON,
     )
     .await
     .unwrap();
-    assert_eq!(count.total_count, 0, "counted by a forged value");
+    assert_eq!(count.total_count.unwrap(), 0, "counted by a forged value");
 }
 
 /// Genuine recipes `a`, `b`, `c` (typed at :10, :11, :12) with every order key
@@ -417,6 +418,7 @@ async fn proof_valid_unverified_links_do_not_reorder_a_page() {
         limit,
         offset,
         include_unverified,
+        count: Some(true),
         projections: Some(projections.clone()),
         ..Default::default()
     };
@@ -476,7 +478,7 @@ async fn proof_valid_unverified_links_do_not_reorder_a_page() {
         let all = pv_page(&dirty, &shape, &resolver, query(order, None, None, None)).await;
         assert_eq!(all.instances.len(), 3, "order {order:?}");
         assert_eq!(
-            first.total_count,
+            first.total_count.unwrap(),
             all.instances.len(),
             "order {order:?}: totalCount disagrees with the rows"
         );
@@ -727,7 +729,7 @@ async fn proof_valid_a_forged_value_does_not_pass_a_relation_where() {
 }
 
 /// #1113 across a publish: `ensure_public_links_are_shared` sends
-/// `sparql_store.get_all_links()` output to the link language, and every
+/// `sparql_store.get_all_links(&crate::perspectives::sparql_store::EvalStop::none(),)` output to the link language, and every
 /// joiner ingests those copies with `add_link`. This signs one property link
 /// per `(name, target)` on store A, copies A's read-back links into store B
 /// the same way, and reads A with the default and B with `include_unverified`.
@@ -768,7 +770,10 @@ async fn pv_withheld_after_read_back_with(
         }
     }
     let b = SparqlStore::new(None).unwrap();
-    for decorated in a.get_all_links().unwrap() {
+    for decorated in a
+        .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+        .unwrap()
+    {
         b.add_link(&LinkExpression::from(decorated)).unwrap();
     }
 

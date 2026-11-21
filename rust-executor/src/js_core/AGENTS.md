@@ -11,7 +11,7 @@ as well. Split plan: spec item 9 (languages), item 1 (delete dead `main.js`).
 | `mod.rs` | `JsCore`: Deno `MainWorker` from the custom snapshot, extension registration, `new_for_language` |
 | `language_bootstrap.js` | Main module of every language isolate: loads the bundle, wires `ad4m:host` |
 | `host.js` | `ad4m:host` shim: ~28 functions (agent, holochain, http, hashing, language ctx, emit, storage) backed by ops. `httpFetch`: 10 s for headers and body; the body is read as a stream and refused (`code` `"too-large"`) past `HTTP_FETCH_MAX_BYTES` (32 MiB) or the call's lower `maxBytes` (5th argument). The limit counts decompressed bytes: Deno's fetch decompresses a `Content-Encoding: gzip` reply and the stream yields only those (`host_http_fetch_tests.rs`) |
-| `*_extension.rs` + `.js` | `#[op2]` ops per area: agent (16), languages (8), utils (5), signature (2), pubsub (1). Holochain (15), runtime (3), entanglement (5) ops live in their service dirs |
+| `*_extension.rs` + `.js` | `#[op2]` ops per area: agent (16), languages (8), utils (6; the language `console`), signature (2), pubsub (1). Holochain (15), runtime (3), entanglement (5) ops live in their service dirs |
 | `string_module_loader.rs`, `options.rs`, `futures.rs`, `error.rs` | module loading from strings, worker options, future bridging |
 | `residual_lazy.rs`, `../../CUSTOM_DENO_SNAPSHOT.bin` | snapshot artifacts; `pnpm build` in `rust-executor/` rebuilds them when an input changed |
 
@@ -22,8 +22,11 @@ as well. Split plan: spec item 9 (languages), item 1 (delete dead `main.js`).
   not just `cargo build`. `scripts/build-deno-snapshot.sh` hashes this directory's
   `.rs` and `.js` files, the holochain and runtime service extensions,
   `bin/generate_snapshot.rs`, `Cargo.lock` and the two `Cargo.toml`; when the hash
-  matches the stamp (`CUSTOM_DENO_SNAPSHOT.inputs`) it skips the build.
-  `FORCE_DENO_SNAPSHOT=1` builds anyway.
+  matches the stamp (`CUSTOM_DENO_SNAPSHOT.inputs`) and the outputs on disk still
+  match the digest the stamp recorded, it skips the build. Outputs copied in from
+  elsewhere (another commit's CI compile inputs) do not match, so it builds again;
+  a cache entry is restored only when its files match its own `digest`.
+  `FORCE_DENO_SNAPSHOT=1` builds anyway. Test: `bash scripts/build-deno-snapshot.test.sh`.
 - A new extension in `ad4m_language_extensions()`, or a file one of them reads
   (`esm`, ops), outside this directory goes into that script's `inputs` list.
   Otherwise a change to it keeps the old snapshot.

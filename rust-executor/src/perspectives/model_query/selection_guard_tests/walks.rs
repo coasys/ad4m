@@ -99,14 +99,18 @@ async fn selection_a_forged_link_does_not_extend_a_transitive_scope() {
             query["limit"] = limit;
             let got = run(&store, query.clone()).await;
             assert_eq!(sorted(&got), expected, "{query}");
-            assert_eq!(got.total_count, expected.len(), "{query}: totalCount");
+            assert_eq!(
+                got.total_count.unwrap(),
+                expected.len(),
+                "{query}: totalCount"
+            );
             let got = run(&store, opted_in(query.clone())).await;
             assert_eq!(sorted(&got), expected_opted_in, "{query} with the opt-in");
         }
         let mut count = walk(anchor, direction);
         count["limit"] = json!(0);
         assert_eq!(
-            run(&store, count.clone()).await.total_count,
+            run(&store, count.clone()).await.total_count.unwrap(),
             expected.len(),
             "{count}"
         );
@@ -248,7 +252,7 @@ async fn test_perf_guarded_selection_paginated_query() {
         let got = run(&store, q.clone()).await;
         let elapsed = start.elapsed();
         assert_eq!(got.instances.len(), 50, "{q}");
-        assert_eq!(got.total_count, 1000, "{q}");
+        assert_eq!(got.total_count.unwrap(), 1000, "{q}");
         timings.push(elapsed);
     }
     eprintln!(
@@ -305,12 +309,15 @@ async fn test_perf_exists_guard_binds_the_reifier() {
          ?_r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?s <sg://member> ?o )>> . \
          ?_r <ad4m://ontology/proofValid> \"true\" . }";
     let rows = |q: &str| {
-        let mut rows: Vec<String> =
-            serde_json::from_str::<Vec<Value>>(&store.query_arbitrary(q).unwrap())
-                .unwrap()
-                .iter()
-                .map(|r| r.to_string())
-                .collect();
+        let mut rows: Vec<String> = serde_json::from_str::<Vec<Value>>(
+            &store
+                .query_arbitrary(&crate::perspectives::sparql_store::EvalStop::none(), q)
+                .unwrap(),
+        )
+        .unwrap()
+        .iter()
+        .map(|r| r.to_string())
+        .collect();
         rows.sort();
         rows
     };

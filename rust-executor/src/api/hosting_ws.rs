@@ -89,6 +89,7 @@ async fn get_hosting_wallet_history(
         .map_err(|e| {
             if e.is::<crate::unyt_service::HolochainNotRunning>() {
                 WsRpcError {
+                    data: None,
                     code: 503,
                     message: e.to_string(),
                 }

@@ -42,7 +42,7 @@ fn typed_number_literal(n: f64) -> Option<String> {
     };
     Some(format!("\"{s}\"^^<{dt}>"))
 }
-use crate::perspectives::sparql_store::SparqlStore;
+use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
 use crate::types::LinkStatus;
 
 /// Resolve all projections for a set of parent instances.
@@ -56,6 +56,7 @@ use crate::types::LinkStatus;
 /// (one batch per projection key, eliminating TS-side round-trips). That call
 /// inherits the parent query's `link_status` and `include_unverified`.
 pub(super) async fn resolve_projections(
+    stop: &EvalStop,
     store: &SparqlStore,
     instances: &mut Vec<Value>,
     projections: &HashMap<String, ProjectionInput>,
@@ -64,7 +65,7 @@ pub(super) async fn resolve_projections(
     depth: u8,
     link_status: Option<&LinkStatus>,
     include_unverified: Option<bool>,
-) -> Result<(), deno_core::anyhow::Error> {
+) -> Result<(), anyhow::Error> {
     if instances.is_empty() || projections.is_empty() {
         return Ok(());
     }
@@ -126,7 +127,7 @@ pub(super) async fn resolve_projections(
             wc.values()
                 .any(|c| matches!(c, WhereCondition::Ops(o) if o.author.is_some()))
         }) {
-            return Err(deno_core::anyhow::anyhow!(
+            return Err(anyhow::anyhow!(
                 "IncludeProjection '{key}': a nested `author` is not supported in a projection's \
                  `where`; use its top-level `author` for the projected link's author"
             ));
@@ -165,6 +166,7 @@ pub(super) async fn resolve_projections(
         // guarded step at a time (#1120).
         let walked = if proj.transitive && !guard.is_open() {
             Some(walk_guarded(
+                stop,
                 store,
                 &parent_ids,
                 &safe_pred,
@@ -203,7 +205,7 @@ pub(super) async fn resolve_projections(
                 verified = verified,
             );
 
-            let result_json = store.query(&sparql)?;
+            let result_json = store.query(stop, &sparql)?;
             let rows: Vec<Value> = serde_json::from_str(&result_json)?;
 
             let mut count_map: HashMap<String, u64> = HashMap::new();
@@ -255,7 +257,7 @@ pub(super) async fn resolve_projections(
                     .into_iter()
                     .map(|(parent, t)| serde_json::json!({ "parent": parent, "t": t }))
                     .collect(),
-                None => serde_json::from_str(&store.query(&sparql)?)?,
+                None => serde_json::from_str(&store.query(stop, &sparql)?)?,
             };
 
             // Collapse duplicate targets per parent.
@@ -330,6 +332,7 @@ pub(super) async fn resolve_projections(
                             };
 
                             if let Ok(result) = Box::pin(super::query::execute_model_query_inner(
+                                stop,
                                 store,
                                 &target_shape,
                                 &sub_query,
@@ -420,7 +423,7 @@ fn with_where_target<'a>(
         .find(|r| r.name == proj.from && !r.target_class_name.is_empty())
     {
         Some(rel) => std::borrow::Cow::Owned(ProjectionInput {
-            target_class_name: Some(rel.target_class_name.clone()),
+            target_class_name: Some(rel.target().to_string()),
             ..proj.clone()
         }),
         None => std::borrow::Cow::Borrowed(proj),
@@ -720,18 +723,20 @@ pub(super) fn projection_verified_pattern(
 /// projection's `where` is applied afterwards to the reached targets, with the
 /// same guarded patterns the non-transitive form uses.
 fn walk_guarded(
+    stop: &EvalStop,
     store: &SparqlStore,
     parent_ids: &[String],
     safe_pred: &str,
     where_patterns: &str,
     proj: &ProjectionInput,
     guard: LinkGuard,
-) -> Result<Vec<(String, String)>, deno_core::anyhow::Error> {
+) -> Result<Vec<(String, String)>, anyhow::Error> {
     let edge = super::containment::ContainmentEdge {
         predicate: safe_pred.to_string(),
         holder: None,
     };
     let mut pairs = super::query::guarded_reach(
+        stop,
         store,
         parent_ids,
         std::slice::from_ref(&edge),
@@ -751,7 +756,7 @@ fn walk_guarded(
             "SELECT DISTINCT ?t WHERE {{\n    {}\n{where_patterns}}}",
             values_or_str_filter("t", &targets)
         );
-        let rows: Vec<Value> = serde_json::from_str(&store.query(&sparql)?)?;
+        let rows: Vec<Value> = serde_json::from_str(&store.query(stop, &sparql)?)?;
         let passing: HashSet<&str> = rows.iter().filter_map(|r| r["t"].as_str()).collect();
         pairs.retain(|(_, t)| passing.contains(t.as_str()));
     }

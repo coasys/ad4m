@@ -3,7 +3,7 @@
 //! This module implements the Rust-side query engine for AD4M's `@Subject`-class
 //! model system.  TypeScript client code declares model classes with decorators
 //! (`@Property`, `@HasMany`, `@Flag`, etc.) that map to RDF triples stored in an
-//! Oxigraph SPARQL 1.2 store.  When a client calls `Model.query(...)`, the
+//! Oxigraph SPARQL 1.2 store.  When a client calls `Model.query(&crate::perspectives::sparql_store::EvalStop::none(),...)`, the
 //! request is serialised as a [`ModelQueryInput`] and executed here.
 //!
 //! # Query pipeline
@@ -96,6 +96,8 @@ mod filtering;
 mod getters;
 mod hydration;
 #[cfg(test)]
+mod include_limit_tests;
+#[cfg(test)]
 mod integration_tests;
 mod link_author;
 #[cfg(test)]
@@ -107,6 +109,8 @@ mod link_status_tests;
 mod links;
 #[cfg(test)]
 mod page_before_resolve_tests;
+#[cfg(test)]
+mod polymorphic_default_tests;
 mod projection;
 #[cfg(test)]
 mod proof_valid_tests;
@@ -122,6 +126,8 @@ pub(crate) mod shape;
 mod sparql_builder;
 #[cfg(test)]
 mod test_helpers;
+#[cfg(test)]
+mod timestamp_probe_tests;
 pub(crate) mod types;
 mod union;
 pub(crate) mod utils;
@@ -133,7 +139,7 @@ pub(crate) use filtering::matches_condition;
 pub(crate) use getters::conformance_predicates;
 pub use getters::evaluate_getters_batch;
 pub(crate) use links::{links_rows, links_trigger_predicates};
-pub use query::execute_model_query;
+pub use query::{execute_model_query, execute_model_query_stopped};
 pub use relations::resolve_reverse_relations;
 pub(crate) use shape::{load_shape_from_store, MissingShape};
 pub use types::{
