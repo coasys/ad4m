@@ -147,8 +147,10 @@ pub struct LinkFacts<'a> {
     /// `Some(false)` when this store already counted the link as `Valid` before the
     /// revocation reached the key map.
     pub entered_after_revoke: Option<bool>,
-    /// When this executor first received the link (unix ms); `None` for a link stored before
-    /// the executor kept it. Read only against a revoke's `since`.
+    /// When this executor first received the statement the link's proof signs (unix ms): the
+    /// store's receipt of that key and signature, set once and kept through removals. `None`
+    /// for a proof with no receipt (a link stored before receipts). Read only against a
+    /// revoke's `since`.
     pub received_at: Option<u64>,
     /// The executor's clock (unix seconds), for bot scopes only.
     pub now: u64,

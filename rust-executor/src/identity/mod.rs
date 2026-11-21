@@ -505,8 +505,8 @@ pub fn check_signed<T: serde::Serialize>(expr: &Expression<T>) -> CheckedLink {
 /// [`check_signed`] with what the caller knows of the order: `Some(false)` for a link this
 /// executor held as `valid` before the signer's revocation reached its key map (the link store
 /// at a re-judgement), `Some(true)` for one that arrived after, `None` when nothing is known.
-/// `received_at`: when this executor first received the link (unix ms), where the link store
-/// kept it; a revoke's `since` reads it.
+/// `received_at`: when this executor first received the statement the link's proof signs (unix
+/// ms), from the link store's receipt of that key and signature; a revoke's `since` reads it.
 pub fn check_signed_entered<T: serde::Serialize>(
     expr: &Expression<T>,
     entered_after_revoke: Option<bool>,
