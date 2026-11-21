@@ -267,6 +267,10 @@ What you get back will be an array of [LinkExpressions](/jsdoc/classes/LinkExpre
 ]
 ```
 
+This read leaves out links whose signature check fails (verdict `invalid`, e.g. forged).
+Pass `includeUnverified: true` in the `LinkQuery` to get them too, each with its verdict,
+for example to remove them.
+
 Each link comes back with the exact `target` it was signed over. The store
 indexes `literal:string:`, `literal:number:`, `literal:boolean:` and
 `literal:json:` targets as typed values, so a query finds a value however it

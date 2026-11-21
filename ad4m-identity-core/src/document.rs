@@ -32,7 +32,7 @@ pub const DID_CONTEXT: &str = "https://www.w3.org/ns/did/v1";
 pub const MULTIKEY_CONTEXT: &str = "https://w3id.org/security/multikey/v1";
 /// The `coasys/1` context: defines `coasys:bot`. The identity site serves
 /// `docs-src/identity/did-scid-coasys-v1.jsonld` at this URL.
-pub const COASYS_CONTEXT: &str = "https://id.coasys.org/ns/did-scid-coasys/v1";
+pub const COASYS_CONTEXT: &str = "https://coasys.id/ns/did-scid-coasys/v1";
 /// The `@context` of every document, in order.
 pub const CONTEXTS: [&str; 3] = [DID_CONTEXT, MULTIKEY_CONTEXT, COASYS_CONTEXT];
 /// The type of every verification method.

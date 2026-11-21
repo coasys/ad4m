@@ -5,25 +5,15 @@
 use super::*;
 use crate::perspectives::model_query::page_before_resolve_tests::{file_type, FileLanguage};
 use crate::perspectives::model_query::shape::parse_shape_from_json;
-use crate::perspectives::model_query::test_helpers::StaticShapeResolver;
+use crate::perspectives::model_query::test_helpers::{signed_link, StaticShapeResolver};
 use crate::perspectives::sparql_store::SparqlStore;
-use crate::types::{ExpressionProof, Link, LinkExpression, LinkStatus};
+use crate::types::{LinkExpression, LinkStatus};
 
+/// Signed for real: the union classifies every record through
+/// `subject_classes_of`, which counts a link only when its stored verdict is
+/// `valid` — a fake proof reads as no flag at all.
 fn link(source: &str, predicate: &str, target: &str, ts: &str) -> LinkExpression {
-    LinkExpression {
-        author: "did:key:test123".to_string(),
-        timestamp: ts.to_string(),
-        data: Link {
-            source: source.to_string(),
-            predicate: Some(predicate.to_string()),
-            target: target.to_string(),
-        },
-        proof: ExpressionProof {
-            key: "key".to_string(),
-            signature: "sig".to_string(),
-        },
-        status: Some(LinkStatus::Shared),
-    }
+    signed_link(source, predicate, target, ts)
 }
 
 fn add(store: &SparqlStore, source: &str, predicate: &str, target: &str, ts: &str) {
@@ -318,7 +308,8 @@ async fn union_pages_on_the_creation_time_its_rows_carry() {
             ids(&union),
             ["app://t_late", "app://t_mid"][..limit].to_vec()
         );
-        assert_eq!(union.instances[0]["timestamp"], "05");
+        // `signed_link` maps the bare `05` to epoch millis.
+        assert_eq!(union.instances[0]["timestamp"], "1970-01-01T00:00:00.005Z");
     }
 }
 

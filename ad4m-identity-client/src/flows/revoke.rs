@@ -3,6 +3,12 @@
 //! for the person from that event on. Earlier signatures stay valid only where they name the
 //! seq they were made at: did:key links, and profiles whose `proof.record` anchors them. A
 //! did:scid expression without an anchor is judged at the trusted head, so it turns invalid.
+//!
+//! A key that is lost or stolen, not just retired, gets a `since`: the time (ms) from which the
+//! person no longer trusts it. A reader flags the key's links it first received at or after
+//! `since`. The store takes a `since` up to the revoke's append time and no
+//! earlier than the key's `add`. A key that is only retired is better `unlink`ed first
+//! (`flows::unlink`): its older links stay valid.
 
 use ad4m_identity_core::build::revoke as revoke_event;
 use ad4m_identity_core::KeyId;
@@ -12,12 +18,14 @@ use crate::executor::{ExecutorRpc, ViaExecutor};
 use crate::vault::{MasterUse, Vault};
 use crate::{fold, ClientError, Clock};
 
-/// Revokes the device keys `key_ids` of the identity `did`.
+/// Revokes the device keys `key_ids` of the identity `did`. `since` (ms since the epoch) is the
+/// time from which the keys are no longer trusted; `None` is the revoke's own append time.
 pub async fn revoke<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
     did: &str,
     key_ids: &[KeyId],
+    since: Option<u64>,
     clock: &dyn Clock,
 ) -> Result<SignedHead, ClientError> {
     let scid = ad4m_identity_core::scid_of(did)
@@ -32,7 +40,7 @@ pub async fn revoke<R: ExecutorRpc>(
         }
     }
     let unlocked = vault.unlock(&scid, MasterUse::Revoke, clock.now())?;
-    let event = revoke_event(&chain, unlocked.signer(clock.now())?, key_ids)?;
+    let event = revoke_event(&chain, unlocked.signer(clock.now())?, key_ids, since)?;
     Ok(executor.publish(std::slice::from_ref(&event)).await?)
 }
 

@@ -276,8 +276,11 @@ mod tests {
                 key: "key".to_string(),
                 valid: Some(true),
                 invalid: None,
+                anchor: None,
             },
             status: None,
+            verdict: None,
+            person: None,
         }
     }
 

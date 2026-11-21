@@ -487,12 +487,13 @@ fn identity_wire_types_use_ar01_field_names() {
             key_id: "d3".into(),
             added: 1,
             revoked: None,
+            unlinked: None,
             bot: Some(json!({"can": ["read"], "expires": 99})),
             expires: Some(99),
             paused: false,
             head: head(),
         },
-        json!({"did": "did:scid:zScid", "keyId": "d3", "added": 1, "revoked": null, "bot": {"can": ["read"], "expires": 99},
+        json!({"did": "did:scid:zScid", "keyId": "d3", "added": 1, "revoked": null, "unlinked": null, "bot": {"can": ["read"], "expires": 99},
                "expires": 99, "paused": false, "head": head_json}),
     );
 

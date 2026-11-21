@@ -361,6 +361,30 @@ fn revoke_twice() {
 }
 
 #[test]
+fn unlink_of_a_master_key() {
+    assert_eq!(
+        policy_of(refuse("unlink of a master key")),
+        FoldError::UnknownKey("m0".into())
+    );
+}
+
+#[test]
+fn unlink_twice() {
+    assert_eq!(
+        policy_of(refuse("unlink twice")),
+        FoldError::UnlinkedKey("d1".into())
+    );
+}
+
+#[test]
+fn unlink_signed_by_another_device() {
+    assert_eq!(
+        policy_of(refuse("unlink signed by another device")),
+        FoldError::MissingProof("m0".into())
+    );
+}
+
+#[test]
 fn scope_on_a_key_without_the_bot_mark() {
     assert_eq!(
         policy_of(refuse("scope on a key without the bot mark")),

@@ -131,7 +131,7 @@ fn listed_keys(event: &Event) -> Vec<&str> {
             .collect(),
         Op::Add { add, .. } => add.iter().map(|k| k.sign.as_str()).collect(),
         Op::Rotate { master, .. } => vec![master.as_str()],
-        Op::Revoke { .. } | Op::Scope { .. } => Vec::new(),
+        Op::Revoke { .. } | Op::Unlink { .. } | Op::Scope { .. } => Vec::new(),
     }
 }
 
@@ -139,8 +139,8 @@ fn listed_keys(event: &Event) -> Vec<&str> {
 /// replay): the master current before `event.seq`, or for a `rotate` the master it names, which
 /// must be the key the stored log rotated onto there or, at the current master, the key the
 /// stored next-key commitment names (its id the next master id). Only masters sign events after
-/// #0 (`KelPolicy`: `add`, `revoke` and `scope` by the current master, `rotate` by the master it
-/// reveals); a device key signs nothing of the log after #0. `Err` is the refusal the replay
+/// #0 (`KelPolicy`: `add`, `revoke`, `unlink` and `scope` by the current master, `rotate` by the
+/// master it reveals); a device key signs only its own `unlink` ([`self_unlink_signer`]). `Err` is the refusal the replay
 /// would give: `Ended` past the end, `NextMismatch` for a `rotate` onto another key,
 /// `InceptAfterGenesis` for an `incept`.
 fn indexed_signer(
@@ -170,6 +170,70 @@ fn indexed_signer(
         }
         _ => Ok((at.id, at.sign)),
     })
+}
+
+/// The signer of an `unlink` that the key itself signs, by the key index: the key named by
+/// `unlink`, when `event` carries a proof by it and the index lists it, not revoked or unlinked
+/// at the stored head. `None` otherwise: the master's path then answers. Used for an event that
+/// continues the head only: a device key never makes a rival event (a fork is a master's).
+fn self_unlink_signer(
+    conn: &Connection,
+    scid: &str,
+    event: &Event,
+) -> Result<Option<(String, Multikey)>, ApiError> {
+    let Op::Unlink { unlink } = &event.op else {
+        return Ok(None);
+    };
+    let method = format!("{}#{unlink}", did_of(scid));
+    if !event.proof.iter().any(|p| p.verification_method == method) {
+        return Ok(None);
+    }
+    let signs = db::indexed_signs(conn, scid, unlink)?;
+    let [sign] = signs.as_slice() else {
+        return Ok(None);
+    };
+    let active = db::standing(conn, sign)?.is_some_and(|s| !s.revoked);
+    Ok(active.then(|| (unlink.clone(), sign.clone())))
+}
+
+/// The refusal of a `revoke`'s `since` (spec rule K17), by the store's clock `now` (unix
+/// seconds): not after `now`, not before the store appended the `add` of any key the event
+/// names (`added_at`, per key). `since` is in ms and compared by whole seconds, the grain of
+/// the store's clock and append times: a `since` later in the append second is accepted, so a
+/// client may send its own `Date.now()` without racing the store's second.
+fn check_since(
+    event: &Event,
+    state: &ad4m_identity_core::KeyState,
+    now: u64,
+    added_at: &mut dyn FnMut(u64) -> Result<Option<u64>, ApiError>,
+) -> Result<(), ApiError> {
+    let Op::Revoke {
+        revoke,
+        since: Some(since),
+    } = &event.op
+    else {
+        return Ok(());
+    };
+    let since_s = since / 1000;
+    if since_s > now {
+        return Err(ApiError::invalid(
+            "since",
+            "since is later than the store's time of the revoke",
+        ));
+    }
+    for id in revoke {
+        // A key the state does not hold is the replay's refusal (`UnknownKey`).
+        let Some(record) = state.keys.get(id) else {
+            continue;
+        };
+        if added_at(record.added)?.is_some_and(|added| since_s < added) {
+            return Err(ApiError::invalid(
+                "since",
+                format!("since is before the store appended the add of {id}"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The proof by `id` (`<did>#<id>`) on `event` verifies under `key` in the `coasys:kel` domain:
@@ -323,7 +387,10 @@ impl Store {
         }
         if first.seq == head.seq + 1 && first.prev.as_ref() == Some(&head.hash) {
             let refusal = |e: FoldError| chain_error(&ChainError::Policy(e));
-            let (id, key) = indexed_signer(conn, scid, first)?.map_err(refusal)?;
+            let (id, key) = match self_unlink_signer(conn, scid, first)? {
+                Some(signer) => signer,
+                None => indexed_signer(conn, scid, first)?.map_err(refusal)?,
+            };
             check_proof(scid, first, &id, &key).map_err(refusal)?;
             return Ok(First::Continues);
         }
@@ -497,6 +564,14 @@ impl Store {
                 )),
                 _ => None,
             });
+            check_since(event, chain.state(), now, &mut |seq| {
+                if seq >= first.seq {
+                    // added by this append
+                    Ok(Some(now))
+                } else {
+                    db::stored_at(&tx, scid, seq)
+                }
+            })?;
             chain = chain
                 .appended(&KelPolicy, event)
                 .map_err(|e| chain_error(&e))?;

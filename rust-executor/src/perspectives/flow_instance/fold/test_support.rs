@@ -53,6 +53,7 @@ pub(super) fn vouched_committing(
         .map(|(did, at)| Vote {
             did: did.to_string(),
             at: at.to_string(),
+            voter: None,
         })
         .collect();
     VouchedAtom {
@@ -69,6 +70,27 @@ pub(super) fn vouched_committing(
         },
         eligible_votes: votes,
     }
+}
+
+/// [`vouched`] whose votes count as the given voters: `(did, voter, at)`, the voter being the
+/// person the reader resolved the DID to.
+pub(super) fn vouched_as(
+    uri: &str,
+    from: &str,
+    to: &str,
+    votes: &[(&str, &str, &str)],
+) -> VouchedAtom {
+    let mut atom = vouched(
+        uri,
+        from,
+        to,
+        &votes.iter().map(|(d, _, at)| (*d, *at)).collect::<Vec<_>>(),
+    );
+    for (vote, (_, voter, _)) in atom.eligible_votes.iter_mut().zip(votes) {
+        vote.voter = Some(voter.to_string());
+    }
+    atom.atom.votes = atom.eligible_votes.clone();
+    atom
 }
 
 pub(super) fn walked(derived: &DerivedState) -> Vec<(&str, &str)> {

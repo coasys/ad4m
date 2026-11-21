@@ -124,6 +124,16 @@ async fn publish(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpc
     )
 }
 
+/// `identity.unlinkSelf`: this agent's device key unlinks itself from its identity and is dead
+/// on this executor (`identity::unlink`).
+async fn unlink_self(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    answer(
+        crate::identity::service()?
+            .unlink_self(&ctx.acts_as())
+            .await?,
+    )
+}
+
 async fn open_offer(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let p: OpenOfferParams = parse(params)?;
     answer(
@@ -203,6 +213,10 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<CosignInceptParams, Value>("identity.cosignIncept", cosign_incept)
         .guard(Guard::UserOrOperator(AGENT_SIGN_CAPABILITY.clone()));
     map.method::<PublishParams, SignedHead>("identity.publish", publish)
+        .guard(Guard::UserOrOperator(AGENT_UPDATE_CAPABILITY.clone()));
+    // The device leaves the identity with its own key, no master key: for the main agent the
+    // operator, as `identity.publish`; a user for their own agent.
+    map.method::<NoParams, SignedHead>("identity.unlinkSelf", unlink_self)
         .guard(Guard::UserOrOperator(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<OpenOfferParams, OfferOpened>("identity.openOffer", open_offer)
         .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
@@ -331,6 +345,13 @@ mod tests {
             ("identity.resetLog", format!("{:?}", Guard::Operator)),
             ("identity.resolve", cap(&AGENT_READ_CAPABILITY)),
             ("identity.status", cap(&AGENT_READ_CAPABILITY)),
+            (
+                "identity.unlinkSelf",
+                format!(
+                    "{:?}",
+                    Guard::UserOrOperator(AGENT_UPDATE_CAPABILITY.clone())
+                ),
+            ),
         ];
         let got: Vec<(String, String)> = map
             .guards()

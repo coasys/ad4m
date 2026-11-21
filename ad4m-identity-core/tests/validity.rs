@@ -30,6 +30,7 @@ fn nothing_applies_after_an_ending_rotate() {
     let ops = [
         ad4m_identity_core::Op::Revoke {
             revoke: vec!["d1".into()],
+            since: None,
         },
         ad4m_identity_core::Op::Add {
             add: vec![device(3, KeyLife::Standing)],

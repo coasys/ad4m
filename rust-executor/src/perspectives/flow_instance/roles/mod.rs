@@ -425,6 +425,7 @@ mod tests {
             .map(|(did, at)| Vote {
                 did: did.to_string(),
                 at: at.to_string(),
+                voter: None,
             })
             .collect();
         TransitionAtom {

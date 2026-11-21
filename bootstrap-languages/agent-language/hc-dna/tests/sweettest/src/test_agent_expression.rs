@@ -80,3 +80,37 @@ async fn test_multi_agent_sync() {
     assert_eq!(retrieved.author, did);
     assert_eq!(retrieved.data.direct_message_language, dml);
 }
+
+/// A profile link signed with an anchor keeps `proof.anchor` when Agent B reads Agent A's
+/// profile. The test sends and reads JSON, so it pins the wire field, not only the Rust type.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_profile_link_keeps_its_anchor() {
+    let (conductors, cells) = setup_conductors(2, true).await;
+
+    let did = "did:test:dana";
+    let expression = serde_json::json!({
+        "author": did,
+        "timestamp": "2026-10-30T00:00:00.123Z",
+        "data": {
+            "did": did,
+            "perspective": { "links": [{
+                "author": did,
+                "timestamp": "2026-10-30T00:00:00.123Z",
+                "data": { "source": "ad4m://self", "target": "literal://string:x", "predicate": null },
+                "proof": { "signature": "abcd", "key": "did:test:dana#key", "anchor": 7 },
+            }] },
+            "directMessageLanguage": null,
+        },
+        "proof": { "signature": "ef01", "key": "did:test:dana#key" },
+    });
+    let _: () = call_zome(&conductors[0], &cells[0], "create_agent_expression", expression).await;
+
+    await_consistency(3).await;
+
+    let retrieved: serde_json::Value =
+        call_zome(&conductors[1], &cells[1], "get_agent_expression", did.to_string()).await;
+    let link = &retrieved["data"]["perspective"]["links"][0];
+    assert_eq!(link["proof"]["anchor"], 7, "Agent B's copy keeps the anchor");
+    assert_eq!(link["proof"]["signature"], "abcd");
+    assert!(retrieved["proof"].get("anchor").is_none(), "an unanchored proof stays without one");
+}

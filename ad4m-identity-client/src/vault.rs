@@ -15,24 +15,26 @@ use crate::secret::Secret;
 pub const UNLOCK_TTL_S: u64 = 300;
 
 /// Why the surface asks for the unlock; shown in the OS prompt where the OS allows it. The
-/// flows unlock for a link and a revocation (`create` stores master #0 without an unlock).
+/// flows unlock for a link, a revocation and an unlink (`create` stores master #0 without an
+/// unlock).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MasterUse {
     Link,
     Revoke,
+    Unlink,
 }
 
 impl MasterUse {
     /// How long an unlock for this use lasts. A link signs its `add` up to the end of the
     /// store's confirm grace: the offer lives [`OFFER_TTL_S`](ad4m_identity_core::link::OFFER_TTL_S)
     /// from the unlock and the store takes the `add` [`CONFIRM_GRACE_S`](ad4m_identity_core::link::CONFIRM_GRACE_S)
-    /// longer. A revocation lasts [`UNLOCK_TTL_S`].
+    /// longer. A revocation and an unlink last [`UNLOCK_TTL_S`].
     pub fn ttl_s(self) -> u64 {
         match self {
             MasterUse::Link => {
                 ad4m_identity_core::link::OFFER_TTL_S + ad4m_identity_core::link::CONFIRM_GRACE_S
             }
-            MasterUse::Revoke => UNLOCK_TTL_S,
+            MasterUse::Revoke | MasterUse::Unlink => UNLOCK_TTL_S,
         }
     }
 }

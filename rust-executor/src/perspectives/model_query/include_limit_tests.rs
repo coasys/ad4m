@@ -25,6 +25,7 @@ fn link(source: &str, predicate: &str, target: &str, ts: u64) -> LinkExpression 
         proof: ExpressionProof {
             key: "key".to_string(),
             signature: "sig".to_string(),
+            anchor: None,
         },
         status: Some(crate::types::LinkStatus::Shared),
     }

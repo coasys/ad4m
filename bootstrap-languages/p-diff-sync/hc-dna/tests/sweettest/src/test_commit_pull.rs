@@ -127,7 +127,7 @@ async fn test_merge_fetch() {
     );
 
     // Cleanup
-    for conductor in conductors.iter_mut() {
+    for mut conductor in conductors.into_inner() {
         conductor.shutdown().await;
     }
 }
@@ -216,7 +216,7 @@ async fn test_merge_fetch_deep() {
     assert_eq!(bob_final.diff.additions.len(), 7, "Bob should see 7 from Alice");
 
     // Cleanup
-    for conductor in conductors.iter_mut() {
+    for mut conductor in conductors.into_inner() {
         conductor.shutdown().await;
     }
 }
@@ -384,7 +384,7 @@ async fn test_chunked_broadcast_does_not_update_revision_on_failure() {
         "current_revision must not change when chunk loading fails"
     );
 
-    for conductor in conductors.iter_mut() {
+    for mut conductor in conductors.into_inner() {
         conductor.shutdown().await;
     }
 }
@@ -532,7 +532,7 @@ async fn test_pull_initial_with_chunked_diffs() {
     println!("✓ TEST PASSED: Bob correctly pulled and rendered Alice's chunked commit");
 
     // Cleanup
-    for conductor in conductors.iter_mut() {
+    for mut conductor in conductors.into_inner() {
         conductor.shutdown().await;
     }
 }

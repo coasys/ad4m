@@ -618,7 +618,8 @@ pub async fn add_to_collection(
     // own reifier, so adding the same item twice would show up as a duplicate member. Look for
     // an existing membership link first and leave the collection untouched if the item is
     // already in it — on the batch's effective graph, so a member the same batch dropped reads
-    // as out and one it added reads as in.
+    // as out and one it added reads as in. Only a link that counts makes the item a member: a
+    // forged or uncheckable membership must not suppress a legitimate add.
     let wanted = params.item_uri.trim();
     let spellings = item_spellings(wanted, Some(&coerced));
     let existing = perspective
@@ -640,10 +641,10 @@ pub async fn add_to_collection(
                 e,
             )
         })?;
-    if existing
-        .iter()
-        .any(|effective| target_matches(&effective.link.data.target, &spellings))
-    {
+    if existing.iter().any(|effective| {
+        effective.link.proof.valid == Some(true)
+            && target_matches(&effective.link.data.target, &spellings)
+    }) {
         return Ok(CollectionItemAdded {
             class_name,
             base_uri,

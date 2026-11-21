@@ -1809,6 +1809,7 @@ impl Ad4mDb {
                         proof: ExpressionProof {
                             signature: row.get(6)?,
                             key: row.get(7)?,
+                            anchor: None,
                         },
                         author: row.get(4)?,
                         timestamp: row.get(5)?,
@@ -1847,6 +1848,7 @@ impl Ad4mDb {
                 proof: ExpressionProof {
                     signature: row.get(6)?,
                     key: row.get(7)?,
+                    anchor: None,
                 },
                 author: row.get(4)?,
                 timestamp: row.get(5)?,
@@ -1884,6 +1886,7 @@ impl Ad4mDb {
                 proof: ExpressionProof {
                     signature: row.get(6)?,
                     key: row.get(7)?,
+                    anchor: None,
                 },
                 author: row.get(4)?,
                 timestamp: row.get(5)?,
@@ -1921,6 +1924,7 @@ impl Ad4mDb {
                 proof: ExpressionProof {
                     signature: row.get(6)?,
                     key: row.get(7)?,
+                    anchor: None,
                 },
                 author: row.get(4)?,
                 timestamp: row.get(5)?,
@@ -1959,6 +1963,7 @@ impl Ad4mDb {
                 proof: ExpressionProof {
                     signature: row.get(6)?,
                     key: row.get(7)?,
+                    anchor: None,
                 },
                 author: row.get(4)?,
                 timestamp: row.get(5)?,
@@ -4444,6 +4449,7 @@ mod tests {
             proof: ExpressionProof {
                 signature: "signature".to_string(),
                 key: "key".to_string(),
+                anchor: None,
             },
             author: "did:test:key".to_string(),
             timestamp: Utc::now().to_rfc3339(),
@@ -4489,6 +4495,7 @@ mod tests {
                 key: "test-key".to_string(),
                 valid: None,
                 invalid: None,
+                anchor: None,
             },
         };
 

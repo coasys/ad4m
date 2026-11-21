@@ -62,7 +62,7 @@ members, and no others:
 | `scid` | string | the SCID of the log |
 | `seq` | integer | 0 for the first event, then +1 |
 | `prev` | string or null | the hash of the event before; `null` at seq 0 |
-| `op` | string | one of `incept`, `add`, `revoke`, `rotate`, `scope` |
+| `op` | string | one of `incept`, `add`, `revoke`, `unlink`, `rotate`, `scope` |
 | *op members* | | below |
 | `proof` | array | Data Integrity proofs; left out only on an unsigned event, never empty |
 
@@ -70,7 +70,8 @@ members, and no others:
 |---|---|---|
 | `incept` | `kind: "human"`, `master` (signing multikey), `next` (commitment), `add` (one or more device keys, no bot key) | master #0 and each listed device key |
 | `add` | `add` (exactly one device key), `offer` (offer id), `coSig` (the claim co-signature of device linking) | the current master key |
-| `revoke` | `revoke` (one or more device key ids) | the current master key |
+| `revoke` | `revoke` (one or more device key ids), `since` (integer ms since the epoch; left out when absent) | the current master key |
+| `unlink` | `unlink` (one device key id) | the current master key, or the named key itself |
 | `rotate` | `master` (the revealed key), `salt`, `next` (commitment or `null`), `revoke` (device key ids; left out when empty) | the revealed key |
 | `scope` | `key` (a bot key id), `can`, `expires` | the current master key |
 
@@ -164,18 +165,31 @@ rule. Each rule names the error that the reference implementation returns
 - **K10** Proofs: each required signer has exactly one proof naming `<did>#<keyId>`, with
   `proofPurpose: "assertionMethod"`, domain `coasys:kel` and a valid signature by its key
   (`MissingProof(id)` when absent, `BadProof(id)` otherwise). A proof by any other key fails
-  (`BadProof`). A device key never signs its own identity's log after #0.
+  (`BadProof`). A device key signs its own identity's log after #0 only to `unlink` itself (K16).
 
 **Per op**:
 
 - **K11** `add` lists exactly one key (`AddNotOne`) and is signed by the current master only.
 - **K12** `revoke` names at least one key (`Format(EmptyRevoke)`), each a device key of this
-  log (`UnknownKey`) that no earlier event ended (`RevokedKey`); signed by the current master.
+  log (`UnknownKey`) that no earlier revoke ended (`RevokedKey`); an unlinked key may be
+  revoked. Signed by the current master. `since`, when present, is an integer below 2^53.
+  The log does not read it (the core reads no clock); a store that appends the event checks it
+  (K17).
 - **K13** `rotate`: `salt` is base58btc of 16 bytes (`Format(BadSalt)`); `master` and `salt`
   hash to the stored `next` (`NextMismatch`); the revealed key signs as `m<n+1>`; its `revoke`
   follows K12; `next` is a multihash or `null`.
 - **K14** `scope` names a device key (`UnknownKey`) that no event ended (`RevokedKey`) and that
   carries the bot mark (`NotABot`); signed by the current master.
+- **K16** `unlink` names one device key of this log (`UnknownKey`: a master key is not one)
+  that no event ended: not revoked (`RevokedKey`), not unlinked (`UnlinkedKey`). It is signed
+  by the current master or by the named key itself, with exactly one proof (K10): a proof by
+  any other key fails. A key that is unlinked signs nothing new; a `scope` of it is refused
+  (`UnlinkedKey`).
+- **K17** The time of a `revoke`'s `since` is the store's, not the event's: the store that
+  appends a `revoke` refuses a `since` later than its own append time of the event, or before
+  its append time of the `add` of any key the event names (there is no other lower bound). Omitted, `since` means the append time of the revoke. `since` is
+  the time from which the person no longer trusts the key; a reader uses it for links it
+  received at or after that time (the executor's link rules).
 - **K15** A bot scope (in `add` or `scope`) names at least one action (`EmptyScope`), each one of
   `read`, `write`, `join` (`Format(UnknownAction)`). `expires` is checked only as an integer
   below 2^53; the core reads no clock.
@@ -184,7 +198,8 @@ rule. Each rule names the error that the reference implementation returns
 
 - `incept`: master #0 and the listed keys take effect at seq 0; `next` is stored.
 - `add`: the key takes effect at its seq; a bot key's scope is recorded at that seq.
-- `revoke`: each key stops at its seq.
+- `revoke`: each key stops at its seq, unless an `unlink` stopped it earlier.
+- `unlink`: the key stops at its seq: valid below it, as for a revoke.
 - `rotate`: master *n* stops and master *n*+1 starts at its seq; listed keys stop; `next` is
   replaced. With `next: null` the log ends: every key stops at that seq.
 - `scope`: the bot key's scope is replaced from its seq.
@@ -195,7 +210,8 @@ rule. Each rule names the error that the reference implementation returns
 and the seq that ended it, the bot scopes per seq, `next`, and `ended`.
 
 - `key_valid_at(k, s)`: `k` (a key id or a signing multikey) was added at or before `s` and not
-  revoked, replaced or ended at or before `s`. A key revoked at *N* stays valid below *N*.
+  revoked, replaced, unlinked or ended at or before `s`. A key revoked or unlinked at *N* stays
+  valid below *N*.
 - `key_valid_at_time(k, s, t)`: `key_valid_at(k, s)`, and for a bot key `t < expires` of the
   scope in force at `s`. `t` is the caller's trusted time. For every other key it equals
   `key_valid_at(k, s)`.
@@ -287,7 +303,7 @@ reference is `ad4m_identity_core::did_document`.
 | Standing device key `dN` valid at *s* (`key_valid_at`) | `verificationMethod` `#dN`: `Multikey`, `publicKeyMultibase` = its `sign`. Listed in `authentication` and `assertionMethod` | devices sign as the person: links, records, logins |
 | Bot key valid at *s* | `verificationMethod` `#dN` with `"coasys:bot": {"can": […], "expires": …}`, the scope in force at *s*. Listed only in `capabilityInvocation`, never in `authentication` or `assertionMethod` | a bot acts within a scope, not as the person: a generic verifier must not take a bot's statement as the person's |
 | The `enc` key of each standing key | `verificationMethod` `#dN-enc`: `Multikey`, `publicKeyMultibase` = its `enc`. Listed in `keyAgreement` | where messages to the person are sealed. A bot's `enc` key is absent: a bot has no inbox, and a message to the person must not reach one |
-| A key revoked, replaced or ended at or before *s* | absent | a document describes one state; a document of an earlier version lists it |
+| A key revoked, replaced, unlinked or ended at or before *s* | absent | a document describes one state; a document of an earlier version lists it |
 | Masters `mN` | absent | masters control the log, not the subject's statements; the log never lets them sign for the person |
 | Next-key commitment | absent | a log parameter, not a key |
 | Ended log | no verification methods, every relationship empty; metadata `deactivated: true` | DID Core's deactivation |
@@ -312,7 +328,7 @@ Example: the log of `vectors/log.json` at `versionId=3` (`vectors/document.json`
   "@context": [
     "https://www.w3.org/ns/did/v1",
     "https://w3id.org/security/multikey/v1",
-    "https://id.coasys.org/ns/did-scid-coasys/v1"
+    "https://coasys.id/ns/did-scid-coasys/v1"
   ],
   "id": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
   "controller": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
@@ -350,7 +366,7 @@ Example: the log of `vectors/log.json` at `versionId=3` (`vectors/document.json`
 Its metadata: `{"versionId": "3", "nextVersionId": "4", "deactivated": true}` (the log of
 the vectors ends at seq 6).
 
-The context `https://id.coasys.org/ns/did-scid-coasys/v1` defines the extension property. The
+The context `https://coasys.id/ns/did-scid-coasys/v1` defines the extension property. The
 identity site serves the file `docs-src/identity/did-scid-coasys-v1.jsonld` of the AD4M
 repository, unchanged, at that URL (media type `application/ld+json`):
 
@@ -359,7 +375,7 @@ repository, unchanged, at that URL (media type `application/ld+json`):
   "@context": {
     "@version": 1.1,
     "@protected": true,
-    "coasys": "https://id.coasys.org/ns/did-scid-coasys/v1#",
+    "coasys": "https://coasys.id/ns/did-scid-coasys/v1#",
     "coasys:bot": {
       "@id": "coasys:bot",
       "@context": {
@@ -395,8 +411,8 @@ signed. It places the signature at a position in the log, so revocation is check
 clocks.
 
 - A signature by a device key `k` of identity X, anchored at seq `s`, holds only when X's log
-  lists `k` and `key_valid_at(k, s)` (section 6). A key revoked at *N* signs nothing valid
-  anchored at or after *N*; content anchored below *N* stays valid.
+  lists `k` and `key_valid_at(k, s)` (section 6). A key revoked or unlinked at *N* signs
+  nothing valid anchored at or after *N*; content anchored below *N* stays valid.
 - An anchor past the head of the log the verifier holds is refused.
 - The signer picks the anchor, so the anchor alone cannot stop a holder of a revoked key from
   backdating new content to a seq below *N*. A host that admits signed content can order

@@ -311,12 +311,12 @@ describe("Ad4mModel — linkStatus reads", function () {
       proof: { key: signed.proof.key, signature: signed.proof.signature },
     } as LinkExpression;
     await perspective.addLinkExpression(forged, "local");
-    const stored = (
+    // A display read never returns a link whose verdict is invalid. The
+    // `includeUnverified` cases below read the stored link and its status.
+    const shown = (
       await perspective.get(new LinkQuery({ source: cardId, predicate: "lsc://note" }))
     ).find((l) => l.data.target === forged.data.target);
-    expect(stored, "the forged link must be stored").to.exist;
-    expect(String(stored!.status).toLowerCase()).to.equal("local");
-    expect(stored!.proof.valid, "the forged link must not verify").to.not.equal(true);
+    expect(shown, "perspective.get hides the forged link").to.not.exist;
 
     const unverified = forged.data.target;
     const cases: [object, boolean][] = [
