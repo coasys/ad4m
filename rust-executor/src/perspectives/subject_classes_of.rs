@@ -44,9 +44,14 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 use super::model_query::types::{ModelShape, ShapeResolver};
-use super::model_query::utils::looks_like_absolute_iri;
+use super::model_query::utils::{emittable_iri, looks_like_absolute_iri};
+use super::model_query::{
+    conformance_triples, instance_link_predicates, local_predicates, ConformanceObject, LinkGuard,
+};
 use super::shacl_parser::{class_name_of, ABSTRACT_PREDICATE};
+use super::sparql_store::stored_as_literal;
 use super::sparql_store::{EvalStop, SparqlStore};
+use crate::types::LinkStatus;
 
 /// Every subject class registered in this perspective.
 ///
@@ -117,40 +122,96 @@ pub(crate) fn local_name(uri: &str) -> String {
     uri.to_string()
 }
 
+/// One triple an instance of a class must carry: `value` for a flag's fixed
+/// object, `None` when only the predicate's presence is required, and `local`
+/// when the class declares the predicate `local`, so only a Local link
+/// asserts it.
+struct Required {
+    pred: String,
+    value: Option<FlagValue>,
+    local: bool,
+}
+
+/// A flag's fixed object, as conformance matches it.
+#[derive(Clone)]
+enum FlagValue {
+    /// `?source <pred> <iri>`: this IRI, not a literal with the same text.
+    Iri(String),
+    /// `FILTER(STR(?o) = "…")`: any term whose lexical form is this.
+    Str(String),
+}
+
+/// What a node must carry to be returned by a class's own query: its
+/// conformance triples ([`required_triples`]), and at least one link that
+/// query loads, for an instance with no loaded link has no row and is not
+/// returned. `loaded` is [`instance_link_predicates`] with each predicate's
+/// local admission; empty means every predicate, so the required links
+/// themselves are loaded.
+struct Membership {
+    required: Vec<Required>,
+    loaded: Vec<(String, bool)>,
+}
+
 /// The triples an instance of this class must carry, or `None` when the class
 /// cannot be tested at all.
 ///
-/// Flags contribute `(predicate, Some(value))`; required properties contribute
-/// `(predicate, None)` — the value is whatever the instance holds, so only the
-/// predicate's presence is checked. This mirrors what `isSubjectInstance` builds
-/// its `ASK` from, so the two agree on what membership means.
+/// Derived from the class's own query: [`conformance_triples`] is what its
+/// conformance patterns are emitted from (required properties, getter-backed
+/// ones and value-less flags included; else the first initial value), and
+/// [`local_predicates`] is what loading's local filter keeps to Local links.
+/// With [`Membership`]'s loaded-link clause, a node is classified as a class
+/// exactly when that class's query, under the same read, returns it.
 ///
-/// Every part of a required triple is emitted as an `<…>` IRIREF, where a
-/// relative reference does not merely fail to match — it fails to *parse*, and
-/// SPARQL rejects the whole query. A class carrying one is therefore dropped
-/// entirely rather than tested with the offending property quietly removed,
-/// which would only make the class easier to match than its definition says.
-fn required_triples(shape: &ModelShape) -> Option<Vec<(String, Option<String>)>> {
+/// The predicates are emitted as `<…>` IRIREFs, where one that is not a
+/// parseable IRI (a relative reference, `literal://string:x`) does not merely
+/// fail to match — it fails to *parse*, and SPARQL rejects the whole query,
+/// the classifier's batch for every class as well as the class's own. A class
+/// carrying one is therefore dropped entirely ([`emittable_iri`], also for its
+/// loaded predicates in [`membership`]) rather than tested with the offending
+/// property quietly removed, which would only make the class easier to match
+/// than its definition says.
+fn required_triples(shape: &ModelShape) -> Option<Vec<Required>> {
+    let local = local_predicates(shape);
     let mut triples = Vec::new();
-    for p in &shape.properties {
-        if p.is_flag {
-            // A flag with no fixed value pins nothing, so there is no triple to
-            // require — that is not a reason to reject the class.
-            let Some(value) = p.initial_value.as_ref() else {
-                continue;
-            };
-            if !looks_like_absolute_iri(&p.predicate) || !looks_like_absolute_iri(value) {
-                return None;
-            }
-            triples.push((p.predicate.clone(), Some(value.clone())));
-        } else if p.is_required && p.getter.is_none() {
-            if !looks_like_absolute_iri(&p.predicate) {
-                return None;
-            }
-            triples.push((p.predicate.clone(), None));
+    for t in conformance_triples(shape).triples {
+        let pred = &t.property.predicate;
+        if !emittable_iri(pred) {
+            return None;
         }
+        triples.push(Required {
+            pred: pred.clone(),
+            value: match t.object {
+                ConformanceObject::Iri(v) => Some(FlagValue::Iri(v)),
+                ConformanceObject::Str(v) => Some(FlagValue::Str(v)),
+                ConformanceObject::Any => None,
+            },
+            local: local.contains(&format!("<{pred}>")),
+        });
     }
     Some(triples)
+}
+
+/// [`Membership`] of `shape`, or `None` when the class cannot be tested: a
+/// predicate its query emits is not [`emittable_iri`], so that query cannot
+/// parse and returns nothing, and fetching it would fail the whole batch.
+fn membership(shape: &ModelShape) -> Option<Membership> {
+    let required = required_triples(shape)?;
+    let local = local_predicates(shape);
+    let loaded = instance_link_predicates(shape);
+    // The class's query emits every loaded predicate, and every `local` one in
+    // its status filter, as `<iri>`: one that does not parse fails the query.
+    if !loaded.iter().all(|p| emittable_iri(p))
+        || !local
+            .iter()
+            .all(|p| emittable_iri(p.trim_start_matches('<').trim_end_matches('>')))
+    {
+        return None;
+    }
+    let loaded = loaded
+        .into_iter()
+        .map(|p| (p.to_string(), local.contains(&format!("<{p}>"))))
+        .collect();
+    Some(Membership { required, loaded })
 }
 
 /// Order the classes a URI belongs to, most specific first.
@@ -194,13 +255,21 @@ fn order_by_specificity(matches: &mut Vec<(String, usize)>) -> Vec<String> {
 /// perspective has not registered. Absence is used rather than an empty list
 /// because an empty list would claim the stronger thing — that the URI belongs
 /// to no class — which this cannot know.
-pub fn subject_classes_of(
+///
+/// `guard` is the links classification reads: a triple counts only when a link
+/// asserting it passes the guard, the same check the read's own conformance
+/// and hydration apply. A caller serving a read passes the read's
+/// (`LinkGuard::of(query)`), so a target is never classified through a link
+/// the read cannot see (a Local type link under a Shared read); one that
+/// serves no read passes [`LinkGuard::ANY`], every link.
+pub(crate) fn subject_classes_of(
     stop: &EvalStop,
     store: &SparqlStore,
     resolver: &dyn ShapeResolver,
     uris: &[String],
+    guard: LinkGuard<'_>,
 ) -> Result<HashMap<String, Vec<String>>, Error> {
-    subject_classes_of_with_pending(stop, store, resolver, uris, &[])
+    subject_classes_of_with_pending(stop, store, resolver, uris, &[], guard)
 }
 
 /// [`subject_classes_of`], counting links that are staged but not yet committed.
@@ -215,15 +284,16 @@ pub fn subject_classes_of(
 ///
 /// Membership is set containment, so a staged triple counts exactly as a
 /// committed one does — this widens what is known, never what conforms.
-pub fn subject_classes_of_with_pending(
+pub(crate) fn subject_classes_of_with_pending(
     stop: &EvalStop,
     store: &SparqlStore,
     resolver: &dyn ShapeResolver,
     uris: &[String],
     pending: &[(String, String, String)],
+    guard: LinkGuard<'_>,
 ) -> Result<HashMap<String, Vec<String>>, Error> {
     Ok(
-        subject_class_iris_of_with_pending(stop, store, resolver, uris, pending)?
+        subject_class_iris_of_with_pending(stop, store, resolver, uris, pending, guard)?
             .into_iter()
             .map(|(uri, classes)| {
                 let mut names: Vec<String> = Vec::new();
@@ -241,13 +311,14 @@ pub fn subject_classes_of_with_pending(
 /// [`subject_classes_of`] by target class IRI: each URI's classes, most
 /// specific first. Two classes of one name are told apart here, so a reader
 /// hydrates an instance through the class it conforms to.
-pub fn subject_class_iris_of(
+pub(crate) fn subject_class_iris_of(
     stop: &EvalStop,
     store: &SparqlStore,
     resolver: &dyn ShapeResolver,
     uris: &[String],
+    guard: LinkGuard<'_>,
 ) -> Result<HashMap<String, Vec<String>>, Error> {
-    subject_class_iris_of_with_pending(stop, store, resolver, uris, &[])
+    subject_class_iris_of_with_pending(stop, store, resolver, uris, &[], guard)
 }
 
 fn subject_class_iris_of_with_pending(
@@ -256,6 +327,7 @@ fn subject_class_iris_of_with_pending(
     resolver: &dyn ShapeResolver,
     uris: &[String],
     pending: &[(String, String, String)],
+    guard: LinkGuard<'_>,
 ) -> Result<HashMap<String, Vec<String>>, Error> {
     let mut out: HashMap<String, Vec<String>> = HashMap::new();
     if uris.is_empty() {
@@ -280,17 +352,17 @@ fn subject_class_iris_of_with_pending(
     // Load every class's shape once, by its IRI. Shapes are cached per
     // perspective, so this is a map lookup after the first call.
     let classes = concrete_subject_classes(stop, store)?;
-    let mut shapes: Vec<(String, Vec<(String, Option<String>)>)> = Vec::new();
+    let mut shapes: Vec<(String, Membership)> = Vec::new();
     for class in classes {
         match resolver.get_shape(&class) {
             // A class with no required triples at all matches literally every
             // URI, which is not an answer — it is the absence of one.
-            Ok(shape) => match required_triples(shape.as_ref()) {
-                Some(triples) if !triples.is_empty() => shapes.push((class, triples)),
+            Ok(shape) => match membership(shape.as_ref()) {
+                Some(m) if !m.required.is_empty() => shapes.push((class, m)),
                 Some(_) => {}
                 None => log::warn!(
-                    "subjectClassesOf: skipping class '{class}': a required predicate or flag \
-                     value is not an absolute IRI"
+                    "subjectClassesOf: skipping class '{class}': a predicate its query emits is \
+                     not a parseable IRI"
                 ),
             },
             // A class whose SHACL will not parse cannot classify anything; skip
@@ -303,64 +375,66 @@ fn subject_class_iris_of_with_pending(
     }
 
     // Split the predicates by what each is used for: a flag has to match a
-    // specific object, a required property only has to be present.
+    // specific object, a required property only has to be present. A local
+    // predicate is read again through Local links alone.
     let mut flag_preds: HashSet<&str> = HashSet::new();
     let mut presence_preds: HashSet<&str> = HashSet::new();
-    for (_, triples) in &shapes {
-        for (pred, value) in triples {
-            match value {
-                Some(_) => flag_preds.insert(pred.as_str()),
-                None => presence_preds.insert(pred.as_str()),
+    let mut local_flag_preds: HashSet<&str> = HashSet::new();
+    let mut local_presence_preds: HashSet<&str> = HashSet::new();
+    for (_, m) in &shapes {
+        for t in &m.required {
+            let (flags, presence) = if t.local {
+                (&mut local_flag_preds, &mut local_presence_preds)
+            } else {
+                (&mut flag_preds, &mut presence_preds)
             };
+            match t.value {
+                Some(_) => flags.insert(t.pred.as_str()),
+                None => presence.insert(t.pred.as_str()),
+            };
+        }
+        for (pred, local) in &m.loaded {
+            if *local {
+                local_presence_preds.insert(pred.as_str());
+            } else {
+                presence_preds.insert(pred.as_str());
+            }
         }
     }
 
-    // What each URI actually carries, in the two shapes membership asks about.
-    let mut pairs: HashMap<String, HashSet<(String, String)>> = HashMap::new();
-    let mut present: HashMap<String, HashSet<String>> = HashMap::new();
-
-    // Staged links first. Both maps are sets, so a triple the store also
-    // returns simply lands in the same slot.
+    // What each URI carries under the read, and under the read through Local
+    // links only (what loading keeps for a `local` predicate). Staged links
+    // count in both: they are this agent's own, not yet committed.
+    let mut carried = Carried::default();
+    let mut carried_local = Carried::default();
     for (s, p, o) in pending {
-        pairs
-            .entry(s.clone())
-            .or_default()
-            .insert((p.clone(), o.clone()));
-        present.entry(s.clone()).or_default().insert(p.clone());
+        let iri = !stored_as_literal(o);
+        carried.add(s, p, Some((o, iri)));
+        carried_local.add(s, p, Some((o, iri)));
     }
-
-    if !flag_preds.is_empty() {
-        let rows = fetch(stop, store, &values_clause, &flag_preds, true)?;
-        for row in &rows {
-            let (s, p, o) = match (row["s"].as_str(), row["p"].as_str(), row["o"].as_str()) {
-                (Some(s), Some(p), Some(o)) => (s, p, o),
-                _ => continue,
-            };
-            pairs
-                .entry(s.to_string())
-                .or_default()
-                .insert((p.to_string(), o.to_string()));
-            // A flag predicate can also be some other class's required
-            // property, so it counts as present too.
-            present
-                .entry(s.to_string())
-                .or_default()
-                .insert(p.to_string());
-        }
-    }
-
-    if !presence_preds.is_empty() {
-        let rows = fetch(stop, store, &values_clause, &presence_preds, false)?;
-        for row in &rows {
-            let (s, p) = match (row["s"].as_str(), row["p"].as_str()) {
-                (Some(s), Some(p)) => (s, p),
-                _ => continue,
-            };
-            present
-                .entry(s.to_string())
-                .or_default()
-                .insert(p.to_string());
-        }
+    carried.fetch(
+        stop,
+        store,
+        &values_clause,
+        &flag_preds,
+        &presence_preds,
+        guard,
+    )?;
+    // Local and Shared at once admits nothing: under a Shared read a `local`
+    // predicate loads nothing, so it is never carried.
+    if guard.status != Some(&LinkStatus::Shared) {
+        let local_guard = LinkGuard {
+            status: Some(&LinkStatus::Local),
+            include_unverified: guard.include_unverified,
+        };
+        carried_local.fetch(
+            stop,
+            store,
+            &values_clause,
+            &local_flag_preds,
+            &local_presence_preds,
+            local_guard,
+        )?;
     }
 
     // Set containment, in memory. Every class is tested against every URI —
@@ -368,19 +442,22 @@ fn subject_class_iris_of_with_pending(
     // nothing to gain from querying class by class.
     for uri in &valid {
         let uri = uri.as_str();
-        let uri_pairs = pairs.get(uri);
-        let uri_present = present.get(uri);
-
         let mut matches: Vec<(String, usize)> = Vec::new();
-        for (class, triples) in &shapes {
-            let conforms = triples.iter().all(|(pred, value)| match value {
-                Some(v) => uri_pairs
-                    .map(|p| p.contains(&(pred.clone(), v.clone())))
-                    .unwrap_or(false),
-                None => uri_present.map(|p| p.contains(pred)).unwrap_or(false),
-            });
-            if conforms {
-                matches.push((class.clone(), triples.len()));
+        for (class, m) in &shapes {
+            let carries = |pred: &str, local: bool, value: Option<&FlagValue>| {
+                let c = if local { &carried_local } else { &carried };
+                c.has(uri, pred, value)
+            };
+            let conforms = m
+                .required
+                .iter()
+                .all(|t| carries(&t.pred, t.local, t.value.as_ref()));
+            let loads_a_link = m.loaded.is_empty()
+                || m.loaded
+                    .iter()
+                    .any(|(pred, local)| carries(pred, *local, None));
+            if conforms && loads_a_link {
+                matches.push((class.clone(), m.required.len()));
             }
         }
 
@@ -392,17 +469,89 @@ fn subject_class_iris_of_with_pending(
     Ok(out)
 }
 
+/// The triples each URI carries, in the two forms membership asks about:
+/// `(predicate, object's lexical form, object is an IRI)` for flags,
+/// predicates for presence.
+#[derive(Default)]
+struct Carried {
+    pairs: HashMap<String, HashSet<(String, String, bool)>>,
+    present: HashMap<String, HashSet<String>>,
+}
+
+impl Carried {
+    fn add(&mut self, s: &str, p: &str, o: Option<(&str, bool)>) {
+        if let Some((o, iri)) = o {
+            self.pairs.entry(s.to_string()).or_default().insert((
+                p.to_string(),
+                o.to_string(),
+                iri,
+            ));
+        }
+        // A flag predicate can also be some other class's required property,
+        // so it counts as present too.
+        self.present
+            .entry(s.to_string())
+            .or_default()
+            .insert(p.to_string());
+    }
+
+    fn has(&self, s: &str, p: &str, value: Option<&FlagValue>) -> bool {
+        let pair = |v: &str, iri: bool| {
+            self.pairs
+                .get(s)
+                .is_some_and(|pairs| pairs.contains(&(p.to_string(), v.to_string(), iri)))
+        };
+        match value {
+            Some(FlagValue::Iri(v)) => pair(v, true),
+            Some(FlagValue::Str(v)) => pair(v, true) || pair(v, false),
+            None => self.present.get(s).is_some_and(|preds| preds.contains(p)),
+        }
+    }
+
+    /// Both fetches under `guard`; nothing is queried for an empty set.
+    fn fetch(
+        &mut self,
+        stop: &EvalStop,
+        store: &SparqlStore,
+        values_clause: &str,
+        flag_preds: &HashSet<&str>,
+        presence_preds: &HashSet<&str>,
+        guard: LinkGuard<'_>,
+    ) -> Result<(), Error> {
+        if !flag_preds.is_empty() {
+            for row in &fetch(stop, store, values_clause, flag_preds, true, guard)? {
+                if let (Some(s), Some(p), Some(o)) =
+                    (row["s"].as_str(), row["p"].as_str(), row["o"].as_str())
+                {
+                    self.add(s, p, Some((o, row["iri"].as_str() == Some("true"))));
+                }
+            }
+        }
+        if !presence_preds.is_empty() {
+            for row in &fetch(stop, store, values_clause, presence_preds, false, guard)? {
+                if let (Some(s), Some(p)) = (row["s"].as_str(), row["p"].as_str()) {
+                    self.add(s, p, None);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// One `VALUES`-bound query for the whole batch over one set of predicates.
 ///
-/// `with_object` selects the object as well, which flag matching needs and a
+/// `with_object` selects the object as well, and whether it is an IRI (`?iri`,
+/// conformance's `<iri>` matches no literal), which flag matching needs and a
 /// presence test does not — a required property's value can be an arbitrarily
-/// long literal, and none of it is read.
+/// long literal, and none of it is read. `guard` keeps a triple only when a
+/// link asserting it passes; empty when it admits every link.
 fn fetch(
     stop: &EvalStop,
     store: &SparqlStore,
     values_clause: &str,
     preds: &HashSet<&str>,
     with_object: bool,
+    guard: LinkGuard<'_>,
 ) -> Result<Vec<Value>, Error> {
     let pred_values = preds
         .iter()
@@ -412,11 +561,13 @@ fn fetch(
 
     let query = if with_object {
         format!(
-            "SELECT DISTINCT ?s ?p ?o WHERE {{ VALUES ?s {{ {values_clause} }} VALUES ?p {{ {pred_values} }} ?s ?p ?o . }}"
+            "SELECT DISTINCT ?s ?p ?o (isIRI(?o) AS ?iri) WHERE {{ VALUES ?s {{ {values_clause} }} VALUES ?p {{ {pred_values} }} ?s ?p ?o .{} }}",
+            guard.exists("?s", "?p", "?o")
         )
     } else {
         format!(
-            "SELECT DISTINCT ?s ?p WHERE {{ VALUES ?s {{ {values_clause} }} VALUES ?p {{ {pred_values} }} ?s ?p ?_o . }}"
+            "SELECT DISTINCT ?s ?p WHERE {{ VALUES ?s {{ {values_clause} }} VALUES ?p {{ {pred_values} }} ?s ?p ?_o .{} }}",
+            guard.exists("?s", "?p", "?_o")
         )
     };
 

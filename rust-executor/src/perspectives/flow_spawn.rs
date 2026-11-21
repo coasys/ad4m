@@ -20,6 +20,7 @@ use std::collections::HashMap;
 
 use super::flow_classes::mint_flow_instance;
 use super::flow_context::{load_flow_instances, load_shacl_flows, FlowInstanceRecord};
+use super::model_query::LinkGuard;
 use super::perspective_instance::PerspectiveInstance;
 use super::shacl_parser::SHACLFlow;
 use crate::agent::AgentContext;
@@ -194,7 +195,9 @@ pub async fn run_flow_spawn_pass(
         return Vec::new();
     }
 
-    let classes_by_uri = match perspective.subject_classes_of(created_bases) {
+    // Every link: a spawn pass acts on what this agent created, for itself,
+    // and serves no read with a `linkStatus` or `includeUnverified`.
+    let classes_by_uri = match perspective.subject_classes_of(created_bases, LinkGuard::ANY) {
         Ok(map) => map,
         Err(e) => {
             log::error!(
@@ -695,7 +698,7 @@ mod tests {
             "states must round-trip in value order"
         );
         let classes = perspective
-            .subject_classes_of(&[base.clone()])
+            .subject_classes_of(&[base.clone()], LinkGuard::ANY)
             .expect("subject_classes_of");
         assert_eq!(
             classes.get(&base).map(|v| v.as_slice()),

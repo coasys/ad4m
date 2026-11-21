@@ -59,6 +59,7 @@ use super::filtering::{compare_values, extract_sort_value};
 use super::projection::resolve_projections;
 use super::query::{execute_model_query_inner, select_ids, walk_order, with_walk};
 use super::relations::{choose, SUBJECT_CLASSES_KEY, SUBJECT_CLASS_KEY};
+use super::sparql_builder::LinkGuard;
 use super::types::{
     ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, ProjectionInput, Scope,
     ShapeResolver, SortKey, WhereCondition,
@@ -524,8 +525,15 @@ pub async fn execute_union_query_with_views(
     let mut classified: HashMap<String, Vec<String>> = if shared.is_empty() {
         HashMap::new()
     } else {
+        // Over the links this read admits, as step 1 and hydration read: a
+        // class a record is only through a Local or unverified link is not
+        // one of its `__subjectClasses` here, nor an order value.
         crate::perspectives::subject_classes_of::subject_class_iris_of(
-            stop, store, resolver, &shared,
+            stop,
+            store,
+            resolver,
+            &shared,
+            LinkGuard::of(query),
         )?
     };
     let preferred = query.prefer_classes.as_deref().unwrap_or(&[]);
@@ -602,6 +610,7 @@ pub async fn execute_union_query_with_views(
                 store,
                 resolver,
                 &unclassified,
+                LinkGuard::of(query),
             )?,
         );
     }
