@@ -2054,14 +2054,20 @@ async fn a_device_unlinks_itself_without_the_vault_and_the_master_unlinks_anothe
     .await;
     assert!(matches!(wrong, Err(ClientError::Build(_))), "{wrong:?}");
 
-    // The master unlinks d3 (one unlock), and may revoke d2 after its unlink.
-    let head = unlink_key(&a, &vault, &did, &"d3".to_string(), &SystemClock)
+    // The master unlinks d3 (one unlock) and writes the record again without it; it may revoke
+    // d2 after its unlink.
+    let before = record::read(&a, &vault, &did).await.unwrap().unwrap();
+    assert!(before.record.devices.contains_key("d3"));
+    let unlinked = unlink_key(&a, &vault, &did, &"d3".to_string(), &SystemClock, &OsRandom)
         .await
         .unwrap();
-    assert_eq!(head.seq, done.head.seq + 1);
+    assert_eq!(unlinked.head.seq, done.head.seq + 1);
     assert_eq!(vault.unlocks().last(), Some(&MasterUse::Unlink));
+    unlinked.record.unwrap();
+    let opened = record::read(&a, &vault, &did).await.unwrap().unwrap();
+    assert!(!opened.record.devices.contains_key("d3"));
     assert!(matches!(
-        unlink_key(&a, &vault, &did, &"d9".to_string(), &SystemClock).await,
+        unlink_key(&a, &vault, &did, &"d9".to_string(), &SystemClock, &OsRandom).await,
         Err(ClientError::Protocol(_))
     ));
     revoke(

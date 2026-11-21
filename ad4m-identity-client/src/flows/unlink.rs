@@ -5,15 +5,18 @@
 //! - [`unlink_self`]: the device unlinks itself, signed with its own key, no master key. The
 //!   caller must destroy that key at once (`SelfUnlinked::destroy_key`): a copy of an unlinked
 //!   key still signs a link with an old anchor, which only a `revoke` ends.
-//! - [`unlink_key`]: the master key unlinks another key (opens the vault once).
+//! - [`unlink_key`]: the master key unlinks another key (opens the vault once). Then the
+//!   private record is written again, as after a `revoke`: the unlinked device leaves it, and
+//!   the new version's record key is wrapped only to the devices that remain.
 
 use ad4m_identity_core::build::{unlink as unlink_event, unlink_self as unlink_self_event, Signer};
 use ad4m_identity_core::KeyId;
 use ad4m_ldk::identity::SignedHead;
 
 use crate::executor::{ExecutorRpc, ViaExecutor};
+use crate::record;
 use crate::vault::{MasterUse, Vault};
-use crate::{fold, ClientError, Clock};
+use crate::{fold, ClientError, Clock, Random};
 
 /// A device that unlinked itself. The key is spent: the caller destroys it now.
 #[derive(Clone, Debug, PartialEq)]
@@ -23,6 +26,14 @@ pub struct SelfUnlinked {
     pub head: SignedHead,
     /// The id of the key to destroy; the signer passed to [`unlink_self`] is that key.
     pub destroy_key: KeyId,
+}
+
+/// A key the master key unlinked.
+#[derive(Debug)]
+pub struct Unlinked {
+    pub head: SignedHead,
+    /// The record write without the unlinked device. The unlink stands either way.
+    pub record: Result<u64, ClientError>,
 }
 
 async fn scid_and_chain<R: ExecutorRpc>(
@@ -53,14 +64,15 @@ pub async fn unlink_self<R: ExecutorRpc>(
 }
 
 /// Unlinks the device key `key_id` of the identity `did` with an `unlink` signed by the current
-/// master key.
+/// master key, then writes the private record again without it.
 pub async fn unlink_key<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
     did: &str,
     key_id: &KeyId,
     clock: &dyn Clock,
-) -> Result<SignedHead, ClientError> {
+    random: &dyn Random,
+) -> Result<Unlinked, ClientError> {
     let (scid, chain) = scid_and_chain(executor, did).await?;
     if !chain.state().keys.contains_key(key_id) {
         return Err(ClientError::Protocol(format!(
@@ -69,5 +81,7 @@ pub async fn unlink_key<R: ExecutorRpc>(
     }
     let unlocked = vault.unlock(&scid, MasterUse::Unlink, clock.now())?;
     let event = unlink_event(&chain, unlocked.signer(clock.now())?, key_id)?;
-    Ok(executor.publish(std::slice::from_ref(&event)).await?)
+    let head = executor.publish(std::slice::from_ref(&event)).await?;
+    let record = record::write(executor, vault, did, &[], random).await;
+    Ok(Unlinked { head, record })
 }
