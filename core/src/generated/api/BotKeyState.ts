@@ -9,7 +9,7 @@ export type BotKeyState = {
  */
 keyId: string, 
 /**
- * `valid`, `revoked`, `expired` or `notInLog`.
+ * `valid`, `revoked`, `unlinked`, `expired` or `notInLog`.
  */
 verdict: string, 
 /**

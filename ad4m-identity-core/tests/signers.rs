@@ -25,7 +25,7 @@ fn master_events(log: &Log) -> Vec<Event> {
     let n: u32 = id[1..].parse().unwrap();
     vec![
         build::add_unsigned(&log.chain, device(n, KeyLife::Standing), "o", "c").unwrap(),
-        build::revoke_unsigned(&log.chain, &["d1".to_string()]).unwrap(),
+        build::revoke_unsigned(&log.chain, &["d1".to_string()], None).unwrap(),
         build::scope_unsigned(
             &log.chain,
             &"d2".to_string(),
@@ -86,7 +86,7 @@ fn earlier_master_fails() {
     }
     // And the builder will not sign with it.
     assert_eq!(
-        build::revoke(&log.chain, &master(0), &["d1".to_string()]).unwrap_err(),
+        build::revoke(&log.chain, &master(0), &["d1".to_string()], None).unwrap_err(),
         BuildError::NotCurrentMaster
     );
 }
@@ -232,7 +232,7 @@ fn a_proof_with_another_purpose_type_or_suite_is_refused() {
     ];
     for (what, edit) in edits {
         // Signed over the edited config, so only the config check can refuse it.
-        let mut event = build::revoke_unsigned(&log.chain, &["d1".to_string()]).unwrap();
+        let mut event = build::revoke_unsigned(&log.chain, &["d1".to_string()], None).unwrap();
         let mut proof = build::proof_config(&event, "m0");
         edit(&mut proof);
         let input = ad4m_hash_chain::signing_input(&event, &proof).unwrap();
@@ -337,11 +337,11 @@ fn a_salt_of_any_other_length_is_refused_though_committed() {
 #[test]
 fn signing_input_and_attach_match_the_signer_form() {
     let log = Log::new();
-    let mut by_hand = build::revoke_unsigned(&log.chain, &["d1".to_string()]).unwrap();
+    let mut by_hand = build::revoke_unsigned(&log.chain, &["d1".to_string()], None).unwrap();
     let input = build::signing_input(&by_hand, "m0").unwrap();
     let signature = ed25519_dalek::Signer::sign(&master(0), &input).to_bytes();
     build::attach_proof(&mut by_hand, "m0", &signature).unwrap();
-    let by_signer = build::revoke(&log.chain, &master(0), &["d1".to_string()]).unwrap();
+    let by_signer = build::revoke(&log.chain, &master(0), &["d1".to_string()], None).unwrap();
     assert_eq!(by_hand, by_signer);
     assert_eq!(
         build::attach_proof(&mut by_hand, "m0", &signature).unwrap_err(),

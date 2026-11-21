@@ -363,10 +363,10 @@ pub fn decide_key(
     };
     match key.verdict {
         KeyVerdict::Valid => {}
-        KeyVerdict::Revoked | KeyVerdict::NotInLog => {
+        KeyVerdict::Revoked | KeyVerdict::Unlinked | KeyVerdict::NotInLog => {
             return Err(Refusal::forbidden(
                 BOT_REVOKED,
-                "the owner's log revoked this bot's key",
+                "the owner's log revoked or unlinked this bot's key",
             ))
         }
         KeyVerdict::Expired => {

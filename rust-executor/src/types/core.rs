@@ -245,7 +245,7 @@ impl LinkExpression {
     /// Normalizing `data` first is not optional: the signature was produced over the
     /// normalized link.
     pub fn check(&self) -> crate::identity::resolver::CheckedLink {
-        self.check_entered(None)
+        self.check_entered(None, None)
     }
 
     /// [`LinkExpression::check`] with what the caller knows of where the link entered the
@@ -253,6 +253,7 @@ impl LinkExpression {
     pub fn check_entered(
         &self,
         entered_after_revoke: Option<bool>,
+        received_at: Option<u64>,
     ) -> crate::identity::resolver::CheckedLink {
         let link_expr = Expression::<Link> {
             author: self.author.clone(),
@@ -260,7 +261,7 @@ impl LinkExpression {
             data: self.data.normalize(),
             proof: self.proof.clone(),
         };
-        crate::identity::check_signed_entered(&link_expr, entered_after_revoke)
+        crate::identity::check_signed_entered(&link_expr, entered_after_revoke, received_at)
     }
 
     /// [`LinkExpression::check_entered`] for a link this executor signed during the call that
@@ -269,6 +270,7 @@ impl LinkExpression {
     pub fn check_own_entered(
         &self,
         entered_after_revoke: Option<bool>,
+        received_at: Option<u64>,
     ) -> crate::identity::resolver::CheckedLink {
         let link_expr = Expression::<Link> {
             author: self.author.clone(),
@@ -276,7 +278,7 @@ impl LinkExpression {
             data: self.data.normalize(),
             proof: self.proof.clone(),
         };
-        crate::identity::check_signed_own(&link_expr, entered_after_revoke)
+        crate::identity::check_signed_own(&link_expr, entered_after_revoke, received_at)
     }
 }
 
