@@ -13,6 +13,10 @@
 //!   pushes that failed, and the device's side that takes it from its inbox.
 //! - [`enc`]: the device's enc key, held by the app, and [`WithEncKey`], which opens the
 //!   inbox and the record key here: the executor passes only sealed text.
+//! - `store` (feature `store`): `ViaStore`, the identity store's routes as an
+//!   [`executor::ExecutorRpc`] for a device with no executor (the phone), with its own
+//!   [`EncKey`]; its `identity.takeMaster` runs the same open, check and choice as
+//!   [`WithEncKey`] (`enc`'s `take_from`).
 //! - [`flows::revoke`]: a `revoke` signed by the current master key, published, with an
 //!   optional `since` for a lost or stolen key; or, with the 12 words, a `rotate` that revokes
 //!   the keys too ("Also replace my master key").
@@ -38,15 +42,24 @@ pub mod flows;
 pub mod record;
 mod request;
 pub mod secret;
+#[cfg(feature = "store")]
+pub mod store;
 pub mod vault;
 
+pub use ad4m_identity_core::record::VaultId;
 pub use enc::{EncKey, EncOpenError, SealedInboxMessage, SoftEncKey, WithEncKey};
 pub use executor::{ExecutorRpc, RpcError, ViaExecutor};
 pub use secret::Secret;
+#[cfg(feature = "store")]
+pub use store::{
+    Checkpoint, CheckpointError, HttpClient, HttpError, HttpRequest, HttpResponse, LogCheckpoints,
+    MemoryCheckpoints, StoreEndpoint, ViaStore,
+};
 #[cfg(any(test, feature = "test-vault"))]
 pub use vault::MemoryVault;
 pub use vault::{
-    Forgot, MasterSigner, MasterUse, PendingPush, StageToken, Stored, Unlocked, Vault, VaultError,
+    CustodyNote, Forgot, MasterSigner, MasterUse, NoteToken, PendingPush, StageToken, Standing,
+    Stored, Unlocked, Vault, VaultError, VAULT_NOTE,
 };
 
 /// Unix seconds, from the surface.
@@ -190,6 +203,12 @@ pub enum ClientError {
     /// head that the log lets keep it holds it (per the record). Removing it would leave only the 12 words.
     #[error("this device holds the only copy of the master key")]
     OnlyCopy,
+    /// Not written: this device's custody note ([`vault::CustodyNote`]) changed between the
+    /// decision to mark it and the record version the write built on — a removal released the
+    /// copy, or the owed mark landed and was cleared — so the repair that decided on the old
+    /// note writes nothing.
+    #[error("this device's custody note changed under the mark")]
+    CustodyNoteMoved,
     #[error("{0}")]
     Protocol(String),
 }

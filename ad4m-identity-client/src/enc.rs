@@ -8,6 +8,10 @@
 //! keeps the wire shapes of `identity.takeMaster`, `identity.inbox` and
 //! `identity.unwrapRecordKey` for its caller, so every flow runs unchanged over
 //! `ViaExecutor<WithEncKey<R>>`.
+//!
+//! A phone has no executor: its `ViaStore` (feature `store`) holds its own enc key, reads the
+//! joined inbox from the store and runs the same `take_from`, so the desktop's custody
+//! service and the phone open, check and choose the master key in one place.
 
 use ad4m_identity_core::inbox::{
     check_payload, Accept, InboxAddress, InboxBody, InboxError, InboxPayload,
@@ -24,7 +28,10 @@ use crate::executor::{ExecutorRpc, IdentityLog, IdentityStatus, RpcError, TakenM
 use crate::secret::Secret;
 use crate::Clock;
 
-/// Why an enc key did not open a message or a record key.
+/// Why [`EncKey::open`] or [`EncKey::unwrap_record_key`] gave no answer. `Unavailable` is
+/// transient — the keystore is locked or the open failed in between — so the message is kept
+/// and the call answers `unavailable` (503); `Sealed` is final — the bytes do not open with
+/// this device's key at this address — so the message is for no one here and is dropped.
 #[derive(Debug, thiserror::Error)]
 pub enum EncOpenError<E> {
     /// The key cannot open right now: a locked keystore, an I/O failure. Try again later.
@@ -35,17 +42,22 @@ pub enum EncOpenError<E> {
     Sealed(E),
 }
 
-/// This device's X25519 enc key, wherever it is kept.
+/// This device's X25519 enc key, wherever it is kept (a desktop's custody service, a phone's
+/// keystore): it opens inbox messages and unwraps the record's key for this device's entry.
+/// [`SoftEncKey`] is the software version for tests and callers without a keystore.
 pub trait EncKey {
     /// The `enc` multikey a claim, an incept or a device string carries.
     fn enc(&self) -> Multikey;
-    /// Opens a message sealed for `address`; [`check_payload`] checks it after.
+    /// Opens a message sealed for `address` (`coasys:inbox` + address is the seal's `info`, so
+    /// a seal for one inbox never opens at another); [`check_payload`] checks it after.
+    /// `Unavailable` keeps the message for the next try; `Sealed` drops it.
     fn open(
         &self,
         address: &InboxAddress,
         sealed: &str,
     ) -> Result<InboxPayload, EncOpenError<InboxError>>;
-    /// The record key that `wrapped` seals for identity `scid` to this key.
+    /// The record key that `wrapped` (this device's entry of a record's `wrapped`) seals for
+    /// identity `scid` to this key — the same two error cases as `open`.
     fn unwrap_record_key(
         &self,
         scid: &str,
