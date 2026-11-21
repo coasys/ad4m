@@ -1927,7 +1927,12 @@ pub(crate) mod tests {
 
         /// Appends a `revoke` of d1 signed by m0.
         pub fn revoke_d1(&mut self) {
-            let event = revoke(&self.chain(), &self.master, &["d1".to_string()], None).unwrap();
+            self.revoke_d1_since(None);
+        }
+
+        /// [`TestLog::revoke_d1`] with the `since` (ms) of the revoke.
+        pub fn revoke_d1_since(&mut self, since: Option<u64>) {
+            let event = revoke(&self.chain(), &self.master, &["d1".to_string()], since).unwrap();
             self.events.push(event);
         }
     }

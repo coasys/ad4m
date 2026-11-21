@@ -9,7 +9,7 @@
 //! {"cmd":"open","did":"did:scid:…","store":"http://…"}           -> {"link","offerString","offerId"}
 //! {"cmd":"waitClaim"}                                           -> {"matchCode","deviceKey","hint"}
 //! {"cmd":"confirm"}                                             -> {"seq"}
-//! {"cmd":"revoke","did":"did:scid:…","keyIds":["d2"]}            -> {"seq"}
+//! {"cmd":"revoke","did":"did:scid:…","keyIds":["d2"],"since":ms?} -> {"seq"}
 //! ```
 //!
 //! Build: `cargo build -p ad4m-identity-client --example holder --features ws,test-vault`.
@@ -164,7 +164,8 @@ async fn main() {
                     let did = field(&command, "did")?;
                     let ids: Vec<String> = serde_json::from_value(command["keyIds"].clone())
                         .map_err(|e| format!("keyIds: {e}"))?;
-                    let head = revoke(&executor, &vault, did, &ids, &CLOCK)
+                    let since = command["since"].as_u64();
+                    let head = revoke(&executor, &vault, did, &ids, since, &CLOCK)
                         .await
                         .map_err(|e| e.to_string())?;
                     Ok(json!({ "seq": head.seq }))
