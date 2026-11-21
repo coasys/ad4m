@@ -1092,9 +1092,10 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
             expect(status.keyId).to.equal("d3");
             const devices = await laptop.client.identity.devices();
             const dropped = devices.find((d) => d.keyId === "d1")!;
-            // A restore's lock-out rotates, then revokes the lost device by the new master.
+            // A restore's lock-out rotates, unlinking the lost device, then revokes it by the new
+            // master.
             expect(dropped.revokedSeq).to.equal(restored.seq);
-            expect(dropped.unlinkedSeq).to.be.null;
+            expect(dropped.unlinkedSeq).to.equal(restored.seq - 1);
             const opened = await restorer.send({ cmd: "record", did });
             expect(opened.record.devices.d3).to.include({ name: "Laptop", kind: "desktop-app", holdsMaster: true });
             expect(opened.record.devices.d1).to.be.undefined;
