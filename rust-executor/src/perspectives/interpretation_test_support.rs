@@ -602,6 +602,7 @@ pub(crate) async fn run_interpretation_harness_e2e(
         // dedup-on-drain off (scenarios rely on the LLM's own `_query`
         // discipline, which is exactly what the scenario asserts on).
         false,
+        &crate::perspectives::interpretation::DedupStrategy::NormalizedString,
         // No per-completion credit gate: local Ollama runs at rate=0 so
         // the ledger deltas are zero regardless, and asserting on
         // billing side-effects is not part of these scenarios.

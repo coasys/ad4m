@@ -953,17 +953,19 @@ where
 /// runner-default behaviour of every existing caller.
 ///
 /// Wire shape (matches what `write_processor` stores):
-/// * `None` → default (`NormalizedString`).
+/// * `None` → [`DedupStrategy::for_absent_config`]: semantic with the executor's default
+///   embedding model when it has one, else `NormalizedString`.
 /// * `{"kind":"normalized"}` → `NormalizedString`.
-/// * `{"kind":"semantic","base_url":..., "model":..., "threshold":<f32>}`
-///    → `Semantic { .. }`.
+/// * `{"kind":"semantic","model":..., "threshold":<f32>, "unclearFrom":<f32>}`
+///   → `Semantic { .. }`. `unclearFrom` is optional
+///   ([`crate::perspectives::interpretation::DEFAULT_UNCLEAR_FROM`]).
 ///
 /// Hand-rolled rather than `serde` derive on the enum so this PR does not
 /// add a serde dependency to the interpretation module — the dedup enum
 /// itself keeps its current shape.
 pub fn parse_dedup_strategy_json(blob: Option<&str>) -> DedupStrategy {
     let Some(json) = blob else {
-        return DedupStrategy::default();
+        return DedupStrategy::for_absent_config();
     };
     let value: serde_json::Value = match serde_json::from_str(json) {
         Ok(v) => v,
@@ -988,8 +990,16 @@ pub fn parse_dedup_strategy_json(blob: Option<&str>) -> DedupStrategy {
                 .get("threshold")
                 .and_then(|v| v.as_f64())
                 .map(|f| f as f32);
+            let unclear_from = value.get("unclearFrom").and_then(|v| v.as_f64()).map_or(
+                crate::perspectives::interpretation::DEFAULT_UNCLEAR_FROM,
+                |f| f as f32,
+            );
             match (model, threshold) {
-                (Some(model), Some(threshold)) => DedupStrategy::Semantic { model, threshold },
+                (Some(model), Some(threshold)) => DedupStrategy::Semantic {
+                    model,
+                    threshold,
+                    unclear_from,
+                },
                 _ => {
                     log::warn!(
                         "parse_dedup_strategy_json: semantic strategy missing required fields \
@@ -1526,6 +1536,9 @@ pub async fn run_one_pass(
                     // re-proposed instances must collapse to updates (not
                     // unbounded duplicate creates). James Weir PR #911 review.
                     true,
+                    // The processor's strategy, as on the single-shot path (#1804): it
+                    // sets the bands of the duplicate check.
+                    &dedup,
                     // No per-pass credit gate on the auto-processor path:
                     // the watcher runs as an internal service (no user
                     // session to bill against) and each completion still
@@ -2471,12 +2484,199 @@ mod tests {
         assert_eq!(ids(&batch_b), vec!["b-1".to_string()]);
     }
 
+    /// The processor's `dedupStrategy` reaches the harness path (#1804; before, the harness
+    /// compared normalized titles only). A real harness pass through `run_one_pass`, no
+    /// `test_hooks::interpret` stand-in: a scripted model creates a Task whose title only
+    /// paraphrases an existing one. Under the processor's bands (threshold 0.5) the two are
+    /// the same row and the create becomes an update. With the default strategy (0.85, or
+    /// normalized titles) the paraphrase would stay a second Task.
+    #[tokio::test]
+    async fn run_one_pass_gives_the_harness_the_processors_dedup_strategy() {
+        use crate::perspectives::interpretation::embedding_cache::tests::{
+            word_embedder, word_vector,
+        };
+        use crate::perspectives::interpretation::search::cosine;
+        use crate::perspectives::interpretation_test_support::{
+            graph_titles_lower, seed_instance, TASK_SDNA,
+        };
+        use crate::types::{AiCapability, EndpointKind, ModelInput, ModelType};
+        use std::sync::atomic::AtomicUsize;
+
+        let (old, new) = (
+            "Finish the WebRTC calling module",
+            "WebRTC calling module work",
+        );
+        let score = cosine(&word_vector(old), &word_vector(new));
+        assert!(
+            (0.5..0.85).contains(&score),
+            "fixture: {score} must merge at 0.5 and not at the default 0.85"
+        );
+
+        let (mut p, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        seed_instance(&mut p, &ctx, &shapes[0], "test://old/webrtc", old).await;
+        crate::ai_service::AIService::init_global_instance()
+            .await
+            .unwrap();
+        let service = crate::ai_service::AIService::global_instance()
+            .await
+            .unwrap();
+        let mut embed_server = mockito::Server::new_async().await;
+        let (embed_id, _) = word_embedder(
+            &mut embed_server,
+            &format!("fwd-embed-{}", uuid::Uuid::new_v4()),
+        )
+        .await;
+
+        // The model: one `task_create` with the paraphrase, then a text answer.
+        let asked = Arc::new(AtomicUsize::new(0));
+        let asked_in_mock = asked.clone();
+        let mut llm_server = mockito::Server::new_async().await;
+        let _llm = llm_server
+            .mock("POST", "/v1/chat/completions")
+            .with_body_from_request(move |request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(request.body().unwrap()).unwrap();
+                let first = asked_in_mock.fetch_add(1, Ordering::SeqCst) == 0;
+                let call = serde_json::json!([{
+                    "index": 0, "id": "call_1", "type": "function",
+                    "function": {
+                        "name": "task_create",
+                        "arguments": serde_json::json!({ "title": new, "type": "ns://task" })
+                            .to_string(),
+                    },
+                }]);
+                let (message, delta, finish) = if first {
+                    (
+                        serde_json::json!({ "role": "assistant", "content": null, "tool_calls": call }),
+                        serde_json::json!({ "role": "assistant", "tool_calls": call }),
+                        "tool_calls",
+                    )
+                } else {
+                    (
+                        serde_json::json!({ "role": "assistant", "content": "done" }),
+                        serde_json::json!({ "role": "assistant", "content": "done" }),
+                        "stop",
+                    )
+                };
+                if body.get("stream").and_then(|v| v.as_bool()) == Some(true) {
+                    let chunk = serde_json::json!({
+                        "id": "c", "object": "chat.completion.chunk", "created": 0, "model": "stub",
+                        "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }],
+                    });
+                    format!("data: {chunk}\n\ndata: [DONE]\n\n").into_bytes()
+                } else {
+                    serde_json::json!({
+                        "id": "c", "object": "chat.completion", "created": 0, "model": "stub",
+                        "choices": [{ "index": 0, "finish_reason": finish, "message": message }],
+                        "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 },
+                    })
+                    .to_string()
+                    .into_bytes()
+                }
+            })
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        let endpoint = crate::types::Endpoint {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: format!("fwd-llm-{}", uuid::Uuid::new_v4()),
+            kind: EndpointKind::Vllm,
+            base_url: url::Url::parse(&llm_server.url()).unwrap(),
+            api_key: crate::secret::Secret::new(uuid::Uuid::new_v4().to_string()),
+            capabilities: vec![AiCapability::Chat],
+            max_num_ctx: Some(32_768),
+            request_timeout_secs: None,
+            max_concurrent: None,
+            managed: false,
+            health: Default::default(),
+        };
+        crate::db::Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let llm_id = crate::db::Ad4mDb::with_global_instance(|db| {
+            db.add_model(&ModelInput {
+                name: format!("fwd-llm-{}", uuid::Uuid::new_v4()),
+                model_type: ModelType::Llm,
+                endpoint_id: endpoint.id.clone(),
+                remote_model: "stub".into(),
+                native_tools: Some(true),
+            })
+        })
+        .unwrap();
+        service.reload_model(llm_id.clone()).await.unwrap();
+        service
+            .set_default_model(ModelType::Llm, llm_id)
+            .await
+            .unwrap();
+
+        let mut cfg = cfg("fwd", 100, 32);
+        cfg.interpretation_classes = vec![shapes[0].target_class.clone()];
+        cfg.max_tool_calls = Some(4);
+        cfg.dedup_strategy_json = Some(
+            serde_json::json!({
+                "kind": "semantic", "model": embed_id, "threshold": 0.5, "unclearFrom": 0.4,
+            })
+            .to_string(),
+        );
+        let items = vec![pt("We still have to do the WebRTC calling module work.")];
+        let now = chrono::Utc::now().timestamp_millis();
+        run_one_pass(&mut p, &cfg, &items, now, &ctx, false, 0)
+            .await
+            .expect("pass");
+
+        assert!(
+            asked.load(Ordering::SeqCst) >= 1,
+            "the harness asked the model"
+        );
+        let titles = graph_titles_lower(&p, &shapes).await;
+        assert_eq!(
+            titles,
+            vec![old.to_lowercase()],
+            "the paraphrase merged into the old Task under the processor's bands: {titles:?}"
+        );
+    }
+
     // ---- parse_dedup_strategy_json -----------------------------------------
 
     #[test]
-    fn parse_dedup_none_returns_default() {
+    fn parse_dedup_none_without_an_embedding_model_compares_strings() {
+        crate::db::Ad4mDb::init_global_instance(":memory:").unwrap();
         assert!(matches!(
             parse_dedup_strategy_json(None),
+            DedupStrategy::NormalizedString
+        ));
+    }
+
+    /// Nico 2026-11-18: an absent `dedupStrategy` is semantic when the executor has an
+    /// embedding model, with its default model and the default bands.
+    #[tokio::test]
+    async fn parse_dedup_none_with_an_embedding_model_is_semantic() {
+        use crate::perspectives::interpretation::{
+            DEFAULT_SEMANTIC_THRESHOLD, DEFAULT_UNCLEAR_FROM,
+        };
+        crate::db::Ad4mDb::init_global_instance(":memory:").unwrap();
+        crate::ai_service::AIService::init_global_instance()
+            .await
+            .unwrap();
+        let mut server = mockito::Server::new_async().await;
+        let (id, _) = crate::perspectives::interpretation::embedding_cache::tests::word_embedder(
+            &mut server,
+            "absent-embed",
+        )
+        .await;
+        match parse_dedup_strategy_json(None) {
+            DedupStrategy::Semantic {
+                model,
+                threshold,
+                unclear_from,
+            } => {
+                assert_eq!(model, id);
+                assert_eq!(threshold, DEFAULT_SEMANTIC_THRESHOLD);
+                assert_eq!(unclear_from, DEFAULT_UNCLEAR_FROM);
+            }
+            other => panic!("expected Semantic, got {other:?}"),
+        }
+        // An explicit strategy stays what it says.
+        assert!(matches!(
+            parse_dedup_strategy_json(Some(r#"{"kind":"normalized"}"#)),
             DedupStrategy::NormalizedString
         ));
     }
@@ -2495,9 +2695,25 @@ mod tests {
             r#"{"kind":"semantic","model":"nomic","threshold":0.8}"#,
         ));
         match strat {
-            DedupStrategy::Semantic { model, threshold } => {
+            DedupStrategy::Semantic {
+                model,
+                threshold,
+                unclear_from,
+            } => {
                 assert_eq!(model, "nomic");
                 assert!((threshold - 0.8).abs() < 1e-4);
+                assert_eq!(
+                    unclear_from,
+                    crate::perspectives::interpretation::DEFAULT_UNCLEAR_FROM
+                );
+            }
+            other => panic!("expected Semantic, got {other:?}"),
+        }
+        match parse_dedup_strategy_json(Some(
+            r#"{"kind":"semantic","model":"nomic","threshold":0.8,"unclearFrom":0.6}"#,
+        )) {
+            DedupStrategy::Semantic { unclear_from, .. } => {
+                assert!((unclear_from - 0.6).abs() < 1e-4)
             }
             other => panic!("expected Semantic, got {other:?}"),
         }

@@ -67,6 +67,7 @@ assume they are there; prefer the static tools below.
 | `instance_create(perspective_id, class_name, properties, base_uri?, parent?)` | Create an instance; `parent` also puts it under that node (e.g. a Message into a Channel), the way the node holds children. Returns its `base_uri` |
 | `instance_query(perspective_id, class_name, filter?, parent?, limit?, offset?)` | List instances with property values; `filter` is a where clause, `parent` scopes to what one node contains |
 | `instance_get(perspective_id, class_name, base_uri)` | One instance, fully resolved |
+| `instance_search(perspective_id, text, class_name?, k?, parent?)` | The k rows whose title is nearest to `text`, across classes (or one class): id, class, title, score. By meaning with the executor's embedding model; without one, by word overlap, and the result says so |
 | `instance_update(perspective_id, class_name, base_uri, properties)` | Set single-valued properties |
 | `instance_add_to_collection(perspective_id, class_name, base_uri, collection, item_uri)` | Add an item to a collection property |
 | `instance_remove_from_collection(perspective_id, class_name, base_uri, collection, item_uri)` | Remove an item from a collection property (the item itself stays) |

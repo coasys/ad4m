@@ -116,6 +116,7 @@ impl Ad4mMcpHandler {
             "instance_create" => dispatch_static_tool!(instance_create),
             "instance_query" => dispatch_static_tool!(instance_query),
             "instance_get" => dispatch_static_tool!(instance_get),
+            "instance_search" => dispatch_static_tool!(instance_search),
             "instance_update" => dispatch_static_tool!(instance_update),
             "instance_add_to_collection" => dispatch_static_tool!(instance_add_to_collection),
             "instance_remove_from_collection" => {

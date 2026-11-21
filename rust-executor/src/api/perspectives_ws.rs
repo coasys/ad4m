@@ -1556,6 +1556,9 @@ async fn run_interpretation_with_harness_handler(
             // to `_query` before proposing. The auto-processor watcher is
             // the caller that passes `true`.
             false,
+            // No processor, so no `dedupStrategy`: equal titles. Its create replies
+            // show them, and the model decides with `propose_same_as`.
+            &crate::perspectives::interpretation::DedupStrategy::NormalizedString,
             credit_gate,
             // Direct WS runs default to all flows on the perspective; a
             // `flows` request field can narrow this later (per-run flow

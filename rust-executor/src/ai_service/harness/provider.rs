@@ -380,6 +380,11 @@ impl<T> HintBuffer<T> {
     pub fn len(&self) -> usize {
         self.lock().len()
     }
+
+    /// The first `f` answer over the items, oldest first.
+    pub fn find_map<R>(&self, f: impl FnMut(&T) -> Option<R>) -> Option<R> {
+        self.lock().iter().find_map(f)
+    }
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────
