@@ -1,0 +1,30 @@
+[package]
+name = "s0b-oxigraph"
+version = "0.1.0"
+edition = "2021"
+
+# Own workspace root, so the ad4m root workspace does not claim this crate.
+# vendor/sparopt is a [patch] path, not a member.
+[workspace]
+exclude = ["vendor/sparopt"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+oxigraph = { version = "=0.5.13", default-features = false, features = ["rdf-12"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+oxigraph = { version = "=0.5.13", default-features = false, features = ["rdf-12", "js"] }
+wasm-bindgen = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O3", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]
+
+[patch.crates-io]
+sparopt = { path = "vendor/sparopt" }

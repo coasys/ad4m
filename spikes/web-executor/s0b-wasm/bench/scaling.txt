@@ -1,0 +1,9 @@
+== 10000
+load_ms=131.1 bytes_per_link=3515 Q1 median_ms=16.488 Q2 median_ms=1.883 Q3 median_ms=4.694 Q4 median_ms=1.646 Q5 median_ms=45.907 Q6 median_ms=9.935 
+load_ms=175.8 bytes_per_link=2995 Q1 median_ms=21.101 Q2 median_ms=2.755 Q3 median_ms=6.586 Q4 median_ms=1.920 Q5 median_ms=56.109 Q6 median_ms=11.521 
+== 50000
+load_ms=700.2 bytes_per_link=3339 Q1 median_ms=99.956 Q2 median_ms=1.899 Q3 median_ms=32.866 Q4 median_ms=14.072 Q5 median_ms=244.909 Q6 median_ms=51.844 
+load_ms=1064.8 bytes_per_link=2890 Q1 median_ms=121.476 Q2 median_ms=3.119 Q3 median_ms=41.653 Q4 median_ms=15.076 Q5 median_ms=290.682 Q6 median_ms=59.890 
+== 100000
+load_ms=1419.5 bytes_per_link=3302 Q1 median_ms=217.971 Q2 median_ms=1.932 Q3 median_ms=72.704 Q4 median_ms=28.494 Q5 median_ms=515.837 Q6 median_ms=106.216 
+load_ms=2323.3 bytes_per_link=2882 Q1 median_ms=265.062 Q2 median_ms=2.765 Q3 median_ms=90.176 Q4 median_ms=30.290 Q5 median_ms=606.939 Q6 median_ms=124.803 

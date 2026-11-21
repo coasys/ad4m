@@ -1,0 +1,88 @@
+Perspective {
+    links: [
+        LinkExpression {
+            author: "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+            data: Link {
+                predicate: Some(
+                    "s0a://x1",
+                ),
+                source: "s0a://native-before",
+                target: "ad4m://has",
+            },
+            proof: ExpressionProof {
+                invalid: Some(
+                    false,
+                ),
+                key: Some(
+                    "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP#z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+                ),
+                signature: Some(
+                    "88ef5337d029e6d51d35d5c25cec50d03cfb8734931fa163320d6693e5948349cc29df4e446ae4f8f993714b42655cc19efcc53a6d3d60a3f3fe9fce4db92f0f",
+                ),
+                valid: Some(
+                    true,
+                ),
+            },
+            timestamp: "2026-11-19T06:04:40.856Z",
+            status: Some(
+                "SHARED",
+            ),
+        },
+        LinkExpression {
+            author: "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+            data: Link {
+                predicate: Some(
+                    "s0a://native-live-1795068338185",
+                ),
+                source: "s0a://native-live",
+                target: "ad4m://has",
+            },
+            proof: ExpressionProof {
+                invalid: Some(
+                    false,
+                ),
+                key: Some(
+                    "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP#z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+                ),
+                signature: Some(
+                    "b5d2eb140faebd50648a34a131ed97245b1b1a389b0b7135328e58bcb6cde319167f6cf77e5610193b2d35efc928ed84ab9e711e5297f78207431bffa996e00a",
+                ),
+                valid: Some(
+                    true,
+                ),
+            },
+            timestamp: "2026-11-19T06:05:38.202Z",
+            status: Some(
+                "SHARED",
+            ),
+        },
+        LinkExpression {
+            author: "did:key:z6MkghMCM29a5WMWNu9ZUz11AUWuHok9Zip6aiVP75DQaPhL",
+            data: Link {
+                predicate: Some(
+                    "ad4m://has",
+                ),
+                source: "s0a://tab",
+                target: "s0a://from-tab-1795068338736",
+            },
+            proof: ExpressionProof {
+                invalid: Some(
+                    false,
+                ),
+                key: Some(
+                    "did:key:z6MkghMCM29a5WMWNu9ZUz11AUWuHok9Zip6aiVP75DQaPhL#z6MkghMCM29a5WMWNu9ZUz11AUWuHok9Zip6aiVP75DQaPhL",
+                ),
+                signature: Some(
+                    "6f165cb7fa77ecb7f7e0323abda60e79493b005d9c79c93e43815f5c743251855ade11773d1cbc1a81534acb51c55a4a5a4a29cd151d96144adaa7a7fb491908",
+                ),
+                valid: Some(
+                    true,
+                ),
+            },
+            timestamp: "2026-11-19T06:05:38.737Z",
+            status: Some(
+                "SHARED",
+            ),
+        },
+    ],
+}
