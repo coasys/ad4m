@@ -8,16 +8,7 @@
 
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::types::{DecoratedLinkExpression, LinkQuery, LinkStatus};
-
-/// The first link in `links` that counts — `proof.valid == Some(true)`, the
-/// stored `valid` verdict every schema/logic read of decorated links makes
-/// (`flow_context/loader.rs`'s cut). A definition link a peer sent whose
-/// verdict does not count must not decide a shape, a property's predicate,
-/// or the status of a write.
-fn first_counting(links: &[DecoratedLinkExpression]) -> Option<&DecoratedLinkExpression> {
-    links.iter().find(|l| l.counts())
-}
+use crate::types::LinkStatus;
 
 /// A SHACL subject class with its properties and metadata.
 ///
@@ -31,7 +22,7 @@ pub struct ShaclClass {
     pub name_lower: String,
     /// Properties defined on this class
     pub properties: Vec<ShaclProperty>,
-    /// The SHACL shape URI (the target of ad4m://shacl_shape_uri link)
+    /// The SHACL shape URI (the target of the class's `ad4m://shape` link)
     pub shape_uri: Option<String>,
     /// All predicate URIs used by this class's properties (derived from sh://path).
     /// Useful for constructing targeted subscription queries.
@@ -137,7 +128,7 @@ impl ShaclProperty {
 /// memoized, so repeated MCP tool generation runs are O(class count) rather
 /// than O(class count × predicate count) against the store.
 pub async fn load_classes(perspective: &PerspectiveInstance) -> Vec<ShaclClass> {
-    let class_names = match perspective.get_subject_classes_from_shacl().await {
+    let class_names = match perspective.class_names() {
         Ok(names) => names,
         Err(_) => return vec![],
     };
@@ -162,14 +153,15 @@ pub async fn load_class(perspective: &PerspectiveInstance, class_name: &str) -> 
     Some(shape_to_shacl_class(class_name, &shape))
 }
 
-/// Extract property information from a SHACL shape (convenience wrapper)
+/// The properties of `class_name`'s shape (none for an unknown class).
 pub async fn load_class_properties(
     perspective: &PerspectiveInstance,
     class_name: &str,
 ) -> Vec<ShaclProperty> {
-    load_class_properties_with_uri(perspective, class_name)
+    load_class(perspective, class_name)
         .await
-        .0
+        .map(|class| class.properties)
+        .unwrap_or_default()
 }
 
 /// Translate a `ModelShape` (the canonical in-memory representation derived
@@ -240,349 +232,38 @@ fn shape_to_shacl_class(class_name: &str, shape: &ModelShape) -> ShaclClass {
     }
 }
 
-/// Extract property information from a SHACL shape, also returning the shape URI
-pub async fn load_class_properties_with_uri(
-    perspective: &PerspectiveInstance,
-    class_name: &str,
-) -> (Vec<ShaclProperty>, Option<String>) {
-    // Try both URL-encoded and raw formats (Flux uses raw, Rust Literal encodes)
-    let encoded = ad4m_client::literal::Literal::from_string(format!("shacl://{}", class_name))
-        .to_url()
-        .unwrap_or_else(|_| format!("literal:string:shacl://{}", class_name));
-    let raw = format!("literal:string:shacl://{}", class_name);
-    let mut shape_links = match perspective
-        .get_links(&LinkQuery {
-            source: Some(encoded),
-            predicate: Some("ad4m://shacl_shape_uri".to_string()),
-            ..Default::default()
-        })
-        .await
-    {
-        Ok(links) => links,
-        Err(_) => return (vec![], None),
-    };
-    if !shape_links.iter().any(|l| l.counts()) {
-        shape_links = match perspective
-            .get_links(&LinkQuery {
-                source: Some(raw),
-                predicate: Some("ad4m://shacl_shape_uri".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) => links,
-            Err(_) => return (vec![], None),
-        };
-    }
-
-    let Some(shape_link) = first_counting(&shape_links) else {
-        return (vec![], None);
-    };
-
-    let shape_uri = &shape_link.data.target;
-    let mut prop_links = match perspective
-        .get_links(&LinkQuery {
-            source: Some(shape_uri.clone()),
-            predicate: Some("sh://property".to_string()),
-            ..Default::default()
-        })
-        .await
-    {
-        Ok(links) => links,
-        Err(_) => return (vec![], None),
-    };
-    prop_links.retain(|l| l.counts());
-
-    let mut properties = Vec::new();
-    for prop_link in &prop_links {
-        let prop_uri = &prop_link.data.target;
-        let prop_name = prop_uri
-            .rsplit_once('.')
-            .map(|(_, name)| name.to_string())
-            .unwrap_or_else(|| prop_uri.clone());
-
-        let is_collection = match perspective
-            .get_links(&LinkQuery {
-                source: Some(prop_uri.clone()),
-                predicate: Some("rdf://type".to_string()),
-                target: Some("ad4m://CollectionShape".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) => links.iter().any(|l| l.counts()),
-            Err(_) => false,
-        };
-
-        // Get the predicate URI (sh://path link)
-        let predicate = match perspective
-            .get_links(&LinkQuery {
-                source: Some(prop_uri.clone()),
-                predicate: Some("sh://path".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) => first_counting(&links).map(|l| l.data.target.clone()),
-            _ => None,
-        };
-
-        // Get datatype constraint (sh://datatype)
-        let datatype = match perspective
-            .get_links(&LinkQuery {
-                source: Some(prop_uri.clone()),
-                predicate: Some("sh://datatype".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) => first_counting(&links).map(|l| l.data.target.clone()),
-            _ => None,
-        };
-
-        // Get min/max count (sh://minCount, sh://maxCount)
-        let min_count = match perspective
-            .get_links(&LinkQuery {
-                source: Some(prop_uri.clone()),
-                predicate: Some("sh://minCount".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) => first_counting(&links).and_then(|link| {
-                ad4m_client::literal::Literal::from_url(link.data.target.clone())
-                    .ok()
-                    .and_then(|l| l.get().ok())
-                    .and_then(|v| v.to_string().parse::<u32>().ok())
-            }),
-            _ => None,
-        };
-
-        let max_count = match perspective
-            .get_links(&LinkQuery {
-                source: Some(prop_uri.clone()),
-                predicate: Some("sh://maxCount".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) => first_counting(&links).and_then(|link| {
-                ad4m_client::literal::Literal::from_url(link.data.target.clone())
-                    .ok()
-                    .and_then(|l| l.get().ok())
-                    .and_then(|v| v.to_string().parse::<u32>().ok())
-            }),
-            _ => None,
-        };
-
-        // Get node kind (sh://nodeKind)
-        let node_kind = match perspective
-            .get_links(&LinkQuery {
-                source: Some(prop_uri.clone()),
-                predicate: Some("sh://nodeKind".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) => first_counting(&links).map(|l| l.data.target.clone()),
-            _ => None,
-        };
-
-        // Get getter expression (ad4m://getter)
-        let getter = match perspective
-            .get_links(&LinkQuery {
-                source: Some(prop_uri.clone()),
-                predicate: Some("ad4m://getter".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) => first_counting(&links).map(|link| {
-                let raw = link.data.target.clone();
-                raw.strip_prefix("literal://string:")
-                    .or_else(|| raw.strip_prefix("literal:string:"))
-                    .unwrap_or(&raw)
-                    .to_string()
-            }),
-            _ => None,
-        };
-
-        // Get target shape class (sh://class)
-        let class_uri = match perspective
-            .get_links(&LinkQuery {
-                source: Some(prop_uri.clone()),
-                predicate: Some("sh://class".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) => first_counting(&links).map(|l| l.data.target.clone()),
-            _ => None,
-        };
-
-        // Get resolveLanguage (ad4m://resolveLanguage) — the general language selector.
-        let resolve_language = match perspective
-            .get_links(&LinkQuery {
-                source: Some(prop_uri.clone()),
-                predicate: Some("ad4m://resolveLanguage".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) => first_counting(&links).map(|link| {
-                let target = &link.data.target;
-                let val = target
-                    .strip_prefix("literal://string:")
-                    .or_else(|| target.strip_prefix("literal:string:"))
-                    .unwrap_or(target);
-                urlencoding::decode(val).unwrap_or_default().to_string()
-            }),
-            _ => None,
-        };
-
-        // Interpretation hint (ad4m://interpretation_hint) — natural-language
-        // meaning for this property/relation, used by the harness's tool
-        // schema generation to explain what a predicate is for.
-        let interpretation_hint = match perspective
-            .get_links(&LinkQuery {
-                source: Some(prop_uri.clone()),
-                predicate: Some("ad4m://interpretation_hint".to_string()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) => first_counting(&links).map(|link| {
-                let target = &link.data.target;
-                let raw = target
-                    .strip_prefix("literal://string:")
-                    .or_else(|| target.strip_prefix("literal:string:"))
-                    .unwrap_or(target);
-                urlencoding::decode(raw).unwrap_or_default().to_string()
-            }),
-            _ => None,
-        };
-
-        // `ad4m://local` — executor-private storage for this property's
-        // links. Read here as well as in `load_shape`, because this
-        // link-walking path is what the dynamic per-class tools resolve
-        // against; missing it would leave them writing Shared links for a
-        // property the shape declares local. Locality fails toward Local:
-        // a `true` from any link that is not `invalid` — `cantCheck`
-        // included — declares the property private; only an `invalid`
-        // declaration stays out, or a forged `true` could stop the
-        // victim's writes being shared. A lookup that fails answers `true`
-        // for the same reason: a write the executor cannot see declared
-        // private must not be gossiped.
-        let local = match local_property_links(perspective, prop_uri).await {
-            Ok(links) => links
-                .iter()
-                .filter(|link| link.verdict.as_ref().is_none_or(|v| v.shown()))
-                .filter_map(|link| link.data.target.rsplit(':').next())
-                .any(|v| v.eq_ignore_ascii_case("true")),
-            Err(e) => {
-                log::warn!(
-                    "the ad4m://local lookup for `{prop_uri}` failed ({e}); treating the \
-                     property as local, so its next write stays on this executor"
-                );
-                true
-            }
-        };
-
-        properties.push(ShaclProperty {
-            name: prop_name,
-            is_collection,
-            predicate,
-            datatype,
-            min_count,
-            max_count,
-            node_kind,
-            getter,
-            class: class_uri,
-            resolve_language,
-            interpretation_hint,
-            local,
-        });
-    }
-
-    (properties, Some(shape_uri.clone()))
-}
-
-/// The property-shape URIs whose `ad4m://local` lookup fails as if the store
-/// errored: the seam the `instance_create` locality tests fail the read
-/// through. Keyed by URI and cleared by the test, so one test's failure
-/// never reaches another's store.
+/// The classes whose shape read fails as if the store errored: the seam the
+/// `instance_create` locality tests fail the read through. Keyed by class
+/// name and cleared by the test, so one test's failure never reaches another's.
 #[cfg(test)]
 pub(crate) static LOCAL_LOOKUP_FAILS_FOR: std::sync::Mutex<Option<String>> =
     std::sync::Mutex::new(None);
 
-/// The `ad4m://local` declarations on `prop_uri`, as the store answers them.
-async fn local_property_links(
+/// The shape of `class_name` for a locality decision: `Ok(None)` when no class
+/// of that name is registered, `Err` when the read itself failed.
+fn shape_for_locality(
     perspective: &PerspectiveInstance,
-    prop_uri: &str,
-) -> Result<Vec<DecoratedLinkExpression>, deno_core::error::AnyError> {
+    class_name: &str,
+) -> Result<Option<std::sync::Arc<ModelShape>>, deno_core::error::AnyError> {
     #[cfg(test)]
     if LOCAL_LOOKUP_FAILS_FOR
         .lock()
         .unwrap()
         .as_deref()
-        .is_some_and(|fails| fails == prop_uri)
+        .is_some_and(|fails| fails == class_name)
     {
         return Err(anyhow::anyhow!("injected locality lookup failure"));
     }
-    perspective
-        .get_links(&LinkQuery {
-            source: Some(prop_uri.to_string()),
-            predicate: Some("ad4m://local".to_string()),
-            ..Default::default()
-        })
-        .await
-}
-
-/// Find the original-cased class name from a lowercase name
-pub async fn find_class_name(
-    perspective: &PerspectiveInstance,
-    class_name_lower: &str,
-) -> Option<String> {
-    let class_names = match perspective.get_subject_classes_from_shacl().await {
-        Ok(names) => names,
-        Err(_) => return None,
-    };
-
-    for name in &class_names {
-        if name.to_lowercase() == class_name_lower {
-            return Some(name.clone());
+    match perspective.get_shape(class_name) {
+        Ok(shape) => Ok(Some(shape)),
+        Err(e)
+            if e.downcast_ref::<crate::perspectives::model_query::MissingShape>()
+                .is_some() =>
+        {
+            Ok(None)
         }
+        Err(e) => Err(e),
     }
-
-    // Fallback: direct link query for non-standard URIs
-    let class_links = match perspective
-        .get_links(&LinkQuery {
-            predicate: Some("rdf://type".to_string()),
-            target: Some("ad4m://SubjectClass".to_string()),
-            ..Default::default()
-        })
-        .await
-    {
-        Ok(links) => links,
-        Err(_) => return None,
-    };
-
-    for link in &class_links {
-        if !link.counts() {
-            continue;
-        }
-        let name = link
-            .data
-            .source
-            .split("://")
-            .last()
-            .unwrap_or(&link.data.source);
-        if name.to_lowercase() == class_name_lower {
-            return Some(name.to_string());
-        }
-    }
-
-    None
 }
 
 /// Resolve a property name to its predicate URI for a given class.
@@ -645,7 +326,19 @@ pub async fn resolve_property_link_status(
     class_name: &str,
     property_name: &str,
 ) -> LinkStatus {
-    let properties = load_class_properties(perspective, class_name).await;
+    // A shape read that fails (not one that finds no class) answers `Local`: a
+    // write the executor cannot see declared private must not be gossiped.
+    let properties = match shape_for_locality(perspective, class_name) {
+        Ok(Some(shape)) => shape_to_shacl_class(class_name, &shape).properties,
+        Ok(None) => vec![],
+        Err(e) => {
+            log::warn!(
+                "the shape read for `{class_name}` failed ({e}); treating `{property_name}` as \
+                 local, so its next write stays on this executor"
+            );
+            return LinkStatus::Local;
+        }
+    };
     let prop_lower = property_name.to_lowercase();
     let is_local = properties
         .iter()

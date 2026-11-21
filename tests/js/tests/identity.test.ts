@@ -555,16 +555,12 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         expect(await shown()).to.deep.equal(["rev://l1", "rev://l2", "rev://l3", "rev://late"]);
     });
 
-    it("counts a pre-revocation link for a reader that syncs after the revocation (the notice orders it)", async () => {
+    it("flags a pre-revocation link for a reader that syncs after the revocation", async () => {
         // A reader that joins the neighbourhood only now — after the store's head carries
-        // the revoke — syncs the whole history late. Arrival order alone would leave L1
-        // flagged (its key is revoked past its anchor, and this store never counted it
-        // before the revoke). A's executor wrote a revocation notice for L1 when the
-        // revoke reached its key map — a still-valid device of the same identity can only
-        // sign it after the revoke — and the shared notice orders L1 before the revoke for
-        // every reader. Force A's refresh first so the notice is written and committed.
-        await a.client.identity.log(did, 0, true);
-
+        // the revoke — syncs the whole history late. Nothing orders L1 against the revoke
+        // for it (its key is revoked past its anchor, and this store never counted it
+        // before the revoke), so L1 reads flagged until the space's order (identity slice
+        // 3.B) lifts it.
         const lateReader = await startNode("late-reader");
         const onLate = await lateReader.client.neighbourhood.joinFromUrl(nhUrl);
         await pollUntil(async () => {
@@ -580,30 +576,17 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
             return links[0];
         };
 
-        // L1 counts on the late reader, as on the early one. If it arrived before the
-        // notice, the flagged re-check lifts it on the next tick (60 s), so wait for valid.
+        // L1 is flagged on the late reader, where the early reader counted it.
         let l1: LinkExpression | undefined;
         await pollUntil(async () => {
             l1 = await onLateLink("l1");
-            return l1?.verdict?.kind === "valid";
-        }, { timeoutMs: 150_000, intervalMs: 1_000, label: "l1 valid on the late reader" });
+            return l1 !== undefined;
+        }, { timeoutMs: 150_000, intervalMs: 1_000, label: "l1 on the late reader" });
+        expect(l1!.verdict).to.deep.equal({ kind: "flagged" });
         expect(l1!.proof.anchor).to.equal(1);
-        expect(l1!.person).to.equal(did);
 
-        // The notice itself is there: A's still-valid device signed (reifier(l1),
-        // ad4m://entered-before-revoke, did) anchored at or past the revoke.
-        const notices = await lateReader.client.perspective.queryLinks(
-            onLate.uuid,
-            new LinkQuery({ predicate: "ad4m://entered-before-revoke" }),
-        );
-        expect(notices).to.have.length(1);
-        expect(notices[0].verdict).to.deep.equal({ kind: "valid" });
-        expect(notices[0].data.target).to.equal(did);
-        expect(notices[0].person).to.equal(did);
-        expect(notices[0].proof.anchor).to.be.gte(2);
-
-        // And nothing changed for post-revocation links: a new link of the revoked key is
-        // invalid on the late reader, as it was on the early one.
+        // A new link of the revoked key is invalid on the late reader, as it was on the
+        // early one.
         const l4OnB = await b.client.perspective.addLink(
             nhOnB!.uuid,
             { source: "rev://l4", predicate: "rev://type", target: "rev://note" },
