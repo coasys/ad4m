@@ -355,16 +355,21 @@ and answers `JoinAdded`, so a repeated claim keeps the first row's identity and 
   counted it. No attestation stands in for that order.
   **`since`**: a `revoke` may name a `since` (ms). A link of the revoked key that this
   executor first received at or after it is `flagged`, even when stored `valid` before. The
-  time is the executor's own, never the link's timestamp or anchor: the link store keeps it
-  beside the verdict (`ad4m://ontology/receivedAt`, set by the link's first write, never
-  changed by a re-check or a re-write). A link first received before `since` keeps the rule
-  above; a link stored before the executor kept the time has none and is judged by that
-  rule too. A revoke with a `since` fires the same `VerdictChange` as any revoke, and the
+  time is the executor's own, never the link's timestamp or anchor. The link store keeps it
+  as a receipt of the signed statement, not on the link: one receipt per proof key and
+  signature (a hash of both, length-prefixed), `ad4m://ontology/receivedAt` on a
+  `receipt:<hash>` node in the named graph `ad4m://receipts`, which no link read, SPARQL
+  query, snapshot or export touches. It is written only for a proof whose signature holds,
+  only when none exists (set once, never changed), and nothing removes it: a removal and a
+  re-add (a local diff or a peer's, which removes before it adds), a re-check, a rewrite and
+  `clear` keep it. A forged proof of the same fields gets none, so it cannot lend its time to
+  the real signature that arrives later. The judge reads the receipt of the link's stored
+  proof. A link first received before `since` keeps the rule above; a link stored before
+  receipts has none and is judged by that rule too. A revoke with a `since` fires the same `VerdictChange` as any revoke, and the
   re-check re-judges the key's stored links, `valid` ones included.
   **`unlink`**: a link of an unlinked key anchored below the unlink's seq is judged as for
-  an active key; anchored at or after it, `invalid` (`unlinked`). The key's sessions, grants
-  and key-session state end as on a revoke (`KeyVerdict::Unlinked`, the same
-  `VerdictChange`). Known limit: a surviving unlinked key's holder can still sign a link with
+  an active key; anchored at or after it, `invalid` (`unlinked`). An unlink fires the same
+  `VerdictChange` as a revoke (`KeyVerdict::Unlinked`), and the link re-check follows. Known limit: a surviving unlinked key's holder can still sign a link with
   an old anchor, and it counts until the person revokes (with a `since`). So the client's
   self-unlink destroys the local key.
 - **Admission needs a confirmed head** (`check_signed_with`, `KeyMap::admits`). A new link

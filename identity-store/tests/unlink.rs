@@ -134,6 +134,25 @@ async fn a_since_is_held_to_the_stores_append_time() {
 }
 
 #[tokio::test]
+async fn a_since_is_compared_by_the_stores_whole_seconds() {
+    let t = TestStore::new();
+    let (mut alice, _phone, _tablet) = alice_with_two_devices(&t).await;
+    let now = T0 + 86_400;
+    t.set_now(now);
+
+    // The first ms of the next second is after the store's time.
+    let next_second = alice.revoke_since(&["d2"], (now + 1) * 1000);
+    let reply = t.append(&alice.scid(), &[&next_second]).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert!(reply.body.to_string().contains("since"), "{}", reply.body);
+
+    // Any ms within the store's second is accepted: a client's own clock reads it.
+    let late_in_second = alice.revoke_since(&["d2"], now * 1000 + 999);
+    let reply = t.append_push(&mut alice, late_in_second).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+}
+
+#[tokio::test]
 async fn a_since_in_range_is_kept_in_the_log() {
     let t = TestStore::new();
     let (mut alice, _phone, _tablet) = alice_with_two_devices(&t).await;
