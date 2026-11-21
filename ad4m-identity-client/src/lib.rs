@@ -14,12 +14,13 @@
 //! - [`enc`]: the device's enc key, held by the app, and [`WithEncKey`], which opens the
 //!   inbox and the record key here: the executor passes only sealed text.
 //! - [`flows::revoke`]: a `revoke` signed by the current master key, published, with an
-//!   optional `since` for a lost or stolen key; or, with the 12 words, a `rotate` that revokes
-//!   the keys too ("Also replace my master key").
+//!   optional `since` for a lost or stolen key; or, with the 12 words, that `revoke` and then a
+//!   `rotate` to master *n*+1 ("Also replace my master key").
 //! - [`flows::unlink`]: an `unlink` signed by the key itself (it then destroys the key) or by
 //!   the current master key.
 //! - [`flows::rotate`]: master *n*+1 from the 12 words, rebuilt on the new head when another
-//!   event lands first, sent to every app that kept the master key, and the record written.
+//!   event lands first, sent to every app that kept the master key, and the record written. The
+//!   keys a rotation drops are unlinked, never revoked.
 //! - [`flows::restore`]: the 12 words alone find the identity, lock out lost devices with a
 //!   rotation to a fresh master on this device, and link this device again.
 //! - [`flows::requests`]: the holder's answer to a device's request (send the master key,

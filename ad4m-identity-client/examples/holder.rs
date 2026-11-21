@@ -21,11 +21,11 @@
 //! {"cmd":"postRequest","body":{"kind":"send-master"}}           -> {"id"}
 //! {"cmd":"requests"}                                            -> [DeviceRequest]
 //! {"cmd":"answer","did":"did:scid:…","id":"…"}                   -> {"answered","record"}
-//! {"cmd":"rotate","did":"did:scid:…","keyIds":[]}   -> {"index","seq","tries","revoked","pushes","record","kept"}
+//! {"cmd":"rotate","did":"did:scid:…","keyIds":[]}   -> {"index","seq","tries","unlinked","pushes","record","kept"}
 //! {"cmd":"refreshMaster","did":"did:scid:…"}         -> {"refreshed","index"?,"id"?,"record"?}
 //! {"cmd":"removeMaster","did":"did:scid:…"}          -> {"record"}
 //! {"cmd":"restore","words":"…","name":"Laptop","kind":"desktop-app","lockOut":["d1"]}
-//!        -> {"did","devices","index","seq","tries","revoked","keyId","pushes","record"}
+//!        -> {"did","devices","index","seq","tries","unlinked","keyId","pushes","record"}
 //!           (an enrolment that failed after the rotation: {…,"enrolled":{"error"}} instead of
 //!           keyId, pushes and record)
 //! ```
@@ -299,7 +299,7 @@ async fn main() {
                         "index": rotated.index,
                         "seq": rotated.head.seq,
                         "tries": rotated.tries,
-                        "revoked": rotated.revoked,
+                        "unlinked": rotated.unlinked,
                         "pushes": pushes(&rotated.pushes),
                         "record": written(&rotated.record),
                         "kept": written(&rotated.kept.map(u64::from)),
@@ -381,7 +381,7 @@ async fn main() {
                         "index": restored.index,
                         "seq": restored.head.seq,
                         "tries": restored.tries,
-                        "revoked": restored.revoked,
+                        "unlinked": restored.unlinked,
                     });
                     match &restored.enrolled {
                         Ok(enrolled) => {

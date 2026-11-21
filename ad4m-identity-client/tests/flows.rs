@@ -1017,6 +1017,17 @@ fn confirmed(entropy: u8) -> CreateFlow {
 }
 
 /// `create` on `executor` with fixed words; answers the identity.
+/// The seqs at which `key` of `did` was unlinked and revoked in the log, if it was.
+async fn key_end<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    did: &str,
+    key: &str,
+) -> (Option<u64>, Option<u64>) {
+    let chain = ad4m_identity_core::fold(&executor.events(did).await.unwrap()).unwrap();
+    let record = &chain.state().keys[key];
+    (record.unlinked, record.revoked)
+}
+
 async fn create(executor: &Custody, vault: &MemoryVault, entropy: u8) -> String {
     confirmed(entropy)
         .finish(executor, vault, this_computer(), &SystemClock, &OsRandom)
@@ -3414,7 +3425,7 @@ async fn a_rotation_reveals_the_next_master_and_hands_it_to_the_kept_holder() {
         .await
         .unwrap();
     assert_eq!((rotated.index, rotated.tries), (1, 1));
-    assert!(rotated.revoked.is_empty());
+    assert!(rotated.unlinked.is_empty());
     assert_eq!(rotated.pushes.len(), 1);
     assert_eq!(rotated.pushes[0].0, d2);
     assert!(rotated.pushes[0].1.is_ok(), "{:?}", rotated.pushes[0].1);
@@ -3974,8 +3985,11 @@ async fn a_rotation_that_meets_a_409_is_built_again_on_the_new_head() {
     .await
     .unwrap();
     assert_eq!((rotated.index, rotated.tries), (2, 2));
-    assert_eq!(rotated.revoked, vec![d2.clone()]);
-    assert_eq!(host.status().await.unwrap().revoked, Some(4));
+    assert_eq!(rotated.unlinked, vec![d2.clone()]);
+    // dropped by the rotation: unlinked at its seq, never revoked
+    let (unlinked, revoked) = key_end(&a, &did, &d2).await;
+    assert_eq!((unlinked, revoked), (Some(4), None));
+    assert_eq!(host.status().await.unwrap().revoked, None);
     assert_eq!(vault.master_index(&scid).unwrap(), Some(2));
 
     // Another app revoked d3 first: the rebuilt rotation revokes nothing.
@@ -3991,7 +4005,7 @@ async fn a_rotation_that_meets_a_409_is_built_again_on_the_new_head() {
     .await
     .unwrap();
     assert_eq!((rotated.index, rotated.tries), (3, 2));
-    assert!(rotated.revoked.is_empty());
+    assert!(rotated.unlinked.is_empty());
     assert_eq!(server.status().await.unwrap().revoked, Some(5));
 
     // The rotation landed but its answer was lost: found in the log, not published again.
@@ -4117,11 +4131,11 @@ async fn a_revocation_with_a_rotation_needs_the_words() {
     };
     deleted.unwrap();
     rotated.kept.as_ref().unwrap();
-    assert_eq!(
-        (rotated.index, rotated.revoked.clone()),
-        (1, vec![d3.clone()])
-    );
-    assert_eq!(host.status().await.unwrap().revoked, Some(rotated.head.seq));
+    // revoked by its own event, then rotated: the rotation unlinks nothing
+    assert_eq!((rotated.index, rotated.unlinked.clone()), (1, vec![]));
+    let revoke_seq = rotated.head.seq - 1;
+    assert_eq!(host.status().await.unwrap().revoked, Some(revoke_seq));
+    assert_eq!(key_end(&a, &did, &d3).await, (None, Some(revoke_seq)));
     assert!(
         a.requests(0).await.unwrap().is_empty(),
         "deleted by master #1"
@@ -4131,7 +4145,7 @@ async fn a_revocation_with_a_rotation_needs_the_words() {
     assert!(!opened.record.devices.contains_key(&d3));
 
     assert!(matches!(
-        revoke_and_rotate(&a, &vault, &did, &[], &words, &SystemClock, &OsRandom).await,
+        revoke_and_rotate(&a, &vault, &did, &[], None, &words, &SystemClock, &OsRandom).await,
         Err(ClientError::Protocol(_))
     ));
     assert!(matches!(
@@ -4140,6 +4154,7 @@ async fn a_revocation_with_a_rotation_needs_the_words() {
             &vault,
             &did,
             &["d1".into()],
+            None,
             &words,
             &SystemClock,
             &OsRandom
@@ -4147,25 +4162,50 @@ async fn a_revocation_with_a_rotation_needs_the_words() {
         .await,
         Err(ClientError::Protocol(_))
     ));
+    let publishes = a.fake().publishes.get();
+    let since = SystemClock.now() * 1000;
     let rotated = revoke_and_rotate(
         &a,
         &vault,
         &did,
         std::slice::from_ref(&d2),
+        Some(since),
         &words,
         &SystemClock,
         &OsRandom,
     )
     .await
     .unwrap();
-    assert_eq!((rotated.index, rotated.revoked), (2, vec![d2.clone()]));
+    // two events: the explicit revoke (with the person's `since`), then the rotation that
+    // names no key
+    assert_eq!(a.fake().publishes.get(), publishes + 2);
+    assert_eq!((rotated.index, rotated.unlinked.clone()), (2, vec![]));
+    let revoke_seq = rotated.head.seq - 1;
+    assert_eq!(phone.status().await.unwrap().revoked, Some(revoke_seq));
+    let chain = ad4m_identity_core::fold(&a.events(&did).await.unwrap()).unwrap();
+    let record = &chain.state().keys[&d2];
     assert_eq!(
-        phone.status().await.unwrap().revoked,
-        Some(rotated.head.seq)
+        (record.revoked, record.revoked_since, record.unlinked),
+        (Some(revoke_seq), Some(since), None)
     );
+    // revoking a key the log already revoked publishes only the rotation
+    let again = revoke_and_rotate(
+        &a,
+        &vault,
+        &did,
+        std::slice::from_ref(&d2),
+        None,
+        &words,
+        &SystemClock,
+        &OsRandom,
+    )
+    .await
+    .unwrap();
+    assert_eq!(again.index, 3);
+    assert_eq!(a.fake().publishes.get(), publishes + 3);
     assert_eq!(
         assert_words_derive(&a.events(&did).await.unwrap(), &words::seed(&words)),
-        2
+        3
     );
 }
 
@@ -4262,7 +4302,7 @@ async fn the_words_restore_the_identity_on_a_new_device() {
         .await
         .unwrap();
     assert_eq!((restored.index, restored.tries), (1, 1));
-    assert_eq!(restored.revoked, lock_out);
+    assert_eq!(restored.unlinked, lock_out);
     let enrolled = restored.enrolled.as_ref().unwrap();
     assert_eq!(enrolled.key_id, "d4");
     assert!(enrolled.pushes.is_empty(), "the kept holder was locked out");
@@ -4281,9 +4321,11 @@ async fn the_words_restore_the_identity_on_a_new_device() {
         (status.did.as_deref(), status.key_id.as_deref()),
         (Some(did.as_str()), Some("d4"))
     );
-    assert!(a.status().await.unwrap().revoked.is_some());
-    assert!(desk.status().await.unwrap().revoked.is_some());
-    assert!(host.status().await.unwrap().revoked.is_none());
+    // locked out by the rotation: unlinked, not revoked
+    assert!(key_end(&new, &did, "d1").await.0.is_some());
+    assert!(key_end(&new, &did, &d2).await.0.is_some());
+    assert_eq!(key_end(&new, &did, "d1").await.1, None);
+    assert_eq!(key_end(&new, &did, &d3).await, (None, None));
 
     let opened = record::read(&new, &new_vault, &did).await.unwrap().unwrap();
     assert_eq!(opened.record.devices["d4"].name, "New phone");
@@ -5053,7 +5095,7 @@ async fn a_restore_whose_link_fails_after_the_publish_holds_a_key_it_cannot_use(
         .await
         .unwrap();
     assert_eq!(
-        (restored.index, restored.revoked.clone()),
+        (restored.index, restored.unlinked.clone()),
         (1, vec!["d1".to_string()])
     );
     assert!(
@@ -5067,7 +5109,7 @@ async fn a_restore_whose_link_fails_after_the_publish_holds_a_key_it_cannot_use(
         None,
         "not a device of the log yet"
     );
-    assert!(a.status().await.unwrap().revoked.is_some());
+    assert!(key_end(&a, &did, "d1").await.0.is_some());
 
     // The retry enrols on the same flow.
     new.rpc().refuse.set(false);
@@ -5330,13 +5372,13 @@ async fn answering_with_words_reports_a_failed_delete_with_the_rotation() {
         matches!(&deleted, Err(ClientError::Rpc(e)) if e.code == 503),
         "{deleted:?}"
     );
-    assert_eq!(
-        (rotated.index, rotated.revoked.clone()),
-        (1, vec![d3.clone()])
-    );
+    assert_eq!((rotated.index, rotated.unlinked.clone()), (1, vec![]));
     rotated.kept.as_ref().unwrap();
     assert_eq!(vault.master_index(&scid).unwrap(), Some(1));
-    assert_eq!(host.status().await.unwrap().revoked, Some(rotated.head.seq));
+    assert_eq!(
+        host.status().await.unwrap().revoked,
+        Some(rotated.head.seq - 1)
+    );
 }
 
 /// One vault store seen through two handles: the custody folder is shared by every desktop app
@@ -5924,7 +5966,7 @@ async fn a_rotation_whose_staged_key_another_rebuild_replaced_still_keeps_the_la
     assert_eq!(by_b.index, 1);
     assert!(by_b.kept.is_ok(), "{:?}", by_b.kept);
     let by_a = by_a.unwrap();
-    assert_eq!((by_a.index, by_a.revoked.clone()), (2, vec![d3]));
+    assert_eq!((by_a.index, by_a.unlinked.clone()), (2, vec![d3]));
     assert!(by_a.kept.is_ok(), "{:?}", by_a.kept);
     assert_eq!(shared.master_index(&scid).unwrap(), Some(2));
     assert_eq!(shared.staged_index(&scid).unwrap(), None);

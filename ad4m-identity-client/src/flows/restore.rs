@@ -10,7 +10,7 @@
 //! 2. The person picks the devices to lock out. Apps (desktop, phone, browser, and a device
 //!    the record does not name) are ticked by default; servers, community hosts, Coasys cloud
 //!    and bots are not.
-//! 3. [`RestoreFlow::finish`]: one `rotate` to a fresh master *n*+1 revokes the ticked devices
+//! 3. [`RestoreFlow::finish`]: one `rotate` to a fresh master *n*+1 unlinks the ticked devices
 //!    ([`super::rotate`], with its rebuild after a `409`); the vault stages *n*+1 before the
 //!    publish (a vault that refuses leaves nothing public) and promotes it after. Then this
 //!    device is enrolled ([`RestoreFlow::enrol`]): linked as a device: an offer bound to this executor's device key,
@@ -20,7 +20,7 @@
 //!    record is written with the recovery key: this device listed as holding the master key.
 //!
 //! Once the rotation is published, `finish` answers [`Restored`] whatever comes after: the
-//! rotation stands (the locked-out devices are revoked, *n*+1 is current). An enrolment that
+//! rotation stands (the locked-out devices are unlinked, *n*+1 is current). An enrolment that
 //! failed (the vault, the link, the store) is [`Restored::enrolled`]'s error, and
 //! [`RestoreFlow::enrol`] retries it on the same flow, without the words typed again and
 //! without another rotation.
@@ -77,8 +77,9 @@ pub struct Restored {
     pub head: SignedHead,
     /// The new master's index.
     pub index: u32,
-    /// The device keys the rotation revoked.
-    pub revoked: Vec<KeyId>,
+    /// The device keys the rotation unlinked (not revoked: what they linked before stays
+    /// valid; `flows::revoke` distrusts a key).
+    pub unlinked: Vec<KeyId>,
     /// Rotations built (more than 1 when another event landed first).
     pub tries: usize,
     /// This device enrolled after the rotation. An error (the vault did not keep master
@@ -251,7 +252,7 @@ impl<'a, R: ExecutorRpc> RestoreFlow<'a, R> {
             did: self.did.clone(),
             head: published.head,
             index,
-            revoked: published.revoked,
+            unlinked: published.unlinked,
             tries: published.tries,
             enrolled,
         })

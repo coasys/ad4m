@@ -13,7 +13,7 @@
 //!   `holdsMaster: "offered"`.
 //! - `confirm-revoke`: the listed keys are revoked ([`super::revoke`]). One that asks for a
 //!   rotation too needs the 12 words: [`answer`] refuses it with [`ClientError::NeedsWords`],
-//!   and [`answer_with_words`] revokes the keys in a rotation ([`super::rotate`]).
+//!   and [`answer_with_words`] revokes the keys, then rotates ([`super::revoke::revoke_and_rotate`]).
 //!
 //! The answered request is deleted with a store request the master key signs (master *n*+1
 //! after a rotation).
@@ -27,8 +27,8 @@ use ad4m_ldk::identity::{DeviceRequest, DeviceRequestBody, PostedRequest};
 
 use crate::executor::{ExecutorRpc, ViaExecutor};
 use crate::flows::master::{self, Sent};
-use crate::flows::revoke::{revoke_with, Revoked};
-use crate::flows::rotate::{master_of, rotate, Rotated};
+use crate::flows::revoke::{revoke_and_rotate, revoke_with, Revoked};
+use crate::flows::rotate::{master_of, Rotated};
 use crate::request::{
     body_bytes, chain_of, log_of, master_at_head, master_request, scid_of, store_of, MasterPosition,
 };
@@ -167,9 +167,9 @@ pub async fn answer<R: ExecutorRpc>(
 }
 
 /// [`answer`] with the 12 `words`, which a `confirm-revoke` asking for a rotation needs: the
-/// listed keys are revoked in a `rotate` to master *n*+1 ([`super::rotate::rotate`], which this
-/// device keeps and sends to the apps that kept the master key), and the request is deleted
-/// with master *n*+1. Any other request is answered as [`answer`] does.
+/// listed keys are revoked, then a `rotate` to master *n*+1 follows
+/// ([`super::revoke::revoke_and_rotate`]; this device keeps *n*+1 and sends it to the apps that
+/// kept the master key), and the request is deleted with master *n*+1. Any other request is answered as [`answer`] does.
 pub async fn answer_with_words<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
@@ -185,7 +185,8 @@ pub async fn answer_with_words<R: ExecutorRpc>(
     let chain = chain_of(executor, did).await?;
     check_poster(request, did, &chain)?;
     check_current(request, &chain, clock.now())?;
-    let rotated = rotate(executor, vault, did, words, key_ids, clock, random).await?;
+    let rotated =
+        revoke_and_rotate(executor, vault, did, key_ids, None, words, clock, random).await?;
     // The rotation is public from here: a failed delete is reported with it, not as an error.
     let deleted = async {
         let signer = master_of(&ad4m_identity_core::words::seed(words), rotated.index)?;
