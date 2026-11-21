@@ -183,7 +183,8 @@ The output names users and perspectives, so only the operator reads it: send
 the admin credential as a bearer token. Any other caller gets 403.
 
 ```bash
-curl -s -H "Authorization: Bearer $AD4M_ADMIN_CREDENTIAL" http://localhost:12000/metrics
+printf 'Authorization: Bearer %s\n' "$AD4M_ADMIN_CREDENTIAL" |
+  curl -s -H @- http://localhost:12000/metrics
 ```
 
 A Prometheus scrape job sets the same header with `authorization: { credentials_file: … }`.

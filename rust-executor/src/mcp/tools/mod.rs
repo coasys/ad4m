@@ -212,7 +212,14 @@ impl ServerHandler for Ad4mMcpHandler {
             .admit_tool_call(&tool_name, RequestAuth::of(&context))
             .await
         {
-            Ok(this) => this.dispatch_tool(request, context).await,
+            // The link writes the tool makes count for its caller's agent
+            // (`GET /metrics`), as they do for an RPC call
+            // (`metrics::as_caller` in `HandlerMap::dispatch`).
+            Ok(this) => {
+                let did = this.session().await.ok().and_then(|s| s.acts_as_did());
+                crate::metrics::as_caller(did.as_deref(), this.dispatch_tool(request, context))
+                    .await
+            }
             Err(refusal) => Ok(refusal),
         }
     }
@@ -686,6 +693,29 @@ impl Ad4mMcpHandler {
             .admitted_perspective(perspective_id, perspective_query_capability)
             .await?;
         Ok(perspective)
+    }
+
+    /// [`Self::get_readable_perspective`], and the gate its query runs under: the one every
+    /// RPC query call gets (`sparql_store::query_gate`) — the configured deadline, and one
+    /// `GET /metrics` query counted for the call however many evaluations run under it.
+    /// An MCP session has no RPC connection, so no `request.cancel` and no query slots.
+    pub(crate) async fn gated_readable_perspective(
+        &self,
+        perspective_id: &str,
+    ) -> Result<
+        (
+            PerspectiveInstance,
+            crate::perspectives::sparql_store::EvalGate,
+        ),
+        String,
+    > {
+        let (perspective, session) = self
+            .admitted_perspective(perspective_id, perspective_query_capability)
+            .await?;
+        let gate =
+            crate::perspectives::sparql_store::query_gate(&request_context(session), &perspective)
+                .await;
+        Ok((perspective, gate))
     }
 
     /// Perspective `perspective_id` and the agent the caller writes as, if the caller may

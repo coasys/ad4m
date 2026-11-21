@@ -16,6 +16,7 @@ pub mod language_runtime;
 pub mod language_runtime_handle;
 pub mod literal;
 mod metas;
+mod metrics;
 #[cfg(test)]
 mod signing_reach_tests;
 pub mod wasm_delegate;
@@ -338,23 +339,6 @@ impl LanguageController {
             Some(handle) => runtimes.insert(address.to_string(), handle),
             None => runtimes.remove(address),
         };
-    }
-
-    /// The call counters of every loaded language (`GET /metrics`). An unloaded language is
-    /// not in the runtimes map, so it is not here.
-    pub async fn call_stats(&self) -> Vec<crate::metrics::LanguageRow> {
-        self.runtimes
-            .lock()
-            .await
-            .iter()
-            .map(|(address, handle)| {
-                crate::metrics::LanguageRow::of(
-                    address,
-                    handle.language_name.as_deref(),
-                    &handle.call_stats,
-                )
-            })
-            .collect()
     }
 
     /// Unload a language and clean up

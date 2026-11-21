@@ -1910,6 +1910,14 @@ impl PerspectiveInstance {
         // applied is decorated and published, with what the diff's
         // tombstones did folded in.
         let (applied, effects) = self.persist_remote_diff(store_diff)?;
+        // Synced links count like a local write, for no caller: the
+        // perspective's added/removed counters, no user's
+        // (`metrics::record_link_writes`).
+        crate::metrics::record_link_writes(
+            &self.metrics,
+            applied.additions.len(),
+            applied.removals.len() + effects.retracted.len(),
+        );
         let mut decorated_diff = DecoratedPerspectiveDiff {
             additions: applied
                 .additions
@@ -5863,17 +5871,6 @@ impl PerspectiveInstance {
             .join(", ");
 
         Ok(format!("{{ {} }}", stringified))
-    }
-
-    /// The subscriber of each live subscription (a managed agent's DID; `None` for the main
-    /// agent), for the gauges of `GET /metrics`.
-    pub(crate) async fn subscription_subscribers(&self) -> Vec<Option<String>> {
-        self.subscribed_queries
-            .lock()
-            .await
-            .values()
-            .map(|q| q.subscriber.clone())
-            .collect()
     }
 
     /// Subscribe to a SPARQL query under `subscription_id` (the client's) for

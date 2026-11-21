@@ -131,7 +131,9 @@ pub fn user(did: &str) -> Arc<UserCounters> {
         .clone()
 }
 
-/// Runs `request` with `did` as the user its link writes count for.
+/// Runs `request` with `did` as the caller whose link writes count (`GET /metrics`). The
+/// DID's counters are looked up — created on first sight — when the scope opens, on every
+/// call it wraps, whether or not the call writes.
 pub async fn as_caller<F: std::future::Future>(did: Option<&str>, request: F) -> F::Output {
     CALLER.scope(did.map(user), request).await
 }
@@ -285,13 +287,16 @@ impl LanguageRow {
 }
 
 /// Bytes of the files directly in `dir` and its subdirectories. A RocksDB store is a flat
-/// directory of tens of files, so this is a few `stat`s per perspective.
+/// directory of tens of files, so this is a few `stat`s per perspective. `None` when the walk
+/// cannot finish (an unreadable directory, entry, file or recursive size): a partial total
+/// is no measurement, so the renderer publishes no `store_bytes` for it.
 fn dir_bytes(dir: &std::path::Path) -> Option<u64> {
     let mut total = 0;
-    for entry in std::fs::read_dir(dir).ok()?.flatten() {
-        let Ok(meta) = entry.metadata() else { continue };
+    for entry in std::fs::read_dir(dir).ok()? {
+        let entry = entry.ok()?;
+        let meta = entry.metadata().ok()?;
         if meta.is_dir() {
-            total += dir_bytes(&entry.path()).unwrap_or(0);
+            total += dir_bytes(&entry.path())?;
         } else {
             total += meta.len();
         }
@@ -681,7 +686,7 @@ mod tests {
                 store_bytes: Some(4096),
             }],
             users: vec![UserRow {
-                did: "did:key:u\"1".into(),
+                did: "did:key:u\"\\\n1".into(),
                 queries: 4,
                 query_micros: 1_500_000,
                 subscriptions: 2,
@@ -709,9 +714,9 @@ mod tests {
             "ad4m_perspective_links_added_total{perspective=\"p-1\"} 3",
             "ad4m_perspective_links_removed_total{perspective=\"p-1\"} 1",
             "ad4m_perspective_store_bytes{perspective=\"p-1\"} 4096",
-            "ad4m_user_queries_total{user=\"did:key:u\\\"1\"} 4",
-            "ad4m_user_links_written_total{user=\"did:key:u\\\"1\"} 4",
-            "ad4m_user_perspectives{user=\"did:key:u\\\"1\"} 1",
+            "ad4m_user_queries_total{user=\"did:key:u\\\"\\\\\\n1\"} 4",
+            "ad4m_user_links_written_total{user=\"did:key:u\\\"\\\\\\n1\"} 4",
+            "ad4m_user_perspectives{user=\"did:key:u\\\"\\\\\\n1\"} 1",
             "ad4m_language_calls_total{language=\"Qm1\",name=\"agent\"} 9",
             "ad4m_language_call_seconds_total{language=\"Qm1\",name=\"agent\"} 0.25",
             "ad4m_language_call_errors_total{language=\"Qm1\",name=\"agent\"} 1",
@@ -725,5 +730,28 @@ mod tests {
         // Each family declared once.
         let types = text.lines().filter(|l| l.starts_with("# TYPE ")).count();
         assert_eq!(types, 19);
+    }
+
+    #[test]
+    fn dir_bytes_counts_a_tree_and_reports_none_when_the_walk_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/one"), b"1234").unwrap();
+        std::fs::write(dir.path().join("two"), b"56").unwrap();
+        assert_eq!(dir_bytes(dir.path()), Some(6));
+        // A missing directory and a walk that cannot finish are no measurement
+        // (`None`), not a partial total.
+        assert_eq!(dir_bytes(&dir.path().join("missing")), None);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = dir.path().join("locked");
+            std::fs::create_dir(&locked).unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            // Root reads a 0o000 directory anyway, so the walk can fail only for others.
+            if std::fs::read_dir(&locked).is_err() {
+                assert_eq!(dir_bytes(dir.path()), None);
+            }
+        }
     }
 }
