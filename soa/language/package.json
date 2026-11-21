@@ -1,0 +1,23 @@
+{
+  "name": "@coasys/soa-language",
+  "version": "0.1.0",
+  "description": "Static self-documenting vocabulary for State of Affairs ontology",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.ts"
+  },
+  "dependencies": {
+    "@perspect3vism/ad4m": "^0.5.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.19.0"
+  }
+}
