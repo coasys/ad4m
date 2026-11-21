@@ -98,7 +98,7 @@ fn world() -> SparqlStore {
         ("bot://item/2", "bot://flag", "bot://action_item"),
         ("we://task/1", "we://flag", "we://task_block"),
         ("we://c/1", "we://flag", "we://collection_block"),
-        ("we://c/1", "we://name", "literal://string:Monday"),
+        ("we://c/1", "we://name", "literal:string:Monday"),
         ("we://c/1", "we://extracted", "bot://item/1"),
         ("we://c/1", "we://extracted", "we://task/1"),
         ("we://c/2", "we://flag", "we://collection_block"),
@@ -242,10 +242,127 @@ async fn through_needs_a_reverse_kind() {
 async fn through_must_be_a_predicate_iri() {
     let (resolver, item) = shapes();
     let store = world();
+    // A breakout, nothing, a relative name, a wildcard.
+    for through in ["we://extracted> } UNION { ?s ?p ?o", "", "extracted", "*"] {
+        let query = q(json!({ "include": { "extractedFrom": {
+            "through": through, "kind": "belongsToOne" } } }));
+        let err = fixture_query(&store, item.as_ref(), &query, &resolver)
+            .await
+            .expect_err("not an IRI");
+        assert!(
+            err.to_string().contains("predicate IRI"),
+            "{through:?}: {err}"
+        );
+    }
+}
+
+/// The include's result is written onto each instance under its name, so a
+/// name the instance already carries is refused rather than replaced:
+/// `id` would become an object or null, and every read keyed on it after.
+#[tokio::test]
+async fn an_undeclared_include_cannot_take_a_name_the_instance_carries() {
+    let (resolver, item) = shapes();
+    let store = world();
+    for name in [
+        "id",
+        "author",
+        "timestamp",
+        "__links",
+        "__subjectClass",
+        "flag",
+    ] {
+        let query = q(json!({ "include": { name: {
+            "through": "we://extracted", "kind": "belongsToOne" } } }));
+        let err = fixture_query(&store, item.as_ref(), &query, &resolver)
+            .await
+            .expect_err("a name the instance carries");
+        assert!(err.to_string().contains("would replace"), "{name}: {err}");
+    }
+}
+
+/// Two calls extracted the same item; the include's `where` keeps one. To one
+/// reads the source that matched, whichever the store lists first. Both
+/// names are asked for, so one of them is the second source listed: red
+/// while to one took the first source linked and then looked it up.
+#[tokio::test]
+async fn a_filtered_belongs_to_one_reads_the_source_that_matched() {
+    let (resolver, item) = shapes();
+    let store = world();
+    for (s, p, t) in [
+        ("we://c/2", "we://name", "literal:string:Tuesday"),
+        ("we://c/2", "we://extracted", "bot://item/1"),
+    ] {
+        store.add_link(&make_link(s, p, t, "3")).unwrap();
+    }
+    for (name, call) in [("Monday", "we://c/1"), ("Tuesday", "we://c/2")] {
+        let query = q(json!({ "include": { "extractedFrom": {
+            "through": "we://extracted", "kind": "belongsToOne",
+            "where": { "name": name } } } }));
+        let result = fixture_query(&store, item.as_ref(), &query, &resolver)
+            .await
+            .unwrap();
+        let from = &by_id(&result, "bot://item/1")["extractedFrom"];
+        assert_eq!(from["id"], call, "{name}: {from}");
+    }
+}
+
+/// The link is read under the include's guard, as a declared relation's is.
+/// Both items and the call are signed; the call's link to the first item is
+/// not (the fixture proof never verifies), its link to the second is. A query
+/// that does not opt in to unverified links reads only the second.
+#[tokio::test]
+async fn an_undeclared_include_reads_only_verified_links() {
+    use crate::agent::signatures::TestSigner;
+    let (resolver, item) = shapes();
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link(
+            "we://models/CollectionBlock",
+            "rdf://type",
+            "ad4m://SubjectClass",
+            "1",
+        ))
+        .unwrap();
+    let signer = TestSigner::generate();
+    let signed = |s: &str, p: &str, t: &str| {
+        let mut l = LinkExpression::from(signer.sign(Link {
+            source: s.to_string(),
+            predicate: Some(p.to_string()),
+            target: t.to_string(),
+        }));
+        l.status = Some(LinkStatus::Shared);
+        l
+    };
+    for (s, p, t) in [
+        ("bot://item/1", "bot://flag", "bot://action_item"),
+        ("bot://item/2", "bot://flag", "bot://action_item"),
+        ("we://c/1", "we://flag", "we://collection_block"),
+        ("we://c/1", "we://extracted", "bot://item/2"),
+    ] {
+        store.add_link(&signed(s, p, t)).unwrap();
+    }
+    store
+        .add_link(&make_link(
+            "we://c/1",
+            "we://extracted",
+            "bot://item/1",
+            "2",
+        ))
+        .unwrap();
+
     let query = q(json!({ "include": { "extractedFrom": {
-        "through": "we://extracted> } UNION { ?s ?p ?o", "kind": "belongsToOne" } } }));
-    let err = fixture_query(&store, item.as_ref(), &query, &resolver)
+        "through": "we://extracted", "kind": "belongsToOne" } } }));
+    let result = super::query::execute_model_query(&store, item.as_ref(), &query, &resolver)
         .await
-        .expect_err("not an IRI");
-    assert!(err.to_string().contains("predicate IRI"), "{err}");
+        .unwrap();
+    assert_eq!(
+        by_id(&result, "bot://item/1")["extractedFrom"],
+        Value::Null,
+        "{:?}",
+        result.instances
+    );
+    assert_eq!(
+        by_id(&result, "bot://item/2")["extractedFrom"]["id"],
+        "we://c/1"
+    );
 }

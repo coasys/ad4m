@@ -310,6 +310,80 @@ async fn a_polymorphic_members_related_record_that_starts_to_conform_reruns() {
     assert_eq!(remarks(&now), json!(["ns://c3"]), "{now}");
 }
 
+/// An include that names its link with `through`, which `Comment` does not
+/// declare: a Note citing a comment is read from the comment's side. The
+/// trigger reads the include as the query does, so the members, whose
+/// class the reader does not name, are watched as a polymorphic include's.
+/// All three red while the trigger skipped every include the shape does
+/// not declare: the query read the link, and no write to it re-ran.
+fn cited_in() -> Value {
+    json!({ "include": { "citedIn": {
+        "through": "ns://cite", "kind": "belongsToMany" } } })
+}
+
+fn cited_in_ids(result: &Value) -> Vec<String> {
+    result["instances"][0]["citedIn"]
+        .as_array()
+        .expect("citedIn")
+        .iter()
+        .map(|i| i["id"].as_str().expect("id").to_string())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_an_undeclared_include_reads_reruns_when_added() {
+    let mut p = blog().await;
+    record(&mut p, "ns://c1", "Comment", &[]).await;
+    record(&mut p, "ns://n1", "Note", &[]).await;
+    check(&p).await;
+
+    let (id, first) = subscribe(&p, "Comment", cited_in()).await;
+    assert!(cited_in_ids(&first).is_empty(), "{first}");
+
+    add(&mut p, "ns://n1", "ns://cite", "ns://c1").await;
+    check(&p).await;
+
+    assert_eq!(reruns::count(&id), 1);
+    assert_eq!(cited_in_ids(&last_result(&p, &id).await), ["ns://n1"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_an_undeclared_include_reads_reruns_when_removed() {
+    let mut p = blog().await;
+    record(&mut p, "ns://c1", "Comment", &[]).await;
+    record(&mut p, "ns://n1", "Note", &[]).await;
+    let cite = add(&mut p, "ns://n1", "ns://cite", "ns://c1").await;
+    check(&p).await;
+
+    let (id, first) = subscribe(&p, "Comment", cited_in()).await;
+    assert_eq!(cited_in_ids(&first), ["ns://n1"], "{first}");
+
+    p.remove_link(cite.into(), None).await.expect("remove_link");
+    check(&p).await;
+
+    assert_eq!(reruns::count(&id), 1);
+    assert!(cited_in_ids(&last_result(&p, &id).await).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_to_a_record_an_undeclared_include_reads_reruns() {
+    let mut p = blog().await;
+    record(&mut p, "ns://c1", "Comment", &[]).await;
+    record(&mut p, "ns://n1", "Note", &[]).await;
+    add(&mut p, "ns://n1", "ns://cite", "ns://c1").await;
+    check(&p).await;
+
+    let (id, first) = subscribe(&p, "Comment", cited_in()).await;
+    assert_eq!(cited_in_ids(&first), ["ns://n1"], "{first}");
+
+    add(&mut p, "ns://n1", "ns://title", "literal:string:cited").await;
+    check(&p).await;
+
+    assert_eq!(reruns::count(&id), 1);
+    let now = last_result(&p, &id).await;
+    assert!(now.to_string().contains("cited"), "{now}");
+}
+
 /// Records that entered the result in earlier batches are watched too: a
 /// reply added under a new comment, then edited. The reply is two includes
 /// deep, so only the result's own nodes say it is shown: it is linked to the

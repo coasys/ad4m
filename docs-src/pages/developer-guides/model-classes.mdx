@@ -958,6 +958,9 @@ const items = await ActionItem.findAll(perspective, {
 - `kind` is `belongsToOne` (one instance, or `null`) or `belongsToMany` (a list). Only links pointing *at* the instance can be read this way; an outgoing one the class does not declare is reachable with [`links`](#per-link-rows-with-links).
 - The linking instances are hydrated as the classes they are, as a `polymorphic` include is, so the include refuses `limit` and `offset`. They arrive as plain objects carrying `__subjectClass`.
 - Where the class does declare the name, the declaration wins: the same predicate in `through` changes nothing, and a different one is an error.
+- `through` is an absolute IRI. The include's name cannot be one every instance already carries (`id`, `author`, `timestamp`, `createdAt`, `updatedAt`, `baseExpression`, or one starting `__`) or a property of the class, since the result is written under that name.
+- With `belongsToOne`, the result is the first linking instance the include's `where` keeps, so a filter picks among several.
+- `subscribe()` re-runs when such a link is added or removed, or a linking instance changes.
 
 ### Sparse Fieldsets with `properties`
 

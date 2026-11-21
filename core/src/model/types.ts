@@ -552,6 +552,10 @@ export type RelationSubQuery = Omit<Query, 'parent' | 'count'> & {
    * The linking instances are hydrated as the classes they are (`polymorphic`),
    * since the reading class names none. Where the class declares the name, the
    * declaration wins, and a different predicate here is an error.
+   *
+   * An absolute IRI. The include's name cannot be one every instance carries
+   * (`id`, `author`, ...) or a property of the class: the result is written
+   * under it.
    */
   through?: string;
   /**
