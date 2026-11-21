@@ -14,9 +14,19 @@ parameters:
   we-ref:
     type: string
     default: dev
+  # The 2-hourly dev tier (workflow `dev-2-hourly`). A scheduled pipeline on dev
+  # sets this true every 2 hours, like `run-nightly-llm`.
+  run-dev-2-hourly:
+    type: boolean
+    default: false
 
 references:
   ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
+  # Run-time guards for the 2-hourly dev tier (the `guard` parameter of the build, restore
+  # and stash commands). Its stash step sets DEV_TIER_BUILD=true when build's stash of the
+  # commit is gone and no build of it is running; the job then builds here.
+  dev_tier_when_building: &dev_tier_when_building 'if [ "${DEV_TIER_BUILD:-}" != true ]; then echo "the stash of this commit is there: not building here"; exit 0; fi'
+  dev_tier_unless_building: &dev_tier_unless_building 'if [ "${DEV_TIER_BUILD:-}" = true ]; then echo "built in this job: nothing to restore"; exit 0; fi'
 
 # Self-hosted machine runners on marvin (AMD Ryzen 9 9950X, 60GB RAM, Ubuntu 25.04), two pools:
 # - coasys/marvin: every job that compiles Rust (build, clippy, rust-tests) and llm-e2e
@@ -30,6 +40,11 @@ references:
 # `heavy_gate`: on a draft PR, a PR whose base is not dev, or a branch with no PR they halt
 # green at once (.circleci/scripts/should-run-heavy.sh). The full-ci label or [full-ci] in
 # the commit message runs them anyway.
+# Tiers (CI-PLAN section 3): integration-tests-sfu-e2e skips on a PR only when every file
+# the PR changes is on its skip list (.circleci/scripts/paths-changed.sh). It, integration-tests-mcp and
+# integration-tests-email-verification run on dev in workflow `dev-2-hourly`, every 2 hours
+# when dev has moved. A red run there opens the GitHub issue "dev red: <job>"
+# (.circleci/scripts/dev-tier.sh).
 
 commands:
   fix_workdir:
@@ -156,17 +171,33 @@ commands:
           # `build`); anything but its "skip" answer runs the suite, so a GitHub API
           # failure costs a full run, never a skipped one. A halted job is green: a PR
           # that gets ready or retargeted to dev without a push keeps that green until
-          # its workflow is rerun.
+          # its workflow is rerun. An override (the label, [full-ci], the nightly) is
+          # written to $BASH_ENV as CI_FULL_CI, so a later path gate in the job honours
+          # the same decision.
           name: Stack gate (heavy suites only for non-draft PRs to dev)
           environment:
             HEAVY_GATE_FORCE: << pipeline.parameters.run-nightly-llm >>
           command: |
             rc=0
-            bash .circleci/scripts/should-run-heavy.sh || rc=$?
+            HEAVY_GATE_EXPORT="$BASH_ENV" bash .circleci/scripts/should-run-heavy.sh || rc=$?
             if [ "$rc" = 10 ]; then
               circleci-agent step halt
             fi
             exit 0
+
+  dev_tier_report:
+    description: "Last steps of a 2-hourly dev tier job: open or comment the 'dev red: <job>' issue"
+    steps:
+      - run:
+          # GITHUB_TOKEN (Issues: write) comes from the dev-tier-github context. Without
+          # it the step prints the issue text and opens nothing.
+          name: 'Report a red run (GitHub issue "dev red: <job>")'
+          when: on_fail
+          command: bash .circleci/scripts/dev-tier.sh red "$CIRCLE_JOB"
+      - run:
+          name: Note a green run on an open "dev red" issue
+          when: on_success
+          command: bash .circleci/scripts/dev-tier.sh green "$CIRCLE_JOB"
 
   setup_env:
     description: "Set up build environment (Node, Rust, Deno, Go, pnpm)"
@@ -208,6 +239,13 @@ commands:
 
   build_adam:
     description: "Build the dapp, the Deno snapshot and the ADAM binaries (target/release/ad4m, ad4m-executor)"
+    parameters:
+      guard:
+        description: >-
+          A shell line run first in each step; it may `exit 0` to skip the step at run
+          time. The 2-hourly dev tier builds here only when build's stash is gone.
+        type: string
+        default: ""
     steps:
       - run:
           # Install per-workspace `hc` + `kitsune2-bootstrap-srv` matching
@@ -220,20 +258,30 @@ commands:
           # binaries with the language bundles so the integration jobs do not
           # each build `hc` from source after a Holochain bump.
           name: Install pinned Holochain + kitsune2 CLIs (matches Cargo.lock)
-          command: bash scripts/install-hc-toolchain.sh
+          command: |
+            << parameters.guard >>
+            bash scripts/install-hc-toolchain.sh
           no_output_timeout: 30m
       - run:
           name: Install dependencies
-          command: pnpm install --no-frozen-lockfile
+          command: |
+            << parameters.guard >>
+            pnpm install --no-frozen-lockfile
       - run:
           name: Build dapp
-          command: pnpm build-dapp
+          command: |
+            << parameters.guard >>
+            pnpm build-dapp
       - run:
           name: Install core dependencies
-          command: cd ./core && pnpm install --no-frozen-lockfile
+          command: |
+            << parameters.guard >>
+            cd ./core && pnpm install --no-frozen-lockfile
       - run:
           name: Remove stale binaries (self-hosted runner incremental cache)
-          command: rm -f target/release/ad4m target/release/ad4m-executor
+          command: |
+            << parameters.guard >>
+            rm -f target/release/ad4m target/release/ad4m-executor
       - run:
           # Makes the Deno snapshot too: build-libs runs @coasys/rust-ad4m-executor#build
           # (`build-deno-snapshot`) before the cli builds the executor. The script
@@ -242,6 +290,7 @@ commands:
           # $CI_ARTIFACT_DIR/deno-snapshot/ when another runner built those inputs.
           name: Build ADAM (without bootstrap languages)
           command: |
+            << parameters.guard >>
             export CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
             pnpm run build-libs
           no_output_timeout: 30m
@@ -251,6 +300,7 @@ commands:
           # whose TLS needs OpenSSL, and only `ad4m`'s graph vendors it (no system OpenSSL here).
           name: Build identity-store and the identity test holder
           command: |
+            << parameters.guard >>
             cargo build --release -p ad4m -p identity-store -p ad4m-identity-client \
               --bin identity-store --example holder \
               --features ad4m-identity-client/ws,ad4m-identity-client/test-vault
@@ -258,6 +308,13 @@ commands:
 
   build_integration_inputs:
     description: "Build the bootstrap languages with the pinned hc (after build_adam)"
+    parameters:
+      guard:
+        description: >-
+          A shell line run first in each step; it may `exit 0` to skip the step at run
+          time. The 2-hourly dev tier builds here only when build's stash is gone.
+        type: string
+        default: ""
     steps:
       - run:
           # Same clear the integration jobs used to do before their own
@@ -266,6 +323,7 @@ commands:
           # packed by a previous Holochain version.
           name: Clear stale bootstrap-language build cache (cross-branch shared workdir)
           command: |
+            << parameters.guard >>
             rm -rf .turbo bootstrap-languages/*/.turbo bootstrap-languages/*/build
       - run:
           # Built ONCE in `build` instead of in every integration job (Nico,
@@ -273,15 +331,25 @@ commands:
           # nightly, which has no `build` job, runs this itself. Rollup
           # bundles + Holochain wasm DNAs packed with build_adam's pinned `hc`.
           name: Build bootstrap languages
-          command: pnpm run build-languages
+          command: |
+            << parameters.guard >>
+            pnpm run build-languages
           no_output_timeout: 30m
 
   restore_binaries:
     description: "Restore the ad4m + ad4m-executor binaries that build stashed on this host"
+    parameters:
+      guard:
+        description: >-
+          A shell line run first in each step; it may `exit 0` to skip the step at run
+          time. The 2-hourly dev tier builds here only when build's stash is gone.
+        type: string
+        default: ""
     steps:
       - run:
           name: Restore binaries from local stash (no CircleCI network storage needed — same host)
           command: |
+            << parameters.guard >>
             # CI_ARTIFACT_DIR: env-driven so the shared self-hosted runner
             # can be re-imaged / re-owned without editing this file. Default
             # is a system-level path that does not couple this config to any
@@ -304,6 +372,13 @@ commands:
 
   restore_integration_inputs:
     description: "Restore the JS build outputs and hc toolchain that build produced (bootstrap languages, link-server, core, ALDK)"
+    parameters:
+      guard:
+        description: >-
+          A shell line run first in each step; it may `exit 0` to skip the step at run
+          time. The 2-hourly dev tier builds here only when build's stash is gone.
+        type: string
+        default: ""
     steps:
       - run:
           # `build` compiles the bootstrap languages (rollup + Holochain wasm
@@ -315,6 +390,7 @@ commands:
           # ~/.cargo package-cache lock (PR #1156, 2026-09-25).
           name: Restore integration inputs from build
           command: |
+            << parameters.guard >>
             set -eo pipefail
             CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
             src="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/integration-inputs.tar"
@@ -327,6 +403,82 @@ commands:
             echo "restored $(tar -tf "$src" | wc -l) entries from $src"
             ls -l bootstrap-languages/*/build/bundle.js bootstrap-languages/local/dist/docker_seed.json \
                   link-server/dist/index.js .hc-toolchain/bin/
+
+  stash_binaries:
+    description: "Stash the ad4m, ad4m-executor, identity-store and holder binaries for this commit on this host"
+    parameters:
+      guard:
+        description: >-
+          A shell line run first in each step; it may `exit 0` to skip the step at run
+          time. The 2-hourly dev tier builds here only when build's stash is gone.
+        type: string
+        default: ""
+    steps:
+      - run:
+          name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
+          command: |
+            << parameters.guard >>
+            # Write to a temp name and rename: a rerun of build for the same
+            # SHA must not hand a half-written file to an integration job
+            # that is restoring from the earlier run (mv is atomic on one fs).
+            # The temp name is this job's own, so two jobs that stash the same
+            # SHA at once (a build rerun, a tier job) do not share one.
+            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
+            dst="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}"
+            mkdir -p "$dst"
+            for bin in ad4m ad4m-executor identity-store examples/holder; do
+              # `a && b` inside a loop does not stop the step under bash -e.
+              name="$(basename "$bin")"
+              tmp="$dst/$name.tmp.${CIRCLE_BUILD_NUM:-$$}"
+              cp "target/release/$bin" "$tmp" || exit 1
+              mv "$tmp" "$dst/$name"
+            done
+
+  stash_integration_inputs:
+    description: "Stash the integration inputs (bootstrap languages, link-server, core, hc toolchain) for this commit on this host"
+    parameters:
+      guard:
+        description: >-
+          A shell line run first in each step; it may `exit 0` to skip the step at run
+          time. The 2-hourly dev tier builds here only when build's stash is gone.
+        type: string
+        default: ""
+    steps:
+      - run:
+          # Everything gitignored that the integration jobs read and used to
+          # rebuild themselves (restored by restore_integration_inputs):
+          #   bootstrap-languages/*/build      esbuild/rollup bundles; tests copy
+          #                                    build/bundle.js (get-builtin-test-langs.js)
+          #   hc-dna/workdir/*.dna|*.happ      packed DNAs/hApps (dna.yaml/happ.yaml names)
+          #   ad4m-ldk/js/lib                  ALDK, bundled into the languages
+          #   core/lib                         @coasys/ad4m, linked from tests/js
+          #   link-server/dist                 spawned by tests/js/utils/linkServer.ts
+          #   .hc-toolchain/bin + stamps       `hc` and `kitsune2-bootstrap-srv`,
+          #                                    needed at test runtime
+          #   bootstrap-languages/local/dist   #918's local-language seed + bundles
+          #                                    (generate-seed.mjs); the tests read
+          #                                    local/*.js from git
+          # A branch that adds a language output dir must add it to this list.
+          name: Stash integration inputs (bootstrap languages, link-server, core, hc toolchain)
+          command: |
+            << parameters.guard >>
+            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
+            dst="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/integration-inputs.tar"
+            tmp="$dst.tmp.${CIRCLE_BUILD_NUM:-$$}"
+            tar -cf "$tmp" \
+              bootstrap-languages/*/build \
+              bootstrap-languages/local/dist \
+              bootstrap-languages/*/hc-dna/workdir/*.dna \
+              bootstrap-languages/*/hc-dna/workdir/*.happ \
+              ad4m-ldk/js/lib \
+              core/lib \
+              link-server/dist \
+              .hc-toolchain/bin/hc \
+              .hc-toolchain/bin/kitsune2-bootstrap-srv \
+              .hc-toolchain/.installed_rev \
+              .hc-toolchain/.installed_kitsune_version
+            mv "$tmp" "$dst"
+            ls -l "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/"
 
   test_artifacts_dir:
     description: "Give this job an empty test-artifact directory, test-artifacts/ in the workdir, as $TEST_ARTIFACTS"
@@ -360,11 +512,88 @@ commands:
           may be gone.
         type: boolean
         default: false
+      skip_paths:
+        description: >-
+          Paths, space-separated (rules in .circleci/scripts/paths-changed.sh). When set,
+          the job halts green on a PR whose own changed files are all on this list, and
+          on dev (the 2-hourly tier runs it there).
+        type: string
+        default: ""
+      dev_tier:
+        description: >-
+          This job runs in the 2-hourly dev tier: halt green when its commit already
+          passed the tier; use build's stash of the commit, waiting while that build
+          runs, or build here when the stash is gone.
+        type: boolean
+        default: false
     steps:
       - fix_workdir
       - checkout
+      - when:
+          condition: << parameters.dev_tier >>
+          steps:
+            - run:
+                # Any lookup failure runs the job. CIRCLECI_API_TOKEN comes from the
+                # nightly-llm-e2e context, as for llm-e2e's check.
+                name: Skip if this commit already passed the 2-hourly dev tier
+                command: |
+                  rc=0
+                  bash .circleci/scripts/dev-tier.sh moved "$CIRCLE_JOB" || rc=$?
+                  if [ "$rc" = 10 ]; then
+                    circleci-agent step halt
+                  fi
+                  exit 0
       - test_artifacts_dir
       - heavy_gate
+      - when:
+          condition: << parameters.skip_paths >>
+          steps:
+            - run:
+                # Anything but the script's "skip" answer runs the job. heavy_gate's
+                # full-ci decision (CI_FULL_CI in $BASH_ENV) runs it too. set -f: the
+                # list holds globs for the script, not for this shell.
+                name: Path gate (on a PR, skip only when every changed file is on the skip list)
+                command: |
+                  set -f
+                  rc=0
+                  bash .circleci/scripts/paths-changed.sh << parameters.skip_paths >> || rc=$?
+                  if [ "$rc" = 10 ]; then
+                    circleci-agent step halt
+                  fi
+                  exit 0
+      - when:
+          condition: << parameters.dev_tier >>
+          steps:
+            - run:
+                # The scheduled pipeline has no `build` job: it uses the stash of the push
+                # pipeline's `build` of this commit, and waits while that build runs. When
+                # that build is red the job fails without a "dev red" issue (the suite did
+                # not run). When the stash is gone (build deletes stashes older than 12
+                # hours, so a red tier on a quiet dev hits this) and no build of the commit
+                # runs, the job builds here (DEV_TIER_BUILD) and stashes the result for the
+                # next run. A failure before the build is done opens no issue either.
+                name: Wait for build's stash of this commit, or build here when it is gone
+                no_output_timeout: 50m
+                command: |
+                  rc=0
+                  bash .circleci/scripts/dev-tier.sh stash "$CIRCLE_JOB" || rc=$?
+                  case "$rc" in
+                    0) ;;
+                    11)
+                      echo "export DEV_TIER_NO_ISSUE='build of $CIRCLE_SHA1 is red: the suite did not run'" >> "$BASH_ENV"
+                      exit 1
+                      ;;
+                    13)
+                      # Another build of this commit (the push pipeline's, or another
+                      # tier job's) is still running: no second build beside it.
+                      echo "export DEV_TIER_NO_ISSUE='another build of $CIRCLE_SHA1 still running: the suite did not run'" >> "$BASH_ENV"
+                      exit 1
+                      ;;
+                    *)
+                      echo 'export DEV_TIER_BUILD=true' >> "$BASH_ENV"
+                      echo "export DEV_TIER_NO_ISSUE='building $CIRCLE_SHA1 in this job failed: the suite did not run'" >> "$BASH_ENV"
+                      ;;
+                  esac
       - when:
           condition: << parameters.local >>
           steps:
@@ -374,13 +603,49 @@ commands:
       - unless:
           condition: << parameters.build_binaries >>
           steps:
-            - restore_binaries
+            - when:
+                condition: << parameters.dev_tier >>
+                steps:
+                  - restore_binaries:
+                      guard: *dev_tier_unless_building
+            - unless:
+                condition: << parameters.dev_tier >>
+                steps:
+                  - restore_binaries
       - setup_env
       - when:
           condition: << parameters.build_binaries >>
           steps:
             - build_adam
             - build_integration_inputs
+      - when:
+          condition: << parameters.dev_tier >>
+          steps:
+            - build_adam:
+                guard: *dev_tier_when_building
+            - build_integration_inputs:
+                guard: *dev_tier_when_building
+            - stash_binaries:
+                guard: *dev_tier_when_building
+            - stash_integration_inputs:
+                guard: *dev_tier_when_building
+            - run:
+                name: Built here; from now on a failure is the suite's
+                command: |
+                  if [ "${DEV_TIER_BUILD:-}" = true ]; then
+                    echo 'unset DEV_TIER_NO_ISSUE' >> "$BASH_ENV"
+                    echo "built and stashed $CIRCLE_SHA1 in this job"
+                  fi
+            - run:
+                # dev-tier.sh stash took the lock for this job; release it whether the
+                # build passed or failed, so the next tier run need not wait it out.
+                name: Release the build lock of this commit
+                when: always
+                command: |
+                  lock="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}/${CIRCLE_SHA1}/.dev-tier-build"
+                  if [ "${DEV_TIER_BUILD:-}" = true ] && [ "$(cat "$lock/owner" 2>/dev/null)" = "$CIRCLE_BUILD_NUM" ]; then
+                    rm -rf "$lock" && echo "released $lock"
+                  fi
       - run:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
@@ -390,7 +655,15 @@ commands:
       - unless:
           condition: << parameters.build_binaries >>
           steps:
-            - restore_integration_inputs
+            - when:
+                condition: << parameters.dev_tier >>
+                steps:
+                  - restore_integration_inputs:
+                      guard: *dev_tier_unless_building
+            - unless:
+                condition: << parameters.dev_tier >>
+                steps:
+                  - restore_integration_inputs
       - run:
           # core/lib itself comes from the tarball; this is the remaining
           # half of core's build script (`patch-package && tsc && bundle`),
@@ -461,6 +734,12 @@ jobs:
           # Fake curl with fixture PRs, no network; about a second. The heavy_gate decision.
           name: Test should-run-heavy.sh
           command: bash .circleci/scripts/should-run-heavy.test.sh
+      - run:
+          # Scratch git repos and a fake curl, no network; about 15 seconds.
+          name: Test paths-changed.sh and dev-tier.sh (sfu-e2e path gate, 2-hourly dev tier)
+          command: |
+            bash .circleci/scripts/paths-changed.test.sh
+            bash .circleci/scripts/dev-tier.test.sh
       - build_adam
       - build_integration_inputs
       - run:
@@ -474,21 +753,7 @@ jobs:
             floor="$(objdump -T target/release/ad4m-executor | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
             echo "ad4m-executor needs ${floor:-no versioned glibc symbols}"
             echo "This machine: $(ldd --version | head -1)"
-      - run:
-          name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
-          command: |
-            # Write to a temp name and rename: a rerun of build for the same
-            # SHA must not hand a half-written file to an integration job
-            # that is restoring from the earlier run (mv is atomic on one fs).
-            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
-            dst="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}"
-            mkdir -p "$dst"
-            for bin in ad4m ad4m-executor identity-store examples/holder; do
-              # `a && b` inside a loop does not stop the step under bash -e.
-              name="$(basename "$bin")"
-              cp "target/release/$bin" "$dst/$name.tmp" || exit 1
-              mv "$dst/$name.tmp" "$dst/$name"
-            done
+      - stash_binaries
       # The executor for this commit, for use outside this host. Written on the runner's
       # magnetic disk and served at https://executor.ad4m.dev/<commit>/manifest.json.
       # Not a CircleCI artifact: that storage is billed, and one file is about 90 MB per push.
@@ -576,39 +841,7 @@ jobs:
               rust-executor/CUSTOM_DENO_SNAPSHOT.residual_js.rs \
               dapp/dist
             mv "$dst.tmp" "$dst"
-      - run:
-          # Everything gitignored that the integration jobs read and used to
-          # rebuild themselves (restored by restore_integration_inputs):
-          #   bootstrap-languages/*/build      esbuild/rollup bundles; tests copy
-          #                                    build/bundle.js (get-builtin-test-langs.js)
-          #   hc-dna/workdir/*.dna|*.happ      packed DNAs/hApps (dna.yaml/happ.yaml names)
-          #   ad4m-ldk/js/lib                  ALDK, bundled into the languages
-          #   core/lib                         @coasys/ad4m, linked from tests/js
-          #   link-server/dist                 spawned by tests/js/utils/linkServer.ts
-          #   .hc-toolchain/bin + stamps       `hc` and `kitsune2-bootstrap-srv`,
-          #                                    needed at test runtime
-          #   bootstrap-languages/local/dist   #918's local-language seed + bundles
-          #                                    (generate-seed.mjs); the tests read
-          #                                    local/*.js from git
-          # A branch that adds a language output dir must add it to this list.
-          name: Stash integration inputs (bootstrap languages, link-server, core, hc toolchain)
-          command: |
-            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
-            dst="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/integration-inputs.tar"
-            tar -cf "$dst.tmp" \
-              bootstrap-languages/*/build \
-              bootstrap-languages/local/dist \
-              bootstrap-languages/*/hc-dna/workdir/*.dna \
-              bootstrap-languages/*/hc-dna/workdir/*.happ \
-              ad4m-ldk/js/lib \
-              core/lib \
-              link-server/dist \
-              .hc-toolchain/bin/hc \
-              .hc-toolchain/bin/kitsune2-bootstrap-srv \
-              .hc-toolchain/.installed_rev \
-              .hc-toolchain/.installed_kitsune_version
-            mv "$dst.tmp" "$dst"
-            ls -l "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/"
+      - stash_integration_inputs
 
   # Clippy and the Rust tests outside rust-executor. They run here, beside rust-tests,
   # because rust-executor's single-threaded suite alone fills rust-tests; both jobs are
@@ -831,12 +1064,52 @@ jobs:
   # executor, local languages (no Holochain). About 4 minutes. E6 shapes the
   # loopback with `tc` for its own ports only (runners share the host), and
   # skips where passwordless sudo is missing.
+  # On a PR it halts green only when every file the PR changes is on skip_paths
+  # below; any other file, a new one too, runs it. On dev it runs in the 2-hourly
+  # tier. The list holds only what the job cannot read: the docs and other apps
+  # (docs/, docs-src/, ui/, ad4m-hooks/, test-runner/, plugins/), deployment
+  # and repo tooling, top-level Markdown and licence files, the other test suites
+  # (tests/js/tests/ except this suite, the AI and identity helpers, the bats and
+  # Rust-language tests) and the nightly's scripts. Workspace and crate manifests
+  # (package.json, Cargo.toml, build.rs) run it wherever they are, since pnpm
+  # install and cargo resolve the whole workspace. Kept off the list on purpose:
+  # the executor and every crate it builds from, core/, connect/ (tests/js
+  # links it), dapp/ and bootstrap-languages/ (in the binary or the stash),
+  # ai-wind-tunnel/ (the executor embeds its JSON), tests/js/utils, helpers,
+  # scripts, sdna and languages, the lockfiles, .cargo/, rust-toolchain.toml and
+  # .circleci/. Tested against this list: .circleci/scripts/paths-changed.test.sh.
   integration-tests-sfu-e2e:
     machine: true
     resource_class: coasys/marvin
+    parameters:
+      dev_tier:
+        type: boolean
+        default: false
+      skip_paths:
+        # Empty in the 2-hourly tier: there the job always runs.
+        type: string
+        default: >-
+          docs/ docs-src/ ui/ ad4m-hooks/ test-runner/ plugins/ planning/
+          deploy/ docker/ Dockerfile docker-entrypoint.sh
+          .github/ .gitlab-ci.yml .claude/ .codegraph/ .githooks/ hooks/ .vscode/
+          setup-hooks.sh setup-hooks.bat setVersion.js .npmignore .config/nextest.toml
+          *.md CHANGELOG LICENSE CNAME
+          tests/js/tests/ !tests/js/tests/sfu-e2e.test.ts
+          tests/js/helpers/ai-models.ts tests/js/helpers/ai-upstream.ts
+          tests/js/helpers/ai-wind-tunnel/ tests/js/helpers/identity.ts
+          tests/js/demo-multi-user.js tests/js/demo-working.js
+          tests/js/email-verification-test-with-setup.sh tests/js/test-multi-user-with-setup.sh
+          tests/binaries.bats tests/integration.bats tests/test_helper/ tests/potluck.pl
+          tests/rust-languages/ tests/transcription_test.m4a tests/transcription_test.wav
+          scripts/coasys-spaces.sh scripts/coasys-spaces.test.sh scripts/run-llm-e2e.sh
+          scripts/we-agent-tools-cache.test.sh scripts/ci-fix-workdir.test.sh
+          scripts/install-hc-toolchain.test.sh
+          !*/package.json !*/Cargo.toml !*/build.rs
     steps:
       - setup_integration_test_environment:
           local: true
+          dev_tier: << parameters.dev_tier >>
+          skip_paths: << parameters.skip_paths >>
       - run:
           name: Run SFU end-to-end tests (local languages, no Holochain)
           command: |
@@ -848,6 +1121,10 @@ jobs:
           when: always
           path: test-artifacts
           destination: test-logs
+      - when:
+          condition: << parameters.dev_tier >>
+          steps:
+            - dev_tier_report
 
   # SFU and mesh calls in real Chromium, Firefox and WebKit, mixed, through the
   # SDK's browser build (tests/js/tests/sfu-browsers.test.ts). One executor,
@@ -1006,27 +1283,57 @@ jobs:
           command: cd ./tests/js && ./test-multi-user-with-setup.sh
           no_output_timeout: 30m
 
+  # Runs only in the 2-hourly dev tier (workflow dev-2-hourly), not on PRs.
   integration-tests-email-verification:
     machine: true
-    resource_class: coasys/marvin-light
+    resource_class: << parameters.resource_class >>
+    parameters:
+      dev_tier:
+        type: boolean
+        default: false
+      resource_class:
+        # coasys/marvin in the 2-hourly tier: when build's stash is gone the job
+        # compiles the executor, which needs the heavy pool's warm target/.
+        type: string
+        default: coasys/marvin-light
     steps:
       - setup_integration_test_environment:
           local: true
+          dev_tier: << parameters.dev_tier >>
       - run:
           name: Run email-verification integration tests (local)
           command: cd ./tests/js && ./email-verification-test-with-setup.sh --local
           no_output_timeout: 30m
+      - when:
+          condition: << parameters.dev_tier >>
+          steps:
+            - dev_tier_report
 
+  # Runs only in the 2-hourly dev tier (workflow dev-2-hourly), not on PRs.
   integration-tests-mcp:
     machine: true
-    resource_class: coasys/marvin-light
+    resource_class: << parameters.resource_class >>
+    parameters:
+      dev_tier:
+        type: boolean
+        default: false
+      resource_class:
+        # coasys/marvin in the 2-hourly tier: when build's stash is gone the job
+        # compiles the executor, which needs the heavy pool's warm target/.
+        type: string
+        default: coasys/marvin-light
     steps:
       - setup_integration_test_environment:
           local: true
+          dev_tier: << parameters.dev_tier >>
       - run:
           name: Run MCP integration tests (local)
           command: cd ./tests/js && pnpm install && pnpm run test-mcp
           no_output_timeout: 30m
+      - when:
+          condition: << parameters.dev_tier >>
+          steps:
+            - dev_tier_report
 
   integration-tests-model:
     machine: true
@@ -1181,7 +1488,8 @@ jobs:
   # and network baselines, over Holochain. Several scenarios sleep on
   # purpose (30s media/RTT, 35s TTL). That is a nightly measurement, not a
   # merge check, so this job is only in `nightly-llm-e2e`; the single-executor
-  # calls run on every push in `integration-tests-sfu-e2e`. It builds its own
+  # calls run in `integration-tests-sfu-e2e` (PRs that touch SFU files, and dev
+  # every 2 hours). It builds its own
   # binaries: that pipeline has no `build` job, and `build` deletes stashes
   # older than 12 hours.
   integration-tests-sfu:
@@ -1412,7 +1720,9 @@ workflows:
   version: 2
   build-and-test:
     when:
-      not: << pipeline.parameters.run-nightly-llm >>
+      and:
+        - not: << pipeline.parameters.run-nightly-llm >>
+        - not: << pipeline.parameters.run-dev-2-hourly >>
     jobs:
       - build
       - plugin-ad4m-tests
@@ -1435,6 +1745,7 @@ workflows:
       - integration-tests-js:
           requires:
             - build
+      # On a PR unless every changed file is on its skip list (the job's path gate); on dev in dev-2-hourly.
       - integration-tests-sfu-e2e:
           requires:
             - build
@@ -1450,12 +1761,7 @@ workflows:
       - integration-tests-multi-user-simple:
           requires:
             - build
-      - integration-tests-email-verification:
-          requires:
-            - build
-      - integration-tests-mcp:
-          requires:
-            - build
+      # integration-tests-email-verification and integration-tests-mcp run in dev-2-hourly.
       - integration-tests-model:
           requires:
             - build
@@ -1486,3 +1792,32 @@ workflows:
           serial-group: << pipeline.project.slug >>/nightly-sfu-browsers
       - coasys-spaces:
           serial-group: << pipeline.project.slug >>/nightly-llm
+
+  # The 2-hourly dev tier. A scheduled pipeline on dev (Project Settings → Triggers)
+  # sets `run-dev-2-hourly` every 2 hours; in-config cron does not reach this project.
+  # Each job halts green at once when its commit's latest run in this tier passed (dev has
+  # not moved). It has no `build` job: it uses the stash of the push pipeline's `build` of
+  # the same commit, waits while that build runs, and builds here when the stash is gone
+  # (so the tier jobs run on coasys/marvin, whose runners keep a warm target/). A red job opens or comments the GitHub issue
+  # "dev red: <job>" (.circleci/scripts/dev-tier.sh). nightly-llm-e2e gives
+  # CIRCLECI_API_TOKEN (read-only) for the lookups; dev-tier-github gives GITHUB_TOKEN
+  # (Issues: write on coasys/ad4m) for the issue. Its own serial group per job, so a
+  # slow run and the next trigger do not overlap.
+  dev-2-hourly:
+    when: << pipeline.parameters.run-dev-2-hourly >>
+    jobs:
+      - integration-tests-sfu-e2e:
+          dev_tier: true
+          skip_paths: ""
+          context: [nightly-llm-e2e, dev-tier-github]
+          serial-group: << pipeline.project.slug >>/dev-2-hourly-sfu-e2e
+      - integration-tests-mcp:
+          dev_tier: true
+          resource_class: coasys/marvin
+          context: [nightly-llm-e2e, dev-tier-github]
+          serial-group: << pipeline.project.slug >>/dev-2-hourly-mcp
+      - integration-tests-email-verification:
+          dev_tier: true
+          resource_class: coasys/marvin
+          context: [nightly-llm-e2e, dev-tier-github]
+          serial-group: << pipeline.project.slug >>/dev-2-hourly-email-verification
