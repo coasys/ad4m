@@ -394,7 +394,8 @@ export class SfuManager {
     /** Running while the room's roster leaves this session out: see `noticeRoster`. */
     private unlistedTimer: ReturnType<typeof setTimeout> | null = null
     /** The newest applied roster left this session out and no ask has cleared
-     *  it since: a socket-faulted ask for it is asked again within the grace. */
+     *  it since: an ask for it that went unanswered — a socket fault or an
+     *  expired box — is asked again within the grace. */
     private unlisted = false
     /** The revision of the newest applied roster that listed this session.
      *  A resume's `listed: false` stands unless a roster newer than its ask
@@ -1188,7 +1189,8 @@ export class SfuManager {
      * starts run to their end like any offer's.
      * A socket fault (503, 408) keeps the call: an ask a roster left this
      * session out for (`retryUnlisted`) is asked again within the grace
-     * while the roster still omits it; the others wait for the next
+     * while the roster still omits it — an expired box leaves the omission
+     * as unresolved as a fault — while the others wait for the next
      * reconnect. A 403 ends it: the executor refused this session's
      * resume — it is another agent's, or this agent lost its membership —
      * and a refusal does not heal.
@@ -1219,12 +1221,34 @@ export class SfuManager {
                 }
             }, Math.min(SfuManager.RESUME_STEP_TIMEOUT_MS, restartLeft))
             // The box won: whatever the RPC answers now belongs to a call
-            // that went on without it.
-            if (reply === null) return
+            // that went on without it. For an ask a roster left this
+            // session out for, the omission is as unresolved as a fault
+            // left it: the grace asks again while it still holds.
+            if (reply === null) {
+                if (retryUnlisted) this.scheduleUnlistedRetry(pc, participantId)
+                return
+            }
             this.offerQueue = this.offerQueue
                 .then(() => this.applyResume(pc, participantId, askedAtRevision, askedAtOfferId, reply!, retryUnlisted))
                 .catch((err) => console.warn("SFU: applying the resume's reply failed:", err))
         })
+    }
+
+    /**
+     * The grace retry an unresolved omission gets: an ask a roster left
+     * this session out for stays open until one answers — a socket fault
+     * or an expired box both leave it unanswered — so while the roster
+     * still omits this session, and no retry runs already, the grace asks
+     * again rather than waiting for a socket reconnect. True when armed.
+     */
+    private scheduleUnlistedRetry(pc: RTCPeerConnection, participantId: string): boolean {
+        if (!this.unlisted || this.unlistedTimer) return false
+        this.unlistedTimer = setTimeout(() => {
+            this.unlistedTimer = null
+            if (this.state.peerConnection !== pc || this.state.participantId !== participantId || !this.unlisted) return
+            this.resume(pc, true)
+        }, SfuManager.UNLISTED_GRACE_MS)
+        return true
     }
 
     /**
@@ -1245,17 +1269,7 @@ export class SfuManager {
             const err = reply.error
             if (this.state.peerConnection !== pc || this.state.participantId !== participantId) return
             if (isSocketFault(err)) {
-                // An ask a roster left this session out for stays open until
-                // one answers: the fault left the omission unresolved, so
-                // while the roster still omits it the grace asks again
-                // rather than waiting for a socket reconnect.
-                if (retryUnlisted && this.unlisted && !this.unlistedTimer) {
-                    this.unlistedTimer = setTimeout(() => {
-                        this.unlistedTimer = null
-                        if (this.state.peerConnection !== pc || this.state.participantId !== participantId || !this.unlisted) return
-                        this.resume(pc, true)
-                    }, SfuManager.UNLISTED_GRACE_MS)
-                } else {
+                if (!(retryUnlisted && this.scheduleUnlistedRetry(pc, participantId))) {
                     console.warn("SFU: resuming the session failed with the socket; the next reconnect asks again:", err)
                 }
                 return
