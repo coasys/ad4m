@@ -132,11 +132,30 @@ fn a_revoke_may_follow_an_unlink_once() {
 }
 
 #[test]
-fn a_rotate_may_revoke_an_unlinked_key() {
+fn a_rotate_unlinks_the_keys_it_drops_and_never_revokes_them() {
+    let mut log = two_devices();
+    log.rotate(&["d1"], false);
+    let record = &log.chain.state().keys["d1"];
+    assert_eq!((record.unlinked, record.revoked), (Some(2), None));
+    // an explicit revoke may still follow
+    log.revoke(&["d1"]);
+    let record = &log.chain.state().keys["d1"];
+    assert_eq!((record.unlinked, record.revoked), (Some(2), Some(3)));
+}
+
+#[test]
+fn a_rotate_refuses_a_key_already_unlinked_or_revoked() {
     let mut log = two_devices();
     log.unlink("d1");
-    log.rotate(&["d1"], false);
-    assert_eq!(log.chain.state().keys["d1"].revoked, Some(3));
+    log.revoke(&["d2"]);
+    let again = log.rotate_event(&["d1"], false);
+    assert_eq!(refused(&log, &again), FoldError::UnlinkedKey("d1".into()));
+    let again = log.rotate_event(&["d2"], false);
+    assert_eq!(refused(&log, &again), FoldError::RevokedKey("d2".into()));
+    // and the same key twice in one rotate
+    let log = two_devices();
+    let twice = log.rotate_event(&["d1", "d1"], false);
+    assert_eq!(refused(&log, &twice), FoldError::UnlinkedKey("d1".into()));
 }
 
 #[test]

@@ -423,6 +423,11 @@ macro_rules! ad4m_db_methods {
             fn join(&self, offer_id: &str) -> Ad4mDbResult<Option<JoinRow>>;
             fn set_join_accept(&self, offer_id: &str, accept: JoinAccept) -> Ad4mDbResult<bool>;
             fn cancel_join(&self, offer_id: &str, agent_did: &str) -> Ad4mDbResult<JoinCancel>;
+            // The pending unlinks of local agents' device keys (`identity.unlinkSelf`)
+            fn set_unlink_intent(&self, agent_did: &str, scid: &str, set_at: u64) -> Ad4mDbResult<()>;
+            fn unlink_intent(&self, agent_did: &str) -> Ad4mDbResult<Option<String>>;
+            fn unlink_intents(&self) -> Ad4mDbResult<Vec<(String, String)>>;
+            fn clear_unlink_intent(&self, agent_did: &str) -> Ad4mDbResult<()>;
 
             // Bots: the bot agents, their grants and their activity log (`db/bots.rs`)
             fn add_bot(&self, bot: &BotRow) -> Ad4mDbResult<()>;

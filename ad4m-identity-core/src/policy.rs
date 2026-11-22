@@ -317,7 +317,7 @@ fn apply(state: &mut KeyState, event: &Event, replay: Replay) -> Result<(), Fold
             master,
             salt,
             next,
-            revoke,
+            unlink,
         } => {
             if !is_ed25519_multikey(master) {
                 return Err(FoldError::UnsupportedKeyType);
@@ -334,7 +334,20 @@ fn apply(state: &mut KeyState, event: &Event, replay: Replay) -> Result<(), Fold
             }
             let id = state.next_master_id();
             check_signers(&state.did, event, &[(id.clone(), master.clone())], replay)?;
-            revoke_keys(state, revoke, seq, None)?;
+            // the rotation drops these keys as an `unlink` would: never revoked
+            for id in unlink {
+                let record = state
+                    .keys
+                    .get_mut(id)
+                    .ok_or_else(|| FoldError::UnknownKey(id.clone()))?;
+                if record.revoked.is_some() {
+                    return Err(FoldError::RevokedKey(id.clone()));
+                }
+                if record.unlinked.is_some() {
+                    return Err(FoldError::UnlinkedKey(id.clone()));
+                }
+                record.unlinked = Some(seq);
+            }
             if let Some(old) = state.masters.last_mut() {
                 old.revoked = Some(seq);
             }

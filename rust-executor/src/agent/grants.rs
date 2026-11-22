@@ -275,6 +275,15 @@ impl LiveGrant {
         &self.auth.app_name
     }
 
+    /// Whether the grant is a user's own session, not an app's: a password login (`user.login`),
+    /// which answers no capability request, so its `request_id` is its own id; or a key
+    /// session, whose key binding a key login made (not one an approval of it delegated to an
+    /// app). An app's grant answers a request, whose id is another, and carries no binding or a
+    /// delegated one.
+    pub fn is_login(&self) -> bool {
+        self.request_id == self.id.0 || self.key.as_ref().is_some_and(|k| !k.delegated())
+    }
+
     /// Whether the grant was revoked or removed.
     pub fn is_ended(&self) -> bool {
         self.ended.is_cancelled()

@@ -10,7 +10,7 @@
 //!    head first) reads the log again and builds the rotation again on the new head, at most
 //!    [`MAX_TRIES`] times, then stops with [`ClientError::LogBusy`]. Each rebuild takes *n*
 //!    from the new head (after a rotation by another app with the same words, the words derive
-//!    the next master on), and revokes only the listed keys still valid there. A rotation that
+//!    the next master on), and unlinks only the listed keys still valid there. A rotation that
 //!    landed while its answer was lost is found in the log by its hash and not published again.
 //! 3. The vault promotes the staged master *n*+1 in place of master *n*
 //!    ([`Vault::promote_master`]); a promote another app sharing the vault made first (its
@@ -26,7 +26,7 @@
 //! 4. The record's master-signed write comes first: it re-attests the recovery key with
 //!    master *n*+1 — until it lands, the stored attestation is stale and every device write
 //!    would be refused rather than seal the record without it — and lists this device.
-//! 5. Master *n*+1 goes to every other device that kept the master key: each device the record
+//! 5. Master *n*+1 goes (except to keys the caller excludes, as a revoke-with-rotation's targets) to every other device that kept the master key: each device the record
 //!    lists as holding it (`true` or `"offered"`), valid at the head, that the log after the
 //!    rotation lets keep it ([`ad4m_identity_core::link::may_keep_master`]; the record's device
 //!    kind grants nothing, any linked device can write the record), sealed to its `enc` key in its joined inbox ([`super::master`], with the retry list). The store
@@ -59,9 +59,10 @@ pub struct Rotated {
     pub head: SignedHead,
     /// The new master's index *n*+1 (its key id is `m<n+1>`).
     pub index: u32,
-    /// The device keys the rotation revoked: those asked for that were still valid at the head
-    /// it was built on.
-    pub revoked: Vec<KeyId>,
+    /// The device keys the rotation unlinked (dropped): those asked for that were still valid
+    /// at the head it was built on. Unlinked, not revoked: the links they made before the
+    /// rotation stay valid (an explicit `revoke` distrusts a key: [`super::revoke`]).
+    pub unlinked: Vec<KeyId>,
     /// Rotations built: more than 1 when another event landed first.
     pub tries: usize,
     /// Master *n*+1 put into each kept holder's inbox, by device key id: the message id, or why
@@ -167,12 +168,12 @@ fn landed(chain: &KelChain, event: &Event) -> bool {
 pub(crate) struct Published {
     pub head: SignedHead,
     pub signer: KeySigner,
-    pub revoked: Vec<KeyId>,
+    pub unlinked: Vec<KeyId>,
     pub tries: usize,
 }
 
-/// Builds the rotation of `did` to the master after its current one, revoking those of
-/// `revoke` valid at the head, and publishes it; a `409`, or an answer that never came, reads
+/// Builds the rotation of `did` to the master after its current one, unlinking those of
+/// `unlink` valid at the head (a key already revoked or unlinked is left out), and publishes it; a `409`, or an answer that never came, reads
 /// the log and builds it again, at most [`MAX_TRIES`] times.
 ///
 /// **Custody before publish**: each build stages its master *n*+1 in `vault` (for `scid`)
@@ -187,7 +188,7 @@ pub(crate) async fn publish_rotation<R: ExecutorRpc>(
     scid: &str,
     did: &str,
     seed: &Seed,
-    revoke: &[KeyId],
+    unlink: &[KeyId],
     random: &dyn Random,
 ) -> Result<Published, ClientError> {
     let mut attempt = Attempt {
@@ -195,7 +196,7 @@ pub(crate) async fn publish_rotation<R: ExecutorRpc>(
         staged: None,
         unanswered: false,
     };
-    let published = publish_staged(executor, vault, scid, did, seed, revoke, &mut attempt).await;
+    let published = publish_staged(executor, vault, scid, did, seed, unlink, &mut attempt).await;
     if published.is_err() && !attempt.unanswered {
         if let Some(index) = attempt.staged {
             // Best effort, and only the key this flow staged: another app sharing the vault
@@ -224,14 +225,14 @@ async fn publish_staged<R: ExecutorRpc>(
     scid: &str,
     did: &str,
     seed: &Seed,
-    revoke: &[KeyId],
+    unlink: &[KeyId],
     attempt: &mut Attempt,
 ) -> Result<Published, ClientError> {
     let mut sent: Vec<(Event, Vec<KeyId>)> = Vec::new();
     let mut tries = 0;
     loop {
         let (head, chain) = log_of(executor, did).await?;
-        if let Some((_, revoked)) = sent.iter().find(|(event, _)| landed(&chain, event)) {
+        if let Some((_, unlinked)) = sent.iter().find(|(event, _)| landed(&chain, event)) {
             // It landed and its answer was lost: the head read now is past it.
             let head = head.ok_or_else(|| {
                 ClientError::Protocol("the executor accepted no head for the log".into())
@@ -240,7 +241,7 @@ async fn publish_staged<R: ExecutorRpc>(
             return Ok(Published {
                 head,
                 signer: master_of(seed, index)?,
-                revoked: revoked.clone(),
+                unlinked: unlinked.clone(),
                 tries,
             });
         }
@@ -254,12 +255,12 @@ async fn publish_staged<R: ExecutorRpc>(
         let (next, _) = words::next_commitment(seed, index + 1)?;
         let state = chain.state();
         let at = chain.head().seq;
-        let revoked: Vec<KeyId> = revoke
+        let unlinked: Vec<KeyId> = unlink
             .iter()
             .filter(|id| state.keys.contains_key(*id) && state.key_valid_at(id, at))
             .cloned()
             .collect();
-        let event = rotate_event(&chain, &signer, &salt, Some(next), &revoked)?;
+        let event = rotate_event(&chain, &signer, &salt, Some(next), &unlinked)?;
         // The new master is in the vault before anything names it publicly.
         stage(vault, scid, seed, index, &attempt.owner)?;
         attempt.staged = Some(index);
@@ -268,16 +269,16 @@ async fn publish_staged<R: ExecutorRpc>(
                 return Ok(Published {
                     head,
                     signer,
-                    revoked,
+                    unlinked,
                     tries,
                 })
             }
             Err(e) if e.code == 409 => {
-                sent.push((event, revoked));
+                sent.push((event, unlinked));
             }
             Err(e) if transient(&ClientError::Rpc(e.clone())) => {
                 attempt.unanswered = true;
-                sent.push((event, revoked));
+                sent.push((event, unlinked));
             }
             Err(e) => return Err(e.into()),
         }
@@ -293,6 +294,7 @@ pub(crate) fn kept_holders(
     events: &[Event],
     chain: &KelChain,
     own: Option<&str>,
+    exclude: &[KeyId],
 ) -> Vec<KeyId> {
     let state = chain.state();
     let head = chain.head().seq;
@@ -301,6 +303,7 @@ pub(crate) fn kept_holders(
         .iter()
         .filter(|(id, entry)| {
             Some(id.as_str()) != own
+                && !exclude.contains(*id)
                 && matches!(entry.holds_master, HoldsMaster::Yes | HoldsMaster::Offered)
                 && state.keys.contains_key(*id)
                 && state.key_valid_at(id, head)
@@ -341,6 +344,7 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
     this: Option<ThisDevice>,
     owed: Option<CustodyNote>,
     recovery_key: &Multikey,
+    exclude: &[KeyId],
     clock: &dyn Clock,
     random: &dyn Random,
 ) -> (
@@ -362,7 +366,7 @@ pub(crate) async fn hand_over<R: ExecutorRpc>(
     };
     let own = this.as_ref().map(|t| t.key_id.as_str());
     let holders = opened
-        .map(|o| kept_holders(&o.record, &events, &chain, own))
+        .map(|o| kept_holders(&o.record, &events, &chain, own, exclude))
         .unwrap_or_default();
     let index = signer.index();
     // The master-signed write comes before the pushes: it re-attests the recovery key with
@@ -534,18 +538,38 @@ pub(crate) fn acquire(
     }
 }
 
-/// Rotates the master key of `did`, the executor's identity, with the 12 `words`, revoking the
-/// device keys `revoke` in the same event; this device keeps master *n*+1, and every other app
+/// Rotates the master key of `did`, the executor's identity, with the 12 `words`, dropping the
+/// device keys `unlink` in the same event: they are unlinked (sign nothing more; what they
+/// linked before stays valid), not revoked. To distrust a lost or stolen key, revoke it
+/// ([`super::revoke::revoke_and_rotate`]). This device keeps master *n*+1, and every other app
 /// that kept the master key is sent it. Refused before anything is published when the words do
-/// not derive the current master, when a key of `revoke` is not in the log, or when `revoke`
-/// names this device's own key.
+/// not derive the current master, when a key of `unlink` is not in the log, or when `unlink`
+/// names this device's own key. A key already revoked or unlinked is left out of the event.
 #[allow(clippy::too_many_arguments)]
 pub async fn rotate<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,
     did: &str,
     words: &Words,
-    revoke: &[KeyId],
+    unlink: &[KeyId],
+    clock: &dyn Clock,
+    random: &dyn Random,
+) -> Result<Rotated, ClientError> {
+    rotate_excluding(executor, vault, did, words, unlink, &[], clock, random).await
+}
+
+/// [`rotate`] that never sends master *n*+1 to the devices `exclude` (key ids), whatever the
+/// record says of them: the devices a `revoke` follows ([`super::revoke::revoke_and_rotate`],
+/// restore's lock-out), which must not receive the key that replaces the one they may hold.
+/// `exclude` is a list of keys of the log, not checked here.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn rotate_excluding<R: ExecutorRpc>(
+    executor: &ViaExecutor<R>,
+    vault: &dyn Vault,
+    did: &str,
+    words: &Words,
+    unlink: &[KeyId],
+    exclude: &[KeyId],
     clock: &dyn Clock,
     random: &dyn Random,
 ) -> Result<Rotated, ClientError> {
@@ -561,14 +585,14 @@ pub async fn rotate<R: ExecutorRpc>(
         .key_id
         .ok_or_else(|| ClientError::Protocol("the executor's device key is in no log".into()))?;
     let chain = chain_of(executor, did).await?;
-    check_keys(&chain, did, revoke)?;
-    if revoke.contains(&own) {
+    check_keys(&chain, did, unlink)?;
+    if unlink.contains(&own) {
         return Err(ClientError::Protocol(
-            "a device does not revoke its own key in a rotation it keeps".into(),
+            "a device does not drop its own key in a rotation it keeps".into(),
         ));
     }
     current_index(&chain, &seed)?;
-    let published = publish_rotation(executor, vault, &scid, did, &seed, revoke, random).await?;
+    let published = publish_rotation(executor, vault, &scid, did, &seed, unlink, random).await?;
     let index = published.signer.index();
     // The rotation is public from here: what fails after it is reported, not returned.
     // The vault keeps the new master ([`acquire`]); `kept` names the index it keeps. The
@@ -617,6 +641,7 @@ pub async fn rotate<R: ExecutorRpc>(
         }),
         owed,
         &recovery_key_of(&seed),
+        exclude,
         clock,
         random,
     )
@@ -624,7 +649,7 @@ pub async fn rotate<R: ExecutorRpc>(
     Ok(Rotated {
         head: published.head,
         index,
-        revoked: published.revoked,
+        unlinked: published.unlinked,
         tries: published.tries,
         pushes,
         record,
