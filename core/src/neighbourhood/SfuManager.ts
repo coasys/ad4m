@@ -364,6 +364,19 @@ export class SfuManager {
      *  The resume ask snapshots it: the reply's offer applies only while
      *  this is still what it was when the ask went out. */
     private appliedOfferId: string | null = null
+    /** The connection a `sfu.callResume` ask is out for — the ask sent and
+     *  its reply not yet applied (or its box not yet spent). One at a time
+     *  per connection: a trigger while it is set only marks `resumeAgain`,
+     *  and every ask that ends runs that one follow-up. Otherwise each of
+     *  the ask's triggers — the socket's return, ICE down during a
+     *  restart, the chain a reply's offer starts — sent its own RPC, and
+     *  each made the executor resend its pending offer. */
+    private resumeInFlight: RTCPeerConnection | null = null
+    /** A trigger while `resumeInFlight`'s ask was out wants one more ask
+     *  once it ends; `resumeAgainUnlisted` keeps whether any such trigger
+     *  was an unlisted roster's retry. */
+    private resumeAgain = false
+    private resumeAgainUnlisted = false
     /** The last answer this connection produced for a server offer. The
      *  executor's pending offer is the one source of what is still owed:
      *  a socket fault on the send keeps nothing more, since the executor
@@ -984,6 +997,11 @@ export class SfuManager {
         // old session's last answer is not this one's to send.
         this.lastAnswer = null
         this.appliedOfferId = null
+        // The old connection's resume ask and whatever it marked belong to
+        // it: its late reply applies nothing and runs nothing here.
+        this.resumeInFlight = null
+        this.resumeAgain = false
+        this.resumeAgainUnlisted = false
         this.renegotiationUnsubscribe = this.neighbourhood.subscribeSfuCallRenegotiationOffer(
             this.agentDid,
             (event) => {
@@ -1163,6 +1181,10 @@ export class SfuManager {
      * the bound is the restart's remaining time, never a fresh one from
      * the socket's return. Only the RPC is bounded: the SDP steps a reply
      * starts run to their end like any offer's.
+     * One ask per connection at a time: while `pc`'s is out a trigger only
+     * marks `resumeAgain`, and `resumeDone` — once the reply is applied or
+     * the box spent — sends the one follow-up the marks add up to, while
+     * `pc` is still this call's.
      * A socket fault (503, 408) keeps the call: an ask a roster left this
      * session out for (`retryUnlisted`) is asked again within the grace
      * while the roster still omits it — an expired box leaves the omission
@@ -1174,10 +1196,19 @@ export class SfuManager {
     private resume(pc: RTCPeerConnection, retryUnlisted = false): void {
         const participantId = this.state.participantId
         if (!participantId || this.state.peerConnection !== pc) return
+        if (this.resumeInFlight === pc) {
+            this.resumeAgain = true
+            this.resumeAgainUnlisted ||= retryUnlisted
+            return
+        }
+        this.resumeInFlight = pc
         const joined = this.joinSettled
         void joined.then(async () => {
             // The join the ask waited for may not be this call's any more.
-            if (this.state.peerConnection !== pc || this.state.participantId !== participantId) return
+            if (this.state.peerConnection !== pc || this.state.participantId !== participantId) {
+                this.resumeDone(pc, participantId)
+                return
+            }
             const askedAtRevision = this.rosterRevision
             // What `askedAtRevision` is for the roster, this is for offers:
             // the reply's offer applies only while the offer last applied
@@ -1187,7 +1218,10 @@ export class SfuManager {
             // came back late in it bounds the ask by what is left, or
             // drops it.
             const restartLeft = this.restartDeadline === null ? Infinity : this.restartDeadline - performance.now()
-            if (restartLeft <= 0) return
+            if (restartLeft <= 0) {
+                this.resumeDone(pc, participantId)
+                return
+            }
             let reply: { result: SfuResumeResult } | { error: unknown } | null = null
             await this.timeBoxed(async () => {
                 try {
@@ -1202,12 +1236,34 @@ export class SfuManager {
             // left it: the grace asks again while it still holds.
             if (reply === null) {
                 if (retryUnlisted) this.scheduleUnlistedRetry(pc, participantId)
+                this.resumeDone(pc, participantId)
                 return
             }
             this.offerQueue = this.offerQueue
                 .then(() => this.applyResume(pc, participantId, askedAtRevision, askedAtOfferId, reply!, retryUnlisted))
                 .catch((err) => console.warn("SFU: applying the resume's reply failed:", err))
+                .finally(() => this.resumeDone(pc, participantId))
         })
+    }
+
+    /**
+     * `pc`'s resume ask ended — its reply applied, its box spent, or the
+     * join it waited on turned out to be another call's. The in-flight
+     * marker frees, and a trigger that marked `resumeAgain` while the ask
+     * was out gets its one follow-up, only while `pc` is still this call's
+     * connection and session. An ask ending after its connection was
+     * replaced touches nothing: the new connection's marker and marks are
+     * its own.
+     */
+    private resumeDone(pc: RTCPeerConnection, participantId: string): void {
+        if (this.resumeInFlight !== pc) return
+        this.resumeInFlight = null
+        const again = this.resumeAgain
+        const retryUnlisted = this.resumeAgainUnlisted
+        this.resumeAgain = false
+        this.resumeAgainUnlisted = false
+        if (!again || this.state.peerConnection !== pc || this.state.participantId !== participantId) return
+        this.resume(pc, retryUnlisted)
     }
 
     /**
