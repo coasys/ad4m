@@ -23,9 +23,8 @@ use common::{Reply, TestStore};
 
 fn store_with_bound(held_log_bytes: usize) -> TestStore {
     TestStore::with_settings(Settings {
-        pow_bits: 8,
         held_log_bytes,
-        ..Settings::default()
+        ..TestStore::settings()
     })
 }
 

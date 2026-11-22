@@ -272,7 +272,7 @@ pub(crate) async fn publish_revoke<R: ExecutorRpc>(
         }
         let signer = super::rotate::master_of(seed, super::rotate::current_index(&chain, seed)?)?;
         let event = revoke_event(&chain, &signer, &keys, since)?;
-        match executor.publish(std::slice::from_ref(&event)).await {
+        match executor.publish(std::slice::from_ref(&event), None).await {
             Ok(head) => return Ok(head),
             Err(e) if e.code == 409 || transient(&ClientError::Rpc(e.clone())) => {}
             Err(e) => return Err(e.into()),
@@ -315,7 +315,7 @@ pub(crate) async fn revoke_with<R: ExecutorRpc>(
     random: &dyn Random,
 ) -> Result<Revoked, ClientError> {
     let event = revoke_event(chain, signer, key_ids, since)?;
-    let head = executor.publish(std::slice::from_ref(&event)).await?;
+    let head = executor.publish(std::slice::from_ref(&event), None).await?;
     let record = record::write(executor, vault, did, &[], random).await;
     Ok(Revoked { head, record })
 }

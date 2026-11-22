@@ -56,7 +56,7 @@ pub async fn unlink_self<R: ExecutorRpc>(
 ) -> Result<SelfUnlinked, ClientError> {
     let (_, chain) = scid_and_chain(executor, did).await?;
     let event = unlink_self_event(&chain, key_id, signer)?;
-    let head = executor.publish(std::slice::from_ref(&event)).await?;
+    let head = executor.publish(std::slice::from_ref(&event), None).await?;
     Ok(SelfUnlinked {
         head,
         destroy_key: key_id.clone(),
@@ -81,7 +81,7 @@ pub async fn unlink_key<R: ExecutorRpc>(
     }
     let unlocked = vault.unlock(&scid, MasterUse::Unlink, clock.now())?;
     let event = unlink_event(&chain, unlocked.signer(clock.now())?, key_id)?;
-    let head = executor.publish(std::slice::from_ref(&event)).await?;
+    let head = executor.publish(std::slice::from_ref(&event), None).await?;
     let record = record::write(executor, vault, did, &[], random).await;
     Ok(Unlinked { head, record })
 }

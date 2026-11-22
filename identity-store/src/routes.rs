@@ -19,6 +19,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
+use crate::brake::Sender;
 use crate::db::{from_sql, to_sql};
 use crate::error::ApiError;
 use crate::inbox::{joined_address, pre_text, PRE_INBOX_HEADER};
@@ -69,6 +70,7 @@ pub fn router(store: Arc<Store>) -> Router {
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/pow", get(pow_params))
+        .route("/v1/metrics", get(metrics))
         .route("/v1/logs/{scid}/events", post(append))
         .route("/v1/keys/{multikey}", get(key_owner))
         .route("/v1/notes/{scid}", post(attach_note))
@@ -155,11 +157,27 @@ async fn health() -> Answer {
 }
 
 async fn pow_params(State(store): Shared) -> Answer {
-    ok(PowParams {
+    // `GET /v1/pow` answers the cost the next proof must meet and mints the one-use challenge
+    // it solves over, tagged with that cost (`store.pow_challenge`). The caller fetches again
+    // for another log.
+    let params = PowParams {
         bits: store.settings.pow_bits,
-        previous_bits: store.settings.pow_bits,
-        changed_at: store.started_at(),
-    })
+        challenge: store.pow_challenge(),
+    };
+    ok(params)
+}
+
+/// `GET /v1/metrics`: the brake's bucket levels, in plain text.
+async fn metrics(State(store): Shared) -> Answer {
+    let text = store.metrics()?;
+    Ok((
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        )],
+        text,
+    )
+        .into_response())
 }
 
 async fn log_page(
@@ -169,8 +187,15 @@ async fn log_page(
 ) -> Answer {
     let from = number(&q, "from")?.unwrap_or(0);
     let (mut answer, cache) = match store.log_page(&scid, from)? {
-        Some(page) => {
+        Some(mut page) => {
             let cache = page_cache(from, page.events.len() as u64, page.head.seq);
+            if cache == CACHE_SETTLED {
+                // A settled page is cached for a year, and a note may come later (or the store
+                // may stop trusting its voucher): the note and `vouched` travel only on the
+                // short-lived page that holds the head, as the current head does.
+                page.note = None;
+                page.vouched = false;
+            }
             (ok(page)?, cache)
         }
         None => (
@@ -200,11 +225,12 @@ pub fn page_cache(from: u64, events: u64, head_seq: u64) -> &'static str {
 async fn append(
     State(store): Shared,
     Path(scid): Path<String>,
+    Sender(sender): Sender,
     bytes: Result<Bytes, BytesRejection>,
 ) -> Answer {
     let bytes = body(bytes)?;
     let req: AppendRequest = json_body(&bytes)?;
-    let head = store.append(&scid, &req, &bytes)?;
+    let head = store.append(&scid, &req, &bytes, &sender).await?;
     ok(json!({ "head": head }))
 }
 
@@ -231,9 +257,9 @@ async fn key_owner(
 }
 
 /// `POST /v1/notes/{scid}`. The signed request must come from a non-bot
-/// device key valid at the head, or from the current master key; then the store would redeem the
-/// token with the vouching service. No vouching service exists yet, so a valid request gets
-/// `503 {error:"vouch-unavailable"}` and nothing is stored.
+/// device key valid at the head, or from the current master key; then the store redeems the
+/// token with the vouching service and keeps the note: `201` with the note, `409
+/// already-vouched` when the log has one (`vouch.rs`).
 async fn attach_note(
     State(store): Shared,
     Path(scid): Path<String>,
@@ -243,20 +269,10 @@ async fn attach_note(
     bytes: Result<Bytes, BytesRejection>,
 ) -> Answer {
     let bytes = body(bytes)?;
-    let did = ad4m_identity_core::did_of(&scid);
-    store.verify_request(
-        &incoming(&headers, &method, &uri, &bytes),
-        Some(&did),
-        Signer::AnyKey,
-    )?;
-    let note: Value = json_body(&bytes)?;
-    let well_formed = note
-        .as_object()
-        .is_some_and(|o| o.len() == 1 && o.get("token").is_some_and(Value::is_string));
-    if !well_formed {
-        return Err(ApiError::invalid("malformed", "the body is {token}"));
-    }
-    Err(ApiError::unavailable("vouch-unavailable"))
+    let note = store
+        .attach_note(&scid, &incoming(&headers, &method, &uri, &bytes))
+        .await?;
+    Ok((StatusCode::CREATED, Json(note)).into_response())
 }
 
 async fn agent(State(store): Shared, Path(did): Path<String>) -> Answer {

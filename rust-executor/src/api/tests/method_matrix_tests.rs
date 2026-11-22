@@ -730,7 +730,8 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "didUrl": "did:scid:coasys:1:Qm" }),
     ),
     ("identity.cosignIncept", || json!({ "event": {} })),
-    ("identity.publish", || json!({ "events": [] })),
+    ("identity.publish", || json!({ "events": [], "pow": null })),
+    ("identity.attachNote", || json!({ "token": "t" })),
     ("identity.unlinkSelf", || json!({})),
     (
         "identity.openOffer",

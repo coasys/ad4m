@@ -497,7 +497,7 @@ DID URL from the identity, the anchor and the key id that the log lists for the 
 | `fold.json` | one invalid log per rule with the pinned error `{code, reason, format}`; in `textCases` the events are JSON text (a duplicate member name, P6) |
 | `proofs.json` | every proof of `log.json` with its proof config, config hash, signing input and event hash; a tampered body, a wrong key, another domain |
 | `commitment.json` | entropy, words, seed, masters 0–3 with path, key, salt and commitment, and the recovery public key |
-| `pow.json` | proofs at 8, 12 and 16 bits for the SCID of `log.json`, with their hashes |
+| `pow.json` | proofs at 8, 12 and 16 bits for the SCID of `log.json` over a fixed challenge, with their hashes |
 | `domains.json` | the registry and the labels; one domain-field signature per domain, which verifies only under its own domain; the refused names |
 | `link.json` | device linking: the offer commit, the claim and offer signing bytes, the match code, the offer and device strings, and the `add` events that spend a claim |
 | `document.json` | the log of `log.json` with a fixed `alsoKnownAs`, the DID document and metadata at the head and after every seq, and a version past the head refused (`VersionPastHead`) |
@@ -630,11 +630,21 @@ Coasys identity store adds these checks:
 
 ### Proof of work for a log with no vouching note
 
-A 16-byte `nonce` such that `sha256("coasys:pow" ‖ scid ‖ nonce)` has at least `bits` leading
-zero bits, with `scid` as its UTF-8 text. On the wire: `{ "nonce": base58btc(16 bytes), "bits" }`;
-the store checks against its own `bits` (or `previousBits` for 10 minutes after a change),
-never the proof's. The proof binds to the SCID, which covers master #0, the commitment and every
-listed key, so one proof admits one log.
+A 16-byte `nonce` such that `sha256("coasys:pow" ‖ scid ‖ challenge ‖ nonce)` has at least
+`bits` leading zero bits, with `scid` and `challenge` as their UTF-8 text. On the wire:
+`{ "nonce": base58btc(16 bytes), "bits", "challenge" }`; the store checks against the
+`bits` its challenge carries (below), never the proof's. The proof binds
+to the SCID, which covers master #0, the commitment and every listed key, so one proof admits
+one log.
+
+`challenge` is the one-use token the host mints on `GET /v1/pow` for the next proof
+(`{nonce, expires}`, a few minutes): the solver hashes over `challenge.nonce` and puts it in
+the proof, and the host refuses a missing, expired, forged or already-spent one. So a proof
+cannot be made ahead of time and stockpiled: it is only good on the host that issued the
+challenge, before it expires, once. The host's tag on the challenge also covers the `bits`
+it asked for when it minted it (`GET /v1/pow` answers `{bits, challenge}`), and the host checks
+the proof at those bits: a change of the host's cost needs no grace, since each challenge in
+flight keeps the bits it was issued at and expires within minutes.
 
 # Part C — Wallet profile (informative)
 
@@ -934,6 +944,22 @@ a new string ends the read of the last one.
   held or cancelled the head is answered but nothing is bound; an accepted first-run claim
   binds and records `FirstRun` in one write. A key the main agent's own incept lists, and
   the refresh of an identity it already speaks for, bind as before.
+- The executor never builds #0 and never solves a proof of work (section 14). The party that
+  builds #0 reads `identity.powParams` → `{bits, challenge}` (the
+  store's `GET /v1/pow`, which mints a fresh `challenge` per call), solves the proof for the
+  SCID over `challenge.nonce`, and calls `identity.publish {events, pow}`; the executor sends
+  `pow` to the store unchanged (`null` on every later event). A resumed create reads
+  `identity.powParams` again and solves a fresh proof over the new challenge — the spent one
+  would be refused — and gets the head. A client refuses to solve above 28 bits. `identity.attachNote {token}` → `VouchNote` asks the store for a vouching
+  note for the main agent's identity, in a request the device key signs; it answers 409
+  `already-vouched` when the store keeps a note, 403 `vouch` when the vouching service
+  refuses the token, 503 `vouch-unavailable` when the store has no service, and 409
+  `no-identity` when the main agent speaks for no identity. A refusal a client acts on carries
+  its kind as the reply's `error.data`, so no client reads the message: 429
+  `{"error":"rate-limited","scope","retryAfter"}`, 403 `{"error":"forbidden","reason"}` (`pow`,
+  `vouch`, ...), 409 `{"error":"already-vouched"}` and `{"error":"no-identity"}`; the message text
+  stays for people. `identity.status.vouched` is the
+  store's `vouched` on the page that holds the head.
 - The executor never opens the private record. It passes the record and request-box calls
   with a store request the caller signed with the master key, or signs one with its own key
   (always for a post). The desktop's custody service opens the record key of its device's

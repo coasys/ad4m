@@ -162,6 +162,7 @@ impl IdentityService {
                 agent,
                 &PublishParams {
                     events: vec![serde_json::to_value(&event)?],
+                    pow: None,
                 },
             )
             .await;

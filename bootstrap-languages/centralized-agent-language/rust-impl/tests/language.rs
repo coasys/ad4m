@@ -122,6 +122,10 @@ impl StoreProcess {
             // The identity bucket has its own store tests; here it would only stop the cases
             // that make many writes for one person.
             .env("IDENTITY_BURST", "1000")
+            // Every person here starts a log with no vouching note, all from 127.0.0.1: the
+            // brake's buckets have their own store tests, so they are set high.
+            .env("BRAKE_ADDR_BURST", "100000")
+            .env("BRAKE_GLOBAL_PER_HOUR", "100000")
             .stdout(Stdio::piped())
             .spawn()
             .expect("identity-store starts");
@@ -546,14 +550,30 @@ fn append_req(events: Vec<Value>) -> AppendRequest {
     }
 }
 
+/// The append of person `p`'s event #0, with the proof of work the store asks for: the party
+/// that builds #0 reads `GET /v1/pow`'s challenge and bits and solves over them.
+fn incept_req(store: &Store<Host>, p: &Value) -> AppendRequest {
+    let params = block_on(store.pow_params()).unwrap();
+    let solved = ad4m_identity_core::pow::solve(
+        p["scid"].as_str().unwrap(),
+        &params.challenge.nonce,
+        params.bits,
+    );
+    AppendRequest {
+        events: vec![p["incept"].clone()],
+        vouch: None,
+        pow: Some(ad4m_ldk::identity::Pow {
+            nonce: solved.nonce,
+            bits: solved.bits,
+            challenge: solved.challenge,
+        }),
+    }
+}
+
 /// Publishes a fresh person through the language.
 fn person(apps: &mut Apps, store: &Store<Host>, name: &str) -> Value {
     let p = apps.run("person", json!({ "name": name }));
-    block_on(store.append(
-        p["did"].as_str().unwrap(),
-        &append_req(vec![p["incept"].clone()]),
-    ))
-    .unwrap();
+    block_on(store.append(p["did"].as_str().unwrap(), &incept_req(store, &p))).unwrap();
     p
 }
 
@@ -614,7 +634,14 @@ fn the_log_calls_answer_and_refuse_as_the_store_does() {
 
     assert!(block_on(store.head(did)).unwrap().is_none());
     assert!(block_on(store.log(did, 0)).unwrap().is_none());
-    let head = block_on(store.append(did, &append_req(vec![alice["incept"].clone()]))).unwrap();
+    // #0 with no proof is refused (`403 pow`); with the proof the store takes it.
+    assert!(matches!(
+        refusal(block_on(
+            store.append(did, &append_req(vec![alice["incept"].clone()]))
+        )),
+        IdentityErrorCode::Forbidden { .. }
+    ));
+    let head = block_on(store.append(did, &incept_req(&store, &alice))).unwrap();
     assert_eq!(head.seq, 0);
     assert_eq!(head.store, format!("did:key:{}", server.key));
     assert_eq!(block_on(store.head(did)).unwrap(), Some(head.clone()));
@@ -622,10 +649,9 @@ fn the_log_calls_answer_and_refuse_as_the_store_does() {
     assert_eq!(page.events, vec![alice["incept"].clone()]);
     assert!(!page.vouched);
 
+    // A repeat of #0 as it was (with its proof) gets the head.
     assert_eq!(
-        refusal(block_on(
-            store.append(did, &append_req(vec![alice["incept"].clone()]))
-        )),
+        refusal(block_on(store.append(did, &incept_req(&store, &alice)))),
         IdentityErrorCode::Conflict { head }
     );
     assert_eq!(
@@ -648,6 +674,7 @@ fn the_log_calls_answer_and_refuse_as_the_store_does() {
     wrong_pow.pow = Some(ad4m_ldk::identity::Pow {
         nonce: "11111111111111111111111".into(),
         bits: 8,
+        challenge: String::new(),
     });
     assert!(matches!(
         refusal(block_on(store.append(bob_did, &wrong_pow))),
@@ -1436,7 +1463,7 @@ fn bodies_are_the_inputs_canonical_json_and_the_signed_request_travels_unchanged
     let name = "kim bytes";
     let p = apps.run("person", json!({ "name": name }));
     let did = p["did"].as_str().unwrap();
-    let request = append_req(vec![p["incept"].clone()]);
+    let request = incept_req(&store, &p);
     block_on(store.append(did, &request)).unwrap();
     let sent = host.last();
     assert_eq!(
@@ -1499,7 +1526,7 @@ fn changing_the_store_setting_moves_every_call_and_a_silent_store_is_unavailable
     assert!(block_on(store.head(did)).unwrap().is_some());
     *host.url.borrow_mut() = format!("{}/", second.url);
     assert!(block_on(store.head(did)).unwrap().is_none());
-    block_on(store.append(did, &append_req(vec![p["incept"].clone()]))).unwrap();
+    block_on(store.append(did, &incept_req(&store, &p))).unwrap();
     assert!(block_on(store.head(did)).unwrap().is_some());
     for call in host.calls.borrow().iter().rev().take(3) {
         assert!(
@@ -2017,7 +2044,7 @@ fn a_reply_over_the_byte_cap_is_refused_on_every_route() {
 
     answering(200, serde_json::to_value(&head).unwrap());
     assert_eq!(refusal(block_on(store.head(&did))), too_large);
-    answering(200, json!({ "bits": 8, "previousBits": 8, "changedAt": 0 }));
+    answering(200, json!({ "bits": 8 }));
     assert_eq!(refusal(block_on(store.pow_params())), too_large);
     answering(200, json!({ "scid": "x" }));
     assert_eq!(refusal(block_on(store.key_owner("z6Mk", 0))), too_large);

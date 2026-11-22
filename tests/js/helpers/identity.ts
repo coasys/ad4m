@@ -1,6 +1,7 @@
 // The identity suite's tools: a real identity-store on a temp SQLite file, the test holder
 // (ad4m-identity-client's `holder` example: the client's flows with master keys in memory),
-// and `ad4m-executor claim`. The store and the holder are built with cargo in the repo root,
+// the test vouching service (identity-store's `vouch_service` example) and
+// `ad4m-executor claim`. The store and the holder are built with cargo in the repo root,
 // as the agent language suites build the store (bootstrap-languages/centralized-agent-language).
 import { ChildProcess, execSync, spawn } from "child_process";
 import { copyFileSync, existsSync, mkdirSync, rmSync } from "fs";
@@ -20,9 +21,10 @@ function targetDir(): string {
 
 const storeBinary = () => path.join(targetDir(), "release", "identity-store");
 const holderBinary = () => path.join(targetDir(), "release", "examples", "holder");
+const vouchBinary = () => path.join(targetDir(), "release", "examples", "vouch_service");
 
 /**
- * Release builds of `identity-store` and the test holder. CI's `build` job builds and stashes
+ * Release builds of `identity-store`, the test holder and the test vouching service. CI's `build` job builds and stashes
  * them (the integration runners compile no Rust); locally this builds them when missing.
  */
 export function buildIdentityTools() {
@@ -32,10 +34,85 @@ export function buildIdentityTools() {
     // One invocation with `ad4m`, as CI builds them: only `ad4m`'s graph vendors OpenSSL.
     execSync(
         "cargo build --release -p ad4m -p identity-store -p ad4m-identity-client " +
-            "--bin identity-store --example holder " +
+            "--bin identity-store --example holder --example vouch_service " +
             "--features ad4m-identity-client/ws,ad4m-identity-client/test-vault",
         opts,
     );
+}
+
+/**
+ * The test vouching service: it implements the platform's redeem contract
+ * (`POST /api/vouch/redeem`) and signs notes with the test vouching key. A store started with
+ * `vouch` set to it redeems the tokens given here.
+ */
+export class VouchService {
+    url = "";
+    key = "";
+    credential = "";
+    private child: ChildProcess;
+    private lines: readline.Interface;
+    private answers: string[] = [];
+    private waiting: ((line: string) => void)[] = [];
+
+    private constructor() {
+        this.child = spawn(vouchBinary(), [], { stdio: ["pipe", "pipe", "inherit"] });
+        this.lines = readline.createInterface({ input: this.child.stdout! });
+        this.lines.on("line", (line) => {
+            const next = this.waiting.shift();
+            if (next) next(line);
+            else this.answers.push(line);
+        });
+    }
+
+    static async start(): Promise<VouchService> {
+        const service = new VouchService();
+        // "vouch-service listening on <url> key <multikey> credential <credential>"
+        const ready = await service.next(30_000);
+        const [, url, key, credential] = ready.match(/listening on (\S+) key (\S+) credential (\S+)/)!;
+        service.url = url;
+        service.key = key;
+        service.credential = credential;
+        return service;
+    }
+
+    private next(timeoutMs: number): Promise<string> {
+        if (this.answers.length) return Promise.resolve(this.answers.shift()!);
+        return new Promise<string>((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error("vouch-service did not answer")), timeoutMs);
+            this.waiting.push((line) => {
+                clearTimeout(timer);
+                resolve(line);
+            });
+        });
+    }
+
+    private async send(command: Record<string, unknown>): Promise<any> {
+        this.child.stdin!.write(JSON.stringify(command) + "\n");
+        const answer = JSON.parse(await this.next(10_000));
+        if (answer.error) throw new Error(answer.error);
+        return answer.ok;
+    }
+
+    /** Gives `token` for a check of `email`: its first redeem vouches the DID it names. */
+    async give(token: string, email: string) {
+        await this.send({ op: "give", token, email });
+    }
+
+    /** How many redeems reached the service. */
+    async redeems(): Promise<number> {
+        return this.send({ op: "redeems" });
+    }
+
+    async stop() {
+        this.child.stdin!.end();
+        await stopChildProcess(this.child);
+    }
+}
+
+/** What a store is started with. */
+export interface StoreOptions {
+    /** The vouching service whose tokens the store redeems; without it every token is `503`. */
+    vouch?: VouchService;
 }
 
 /** A running identity-store. `restart` keeps its port, key and database file. */
@@ -44,16 +121,16 @@ export class IdentityStore {
     key = "";
     private process: ChildProcess | null = null;
 
-    constructor(readonly dir: string, readonly port: number) {}
+    constructor(readonly dir: string, readonly port: number, readonly options: StoreOptions = {}) {}
 
     get dbPath(): string {
         return path.join(this.dir, "store.sqlite");
     }
 
-    static async start(dir: string, port: number): Promise<IdentityStore> {
+    static async start(dir: string, port: number, options: StoreOptions = {}): Promise<IdentityStore> {
         rmSync(dir, { recursive: true, force: true });
         mkdirSync(dir, { recursive: true });
-        const store = new IdentityStore(dir, port);
+        const store = new IdentityStore(dir, port, options);
         await store.run();
         return store;
     }
@@ -71,6 +148,17 @@ export class IdentityStore {
                 // A suite makes an identity's writes (offers, inbox puts, record writes, posts)
                 // within seconds; the store's per-identity bucket is not under test here.
                 IDENTITY_BURST: "100",
+                // Every identity of a suite starts its log with no vouching note, all from
+                // 127.0.0.1; the brake's buckets have their own store tests.
+                BRAKE_ADDR_BURST: "100000",
+                BRAKE_GLOBAL_PER_HOUR: "100000",
+                ...(this.options.vouch
+                    ? {
+                          VOUCH_URL: this.options.vouch.url,
+                          VOUCH_CREDENTIAL: this.options.vouch.credential,
+                          VOUCH_KEYS: this.options.vouch.key,
+                      }
+                    : {}),
             },
         });
         child.stderr!.on("data", (d) => console.log(`[identity-store] ${d}`));

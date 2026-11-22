@@ -23,7 +23,7 @@ use crate::error::ApiError;
 /// The chain type of key logs in the module's tables.
 pub const KEL: ChainType = "coasys:kel";
 
-const SCHEMA: &str = "
+pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS logs (
     scid        TEXT PRIMARY KEY,
     created_at  INTEGER NOT NULL,
@@ -56,6 +56,10 @@ CREATE TABLE IF NOT EXISTS agents (
 CREATE TABLE IF NOT EXISTS nonces (
     nonce   TEXT PRIMARY KEY,
     seen_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pow_seen (
+    nonce   TEXT PRIMARY KEY,
+    expires INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS feed (
     cursor INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -125,6 +129,16 @@ CREATE TABLE IF NOT EXISTS buckets (
     bucket      TEXT PRIMARY KEY,
     tokens      INTEGER NOT NULL,
     refilled_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS brake (
+    bucket     TEXT PRIMARY KEY,
+    tokens     REAL NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS notes (
+    scid      TEXT PRIMARY KEY,
+    note      TEXT NOT NULL,
+    stored_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS fork_signers (
     scid   TEXT NOT NULL,

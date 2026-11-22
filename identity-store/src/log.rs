@@ -6,16 +6,16 @@ use std::sync::Arc;
 use ad4m_hash_chain::store::{SqliteChainStore, StoreError, StoredEntry};
 use ad4m_hash_chain::{verify_proof, ForkEvidence, Head, Multikey};
 use ad4m_identity_core::{
-    commitment, did_of, error_code, event_hash, pow, ChainError, ChainPolicy, DeviceKey, Event,
+    commitment, did_of, error_code, event_hash, ChainError, ChainPolicy, DeviceKey, Event,
     FoldError, FormatError, KelChain, KelPolicy, KeyLife, Op, KEL_DOMAIN,
 };
-use ad4m_ldk::identity::{AppendRequest, KeyIndexEntry, LogPage, SignedHead};
+use ad4m_ldk::identity::{AppendRequest, KeyIndexEntry, LogPage, SignedHead, VouchNote};
 use rusqlite::{params, Connection, TransactionBehavior};
 
 use crate::db::{self, to_sql, KEL};
 use crate::error::ApiError;
 use crate::held::{fold_bytes_of, state_before, FoldBytes};
-use crate::{inbox, offers};
+use crate::{brake, inbox, offers, vouch};
 use crate::{Fault, Store, Topic};
 
 /// Events per append.
@@ -68,30 +68,26 @@ fn events_of(body: &[u8]) -> Result<Vec<Event>, ApiError> {
         .collect()
 }
 
-/// How a new log with no vouching note is admitted (section 14, host admission policy, of
-/// `docs-src/identity/did-scid-coasys-1.md`). There is no brake yet: no
-/// bucket per address, no store-wide ceiling and no required proof of work. A proof that is
-/// sent must still meet `POW_BITS`, so the request format and the client's work stay those
-/// of the format. The brake adds the buckets and makes the proof required here; it runs once
-/// event #0 has replayed and before the rest of the append replays.
-pub fn admit_new_log(
-    scid: &str,
-    proof: Option<&ad4m_ldk::identity::Pow>,
-    bits: u8,
-) -> Result<(), ApiError> {
-    if let Some(proof) = proof {
-        let proof = pow::Pow {
-            nonce: proof.nonce.clone(),
-            bits: proof.bits,
-        };
-        if !pow::check(scid, &proof, bits) {
-            return Err(ApiError::forbidden(
-                "pow",
-                "the proof of work does not meet the store's bits",
-            ));
-        }
-    }
-    Ok(())
+/// How an append of event #0 to a log the store does not hold is admitted (section 14, host
+/// admission policy, of `docs-src/identity/did-scid-coasys-1.md`).
+#[derive(Clone, Copy)]
+enum Admission<'a> {
+    /// No vouching token: the brake (`brake.rs`), for a request from the address `sender`.
+    Brake { sender: &'a str },
+    /// A vouching token not yet redeemed, from the address `sender`: the failure bucket first (the
+    /// brake's step 1), then every check of the append; nothing is committed.
+    VouchCheck { sender: &'a str },
+    /// A token the vouching service redeemed for `note`: the log is committed with it.
+    Vouched(&'a VouchNote),
+}
+
+/// Whether a refusal takes a token from the sender's failure bucket: every refusal of the
+/// request itself (`4xx`) but the brake's own `429`, and the vouching service's `503` (a token
+/// request a store cannot redeem costs a replay all the same).
+fn charges_failure(e: &ApiError) -> bool {
+    use axum::http::StatusCode;
+    (e.status.is_client_error() && e.status != StatusCode::TOO_MANY_REQUESTS)
+        || e.status == StatusCode::SERVICE_UNAVAILABLE
 }
 
 /// The store's own check of expiries (the core reads no clock): a bot scope's `expires` in an
@@ -435,16 +431,73 @@ fn current_head(conn: &Connection, scid: &str) -> Result<SignedHead, ApiError> {
 }
 
 impl Store {
-    /// `POST /v1/logs/{scid}/events`.
+    /// `POST /v1/logs/{scid}/events` from the address `sender` (`brake::Sender`).
     /// `body` is the text `req` was parsed from: the events are parsed again from their own
     /// text there, so an event that names a member twice is refused (`DuplicateMember`), which
     /// `req.events` (each a `Value`, holding only the last of the two) cannot show.
-    pub fn append(
+    ///
+    /// Event #0 of a log the store does not hold is admitted by the brake when the request
+    /// carries no vouching token: the buckets and the proof of work are checked before any
+    /// signature replays. With a token, the sender's failure bucket is checked first (the
+    /// brake's step 1, so a token that never redeems cannot make the store replay without
+    /// limit), then every check of the append runs (nothing committed), then the token is
+    /// redeemed (`vouch.rs`), then the log is committed with its note (`admitted_by =
+    /// 'vouch'`, no global or address bucket, no proof): a token is spent only on an append
+    /// that passes. Either way, a request refused (`4xx` but `429`, or the vouching service's
+    /// `503`) while the store holds no log at `scid` takes a token from the sender's failure
+    /// bucket: bad proofs, bad events, malformed bodies and refused tokens alike.
+    pub async fn append(
         &self,
         scid: &str,
         req: &AppendRequest,
         body: &[u8],
+        sender: &str,
     ) -> Result<SignedHead, ApiError> {
+        let committed = |head: Option<SignedHead>| {
+            head.ok_or_else(|| ApiError::internal("the append committed no head"))
+        };
+        let result = match (&req.vouch, &req.pow) {
+            (Some(token), None) => {
+                async {
+                    self.append_admitted(scid, req, body, Admission::VouchCheck { sender })?;
+                    let note = self.redeem(token, &did_of(scid)).await?;
+                    self.append_admitted(scid, req, body, Admission::Vouched(&note))
+                        .and_then(committed)
+                }
+                .await
+            }
+            _ => self
+                .append_admitted(scid, req, body, Admission::Brake { sender })
+                .and_then(committed),
+        };
+        if let Err(refusal) = &result {
+            if charges_failure(refusal) && self.head(scid)?.is_none() {
+                self.charge_failure(sender)?;
+            }
+        }
+        result
+    }
+
+    /// Takes a token from the failure bucket of `sender`, in a transaction of its own (the
+    /// refused append's was rolled back).
+    fn charge_failure(&self, sender: &str) -> Result<(), ApiError> {
+        let now = self.now();
+        let mut conn = self.db.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        brake::charge_failure(&tx, sender, now)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The append, with event #0 of a new log admitted by `admission`. `None` for
+    /// [`Admission::VouchCheck`], which commits nothing.
+    fn append_admitted(
+        &self,
+        scid: &str,
+        req: &AppendRequest,
+        body: &[u8],
+        admission: Admission<'_>,
+    ) -> Result<Option<SignedHead>, ApiError> {
         if req.events.is_empty() {
             return Err(ApiError::invalid(
                 "malformed",
@@ -481,7 +534,13 @@ impl Store {
         // The sender's authority before any replay: the first event must carry the proof of the
         // master the key index names for it (`authenticate_first`).
         if let Some(head) = SqliteChainStore::head_in(&tx, KEL, &scid.to_string())? {
-            if req.vouch.is_some() || req.pow.is_some() {
+            if let Admission::Vouched(_) = admission {
+                // The log was created while the token was redeemed.
+                return Err(ApiError::conflict(&current_head(&tx, scid)?));
+            }
+            // A repeat of event #0 keeps its token or proof: a client that resumes a create
+            // resends its #0 as it was, and gets the same answer as any repeat (`409`).
+            if first.seq != 0 && (req.vouch.is_some() || req.pow.is_some()) {
                 return Err(ApiError::invalid(
                     "malformed",
                     "a vouching token or a proof of work comes only with event #0",
@@ -525,6 +584,33 @@ impl Store {
                 if first.seq != 0 {
                     return Err(ApiError::not_found(format!("no log {scid}")));
                 }
+                // The brake, before any signature of the request replays: the buckets, then the
+                // proof of work over its one-use challenge.
+                match admission {
+                    Admission::Brake { sender } => {
+                        if let Err(refusal) = brake::check_buckets(&tx, &self.settings, sender, now)
+                        {
+                            if refusal.body["scope"] == "global" {
+                                self.notice_global_empty();
+                            }
+                            return Err(refusal);
+                        }
+                        brake::check_pow(
+                            &tx,
+                            scid,
+                            req.pow.as_ref(),
+                            &self.key.pow_challenge_key(),
+                            now,
+                        )?;
+                    }
+                    // A token skips the global and address buckets and the proof (the note
+                    // is its cost), not the failure bucket: refused tokens cannot make the
+                    // store replay without limit.
+                    Admission::VouchCheck { sender } => {
+                        brake::check_failure(&tx, sender, now)?;
+                    }
+                    Admission::Vouched(_) => {}
+                }
                 if first.scid != scid {
                     return Err(ApiError::invalid(
                         "wrong-chain",
@@ -532,11 +618,6 @@ impl Store {
                     ));
                 }
                 chain = KelChain::genesis(&KelPolicy, first).map_err(|e| chain_error(&e))?;
-                admit_new_log(scid, req.pow.as_ref(), self.settings.pow_bits)?;
-                if req.vouch.is_some() {
-                    // No vouching service exists yet: nothing is committed.
-                    return Err(ApiError::unavailable("vouch-unavailable"));
-                }
                 claim_checks.push(None);
                 rest = &events[1..];
             }
@@ -630,8 +711,14 @@ impl Store {
             }
         }
 
+        // Every check passed: the token is redeemed only now, without the database lock.
+        if let Admission::VouchCheck { .. } = admission {
+            return Ok(None);
+        }
+
         // The one-transaction rule: the events, the head, the key index, the feed, the spent
-        // claims and the purges in one transaction.
+        // claims, the purges and a new log's admission (the brake's tokens or the note) in one
+        // transaction.
         let entries = events
             .iter()
             .map(|e| StoredEntry::from_entry(e, now))
@@ -661,9 +748,23 @@ impl Store {
         };
         self.fault_point(Fault::AfterEvents)?;
         if new_log {
+            let admitted_by = match admission {
+                Admission::Brake { sender } => {
+                    brake::admit(&tx, &self.settings, sender, now)?;
+                    self.clear_global_empty_logged();
+                    "brake"
+                }
+                Admission::Vouched(note) => {
+                    vouch::put_note(&tx, scid, note, now)?;
+                    "vouch"
+                }
+                Admission::VouchCheck { .. } => {
+                    return Err(ApiError::internal("a vouch check reached the commit"))
+                }
+            };
             tx.execute(
-                "INSERT INTO logs (scid, created_at, admitted_by) VALUES (?1, ?2, 'brake')",
-                params![scid, to_sql(now)?],
+                "INSERT INTO logs (scid, created_at, admitted_by) VALUES (?1, ?2, ?3)",
+                params![scid, to_sql(now)?, admitted_by],
             )?;
         }
         db::put_keys(&tx, chain.state(), head.seq)?;
@@ -694,7 +795,7 @@ impl Store {
             topics.extend(listed_keys(event).into_iter().map(Topic::key));
         }
         self.changed(&topics);
-        Ok(signed)
+        Ok(Some(signed))
     }
 
     /// `GET /v1/logs/{scid}?from=`: at most 256 events from `from`, with the signed head.
@@ -705,13 +806,18 @@ impl Store {
         };
         let rows = db::events_from(&conn, scid, from, PAGE_EVENTS)?;
         let (events, appended_at) = rows.into_iter().unzip();
+        let note = vouch::stored_note(&conn, scid)?;
+        // `vouched` is the store's reading of the note under its `VOUCH_KEYS`; a reader with its
+        // own trusted keys checks `note` itself.
+        let vouched = note
+            .as_ref()
+            .is_some_and(|n| vouch::note_vouches(n, &did_of(scid), &self.settings.vouch_keys));
         Ok(Some(LogPage {
             events,
             appended_at,
             head,
-            // No vouching notes yet: `vouched` reads false and `note` is empty.
-            note: None,
-            vouched: false,
+            note,
+            vouched,
             pauses: Vec::new(),
         }))
     }

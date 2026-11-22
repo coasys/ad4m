@@ -143,6 +143,16 @@ describe('ApiClient calls', () => {
         expect(error).toMatchObject({ status: 404, body: 'perspective not found' })
     })
 
+    it('carries the error reply\'s data on the RpcError, so a caller reads the refusal and not its English', async () => {
+        const promise = call('identity.attachNote', { token: 't' })
+        await flush()
+        const data = { error: 'rate-limited', scope: 'address', retryAfter: 7 }
+        socket(0).reply({ id: socket(0).sent[0].id, error: { code: 429, message: 'rate-limited: Address, retry after 7 s', data } })
+        const error = await promise.catch((e) => e)
+        expect(error).toBeInstanceOf(RpcError)
+        expect(error).toMatchObject({ status: 429, data })
+    })
+
     it('rejects with status 500 when an error reply has no code', async () => {
         const promise = call('agent.get')
         await flush()

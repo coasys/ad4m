@@ -37,10 +37,12 @@
 //!
 //! | `identity.*` | Route |
 //! |---|---|
-//! | `status` | `GET /v1/keys/{deviceKey}`, then `GET /v1/logs/{scid}` for `keyId`, `revoked`, `head` |
+//! | `status` | `GET /v1/keys/{deviceKey}`, then `GET /v1/logs/{scid}` for `keyId`, `revoked`, `head`, `vouched` |
 //! | `log` | `GET /v1/logs/{scid}?from=` paged to the head |
 //! | `keyOwner` | `GET /v1/keys/{key}` (`404` → `null`) |
-//! | `publish` | `POST /v1/logs/{scid}/events` (`409` → head when the log holds the events) |
+//! | `publish` | `POST /v1/logs/{scid}/events` with the caller's `pow` unchanged (`409` → head when the log holds the events) |
+//! | `powParams` | `GET /v1/pow` |
+//! | `attachNote` | `POST /v1/notes/{scid}` `{token}` (`409 already-vouched`, `403 vouch`, `503 vouch-unavailable`) |
 //! | `openOffer` | `POST /v1/offers/{scid}` |
 //! | `offers` | `GET /v1/offers/{scid}?wait=` with the caller's `X-Coasys-Request` |
 //! | `claimOffer` | `POST /v1/offers/{scid}/{offerId}/claim`, the claim co-signed by `device` |
@@ -122,8 +124,17 @@ const ENC_UNAVAILABLE: &str = "the wallet is locked, so the inbox does not open"
 
 fn error(code: u16, message: impl Into<String>) -> RpcError {
     RpcError {
+        data: None,
         code,
         message: message.into(),
+    }
+}
+
+/// [`error`] with the refusal as data (what the executor sends as `error.data`).
+fn error_with(code: u16, message: impl Into<String>, data: Value) -> RpcError {
+    RpcError {
+        data: Some(data),
+        ..error(code, message)
     }
 }
 
@@ -147,9 +158,10 @@ fn bad_reply(what: impl Into<String>) -> RpcError {
 
 /// `409`: this device's key speaks for no identity (as the executor's `bound_position`).
 fn no_identity() -> RpcError {
-    error(
+    error_with(
         409,
         "no-identity: this device's key speaks for no identity".to_string(),
+        json!({"error": "no-identity"}),
     )
 }
 
@@ -197,7 +209,11 @@ fn refused(status: u16, body: &[u8]) -> RpcError {
         400 => invalid("malformed"),
         403 => {
             if forbidden_reason(reason) {
-                error(403, format!("forbidden: {reason:?}"))
+                error_with(
+                    403,
+                    format!("forbidden: {reason:?}"),
+                    json!({"error": "forbidden", "reason": reason}),
+                )
             } else {
                 invalid("forbidden")
             }
@@ -212,6 +228,12 @@ fn refused(status: u16, body: &[u8]) -> RpcError {
                         head["seq"].as_u64().unwrap_or(0),
                         head["hash"].as_str().unwrap_or_default()
                     ),
+                )
+            } else if reason == "already-vouched" {
+                error_with(
+                    409,
+                    "already-vouched: the store keeps a note for this identity already".to_string(),
+                    json!({"error": "already-vouched"}),
                 )
             } else if reason == "key-taken" {
                 error(
@@ -233,13 +255,15 @@ fn refused(status: u16, body: &[u8]) -> RpcError {
             ),
         ),
         413 => invalid("too-large"),
-        429 => error(
+        429 => error_with(
             429,
             format!(
                 "rate-limited: {}, retry after {} s",
                 value["scope"].as_str().unwrap_or("address"),
                 value["retryAfter"].as_u64().unwrap_or(60)
             ),
+            // The store's own body: `{error, scope, retryAfter}`.
+            value.clone(),
         ),
         s if s >= 500 => unavailable(if reason.is_empty() {
             "the store did not answer".to_string()
@@ -655,8 +679,14 @@ impl ViaStore {
     /// cursor strictly past the last one, one head across all of them. A store that cannot
     /// end a read so — pages that never reach the head it signs, a head that moves mid-read,
     /// a page that re-serves what was read — is refused, never served as a log.
-    async fn log_from(&self, scid: &str, from: u64) -> Result<(Vec<Value>, SignedHead), RpcError> {
+    /// The `bool` is the `vouched` of the page that reached the head.
+    async fn log_from(
+        &self,
+        scid: &str,
+        from: u64,
+    ) -> Result<(Vec<Value>, SignedHead, bool), RpcError> {
         let mut events = Vec::new();
+        let mut vouched = false;
         let mut cursor = from;
         let mut head: Option<SignedHead> = None;
         let mut budget = MAX_STORE_LOG_BYTES;
@@ -694,6 +724,7 @@ impl ViaStore {
                     ))
                 }
             }
+            vouched = page.vouched;
             if page.events.is_empty() {
                 // The log ends here: reached only when the cursor is already past the head
                 // (a `from` beyond it); an end before it is no complete log.
@@ -727,7 +758,7 @@ impl ViaStore {
         }
         let head = head.expect("every page keeps its head");
         self.check_head(scid, &head)?;
-        Ok((events, head))
+        Ok((events, head, vouched))
     }
 
     /// `scid`'s log as every read of this phone admits it: the events from the store, folded
@@ -735,7 +766,16 @@ impl ViaStore {
     /// log, and the checkpoint kept. `identity.log`, which the flows read the log through,
     /// goes through here as well as every signed call.
     async fn admitted(&self, scid: &str) -> Result<(Vec<Value>, KelChain, SignedHead), RpcError> {
-        let (values, head) = self.log_from(scid, 0).await?;
+        let (values, chain, head, _) = self.admitted_read(scid).await?;
+        Ok((values, chain, head))
+    }
+
+    /// [`Self::admitted`], with the `vouched` of the store's page at the head.
+    async fn admitted_read(
+        &self,
+        scid: &str,
+    ) -> Result<(Vec<Value>, KelChain, SignedHead, bool), RpcError> {
+        let (values, head, vouched) = self.log_from(scid, 0).await?;
         let events: Vec<Event> = values
             .iter()
             .map(Event::from_json)
@@ -791,7 +831,7 @@ impl ViaStore {
                 },
             )
             .map_err(checkpoints_failed)?;
-        Ok((values, chain, head))
+        Ok((values, chain, head, vouched))
     }
 
     /// [`Self::admitted`]'s chain and head.
@@ -953,12 +993,14 @@ impl ViaStore {
                 "url": self.endpoint.url,
                 "trusted": self.trusted(),
             },
+            "vouched": false,
         });
         let Some(scid) = self.scid_of_self().await? else {
             return Ok(out);
         };
         out["did"] = json!(did_of(&scid));
-        let (chain, head) = self.chain(&scid).await?;
+        let (_, chain, head, vouched) = self.admitted_read(&scid).await?;
+        out["vouched"] = json!(vouched);
         let state = chain.state();
         let key_id = state.key_id_of(&self.device.key());
         out["keyId"] = key_id.map_or(Value::Null, |id| json!(id));
@@ -1055,7 +1097,14 @@ impl ViaStore {
                 .cloned()
                 .unwrap_or_default(),
             vouch: None,
-            pow: None,
+            // The proof of work of a new log, as the caller solved it (`crate::pow`).
+            pow: match &params["pow"] {
+                Value::Null => None,
+                pow => Some(
+                    serde_json::from_value(pow.clone())
+                        .map_err(|e| bad_request(format!("invalid: pow ({e})")))?,
+                ),
+            },
         };
         let (status, body) = self
             .send(
@@ -1081,7 +1130,7 @@ impl ViaStore {
                 )
                 .map_err(|_| refused())?;
                 let from = events.iter().map(|e| e.seq).min().unwrap_or(0);
-                let (held_values, held_head) = self.log_from(&scid, from).await?;
+                let (held_values, held_head, _) = self.log_from(&scid, from).await?;
                 let held: Vec<Event> = held_values
                     .iter()
                     .map(Event::from_json)
@@ -1745,6 +1794,27 @@ impl ViaStore {
         serde_json::from_slice(&reply).map_err(|e| bad_reply(format!("the store served {e}")))
     }
 
+    /// `identity.attachNote`: `POST /v1/notes/{scid}` with `{token}` signed by `device`. The
+    /// store redeems the token with its vouching service and keeps the note beside the log.
+    async fn attach_note(&self, params: &Value) -> Result<Value, RpcError> {
+        let token = params["token"]
+            .as_str()
+            .ok_or_else(|| bad_request("token is a string"))?;
+        let position = self.position().await?;
+        let (status, reply) = self
+            .as_device(
+                &position,
+                "POST",
+                &format!("/v1/notes/{}", position.scid),
+                Some(body_bytes(&json!({ "token": token }))?),
+            )
+            .await?;
+        if !(200..300).contains(&status) {
+            return Err(refused(status, &reply));
+        }
+        serde_json::from_slice(&reply).map_err(|e| bad_reply(format!("the store served {e}")))
+    }
+
     /// `identity.deleteRequest`: `DELETE` to the caller request's own signed `path`.
     async fn delete_request(&self, params: &Value) -> Result<Value, RpcError> {
         let request = signed_request_of(&params["request"])?;
@@ -1825,6 +1895,8 @@ impl ExecutorRpc for ViaStore {
             "identity.log" => self.log(&params).await,
             "identity.cosignIncept" => self.cosign_incept(&params).await,
             "identity.publish" => self.publish(&params).await,
+            "identity.powParams" => self.fetch("GET", "/v1/pow", None, Auth::None).await,
+            "identity.attachNote" => self.attach_note(&params).await,
             "identity.openOffer" => self.open_offer(&params).await,
             "identity.offers" => self.offers(&params).await,
             "identity.claimOffer" => self.claim_offer(&params).await,
@@ -1858,5 +1930,33 @@ impl ExecutorRpc for ViaStore {
             })),
             other => Err(not_served(other)),
         }
+    }
+}
+
+#[cfg(test)]
+mod refusal_data_tests {
+    use super::*;
+
+    /// The store's 429 body reaches the caller as it is; a proof-of-work 403 is
+    /// `{error: forbidden, reason}`.
+    #[test]
+    fn the_brake_and_the_proof_of_work_refusals_carry_data() {
+        let body = json!({"error": "rate-limited", "scope": "global", "retryAfter": 12});
+        let limited = refused(429, body.to_string().as_bytes());
+        assert_eq!(limited.code, 429);
+        assert_eq!(limited.message, "rate-limited: global, retry after 12 s");
+        assert_eq!(limited.data, Some(body));
+
+        let pow = refused(
+            403,
+            json!({"error": "pow", "detail": "bad proof"})
+                .to_string()
+                .as_bytes(),
+        );
+        assert_eq!(pow.code, 403);
+        assert_eq!(
+            pow.data,
+            Some(json!({"error": "forbidden", "reason": "pow"}))
+        );
     }
 }

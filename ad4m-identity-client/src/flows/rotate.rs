@@ -264,7 +264,7 @@ async fn publish_staged<R: ExecutorRpc>(
         // The new master is in the vault before anything names it publicly.
         stage(vault, scid, seed, index, &attempt.owner)?;
         attempt.staged = Some(index);
-        match executor.publish(std::slice::from_ref(&event)).await {
+        match executor.publish(std::slice::from_ref(&event), None).await {
             Ok(head) => {
                 return Ok(Published {
                     head,
