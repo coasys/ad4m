@@ -565,7 +565,7 @@ describe('ApiClient checkConnection', () => {
 
     const pings = (i: number) => socket(i).sent.filter(m => m.type === 'ping').length
 
-    it('pings at once; a socket silent for two probes is dropped, the next dialled at once, and onNetworkChange fires when it opens', async () => {
+    it('pings at once; a socket silent for the probe is dropped, the next dialled at once, and onNetworkChange fires when it opens', async () => {
         const changed = jest.fn()
         client.onNetworkChange(changed)
         open()
@@ -574,15 +574,14 @@ describe('ApiClient checkConnection', () => {
 
         client.checkConnection()
         expect(pings(0)).toBe(1)
-        // One missed probe pings again and keeps the socket.
-        await jest.advanceTimersByTimeAsync(8_000)
-        expect(pings(0)).toBe(2)
         await jest.advanceTimersByTimeAsync(7_999)
         expect(TestSocket.instances).toHaveLength(1)
         expect(socket(0).readyState).toBe(1)
 
         await jest.advanceTimersByTimeAsync(1)
-        // No backoff: the next socket is dialled now.
+        // Silent for the whole probe: dropped, and the next socket dialled
+        // now, with no backoff.
+        expect(pings(0)).toBe(1)
         expect(socket(0).readyState).toBe(2)
         expect(TestSocket.instances).toHaveLength(2)
         expect(changed).not.toHaveBeenCalled()
@@ -627,7 +626,7 @@ describe('ApiClient checkConnection', () => {
     it('keeps a socket that sends anything else within the deadline', async () => {
         open()
         socket(0).open()
-        client.checkConnection(3_000)
+        client.checkConnection()
         await jest.advanceTimersByTimeAsync(2_500)
         socket(0).reply({ type: 'agent-updated' })
         await jest.advanceTimersByTimeAsync(5_000)
@@ -708,32 +707,30 @@ describe('ApiClient checkConnection', () => {
         expect(changed).not.toHaveBeenCalled()
     })
 
-    it('keeps a socket after one missed probe; a message before the second deadline ends the check', async () => {
+    it('keeps a socket that answers any time before the deadline', async () => {
         open()
         socket(0).open()
         client.checkConnection()
-        await jest.advanceTimersByTimeAsync(8_000)
-        expect(socket(0).readyState).toBe(1)
-        expect(pings(0)).toBe(2)
+        await jest.advanceTimersByTimeAsync(7_999)
         socket(0).reply({ type: 'pong' })
-        await jest.advanceTimersByTimeAsync(9_000)
+        await jest.advanceTimersByTimeAsync(1_000)
         expect(TestSocket.instances).toHaveLength(1)
         expect(socket(0).readyState).toBe(1)
     })
 
-    it('a later check after an answered one starts counting misses from zero', async () => {
+    it('a later check after an answered one probes again, and drops a socket silent for it', async () => {
         open()
         socket(0).open()
         client.checkConnection()
-        await jest.advanceTimersByTimeAsync(8_000)
+        await jest.advanceTimersByTimeAsync(5_000)
         socket(0).reply({ type: 'pong' })
-        await jest.advanceTimersByTimeAsync(6_000)
+        await jest.advanceTimersByTimeAsync(5_000)
         socket(0).reply({ type: 'pong' })
         await jest.advanceTimersByTimeAsync(6_000)
         client.checkConnection()
         await jest.advanceTimersByTimeAsync(8_000)
-        expect(socket(0).readyState).toBe(1)
-        expect(TestSocket.instances).toHaveLength(1)
+        expect(socket(0).readyState).toBe(2)
+        expect(TestSocket.instances).toHaveLength(2)
     })
 
     it('sends no probe when the socket delivered a message in the last 5 s', async () => {
