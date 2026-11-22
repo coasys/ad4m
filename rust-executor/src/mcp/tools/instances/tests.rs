@@ -5430,6 +5430,8 @@ async fn collection_tools_run_a_call_adder_and_remover() {
             json!({"address": "t1", "name": "removeTags", "params": {"tags": ["x"]}}),
         ]
     );
+}
+
 /// A managed user's MCP calls count on its DID (`GET /metrics`): the links its
 /// `instance_create` writes on `ad4m_user_links_written_total`, and its
 /// `instance_query` as one query on the perspective's and the user's totals —
