@@ -382,9 +382,10 @@ export class SfuManager {
     /** An ICE restart is in flight until this fires: ICE going disconnected
      *  again joins it, a network change replaces it. */
     private restartTimer: ReturnType<typeof setTimeout> | null = null
-    /** The restart in flight's deadline — `restartTimer`'s fire time — so an
-     *  ask it made (`sfu.callResume` after the socket's return) is bounded
-     *  by what is left of the window, never a fresh one. */
+    /** The restart in flight's deadline — `restartTimer`'s fire time on the
+     *  `performance.now` scale, so a wall-clock jump cannot stretch or cut
+     *  the window — so an ask it made (`sfu.callResume` after the socket's
+     *  return) is bounded by what is left of the window, never a fresh one. */
     private restartDeadline: number | null = null
     private networkUnsubscribe: (() => void) | null = null
     /** Running while the room's roster leaves this session out: see `noticeRoster`. */
@@ -471,7 +472,7 @@ export class SfuManager {
         const stream = this.state.localStream
         if (!stream || this.reconnecting) return
         const generation = this.generation
-        const now = Date.now()
+        const now = performance.now()
         this.rebuilds = this.rebuilds.filter((at) => now - at < SfuManager.REBUILD_WINDOW_MS)
         if (this.rebuilds.length >= SfuManager.MAX_REBUILDS) {
             console.error(
@@ -488,7 +489,7 @@ export class SfuManager {
         this.endRestart()
         const previous = this.state.participantId
         try {
-            const deadline = Date.now() + SfuManager.REJOIN_WINDOW_MS
+            const deadline = performance.now() + SfuManager.REJOIN_WINDOW_MS
             for (let delay = 1000; ; delay = Math.min(delay * 2, 10_000)) {
                 this.releaseServerEvents()
                 if (this.state.peerConnection) {
@@ -517,7 +518,7 @@ export class SfuManager {
                         })
                         return
                     }
-                    if (Date.now() + delay > deadline) {
+                    if (performance.now() + delay > deadline) {
                         console.error("SFU reconnect failed:", e)
                         this.giveUp(e instanceof Error ? e : new Error(String(e)))
                         return
@@ -559,7 +560,7 @@ export class SfuManager {
             void this.reconnect()
         }, SfuManager.RESTART_TIMEOUT_MS)
         this.restartTimer = restart
-        this.restartDeadline = Date.now() + SfuManager.RESTART_TIMEOUT_MS
+        this.restartDeadline = performance.now() + SfuManager.RESTART_TIMEOUT_MS
         this.sendRestart(pc, participantId)
     }
 
@@ -1179,7 +1180,7 @@ export class SfuManager {
             // A restart in flight owns its remaining window: a socket that
             // came back late in it bounds the ask by what is left, or
             // drops it.
-            const restartLeft = this.restartDeadline === null ? Infinity : this.restartDeadline - Date.now()
+            const restartLeft = this.restartDeadline === null ? Infinity : this.restartDeadline - performance.now()
             if (restartLeft <= 0) return
             let reply: { result: SfuResumeResult } | { error: unknown } | null = null
             await this.timeBoxed(async () => {
