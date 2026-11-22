@@ -1861,7 +1861,11 @@ test("a network change asks again during a restart, and its timeout starts over"
     }
 })
 
-test("ICE going disconnected during a restart does not ask again", async () => {
+test("ICE going disconnected during a restart asks the executor, whose offer-less reply re-requests it", async () => {
+    // A restart in flight gets no blind second request — one the network
+    // change sent may never have arrived, and only the executor's pending
+    // offer says so. Each drop asks the resume; its reply here carries no
+    // offer, so the restart is asked for again.
     fakeTimers()
     try {
         const api = fakeApi()
@@ -1869,17 +1873,66 @@ test("ICE going disconnected during a restart does not ask again", async () => {
         await manager.join(fakeStream())
 
         api.emitNetworkChange()
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+
         await iceState("disconnected")
+        await flush()
+        await flush()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
+
         await iceState("checking")
         await iceState("disconnected")
-        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+        await flush()
+        await flush()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(2)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(3)
 
         // Once that one settled, a new disconnect restarts again.
         await iceState("connected")
         await jest.advanceTimersByTimeAsync(5_000)
         await iceState("disconnected")
-        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(4)
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a restart a network change sent while ICE still read connected is re-asked when ICE drops, inside the same deadline", async () => {
+    // The change's request went out at once but never reached the
+    // executor, and ICE kept reading `connected` — the old path's state —
+    // until consent checks failed. `restartIce` does not run twice, so
+    // the drop asks the executor instead: its offer-less reply says the
+    // request never arrived, and a fresh one goes out without moving the
+    // restart's deadline.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        await iceState("connected")
+
+        api.emitNetworkChange()
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+
+        // Consent fails seconds later: ICE drops, the restart timer is
+        // still the change's, and the resume's reply decides what is owed.
+        await jest.advanceTimersByTimeAsync(3_000)
+        await iceState("disconnected")
+        await flush()
+        await flush()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallResume).toHaveBeenCalledWith(URL, ROOM, MINE)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
+
+        // The second request did not start the window over: the restart
+        // still has only its first 15 s.
+        await jest.advanceTimersByTimeAsync(11_900)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        await jest.advanceTimersByTimeAsync(200)
+        expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
     } finally {
         jest.useRealTimers()
     }
