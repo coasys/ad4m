@@ -1390,12 +1390,12 @@ describe('holdsAWholeWordTerm', () => {
 
   it('reads a bounded prefix, so a long run of unclosed openers cannot stall the waker', () => {
     const bot = ['Data', 'did:key:zBot'];
-    // Unbounded, each of these took seconds: every unclosed opener scans to the end.
+    // Unbounded, each of these took seconds: every unclosed opener scans to the end. The bound
+    // itself is pinned below without a clock ("past it, it does not"), so a busy runner
+    // cannot fail this test.
     for (const opener of ['<script>', '<style>', '<!--']) {
-      const started = Date.now();
       expect(holdsAWholeWordTerm('the metadata ' + opener.repeat(125_000), bot)).toBe(false);
       expect(holdsAWholeWordTerm('hey Data ' + opener.repeat(125_000), bot)).toBe(true);
-      expect(Date.now() - started).toBeLessThan(1000);
     }
     // Within the limit a long message still wakes, by name and by DID target.
     const filler = 'lorem ipsum '.repeat(1000);

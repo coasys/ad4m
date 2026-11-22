@@ -72,6 +72,14 @@ impl Ad4mMcpHandler {
     /// A static tool without an arm answers `Unknown tool`. The tools that open
     /// or widen a session have none on purpose.
     pub(crate) async fn call_tool_by_name(&self, name: &str, args: Value) -> Result<String> {
+        // The same scope `call_tool` puts a tool call under: the link writes the
+        // tool makes count for the caller's agent (`GET /metrics`).
+        let did = self.session().await.ok().and_then(|s| s.acts_as_did());
+        crate::metrics::as_caller(did.as_deref(), self.dispatch_by_name(name, args)).await
+    }
+
+    /// [`Self::call_tool_by_name`]'s dispatch, unscoped.
+    async fn dispatch_by_name(&self, name: &str, args: Value) -> Result<String> {
         // The static-tool arms below all deserialize into a distinct
         // `Parameters<T>` where T is the argument struct on the
         // `#[tool]`-annotated method. That's why they can't collapse into
