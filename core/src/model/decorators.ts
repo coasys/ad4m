@@ -1221,6 +1221,26 @@ function resolveRelationArgs(
 }
 
 /**
+ * Install the three generated relation mutators (`add*`, `remove*`, `set*`)
+ * on a model prototype. Each forwards to the matching private instance
+ * writer with the relation's property name, the argument and the optional
+ * batchId. Shared by @HasMany and @HasOne; both call it only on a
+ * writable `through` relation.
+ * @internal
+ */
+function installRelationMutators(target: any, relKey: string): void {
+    target[`add${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
+        return (this as any).addRelationValue(relKey, arg, batchId);
+    };
+    target[`remove${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
+        return (this as any).removeRelationValue(relKey, arg, batchId);
+    };
+    target[`set${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
+        return (this as any).setRelationValues(relKey, arg, batchId);
+    };
+}
+
+/**
  * Decorator for defining a one-to-many relation.
  *
  * @category Decorators
@@ -1282,15 +1302,7 @@ export function HasMany(
         // Only add mutation methods when a predicate is available
         // (getter-only relations are read-only) and writing is allowed
         if (opts.through && !opts.readOnly) {
-            (target as any)[`add${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
-                return (this as any).addRelationValue(relKey, arg, batchId);
-            };
-            (target as any)[`remove${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
-                return (this as any).removeRelationValue(relKey, arg, batchId);
-            };
-            (target as any)[`set${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
-                return (this as any).setRelationValues(relKey, arg, batchId);
-            };
+            installRelationMutators(target, relKey);
         }
         Object.defineProperty(target, relKey, { configurable: true, writable: true });
     };
@@ -1381,15 +1393,7 @@ export function HasOne(
             // relation is still empty. Anything rendering from a subscription
             // therefore has a frame in which the record exists and points at
             // nothing.
-            (target as any)[`add${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
-                return (this as any).addRelationValue(relKey, arg, batchId);
-            };
-            (target as any)[`remove${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
-                return (this as any).removeRelationValue(relKey, arg, batchId);
-            };
-            (target as any)[`set${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
-                return (this as any).setRelationValues(relKey, arg, batchId);
-            };
+            installRelationMutators(target, relKey);
         } else {
             Object.defineProperty(target, relKey, { configurable: true, writable: true });
         }
