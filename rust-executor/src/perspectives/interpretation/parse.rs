@@ -705,4 +705,14 @@ mod tests {
         assert_eq!(out.instances.len(), 1);
         assert_eq!(prop_values(&out.instances, "title"), vec!["B"]);
     }
+
+    #[test]
+    fn structurally_nonempty_payload_outranks_an_earlier_prose_empty_array() {
+        // Tier 1 above tier 2: a prose `[]` comes first, then a payload that
+        // is non-empty but not semantically valid (no `class`). The payload
+        // must be the one chosen, so the result is a parse error about it,
+        // not an empty Ok from the prose `[]`.
+        let raw = r#"No changes: [] — draft: [{"title":"A"}]"#;
+        assert!(parse_interpretation_response(raw).is_err());
+    }
 }
