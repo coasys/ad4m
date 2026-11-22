@@ -156,4 +156,82 @@ mod tests {
             "json:%7B%22a%22%3A%22x-y%22%7D"
         );
     }
+
+    /// `%FF` decodes to a lone invalid UTF-8 byte; every branch rejects it
+    /// with its own message prefix (the `json:` branch capitalizes JSON)
+    /// rather than falling back to a string value.
+    #[test]
+    fn test_decode_invalid_utf8_error_per_prefix() {
+        let cases: [(&str, &str); 5] = [
+            ("string:%FF", "Failed to decode literal string"),
+            ("number:%FF", "Failed to decode literal number"),
+            ("boolean:%FF", "Failed to decode literal boolean"),
+            ("json:%FF", "Failed to decode literal JSON"),
+            ("%FF", "Failed to decode literal"),
+        ];
+        for (input, prefix) in cases {
+            let err = literal_decode(input).unwrap_err().to_string();
+            assert_eq!(
+                err,
+                format!(
+                    "Serialization error: {}: invalid utf-8 sequence of 1 bytes from index 0",
+                    prefix
+                ),
+                "input {input:?}"
+            );
+        }
+    }
+
+    /// A malformed `%` escape is not an error: percent-decoding leaves it
+    /// as literal text, so `string:` yields it and the unprefixed fallback
+    /// keeps it as a string.
+    #[test]
+    fn test_decode_malformed_escape_stays_literal_text() {
+        assert_eq!(
+            literal_decode("string:%ZZ").unwrap(),
+            JsonValue::String("%ZZ".to_string())
+        );
+        assert_eq!(
+            literal_decode("%ZZ").unwrap(),
+            JsonValue::String("%ZZ".to_string())
+        );
+    }
+
+    /// The unprefixed fallback parses the decoded text as JSON when it can
+    /// and keeps it as a string when it cannot.
+    #[test]
+    fn test_decode_unprefixed_json_or_string_fallback() {
+        assert_eq!(
+            literal_decode("%7B%22a%22%3A1%7D").unwrap(),
+            serde_json::json!({"a": 1})
+        );
+        assert_eq!(
+            literal_decode("hello%20world").unwrap(),
+            JsonValue::String("hello world".to_string())
+        );
+    }
+
+    /// Typed branches keep their own parse errors — they do not fall back
+    /// to string values on undecodable-but-valid-UTF-8 input.
+    #[test]
+    fn test_decode_typed_parse_errors() {
+        let err = literal_decode("number:nope").unwrap_err().to_string();
+        assert!(
+            err.starts_with("Serialization error: Failed to parse literal number: "),
+            "{err}"
+        );
+
+        let err = literal_decode("boolean:TRUE").unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "Serialization error: Failed to parse literal boolean: \
+             provided string was not `true` or `false`"
+        );
+
+        let err = literal_decode("json:nope").unwrap_err().to_string();
+        assert!(
+            err.starts_with("Serialization error: Failed to parse literal JSON: "),
+            "{err}"
+        );
+    }
 }
