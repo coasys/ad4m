@@ -949,11 +949,13 @@ The sub-query accepts: `where`, `order`, `limit`, `offset`, `include`, and `prop
 An include names a relation the class declares, and any other name is skipped. A class cannot declare every link another app may later point at its instances: a conversation links to the action items it produced, and an action item's class, written by whoever wrote it, says nothing about conversations. Name the predicate with `through` and how many with `kind`, and the include reads the instances linking to each result:
 
 ```typescript
-const items = await ActionItem.findAll(perspective, {
+const { instances } = await perspective.modelQuery('ActionItem', JSON.stringify({
   include: { extractedFrom: { through: 'we://extracted', kind: 'belongsToOne' } },
-});
-// items[0].extractedFrom: the conversation, or null when nothing links to it
+}));
+// instances[0].extractedFrom: the conversation, or null when nothing links to it
 ```
+
+The typed query of a class with declared fields (`findAll`, `query().include()`) accepts only the names the class declares, so a misspelled relation is a compile error. It rejects an undeclared name too, so use `perspective.modelQuery` as above. A class with no declared fields (one made with `fromSHACL`) takes it in `findAll` as well.
 
 - `kind` is `belongsToOne` (one instance, or `null`) or `belongsToMany` (a list). Only links pointing *at* the instance can be read this way; an outgoing one the class does not declare is reachable with [`links`](#per-link-rows-with-links).
 - The linking instances are hydrated as the classes they are, as a `polymorphic` include is, so the include refuses `limit` and `offset`. They arrive as plain objects carrying `__subjectClass`.

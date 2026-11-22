@@ -544,10 +544,14 @@ export type RelationSubQuery = Omit<Query, 'parent' | 'count'> & {
    * class, written by another app, says nothing about conversations.
    *
    * ```typescript
-   * await ActionItem.findAll(perspective, {
+   * await perspective.modelQuery('ActionItem', JSON.stringify({
    *   include: { extractedFrom: { through: 'we://extracted', kind: 'belongsToOne' } },
-   * });
+   * }));
    * ```
+   *
+   * Untyped only: {@link TypedIncludeMap} accepts just the names a class
+   * declares, so a typed query (`findAll`, `query().include()`) on a class with
+   * declared fields refuses an undeclared name at compile time.
    *
    * The linking instances are hydrated as the classes they are (`polymorphic`),
    * since the reading class names none. Where the class declares the name, the

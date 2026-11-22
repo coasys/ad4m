@@ -381,7 +381,13 @@ async fn an_edit_to_a_record_an_undeclared_include_reads_reruns() {
 
     assert_eq!(reruns::count(&id), 1);
     let now = last_result(&p, &id).await;
-    assert!(now.to_string().contains("cited"), "{now}");
+    // The included Note itself, not the result as text: `citedIn` contains
+    // "cited" too.
+    assert_eq!(
+        now["instances"][0]["citedIn"][0]["title"],
+        json!("cited"),
+        "{now}"
+    );
 }
 
 /// Records that entered the result in earlier batches are watched too: a
