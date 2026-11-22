@@ -195,8 +195,9 @@ function replaced(participantId: string, overrides: Partial<SfuSessionReplaced> 
 
 function deferred<T>() {
     let resolve!: (value: T) => void
-    const promise = new Promise<T>((r) => { resolve = r })
-    return { promise, resolve }
+    let reject!: (err: unknown) => void
+    const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+    return { promise, resolve, reject }
 }
 
 /** A fake API that records the order of subscribe and RPC calls. */
@@ -3476,6 +3477,71 @@ test("an unlisted-session ask that outlives its box is asked again within the gr
         await flush()
         expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("an old session's late box expiry arms no retry the rebuilt session's own ask then loses", async () => {
+    // The old session's ask outlives its box only after the call rebuilt:
+    // the new session is the unlisted one then, with its own ask still
+    // out. A retry armed for the dead session would hold the timer when
+    // the new session's ask faults, then die at its identity check with
+    // no retry left for the new one — the expiry must check first whose
+    // session it is.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        api.sfuCallJoin
+            .mockResolvedValueOnce(session())
+            .mockResolvedValue(session({ participantId: "P9" }))
+        const firstAsk = deferred<SfuResumeResult>()
+        const secondAsk = deferred<SfuResumeResult>()
+        api.sfuCallResume
+            .mockImplementationOnce(() => firstAsk.promise)
+            .mockImplementationOnce(() => secondAsk.promise)
+            .mockResolvedValue(resumeListed())
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+
+        // The roster drops this session; the grace sends the ask, which stays out.
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await flush()
+        await jest.advanceTimersByTimeAsync(3_000)
+        await flush()
+        await flush()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+
+        // The call rebuilds to a new session while the ask is out.
+        await iceState("failed")
+        for (let i = 0; i < 6; i++) await flush()
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+        expect(manager.getState().participantId).toBe("P9")
+
+        // The new session is unlisted too; its grace sends its own ask, still out.
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await flush()
+        await jest.advanceTimersByTimeAsync(3_000)
+        await flush()
+        await flush()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(2)
+
+        // The old ask's box wins now (10 s from when it went out): its
+        // retry belongs to the dead session and must arm nothing.
+        await jest.advanceTimersByTimeAsync(7_000)
+        await flush()
+        await flush()
+
+        // The new session's ask faults: its retry arms and asks again.
+        secondAsk.reject(new RpcError(408, "request timed out"))
+        await flush()
+        await flush()
+        await jest.advanceTimersByTimeAsync(3_000)
+        await flush()
+        await flush()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(3)
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
         await manager.leave()
     } finally {
         jest.useRealTimers()
