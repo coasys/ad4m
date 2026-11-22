@@ -157,13 +157,14 @@ pub fn scope_unsigned(
 }
 
 /// A `rotate` that reveals `master` with its `salt`, commits to `next` (`None` ends the
-/// identity) and may revoke device keys.
+/// identity) and may unlink device keys (they stop signing; links they made earlier stay
+/// valid. To distrust a key, `revoke` it).
 pub fn rotate_unsigned(
     chain: &KelChain,
     master: &Multikey,
     salt: &str,
     next: Option<Hash>,
-    revoke: &[KeyId],
+    unlink: &[KeyId],
 ) -> Result<Event, BuildError> {
     later(
         chain,
@@ -171,7 +172,7 @@ pub fn rotate_unsigned(
             master: master.clone(),
             salt: salt.to_string(),
             next,
-            revoke: revoke.to_vec(),
+            unlink: unlink.to_vec(),
         },
     )
 }
@@ -322,7 +323,7 @@ pub fn rotate(
     revealed: &dyn Signer,
     salt: &str,
     next: Option<Hash>,
-    revoke: &[KeyId],
+    unlink: &[KeyId],
 ) -> Result<Event, BuildError> {
     let key = revealed.key();
     if chain.state().next.as_deref() != Some(commitment(&key, salt).as_str()) {
@@ -332,7 +333,7 @@ pub fn rotate(
             BuildError::NextMismatch
         });
     }
-    let mut event = rotate_unsigned(chain, &key, salt, next, revoke)?;
+    let mut event = rotate_unsigned(chain, &key, salt, next, unlink)?;
     let id = chain.state().next_master_id();
     cosign(&mut event, &id, revealed)?;
     Ok(event)

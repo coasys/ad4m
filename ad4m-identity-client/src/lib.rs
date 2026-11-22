@@ -18,14 +18,17 @@
 //!   [`EncKey`]; its `identity.takeMaster` runs the same open, check and choice as
 //!   [`WithEncKey`] (`enc`'s `take_from`).
 //! - [`flows::revoke`]: a `revoke` signed by the current master key, published, with an
-//!   optional `since` for a lost or stolen key; or, with the 12 words, a `rotate` that revokes
-//!   the keys too ("Also replace my master key").
+//!   optional `since` for a lost or stolen key; or, with the 12 words, a `rotate` to master *n*+1
+//!   first and then that `revoke` signed by *n*+1 ("Also replace my master key"; a frozen log
+//!   accepts only a `rotate`).
 //! - [`flows::unlink`]: an `unlink` signed by the key itself (it then destroys the key) or by
 //!   the current master key.
 //! - [`flows::rotate`]: master *n*+1 from the 12 words, rebuilt on the new head when another
-//!   event lands first, sent to every app that kept the master key, and the record written.
-//! - [`flows::restore`]: the 12 words alone find the identity, lock out lost devices with a
-//!   rotation to a fresh master on this device, and link this device again.
+//!   event lands first, sent to every app that kept the master key, and the record written. The
+//!   keys a rotation drops are unlinked, never revoked.
+//! - [`flows::restore`]: the 12 words alone find the identity, lock out lost devices (a
+//!   rotation to a fresh master on this device, then a `revoke` of them by it), and link this
+//!   device again.
 //! - [`flows::requests`]: the holder's answer to a device's request (send the master key,
 //!   confirm a revocation, with the words when it asks for a rotation) and the device's post.
 //! - [`flows::master`] also removes the master key from a device that is not its only holder,
@@ -160,6 +163,18 @@ pub enum ClientError {
     /// `canKeepMaster` (and at a link, only on a `device` offer). Never by the record's kind.
     #[error("{0} may not keep the master key")]
     NotAKeeper(String),
+    /// A rotation that precedes a revocation is published (master #`index` is current), and
+    /// the revoke is not: the master key is replaced but the devices are not yet revoked.
+    /// `pending` names what is left: [`flows::revoke::finish_revoke`] publishes only the revoke,
+    /// with a `since` the caller may correct (a call that starts over would rotate again).
+    #[error(
+        "the master key is replaced (master #{}) but the devices are not yet revoked: {cause}",
+        pending.index
+    )]
+    RotatedNotRevoked {
+        pending: flows::revoke::PendingRevoke,
+        cause: String,
+    },
     /// A request asks for a rotation, which needs the 12 words.
     #[error("the request asks for a rotation, which needs the 12 words")]
     NeedsWords,

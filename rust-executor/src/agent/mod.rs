@@ -11,6 +11,7 @@ use crate::types::{Expression, ExpressionProof};
 use crate::wallet::wallet_backend;
 
 pub mod capabilities;
+pub mod fence;
 pub mod grants;
 pub mod rekey;
 pub mod sealed_box;
@@ -309,6 +310,28 @@ pub fn did_for_context(context: &AgentContext) -> Result<String, AnyError> {
 }
 
 pub fn sign_for_context(payload: &[u8], context: &AgentContext) -> Result<Vec<u8>, AnyError> {
+    if fence::any() {
+        // The DID of the key that would sign, read from the wallet: `AgentService`'s lock may
+        // be held by the caller (a re-key signs the profile under it).
+        let key_name = context.wallet_key_name()?;
+        if let Some(document) = wallet_backend().get_did_document(&key_name) {
+            if fence::is_raised(&document.id) {
+                return Err(anyhow!(
+                    "the key of {} is being unlinked and signs nothing new",
+                    document.id
+                ));
+            }
+        }
+    }
+    sign_for_context_unfenced(payload, context)
+}
+
+/// [`sign_for_context`] without the signing fence: only the `unlink` event of the key that is
+/// being unlinked signs this way.
+pub(crate) fn sign_for_context_unfenced(
+    payload: &[u8],
+    context: &AgentContext,
+) -> Result<Vec<u8>, AnyError> {
     let backend = wallet_backend();
     let key_name = context.wallet_key_name()?;
     let signature = backend
@@ -1085,7 +1108,7 @@ impl AgentService {
     /// file. The rewrite binds the file to whichever of them was typed. Until an unlock
     /// opens the rewritten file directly, a failed unlock on a locked executor falls back to
     /// this copy (`unlock_from_legacy_backup`).
-    fn legacy_backup_file(&self) -> String {
+    pub(crate) fn legacy_backup_file(&self) -> String {
         format!("{}.legacy", self.file)
     }
 
@@ -1234,6 +1257,10 @@ impl AgentService {
                     e
                 ),
             }
+            // An unlink the executor left half done (a key still fenced, its secret still in
+            // the wallet) is finished now that the wallet can sign and be saved. Runs on its
+            // own task: it takes this service's lock itself.
+            crate::identity::resume_pending_unlinks();
         }
         self.finish_unlock(password)
     }

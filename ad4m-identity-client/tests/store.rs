@@ -835,7 +835,7 @@ async fn a_restore_reads_and_writes_the_record_with_the_recovery_key() {
     .unwrap();
     // Lock out the first holder (d1 is a phone: ticked by default).
     let lock_out: Vec<String> = flow.devices().iter().map(|d| d.key_id.clone()).collect();
-    let restored = flow.finish(&lock_out, this_phone()).await.unwrap();
+    let restored = flow.finish(&lock_out, None, this_phone()).await.unwrap();
     assert_eq!(restored.did, did);
     let enrolled = restored.enrolled.as_ref().expect("the phone enrolled");
     assert_eq!(new_vault.master_index(scid(&did)).unwrap(), Some(1));

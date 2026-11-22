@@ -410,6 +410,7 @@ export interface RpcMethods {
   "identity.resetLog": { params: ResetLogParams; result: boolean };
   "identity.resolve": { params: ResolveParams; result: DidResolutionResult };
   "identity.status": { params: Record<string, never>; result: IdentityStatus };
+  "identity.unlinkSelf": { params: Record<string, never>; result: SignedHead };
   "identity.unwrapRecordKey": { params: UnwrapRecordKeyParams; result: RecordKey };
   "language.all": { params: LanguageListParams; result: Array<LanguageHandle> };
   "language.applyTemplate": { params: ApplyTemplateRequest; result: LanguageRef };
