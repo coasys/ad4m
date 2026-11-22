@@ -668,8 +668,15 @@ export class SfuManager {
                 void this.reconnect()
             } else if (pc.iceConnectionState === "disconnected") {
                 // The restart is the whole answer: whether the socket it
-                // goes out on still answers is the socket layer's call.
-                this.restartIce(pc)
+                // goes out on still answers is the socket layer's call. A
+                // restart already in flight gets no blind second request —
+                // one a network change sent while ICE still read
+                // `connected` may never have reached the executor, and
+                // only its pending offer says so: the resume's reply
+                // applies it, or asks for the restart again inside the
+                // same deadline.
+                if (this.restartTimer) this.resume(pc)
+                else this.restartIce(pc)
             } else if (
                 pc.iceConnectionState === "connected" ||
                 pc.iceConnectionState === "completed"
