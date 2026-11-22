@@ -2256,6 +2256,27 @@ test("a socket reconnect with no network change still gives ICE 2 s before resta
     }
 })
 
+test("a redial after a silent socket, with ICE connected, sends no ICE restart", async () => {
+    // A probe that gave up on a silent socket only redials: the new socket
+    // brings onReconnect, never a network change. Media that kept flowing
+    // over the same path is left alone.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        await iceState("connected")
+
+        api.emitReconnect()
+        await jest.advanceTimersByTimeAsync(30_000)
+
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
 test("ICE that comes back within the 2 s after the socket does is not restarted", async () => {
     fakeTimers()
     try {
