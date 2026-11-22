@@ -391,6 +391,9 @@ export class SfuManager {
     private networkUnsubscribe: (() => void) | null = null
     /** Running while the room's roster leaves this session out: see `noticeRoster`. */
     private unlistedTimer: ReturnType<typeof setTimeout> | null = null
+    /** The newest applied roster left this session out and no ask has cleared
+     *  it since: a socket-faulted ask for it is asked again within the grace. */
+    private unlisted = false
     /** The revision of the newest applied roster that listed this session.
      *  A resume's `listed: false` stands unless a roster newer than its ask
      *  listed the session meanwhile — a boolean could not order the two. */
@@ -900,14 +903,16 @@ export class SfuManager {
         const participantId = this.state.participantId
         if (!participantId || sessions.some((s) => s.participantId === participantId)) {
             if (participantId) this.listedAtRevision = revision
+            this.unlisted = false
             this.clearUnlistedTimer()
             return
         }
+        this.unlisted = true
         if (this.unlistedTimer) return
         this.unlistedTimer = setTimeout(() => {
             this.unlistedTimer = null
-            if (this.state.peerConnection !== pc || this.state.participantId !== participantId) return
-            this.resume(pc)
+            if (this.state.peerConnection !== pc || this.state.participantId !== participantId || !this.unlisted) return
+            this.resume(pc, true)
         }, SfuManager.UNLISTED_GRACE_MS)
     }
 
@@ -972,6 +977,7 @@ export class SfuManager {
         this.offerQueue = Promise.resolve()
         this.listedAtRevision = 0
         this.rosterRevision = 0
+        this.unlisted = false
         // Per-session offer state: the executor's offer counter restarts
         // with it, so this session decides on its own ids afresh, and an
         // answer kept for the old session's connection is not its to send.
@@ -1178,11 +1184,13 @@ export class SfuManager {
      * the bound is the restart's remaining time, never a fresh one from
      * the socket's return. Only the RPC is bounded: the SDP steps a reply
      * starts run to their end like any offer's.
-     * A socket fault (503, 408) keeps the call: the next reconnect asks
-     * again. A 403 ends it: the session the join returned is another
+     * A socket fault (503, 408) keeps the call: an ask a roster left this
+     * session out for (`retryUnlisted`) is asked again within the grace
+     * while the roster still omits it; the others wait for the next
+     * reconnect. A 403 ends it: the session the join returned is another
      * agent's, so there is no call to keep.
      */
-    private resume(pc: RTCPeerConnection): void {
+    private resume(pc: RTCPeerConnection, retryUnlisted = false): void {
         const participantId = this.state.participantId
         if (!participantId || this.state.peerConnection !== pc) return
         const joined = this.joinSettled
@@ -1207,7 +1215,7 @@ export class SfuManager {
             // that went on without it.
             if (reply === null) return
             this.offerQueue = this.offerQueue
-                .then(() => this.applyResume(pc, participantId, askedAtRevision, reply!))
+                .then(() => this.applyResume(pc, participantId, askedAtRevision, reply!, retryUnlisted))
                 .catch((err) => console.warn("SFU: applying the resume's reply failed:", err))
         })
     }
@@ -1222,12 +1230,25 @@ export class SfuManager {
         participantId: string,
         askedAtRevision: number,
         reply: { result: SfuResumeResult } | { error: unknown },
+        retryUnlisted: boolean,
     ): Promise<void> {
         if ("error" in reply) {
             const err = reply.error
             if (this.state.peerConnection !== pc || this.state.participantId !== participantId) return
             if (isSocketFault(err)) {
-                console.warn("SFU: resuming the session failed with the socket; the next reconnect asks again:", err)
+                // An ask a roster left this session out for stays open until
+                // one answers: the fault left the omission unresolved, so
+                // while the roster still omits it the grace asks again
+                // rather than waiting for a socket reconnect.
+                if (retryUnlisted && this.unlisted && !this.unlistedTimer) {
+                    this.unlistedTimer = setTimeout(() => {
+                        this.unlistedTimer = null
+                        if (this.state.peerConnection !== pc || this.state.participantId !== participantId || !this.unlisted) return
+                        this.resume(pc, true)
+                    }, SfuManager.UNLISTED_GRACE_MS)
+                } else {
+                    console.warn("SFU: resuming the session failed with the socket; the next reconnect asks again:", err)
+                }
                 return
             }
             if (err instanceof RpcError && err.status === 403) {
