@@ -847,8 +847,9 @@ impl SfuService {
                             dead.participant_id, dead.room_id, dead.agent_did, dead.reason
                         );
                         let room_key = dead.room_id.to_string();
-                        // `offer` waits before the next dial. A timeout or an
-                        // ICE drop only removes the entry.
+                        // An ended offer waits before the next dial, and so
+                        // does an ICE drop on the end that dials. A timeout
+                        // only removes the entry.
                         self.cascade_manager.write().await.on_pipe_died(
                             &room_key,
                             &dead.agent_did,

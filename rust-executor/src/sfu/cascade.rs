@@ -174,19 +174,21 @@ impl CascadeSignal {
     }
 }
 
-/// How long the cascade waits before redialling a pipe that was ended
-/// because its offer was refused or still unanswered after the second
-/// resend. Announce arrives every 10 s, so the next announce is not this
-/// wait: it would rebuild the pipe while the other end still held its
-/// entry, and a pipe that failed the same way would end and redial about
-/// every minute. The first end waits this long. Each further end doubles
-/// the wait, up to [`PIPE_REDIAL_BACKOFF_CAP`].
+/// How long the cascade waits before redialling a pipe that ended because
+/// its answer was rejected locally, its offer was still unanswered after
+/// the second resend, or its ICE dropped on the end that dials. Announce
+/// arrives every 10 s, so the next announce is not this wait: it would
+/// rebuild the pipe while the other end still held its entry, and a pipe
+/// that failed the same way would end and redial about every minute. The
+/// first failure waits this long. Each further one doubles the wait, up to
+/// [`PIPE_REDIAL_BACKOFF_CAP`]. A timeout (the pipe never connected) does
+/// not wait.
 pub const PIPE_REDIAL_BACKOFF: Duration = Duration::from_secs(30);
 
 /// The longest redial wait. Further failures of the same pipe stay here.
 pub const PIPE_REDIAL_BACKOFF_CAP: Duration = Duration::from_secs(120);
 
-/// One pipe's run of refused or unanswered offers, and when it may be dialled.
+/// One pipe's run of ended offers and dialler drops, and when it may be dialled.
 struct PipeRedial {
     failures: u32,
     not_before: Instant,
@@ -224,9 +226,10 @@ pub struct CascadeManager {
     /// Per-room cooldown: last time a rebalance migration was issued.
     /// Prevents rapid-fire migrations (anti-pingpong).
     rebalance_cooldowns: HashMap<String, Instant>,
-    /// Pipes ended because an established offer was refused or unanswered,
-    /// keyed by `(room_id, remote_did)`. Absent when that pair has not
-    /// ended that way. See [`PIPE_REDIAL_BACKOFF`].
+    /// Pipes the dialling end must not rebuild yet, keyed by
+    /// `(room_id, remote_did)`. An ended offer records one, and so does an
+    /// ICE drop on the end that dials. Absent when that pair may dial now.
+    /// See [`PIPE_REDIAL_BACKOFF`].
     redials: HashMap<(String, String), PipeRedial>,
     /// Tests set the clock [`Self::establish_pipe`] compares to the redial
     /// wait. Production leaves it unset.
@@ -268,8 +271,9 @@ impl CascadeManager {
         self.test_now = Some(now);
     }
 
-    /// An established pipe to `remote_did` was ended because its offer was
-    /// refused or unanswered. The next [`Self::establish_pipe`] waits.
+    /// An established pipe to `remote_did` ended: a locally rejected answer,
+    /// an unanswered offer, or an ICE drop on the end that dials. The next
+    /// [`Self::establish_pipe`] waits.
     fn note_pipe_offer_ended(&mut self, room_id: &str, remote_did: &str, now: Instant) {
         let key = (room_id.to_string(), remote_did.to_string());
         let failures = self
@@ -292,9 +296,12 @@ impl CascadeManager {
         );
     }
 
-    /// A pipe peer died. `reason` `"offer"` arms the redial wait. Any other
-    /// reason only drops the entry, so a timeout or a leave can dial on the
-    /// next announce.
+    /// A pipe peer died. An ended offer (`reason` `"offer"`) arms the redial
+    /// wait. An ICE drop does too, but only on the end that dials (the
+    /// lexically higher DID): the other end's ended offer arrives here as an
+    /// ordinary drop, and that is the end that would rebuild the pipe. A
+    /// timeout only drops the entry, so the next announce dials at once. A
+    /// leave does not come through here.
     pub fn on_pipe_died(
         &mut self,
         room_id: &str,
@@ -302,7 +309,8 @@ impl CascadeManager {
         reason: &str,
         now: Instant,
     ) -> Option<ParticipantId> {
-        if reason == "offer" {
+        let dials = self.local_did.as_str() > remote_did;
+        if reason == "offer" || (reason == "drop" && dials) {
             self.note_pipe_offer_ended(room_id, remote_did, now);
         }
         self.remove_node_from_room(room_id, remote_did)
@@ -454,7 +462,7 @@ impl CascadeManager {
                 ));
             }
             warn!(
-                "SFU cascade: redialling pipe to {remote_did} for room {room_key} after {} ended offers",
+                "SFU cascade: redialling pipe to {remote_did} for room {room_key} after {} failures",
                 redial.failures
             );
         }
@@ -1209,9 +1217,10 @@ mod tests {
         assert!(mgr.suggest_rebalance(room_b, 9).is_some());
     }
 
-    /// A pipe ended for an unanswered or refused offer is not dialled again
-    /// on the spot. The wait doubles, and it stops at the cap. A pipe that
-    /// died for another reason dials at once.
+    /// A pipe ended for an unanswered offer, or an answer rejected locally,
+    /// is not dialled again on the spot. The wait doubles, and it stops at
+    /// the cap. A timeout still dials at once. An ICE drop on the dialler
+    /// waits; see [`the_dialler_waits_out_the_backoff_when_the_other_end_ends_the_pipe`].
     #[test]
     fn a_redialled_pipe_that_fails_again_waits_out_its_backoff() {
         let room = RoomId::new("nh", "r");
@@ -1219,13 +1228,13 @@ mod tests {
         let key = room.to_string();
         let t0 = Instant::now();
 
-        let mut dropped = CascadeManager::new("did:key:nodeB".into(), test_addr(10020), 8);
-        dropped.set_now(t0);
-        dropped.establish_pipe(remote, &room).unwrap();
-        dropped.on_pipe_died(&key, remote, "drop", t0);
-        dropped
+        let mut timed_out = CascadeManager::new("did:key:nodeB".into(), test_addr(10020), 8);
+        timed_out.set_now(t0);
+        timed_out.establish_pipe(remote, &room).unwrap();
+        timed_out.on_pipe_died(&key, remote, "timeout", t0);
+        timed_out
             .establish_pipe(remote, &room)
-            .expect("a dropped pipe dials on the next announce");
+            .expect("a timeout still dials on the next announce");
 
         let mut mgr = CascadeManager::new("did:key:nodeB".into(), test_addr(10021), 8);
         mgr.set_now(t0);
@@ -1272,5 +1281,67 @@ mod tests {
         mgr.set_now(t3 + PIPE_REDIAL_BACKOFF_CAP);
         mgr.establish_pipe(remote, &room)
             .expect("a further failure stays at the cap");
+    }
+
+    /// The higher DID is the only end that dials. When the lower DID ends
+    /// its offer, this end only sees the ICE drop. That drop waits out the
+    /// same backoff, so the pipe cannot be redialled on the next announce.
+    /// A timeout still dials at once.
+    #[test]
+    fn the_dialler_waits_out_the_backoff_when_the_other_end_ends_the_pipe() {
+        let room = RoomId::new("nh", "r");
+        let key = room.to_string();
+        let lower = "did:key:nodeA";
+        let higher = "did:key:nodeB";
+        assert!(higher > lower);
+        let t0 = Instant::now();
+
+        let mut timed = CascadeManager::new(higher.into(), test_addr(10032), 8);
+        timed.set_now(t0);
+        timed.establish_pipe(lower, &room).unwrap();
+        timed.on_pipe_died(&key, lower, "timeout", t0);
+        timed
+            .establish_pipe(lower, &room)
+            .expect("a timeout still dials on the next announce");
+
+        let mut dialler = CascadeManager::new(higher.into(), test_addr(10030), 8);
+        let mut other = CascadeManager::new(lower.into(), test_addr(10031), 8);
+        dialler.set_now(t0);
+        other.set_now(t0);
+        dialler.establish_pipe(lower, &room).unwrap();
+        // The lower DID ended its offer. It never dials.
+        other.on_pipe_died(&key, higher, "offer", t0);
+        // The dialler sees an ordinary drop.
+        dialler.on_pipe_died(&key, lower, "drop", t0);
+        assert!(
+            !dialler.has_pipe(&key, lower),
+            "the dialler's pipe entry is gone"
+        );
+
+        assert!(
+            dialler.establish_pipe(lower, &room).is_err(),
+            "the dialling end waits out the backoff after the other end ends the pipe"
+        );
+        dialler.set_now(t0 + PIPE_REDIAL_BACKOFF - Duration::from_millis(1));
+        assert!(
+            dialler.establish_pipe(lower, &room).is_err(),
+            "the dialling end waits out the backoff after the other end ends the pipe"
+        );
+        dialler.set_now(t0 + PIPE_REDIAL_BACKOFF);
+        dialler
+            .establish_pipe(lower, &room)
+            .expect("the dialler redials after one backoff");
+
+        let t1 = t0 + PIPE_REDIAL_BACKOFF;
+        dialler.on_pipe_died(&key, lower, "drop", t1);
+        dialler.set_now(t1 + PIPE_REDIAL_BACKOFF);
+        assert!(
+            dialler.establish_pipe(lower, &room).is_err(),
+            "a second drop on the dialler waits twice as long"
+        );
+        dialler.set_now(t1 + PIPE_REDIAL_BACKOFF * 2);
+        dialler
+            .establish_pipe(lower, &room)
+            .expect("the second drop waits 60 s");
     }
 }
