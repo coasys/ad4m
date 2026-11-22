@@ -544,6 +544,12 @@ export class MeshManager {
     private outbound: Map<"audio" | "video", MediaStreamTrack | null> = new Map()
     /** One stream for all outbound tracks, so a peer receives mic and camera grouped. */
     private outboundStream: MediaStream | null = null
+    /**
+     * The clone each sender encodes, and the camera or mic it was cloned from.
+     * One track on two connections shares an encoder; closing one changes the
+     * SSRC the other still sends. See {@link trackFor}.
+     */
+    private owned = new Map<RTCRtpSender, { source: MediaStreamTrack; clone: MediaStreamTrack }>()
     private closed = false
     private channelUnsubscribe: (() => void) | null = null
     private unwatchPublish: (() => void) | null = null
@@ -807,7 +813,8 @@ export class MeshManager {
      * Replace the outbound track of a given kind on every peer connection.
      * Uses `RTCRtpSender.replaceTrack` on the sections declared up front, so
      * muting, unmuting and camera↔screen swaps never renegotiate. Pass `null`
-     * to stop sending that kind.
+     * to stop sending that kind. Each sender encodes a clone of `track`; the
+     * track handed in is left running.
      */
     async replaceTrack(kind: "audio" | "video", track: MediaStreamTrack | null): Promise<void> {
         const previous = this.outbound.get(kind)
@@ -823,11 +830,19 @@ export class MeshManager {
                 try {
                     const sender = slot.senders.get(kind)
                     if (sender) {
-                        await sender.replaceTrack(track)
+                        await sender.replaceTrack(this.trackFor(sender, track))
                     } else if (track) {
                         // Only reachable if `addTransceiver` failed. This fires
                         // `negotiationneeded`, which perfect negotiation resolves.
-                        slot.senders.set(kind, slot.pc.addTrack(track, this.outboundStream!))
+                        const clone = track.clone()
+                        try {
+                            const added = slot.pc.addTrack(clone, new MediaStream([clone]))
+                            slot.senders.set(kind, added)
+                            this.owned.set(added, { source: track, clone })
+                        } catch (error) {
+                            this.stopClone(clone)
+                            throw error
+                        }
                     }
                 } catch (error) {
                     this.fail(`replacing ${kind} track for ${peerId}`, error)
@@ -958,8 +973,55 @@ export class MeshManager {
             disconnectedAt: 0,
         }
         this.slots.set(peerId, slot)
+        this.arm(peerId, slot)
+
+        /*
+         * Sections, and who creates them.
+         *
+         * A connection can only carry media of a kind it negotiated a section
+         * for. Declaring both up front makes a later mute or camera swap a
+         * `replaceTrack` on an existing section.
+         *
+         * With the tracks already attached. `replaceTrack` applies on a later
+         * turn, so an offer made in between describes sections with nothing
+         * to send. The other side answers recvonly, and the offer that
+         * follows — once the track is on the sender — adds a second section
+         * of that kind. Firefox will not reuse a section this side already
+         * created for the peer's offer, so the pair ends sendonly on the
+         * first video section and recvonly on the second. Firefox then
+         * delivers the new section's packets to the first (bug 1874471) and
+         * this side stops receiving video, while audio on its own section
+         * and the ICE transport keep going. Attaching the track here makes
+         * the first offer sendrecv. An offer that arrives before this side
+         * has offered is answered on a new connection ({@link reseat}), so
+         * Firefox and Chromium — which will not reuse these sections — cannot
+         * leave them beside the offer's. Stopping the unused ones instead
+         * makes `negotiationneeded` fire on every return to stable: an offer
+         * cannot name a section that never had a mid, so the need is never
+         * met and the pair renegotiates until the browser falls over.
+         *
+         * Each connection gets its own stream. One stream shared by every
+         * connection is dropped from the survivors when one connection closes.
+         * It also gets its own clone of the camera and the mic. One track on
+         * two connections shares one encoder, and closing one changes the
+         * SSRC the other still sends. Firefox keeps demuxing the old SSRC, so
+         * that video stops while audio on the same transport keeps going.
+         */
+        this.declareSending(peerId, slot)
+
+        return slot
+    }
+
+    /**
+     * Handlers for one peer connection. {@link reseat} binds them again on the
+     * replacement, so a handler closed over the connection it was given and
+     * does nothing once that connection is no longer the slot's.
+     */
+    private arm(peerId: string, slot: PeerSlot): void {
+        const pc = slot.pc
 
         const negotiate = async () => {
+            if (slot.pc !== pc) return
             /*
              * An answerer's first offer waits until the pair connects. Before
              * that this side cannot know its answer arrived; if it was lost,
@@ -987,18 +1049,20 @@ export class MeshManager {
                  * first the browser refuses, and asks again once stable.
                  */
                 await pc.setLocalDescription({ type: "offer" })
+                if (slot.pc !== pc) return
                 slot.offeredAt = this.now()
                 slot.renegotiating = pc.connectionState === "connected"
                 this.sendDescription(peerId, slot)
             } catch (error) {
-                if (pc.signalingState === "stable") this.fail(`negotiating with ${peerId}`, error)
+                if (slot.pc === pc && pc.signalingState === "stable") this.fail(`negotiating with ${peerId}`, error)
             } finally {
-                slot.makingOffer = false
+                if (slot.pc === pc) slot.makingOffer = false
             }
         }
         pc.onnegotiationneeded = negotiate
 
         pc.onicecandidate = ({ candidate }) => {
+            if (slot.pc !== pc) return
             if (candidate) this.sendFrom(peerId, slot, { kind: "ice", candidate: candidate.toJSON() })
         }
 
@@ -1030,6 +1094,7 @@ export class MeshManager {
         }
 
         pc.onconnectionstatechange = () => {
+            if (slot.pc !== pc) return
             const state = pc.connectionState
             this.states.set(peerId, state)
             if (state === "connected") {
@@ -1051,48 +1116,154 @@ export class MeshManager {
             // `failed` is actionable at once — there is nothing in flight to wait for.
             if (state === "failed") this.tick()
         }
+    }
 
-        /*
-         * Both m-lines, before there is anything to put in them.
-         *
-         * A connection can only carry media of a kind it negotiated a section
-         * for, and `addTrack` creates one. An agent sending no video negotiated
-         * no video section, which left the *other* peer's camera with nowhere
-         * to arrive. Declaring both up front makes every track change a
-         * `replaceTrack` on an existing section.
-         */
+    /** One section per kind, a clone of each track already on it. */
+    private declareSending(peerId: string, slot: PeerSlot): void {
+        const pc = slot.pc
+        const group = new MediaStream()
         for (const kind of ["audio", "video"] as const) {
+            const source = this.outbound.get(kind) ?? null
+            // Cloned before `addTransceiver`: the sender's track has to be set
+            // synchronously, or the first offer describes a section with nothing
+            // to send. See {@link trackFor} for why it is a clone.
+            const sending = source ? source.clone() : null
+            if (sending) group.addTrack(sending)
             try {
-                slot.senders.set(
-                    kind,
-                    pc.addTransceiver(kind, {
-                        direction: "sendrecv",
-                        streams: this.outboundStream ? [this.outboundStream] : [],
-                    }).sender,
-                )
+                const transceiver = sending
+                    ? pc.addTransceiver(sending, { direction: "sendrecv", streams: [group] })
+                    : pc.addTransceiver(kind, { direction: "sendrecv" })
+                slot.senders.set(kind, transceiver.sender)
+                if (source && sending) this.owned.set(transceiver.sender, { source, clone: sending })
             } catch (error) {
+                if (sending) this.stopClone(sending)
                 this.fail(`preparing ${kind} for ${peerId}`, error)
             }
         }
+    }
 
-        // Attach whatever already gets sent, so a peer joining mid-call
-        // receives our media without waiting for a toggle.
-        for (const [kind, track] of this.outbound) {
-            if (!track) continue
-            const sender = slot.senders.get(kind)
-            if (!sender) continue
-            void sender.replaceTrack(track).catch((error) =>
-                this.fail(`sending ${kind} to ${peerId}`, error),
-            )
+    /**
+     * The track one sender encodes.
+     *
+     * A camera or mic shared by two connections shares one encoder, and
+     * closing one connection changes the SSRC the other still sends. Firefox
+     * goes on demuxing the old SSRC, so that video stops while audio on the
+     * same transport and the connection itself stay up. Each sender gets its
+     * own clone. A later offer for the same source reuses the clone, so
+     * renegotiating does not change the SSRC on purpose. `null` stops the
+     * clone and sends nothing. The source is never stopped.
+     */
+    private trackFor(sender: RTCRtpSender, source: MediaStreamTrack | null): MediaStreamTrack | null {
+        const held = this.owned.get(sender)
+        if (!source) {
+            if (held) {
+                this.stopClone(held.clone)
+                this.owned.delete(sender)
+            }
+            return null
         }
+        if (held && held.source === source && held.clone.readyState === "live") return held.clone
+        if (held) this.stopClone(held.clone)
+        const clone = source.clone()
+        this.owned.set(sender, { source, clone })
+        return clone
+    }
 
-        return slot
+    /** `stop` on a clone. Never the camera or the mic the caller handed in. */
+    private stopClone(clone: MediaStreamTrack): void {
+        if (clone.readyState === "ended") return
+        try {
+            clone.stop()
+        } catch {
+            // Already ended, or a sender the browser has dropped.
+        }
+    }
+
+    /** Stop the clones one connection was encoding. The sources stay live for the others. */
+    private releaseClones(slot: PeerSlot): void {
+        for (const sender of slot.senders.values()) {
+            const held = this.owned.get(sender)
+            if (!held) continue
+            this.stopClone(held.clone)
+            this.owned.delete(sender)
+        }
+    }
+
+    /**
+     * The peer's offer got here before this side offered, and this side had
+     * already created sections for its own offer. Firefox and Chromium will
+     * not reuse those, so answer on a connection that has none. A connection
+     * that has already applied a remote description is renegotiating: its
+     * sections have mids and the offer names them.
+     */
+    private shouldReseatForOffer(slot: PeerSlot): boolean {
+        const pc = slot.pc
+        if (slot.makingOffer || pc.remoteDescription) return false
+        if (typeof pc.getTransceivers !== "function") return false
+        return pc.getTransceivers().some((transceiver) => transceiver.mid == null && transceiver.direction !== "stopped")
+    }
+
+    /** Swap in a connection with no sections. The slot, and its generation, stay. */
+    private reseat(peerId: string, slot: PeerSlot): void {
+        // Stop this connection's clones. The replacement encodes new ones, and
+        // the camera the caller holds is not one of them.
+        this.releaseClones(slot)
+        const old = slot.pc
+        old.onnegotiationneeded = null
+        old.onicecandidate = null
+        old.ontrack = null
+        old.onconnectionstatechange = null
+        try { old.close() } catch (error) {
+            this.fail(`replacing the connection to ${peerId}`, error)
+        }
+        slot.pc = this.createPeerConnection(this.configuration)
+        slot.senders.clear()
+        slot.makingOffer = false
+        slot.ignoreOffer = false
+        slot.offerDeferred = false
+        slot.renegotiating = false
+        slot.offeredAt = 0
+        // The description this connection sent described sections it no longer has.
+        slot.lastSent = null
+        slot.lastResent = null
+        this.arm(peerId, slot)
+    }
+
+    /**
+     * Send on the offer's sections, before the answer.
+     *
+     * The connection {@link reseat} installed has only the sections the offer
+     * created, and they arrive recvonly. Put our tracks on them so the answer
+     * is sendrecv on one section per kind.
+     */
+    private async adoptOfferSections(peerId: string, slot: PeerSlot): Promise<void> {
+        const pc = slot.pc
+        if (typeof pc.getTransceivers !== "function") return
+        const kept = pc.getTransceivers().filter((transceiver) => transceiver.mid != null)
+        const sections = kept.length > 0 ? kept : pc.getTransceivers()
+        for (const transceiver of sections) {
+            if (transceiver.direction === "stopped") continue
+            const kind = transceiver.receiver?.track?.kind ?? transceiver.sender?.track?.kind
+            if (kind !== "audio" && kind !== "video") continue
+            slot.senders.set(kind, transceiver.sender)
+            const want = this.outbound.get(kind) ?? null
+            try {
+                const sending = this.trackFor(transceiver.sender, want)
+                if (transceiver.sender.track !== sending) await transceiver.sender.replaceTrack(sending)
+                if (want && transceiver.direction === "recvonly") transceiver.direction = "sendrecv"
+            } catch (error) {
+                this.fail(`sending ${kind} to ${peerId}`, error)
+            }
+        }
     }
 
     /** Close one pair's connection, without telling anyone it happened. */
     private disconnect(peerId: string): void {
         const slot = this.slots.get(peerId)
         if (!slot) return
+        // Stop this connection's clones before it goes. The other connections
+        // keep theirs, and the camera the caller holds is not one of them.
+        this.releaseClones(slot)
         slot.pc.onnegotiationneeded = null
         slot.pc.onicecandidate = null
         slot.pc.ontrack = null
@@ -1257,6 +1428,11 @@ export class MeshManager {
                 // from the resend rung — would be refused against the current one.
                 if (description.type === "answer" && message.offer !== undefined && message.offer !== slot.offers) return
 
+                /*
+                 * Before the description is applied. Afterwards the offer's
+                 * sections are already on this connection, beside any it created.
+                 */
+                if (description.type === "offer" && this.shouldReseatForOffer(slot)) this.reseat(peerId, slot)
                 await slot.pc.setRemoteDescription(description)
                 if (description.type === "offer") slot.remoteOffer = message.offer
                 // An answer settles this side's offer, and accepting the
@@ -1275,6 +1451,7 @@ export class MeshManager {
                 await this.flushCandidates(peerId, slot)
 
                 if (description.type === "offer") {
+                    await this.adoptOfferSections(peerId, slot)
                     await slot.pc.setLocalDescription({ type: "answer" })
                     this.sendDescription(peerId, slot)
                 }

@@ -65,6 +65,9 @@ class FakeTrack {
         return (this.listeners.get(name)?.size ?? 0) > 0
     }
 
+    /** The track this one was cloned from, when {@link clone} made it. */
+    clonedFrom: FakeTrack | null = null
+
     /** Change the state the event describes, then fire it. */
     fire(name: "mute" | "unmute" | "ended") {
         if (name === "mute") this.muted = true
@@ -72,9 +75,21 @@ class FakeTrack {
         if (name === "ended") this.readyState = "ended"
         for (const cb of [...(this.listeners.get(name) ?? [])]) cb()
     }
+
+    /** A browser's `MediaStreamTrack.clone`: a new live track, not this one. */
+    clone(): FakeTrack {
+        const copy = new FakeTrack(this.kind)
+        copy.clonedFrom = this
+        return copy
+    }
+
+    stop(): void {
+        this.readyState = "ended"
+    }
 }
 
 const track = (kind: "audio" | "video") => new FakeTrack(kind) as unknown as MediaStreamTrack
+const asFake = (item: MediaStreamTrack | null | undefined) => item as unknown as FakeTrack
 const stream = (...tracks: MediaStreamTrack[]) => new FakeMediaStream(tracks) as unknown as MediaStream
 
 import {
@@ -103,8 +118,31 @@ import type { PerspectiveExpression } from "../perspectives/Perspective"
 let nextConnection = 0
 
 class FakePeerConnection {
+    /**
+     * A browser applies `replaceTrack` on a microtask, after `negotiationneeded`
+     * has already run. One test turns this on so an offer made before that
+     * microtask is caught carrying no tracks.
+     */
+    static deferReplace = false
+
+    /**
+     * Firefox and Chromium do not reuse a section this side created when the
+     * peer's offer arrives first: they add the offer's sections beside it.
+     * Stopping the unused ones leaves them with no mid, and `negotiationneeded`
+     * then fires on every return to stable, because an offer cannot name them.
+     */
+    static separateSections = false
+
+    /** Hold `negotiationneeded` until the next turn, so an offer can arrive first. */
+    static deferNegotiation = false
+
+    /** Kinds an offer described, so the answerer can open those sections and no others. */
+    static offerSections = new Map<string, string[]>()
+
     /** Which connection this is, written into every description it makes — see `setRemoteDescription`. */
     readonly id = `pc${(nextConnection += 1)}`
+    /** Sender tracks at the first offer. Null until then. */
+    tracksAtFirstOffer: (MediaStreamTrack | null)[] | null = null
     /** The connection the remote descriptions applied so far came from. */
     private remoteOrigin: string | null = null
 
@@ -121,9 +159,26 @@ class FakePeerConnection {
     senders: { track: MediaStreamTrack | null; replaceTrack(t: MediaStreamTrack | null): Promise<void> }[] = []
     addedTracks: unknown[] = []
     /** The m-sections this connection has negotiated. */
-    transceivers: { kind: string; direction: string }[] = []
+    transceivers: {
+        kind: string
+        direction: string
+        mid?: string | null
+        sender?: { track: MediaStreamTrack | null; replaceTrack(t: MediaStreamTrack | null): Promise<void> }
+        receiver?: { track: { kind: string } }
+        stop?: () => void
+    }[] = []
     candidates: RTCIceCandidateInit[] = []
     closed = false
+    /** Times a stopped section with no mid asked for another offer after a stable negotiation. */
+    spins = 0
+
+    constructor() {
+        // Absent unless the test asked: `adoptOfferSections` treats a missing
+        // `getTransceivers` as a connection that does not split sections.
+        if (FakePeerConnection.separateSections) this.getTransceivers = () => this.transceivers
+    }
+
+    getTransceivers?: () => FakePeerConnection["transceivers"]
 
     /**
      * Fire `negotiationneeded` once per task, as a browser does: declaring an
@@ -135,7 +190,7 @@ class FakePeerConnection {
         this.negotiationNeeded = true
         if (this.negotiationQueued) return
         this.negotiationQueued = true
-        queueMicrotask(() => {
+        const fire = () => {
             this.negotiationQueued = false
             // Cleared by `setLocalDescription`: a peer that has just answered
             // an offer describing these sections does not then offer them again.
@@ -143,24 +198,56 @@ class FakePeerConnection {
             // And never mid-handshake: the spec aborts the event unless stable.
             if (this.signalingState !== "stable") return
             this.onnegotiationneeded?.()
-        })
+        }
+        if (FakePeerConnection.deferNegotiation) setTimeout(fire, 0)
+        else queueMicrotask(fire)
+    }
+
+    /** A stopped section that never got a mid cannot be negotiated away, so the browser asks again. */
+    private noteStable() {
+        if (!FakePeerConnection.separateSections || this.signalingState !== "stable") return
+        if (!this.transceivers.some((transceiver) => transceiver.mid == null && transceiver.direction === "stopped")) return
+        this.spins += 1
+        if (this.spins > 4) return
+        this.queueNegotiation()
     }
 
     private makeSender(track: MediaStreamTrack | null) {
         const sender = {
             track,
-            async replaceTrack(next: MediaStreamTrack | null) {
-                sender.track = next
+            replaceTrack(next: MediaStreamTrack | null) {
+                if (!FakePeerConnection.deferReplace) {
+                    sender.track = next
+                    return Promise.resolve()
+                }
+                // As a browser: the track lands after the offer that `addTransceiver` queued.
+                return new Promise<void>((resolve) => {
+                    queueMicrotask(() => {
+                        sender.track = next
+                        resolve()
+                    })
+                })
             },
         }
         this.senders.push(sender)
         return sender
     }
 
-    addTransceiver(kind: string, init?: { direction?: string; streams?: MediaStream[] }) {
-        this.transceivers.push({ kind, direction: init?.direction ?? "sendrecv" })
+    addTransceiver(kindOrTrack: string | MediaStreamTrack, init?: { direction?: string; streams?: MediaStream[] }) {
+        const kind = typeof kindOrTrack === "string" ? kindOrTrack : kindOrTrack.kind
+        const track = typeof kindOrTrack === "string" ? null : kindOrTrack
+        const sender = this.makeSender(track)
+        const transceiver: FakePeerConnection["transceivers"][number] = {
+            kind,
+            direction: init?.direction ?? "sendrecv",
+            mid: null,
+            sender,
+            receiver: { track: { kind } },
+        }
+        transceiver.stop = () => { transceiver.direction = "stopped" }
+        this.transceivers.push(transceiver)
         this.queueNegotiation()
-        return { sender: this.makeSender(null) }
+        return { sender }
     }
 
     addTrack(track: MediaStreamTrack, _stream?: MediaStream) {
@@ -190,8 +277,19 @@ class FakePeerConnection {
             type === "offer"
                 ? `offer-sdp@${this.id}#${(this.offersMade += 1)}`
                 : `answer-sdp@${this.id}>${this.remoteDescription?.sdp?.split("@")[1] ?? ""}`
+        if (type === "offer" && !this.tracksAtFirstOffer) {
+            this.tracksAtFirstOffer = this.senders.map((sender) => sender.track)
+        }
+        if (type === "offer" && FakePeerConnection.separateSections) {
+            const included = this.transceivers.filter((transceiver) => transceiver.direction !== "stopped")
+            included.forEach((transceiver, index) => {
+                if (transceiver.mid == null) transceiver.mid = String(index)
+            })
+            FakePeerConnection.offerSections.set(sdp, included.map((transceiver) => transceiver.kind))
+        }
         this.localDescription = { type: type as RTCSdpType, sdp }
         this.signalingState = type === "offer" ? "have-local-offer" : "stable"
+        this.noteStable()
     }
 
     /**
@@ -225,8 +323,25 @@ class FakePeerConnection {
             )
         }
         if (origin) this.remoteOrigin = origin
+        // The offer's sections arrive beside any this side already created.
+        if (description.type === "offer" && FakePeerConnection.separateSections) {
+            const kinds = FakePeerConnection.offerSections.get(description.sdp ?? "") ?? []
+            kinds.forEach((kind) => {
+                const sender = this.makeSender(null)
+                const transceiver: FakePeerConnection["transceivers"][number] = {
+                    kind,
+                    direction: "recvonly",
+                    mid: String(this.transceivers.filter((item) => item.mid != null).length),
+                    sender,
+                    receiver: { track: { kind } },
+                }
+                transceiver.stop = () => { transceiver.direction = "stopped" }
+                this.transceivers.push(transceiver)
+            })
+        }
         this.remoteDescription = description
         this.signalingState = description.type === "offer" ? "have-remote-offer" : "stable"
+        this.noteStable()
     }
 
     async addIceCandidate(candidate: RTCIceCandidateInit) {
@@ -919,12 +1034,19 @@ describe("call mesh", () => {
         const screen = track("video")
 
         await alice.mesh.replaceTrack("video", camera)
+        const first = asFake(alice.connections[0].getSenders().find((s) => s.track)?.track)
         await alice.mesh.replaceTrack("video", screen)
 
-        // One sender, swapped, and no topology change at all.
+        // One sender, swapped, and no topology change at all. It encodes a clone:
+        // stopping that clone when the screen share ends must not stop the screen.
         expect(alice.connections[0].addedTracks).toEqual([])
         expect(alice.connections[0].getSenders().filter((s) => s.track)).toHaveLength(1)
-        expect(alice.connections[0].getSenders().find((s) => s.track)?.track).toBe(screen)
+        const sent = asFake(alice.connections[0].getSenders().find((s) => s.track)?.track)
+        expect(sent.clonedFrom).toBe(screen)
+        expect(sent).not.toBe(screen)
+        expect(first.readyState).toBe("ended")
+        expect(asFake(camera).readyState).toBe("live")
+        expect(asFake(screen).readyState).toBe("live")
     })
 
     it("reuses the sender after the outbound track is cleared, rather than adding a second one", async () => {
@@ -939,12 +1061,18 @@ describe("call mesh", () => {
         const screenAgain = track("video")
 
         await alice.mesh.replaceTrack("video", screen)
+        const first = asFake(alice.connections[0].getSenders().find((s) => s.track)?.track)
         await alice.mesh.replaceTrack("video", null)
         await alice.mesh.replaceTrack("video", screenAgain)
 
         expect(alice.connections[0].addedTracks).toEqual([])
         expect(alice.connections[0].getSenders().filter((s) => s.track)).toHaveLength(1)
-        expect(alice.connections[0].getSenders().find((s) => s.track)?.track).toBe(screenAgain)
+        const sent = asFake(alice.connections[0].getSenders().find((s) => s.track)?.track)
+        expect(sent.clonedFrom).toBe(screenAgain)
+        expect(sent).not.toBe(screenAgain)
+        expect(first.readyState).toBe("ended")
+        expect(asFake(screen).readyState).toBe("live")
+        expect(asFake(screenAgain).readyState).toBe("live")
     })
 
     it("stops sending when the outbound track is cleared", async () => {
@@ -952,10 +1080,14 @@ describe("call mesh", () => {
         alice.mesh.setRoster(["did:alice", "did:bob"])
         await settle()
 
-        await alice.mesh.replaceTrack("video", track("video"))
+        const camera = track("video")
+        await alice.mesh.replaceTrack("video", camera)
+        const first = asFake(alice.connections[0].getSenders().find((sender) => sender.track)?.track)
         await alice.mesh.replaceTrack("video", null)
 
         expect(alice.connections[0].getSenders().every((sender) => sender.track === null)).toBe(true)
+        expect(first.readyState).toBe("ended")
+        expect(asFake(camera).readyState).toBe("live")
     })
 
     it("sends a peer joining mid-call the media already being sent", async () => {
@@ -969,8 +1101,85 @@ describe("call mesh", () => {
         await settle()
 
         // Attached to the section created with the connection, rather than added as a new one.
+        // A clone: the mic the caller holds stays live when this connection closes.
+        const sent = asFake(alice.connections[0].getSenders().find((sender) => sender.track)?.track)
         expect(alice.connections[0].addedTracks).toEqual([])
-        expect(alice.connections[0].getSenders().find((sender) => sender.track)?.track).toBe(mic)
+        expect(sent.clonedFrom).toBe(mic)
+        expect(sent).not.toBe(mic)
+        expect(asFake(mic).readyState).toBe("live")
+    })
+
+    it("offers a camera that is already on in the first offer", async () => {
+        // Firefox will not reuse a section this side created for the peer's
+        // offer. It answers recvonly, then a second offer adds a sendonly
+        // video section beside it. Packets for the new section are then taken
+        // by the first (bug 1874471), so this side stops receiving video while
+        // audio and ICE stay up. The camera has to be in the impolite side's
+        // first offer, and the polite side has to answer on those sections.
+        FakePeerConnection.deferReplace = true
+        try {
+            const alice = await makeMesh(bus, "did:alice", CALL_ID, { localStream: stream(track("audio"), track("video")) })
+            const bob = await makeMesh(bus, "did:bob", CALL_ID, { localStream: stream(track("audio"), track("video")) })
+            alice.mesh.setRoster(["did:alice", "did:bob"])
+            bob.mesh.setRoster(["did:alice", "did:bob"])
+            await settleAll()
+
+            // did:alice < did:bob, so Alice's offer is the one that survives.
+            // A browser applies replaceTrack after this offer; the tracks have
+            // to already be on the senders or the offer goes out recvonly.
+            expect(alice.connections[0].tracksAtFirstOffer?.map((item) => item?.kind)).toEqual(["audio", "video"])
+            expect(alice.connections[0].transceivers.map((item) => item.kind)).toEqual(["audio", "video"])
+            expect(bob.connections[0].transceivers.map((item) => item.kind)).toEqual(["audio", "video"])
+            expect(bob.connections[0].localDescription?.type).toBe("answer")
+            expect(alice.errors).toEqual([])
+            expect(bob.errors).toEqual([])
+        } finally {
+            FakePeerConnection.deferReplace = false
+        }
+    })
+
+    it("answers on the offer's sections when this side already created its own", async () => {
+        // The offer arrives before `negotiationneeded`. Firefox and Chromium
+        // then keep both sets of sections. Stopping the unused ones spins
+        // negotiation; the answer has to be the only sections, with the camera
+        // on them.
+        FakePeerConnection.separateSections = true
+        FakePeerConnection.deferNegotiation = true
+        try {
+            const alice = await makeMesh(bus, "did:alice", CALL_ID, { localStream: stream(track("audio"), track("video")) })
+            const bob = await makeMesh(bus, "did:bob", CALL_ID, { localStream: stream(track("audio"), track("video")) })
+            alice.mesh.setRoster(["did:alice", "did:bob"])
+            bob.mesh.setRoster(["did:alice", "did:bob"])
+            await settleAll()
+
+            expect(bob.connections).toHaveLength(2)
+            expect(bob.connections[0].closed).toBe(true)
+            const answered = bob.live()
+            expect(answered.localDescription?.type).toBe("answer")
+            expect(answered.transceivers.map((item) => `${item.kind}:${item.direction}`)).toEqual([
+                "audio:sendrecv",
+                "video:sendrecv",
+            ])
+            expect(answered.getSenders().map((sender) => sender.track?.kind)).toEqual(["audio", "video"])
+            // The connection that was replaced encoded its own clones, and closing
+            // it stops those. The camera they came from keeps going on the new one.
+            const closedVideo = asFake(bob.connections[0].getSenders().find((sender) => sender.track?.kind === "video")?.track)
+            const liveVideo = asFake(answered.getSenders().find((sender) => sender.track?.kind === "video")?.track)
+            expect(closedVideo.readyState).toBe("ended")
+            expect(liveVideo.readyState).toBe("live")
+            expect(closedVideo).not.toBe(liveVideo)
+            expect(liveVideo.clonedFrom).toBe(closedVideo.clonedFrom)
+            expect(liveVideo.clonedFrom?.readyState).toBe("live")
+            expect(answered.spins).toBe(0)
+            expect(alice.connections).toHaveLength(1)
+            expect(alice.live().localDescription?.type).toBe("offer")
+            expect(alice.errors).toEqual([])
+            expect(bob.errors).toEqual([])
+        } finally {
+            FakePeerConnection.separateSections = false
+            FakePeerConnection.deferNegotiation = false
+            FakePeerConnection.offerSections.clear()
+        }
     })
 
     it("attaches the tracks handed to join, one per kind", async () => {
@@ -980,8 +1189,47 @@ describe("call mesh", () => {
         alice.mesh.setRoster(["did:alice", "did:bob"])
         await settle()
 
+        const sent = alice.connections[0].getSenders().map((sender) => asFake(sender.track))
         expect(alice.connections[0].addedTracks).toEqual([])
-        expect(alice.connections[0].getSenders().map((sender) => sender.track)).toEqual([mic, camera])
+        expect(sent.map((item) => item.kind)).toEqual(["audio", "video"])
+        expect(sent[0].clonedFrom).toBe(mic)
+        expect(sent[1].clonedFrom).toBe(camera)
+        expect(sent[0]).not.toBe(mic)
+        expect(sent[1]).not.toBe(camera)
+        expect(asFake(mic).readyState).toBe("live")
+        expect(asFake(camera).readyState).toBe("live")
+    })
+
+    it("gives each connection its own clone of a track, and stopping one leaves the others", async () => {
+        // One camera on two connections shares an encoder. Closing one changes
+        // the SSRC the other still sends, and Firefox keeps demuxing the old
+        // one, so that video freezes while the transport stays up.
+        const camera = new FakeTrack("video")
+        const alice = await makeMesh(bus, "did:alice", CALL_ID, {
+            localStream: stream(camera as unknown as MediaStreamTrack),
+        })
+        alice.mesh.setRoster(["did:alice", "did:bob", "did:carol"])
+        await settle()
+
+        const videoOf = (pc: FakePeerConnection) =>
+            asFake(pc.getSenders().find((sender) => sender.track?.kind === "video")?.track)
+        const sent = alice.connections.map(videoOf)
+        expect(sent).toHaveLength(2)
+        expect(sent[0].clonedFrom).toBe(camera)
+        expect(sent[1].clonedFrom).toBe(camera)
+        expect(sent[0]).not.toBe(sent[1])
+        expect(sent[0]).not.toBe(camera)
+        expect(sent[1]).not.toBe(camera)
+
+        alice.mesh.setRoster(["did:alice", "did:bob"])
+        await settle()
+
+        const closed = alice.connections.find((pc) => pc.closed)
+        const live = alice.connections.find((pc) => !pc.closed)
+        expect(videoOf(closed!).readyState).toBe("ended")
+        expect(videoOf(live!).readyState).toBe("live")
+        expect(videoOf(live!)).not.toBe(videoOf(closed!))
+        expect(camera.readyState).toBe("live")
     })
 
     it("stops negotiating once left", async () => {
