@@ -100,6 +100,12 @@ const CHECK_CONNECTION_DEADLINE_MS = 8_000
 /** A socket that delivered a message this recently is alive: `checkConnection` sends no probe. */
 const CHECK_CONNECTION_HEARD_MS = 5_000
 
+/** A request with no reply this long on a socket nothing arrived on since
+ *  the request was sent makes the socket itself suspect: `checkConnection`
+ *  probes it. A request on a socket that keeps delivering is just slow, and
+ *  times out as an RPC failure — the frames that did arrive prove it. */
+const PENDING_PROBE_MS = 4_000
+
 /** The bytes `text` takes as UTF-8, as a WebSocket text frame sends it. */
 function utf8Length(text: string): number {
     let bytes = text.length
@@ -127,6 +133,8 @@ interface PendingCall {
     message: string
     /** True once the message went out on the current socket. */
     sent: boolean
+    /** When the message last went out on the current socket (`performance.now`). */
+    sentAt: number
     /** Sockets that closed before this call went out. */
     failedConnects: number
     /** True while a retryable read has its one retry left. */
@@ -195,6 +203,10 @@ export class ApiClient {
     private _wsSentBy = 0
     /** A `checkConnection` probe waiting for the open socket to say anything; null when none. */
     private _wsProbeTimer: ReturnType<typeof setTimeout> | null = null
+    /** The wait for the next request's PENDING_PROBE_MS silence; null when no sent request needs one. */
+    private _wsPendingProbeTimer: ReturnType<typeof setTimeout> | null = null
+    /** What `_wsPendingProbeTimer` is armed for. */
+    private _wsPendingProbeAt = 0
     /** When the open socket last delivered a message. */
     private _wsHeardAt = -Infinity
     // The executor sends a socket only the events it asked for (`events.watch`).
@@ -257,6 +269,7 @@ export class ApiClient {
                 this._wsPingedAt = null
                 this._wsHeardAt = performance.now()
                 this._endProbe()
+                this._armPendingProbe()
             }
             let parsed: Record<string, unknown>
             try { parsed = JSON.parse(event.data) } catch (e) {
@@ -313,8 +326,10 @@ export class ApiClient {
             if (!pending.sent) {
                 this._send(ws, pending.message)
                 pending.sent = true
+                pending.sentAt = performance.now()
             }
         }
+        this._armPendingProbe()
         if (this._hasConnectedOnce) {
             for (const cb of this._reconnectCallbacks) {
                 try { cb() } catch (e) {
@@ -471,6 +486,7 @@ export class ApiClient {
             this._wsPingTimer = null
         }
         this._endProbe()
+        this._endPendingProbe()
     }
 
     private _endProbe(): void {
@@ -478,6 +494,58 @@ export class ApiClient {
             clearTimeout(this._wsProbeTimer)
             this._wsProbeTimer = null
         }
+    }
+
+    private _endPendingProbe(): void {
+        if (this._wsPendingProbeTimer) {
+            clearTimeout(this._wsPendingProbeTimer)
+            this._wsPendingProbeTimer = null
+        }
+        this._wsPendingProbeAt = 0
+    }
+
+    /**
+     * A request sent on the open socket that nothing has answered — no reply,
+     * and no other frame since it went out — asks the socket itself after
+     * PENDING_PROBE_MS. The check is one wake for the earliest such request;
+     * it fires into `checkConnection`, so an active probe covers it and the
+     * CHECK_CONNECTION_HEARD_MS silence rule applies. A request the socket
+     * outlives (resent after a reconnect) is armed again when it goes out.
+     */
+    private _armPendingProbe(): void {
+        const now = performance.now()
+        let due = Infinity
+        for (const pending of this._pendingCalls.values()) {
+            // A frame at or after a request's send proves the socket for it.
+            if (!pending.sent || this._wsHeardAt >= pending.sentAt) continue
+            // The heard-skip is built into the wait rather than retried.
+            const at = Math.max(
+                pending.sentAt + PENDING_PROBE_MS,
+                this._wsHeardAt + CHECK_CONNECTION_HEARD_MS,
+            )
+            // A request already due got its probe (or is covered by a running one).
+            if (at > now && at < due) due = at
+        }
+        if (due === Infinity) {
+            this._endPendingProbe()
+            return
+        }
+        if (this._wsPendingProbeTimer && this._wsPendingProbeAt <= due) return
+        this._endPendingProbe()
+        this._wsPendingProbeAt = due
+        this._wsPendingProbeTimer = setTimeout(() => {
+            this._wsPendingProbeTimer = null
+            this._wsPendingProbeAt = 0
+            const now = performance.now()
+            for (const pending of this._pendingCalls.values()) {
+                if (!pending.sent || this._wsHeardAt >= pending.sentAt) continue
+                if (now - pending.sentAt >= PENDING_PROBE_MS) {
+                    this.checkConnection()
+                    break
+                }
+            }
+            this._armPendingProbe()
+        }, due - now)
     }
 
     private _scheduleReconnect(): void {
@@ -602,6 +670,7 @@ export class ApiClient {
             const pending: PendingCall = {
                 message,
                 sent: false,
+                sentAt: 0,
                 failedConnects: 0,
                 retry: (READ_METHODS as ReadonlySet<string>).has(type),
                 watch: type === 'events.watch',
@@ -620,6 +689,8 @@ export class ApiClient {
             if (this._ws!.readyState === 1 /* OPEN */) {
                 this._send(this._ws!, message)
                 pending.sent = true
+                pending.sentAt = performance.now()
+                this._armPendingProbe()
             }
         })
     }

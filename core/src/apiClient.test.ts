@@ -416,6 +416,7 @@ describe('ApiClient notices a socket that went silent', () => {
         // write takes. That silence is not a dead socket.
         open()
         socket(0).open()
+        socket(0).reply({ id: socket(0).sent[0].id, result: {} }) // the events.watch reply
         const write = call<string>('perspective.addLink', { uuid: 'u', blob: 'x'.repeat(600_000) }, { timeoutMs: 120_000 })
         await jest.advanceTimersByTimeAsync(30_000)
         expect(TestSocket.instances).toHaveLength(1)
@@ -441,6 +442,7 @@ describe('ApiClient notices a socket that went silent', () => {
         // a 600 kB write takes 37.5 s at 16 kB/s, whatever arrives meanwhile.
         open()
         socket(0).open()
+        socket(0).reply({ id: socket(0).sent[0].id, result: {} }) // the events.watch reply
         const write = outcomeOf(call('perspective.addLink', { uuid: 'u', blob: 'x'.repeat(600_000) }, { timeoutMs: 120_000 }))
         await jest.advanceTimersByTimeAsync(1_000)
         socket(0).reply({ type: 'agent-updated' })
@@ -747,6 +749,122 @@ describe('ApiClient checkConnection', () => {
     })
 })
 
+describe('ApiClient pending-request probe', () => {
+    // A request that gets no reply while nothing at all arrives on the
+    // socket makes the socket itself suspect: after a few seconds the client
+    // pings it. Anything back — the reply, a pong, an event — proves it.
+    // A slow request on a socket that keeps delivering is just slow, and
+    // times out as an RPC failure.
+    beforeEach(() => {
+        TestSocket.autoOpen = false
+        TestSocket.closeHangs = true
+        TestSocket.answersPings = false
+        jest.useFakeTimers()
+    })
+    afterEach(() => jest.useRealTimers())
+
+    const pings = (i: number) => socket(i).sent.filter(m => m.type === 'ping').length
+
+    it('probes once a request has had no reply for 4 s and nothing arrived since it was sent', async () => {
+        const changed = jest.fn()
+        client.onNetworkChange(changed)
+        open()
+        socket(0).open()
+        const read = call<string[]>('perspective.all', {}, { timeoutMs: 120_000 })
+
+        await jest.advanceTimersByTimeAsync(3_999)
+        expect(pings(0)).toBe(0)
+        await jest.advanceTimersByTimeAsync(1)
+        expect(pings(0)).toBe(1)
+
+        // The probe meets silence: the socket is dropped and redialled at once.
+        await jest.advanceTimersByTimeAsync(8_000)
+        expect(socket(0).readyState).toBe(2)
+        expect(TestSocket.instances).toHaveLength(2)
+        socket(1).open()
+        expect(changed).toHaveBeenCalledTimes(1)
+        socket(1).reply({ id: socket(1).sent.find(m => m.type === 'perspective.all')!.id, result: ['p'] })
+        await expect(read).resolves.toEqual(['p'])
+    })
+
+    it('ends the probe on any frame: the reply itself proves the socket', async () => {
+        open()
+        socket(0).open()
+        const read = call<string[]>('perspective.all', {}, { timeoutMs: 120_000 })
+        await jest.advanceTimersByTimeAsync(4_000)
+        expect(pings(0)).toBe(1)
+
+        socket(0).reply({ id: socket(0).sent.find(m => m.type === 'perspective.all')!.id, result: ['p'] })
+        await jest.advanceTimersByTimeAsync(8_000)
+        expect(socket(0).readyState).toBe(1)
+        await expect(read).resolves.toEqual(['p'])
+    })
+
+    it('ends the probe on a pong, and the pending request then fails as an RPC failure, not a dead socket', async () => {
+        TestSocket.answersPings = true
+        open()
+        socket(0).open()
+        const read = outcomeOf(call('perspective.all', {}, { timeoutMs: 30_000 }))
+        await jest.advanceTimersByTimeAsync(4_000)
+        expect(pings(0)).toBe(1)
+
+        // The ping's pong proves the socket; the unanswered request runs to
+        // its own timeout and fails with 408, while the socket stays.
+        await jest.advanceTimersByTimeAsync(26_000)
+        expect(read()).toMatchObject({ name: 'RpcError', status: 408 })
+        expect(socket(0).readyState).toBe(1)
+    })
+
+    it('probes no request that a frame postdates, however long it waits', async () => {
+        open()
+        socket(0).open()
+        const read = outcomeOf(call('perspective.all', {}, { timeoutMs: 30_000 }))
+        await jest.advanceTimersByTimeAsync(3_500)
+        socket(0).reply({ type: 'agent-updated' })
+
+        // The event after the request was sent proves the socket; pending for
+        // 9.5 s now is the request's own wait, so no probe ping goes out.
+        await jest.advanceTimersByTimeAsync(6_000)
+        expect(pings(0)).toBe(0)
+        expect(read()).toBe('pending')
+    })
+
+    it('sends one probe for several pending requests', async () => {
+        open()
+        socket(0).open()
+        call('perspective.all', {}, { timeoutMs: 120_000 })
+        await jest.advanceTimersByTimeAsync(3_000)
+        call('agent.get', {}, { timeoutMs: 120_000 })
+        await jest.advanceTimersByTimeAsync(1_000)
+        expect(pings(0)).toBe(1)
+
+        // The second request's 4 s pass inside the first's probe: still one ping.
+        await jest.advanceTimersByTimeAsync(4_000)
+        expect(pings(0)).toBe(1)
+        await jest.advanceTimersByTimeAsync(4_000)
+        expect(socket(0).readyState).toBe(2)
+    })
+
+    it('probes a request a reconnect sent again once the new socket goes quiet', async () => {
+        open()
+        socket(0).open()
+        const read = call<string[]>('perspective.all', {}, { timeoutMs: 120_000 })
+        await jest.advanceTimersByTimeAsync(4_000)
+        expect(pings(0)).toBe(1)
+        await jest.advanceTimersByTimeAsync(8_000)
+        expect(socket(0).readyState).toBe(2)
+
+        // The read is resent on the new socket; its own silence re-arms the probe.
+        socket(1).open()
+        await jest.advanceTimersByTimeAsync(4_000)
+        expect(pings(1)).toBe(1)
+        socket(1).reply({ id: socket(1).sent.find(m => m.type === 'perspective.all')!.id, result: ['p'] })
+        await jest.advanceTimersByTimeAsync(8_000)
+        expect(socket(1).readyState).toBe(1)
+        await expect(read).resolves.toEqual(['p'])
+    })
+})
+
 describe('ApiClient on a network change', () => {
     // A browser says the network changed with `online` on the window and
     // `change` on `navigator.connection` (Chromium). Node has neither, so the
@@ -1036,6 +1154,7 @@ describe('ApiClient.reconnectNow', () => {
         TestSocket.answersPings = false
         open()
         socket(0).open()
+        socket(0).reply({ id: socket(0).sent[0].id, result: {} }) // the events.watch reply
         await jest.advanceTimersByTimeAsync(20_000)
         expect(socket(0).readyState).toBe(2) // dropped as silent, waiting 500 ms
         expect(TestSocket.instances).toHaveLength(1)
