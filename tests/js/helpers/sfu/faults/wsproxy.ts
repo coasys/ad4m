@@ -144,6 +144,8 @@ export class WsShaper {
   private connSeq = 0;
   private sockets = new Set<Socket>();
   private rules: DropRule[] = [];
+  /** Requests whose reply is to be eaten: armed by `dropReplyOnce`. */
+  private replyRules: { method: string; resolve: (dropped: DroppedMessage) => void }[] = [];
   port = 0;
   droppedLog: DroppedMessage[] = [];
   constructor(
@@ -179,6 +181,34 @@ export class WsShaper {
     return { dropped };
   }
 
+  /**
+   * Eat the executor's reply to the first `method` request the client sends
+   * from now on: the request reaches the executor and is applied, the client
+   * never hears the result. Resolves once the reply was eaten.
+   */
+  dropReplyOnce(method: string): { dropped: Promise<DroppedMessage> } {
+    const dropped = new Promise<DroppedMessage>((resolve) => {
+      this.replyRules.push({ method, resolve });
+    });
+    return { dropped };
+  }
+
+  /** An up message that is the request a reply rule waits for arms a drop of its reply. */
+  private armReply(text: string): void {
+    const idx = this.replyRules.findIndex((r) => matchRpc(r.method)(text, OPCODE_TEXT));
+    if (idx === -1) return;
+    const [rule] = this.replyRules.splice(idx, 1);
+    const id = JSON.parse(text).id;
+    this.rules.push({
+      direction: "down",
+      match: (reply) => {
+        const m = JSON.parse(reply);
+        return m != null && typeof m === "object" && m.type === undefined && m.id === id;
+      },
+      resolve: rule.resolve,
+    });
+  }
+
   private attach(client: Socket): void {
     const conn = ++this.connSeq;
     const executor = connect(this.target, "127.0.0.1");
@@ -201,6 +231,7 @@ export class WsShaper {
 
     const completeMessage = (dir: WsDirection, msg: PendingMessage): void => {
       const text = Buffer.concat(msg.payloads).toString("utf8");
+      if (dir === "up") this.armReply(text);
       const idx = this.rules.findIndex((r) => (r.direction === "both" || r.direction === dir) && safeMatch(r.match, text, msg.opcode));
       if (idx === -1) {
         forward(dir, msg.raws);
@@ -265,7 +296,10 @@ export class WsShaper {
       const rest = Buffer.from(head.subarray(end + 4));
       head = Buffer.alloc(0);
       mode = is101 ? "frames" : "raw";
-      if (is101 && rest.length > 0) feedFrames("down", rest);
+      if (rest.length > 0) {
+        if (is101) feedFrames("down", rest);
+        else forward("down", [rest]);
+      }
     });
 
     let by: "client" | "executor" | null = null;
