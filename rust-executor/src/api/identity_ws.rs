@@ -317,7 +317,7 @@ mod tests {
 
     /// Each call carries its guard: reads the agent read capability; co-signing and publishing
     /// the agent sign and update capabilities, and for the main agent the operator (unlinking, a
-/// user's login or the operator, no app); other writes
+    /// user's login or the operator, no app); other writes
     /// the agent update capability; a claim for the main agent and a log reset the operator.
     #[test]
     fn every_identity_call_has_its_guard() {

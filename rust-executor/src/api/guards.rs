@@ -531,6 +531,57 @@ mod tests {
         );
     }
 
+    /// A key session is the user acting from a listed device, so it may unlink; an app the
+    /// session approved carries the binding delegated, and may not.
+    #[tokio::test]
+    async fn a_user_login_guard_takes_a_key_session_and_refuses_the_apps_it_approved() {
+        use crate::agent::grants::{KeyBinding, LiveGrant};
+        let update = crate::agent::capabilities::AGENT_UPDATE_CAPABILITY.clone();
+        let guard = Guard::UserLoginOrOperator(update.clone());
+        let method = "identity.unlinkSelf";
+        let on_key = |delegated: bool| {
+            let agent = crate::agent::AgentContext::managed("did:key:alice".to_string());
+            let mut grant = LiveGrant::for_test("token-1", agent.clone(), u64::MAX);
+            // An approval: its request id is not the grant's own.
+            grant.request_id = "request-1".to_string();
+            let binding = KeyBinding::new(
+                "did:scid:coasys:1:alice".into(),
+                "z6MkPhone".into(),
+                "d2".into(),
+                1,
+                0,
+            );
+            grant.key = Some(if delegated {
+                binding.delegate()
+            } else {
+                binding
+            });
+            RequestContext::for_session(
+                crate::agent::session::Session::for_test(crate::agent::session::Principal::Agent(
+                    agent,
+                ))
+                .with_caps(vec![update.clone()])
+                .with_did("did:key:alice")
+                .with_grant(std::sync::Arc::new(grant)),
+            )
+        };
+        assert!(guard
+            .admit(method, &Value::Null, &on_key(false))
+            .await
+            .is_ok());
+        let err = guard
+            .admit(method, &Value::Null, &on_key(true))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (err.code, err.message.as_str()),
+            (
+                403,
+                "identity.unlinkSelf may not be called by an app, a user must call it"
+            )
+        );
+    }
+
     #[test]
     fn an_id_param_reads_the_field_it_names() {
         use serde_json::json;
