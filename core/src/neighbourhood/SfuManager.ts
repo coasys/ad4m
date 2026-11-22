@@ -151,14 +151,15 @@ export type SfuEvent =
     /** `(SfuSessionReplaced)` — a later join from this device took the call over; this manager stopped. */
     | "replaced"
     /** `(SfuCallEnded)` — the call ended on its own and will not come back without a new `join`:
-     *  the rebuild budget ran out (`reason: "gave-up"`), or the executor said this session is
+     *  rebuilding gave up on it (`reason: "gave-up"`), or the executor said this session is
      *  another agent's (`reason: "refused"`). The manager has stopped. */
     | "call-ended"
     | "error"
 
 /** Why a call ended without the user leaving it. */
 export interface SfuCallEnded {
-    /** `gave-up`: MAX_REBUILDS rebuilds within REBUILD_WINDOW_MS did not keep the call up.
+    /** `gave-up`: rebuilding could not keep the call up — MAX_REBUILDS within
+     *  REBUILD_WINDOW_MS, or a rejoin window spent without a rejoin.
      *  `refused`: the executor said this session is another agent's (403). */
     reason: "gave-up" | "refused"
     error: Error
@@ -445,10 +446,11 @@ export class SfuManager {
      * the manager stops as the notice would have stopped it, without retrying.
      *
      * Two budgets. At most `MAX_REBUILDS` rebuilds start within
-     * `REBUILD_WINDOW_MS`; one more ends the call (`endCall`): `error`, then
+     * `REBUILD_WINDOW_MS`; one more ends the call: `error`, then
      * `call-ended` with reason `gave-up`, until the user joins again. Within one rebuild, a join that fails because
      * the executor cannot be reached — a restart, an outage — is retried with backoff for up to
-     * `REJOIN_WINDOW_MS`, so the call comes back on its own once it can.
+     * `REJOIN_WINDOW_MS`, so the call comes back on its own once it can. A window spent without a
+     * rejoin ends it the same way (`giveUp`).
      */
     private async reconnect(): Promise<void> {
         const stream = this.state.localStream
@@ -460,11 +462,7 @@ export class SfuManager {
             console.error(
                 `SFU: ${this.rebuilds.length} rebuilds in ${SfuManager.REBUILD_WINDOW_MS / 1000} s; not rebuilding again`,
             )
-            const error = new Error("SFU reconnect attempts exhausted")
-            // No rejoin, so no roster will settle who is still here.
-            this.resetParticipants()
-            this.emit("error", error)
-            this.endCall({ reason: "gave-up", error })
+            this.giveUp(new Error("SFU reconnect attempts exhausted"))
             return
         }
         this.rebuilds.push(now)
@@ -506,9 +504,7 @@ export class SfuManager {
                     }
                     if (Date.now() + delay > deadline) {
                         console.error("SFU reconnect failed:", e)
-                        // No rejoin, so no roster will settle who is still here.
-                        this.resetParticipants()
-                        this.emit("error", e)
+                        this.giveUp(e instanceof Error ? e : new Error(String(e)))
                         return
                     }
                     console.warn(`SFU: rejoin failed, retrying in ${delay} ms:`, e)
@@ -1263,6 +1259,18 @@ export class SfuManager {
         void this.leaveSession()
         this.resetParticipants()
         this.emit("replaced", event)
+    }
+
+    /**
+     * A terminal give-up: the call cannot come back on its own. No rejoin
+     * will run, so no roster will settle who is still here — the
+     * participants are told they left first, then the failure is reported
+     * and the call ended `gave-up`.
+     */
+    private giveUp(error: Error): void {
+        this.resetParticipants()
+        this.emit("error", error)
+        this.endCall({ reason: "gave-up", error })
     }
 
     /**
