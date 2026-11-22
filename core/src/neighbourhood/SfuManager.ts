@@ -359,9 +359,10 @@ export class SfuManager {
     private unsentAnswer: UnsentAnswer | null = null
     /** An ICE restart request a socket fault (503, 408) kept from the
      *  executor: the restart it belongs to stays in flight, and the request
-     *  goes out again from `socketBack`. Set only while a restart is in
-     *  flight — the restart's timeout still decides when the wait is over. */
-    private unsentRestart: { pc: RTCPeerConnection; participantId: string } | null = null
+     *  goes out again from `socketBack`. Set only while the restart it
+     *  belongs to is the current one — a network change that replaced it
+     *  ends its wait, and its own late failure retains nothing. */
+    private unsentRestart: { pc: RTCPeerConnection; participantId: string; timer: ReturnType<typeof setTimeout> } | null = null
     private reconnectUnsubscribe: (() => void) | null = null
     private renegotiationUnsubscribe: (() => void) | null = null
     private rosterUnsubscribe: (() => void) | null = null
@@ -536,30 +537,34 @@ export class SfuManager {
         if (this.restartTimer || this.reconnecting || this.state.peerConnection !== pc || !participantId) return
         const generation = this.generation
         console.info("SFU: restarting ICE")
-        this.restartTimer = setTimeout(() => {
+        const restart = setTimeout(() => {
             this.restartTimer = null
             if (generation !== this.generation || this.state.peerConnection !== pc) return
             if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") return
             void this.reconnect()
         }, SfuManager.RESTART_TIMEOUT_MS)
-        this.sendRestart(pc, participantId)
+        this.restartTimer = restart
+        this.sendRestart(pc, participantId, restart)
     }
 
     /**
      * Ask the executor to restart ICE on `pc`'s session. A socket fault
      * (503, 408) means the request may never have arrived — the socket the
      * network change closed rejected it — so it is kept for `socketBack`
-     * to send again. A refusal (an executor that lost this session) leaves
-     * the decision to the restart's timeout: a blip may still heal.
+     * to send again, but only while `restart` is still the current one:
+     * a network change that replaced it already sent its own request, and
+     * keeping the old one's would send a restart the restart in flight
+     * never asked for. A refusal (an executor that lost this session)
+     * leaves the decision to the restart's timeout: a blip may still heal.
      */
-    private sendRestart(pc: RTCPeerConnection, participantId: string): void {
+    private sendRestart(pc: RTCPeerConnection, participantId: string, restart: ReturnType<typeof setTimeout>): void {
         this.neighbourhood.sfuCallRestartIce(this.neighbourhoodUrl, this.roomId, participantId).catch((err) => {
-            if (isSocketFault(err) && this.restartTimer && this.state.peerConnection === pc) {
+            if (isSocketFault(err) && this.restartTimer === restart && this.state.peerConnection === pc) {
                 console.warn(
                     "SFU: the ICE restart did not reach the executor; it goes out again once the socket is back:",
                     err,
                 )
-                this.unsentRestart = { pc, participantId }
+                this.unsentRestart = { pc, participantId, timer: restart }
                 return
             }
             console.warn("SFU: ICE restart refused:", err)
@@ -1127,7 +1132,7 @@ export class SfuManager {
                 const restart = this.unsentRestart
                 if (restart?.pc === pc) {
                     this.unsentRestart = null
-                    this.sendRestart(pc, restart.participantId)
+                    this.sendRestart(pc, restart.participantId, restart.timer)
                 }
                 await this.resume(pc)
             })
