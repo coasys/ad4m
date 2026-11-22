@@ -2199,6 +2199,34 @@ test("an offer the connection cannot apply still rebuilds the call", async () =>
 
 // ── Resume after a socket reconnect (C6) ────────────────────────────────────
 
+test("a socket reconnect during the join waits for the join to settle before resuming", async () => {
+    // The join returned its session but its answer is still applying: a
+    // reconnect's recovery must not run beside it — the resume's roster
+    // would race the join's own stream mapping.
+    const api = fakeApi()
+    const joinCall = deferred<CallSessionInfo>()
+    api.sfuCallJoin.mockImplementation(() => joinCall.promise)
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    const joining = manager.join(fakeStream())
+    await flush()
+    const remote = deferred<void>()
+    jest.spyOn(currentPc(), "setRemoteDescription").mockImplementationOnce(() => remote.promise)
+    joinCall.resolve(session())
+    await flush()
+
+    api.emitReconnect()
+    await flush()
+    await flush()
+    expect(api.sfuCallResume).not.toHaveBeenCalled()
+
+    remote.resolve()
+    await joining
+    await flush()
+    await flush()
+    expect(api.sfuCallResume).toHaveBeenCalledWith(URL, ROOM, MINE)
+    await manager.leave()
+})
+
 test("after the socket reconnects the manager asks the executor to resume its session", async () => {
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL)
@@ -3325,6 +3353,78 @@ test("a listed:false that lands after the box rebuilds nothing", async () => {
         expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
         expect(currentPc().closed).toBe(false)
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a restart's offer is answered while the resume's ask is still out", async () => {
+    // The resume the reconnect asks triggers the restart's offer on the
+    // executor; the offer must not wait for the reply — the restart's
+    // window closes whether the reply lands or not.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const resuming = deferred<SfuResumeResult>()
+        api.sfuCallResume.mockImplementation(() => resuming.promise)
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        const pc = currentPc()
+
+        await iceState("disconnected") // restart at t=0, deadline t=15
+        await jest.advanceTimersByTimeAsync(11_000)
+        api.emitReconnect() // socket back at t=11
+        await flush()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+
+        api.emitOffer(offer("restart-offer")) // the ask triggered it; it cannot wait for the reply
+        await jest.advanceTimersByTimeAsync(0)
+        await flush()
+        expect(pc.remoteSdps()).toEqual(["server-answer", "restart-offer"])
+        expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledWith(URL, ROOM, MINE, offer("restart-offer").offerId, expect.any(String))
+
+        await iceState("connected")
+        await jest.advanceTimersByTimeAsync(20_000)
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a socket back late in a restart bounds the resume's wait by the restart's remaining time", async () => {
+    // The restart had 15 s from its start; the socket came back at t=11,
+    // so the ask's bound is the restart's remaining 4 s — a reply after
+    // it is the call the restart already settled, whatever ICE did.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const resuming = deferred<SfuResumeResult>()
+        api.sfuCallResume.mockImplementation(() => resuming.promise)
+        const { manager, joined } = recordedManager(api)
+        await manager.join(fakeStream())
+
+        await iceState("disconnected") // restart at t=0, deadline t=15
+        await jest.advanceTimersByTimeAsync(11_000)
+        api.emitReconnect()
+        await flush()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+
+        // ICE comes back before the deadline, so the restart ends without a
+        // rebuild — but the ask's bound was the restart's, spent at t=15.
+        ;(currentPc() as any).iceConnectionState = "connected"
+        await jest.advanceTimersByTimeAsync(4_000)
+        resuming.resolve(
+            resumeListed({
+                roster: { revision: nextRevision++, participants: [{ participantId: MINE, agentDid: ME }, { participantId: pid(ALICE), agentDid: ALICE }] },
+            }),
+        )
+        await flush()
+        await flush()
+
+        // The reply landed after its bound: it applies no one.
+        expect(joined).toEqual([])
         await manager.leave()
     } finally {
         jest.useRealTimers()
