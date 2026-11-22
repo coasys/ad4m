@@ -221,6 +221,9 @@ export class UdpRelay {
   dropped = 0;
   private fronts = new Map<string, Promise<number>>();
   private sockets: UdpSocket[] = [];
+  /** Delayed sends not yet due: cancelled on close, so none reaches a closed socket. */
+  private pending = new Set<ReturnType<typeof setTimeout>>();
+  private closed = false;
   constructor(private random: () => number) {}
   portFor(target: string): Promise<number> {
     let port = this.fronts.get(target);
@@ -235,13 +238,19 @@ export class UdpRelay {
     this.delayMs = c.delayMs ?? 0;
   }
   private pass(send: () => void): void {
+    if (this.closed) return;
     if (this.random() * 100 < this.loss) {
       this.dropped++;
       return;
     }
     this.passed++;
-    if (this.delayMs > 0) setTimeout(send, this.delayMs + this.random() * this.delayMs * 0.2);
-    else send();
+    if (this.delayMs > 0) {
+      const timer = setTimeout(() => {
+        this.pending.delete(timer);
+        if (!this.closed) send();
+      }, this.delayMs + this.random() * this.delayMs * 0.2);
+      this.pending.add(timer);
+    } else send();
   }
   private async open(target: string): Promise<number> {
     const at = target.lastIndexOf(":");
@@ -264,6 +273,9 @@ export class UdpRelay {
     return front.address().port;
   }
   close(): void {
+    this.closed = true;
+    for (const timer of this.pending) clearTimeout(timer);
+    this.pending.clear();
     for (const s of this.sockets) {
       try {
         s.close();
