@@ -404,11 +404,21 @@ export class ApiClient {
             // a new online state says the path may have changed.
             const path = () => `${connection.type}|${navigator?.onLine}`
             let lastPath = path()
+            const hasType = connection.type !== undefined
             const onPathChange = () => {
                 const now = path()
-                if (now === lastPath) return
-                lastPath = now
-                this._onConnectionChange()
+                if (now !== lastPath) {
+                    lastPath = now
+                    this._onConnectionChange()
+                    return
+                }
+                // The platform reports no `type` (desktop Chromium): the
+                // event can still mean the path moved underneath — a
+                // Wi-Fi-to-Ethernet switch and a moved estimate look alike
+                // in the key. Let the socket judge it: a real change kills
+                // it and the probe's drop redials; an estimate's keeps it
+                // and marks nothing.
+                if (!hasType) this.checkConnection()
             }
             connection.addEventListener('change', onPathChange)
             removers.push(() => connection.removeEventListener?.('change', onPathChange))
