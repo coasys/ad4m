@@ -147,9 +147,9 @@ enum OfferDeadline {
     Wait,
     /// Publish the cached SDP again. The token stays pending.
     Resend,
-    /// A pipe that already had a path has resent this offer through the
-    /// back-off. Drop the token and offer the deferred tracks again.
-    Replace,
+    /// An established pipe's offer is still unanswered after the second
+    /// resend. Disconnect the pipe. The cascade redials it.
+    End,
 }
 
 /// A client's ICE restart in flight. The SFU stays the only offerer: the
@@ -208,12 +208,13 @@ pub const PEER_ESTABLISH_TIMEOUT: Duration = Duration::from_secs(
 /// once: resends at t=10s and t=30s, then every [`OFFER_RESEND_STEADY`]
 /// (t=60s, 90s, ...) for as long as the offer is unanswered.
 ///
-/// An unanswered offer never drops the peer. #1802 dropped it at t=70s,
-/// also while ICE was up and its media flowed: a client whose socket was
-/// down for a minute lost a healthy call. A client keeps the offer and
-/// resends it. A pipe that already had a path replaces the offer after the
-/// back-off resends ([`PIPE_OFFER_RESEND_LIMIT`]): the token is dropped and
-/// the tracks are offered again. A pipe that never had a path keeps the
+/// An unanswered offer never drops a client peer. #1802 dropped it at
+/// t=70s, also while ICE was up and its media flowed: a client whose
+/// socket was down for a minute lost a healthy call. A client keeps the
+/// offer and resends it. An established pipe ends after the back-off
+/// resends ([`PIPE_OFFER_RESEND_LIMIT`]): the pipe is disconnected and the
+/// cascade redials it, so a token the remote may already have applied is
+/// not offered again with new mids. A pipe that never had a path keeps the
 /// initial offer until [`PEER_ESTABLISH_TIMEOUT`]. A peer whose client is
 /// gone ends by the ICE rules ([`ICE_DISCONNECT_GRACE`], [`ICE_RESTART_GRACE`]).
 const OFFER_RETRY_BASE: Duration = Duration::from_secs(10);
@@ -221,12 +222,14 @@ const OFFER_RETRY_BASE: Duration = Duration::from_secs(10);
 /// Resends that back off from [`OFFER_RETRY_BASE`] before the steady wait.
 const OFFER_BACKOFF_RESENDS: u32 = 2;
 
-/// A pipe that already had a path replaces an unanswered offer after this
-/// many resends (the back-off: t=10 s and t=30 s). The next deadline drops
-/// the token so deferred tracks can be offered again. An initial pipe
-/// offer, before any path, is not replaced: it carries the pipe-control
+/// An established pipe ends an unanswered offer after this many resends
+/// (the back-off: t=10 s and t=30 s). The next deadline disconnects the
+/// pipe. The cascade redials it after [`super::cascade::PIPE_REDIAL_BACKOFF`],
+/// which doubles when the new pipe fails the same way. An initial pipe
+/// offer, before any path, is not ended here: it carries the pipe-control
 /// channel, and [`PEER_ESTABLISH_TIMEOUT`] drops that pipe. A client offer
-/// is never replaced.
+/// is never ended here. A crossed offer ([`RtcError::ChangesOutOfOrder`])
+/// is not an end either: the tracks are queued again on this pipe.
 const PIPE_OFFER_RESEND_LIMIT: u32 = OFFER_BACKOFF_RESENDS;
 
 /// Wait between resends after the back-off, and after a `sfu.callResume`.
@@ -326,6 +329,26 @@ impl SfuPeer {
     /// peer being made.
     pub fn never_established(&self, now: Instant) -> bool {
         !self.had_path && now >= self.created_at + PEER_ESTABLISH_TIMEOUT
+    }
+
+    /// Why the sweep is dropping this peer, once it has been named.
+    #[cfg(test)]
+    fn drop_reason(&self) -> Option<&'static str> {
+        self.end_reason
+    }
+
+    /// Disconnect an established pipe whose offer was refused or went
+    /// unanswered after the second resend. One warning: the pipe ended.
+    /// The pending token stays, so this tick does not offer those tracks
+    /// again on the pipe that is going away. The cascade removes the entry
+    /// and redials.
+    fn end_for_offer(&mut self, why: &'static str) {
+        warn!(
+            "SFU: pipe {} offer {why}; ending it so the cascade can redial",
+            self.id
+        );
+        self.end_reason = Some("offer");
+        self.rtc.disconnect();
     }
 
     /// Whether the peer stayed disconnected past its grace, or never had a
@@ -555,9 +578,14 @@ impl SfuPeer {
             }
             Err(ServerAnswerError::Rejected(error)) => {
                 // str0m consumed the token. A resend would answer a change
-                // that no longer exists.
-                warn!("SFU: ApplyServerAnswer for {}: {error}", self.id);
-                self.rtc.disconnect();
+                // that no longer exists. An established pipe ends, so the
+                // cascade can redial it. A crossed offer is not this arm.
+                if self.is_pipe && self.had_path {
+                    self.end_for_offer("refused");
+                } else {
+                    warn!("SFU: ApplyServerAnswer for {}: {error}", self.id);
+                    self.rtc.disconnect();
+                }
                 SfuAnswerResult::refused(SfuAnswerRefusal::NoPending)
             }
             Err(ServerAnswerError::NoPending) => {
@@ -620,12 +648,11 @@ impl SfuPeer {
         }
     }
 
-    /// Drop the pending offer's token and queue its tracks again, so the
-    /// next drain offers them. str0m has made no session change until the
-    /// answer is accepted; dropping the token is the rollback. An ICE
-    /// restart request stays, so the next offer still carries it. No-op
-    /// when nothing is pending.
-    fn rollback_pending(&mut self) {
+    /// The remote offer bumped str0m's change id, so this token can no
+    /// longer be answered. Queue its tracks again on this same pipe. This
+    /// is the crossed-offer case: the pipe stays, and the deadline path
+    /// does not use it. No-op when nothing is pending.
+    fn requeue_invalidated_offer(&mut self) {
         let Some(pending) = self.pending.take() else {
             return;
         };
@@ -769,19 +796,19 @@ impl SfuPeer {
 
     /// `now` reached the pending offer's deadline. One call publishes at
     /// most one resend and moves the deadline, so repeated ticks at the
-    /// same instant publish once. The token stays pending across resends,
-    /// and the peer stays: see [`OFFER_RETRY_BASE`]. A pipe that already
-    /// had a path and has used its back-off resends is [`OfferDeadline::Replace`]
-    /// instead: the token is dropped and the tracks are offered again.
+    /// same instant publish once. The token stays pending across resends.
+    /// A client peer stays: see [`OFFER_RETRY_BASE`]. An established pipe
+    /// that has used its back-off resends is [`OfferDeadline::End`]: the
+    /// pipe is disconnected and the cascade redials it.
     fn on_offer_deadline(&mut self, now: Instant) -> OfferDeadline {
         let media_flowing = self.media_flowing(now);
-        let replace = self.is_pipe
+        let end = self.is_pipe
             && self.had_path
             && self.pending.as_ref().is_some_and(|pending| {
                 now >= pending.next_deadline && pending.resends >= PIPE_OFFER_RESEND_LIMIT
             });
-        if replace {
-            return OfferDeadline::Replace;
+        if end {
+            return OfferDeadline::End;
         }
         let Some(pending) = self.pending.as_mut() else {
             return OfferDeadline::Wait;
@@ -792,7 +819,7 @@ impl SfuPeer {
         pending.resends += 1;
         pending.next_deadline = now + offer_retry_wait(pending.resends);
         if pending.resends > OFFER_BACKOFF_RESENDS {
-            warn!(
+            debug!(
                 "SFU: peer {} offer unanswered for {} s ({} resends, media {}); keeping the peer, resending every {} s",
                 self.id,
                 now.saturating_duration_since(pending.sent_at).as_secs(),
@@ -803,6 +830,23 @@ impl SfuPeer {
         }
         OfferDeadline::Resend
     }
+}
+
+/// Apply the ICE state `poll_output` just yielded, then whether the
+/// establishment sweep drops the peer. The event loop polls before that
+/// sweep, so a `Connected` queued at [`PEER_ESTABLISH_TIMEOUT`] is visible
+/// and the peer stays. The loop does this inline; the function is what the
+/// edge test calls.
+#[cfg(test)]
+fn establishment_expired_after_poll(
+    peer: &mut SfuPeer,
+    now: Instant,
+    polled_ice: Option<IceConnectionState>,
+) -> bool {
+    if let Some(state) = polled_ice {
+        peer.on_ice_state(state, now);
+    }
+    peer.never_established(now) || peer.stayed_disconnected(now)
 }
 
 /// Why [`SfuPeer::accept_server_answer`] refused an answer.
@@ -1121,7 +1165,9 @@ pub struct DeadPeer {
     pub participant_id: ParticipantId,
     pub is_pipe: bool,
     /// Why the peer was dropped: `timeout` when it never connected,
-    /// `drop` when it stayed disconnected or died otherwise.
+    /// `drop` when it stayed disconnected or died otherwise, `offer` when
+    /// an established pipe's offer was refused or went unanswered. `offer`
+    /// is what makes the cascade wait before it dials that pipe again.
     pub reason: &'static str,
 }
 
@@ -1518,60 +1564,15 @@ impl SfuServer {
                 }
             }
 
-            // An unanswered offer is published again from its cached SDP. It
-            // never drops the peer (see `OFFER_RETRY_BASE`). A resend is
-            // published after poll: the token stays pending, and the
-            // deadline has already moved, so this tick publishes it once.
+            // An unanswered offer is published again from its cached SDP.
+            // A client peer is never dropped for it. An established pipe
+            // whose offer is still unanswered after the second resend is
+            // disconnected here; the sweep after poll removes it, and the
+            // cascade redials. A resend is published after that sweep: the
+            // token stays pending, and the deadline has already moved, so
+            // this tick publishes it once.
             let now = Instant::now();
             let due_resends = sweep_offer_deadlines(&mut peers, now);
-
-            // Clean out disconnected peers, and tell the service: a client
-            // still holds a room slot (capacity, and its DID could not
-            // rejoin), a pipe a cascade entry (phantom established pipes
-            // after a remote node crash).
-            {
-                let mut dead_peers: Vec<DeadPeer> = Vec::new();
-                let now = Instant::now();
-                for (pid, peer) in peers.iter_mut() {
-                    if peer.never_established(now) {
-                        info!(
-                            "SFU: peer {} never connected within {} s, dropping it",
-                            pid,
-                            PEER_ESTABLISH_TIMEOUT.as_secs()
-                        );
-                        peer.end_reason = Some("timeout");
-                        peer.rtc.disconnect();
-                    } else if peer.stayed_disconnected(now) {
-                        info!("SFU: peer {} stayed disconnected, dropping it", pid);
-                        peer.end_reason = Some("drop");
-                        peer.rtc.disconnect();
-                    }
-                }
-                peers.retain(|pid, peer| {
-                    if !peer.rtc.is_alive() {
-                        info!("SFU: peer {} disconnected", pid);
-                        relay.remove_participant(pid);
-                        quality_preferences.remove(pid);
-                        layers.forget(pid);
-                        dead_peers.push(DeadPeer {
-                            room_id: peer.room_id.clone(),
-                            agent_did: peer.agent_did.clone(),
-                            participant_id: pid.clone(),
-                            is_pipe: peer.is_pipe,
-                            reason: peer.end_reason.unwrap_or("drop"),
-                        });
-                        false
-                    } else {
-                        true
-                    }
-                });
-                for dead in dead_peers {
-                    // Stale track references other peers held for it —
-                    // matches the RemovePeer path.
-                    clean_stale_track_refs(&mut peers, &dead.participant_id, &dead.room_id);
-                    let _ = dead_peer_tx.send(dead);
-                }
-            }
 
             // Poll all peers for output
             let mut earliest_timeout = Instant::now() + Duration::from_millis(100);
@@ -1697,6 +1698,58 @@ impl SfuServer {
                 }
             }
 
+            // Clean out disconnected peers after poll, and tell the service:
+            // a client still holds a room slot (capacity, and its DID could
+            // not rejoin), a pipe a cascade entry. Poll runs first so a
+            // `Connected` queued at `PEER_ESTABLISH_TIMEOUT` is applied
+            // before `never_established` (see
+            // `establishment_expired_after_poll`). A pipe ended for its
+            // offer is removed here, before deferred tracks drain, so the
+            // dying peer does not publish a replacement offer.
+            {
+                let mut dead_peers: Vec<DeadPeer> = Vec::new();
+                let now = Instant::now();
+                for (pid, peer) in peers.iter_mut() {
+                    if peer.never_established(now) {
+                        info!(
+                            "SFU: peer {} never connected within {} s, dropping it",
+                            pid,
+                            PEER_ESTABLISH_TIMEOUT.as_secs()
+                        );
+                        peer.end_reason = Some("timeout");
+                        peer.rtc.disconnect();
+                    } else if peer.stayed_disconnected(now) {
+                        info!("SFU: peer {} stayed disconnected, dropping it", pid);
+                        peer.end_reason = Some("drop");
+                        peer.rtc.disconnect();
+                    }
+                }
+                peers.retain(|pid, peer| {
+                    if !peer.rtc.is_alive() {
+                        info!("SFU: peer {} disconnected", pid);
+                        relay.remove_participant(pid);
+                        quality_preferences.remove(pid);
+                        layers.forget(pid);
+                        dead_peers.push(DeadPeer {
+                            room_id: peer.room_id.clone(),
+                            agent_did: peer.agent_did.clone(),
+                            participant_id: pid.clone(),
+                            is_pipe: peer.is_pipe,
+                            reason: peer.end_reason.unwrap_or("drop"),
+                        });
+                        false
+                    } else {
+                        true
+                    }
+                });
+                for dead in dead_peers {
+                    // Stale track references other peers held for it —
+                    // matches the RemovePeer path.
+                    clean_stale_track_refs(&mut peers, &dead.participant_id, &dead.room_id);
+                    let _ = dead_peer_tx.send(dead);
+                }
+            }
+
             if !data_received.is_empty() {
                 let pubsub = crate::pubsub::get_global_pubsub_sync();
                 for (sender, payload) in data_received {
@@ -1798,12 +1851,13 @@ impl SfuServer {
             }
 
             // Drain deferred tracks for peers whose pending offer just
-            // cleared.  Running here — AFTER poll_output — ensures str0m
-            // has fully processed the previous accept_answer before we
-            // create a new SDP offer via sdp_api().apply().  A resend does
-            // not clear the pending offer, so it does not drain here. A
-            // pipe offer rolled back on this tick does, and its tracks go
-            // out as a new offer.
+            // cleared.  Running here — AFTER poll_output and the dead-peer
+            // sweep — ensures str0m has fully processed the previous
+            // accept_answer before we create a new SDP offer via
+            // sdp_api().apply().  A resend does not clear the pending
+            // offer, so it does not drain here. A crossed offer does: its
+            // tracks were queued again and the pipe is still here. A pipe
+            // ended for its offer was removed above and does not.
             for (pid, peer) in peers.iter_mut() {
                 if peer.pending.is_none() && peer.has_deferred_changes() {
                     if let Some((sdp_offer_json, track_mapping)) =
@@ -2445,9 +2499,10 @@ fn resume_loop_reply(peer: &mut SfuPeer, now: Instant) -> ResumeLoopReply {
 
 /// Apply a remote pipe's renegotiation offer. `accept_offer` bumps str0m's
 /// change id before it validates the SDP, so the local pending offer is
-/// dead whether the remote offer is taken or refused: roll it back and
-/// queue its tracks again. A JSON parse failure does not touch str0m, so
-/// that offer stays pending.
+/// dead whether the remote offer is taken or refused: drop the token and
+/// queue its tracks again on this same pipe. A JSON parse failure does not
+/// touch str0m, so that offer stays pending. This is the crossed-offer
+/// case. It does not end the pipe.
 fn apply_pipe_renegotiation_offer(
     peer: &mut SfuPeer,
     sdp_offer_json: &str,
@@ -2469,7 +2524,7 @@ fn apply_pipe_renegotiation_offer(
         Ok(answer) => answer,
         Err(e) => {
             warn!("SFU: accept_offer for pipe {} failed: {:?}", peer.id, e);
-            peer.rollback_pending();
+            peer.requeue_invalidated_offer();
             return;
         }
     };
@@ -2477,7 +2532,7 @@ fn apply_pipe_renegotiation_offer(
     peer.note_remote_origins(track_mapping);
     // The local token was invalidated by accept_offer. Its tracks were
     // never negotiated.
-    peer.rollback_pending();
+    peer.requeue_invalidated_offer();
     match serde_json::to_string(&answer) {
         Ok(answer_json) => {
             let payload = crate::sfu::SfuPipeRenegotiationAnswer {
@@ -2536,8 +2591,10 @@ struct DueResend {
 }
 
 /// Advance every pending offer's deadline by one step. A resend is returned
-/// for publication after poll. A pipe offer past its back-off is rolled
-/// back here; no peer is dropped.
+/// for publication after the dead-peer sweep. An established pipe whose
+/// offer is still unanswered after the second resend is disconnected here.
+/// The sweep removes it before deferred tracks drain, so those tracks are
+/// not offered again on the pipe that is going away.
 fn sweep_offer_deadlines(
     peers: &mut HashMap<ParticipantId, SfuPeer>,
     now: Instant,
@@ -2558,16 +2615,8 @@ fn sweep_offer_deadlines(
                     track_mapping: pending.track_mapping.clone(),
                 });
             }
-            OfferDeadline::Replace => {
-                let (offer_id, resends) = peer
-                    .pending
-                    .as_ref()
-                    .map(|pending| (pending.offer_id.clone(), pending.resends))
-                    .unwrap_or_default();
-                warn!(
-                    "SFU: pipe {pid} offer {offer_id} unanswered after {resends} resends; replacing it"
-                );
-                peer.rollback_pending();
+            OfferDeadline::End => {
+                peer.end_for_offer("unanswered");
             }
         }
     }
@@ -2594,6 +2643,7 @@ pub fn parse_trickle_candidate(sdp: &str) -> Result<Option<Candidate>, str0m::er
 
 #[cfg(test)]
 mod tests {
+    use super::super::cascade::{CascadeManager, CascadeSignal, PIPE_REDIAL_BACKOFF};
     use super::*;
 
     /// A browser's offer: one audio section, as a caller sends to join.
@@ -3944,6 +3994,9 @@ mod tests {
     fn a_crossed_pipe_offer_keeps_the_established_track() {
         let now = Instant::now();
         let (mut left, mut right, mid) = negotiated_pipe_ends();
+        left.on_ice_state(IceConnectionState::Connected, now);
+        right.on_ice_state(IceConnectionState::Connected, now);
+        assert!(left.had_path && right.had_path);
         assert_audio_writer(&mut left, mid);
 
         let (left_sdp, _, _) = offer_outbound_audio(&mut left, now);
@@ -3972,6 +4025,25 @@ mod tests {
         right.settle_current_answer(&serde_json::to_string(&answer_for_right).unwrap());
         assert!(right.rtc.is_alive(), "the loop keeps the pipe");
         assert!(right.pending.is_none());
+        assert_ne!(left.drop_reason(), Some("offer"));
+        assert_ne!(right.drop_reason(), Some("offer"));
+        assert!(
+            !left.deferred_tracks.is_empty(),
+            "the crossed offer's tracks are queued again"
+        );
+        assert!(!right.deferred_tracks.is_empty());
+
+        let pid = left.id.clone();
+        let mut peers = HashMap::from([(pid.clone(), left)]);
+        assert!(
+            sweep_offer_deadlines(&mut peers, now + Duration::from_secs(60)).is_empty(),
+            "a crossed offer does not end the pipe"
+        );
+        assert!(peers[&pid].rtc.is_alive());
+        assert_ne!(peers[&pid].drop_reason(), Some("offer"));
+        let (_again, mapping) = apply_deferred_tracks(peers.get_mut(&pid).unwrap(), now)
+            .expect("the requeued track is offered again on this pipe");
+        assert_eq!(mapping.len(), 1);
     }
 
     /// An answer that carries this offer's SDP but another offer's id is
@@ -4433,68 +4505,284 @@ mod tests {
         ));
     }
 
-    /// An established pipe resends an unanswered offer through the back-off,
-    /// then drops that offer and negotiates the tracks that were waiting,
-    /// including the one the dropped offer carried.
-    #[test]
-    fn a_pipe_replaces_an_offer_the_remote_never_answers_and_offers_the_deferred_track() {
+    /// One outbound audio track named as a session, held until the pending
+    /// offer clears.
+    fn defer_named(peer: &mut SfuPeer, participant_id: &str, agent_did: &str) {
+        peer.deferred_tracks.push((
+            ParticipantId::next(),
+            Mid::from("o"),
+            MediaKind::Audio,
+            TrackOrigin {
+                participant_id: participant_id.to_string(),
+                agent_did: agent_did.to_string(),
+            },
+        ));
+    }
+
+    /// Offer Alice's and Bob's audio on `peer`.
+    fn offer_two_origins(
+        peer: &mut SfuPeer,
+        now: Instant,
+    ) -> (String, Vec<crate::sfu::TrackMapEntry>) {
+        defer_named(peer, "P-alice", "did:key:alice");
+        defer_named(peer, "P-bob", "did:key:bob");
+        apply_deferred_tracks(peer, now).expect("both origins are offered")
+    }
+
+    /// The SDP text of a pipe answer signal.
+    fn pipe_answer_sdp(signal: CascadeSignal) -> String {
+        match signal {
+            CascadeSignal::PipeAnswer { sdp_answer, .. } => sdp_answer,
+            _ => panic!("expected a pipe answer"),
+        }
+    }
+
+    /// Two cascade nodes with one pipe whose ICE has connected. `nodeB`
+    /// dials: its DID is the higher one.
+    fn connected_cascade_pipe() -> (CascadeManager, CascadeManager, SfuPeer, SfuPeer, RoomId) {
+        let mut dialer = CascadeManager::new(
+            "did:key:nodeB".into(),
+            "192.168.0.22:41022"
+                .parse::<std::net::SocketAddr>()
+                .unwrap(),
+            8,
+        );
+        let mut answerer = CascadeManager::new(
+            "did:key:nodeA".into(),
+            "192.168.0.21:41021"
+                .parse::<std::net::SocketAddr>()
+                .unwrap(),
+            8,
+        );
+        let room = RoomId::new("neighbourhood://pipe-end", "r");
+        let (mut dial, offer) = dialer.establish_pipe("did:key:nodeA", &room).unwrap();
+        let (mut answer, answer_signal) = answerer
+            .handle_pipe_offer("did:key:nodeB", &room.to_string(), &pipe_offer_sdp(offer))
+            .unwrap();
+        let answer_json = pipe_answer_sdp(answer_signal);
+        let (_pid, json) = dialer
+            .handle_pipe_answer("did:key:nodeA", &room.to_string(), &answer_json)
+            .unwrap();
+        dial.accept_current_answer(&json).unwrap();
         let now = Instant::now();
-        let (mut pipe, mut remote, established) = negotiated_pipe_ends();
-        pipe.on_ice_state(IceConnectionState::Connected, now);
-        let (sdp, _, unanswered) = offer_outbound_audio(&mut pipe, now);
-        let old_id = pipe.pending_offer_id().unwrap().to_string();
-        defer_extra_audio(&mut pipe);
-        let pid = pipe.id.clone();
-        let mut peers = HashMap::from([(pid.clone(), pipe)]);
+        dial.on_ice_state(IceConnectionState::Connected, now);
+        answer.on_ice_state(IceConnectionState::Connected, now);
+        assert!(dial.had_path && answer.had_path);
+        assert!(dial.pending.is_none());
+        (dialer, answerer, dial, answer, room)
+    }
+
+    /// The answer, with a different ICE ufrag, so str0m refuses it as an
+    /// ICE restart this offer did not ask for. The m-lines stay this offer's.
+    fn with_other_ice_ufrag(answer_json: &str) -> String {
+        let mut value: serde_json::Value = serde_json::from_str(answer_json).unwrap();
+        let sdp = value["sdp"].as_str().unwrap();
+        let mut out = String::new();
+        for line in sdp.split_inclusive('\n') {
+            let bare = line.trim_end_matches(['\r', '\n']);
+            if bare.starts_with("a=ice-ufrag:") {
+                out.push_str("a=ice-ufrag:refused1");
+                out.push_str(&line[bare.len()..]);
+            } else {
+                out.push_str(line);
+            }
+        }
+        value["sdp"] = serde_json::Value::String(out);
+        serde_json::to_string(&value).unwrap()
+    }
+
+    /// Both cascade entries are gone before the redial. The far end drops
+    /// when ICE stays down. The dialler waits out the backoff, then the new
+    /// pipe carries both origins.
+    fn both_ends_drop_then_redial(
+        dialer: &mut CascadeManager,
+        answerer: &mut CascadeManager,
+        answer: &mut SfuPeer,
+        room: &RoomId,
+        ended: Instant,
+        old_id: &ParticipantId,
+    ) {
+        let key = room.to_string();
+        assert!(dialer.has_pipe(&key, "did:key:nodeA"));
+        assert!(answerer.has_pipe(&key, "did:key:nodeB"));
+
+        answer.on_ice_state(IceConnectionState::Disconnected, ended);
+        assert!(
+            !answer.stayed_disconnected(ended + ICE_DISCONNECT_GRACE - Duration::from_millis(1))
+        );
+        let drop_at = ended + ICE_DISCONNECT_GRACE;
+        assert!(
+            answer.stayed_disconnected(drop_at),
+            "the other end drops once ICE stays down"
+        );
+        answer.rtc.disconnect();
+        answerer.on_pipe_died(&key, "did:key:nodeB", "drop", drop_at);
+        dialer.on_pipe_died(&key, "did:key:nodeA", "offer", ended);
+        assert!(
+            answerer.pipe_meta(&key, "did:key:nodeB").is_none()
+                && !answerer.has_pipe(&key, "did:key:nodeB"),
+            "the far end's pipe entry is gone before the redial"
+        );
+        assert!(
+            dialer.pipe_meta(&key, "did:key:nodeA").is_none()
+                && !dialer.has_pipe(&key, "did:key:nodeA"),
+            "the dialler's pipe entry is gone before the redial"
+        );
+
+        dialer.set_now(ended);
+        assert!(dialer.establish_pipe("did:key:nodeA", room).is_err());
+        dialer.set_now(ended + PIPE_REDIAL_BACKOFF - Duration::from_millis(1));
+        assert!(
+            dialer.establish_pipe("did:key:nodeA", room).is_err(),
+            "the redial waits out the backoff"
+        );
+        dialer.set_now(ended + PIPE_REDIAL_BACKOFF);
+        let (mut redial, offer) = dialer
+            .establish_pipe("did:key:nodeA", room)
+            .expect("the cascade redials after the backoff");
+        assert_ne!(&redial.id, old_id);
+
+        let (mut remote, answer_signal) = answerer
+            .handle_pipe_offer("did:key:nodeB", &key, &pipe_offer_sdp(offer))
+            .expect("the other end accepts the redial");
+        let answer_json = pipe_answer_sdp(answer_signal);
+        let (_pid, json) = dialer
+            .handle_pipe_answer("did:key:nodeA", &key, &answer_json)
+            .unwrap();
+        redial.accept_current_answer(&json).unwrap();
+
+        let (sdp, mapping) = offer_two_origins(&mut redial, ended + PIPE_REDIAL_BACKOFF);
+        let renegotiation: SdpOffer = serde_json::from_str(&sdp).unwrap();
+        let reneg_answer = remote
+            .rtc
+            .sdp_api()
+            .accept_offer(renegotiation)
+            .expect("the new pipe takes both origins");
+        redial
+            .accept_current_answer(&serde_json::to_string(&reneg_answer).unwrap())
+            .unwrap();
+        let mut names = Vec::new();
+        for entry in &mapping {
+            let mid = Mid::from(entry.mid.as_str());
+            assert_audio_writer(&mut redial, mid);
+            let media = remote
+                .rtc
+                .media(mid)
+                .expect("the far end has the origin's mid");
+            assert!(
+                media.kind().is_audio(),
+                "media for {} is audio",
+                entry.participant_id
+            );
+            names.push(entry.participant_id.as_str());
+        }
+        assert!(names.contains(&"P-alice"), "{names:?}");
+        assert!(names.contains(&"P-bob"), "{names:?}");
+    }
+
+    /// Lose the answers to an established pipe's offer, and both resends.
+    /// The pipe ends on both ends, the cascade redials, and each origin's
+    /// audio is on the new pipe.
+    #[test]
+    fn an_unanswered_established_pipe_ends_and_the_cascade_redials() {
+        let now = Instant::now();
+        let (mut dialer, mut answerer, mut dial, mut answer, room) = connected_cascade_pipe();
+        let (sdp, mapping) = offer_two_origins(&mut dial, now);
+        let old_id = dial.id.clone();
+        let pid = dial.id.clone();
+        let mut peers = HashMap::from([(pid.clone(), dial)]);
 
         let at_10 = sweep_offer_deadlines(&mut peers, now + OFFER_RETRY_BASE);
         assert_eq!(at_10.len(), 1);
         assert_eq!(at_10[0].sdp, sdp);
-        assert!(apply_deferred_tracks(peers.get_mut(&pid).unwrap(), now).is_none());
-
+        assert_same_mapping(&at_10[0].track_mapping, &mapping);
         let at_30 = sweep_offer_deadlines(&mut peers, now + Duration::from_secs(30));
         assert_eq!(at_30.len(), 1);
         assert_eq!(at_30[0].sdp, sdp);
         assert!(apply_deferred_tracks(peers.get_mut(&pid).unwrap(), now).is_none());
 
-        let at_60 = sweep_offer_deadlines(&mut peers, now + Duration::from_secs(60));
+        let ended = now + Duration::from_secs(60);
+        let at_60 = sweep_offer_deadlines(&mut peers, ended);
         assert!(
             at_60.is_empty(),
-            "the pipe replaces the offer instead of resending it"
+            "the pipe ends instead of sending a replacement offer"
         );
-        let pipe = peers.get_mut(&pid).unwrap();
+        let mut dial = peers.remove(&pid).unwrap();
+        assert!(!dial.rtc.is_alive());
+        assert_eq!(dial.drop_reason(), Some("offer"));
         assert!(
-            pipe.pending.is_none(),
-            "the unanswered offer is no longer pending"
+            dial.pending.is_some(),
+            "the dying pipe does not clear the token into a new offer"
         );
-        assert!(pipe.rtc.is_alive());
         assert!(
-            pipe.rtc.writer(unanswered).is_none(),
-            "the unanswered mid was never negotiated"
+            apply_deferred_tracks(&mut dial, ended).is_none(),
+            "the drain does not publish a replacement on the dying pipe"
         );
-        assert_audio_writer(pipe, established);
 
-        let (new_sdp, new_mapping) = apply_deferred_tracks(pipe, now + Duration::from_secs(60))
-            .expect("the deferred tracks are offered again");
-        assert_ne!(new_sdp, sdp);
-        let new_id = pipe.pending_offer_id().unwrap().to_string();
-        assert_ne!(new_id, old_id);
-        assert!(
-            new_mapping.len() >= 2,
-            "both tracks are in the new offer: {}",
-            new_mapping.len()
+        both_ends_drop_then_redial(
+            &mut dialer,
+            &mut answerer,
+            &mut answer,
+            &room,
+            ended,
+            &old_id,
         );
-        let new_offer: SdpOffer = serde_json::from_str(&new_sdp).unwrap();
-        let answer = remote
+    }
+
+    /// An explicit refusal of a valid offer ends the pipe the same way.
+    #[test]
+    fn a_refused_established_pipe_ends_and_the_cascade_redials() {
+        let now = Instant::now();
+        let (mut dialer, mut answerer, mut dial, mut answer, room) = connected_cascade_pipe();
+        let (sdp, _mapping) = offer_two_origins(&mut dial, now);
+        let old_id = dial.id.clone();
+        let offer: SdpOffer = serde_json::from_str(&sdp).unwrap();
+        let real = answer
             .rtc
             .sdp_api()
-            .accept_offer(new_offer)
-            .expect("the remote takes the replacement offer");
-        pipe.accept_current_answer(&serde_json::to_string(&answer).unwrap())
-            .unwrap();
-        for entry in &new_mapping {
-            assert_audio_writer(pipe, Mid::from(entry.mid.as_str()));
-        }
+            .accept_offer(offer)
+            .expect("the far end can answer this offer");
+        let answer_json = serde_json::to_string(&real).unwrap();
+        let refused = with_other_ice_ufrag(&answer_json);
+        assert_ne!(refused, answer_json);
+        let id = dial.pending_offer_id().unwrap().to_string();
+        let verdict = dial.settle_answer(&id, &refused);
+        assert!(!verdict.accepted);
+        assert!(!dial.rtc.is_alive());
+        assert_eq!(dial.drop_reason(), Some("offer"));
+        assert!(
+            dial.pending.is_none(),
+            "str0m took the token when it refused the answer"
+        );
+        assert!(
+            apply_deferred_tracks(&mut dial, now).is_none(),
+            "the refused offer is not replaced on the dying pipe"
+        );
+
+        both_ends_drop_then_redial(&mut dialer, &mut answerer, &mut answer, &room, now, &old_id);
+    }
+
+    /// A `Connected` event already queued when the establishment window
+    /// ends is applied before the sweep. The pipe is not dropped as
+    /// never-established.
+    #[test]
+    fn a_connected_event_at_the_establishment_edge_keeps_the_pipe() {
+        let (_caller, mut peer) = connected_pair();
+        peer.is_pipe = true;
+        let edge = Instant::now();
+        peer.created_at = edge - PEER_ESTABLISH_TIMEOUT;
+        assert!(
+            peer.never_established(edge),
+            "before the poll the peer looks never-established"
+        );
+        assert!(
+            !establishment_expired_after_poll(&mut peer, edge, Some(IceConnectionState::Connected)),
+            "the connected event is seen, so the pipe is not swept"
+        );
+        assert!(peer.had_path);
+        assert!(peer.rtc.is_alive());
+        assert!(!peer.never_established(edge));
+        assert!(!peer.stayed_disconnected(edge));
     }
 
     /// A remote offer str0m refuses still bumps the change id, so the local
