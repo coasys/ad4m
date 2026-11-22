@@ -2082,7 +2082,7 @@ test("a manager that left sends no restart for its old connection", async () => 
 test.each([
     ["503 (the socket closed while the answer was out)", new RpcError(503, "WebSocket connection closed")],
     ["408 (the answer timed out)", new RpcError(408, "RPC call 'sfu.callAnswerServerOffer' timed out after 30000ms")],
-])("a %s keeps the connection and the participant id, and the answer goes again once the socket is back", async (_name, fault) => {
+])("a %s on the answer keeps the connection and the participant id; the offer's resend gets the cached answer", async (_name, fault) => {
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL)
     await manager.join(fakeStream())
@@ -2098,21 +2098,26 @@ test.each([
     expect(api.sfuCallLeave).not.toHaveBeenCalled()
     expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
 
-    // The socket is back: the answer it kept goes out again, and the
-    // manager asks the executor for what it missed (`sfu.callResume`).
+    // The socket is back: nothing is replayed. The manager asks the
+    // executor for what it missed (`sfu.callResume`), and the executor's
+    // own resend of the offer is what sends the answer again — the cached one.
     api.emitReconnect()
     await flush()
+    await flush()
+    expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(1)
+    expect(api.sfuCallResume).toHaveBeenCalledWith(URL, ROOM, MINE)
+
+    api.emitOffer(offer("renegotiate"))
     await flush()
     const answer = JSON.stringify({ type: "answer", sdp: "local-answer" })
     expect(api.sfuCallAnswerServerOffer.mock.calls).toEqual([
         [URL, ROOM, MINE, "offer-renegotiate", answer],
         [URL, ROOM, MINE, "offer-renegotiate", answer],
     ])
-    expect(api.sfuCallResume).toHaveBeenCalledWith(URL, ROOM, MINE)
-    // Applied once: the second send is the same answer, not a second negotiation.
+    // Applied once: the resend got the cached answer, not a second negotiation.
     expect(pc.remoteSdps()).toEqual(["server-answer", "renegotiate"])
 
-    // Answered now: the executor's late resend of that offer gets nothing.
+    // Answered now: a later resend of that offer gets nothing.
     api.emitOffer(offer("renegotiate"))
     api.emitReconnect()
     await flush()
@@ -2121,7 +2126,7 @@ test.each([
     await manager.leave()
 })
 
-test("an offer the executor resends while its answer is unsent gets that answer, applied once", async () => {
+test("an offer the executor resends while its answer is still unaccepted gets the cached answer, applied once", async () => {
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL)
     await manager.join(fakeStream())
@@ -2267,9 +2272,11 @@ test("after the socket reconnects the manager asks the executor to resume its se
 })
 
 test("after the socket is back a restart offer whose event was lost is answered through the resume's reply", async () => {
-    // X's answer was lost with the socket; the server now waits on a restart
-    // offer R whose event never arrived. The answer kept for X is refused by
-    // its offer id, and R is applied through the same path the event uses.
+    // X's answer was lost with the socket; the executor now waits on a
+    // restart offer R whose event never arrived. The reply returns the
+    // executor's pending offer — R — applied and answered through the same
+    // path the event uses. X's send is not replayed: the executor's
+    // pending offer is what is owed, and X is not it.
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL)
     await manager.join(fakeStream())
@@ -2277,21 +2284,19 @@ test("after the socket is back a restart offer whose event was lost is answered 
     api.sfuCallAnswerServerOffer.mockRejectedValueOnce(new RpcError(503, "WebSocket connection closed"))
     api.emitOffer(offer("X"))
     await flush()
-    api.sfuCallAnswerServerOffer.mockResolvedValueOnce({ accepted: false, reason: "stale" })
     api.sfuCallResume.mockResolvedValueOnce({ listed: true, offer: offer("R") })
 
     api.emitReconnect()
     await flush()
     await flush()
 
-    // X's first send never arrived; the kept one goes again and is refused
-    // `stale`, and R gets its own answer.
-    expect(answersSent(api)).toEqual([answerTo("X"), answerTo("X"), answerTo("R")])
+    // X's send never arrived and nothing of it is replayed; R gets its own answer.
+    expect(answersSent(api)).toEqual([answerTo("X"), answerTo("R")])
     expect(currentPc().remoteSdps()).toEqual(["server-answer", "X", "R"])
     await manager.leave()
 })
 
-test("the offer a resume returns gets the answer the socket kept for it, without being applied again", async () => {
+test("the offer a resume returns gets the answer this connection last produced for it, without being applied again", async () => {
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL)
     await manager.join(fakeStream())
@@ -2461,10 +2466,11 @@ test("ICE that comes back within the 2 s after the socket does is not restarted"
 test.each([
     ["503 (the socket closed while the request was out)", new RpcError(503, "WebSocket connection closed")],
     ["408 (the request timed out)", new RpcError(408, "RPC call 'sfu.callRestartIce' timed out after 30000ms")],
-])("an ICE restart that fails with a %s is sent again once the socket is back", async (_name, fault) => {
-    // The request died with the socket the network change closed: the
-    // restart in flight keeps its timeout, and the request goes out again
-    // the moment signalling can take it (e17).
+])("an ICE restart that fails with a %s is asked for again when the resume's reply carries no offer", async (_name, fault) => {
+    // The request died with the socket the network change closed, and
+    // nothing of it is kept to replay: the reply's missing offer is what
+    // says the executor never got it, so while the restart is in flight
+    // and ICE is down a fresh request goes out — one per such reply (e17).
     fakeTimers()
     try {
         const api = fakeApi()
@@ -2475,23 +2481,24 @@ test.each([
         await iceState("disconnected")
         expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
 
+        // The socket's return asks the resume; its offer-less reply sends
+        // the fresh restart.
         api.emitReconnect()
         await flush()
         await flush()
         expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
         expect(api.sfuCallResume).toHaveBeenCalledWith(URL, ROOM, MINE)
 
-        // The reconnect's own 2 s check does not pile another request onto
-        // the restart in flight, and once the resent request reached the
-        // executor nothing is kept: a later reconnect sends nothing.
+        // Each reply without an offer while the restart runs and ICE is
+        // down asks again; the 2 s check piles none onto the restart.
         await jest.advanceTimersByTimeAsync(2_000)
         api.emitReconnect()
         await flush()
         await flush()
         await jest.advanceTimersByTimeAsync(2_000)
-        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(3)
 
-        // The resent request's offer is applied and answered on the same
+        // The asked-for offer is applied and answered on the same
         // connection, and a working path ends the restart.
         api.emitOffer(offer("restart-offer"))
         await flush()
@@ -2505,52 +2512,11 @@ test.each([
     }
 })
 
-test("an ICE restart a newer restart replaced is not sent again when the socket is back", async () => {
-    // The network change replaced restart A with restart B on the same
-    // peer: A's request is B's problem no longer, so its late socket
-    // fault retains nothing. Only a fault of the restart still in
-    // flight is replayed.
-    fakeTimers()
-    try {
-        const api = fakeApi()
-        let failA!: (e: unknown) => void
-        api.sfuCallRestartIce.mockImplementationOnce(() => new Promise((_, reject) => { failA = reject }))
-        const manager = new SfuManager(api, ROOM, ME, URL)
-        await manager.join(fakeStream())
-
-        await iceState("disconnected") // restart A
-        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
-        api.emitNetworkChange() // restart B replaces A on the same peer
-        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
-
-        failA(new RpcError(503, "WebSocket connection closed"))
-        await flush()
-        api.emitReconnect()
-        await flush()
-        await flush()
-        await jest.advanceTimersByTimeAsync(2_000)
-
-        // No third request: A's failure kept nothing for the reconnect.
-        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
-
-        // But a fault of the restart still in flight is replayed, as before.
-        api.sfuCallRestartIce.mockRejectedValueOnce(new RpcError(503, "WebSocket connection closed"))
-        api.emitNetworkChange() // restart C replaces B
-        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(3)
-        await flush()
-        api.emitReconnect()
-        await flush()
-        await flush()
-        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(4)
-        await manager.leave()
-    } finally {
-        jest.useRealTimers()
-    }
-})
-
-test("an ICE restart refused for a real reason is not sent again when the socket is back", async () => {
-    // Only a socket fault is retried: a refusal (an executor that lost this
-    // session) leaves the decision to the restart's timeout, as before.
+test("an ICE restart the executor refused is asked for again when the resume's reply carries no offer", async () => {
+    // A refusal is not kept either: while the restart is in flight and ICE
+    // is down, a reply that brings no offer means the executor holds no
+    // pending offer for this session — so a fresh request goes out,
+    // whatever became of the last one.
     fakeTimers()
     try {
         const api = fakeApi()
@@ -2565,8 +2531,7 @@ test("an ICE restart refused for a real reason is not sent again when the socket
         api.emitReconnect()
         await flush()
         await flush()
-        await jest.advanceTimersByTimeAsync(3_000)
-        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
         await manager.leave()
     } finally {
         jest.useRealTimers()
@@ -2886,10 +2851,10 @@ test("an offer step that hangs is given up after 10 s, and the next offer is app
     }
 })
 
-test("an older offer's answer failing late does not replace the current offer's kept answer", async () => {
-    // A's answer outlives its box and B applies; B's answer is the only
-    // one the executor still needs. A's call failing later must not
-    // displace B's kept answer: the next socket sends B's, never A's.
+test("an older offer's answer failing late changes nothing: the newest offer's resend gets the cached answer", async () => {
+    // A's answer outlives its box and B applies; B's answer is the one the
+    // cache holds. A's call failing later writes nothing — the socket's
+    // return replays nothing, and B's own resend is what gets its answer.
     fakeTimers()
     try {
         const api = fakeApi()
@@ -2914,8 +2879,12 @@ test("an older offer's answer failing late does not replace the current offer's 
         await flush()
         await flush()
 
-        expect(answersSent(api)).toEqual([answerTo("A"), answerTo("B"), answerTo("B")])
+        expect(answersSent(api)).toEqual([answerTo("A"), answerTo("B")])
         expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+
+        api.emitOffer(offer("B"))
+        await flush()
+        expect(answersSent(api)).toEqual([answerTo("A"), answerTo("B"), answerTo("B")])
         await manager.leave()
     } finally {
         jest.useRealTimers()
@@ -2939,7 +2908,7 @@ test("an answer given up on that fails after a newer offer was answered sends no
         api.sfuCallAnswerServerOffer.mockClear()
 
         // The first answer's call times out only now, but a newer offer was
-        // applied and answered meanwhile: the stale answer is not kept, and
+        // applied and answered meanwhile: its answer is the cache's, and
         // the reconnect sends none.
         timeOut(new RpcError(408, "RPC call 'sfu.callAnswerServerOffer' timed out after 30000ms"))
         await flush()
@@ -3027,7 +2996,7 @@ function distinctAnswers(pc: FakePeerConnection) {
 const answerTo = (sdp: string) => JSON.stringify({ type: "answer", sdp: `answer-to-${sdp}` })
 const answersSent = (api: ReturnType<typeof fakeApi>) => (api.sfuCallAnswerServerOffer.mock.calls as unknown as string[][]).map((c) => c[4])
 
-test("an answer the socket kept is dropped when a newer offer arrives; after the socket is back only the newer one goes out", async () => {
+test("a newer offer's answer replaces the cache: the socket's return replays nothing, and the newest's resend gets it", async () => {
     fakeTimers()
     try {
         const api = fakeApi()
@@ -3048,10 +3017,10 @@ test("an answer the socket kept is dropped when a newer offer arrives; after the
         await jest.advanceTimersByTimeAsync(0)
         expect(answersSent(api)).toEqual([answerTo("A"), answerTo("B")])
 
-        // B's answer was lost too: the next socket gets B's, never A's.
+        // B's send was lost too: nothing is replayed — the resume's reply
+        // carries B, the executor's pending offer, and gets the cached answer.
         failB(new RpcError(503, "WebSocket connection closed"))
         await flush()
-        // The executor never got B's answer: the resume's reply carries B again.
         api.sfuCallResume.mockResolvedValueOnce({ listed: true, offer: offer("B") })
         api.emitReconnect()
         await jest.advanceTimersByTimeAsync(0)

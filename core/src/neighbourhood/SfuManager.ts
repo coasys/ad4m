@@ -177,13 +177,18 @@ export interface SfuIceConfig {
 
 // ── Constants ─────────────────────────────────────────────────────
 
-/** An answer made for a server offer, kept until the executor has it. */
-interface UnsentAnswer {
+/** The last answer a connection produced for a server offer. The executor
+ *  holds its pending offer until an answer lands and resends it, so a
+ *  resent offer — an event's, or one the resume's reply returns — gets
+ *  this answer sent again, without the SDP steps a second time. */
+interface CachedAnswer {
     pc: RTCPeerConnection
     offerId: string
     roomName: string
     participantId: string
     sdpAnswer: string
+    /** The executor took the answer: resends of its offer get nothing more. */
+    accepted: boolean
 }
 
 /** A failure of the signalling socket, not of the call: the socket closed
@@ -355,24 +360,15 @@ export class SfuManager {
      *  by the restart's remaining time, which is always within this. */
     private static readonly RESUME_STEP_TIMEOUT_MS =
         SfuManager.RESTART_TIMEOUT_MS - SfuManager.RESTART_AFTER_RESEND_MS
-    /** The `offerId` of the last server offer the executor took an answer
-     *  for. Its resends are not answered again. */
-    private answeredOfferId: string | null = null
-    /** The `offerId` of the server offer last applied to the connection,
-     *  whether or not its answer reached the executor. Only its answer is
-     *  kept on a socket fault: an older offer's call failing late must not
-     *  displace the answer the executor is still waiting on. */
+    /** The `offerId` of the server offer last applied to the connection.
+     *  The resume ask snapshots it: the reply's offer applies only while
+     *  this is still what it was when the ask went out. */
     private appliedOfferId: string | null = null
-    /** An answer a socket fault kept from the executor (503, 408): the
-     *  connection is fine, so it goes out again once the socket is back, or
-     *  when the executor sends its offer again. */
-    private unsentAnswer: UnsentAnswer | null = null
-    /** An ICE restart request a socket fault (503, 408) kept from the
-     *  executor: the restart it belongs to stays in flight, and the request
-     *  goes out again from `socketBack`. Set only while the restart it
-     *  belongs to is the current one — a network change that replaced it
-     *  ends its wait, and its own late failure retains nothing. */
-    private unsentRestart: { pc: RTCPeerConnection; participantId: string; timer: ReturnType<typeof setTimeout> } | null = null
+    /** The last answer this connection produced for a server offer. The
+     *  executor's pending offer is the one source of what is still owed:
+     *  a socket fault on the send keeps nothing more, since the executor
+     *  resends the offer, or the resume's reply returns it. */
+    private lastAnswer: CachedAnswer | null = null
     private reconnectUnsubscribe: (() => void) | null = null
     private renegotiationUnsubscribe: (() => void) | null = null
     private rosterUnsubscribe: (() => void) | null = null
@@ -564,27 +560,21 @@ export class SfuManager {
         }, SfuManager.RESTART_TIMEOUT_MS)
         this.restartTimer = restart
         this.restartDeadline = Date.now() + SfuManager.RESTART_TIMEOUT_MS
-        this.sendRestart(pc, participantId, restart)
+        this.sendRestart(pc, participantId)
     }
 
     /**
-     * Ask the executor to restart ICE on `pc`'s session. A socket fault
-     * (503, 408) means the request may never have arrived — the socket the
-     * network change closed rejected it — so it is kept for `socketBack`
-     * to send again, but only while `restart` is still the current one:
-     * a network change that replaced it already sent its own request, and
-     * keeping the old one's would send a restart the restart in flight
-     * never asked for. A refusal (an executor that lost this session)
-     * leaves the decision to the restart's timeout: a blip may still heal.
+     * Ask the executor to restart ICE on `pc`'s session. Nothing is kept
+     * when the request does not arrive: the next resume reply says whether
+     * the executor holds this session's pending offer — none while the
+     * restart is still in flight and ICE is still down asks for a fresh
+     * one. A refusal (an executor that lost this session) leaves the
+     * decision to the restart's timeout: a blip may still heal.
      */
-    private sendRestart(pc: RTCPeerConnection, participantId: string, restart: ReturnType<typeof setTimeout>): void {
+    private sendRestart(pc: RTCPeerConnection, participantId: string): void {
         this.neighbourhood.sfuCallRestartIce(this.neighbourhoodUrl, this.roomId, participantId).catch((err) => {
-            if (isSocketFault(err) && this.restartTimer === restart && this.state.peerConnection === pc) {
-                console.warn(
-                    "SFU: the ICE restart did not reach the executor; it goes out again once the socket is back:",
-                    err,
-                )
-                this.unsentRestart = { pc, participantId, timer: restart }
+            if (isSocketFault(err)) {
+                console.warn("SFU: the ICE restart may not have reached the executor:", err)
                 return
             }
             console.warn("SFU: ICE restart refused:", err)
@@ -596,8 +586,8 @@ export class SfuManager {
      * one it had, so media that kept flowing through the fault is left
      * alone, and ICE is restarted only if it is still not connected
      * ICE_CHECK_AFTER_SOCKET_MS later. A restart already in flight is left
-     * alone too: a request the dead socket kept went out again already
-     * (`unsentRestart`), and a new one would only restart its gathering.
+     * alone too: the executor holds its offer and resends it, and a new
+     * request would only restart its gathering.
      * (A network change is a different call: the path changed, so it
      * restarts ICE at once — see the `onNetworkChange` handler in `join`.)
      */
@@ -618,7 +608,6 @@ export class SfuManager {
             this.restartTimer = null
         }
         this.restartDeadline = null
-        this.unsentRestart = null
     }
 
     on(event: SfuEvent, callback: SfuEventCallback): void {
@@ -709,7 +698,8 @@ export class SfuManager {
                 this.restartIce(current)
             })
         }
-        // The socket came back: what a fault kept from the executor goes out now.
+        // The socket came back: ICE is checked, and the executor is asked
+        // for what went by while it was down.
         if (!this.reconnectUnsubscribe) {
             this.reconnectUnsubscribe = this.neighbourhood.onReconnect(() => this.socketBack())
         }
@@ -982,12 +972,10 @@ export class SfuManager {
         this.rosterRevision = 0
         this.unlisted = false
         // Per-session offer state: the executor's offer counter restarts
-        // with it, so this session decides on its own ids afresh, and an
-        // answer kept for the old session's connection is not its to send.
-        this.answeredOfferId = null
+        // with it, so this session decides on its own ids afresh, and the
+        // old session's last answer is not this one's to send.
+        this.lastAnswer = null
         this.appliedOfferId = null
-        this.unsentAnswer = null
-        this.unsentRestart = null
         this.renegotiationUnsubscribe = this.neighbourhood.subscribeSfuCallRenegotiationOffer(
             this.agentDid,
             (event) => {
@@ -1043,16 +1031,15 @@ export class SfuManager {
     /** Apply the newest of `offers` (in arrival order) to `pc` and answer it, with the track mappings of all. */
     private async applyServerOffers(pc: RTCPeerConnection, offers: SfuCallRenegotiationOffer[]): Promise<void> {
         const event = offers[offers.length - 1]
-        if (this.state.peerConnection !== pc || event.offerId === this.answeredOfferId) return
-        // The executor sent again an offer whose answer a socket fault kept:
-        // that answer is still the one, and the offer is applied already.
-        const unsent = this.unsentAnswer
-        if (unsent) {
-            if (unsent.pc === pc && unsent.offerId === event.offerId) {
-                return this.timeBoxed(() => this.sendAnswer(unsent))
-            }
-            // A kept answer names its offer by id; one for another offer is stale.
-            this.unsentAnswer = null
+        if (this.state.peerConnection !== pc) return
+        // The executor's resend of the offer this connection last answered —
+        // an event's resend or one the resume's reply returned: its answer
+        // is the cached one, sent again without applying the SDP a second
+        // time. Once the executor took it, its resends get nothing.
+        const last = this.lastAnswer
+        if (last && last.pc === pc && last.offerId === event.offerId) {
+            if (last.accepted) return
+            return this.timeBoxed(() => this.sendAnswer(last))
         }
         // The mapping first: the tracks this offer adds arrive while it is applied.
         for (const entry of offers.flatMap((offer) => offer.trackMapping ?? [])) {
@@ -1074,8 +1061,9 @@ export class SfuManager {
             void this.reconnect()
             return
         }
-        const answer = { pc, offerId: event.offerId, roomName: event.roomName, participantId: event.participantId, sdpAnswer }
+        const answer: CachedAnswer = { pc, offerId: event.offerId, roomName: event.roomName, participantId: event.participantId, sdpAnswer, accepted: false }
         this.appliedOfferId = event.offerId
+        this.lastAnswer = answer
         await this.timeBoxed(() => this.sendAnswer(answer))
     }
 
@@ -1088,11 +1076,13 @@ export class SfuManager {
      * rejection, `ChangesOutOfOrder`) — and whether the connection needs
      * repair is media and session evidence's call, not a rebuild's here.
      * One of `unknown-session` rebuilds the call. A socket fault (503,
-     * 408) keeps the answer for the next socket or the executor's resend of
-     * the offer; anything else leaves the verdict to ICE and the roster,
-     * which see whether the session is really gone.
+     * 408) loses the send and keeps nothing more: the executor holds its
+     * offer and resends it — or the resume's reply returns it — and the
+     * resent offer gets the cached answer. Anything else leaves the
+     * verdict to ICE and the roster, which see whether the session is
+     * really gone.
      */
-    private async sendAnswer(answer: UnsentAnswer): Promise<void> {
+    private async sendAnswer(answer: CachedAnswer): Promise<void> {
         if (this.state.peerConnection !== answer.pc || this.state.participantId !== answer.participantId) return
         try {
             const result = await this.neighbourhood.sfuCallAnswerServerOffer(
@@ -1107,11 +1097,8 @@ export class SfuManager {
             // gone: its refusal must not rebuild the new one, its
             // acceptance must not mark this one's offer answered.
             if (this.state.peerConnection !== answer.pc || this.state.participantId !== answer.participantId) return
-            // Accepted or refused, the answer reached the executor: nothing
-            // to keep for the next socket.
-            if (this.unsentAnswer === answer) this.unsentAnswer = null
             if (result.accepted) {
-                this.answeredOfferId = answer.offerId
+                answer.accepted = true
             } else if (result.reason === "unknown-session") {
                 console.warn("SFU: the executor no longer holds this session; rebuilding the call")
                 void this.reconnect()
@@ -1121,14 +1108,10 @@ export class SfuManager {
         } catch (err) {
             if (this.state.peerConnection !== answer.pc) return
             if (isSocketFault(err)) {
-                // The executor may never have seen this answer; keep it unless
-                // a resend of the offer was already answered meanwhile — and
-                // only while it is the newest applied offer's: an older
-                // offer's call failing late must not displace the kept one.
-                if (this.answeredOfferId !== answer.offerId && this.appliedOfferId === answer.offerId) {
-                    console.warn("SFU: the answer did not reach the executor; sending it again once the socket is back:", err)
-                    this.unsentAnswer = answer
-                }
+                console.warn(
+                    "SFU: the answer did not reach the executor; the offer's resend gets the cached one:",
+                    err,
+                )
                 return
             }
             console.warn("SFU: the executor refused the answer; keeping the connection:", err)
@@ -1136,37 +1119,16 @@ export class SfuManager {
     }
 
     /**
-     * The executor socket opened again: what a socket fault kept goes out
-     * now — the kept answer, which the executor refuses by its offer id if
-     * it is stale, and a restart request it never saw — then
-     * `sfu.callResume` returns what went by while the socket was down (an
-     * offer, a roster). The kept restart is read inside the queue, so a
-     * network change that opened this socket has already dropped it for
-     * the immediate restart the change runs instead.
+     * The executor socket opened again: ICE gets its short check, and
+     * `sfu.callResume` returns what went by while the socket was down — an
+     * offer the executor still holds and resends, a roster. Nothing is
+     * replayed: the executor's pending offer is the one source of what is
+     * still owed.
      */
     private socketBack(): void {
         const pc = this.state.peerConnection
         if (!pc || this.reconnecting) return
         this.checkIceSoon()
-        // A join may still be settling — its SDP step and its stream mapping
-        // are part of this call's state, so recovery waits them out on the
-        // queue before it rechecks the peer.
-        const joined = this.joinSettled
-        this.offerQueue = this.offerQueue
-            .then(() => joined)
-            .then(async () => {
-                if (this.state.peerConnection !== pc) return
-                const unsent = this.unsentAnswer
-                // The box is on the RPCs only: one given up on while its SDP
-                // step still ran would free the queue to mutate `pc` beside it.
-                if (unsent?.pc === pc) await this.timeBoxed(() => this.sendAnswer(unsent))
-                const restart = this.unsentRestart
-                if (restart?.pc === pc) {
-                    this.unsentRestart = null
-                    this.sendRestart(pc, restart.participantId, restart.timer)
-                }
-            })
-            .catch((err) => console.warn("SFU: recovering after the socket's return failed:", err))
         // Off the queue: the ask waits out a join still settling, and its
         // reply applies on the queue — so the restart offer it triggers on
         // the executor is answered while the reply is still out.
@@ -1316,10 +1278,19 @@ export class SfuManager {
         // `stale` while the newer offer's ICE credentials are lost. The
         // executor holds its current offer and resends it, so the drop
         // loses nothing; while `appliedOfferId` is still the ask's, the
-        // reply's offer applies — a kept answer for it replaying as ever.
+        // reply's offer applies.
         const offer = result.offer
         if (offer && offer.participantId === participantId && this.appliedOfferId === askedAtOfferId) {
             await this.applyServerOffers(pc, [offer])
+        }
+        // No offer in the reply means the executor holds no pending offer
+        // for this session — a restart request it never saw is the usual
+        // cause while a restart is in flight and ICE is still down, so a
+        // fresh one is asked for then. An offer in the reply is the
+        // restart already, and ICE `checking` says its answer reached the
+        // executor, so neither case is owed one.
+        if (!offer && this.restartTimer && (pc.iceConnectionState === "disconnected" || pc.iceConnectionState === "failed")) {
+            this.sendRestart(pc, participantId)
         }
     }
 
@@ -1422,8 +1393,7 @@ export class SfuManager {
             clearTimeout(this.iceCheckTimer)
             this.iceCheckTimer = null
         }
-        this.unsentAnswer = null
-        this.unsentRestart = null
+        this.lastAnswer = null
         this.senders.clear()
         this.replacedTracks.clear()
         this.qualityPreference = null
