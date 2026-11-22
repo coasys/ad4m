@@ -48,9 +48,10 @@ export interface CallOptions {
      *  URGENT_PENDING_PROBE_MS rather than PENDING_PROBE_MS, and that probe
      *  waits URGENT_CHECK_CONNECTION_DEADLINE_MS rather than
      *  CHECK_CONNECTION_DEADLINE_MS for any frame — with the same drain
-     *  allowance for a large send ahead of the probe's ping. It shortens
-     *  only this request's wait: any frame still proves the socket, and a
-     *  request without it keeps the 4 s / 8 s timing. */
+     *  allowance for a large send ahead of the probe's ping. A probe already
+     *  running gets its verdict moved earlier to this wait, never later.
+     *  It shortens only this request's wait: any frame still proves the
+     *  socket, and a request without it keeps the 4 s / 8 s timing. */
     urgent?: boolean
 }
 
@@ -124,8 +125,10 @@ const URGENT_PENDING_PROBE_MS = 1_000
 /** The CHECK_CONNECTION_DEADLINE_MS verdict for a probe an urgent request
  *  started, with the same drain allowance: a large send ahead of the
  *  probe's ping still gets its crossing time plus half of this for the
- *  pong. Shorter only because the urgent request cannot wait longer —
- *  a busy socket's pong still gets the deadline above. */
+ *  pong. A probe already running gets its verdict moved earlier to the
+ *  same wait — this from the ping it waits on — and never later. Shorter
+ *  only because the urgent request cannot wait longer — a busy socket's
+ *  pong still gets the deadline above. */
 const URGENT_CHECK_CONNECTION_DEADLINE_MS = 3_000
 
 /** The bytes `text` takes as UTF-8, as a WebSocket text frame sends it. */
@@ -227,6 +230,8 @@ export class ApiClient {
     private _wsSentBy = 0
     /** A `checkConnection` probe waiting for the open socket to say anything; null when none. */
     private _wsProbeTimer: ReturnType<typeof setTimeout> | null = null
+    /** When the running probe gives up (`performance.now` scale), as `_armProbe` armed it. */
+    private _wsProbeAt = 0
     /** The wait for the next request's PENDING_PROBE_MS silence; null when no sent request needs one. */
     private _wsPendingProbeTimer: ReturnType<typeof setTimeout> | null = null
     /** What `_wsPendingProbeTimer` is armed for. */
@@ -580,6 +585,7 @@ export class ApiClient {
         if (this._wsProbeTimer) {
             clearTimeout(this._wsProbeTimer)
             this._wsProbeTimer = null
+            this._wsProbeAt = 0
         }
     }
 
@@ -938,13 +944,19 @@ export class ApiClient {
      * and when a request has had no reply for PENDING_PROBE_MS on a socket
      * nothing arrived on since it was sent — an urgent request's own wait
      * is URGENT_PENDING_PROBE_MS and its probe asks for the urgent
-     * deadline. Without an open socket, while a check runs, or when the
-     * socket delivered a message in the last CHECK_CONNECTION_HEARD_MS,
+     * deadline. An urgent request that falls due while a probe already
+     * runs moves that probe's verdict earlier — the urgent deadline from
+     * the ping it waits on — never later. Without an open socket, or when
+     * the socket delivered a message in the last CHECK_CONNECTION_HEARD_MS,
      * this does nothing.
      */
     checkConnection(urgent = false): void {
         const ws = this._ws
-        if (!ws || ws.readyState !== 1 /* OPEN */ || this._wsProbeTimer) return
+        if (!ws || ws.readyState !== 1 /* OPEN */) return
+        if (this._wsProbeTimer) {
+            if (urgent) this._hastenProbe(ws)
+            return
+        }
         if (performance.now() - this._wsHeardAt < CHECK_CONNECTION_HEARD_MS) return
         this._probe(ws, urgent ? URGENT_CHECK_CONNECTION_DEADLINE_MS : CHECK_CONNECTION_DEADLINE_MS)
     }
@@ -961,13 +973,40 @@ export class ApiClient {
             deadline,
             this._wsSentBy - performance.now() + deadline / 2,
         )
+        this._armProbe(ws, performance.now() + wait)
+    }
+
+    /**
+     * A request that cannot wait the running probe's verdict moves that
+     * verdict earlier: the urgent deadline from the ping the probe waits
+     * on, with that ping's own drain allowance — and never later than the
+     * probe's own. It stays one probe: no new ping goes out, and any frame
+     * still ends it.
+     */
+    private _hastenProbe(ws: WebSocket): void {
+        if (this._wsPingedAt === null) return
+        const at = Math.max(
+            this._wsPingedAt + URGENT_CHECK_CONNECTION_DEADLINE_MS,
+            this._wsPingArrivesBy + URGENT_CHECK_CONNECTION_DEADLINE_MS / 2,
+        )
+        if (at >= this._wsProbeAt) return
+        if (this._wsProbeTimer) clearTimeout(this._wsProbeTimer)
+        this._armProbe(ws, at)
+    }
+
+    /**
+     * Arm the probe's give-up for `at` (`performance.now` scale). A probe
+     * that gives up only redials: socket evidence, not a network change.
+     */
+    private _armProbe(ws: WebSocket, at: number): void {
+        this._wsProbeAt = at
         this._wsProbeTimer = setTimeout(() => {
             this._wsProbeTimer = null
             if (this._ws !== ws) return
-            console.warn(`WebSocket silent for ${wait} ms after a check; reconnecting`)
+            console.warn(`WebSocket silent for ${performance.now() - (this._wsPingedAt ?? performance.now())} ms after a check; reconnecting`)
             // Socket evidence, not a network change: only redial.
             this._redialNow()
-        }, wait)
+        }, Math.max(0, at - performance.now()))
     }
 
     /** Register a callback that fires once when the executor refuses this
