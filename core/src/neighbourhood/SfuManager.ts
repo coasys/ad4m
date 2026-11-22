@@ -1218,6 +1218,11 @@ export class SfuManager {
      * again rather than waiting for a socket reconnect. True when armed.
      */
     private scheduleUnlistedRetry(pc: RTCPeerConnection, participantId: string): boolean {
+        // An ask for a session the call has since replaced arms nothing:
+        // the flag it reads is the current session's, and a timer taken
+        // here would only die at its own check with the current session's
+        // retry shut out.
+        if (this.state.peerConnection !== pc || this.state.participantId !== participantId) return false
         if (!this.unlisted || this.unlistedTimer) return false
         this.unlistedTimer = setTimeout(() => {
             this.unlistedTimer = null
