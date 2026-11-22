@@ -2725,6 +2725,42 @@ test("an offer step that hangs is given up after 10 s, and the next offer is app
     }
 })
 
+test("an older offer's answer failing late does not replace the current offer's kept answer", async () => {
+    // A's answer outlives its box and B applies; B's answer is the only
+    // one the executor still needs. A's call failing later must not
+    // displace B's kept answer: the next socket sends B's, never A's.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        distinctAnswers(currentPc())
+        let failA!: (e: unknown) => void
+        api.sfuCallAnswerServerOffer
+            .mockImplementationOnce(() => new Promise((_, reject) => { failA = reject }))
+            .mockRejectedValueOnce(new RpcError(503, "WebSocket connection closed"))
+
+        api.emitOffer(offer("A"))
+        await flush()
+        api.emitOffer(offer("B"))
+        await jest.advanceTimersByTimeAsync(10_000) // A's box ends, B applies, B's answer fails with the socket
+        await flush()
+        expect(answersSent(api)).toEqual([answerTo("A"), answerTo("B")])
+
+        failA(new RpcError(408, "RPC call 'sfu.callAnswerServerOffer' timed out after 30000ms"))
+        await flush()
+        api.emitReconnect()
+        await flush()
+        await flush()
+
+        expect(answersSent(api)).toEqual([answerTo("A"), answerTo("B"), answerTo("B")])
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
 test("an answer given up on that fails after a newer offer was answered goes out once and is refused, without a rebuild", async () => {
     fakeTimers()
     try {
