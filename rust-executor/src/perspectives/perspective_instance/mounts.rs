@@ -102,9 +102,9 @@ impl PerspectiveInstance {
                 MountPhase::Mounting => {
                     return Err(anyhow!("{lang_address} is already being mounted"))
                 }
-                MountPhase::Inactive => self
-                    .mount_lifecycles
-                    .enter(&mut slot, MountPhase::Mounting),
+                MountPhase::Inactive => {
+                    self.mount_lifecycles.enter(&mut slot, MountPhase::Mounting)
+                }
             }
         };
         let result = self.mount_as(lang_address, generation).await;
@@ -211,10 +211,7 @@ impl PerspectiveInstance {
     /// Refused for a language this perspective has not mounted. The
     /// language is asked first; the result is applied under the mount's
     /// apply lock only if the mount is still the one the sync started on.
-    pub async fn sync_mount(
-        &mut self,
-        lang_address: &str,
-    ) -> Result<MountSyncReport, AnyError> {
+    pub async fn sync_mount(&mut self, lang_address: &str) -> Result<MountSyncReport, AnyError> {
         let Some(generation) = self.active_mount_generation(lang_address).await else {
             return Err(anyhow!(
                 "language {lang_address} is not mounted in perspective {}",
@@ -321,9 +318,7 @@ impl PerspectiveInstance {
     /// result takes it before it goes to the language (or as it arrives)
     /// and hands it to `apply_mount_delta`.
     pub(crate) async fn active_mount_generation(&self, lang_address: &str) -> Option<u64> {
-        self.mount_lifecycles
-            .active_generation(lang_address)
-            .await
+        self.mount_lifecycles.active_generation(lang_address).await
     }
 
     /// Apply one delta (`changed` records re-expanded, `removed` addresses

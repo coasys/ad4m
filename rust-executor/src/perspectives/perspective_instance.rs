@@ -80,8 +80,8 @@ mod mount_classes;
 mod mount_links;
 pub(crate) use mount_lifecycle::next_mount_seq;
 // Test seam: deterministic pause points in the mount engine's runs.
-pub(crate) mod mount_gates;
 mod containment;
+pub(crate) mod mount_gates;
 // Class registration and the registry of shapes.
 mod shapes;
 // Name-keyed SDNA writes: `add_sdna`/`add_sdna_batch`, kept for mount

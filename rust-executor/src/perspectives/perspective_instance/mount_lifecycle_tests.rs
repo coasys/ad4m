@@ -8,9 +8,7 @@
 
 use super::mount_gates::gates;
 use super::mount_gates::MountPoint;
-use super::mounts_tests::{
-    class, create, lang_links, mounted, mounted_and_registered, things,
-};
+use super::mounts_tests::{class, create, lang_links, mounted, mounted_and_registered, things};
 use super::*;
 use crate::languages::mount_tests::{interact, load_mount_test_language};
 use crate::languages::mount_types::{MountDelta, MountEntry};
@@ -130,7 +128,10 @@ async fn a_call_result_after_an_unmount_brings_nothing_back() {
     let _ = update.await.unwrap();
 
     let left = lang_links(&p, &lang).await;
-    assert!(left.is_empty(), "the call's delta brought links back: {left:?}");
+    assert!(
+        left.is_empty(),
+        "the call's delta brought links back: {left:?}"
+    );
 }
 
 #[tokio::test]
@@ -186,7 +187,11 @@ async fn two_concurrent_scalar_updates_leave_one_value() {
     let titles = links_at(&p, &format!("{lang}://t1"), "mounttest://title").await;
     crate::perspectives::remove_perspective(&p.uuid).await;
     let values: Vec<&str> = titles.iter().map(|l| l.data.target.as_str()).collect();
-    assert_eq!(values, vec!["literal:string:c"], "a scalar holds {values:?}");
+    assert_eq!(
+        values,
+        vec!["literal:string:c"],
+        "a scalar holds {values:?}"
+    );
 }
 
 #[tokio::test]
@@ -215,7 +220,11 @@ async fn a_snapshot_taken_before_a_delta_keeps_the_delta_record() {
     let _ = sync.await.unwrap();
     let instances = things(&p).await;
     crate::perspectives::remove_perspective(&p.uuid).await;
-    assert_eq!(instances.len(), 1, "the older snapshot swept t1: {instances:?}");
+    assert_eq!(
+        instances.len(),
+        1,
+        "the older snapshot swept t1: {instances:?}"
+    );
     assert_eq!(instances[0]["title"], "new");
 }
 
@@ -342,9 +351,17 @@ async fn a_foreign_local_link_under_the_prefix_survives_sync_and_unmount() {
     .unwrap();
 
     p.sync_mount(&lang).await.unwrap();
-    assert_eq!(links_at(&p, &source, "ex://note").await.len(), 1, "sync removed it");
+    assert_eq!(
+        links_at(&p, &source, "ex://note").await.len(),
+        1,
+        "sync removed it"
+    );
     p.unmount(&lang).await.unwrap();
-    assert_eq!(links_at(&p, &source, "ex://note").await.len(), 1, "unmount removed it");
+    assert_eq!(
+        links_at(&p, &source, "ex://note").await.len(),
+        1,
+        "unmount removed it"
+    );
 }
 
 #[tokio::test]
@@ -427,14 +444,21 @@ async fn a_failed_snapshot_leaves_no_mount_and_a_retry_works() {
     project(&lang, "setSnapshotFault", json!({"fail": "boom"})).await;
     let error = p.mount(&lang).await.unwrap_err();
     assert!(error.to_string().contains("boom"), "{error}");
-    assert!(p.mounts().await.unwrap().is_empty(), "a failed mount is listed");
+    assert!(
+        p.mounts().await.unwrap().is_empty(),
+        "a failed mount is listed"
+    );
     assert!(crate::perspectives::perspectives_for_mount(&lang).is_empty());
 
     project(&lang, "setSnapshotFault", json!({})).await;
     p.mount(&lang).await.unwrap();
     let instances = things(&p).await;
     crate::perspectives::unregister_mount(&lang, &p.uuid);
-    assert_eq!(instances.len(), 1, "the retry imported nothing: {instances:?}");
+    assert_eq!(
+        instances.len(),
+        1,
+        "the retry imported nothing: {instances:?}"
+    );
 }
 
 #[tokio::test]
@@ -456,12 +480,22 @@ async fn an_invalid_entry_leaves_no_records_and_a_retry_works() {
         .into_iter()
         .filter(|l| l.data.source != format!("{lang}://project"))
         .collect();
-    assert!(records.is_empty(), "a failed mount wrote records: {records:?}");
-    assert!(p.mounts().await.unwrap().is_empty(), "a failed mount is listed");
+    assert!(
+        records.is_empty(),
+        "a failed mount wrote records: {records:?}"
+    );
+    assert!(
+        p.mounts().await.unwrap().is_empty(),
+        "a failed mount is listed"
+    );
 
     project(&lang, "setSnapshotFault", json!({})).await;
     p.mount(&lang).await.unwrap();
     let instances = things(&p).await;
     crate::perspectives::unregister_mount(&lang, &p.uuid);
-    assert_eq!(instances.len(), 1, "the retry imported nothing: {instances:?}");
+    assert_eq!(
+        instances.len(),
+        1,
+        "the retry imported nothing: {instances:?}"
+    );
 }
