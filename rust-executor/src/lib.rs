@@ -894,6 +894,18 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         ai_service::endpoints::config::apply(ai_settings, |var| std::env::var(var).ok());
     }
 
+    if let Some(hosting_index) = &config.hosting_index {
+        if let Err(e) = api::index_ws::seed_config(hosting_index) {
+            return refused_start(
+                exit::StartRefused::new(
+                    exit::ExitReason::ConfigRefused,
+                    format!("hosting_index: {e}"),
+                )
+                .into(),
+            );
+        }
+    }
+
     info!("Initializing AI service...");
     AIService::init_global_instance()
         .await
@@ -1007,6 +1019,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             Err(e) => warn!("SFU service failed to start: {}", e),
         }
     }
+
+    // Keeps this executor's listing in the hosting index current; does nothing while the index
+    // is off.
+    api::index_ws::spawn_republisher();
 
     find_and_set_port(&mut config.port, 4000, "REST API");
     find_and_set_port(&mut config.hc_admin_port, 2000, "Holochain admin");

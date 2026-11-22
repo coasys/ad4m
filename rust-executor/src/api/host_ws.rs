@@ -7,6 +7,7 @@ use std::sync::Arc;
 use ts_rs::TS;
 
 use crate::agent::capabilities::*;
+use crate::agent::AgentContext;
 use crate::hosting::live::LiveEnv;
 use crate::hosting::meter::{self, TenantUsage};
 use crate::hosting::policy::{self, HostPolicyPatch, HostPolicyView, SignupPolicy};
@@ -28,6 +29,17 @@ pub struct HostInfo {
     pub run_by_coasys: bool,
     /// The tenant cap is reached.
     pub full: bool,
+    /// The operator's full `did:scid:coasys:1:...`; `null` while the executor has no operator.
+    /// The hosting index's health check compares it with the listing.
+    pub operator_did: Option<String>,
+    /// This executor's main device key as `did:key` (AR-05-R54); `null` while the main agent
+    /// has no key to read. The health check compares it with the listing.
+    pub executor_did: Option<String>,
+    /// `signup == anyone` (AR-07-R50).
+    pub admits_guests: bool,
+    /// No charge for tenants (the free-hosting switch).
+    pub free_access: bool,
+    pub version: String,
 }
 
 /// `host.joinStatus`'s params.
@@ -158,12 +170,18 @@ fn session_tenant(ctx: &RequestContext) -> Result<Tenant, HostRefusal> {
 async fn info(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let env = LiveEnv;
     let policy = policy::current()?;
+    let backend = crate::db_backend::db_backend();
     value(HostInfo {
         multi_user: env.multi_user(),
+        admits_guests: policy.signup == SignupPolicy::Anyone,
         signup: policy.signup,
         name: policy.display.name,
         run_by_coasys: policy.display.run_by_coasys,
         full: tenants::is_full()?,
+        operator_did: backend.operator_record().ok().flatten().map(|r| r.scid),
+        executor_did: crate::agent::did_for_context(&AgentContext::Main).ok(),
+        free_access: backend.get_free_hosting_enabled().unwrap_or(true),
+        version: crate::globals::AD4M_VERSION.clone(),
     })
 }
 

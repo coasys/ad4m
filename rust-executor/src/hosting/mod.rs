@@ -4,6 +4,7 @@
 //! | File | What |
 //! |---|---|
 //! | `export.rs` | `ExportFile`, `export_owned` and `import_into`: links move with their proofs as stored |
+//! | `index_client.rs` | The hosting index's HTTP client (AR-07): sign-in with the main device key, the listing, `IndexConfig`, `LocalListing`; touches no globals |
 //! | `live.rs` | `LiveEnv`: the real wallet, users table, person store and identity service |
 //! | `policy.rs` | `HostPolicy` (sign-up setting, cap, label, pinned fields) in the `settings` row `host_policy`; `seed_from_config` |
 //! | `tenants.rs` | `TenantRecord`, its states, the gate and `join`, activation, expiry and the revocation sweep, `leave`, `remove_tenant`, `admit_claimed_guest`, `admit_call` (the Held rule), invites |
@@ -14,6 +15,7 @@
 //! states run in unit tests without a wallet, a keyring or a store.
 
 pub mod export;
+pub mod index_client;
 pub mod live;
 pub mod meter;
 pub mod policy;

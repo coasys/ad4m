@@ -8,4 +8,22 @@ export type HostInfo = { multiUser: boolean, signup: SignupPolicy, name: string,
 /**
  * The tenant cap is reached.
  */
-full: boolean, };
+full: boolean, 
+/**
+ * The operator's full `did:scid:coasys:1:...`; `null` while the executor has no operator.
+ * The hosting index's health check compares it with the listing.
+ */
+operatorDid: string | null, 
+/**
+ * This executor's main device key as `did:key` (AR-05-R54); `null` while the main agent
+ * has no key to read. The health check compares it with the listing.
+ */
+executorDid: string | null, 
+/**
+ * `signup == anyone` (AR-07-R50).
+ */
+admitsGuests: boolean, 
+/**
+ * No charge for tenants (the free-hosting switch).
+ */
+freeAccess: boolean, version: string, };

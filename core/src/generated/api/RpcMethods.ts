@@ -116,6 +116,8 @@ import type { InboxAckParams } from "./InboxAckParams";
 import type { InboxEntry } from "./InboxEntry";
 import type { InboxPutParams } from "./InboxPutParams";
 import type { InboxStored } from "./InboxStored";
+import type { IndexConfig } from "./IndexConfig";
+import type { IndexStatus } from "./IndexStatus";
 import type { InstanceCreated } from "./InstanceCreated";
 import type { InstanceRemoved } from "./InstanceRemoved";
 import type { InstanceUpdated } from "./InstanceUpdated";
@@ -141,6 +143,7 @@ import type { LanguageRef } from "./LanguageRef";
 import type { LanguageWriteSettingsParams } from "./LanguageWriteSettingsParams";
 import type { LeaveResult } from "./LeaveResult";
 import type { LinkLanguageTemplatesRequest } from "./LinkLanguageTemplatesRequest";
+import type { ListingText } from "./ListingText";
 import type { LocalAiHardware } from "./LocalAiHardware";
 import type { LocalAiInstallParams } from "./LocalAiInstallParams";
 import type { LocalAiPlan } from "./LocalAiPlan";
@@ -166,6 +169,7 @@ import type { OnlineAgent } from "./OnlineAgent";
 import type { OpenLinkRequest } from "./OpenLinkRequest";
 import type { OpenOfferParams } from "./OpenOfferParams";
 import type { OverlayView } from "./OverlayView";
+import type { OwnListing } from "./OwnListing";
 import type { PermitCapabilityRequest } from "./PermitCapabilityRequest";
 import type { PerspectiveAddAutoProcessorParams } from "./PerspectiveAddAutoProcessorParams";
 import type { PerspectiveAddLinkExpressionParams } from "./PerspectiveAddLinkExpressionParams";
@@ -456,6 +460,10 @@ export interface RpcMethods {
   "identity.status": { params: Record<string, never>; result: IdentityStatus };
   "identity.unlinkSelf": { params: Record<string, never>; result: SignedHead };
   "identity.unwrapRecordKey": { params: UnwrapRecordKeyParams; result: RecordKey };
+  "index.configure": { params: IndexConfig; result: IndexConfig };
+  "index.publish": { params: ListingText; result: OwnListing };
+  "index.status": { params: Record<string, never>; result: IndexStatus };
+  "index.withdraw": { params: Record<string, never>; result: boolean };
   "language.all": { params: LanguageListParams; result: Array<LanguageHandle> };
   "language.applyTemplate": { params: ApplyTemplateRequest; result: LanguageRef };
   "language.get": { params: LanguageAddressParams; result: LanguageHandle };
@@ -673,6 +681,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "identity.requests",
   "identity.resolve",
   "identity.status",
+  "index.status",
   "language.all",
   "language.get",
   "language.meta",

@@ -6,6 +6,7 @@ import { RuntimeClient } from './runtime/RuntimeClient'
 import { ExpressionClient } from './expression/ExpressionClient'
 import { AIClient } from './ai/AIClient'
 import { IdentityClient } from './identity/IdentityClient'
+import { HostingIndexClient } from './hosting/HostingIndexClient'
 import { BotClient } from './bot/BotClient'
 import { HostClient } from './host/HostClient'
 import { DataClient } from './data/DataClient'
@@ -36,6 +37,7 @@ export class Ad4mClient {
     #runtimeClient: RuntimeClient
     #aiClient: AIClient
     #identityClient: IdentityClient
+    #hostingIndexClient: HostingIndexClient
     #botClient: BotClient
     #hostClient: HostClient
     #dataClient: DataClient
@@ -59,6 +61,7 @@ export class Ad4mClient {
         this.#perspectiveClient.setAIClient(this.#aiClient)
         this.#runtimeClient = new RuntimeClient(baseUrl, token, this.#apiClient)
         this.#identityClient = new IdentityClient(baseUrl, token, this.#apiClient)
+        this.#hostingIndexClient = new HostingIndexClient(baseUrl, token, this.#apiClient)
         this.#botClient = new BotClient(baseUrl, token, this.#apiClient)
         this.#hostClient = new HostClient(baseUrl, token, this.#apiClient)
         this.#dataClient = new DataClient(baseUrl, token, this.#apiClient)
@@ -109,6 +112,11 @@ export class Ad4mClient {
     /** This executor as a host: tenants, sign-up policy, invites. */
     get host(): HostClient {
         return this.#hostClient
+    }
+
+    /** This executor's listing in the hosting index (operator only). */
+    get hostingIndex(): HostingIndexClient {
+        return this.#hostingIndexClient
     }
 
     /** A person's export and import of their own perspectives and links. */
