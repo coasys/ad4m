@@ -961,24 +961,48 @@ describe('ApiClient urgent pending-request probe', () => {
         expect(socket(0).readyState).toBe(2)
     })
 
-    it('does not restart a probe already running when an urgent request falls due', async () => {
+    it('moves a running probe\'s deadline earlier when an urgent request falls due — the drop lands at the ping\'s urgent wait, not the probe\'s own', async () => {
         open()
         socket(0).open()
         call('agent.get', {}, { timeoutMs: 120_000 })
-        // The normal request's probe starts at +4 s and runs 8 s.
+        // The normal request's probe starts at +4 s and would run to +12 s.
         await jest.advanceTimersByTimeAsync(4_000)
         expect(pings(0)).toBe(1)
 
         await jest.advanceTimersByTimeAsync(500)
         call('perspective.all', {}, { timeoutMs: 120_000, urgent: true })
         // The urgent request falls due at +5.5 s inside the running probe:
-        // one probe at a time, still the 8 s deadline — the drop lands at +12 s.
+        // its wait moves the verdict earlier, to the probe ping's urgent
+        // deadline at +7 s — still one probe, so no second ping goes out.
         await jest.advanceTimersByTimeAsync(1_000)
         expect(pings(0)).toBe(1)
-        await jest.advanceTimersByTimeAsync(6_499)
+        await jest.advanceTimersByTimeAsync(1_499)
         expect(socket(0).readyState).toBe(1)
         await jest.advanceTimersByTimeAsync(1)
         expect(socket(0).readyState).toBe(2)
+        expect(TestSocket.instances).toHaveLength(2)
+    })
+
+    it('never moves a running probe\'s deadline later: a second urgent wait falling due keeps the urgent verdict', async () => {
+        open()
+        socket(0).open()
+        call('perspective.all', {}, { timeoutMs: 120_000, urgent: true })
+        // The urgent request's probe starts at +1 s and judges at +4 s.
+        await jest.advanceTimersByTimeAsync(1_000)
+        expect(pings(0)).toBe(1)
+
+        await jest.advanceTimersByTimeAsync(500)
+        call('agent.get', {}, { timeoutMs: 120_000, urgent: true })
+        // The second urgent request falls due at +2.5 s inside the running
+        // probe: the verdict is already the ping's urgent deadline, and the
+        // new wait cannot lengthen it. The drop still lands at +4 s.
+        await jest.advanceTimersByTimeAsync(1_000)
+        expect(pings(0)).toBe(1)
+        await jest.advanceTimersByTimeAsync(1_499)
+        expect(socket(0).readyState).toBe(1)
+        await jest.advanceTimersByTimeAsync(1)
+        expect(socket(0).readyState).toBe(2)
+        expect(TestSocket.instances).toHaveLength(2)
     })
 })
 
