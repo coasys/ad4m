@@ -3228,6 +3228,48 @@ test("an unlisted-session ask the socket faults is asked again within the grace,
     }
 })
 
+test("an unlisted-session ask that outlives its box is asked again within the grace", async () => {
+    // A reply that never landed inside its bound resolved the omission as
+    // little as a socket fault did: the same guarded retry, and the late
+    // reply then lands on the dropped ask.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const resuming = deferred<SfuResumeResult>()
+        api.sfuCallResume.mockImplementationOnce(() => resuming.promise)
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await flush()
+        await jest.advanceTimersByTimeAsync(3_000)
+        await flush()
+        await flush()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+
+        // The ask's 10 s box wins over the reply still out.
+        await jest.advanceTimersByTimeAsync(10_000)
+        await flush()
+        await flush()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+
+        // The grace asks again; the reply landing after its box changes nothing.
+        await jest.advanceTimersByTimeAsync(3_000)
+        await flush()
+        await flush()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(2)
+        resuming.resolve({ listed: false })
+        await jest.advanceTimersByTimeAsync(10_000)
+        await flush()
+        await flush()
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
 test("a resume refused with 403 ends the call, not a rebuild: the session is another agent's", async () => {
     const api = fakeApi()
     api.sfuCallResume.mockRejectedValue(new RpcError(403, "Session P1 belongs to another agent"))
