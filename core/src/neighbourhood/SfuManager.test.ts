@@ -1674,7 +1674,9 @@ test("a lost restart offer stays open until the executor can resend it", async (
         expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
         await jest.advanceTimersByTimeAsync(2_000)
         api.emitNetworkChange()
-        // ICE is still down 2 s after the socket is back: ask again.
+        // The change asks again at once: the restart's first request went
+        // out over the old network.
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
         await jest.advanceTimersByTimeAsync(2_000)
         expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
 
@@ -1765,6 +1767,8 @@ test("a network change asks again during a restart, and its timeout starts over"
         await iceState("disconnected")
         await jest.advanceTimersByTimeAsync(3_000)
         api.emitNetworkChange()
+        // The change asks again at once, not after a wait.
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
         await jest.advanceTimersByTimeAsync(2_000)
         expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
 
@@ -2205,10 +2209,12 @@ test("no resume goes out without a session, and none after leave", async () => {
     expect(api.reconnectHandlers.size).toBe(0)
 })
 
-// ── ICE restart only when ICE is down after the socket is back (C3) ────────
+// ── ICE restart: at once on a network change, after a wait only for a plain socket reconnect (C3) ──
 
-test("a network change while ICE stays connected restarts nothing", async () => {
-    // A late pong dropped a healthy socket: media never stopped.
+test("a network change restarts ICE at once, though ICE still reports connected", async () => {
+    // The local path changed: ICE's `connected` is the old path's state and
+    // stays it until consent checks fail, seconds later. Waiting on it was
+    // the e18 miss.
     fakeTimers()
     try {
         const api = fakeApi()
@@ -2216,11 +2222,12 @@ test("a network change while ICE stays connected restarts nothing", async () => 
         await manager.join(fakeStream())
         await iceState("connected")
 
-        api.emitNetworkChange()
         api.emitReconnect()
-        await jest.advanceTimersByTimeAsync(30_000)
+        api.emitNetworkChange()
+        expect(api.sfuCallRestartIce).toHaveBeenCalledWith(URL, ROOM, MINE)
 
-        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+        await jest.advanceTimersByTimeAsync(30_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
         expect(FakePeerConnection.instances).toHaveLength(1)
     } finally {
@@ -2228,28 +2235,26 @@ test("a network change while ICE stays connected restarts nothing", async () => 
     }
 })
 
-test.each(["network change", "plain reconnect"])(
-    "after a %s, ICE that is still not connected 2 s later is restarted",
-    async (kind) => {
-        fakeTimers()
-        try {
-            const api = fakeApi()
-            const manager = new SfuManager(api, ROOM, ME, URL)
-            await manager.join(fakeStream())
-            await iceState("connected")
-            ;(currentPc() as any).iceConnectionState = "checking"
+test("a socket reconnect with no network change still gives ICE 2 s before restarting", async () => {
+    // The path is the one the socket already used: media that kept flowing
+    // is left alone, and only ICE still down after the wait is restarted.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        await iceState("connected")
+        ;(currentPc() as any).iceConnectionState = "checking"
 
-            if (kind === "network change") api.emitNetworkChange()
-            else api.emitReconnect()
-            await jest.advanceTimersByTimeAsync(1_999)
-            expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
-            await jest.advanceTimersByTimeAsync(1)
-            expect(api.sfuCallRestartIce.mock.calls).toEqual([[URL, ROOM, MINE]])
-        } finally {
-            jest.useRealTimers()
-        }
-    },
-)
+        api.emitReconnect()
+        await jest.advanceTimersByTimeAsync(1_999)
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+        await jest.advanceTimersByTimeAsync(1)
+        expect(api.sfuCallRestartIce.mock.calls).toEqual([[URL, ROOM, MINE]])
+    } finally {
+        jest.useRealTimers()
+    }
+})
 
 test("ICE that comes back within the 2 s after the socket does is not restarted", async () => {
     fakeTimers()
@@ -2259,7 +2264,7 @@ test("ICE that comes back within the 2 s after the socket does is not restarted"
         await manager.join(fakeStream())
         ;(currentPc() as any).iceConnectionState = "checking"
 
-        api.emitNetworkChange()
+        api.emitReconnect()
         await jest.advanceTimersByTimeAsync(1_000)
         await iceState("connected")
         await jest.advanceTimersByTimeAsync(30_000)
@@ -2276,7 +2281,7 @@ test("leave drops a pending check of ICE after the socket", async () => {
         const api = fakeApi()
         const manager = new SfuManager(api, ROOM, ME, URL)
         await manager.join(fakeStream())
-        api.emitNetworkChange()
+        api.emitReconnect()
         await manager.leave()
         await jest.advanceTimersByTimeAsync(5_000)
         expect(api.sfuCallRestartIce).not.toHaveBeenCalled()

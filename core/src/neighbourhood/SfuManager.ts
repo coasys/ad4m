@@ -375,9 +375,9 @@ export class SfuManager {
     private rosterRevision = 0
     /** How long the roster may leave this session out before the call is rebuilt. */
     private static readonly UNLISTED_GRACE_MS = 3_000
-    /** How long after the socket is back ICE has to be connected before it is restarted. */
+    /** How long after a socket reconnect — with no network change — ICE has to be connected before it is restarted. */
     private static readonly ICE_CHECK_AFTER_SOCKET_MS = 2_000
-    /** Running from a socket reconnect or network change until ICE is looked at: see `checkIceSoon`. */
+    /** Running from a socket reconnect until ICE is looked at: see `checkIceSoon`. */
     private iceCheckTimer: ReturnType<typeof setTimeout> | null = null
 
     constructor(
@@ -538,12 +538,13 @@ export class SfuManager {
     }
 
     /**
-     * The socket is back (a reconnect, or a network change): restart ICE if
-     * it is not connected ICE_CHECK_AFTER_SOCKET_MS later. Media that kept
-     * flowing through a socket fault is left alone. A restart in flight is
-     * replaced: its request may have gone out on the dead socket. If that
-     * restart's offer is still unanswered, the executor sends it again and,
-     * once it is answered, restarts again for this network.
+     * The socket came back with no network change: the path ICE uses is the
+     * one it had, so media that kept flowing through the fault is left
+     * alone, and ICE is restarted only if it is still not connected
+     * ICE_CHECK_AFTER_SOCKET_MS later. A restart in flight is replaced:
+     * its request may have gone out on the dead socket. (A network change
+     * is a different call: the path changed, so it restarts ICE at once —
+     * see the `onNetworkChange` handler in `join`.)
      */
     private checkIceSoon(): void {
         if (this.iceCheckTimer) clearTimeout(this.iceCheckTimer)
@@ -633,12 +634,24 @@ export class SfuManager {
             }
         }
 
-        // A network change: the socket was redialled, and the path ICE uses
-        // may be gone too, or may not: a socket dropped for a late pong says
-        // nothing about media. See `checkIceSoon`. Listened to once per call,
-        // not per rebuild.
+        // A network change: the path ICE used is gone, though ICE may still
+        // report `connected` — that is the old path's state, and it keeps
+        // reporting it until consent checks fail, seconds after the path is
+        // lost. Restart ICE at once on the socket the change opened,
+        // whatever ICE reports. A restart in flight is replaced: its
+        // request may have gone out over the old network. Listened to once
+        // per call, not per rebuild.
         if (!this.networkUnsubscribe) {
-            this.networkUnsubscribe = this.neighbourhood.onNetworkChange(() => this.checkIceSoon())
+            this.networkUnsubscribe = this.neighbourhood.onNetworkChange(() => {
+                if (this.iceCheckTimer) {
+                    clearTimeout(this.iceCheckTimer)
+                    this.iceCheckTimer = null
+                }
+                const current = this.state.peerConnection
+                if (!current || this.reconnecting) return
+                this.endRestart()
+                this.restartIce(current)
+            })
         }
         // The socket came back: what a fault kept from the executor goes out now.
         if (!this.reconnectUnsubscribe) {
