@@ -30,6 +30,11 @@ keyId: string | null,
  */
 revoked: number | null, 
 /**
+ * The seq of the `unlink` that ended the device key, if one did (the device's own
+ * `identity.unlinkSelf` or the person's master key): a dead key, like a revoked one.
+ */
+unlinked: number | null, 
+/**
  * The last head of the log the cache accepted.
  */
 head: SignedHead | null, 

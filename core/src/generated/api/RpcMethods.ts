@@ -460,6 +460,7 @@ export interface RpcMethods {
   "identity.resetLog": { params: ResetLogParams; result: boolean };
   "identity.resolve": { params: ResolveParams; result: DidResolutionResult };
   "identity.status": { params: Record<string, never>; result: IdentityStatus };
+  "identity.unlinkSelf": { params: Record<string, never>; result: SignedHead };
   "identity.unwrapRecordKey": { params: UnwrapRecordKeyParams; result: RecordKey };
   "index.configure": { params: IndexConfig; result: IndexConfig };
   "index.publish": { params: ListingText; result: OwnListing };
