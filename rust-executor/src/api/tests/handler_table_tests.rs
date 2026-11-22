@@ -2,10 +2,9 @@
 //!
 //! Writes `RpcMethods.ts` — every method registered in the WS-RPC
 //! `HandlerMap` with the TypeScript types of its params and result, and its
-//! `read` / `long` flags — next to the ts-rs types it imports. Same trigger
-//! and destination as ts-rs: `cargo test --lib` writes to `$TS_RS_EXPORT_DIR`
-//! (default `bindings/`); `pnpm run generate:api-types` in `core/` points it
-//! at `core/src/generated/api/`.
+//! `read` / `long` flags — next to the ts-rs types it imports. `cargo test
+//! --lib` writes them when `$TS_RS_EXPORT_DIR` is set; `pnpm run
+//! generate:api-types` in `core/` points it at `core/src/generated/api/`.
 //!
 //! Also writes `Events.ts` — every event the executor emits, with the
 //! TypeScript type of its payload, and the perspective-scoped ones.
@@ -158,11 +157,15 @@ pub(crate) fn render_rpc_methods(map: &HandlerMap) -> String {
     out
 }
 
-/// Writes the table and every type it uses to the ts-rs export directory.
+/// Writes the table and every type it uses to the ts-rs export directory, on a
+/// generation run (`pnpm run generate:api-types` in core/, which sets
+/// `TS_RS_EXPORT_DIR`). A plain test run has nowhere to write to.
 #[test]
 fn export_rpc_methods() {
+    let Ok(dir) = std::env::var("TS_RS_EXPORT_DIR") else {
+        return;
+    };
     let cfg = ts_rs::Config::from_env();
-    let dir = std::env::var("TS_RS_EXPORT_DIR").unwrap_or_else(|_| "bindings".to_string());
     std::fs::create_dir_all(&dir).expect("create export dir");
     let map = build_handler_map();
     for spec in map.specs() {

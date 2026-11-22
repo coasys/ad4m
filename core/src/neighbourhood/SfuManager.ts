@@ -461,6 +461,8 @@ export class SfuManager {
                 `SFU: ${this.rebuilds.length} rebuilds in ${SfuManager.REBUILD_WINDOW_MS / 1000} s; not rebuilding again`,
             )
             const error = new Error("SFU reconnect attempts exhausted")
+            // No rejoin, so no roster will settle who is still here.
+            this.resetParticipants()
             this.emit("error", error)
             this.endCall({ reason: "gave-up", error })
             return
@@ -504,6 +506,8 @@ export class SfuManager {
                     }
                     if (Date.now() + delay > deadline) {
                         console.error("SFU reconnect failed:", e)
+                        // No rejoin, so no roster will settle who is still here.
+                        this.resetParticipants()
                         this.emit("error", e)
                         return
                     }

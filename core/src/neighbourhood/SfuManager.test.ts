@@ -1162,6 +1162,29 @@ test("a rejoin that keeps failing reports the error after the window, its connec
     }
 })
 
+test("a rebuild that gives up tells listeners everyone left", async () => {
+    // A rebuild keeps the participants for the rejoin's roster to settle. When
+    // no rejoin succeeds, no roster comes, so the participants must go here.
+    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
+    try {
+        const api = fakeApi()
+        const { manager, left, participants } = recordedManager(api)
+        await manager.join(fakeStream())
+        api.emitRoster(roster([ALICE, BOB]))
+        await flush()
+        api.sfuCallJoin.mockRejectedValue(new Error("Room is full"))
+
+        await iceState("failed")
+        expect(left).toEqual([])
+        await jest.advanceTimersByTimeAsync(130_000)
+
+        expect(left).toEqual([ALICE, BOB])
+        expect(participants()).toEqual([])
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
 test("joins that succeed while ICE keeps failing stop after three reconnects", async () => {
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL)
@@ -1174,6 +1197,22 @@ test("joins that succeed while ICE keeps failing stop after three reconnects", a
     expect(api.sfuCallLeave).toHaveBeenCalledTimes(4) // 3 rebuilds, then the end leaves the last session
     expect(errors).toEqual([new Error("SFU reconnect attempts exhausted")])
 })
+
+test("a rebuild that runs out of attempts tells listeners everyone left", async () => {
+    const api = fakeApi()
+    const { manager, left, participants } = recordedManager(api)
+    await manager.join(fakeStream())
+    api.emitRoster(roster([ALICE, BOB]))
+    await flush()
+
+    for (let i = 0; i < 3; i++) await iceState("failed")
+    expect(left).toEqual([])
+    await iceState("failed")
+
+    expect(left).toEqual([ALICE, BOB])
+    expect(participants()).toEqual([])
+})
+
 
 test("a rebuilt connection sends the tracks replaceTrack set and restores the quality preference", async () => {
     const api = fakeApi()
