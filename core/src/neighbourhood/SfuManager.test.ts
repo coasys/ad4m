@@ -390,9 +390,11 @@ test("a second offer waits until the first one is answered", async () => {
     expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(2)
 })
 
-test("a resume reply's offer waits behind an offer's SDP step still in flight", async () => {
+test("a resume reply's offer waits behind an offer's SDP step still in flight, and drops as stale", async () => {
     // The unlisted-roster timer asked for the resume outside the queue, so
-    // its offer could be applied beside another offer's SDP step.
+    // its offer could be applied beside another offer's SDP step — and an
+    // offer applied while the ask was out makes the reply's stale: the
+    // executor holds its current offer and its own event or resend brings it.
     jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
     try {
         const api = fakeApi()
@@ -423,7 +425,7 @@ test("a resume reply's offer waits behind an offer's SDP step still in flight", 
             applying.resolve()
             await flush()
             await flush()
-            expect(pc.remoteSdps()).toEqual(["server-answer", "event-offer", "resume-offer"])
+            expect(pc.remoteSdps()).toEqual(["server-answer", "event-offer"])
         } finally {
             FakePeerConnection.prototype.setRemoteDescription = original
         }
@@ -2283,6 +2285,39 @@ test("the offer a resume returns gets the answer the socket kept for it, without
 
     expect(answersSent(api)).toEqual([answerTo("X"), answerTo("X")])
     expect(currentPc().remoteSdps()).toEqual(["server-answer", "X"])
+    await manager.leave()
+})
+
+test("a resume reply's offer older than an event offer applied while the ask was out is dropped", async () => {
+    // The resume's wait is off the queue, so an event offer applies while
+    // the reply is still out. The executor built that reply while o7 was
+    // its pending offer; the restart's o8 reached the client first.
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    const pc = currentPc()
+    // Media is fine: the socket check finds nothing to restart.
+    ;(pc as any).iceConnectionState = "connected"
+
+    const resuming = deferred<SfuResumeResult>()
+    api.sfuCallResume.mockImplementationOnce(() => resuming.promise)
+    api.emitReconnect()
+    await flush()
+    await flush()
+    expect(api.sfuCallResume).toHaveBeenCalledWith(URL, ROOM, MINE)
+
+    // o8's event applies and is answered while the reply is on the wire.
+    api.emitOffer(offer("o8"))
+    await flush()
+    expect(pc.remoteSdps()).toEqual(["server-answer", "o8"])
+
+    // The late reply still carries o7: applying it would take the SDP back
+    // and answer it `stale`, losing the restart's ICE credentials.
+    resuming.resolve({ listed: true, offer: offer("o7") })
+    await flush()
+    await flush()
+    expect(pc.remoteSdps()).toEqual(["server-answer", "o8"])
+    expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(1)
     await manager.leave()
 })
 
