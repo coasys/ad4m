@@ -627,17 +627,17 @@
           "cryptosuite": "eddsa-jcs-2022",
           "domain": "coasys:kel",
           "proofPurpose": "assertionMethod",
-          "proofValue": "zEGYYKRDxG8EtLyQMts8oWuuF1ugjr7kGadyb5AnnTzJ8xL5HHsGo8aRA91eX71eWyijbByxbSumda6cs4tZVyvg",
+          "proofValue": "z48mod9S92MP8SaZoov3seZTRXDcHedCTAoz8EwtMdoPNF6WQoySipvniPq2oYimTVMDjMC3ijZ4o8oGgCGEcYFWL",
           "type": "DataIntegrityProof",
           "verificationMethod": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c#m1"
         }
       ],
-      "revoke": [
-        "d1"
-      ],
       "salt": "7DqbanfBGH8JLz4xeScbj2",
       "scid": "QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
-      "seq": 5
+      "seq": 5,
+      "unlink": [
+        "d1"
+      ]
     },
     {
       "add": [
@@ -651,13 +651,13 @@
       "format": "coasys/1",
       "offer": "offer-1",
       "op": "add",
-      "prev": "QmbuZW5E3NQh8KUpN1H4Neu9ByUX1EdbMgetSEoK9f4U4c",
+      "prev": "QmU55NHxAYVjpysCvsoCpMxXzVHohFZiFNLfd13oosu2oQ",
       "proof": [
         {
           "cryptosuite": "eddsa-jcs-2022",
           "domain": "coasys:kel",
           "proofPurpose": "assertionMethod",
-          "proofValue": "z3mvpMFSLMGW6L48VKocvmXVte5Bk2fV5P1U9ebMiLdGKVSz5jmh19aohLmDBEN5Zqdz6c8FDgsURbNK2Q1mGeo4b",
+          "proofValue": "z4HVp8QxE2Y9Hf1BQzcJru4HeBHYJqbP1UwKhjhbf3xF9MCuwoxbiKSziGt6ph5rE7UCoTH4CGjPjegJURrPB1coD",
           "type": "DataIntegrityProof",
           "verificationMethod": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c#m1"
         }
@@ -670,13 +670,13 @@
       "master": "z6MkiHTZ9xT973Yj5KJCXbHKw8j7XyzYYEW5BZTmzppkKEoP",
       "next": null,
       "op": "rotate",
-      "prev": "QmNkRHSG48baLHguazUAn4QcAeJCkTkp1Kodj92pAiTL51",
+      "prev": "QmWjfuhCeJmyfncTGwUrNVstW5gqEzwLngeqxvBMJzKuio",
       "proof": [
         {
           "cryptosuite": "eddsa-jcs-2022",
           "domain": "coasys:kel",
           "proofPurpose": "assertionMethod",
-          "proofValue": "zJx5knjk2Ay3uqb8XoJ7dHmJ8tE5XXyUsPtSHr6ZqUwC64kGEXvmpnCAyF7WgFmWS9Vk883niymSVXPJPua8shxE",
+          "proofValue": "z4r5Ec5eXv4X2FwQjCr3aMS8TjnKUxXoNFtANB53uhzYkLkojgiGBCNxYWi7KApdsWSwWECSH2kan5oKJ4dgiUKDc",
           "type": "DataIntegrityProof",
           "verificationMethod": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c#m2"
         }

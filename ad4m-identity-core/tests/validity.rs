@@ -46,7 +46,7 @@ fn nothing_applies_after_an_ending_rotate() {
             master: mk(&master(2)),
             salt: salt(2),
             next: Some(next(3)),
-            revoke: vec![],
+            unlink: vec![],
         },
     ];
     for op in ops {

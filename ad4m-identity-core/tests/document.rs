@@ -140,7 +140,7 @@ fn masters_never_appear_and_a_rotate_changes_no_method() {
 }
 
 #[test]
-fn a_rotate_that_revokes_drops_the_keys_from_its_seq() {
+fn a_rotate_that_unlinks_drops_the_keys_from_its_seq() {
     let mut log = revoked_log();
     log.rotate(&["d1"], false); // seq 4
     assert_eq!(method_ids(&doc(&log, Some(4)).0), ["#d3"]);

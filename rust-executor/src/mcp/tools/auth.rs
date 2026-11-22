@@ -692,6 +692,8 @@ mod auth_status_session_tests {
     // tool as the operator, but auth_status answered "Not authenticated".
     #[tokio::test]
     async fn no_token_on_a_local_executor_without_a_credential_reports_the_operator() {
+        setup_wallet();
+        setup_agent();
         ensure_test_db();
         let v = status(&handler(ListenerReach::Loopback, None), None).await;
         assert_eq!(v["authenticated"], true, "{v}");
@@ -759,6 +761,8 @@ mod auth_status_session_tests {
 
     #[tokio::test]
     async fn no_token_on_an_executor_with_a_credential_is_anonymous() {
+        setup_wallet();
+        setup_agent();
         ensure_test_db();
         let v = status(&handler(ListenerReach::Loopback, Some(ADMIN)), None).await;
         assert_eq!(v["authenticated"], false);
@@ -799,6 +803,8 @@ mod capability_mint_tests {
     /// `"code"` and "auto-permitted".
     #[tokio::test]
     async fn an_unauthenticated_caller_gets_no_mint_code() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
         crate::test_utils::ensure_test_db();
         let handler = handler_with_admin_credential();
         let anonymous = Session::for_test(Principal::Anonymous).with_caps(
@@ -850,6 +856,8 @@ mod capability_mint_tests {
     async fn an_authenticated_caller_still_gets_a_permitted_code() {
         use crate::agent::capabilities::pending::PendingRequests;
 
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
         crate::test_utils::ensure_test_db();
         let handler = handler_with_admin_credential();
         let operator = Session::for_test(Principal::Operator);
@@ -877,6 +885,8 @@ mod capability_mint_tests {
     /// Runs the tool's real path, `request_capability_as`, with no header.
     #[tokio::test]
     async fn without_admin_credential_a_local_caller_is_still_auto_permitted() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
         crate::test_utils::ensure_test_db();
         let gets_code = |reach| async move {
             let handler = Ad4mMcpHandler::new(McpContext::new(None, reach, false));
@@ -971,6 +981,8 @@ mod capability_mint_tests {
     /// token holding it got the code for the main agent.
     #[tokio::test]
     async fn a_user_session_holding_permit_gets_no_mint_code_for_the_main_agent() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
         crate::test_utils::ensure_test_db();
         let user = Session::for_test(Principal::Agent(crate::agent::AgentContext::managed(
             "did:key:mint-user".into(),

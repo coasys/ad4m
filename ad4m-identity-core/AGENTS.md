@@ -87,7 +87,7 @@ request box), is informative.
 - `fold(&[Event])` takes typed events; anything from outside goes through `Event::from_json`
   (or `fold_json`/`import_json`), which refuses unknown ops and fields, floats, integers at or
   above 2^53, other kinds, and JSON that does not serialise back to itself (an empty `proof`
-  or rotate `revoke` must be left out). That keeps the receiver's hash equal to the sender's.
+  or rotate `unlink` must be left out). That keeps the receiver's hash equal to the sender's.
   Event text goes through `Event::from_json_text` (or serde's `Deserialize` for `Event`), never
   through a `serde_json::Value` first: those refuse an object that names a member twice
   (`DuplicateMember`, rule P6), which a `Value` has already collapsed to its last member.

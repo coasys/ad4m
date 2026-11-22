@@ -175,7 +175,10 @@ export interface KeyIndexEntry {
     /** "d3". */
     keyId: string;
     added: number;
-    /** Seq of the revoke or rotate that ended it. */
+    /**
+     * Seq of the revoke that ended it, the rotate that replaced it (a master key), or the event
+     * that ended the log. `null` for a key that was only unlinked.
+     */
     revoked: number | null;
     /** Seq of the unlink that stopped it signing anything new. */
     unlinked?: number | null;

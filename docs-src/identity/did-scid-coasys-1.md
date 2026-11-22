@@ -73,7 +73,7 @@ members, and no others:
 | `add` | `add` (exactly one device key), `offer` (offer id), `coSig` (the claim co-signature of device linking) | the current master key |
 | `revoke` | `revoke` (one or more device key ids), `since` (integer ms since the epoch; left out when absent) | the current master key |
 | `unlink` | `unlink` (one device key id) | the current master key, or the named key itself |
-| `rotate` | `master` (the revealed key), `salt`, `next` (commitment or `null`), `revoke` (device key ids; left out when empty) | the revealed key |
+| `rotate` | `master` (the revealed key), `salt`, `next` (commitment or `null`), `unlink` (device key ids; left out when empty) | the revealed key |
 | `scope` | `key` (a bot key id), `can`, `expires` | the current master key |
 
 A device key has one of two flat forms, and no other member:
@@ -126,7 +126,7 @@ rule. Each rule names the error that the reference implementation returns
   `bot` or absent (`Format(UnsupportedKind)`); a bot key carries `can` and `expires`.
 - **P5** `kind` of an `incept` is `human`; `group` is reserved (`Format(UnsupportedKind)`).
 - **P6** The event serialises back to exactly the JSON it came from: an empty `proof` or an
-  empty `revoke` on `rotate` is left out, never written as `[]` (`Format(NotCanonical)`).
+  empty `unlink` on `rotate` is left out, never written as `[]` (`Format(NotCanonical)`).
   Without this, a receiver's hash could differ from the sender's. The event's text is I-JSON
   (RFC 7493): no object in it names a member twice (`Format(DuplicateMember)`), checked on the
   text before it is parsed into a value, since a parser keeping the first of two members and one
@@ -177,8 +177,8 @@ rule. Each rule names the error that the reference implementation returns
   The log does not read it (the core reads no clock); a store that appends the event checks it
   (K17).
 - **K13** `rotate`: `salt` is base58btc of 16 bytes (`Format(BadSalt)`); `master` and `salt`
-  hash to the stored `next` (`NextMismatch`); the revealed key signs as `m<n+1>`; its `revoke`
-  follows K12; `next` is a multihash or `null`.
+  hash to the stored `next` (`NextMismatch`); the revealed key signs as `m<n+1>`; its `unlink`
+  follows K16 (an unknown, revoked or already unlinked key is refused); `next` is a multihash or `null`.
 - **K14** `scope` names a device key (`UnknownKey`) that no event ended (`RevokedKey`) and that
   carries the bot mark (`NotABot`); signed by the current master.
 - **K16** `unlink` names one device key of this log (`UnknownKey`: a master key is not one)
@@ -201,7 +201,8 @@ rule. Each rule names the error that the reference implementation returns
 - `add`: the key takes effect at its seq; a bot key's scope is recorded at that seq.
 - `revoke`: each key stops at its seq, unless an `unlink` stopped it earlier.
 - `unlink`: the key stops at its seq: valid below it, as for a revoke.
-- `rotate`: master *n* stops and master *n*+1 starts at its seq; listed keys stop; `next` is
+- `rotate`: master *n* stops and master *n*+1 starts at its seq; the keys it unlinks stop as for
+  an `unlink` (never revoked: links anchored before it stay valid); `next` is
   replaced. With `next: null` the log ends: every key stops at that seq.
 - `scope`: the bot key's scope is replaced from its seq.
 
@@ -608,7 +609,7 @@ Coasys identity store adds these checks:
   either bound would be passed, and stores none of the append's events (`400 log-too-large`).
   A log that reaches the budget may still take an event small enough to fit. Revoking keys
   frees the live part: someone holding a stolen master can pad the live part to the budget,
-  and once the owner rotates and revokes the keys that padded it, the owner appends again, up
+  and once the owner revokes the keys that padded it (a `rotate` that unlinks them does not free the live part: an unlinked record stays in it), the owner appends again, up
   to the whole bound. A log stolen and padded twice can reach the whole bound and then takes
   no event but a `rotate`. A `rotate` is never refused by the budget: an append whose events are
   all `rotate`s is not measured. Rotation is the recovery from a stolen master, and someone
@@ -1060,6 +1061,6 @@ current master key:
   posted the request (its signed store request, by that device key at a position the log
   holds, covers `JCS({body, expires})`) and that it still holds (not past `expires`; a
   `confirm-revoke` names keys valid at the head): `send-master` as above, `confirm-revoke` with a
-  `revoke` signed by the master key (one with `rotate` needs the 12 words). It then deletes the
+  `revoke` signed by the master key (one with `rotate` needs the 12 words: a `rotate` that unlinks the keys to revoke that are still valid comes first, so the log itself shows them ended at the rotation (a key already unlinked ended earlier), then the `revoke` of all of them signed by master *n*+1 (a revoke wins over an unlink), so a log a rival event froze, which accepts only a `rotate`, recovers; the keys being revoked are not sent master *n*+1. A rotation that landed with the `revoke` failed is reported as such (the master is replaced, the keys are not revoked), and a separate resume publishes only the revoke, signed by the master that rotation made current, with a `since` the caller may correct; once the log moved to another master the resume is refused and a new revoke-with-rotation starts over. A restore's device is enrolled only after its lock-out is revoked). It then deletes the
   request with a store request the master key signs (after a rotation, master *n*+1; a delete
   that fails then is reported with the rotation, which stands).

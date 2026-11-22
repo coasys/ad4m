@@ -62,6 +62,10 @@ pub struct IdentityStatus {
     /// The seq of the event that revoked the device key, if one did.
     #[ts(type = "number | null")]
     pub revoked: Option<u64>,
+    /// The seq of the `unlink` that ended the device key, if one did (the device's own
+    /// `identity.unlinkSelf` or the person's master key): a dead key, like a revoked one.
+    #[ts(type = "number | null")]
+    pub unlinked: Option<u64>,
     /// The last head of the log the cache accepted.
     pub head: Option<SignedHead>,
     /// The first fork the cache recorded for the log.
@@ -134,7 +138,8 @@ pub struct KeyOwner {
     /// The seq of the event that added it.
     #[ts(type = "number")]
     pub added: u64,
-    /// The seq of the revoke or rotate that ended it.
+    /// The seq of the revoke that ended it, the rotate that replaced it (a master key), or the
+    /// event that ended the log. `None` for a key that was only unlinked.
     #[ts(type = "number | null")]
     pub revoked: Option<u64>,
 }

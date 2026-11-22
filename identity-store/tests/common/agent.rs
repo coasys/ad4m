@@ -312,9 +312,9 @@ impl Person {
     }
 
     /// The `rotate` to the next master (not pushed).
-    pub fn rotate(&self, revoke: &[&str]) -> Event {
+    pub fn rotate(&self, unlink: &[&str]) -> Event {
         let n = self.n + 1;
-        let ids: Vec<String> = revoke.iter().map(|s| s.to_string()).collect();
+        let ids: Vec<String> = unlink.iter().map(|s| s.to_string()).collect();
         build::rotate(
             &self.chain,
             &self.master(n),
