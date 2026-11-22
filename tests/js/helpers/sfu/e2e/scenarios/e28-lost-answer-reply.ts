@@ -8,7 +8,8 @@
  * it. Her unanswered call must not cost the call (on dev the call's 30 s
  * timeout reads as a failed renegotiation and rebuilds it), and a client
  * that ignored the error would not tell this apart from a lost request
- * (e26). See `lost-signal.ts` for what the row asserts.
+ * (e26). The eaten reply must be a success (`result`, no `error`): a lost
+ * refusal is a different fault. See `lost-signal.ts` for what the row asserts.
  *
  * Gates slice 3. Skipped while listed in `FAILS_ON_DEV`;
  * `E2E_KNOWN_FAILURES=1` runs it.
@@ -22,6 +23,12 @@ export const e28LostAnswerReply = lostSignalRow({
   description: "the executor applies carol's sfu.callAnswerServerOffer for dave's join but its reply is eaten: the call carries on without a rebuild",
   kind: "lost-answer-reply",
   arm: (proxy) => ({ ...proxy.dropReplyOnce("sfu.callAnswerServerOffer"), what: "the reply to carol's sfu.callAnswerServerOffer" }),
+  check: (dropped) => {
+    const reply = JSON.parse(dropped.text);
+    if (reply.error !== undefined || !("result" in reply)) {
+      throw new Error(`the eaten reply was not a success, so no applied answer was lost: ${dropped.text.slice(0, 200)}`);
+    }
+  },
   recoverMs: 20_000,
   holdMs: 45_000,
 });

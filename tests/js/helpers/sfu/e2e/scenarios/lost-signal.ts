@@ -13,7 +13,8 @@
  *
  * Each row asserts, for the affected pair and every other one:
  *  - carol and dave are in each other's roster, and hear and see each
- *    other, within `recoverMs` of the drop;
+ *    other, within `recoverMs` of the moment the proxy ate the message
+ *    (its own timestamp, not the end of dave's join);
  *  - the three already in the call hear and see each other in every sample
  *    from the drop until past the dropped call's 30 s RPC timeout (`holdMs`),
  *    so a rebuild a timeout starts is caught;
@@ -23,12 +24,12 @@
 import { all } from "../call.js";
 import { CAMERA } from "../media.js";
 import { e2eScenario, type E2eDefinition } from "../scenario.js";
-import { RunChecks, WsShaper, failsOnDev, type DroppedMessage } from "../../faults/index.js";
+import { RunChecks, WsShaper, failsOnDev, rowPassed, type DroppedMessage } from "../../faults/index.js";
 
 const PRESENT = ["alice", "bob", "carol"];
 const EVERYONE = [...PRESENT, "dave"];
-/** How long to wait for the message to cross the proxy at all. */
-const DROP_TIMEOUT_MS = 20_000;
+/** How long after the drop is armed (dave's join included) the message must cross the proxy. */
+const DROP_TIMEOUT_MS = 30_000;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -48,6 +49,8 @@ export interface LostSignalRow {
   kind: string;
   /** Arm the drop on carol's proxy; `what` names the message for a timeout. */
   arm(proxy: WsShaper): { dropped: Promise<DroppedMessage>; what: string };
+  /** Throws when the eaten message is not the one the row means to lose. */
+  check?(dropped: DroppedMessage): void;
   /** carol and dave hear, see and list each other within this of the drop. */
   recoverMs: number;
   /** Watch the call this long after the drop: past a dropped call's 30 s timeout and the rebuild it starts. */
@@ -86,9 +89,13 @@ export function lostSignalRow(row: LostSignalRow): ReturnType<typeof e2eScenario
         let droppedAt = 0;
 
         await step(`dave joins; ${what} is lost`, async () => {
-          await call.join(["dave"]);
-          await awaitWithin(dropped, DROP_TIMEOUT_MS, `no ${what} crossed carol's proxy`);
-          droppedAt = Date.now();
+          // The wait for the drop starts now, beside the join: the drop can come before the join returns.
+          const joined = call.join(["dave"]);
+          joined.catch(() => {});
+          const message = await awaitWithin(dropped, DROP_TIMEOUT_MS, `no ${what} crossed carol's proxy`);
+          droppedAt = message.at;
+          row.check?.(message);
+          await joined;
         });
 
         await step(`carol and dave list, hear and see each other within ${row.recoverMs / 1000} s`, async () => {
@@ -107,6 +114,7 @@ export function lostSignalRow(row: LostSignalRow): ReturnType<typeof e2eScenario
           if (violations.length) throw new Error(violations.join("\n"));
         });
         await step("no session reported an error", () => call.eventually(call.noErrors(), 1, "errors"));
+        rowPassed(row.id);
       } finally {
         await checks?.abort();
         proxy.close();
