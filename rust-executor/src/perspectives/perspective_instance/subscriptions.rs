@@ -151,6 +151,17 @@ impl PerspectiveInstance {
         get_global_pubsub().await.publish_event(event);
     }
 
+    /// The subscriber of each live subscription (a managed agent's DID; `None` for the main
+    /// agent), for the gauges of `GET /metrics`.
+    pub(crate) async fn subscription_subscribers(&self) -> Vec<Option<String>> {
+        self.subscribed_queries
+            .lock()
+            .await
+            .values()
+            .map(|q| q.subscriber.clone())
+            .collect()
+    }
+
     /// End one subscription that `connection_id` opened. `false` when there
     /// is no such subscription.
     pub async fn dispose_query_subscription(

@@ -383,14 +383,22 @@ pub(crate) async fn resolve_writable_class(
     }
 }
 
-/// Run a model query for `class_name` and return `(instances, total_count)`.
-pub(crate) async fn run_model_query(
+/// Run a model query for `class_name` under `stop` and return
+/// `(instances, total_count)`: the client call's gate bounds the query's
+/// evaluations and counts it (`GET /metrics`) once for the call, however many
+/// model queries run under the gate.
+pub(crate) async fn run_model_query_stopped(
+    stop: &EvalStop,
     perspective: &PerspectiveInstance,
     class_name: &str,
     query: &Value,
 ) -> Result<(Vec<Value>, usize), String> {
     let raw = perspective
-        .model_query(class_name, &query.to_string())
+        .model_query_classes_stopped(
+            stop,
+            &crate::perspectives::model_query::QueryClasses::One(class_name.to_string()),
+            &query.to_string(),
+        )
         .await
         .map_err(|e| format!("{e:#}"))?;
     let parsed: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
@@ -424,7 +432,17 @@ pub(crate) async fn fetch_instance(
     class_name: &str,
     base_uri: &str,
 ) -> Result<Option<Value>, String> {
-    Ok(find_instance(perspective, class_name, base_uri)
+    fetch_instance_stopped(&EvalStop::none(), perspective, class_name, base_uri).await
+}
+
+/// [`fetch_instance`] under `stop`: see [`run_model_query_stopped`]'s doc.
+pub(crate) async fn fetch_instance_stopped(
+    stop: &EvalStop,
+    perspective: &PerspectiveInstance,
+    class_name: &str,
+    base_uri: &str,
+) -> Result<Option<Value>, String> {
+    Ok(find_instance(stop, perspective, class_name, base_uri)
         .await?
         .map(|(_, instance)| instance))
 }
@@ -432,13 +450,14 @@ pub(crate) async fn fetch_instance(
 /// [`fetch_instance`], with the URI the instance is stored under: `base_uri`, or its other
 /// `literal:` spelling when that is where the lookup found it.
 async fn find_instance(
+    stop: &EvalStop,
     perspective: &PerspectiveInstance,
     class_name: &str,
     base_uri: &str,
 ) -> Result<Option<(String, Value)>, String> {
     let lookup = |uri: String| async move {
         let query = json!({ "where": { "id": uri.clone() }, "limit": 1 });
-        let (instances, _) = run_model_query(perspective, class_name, &query).await?;
+        let (instances, _) = run_model_query_stopped(stop, perspective, class_name, &query).await?;
         Ok::<Option<(String, Value)>, String>(instances.into_iter().next().map(|i| (uri, i)))
     };
 
@@ -460,7 +479,7 @@ async fn require_instance(
     class_name: &str,
     base_uri: &str,
 ) -> Result<String, InstanceError> {
-    match find_instance(perspective, class_name, base_uri).await {
+    match find_instance(&EvalStop::none(), perspective, class_name, base_uri).await {
         Ok(Some((stored, _))) => Ok(stored),
         Ok(None) => Err(InstanceError::NotFound {
             class_name: class_name.to_string(),
