@@ -335,11 +335,12 @@ export class SfuManager {
     private replacedTracks: Map<"audio" | "video", MediaStreamTrack | null> = new Map()
     /** The last quality preference set, for a rebuilt connection to restore. */
     private qualityPreference: SfuQualityPreference | null = null
-    /** Server-offer work, one step at a time. The SDP steps of an offer run
-     *  to their end before the next offer's start; an RPC holds the queue at
-     *  most OFFER_STEP_TIMEOUT_MS. */
+    /** Server-offer work, one step at a time. Every offer — an event's or a
+     *  resume reply's — runs its SDP steps to their end before the next
+     *  offer's start; only an answer RPC is boxed, at most
+     *  OFFER_STEP_TIMEOUT_MS. */
     private offerQueue: Promise<void> = Promise.resolve()
-    /** How long one RPC of `offerQueue` may hold the steps behind it. */
+    /** How long one answer RPC of `offerQueue` may hold the steps behind it. */
     private static readonly OFFER_STEP_TIMEOUT_MS = 10_000
     /** The `offerId` of the last server offer the executor took an answer
      *  for. Its resends are not answered again. */
@@ -843,7 +844,11 @@ export class SfuManager {
         this.unlistedTimer = setTimeout(() => {
             this.unlistedTimer = null
             if (this.state.peerConnection !== pc || this.state.participantId !== participantId) return
-            void this.resume(pc)
+            // On the one offer queue: a resume's offer applies like an event's,
+            // never beside an SDP step still running.
+            this.offerQueue = this.offerQueue
+                .then(() => this.resume(pc))
+                .catch((err) => console.warn("SFU: resuming the session failed:", err))
         }, SfuManager.UNLISTED_GRACE_MS)
     }
 
@@ -1052,13 +1057,15 @@ export class SfuManager {
         const pc = this.state.peerConnection
         if (!pc || this.reconnecting) return
         this.checkIceSoon()
-        this.offerQueue = this.offerQueue.then(() =>
-            this.timeBoxed(async () => {
+        this.offerQueue = this.offerQueue
+            .then(async () => {
                 const unsent = this.unsentAnswer
-                if (unsent?.pc === pc) await this.sendAnswer(unsent)
+                // The box is on the RPCs only: one given up on while its SDP
+                // step still ran would free the queue to mutate `pc` beside it.
+                if (unsent?.pc === pc) await this.timeBoxed(() => this.sendAnswer(unsent))
                 await this.resume(pc)
-            }),
-        )
+            })
+            .catch((err) => console.warn("SFU: recovering after the socket's return failed:", err))
     }
 
     /**

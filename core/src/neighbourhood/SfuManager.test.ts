@@ -390,6 +390,93 @@ test("a second offer waits until the first one is answered", async () => {
     expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(2)
 })
 
+test("a resume reply's offer waits behind an offer's SDP step still in flight", async () => {
+    // The unlisted-roster timer asked for the resume outside the queue, so
+    // its offer could be applied beside another offer's SDP step.
+    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        const pc = currentPc()
+
+        const applying = deferred<void>()
+        const original = FakePeerConnection.prototype.setRemoteDescription
+        FakePeerConnection.prototype.setRemoteDescription = async function (this: FakePeerConnection, d) {
+            if (d.sdp === "event-offer") await applying.promise
+            this.remoteDescriptions.push(d)
+        }
+        try {
+            api.emitOffer(offer("event-offer"))
+            await flush()
+
+            // The grace for the unlisted roster ends; the resume brings an offer.
+            api.sfuCallResume.mockResolvedValue({ listed: true, offer: offer("resume-offer") })
+            api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+            await flush()
+            await jest.advanceTimersByTimeAsync(3_000)
+            await flush()
+            await flush()
+
+            expect(pc.remoteSdps()).toEqual(["server-answer"])
+
+            applying.resolve()
+            await flush()
+            await flush()
+            expect(pc.remoteSdps()).toEqual(["server-answer", "event-offer", "resume-offer"])
+        } finally {
+            FakePeerConnection.prototype.setRemoteDescription = original
+        }
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a slow SDP step on a socket-reconnect resume holds the queue past the step timeout", async () => {
+    // socketBack boxed the whole resume step: past the limit the queue went
+    // on while its SDP work still ran, beside the next offer's.
+    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
+    try {
+        const api = fakeApi()
+        api.sfuCallResume.mockResolvedValue({ listed: true, offer: offer("resume-offer") })
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        const pc = currentPc()
+        // Media is fine: the socket check finds nothing to restart.
+        ;(pc as any).iceConnectionState = "connected"
+
+        const applying = deferred<void>()
+        const original = FakePeerConnection.prototype.setRemoteDescription
+        FakePeerConnection.prototype.setRemoteDescription = async function (this: FakePeerConnection, d) {
+            if (d.sdp === "resume-offer") await applying.promise
+            this.remoteDescriptions.push(d)
+        }
+        try {
+            api.emitReconnect()
+            await flush()
+            await flush()
+
+            // Long past the step timeout, with the resume's offer still applying.
+            await jest.advanceTimersByTimeAsync(30_000)
+            api.emitOffer(offer("next-offer"))
+            await flush()
+            await flush()
+            expect(pc.remoteSdps()).toEqual(["server-answer"])
+
+            applying.resolve()
+            await flush()
+            await flush()
+            expect(pc.remoteSdps()).toEqual(["server-answer", "resume-offer", "next-offer"])
+        } finally {
+            FakePeerConnection.prototype.setRemoteDescription = original
+        }
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
 test("an offer the executor sends again after it was answered is not answered twice", async () => {
     // A second restart request while the restart's offer waits gets that
     // offer again. The executor takes one answer per offer: a second answer
