@@ -185,6 +185,25 @@ pub(crate) fn model_query_sends_cursor(query_json: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The refusals [`PerspectiveInstance::model_query_classes_within`]'s early
+/// answers would skip — the `after` rules that need no shape. A union (or
+/// an abstract class, which resolves to one) refuses `after` reads itself
+/// ([`super::model_query::refuse_union_reads`]); one class refuses the
+/// unsupported cursors of [`super::model_query::refuse_unsupported_cursor`].
+fn refuse_before_empty_model_answer(
+    classes: &super::model_query::QueryClasses,
+    query_input: &super::model_query::ModelQueryInput,
+) -> Result<(), deno_core::anyhow::Error> {
+    match classes {
+        super::model_query::QueryClasses::Union(_) => {
+            super::model_query::refuse_union_reads(query_input)
+        }
+        super::model_query::QueryClasses::One(_) => {
+            super::model_query::refuse_unsupported_cursor(query_input).map(|_| ())
+        }
+    }
+}
+
 pub(crate) fn is_sparql_query(query: &str) -> bool {
     let trimmed = query.trim();
     // Match SPARQL keywords followed by whitespace or '{' / '<' to avoid
@@ -3907,6 +3926,10 @@ impl PerspectiveInstance {
             one => one.clone(),
         };
         if unstored_hardwired.iter().all(|u| *u) {
+            // The empty answer still fails what the query would be refused
+            // for without a shape: a union's `after` rules, or one class's
+            // unsupported cursor.
+            refuse_before_empty_model_answer(classes, &query_input)?;
             return serde_json::to_string(&super::model_query::ModelQueryResult {
                 instances: vec![],
                 total_count: query_input.count.unwrap_or(false).then_some(0),
@@ -3934,6 +3957,10 @@ impl PerspectiveInstance {
             .await?;
         let named = classes;
         let classes = &targets.classes;
+        // The early answers below — no class resolved, a `producedByFlow`
+        // filter nothing passes — skip the pipeline, so they make its
+        // shape-free refusals themselves, the same way.
+        refuse_before_empty_model_answer(classes, &query_input)?;
         if classes.names().is_empty() {
             return serde_json::to_string(&super::model_query::ModelQueryResult {
                 instances: vec![],
@@ -9046,6 +9073,46 @@ mod tests {
             .await
             .expect_err("a malformed cursor is an error, not an empty page");
         assert!(err.to_string().contains("Invalid `after` cursor"), "{err}");
+
+        // And every `after` rule the pipeline refuses without a shape fails
+        // the same way here: the empty result must not stand in for the
+        // refusal a stored class would give.
+        for (name, query) in [
+            (
+                "a property order",
+                r#"{"after":"","limit":1,"order":{"title":"ASC"}}"#,
+            ),
+            ("`limit: 0`", r#"{"after":"","limit":0}"#),
+            ("no `limit`", r#"{"after":""}"#),
+            (
+                "a non-zero `offset`",
+                r#"{"after":"","limit":1,"offset":2}"#,
+            ),
+            ("an `include` cursor", r#"{"include":{"rel":{"after":""}}}"#),
+        ] {
+            let err = perspective
+                .model_query_within("ad4m://FlowInstance", query, Duration::from_secs(1))
+                .await
+                .expect_err(&format!("{name}: refused, not an empty page"));
+            assert!(err.to_string().contains("`after`"), "{name}: {err}");
+        }
+
+        // A cursor taken from a page read the other way is refused too —
+        // the order's direction needs no shape to compare.
+        let desc_cursor = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"ts":"2026-01-01T00:00:00.000Z","id":"ns://a","desc":true}"#);
+        let err = perspective
+            .model_query_within(
+                "ad4m://FlowInstance",
+                &format!(r#"{{"after":"{desc_cursor}","limit":1,"order":{{"timestamp":"ASC"}}}}"#),
+                Duration::from_secs(1),
+            )
+            .await
+            .expect_err("a cursor from the other direction: refused");
+        assert!(
+            err.to_string().contains("opposite order direction"),
+            "{err}"
+        );
 
         let first = perspective
             .model_query_within(

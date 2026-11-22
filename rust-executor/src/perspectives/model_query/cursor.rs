@@ -24,7 +24,8 @@ use base64::Engine;
 use deno_core::anyhow::{anyhow, Error};
 use serde::{Deserialize, Serialize};
 
-use super::types::{IncludeValue, ModelQueryInput, OrderDirection};
+use super::sparql_builder::{level_limits, per_anchor_limit};
+use super::types::{IncludeValue, ModelQueryInput, OrderDirection, Scope};
 
 /// Position after the last row of a page: its first-link timestamp and id,
 /// plus the direction the page was read in.
@@ -86,6 +87,96 @@ pub(super) fn is_timestamp_order(order: &Option<Vec<(String, OrderDirection)>>) 
             keys.len() == 1 && matches!(keys[0].0.as_str(), "timestamp" | "createdAt" | "updatedAt")
         }
     }
+}
+
+/// Is `query`'s scope a containment walk with no `order`? Its rows keep the
+/// walk's order — where each one was reached, not a timestamp a cursor can
+/// key on. `query::walk_order` reads the same condition on the walked input;
+/// `parent` and `order` are what decide it, not what the walk reached.
+fn unordered_containment_walk(query: &ModelQueryInput) -> bool {
+    query.order.is_none()
+        && matches!(
+            query.parent,
+            Some(Scope::Traverse {
+                predicate: None,
+                transitive: true,
+                ..
+            })
+        )
+}
+
+/// Refuse a top-level query whose `after` — or whose `include` sub-query's —
+/// the pipeline cannot honour, checking only the query itself: the decode,
+/// the timestamp order, no containment walk without one, no per-anchor
+/// limit or `levels`, a `limit` above zero and no non-zero `offset`, and no
+/// `include` cursor.
+///
+/// `query.rs` runs this at depth 0 before the early answers that never
+/// reach its keyset block (a count-only result); `model_query_classes_within`
+/// runs it before its own (a hard-wired class nothing stored yet, a
+/// `producedByFlow` filter nothing passes), so a query fails the same way
+/// however it would have been answered. The `after` rules that need the
+/// shape — a `where` or `order` the store cannot push — stay in `query.rs`
+/// and produce the same refusal.
+///
+/// Returns the decoded cursor: `Some` for a non-empty `after`, `None` for
+/// the first page (`""`) or no `after` at all.
+pub(crate) fn refuse_unsupported_cursor(
+    query: &ModelQueryInput,
+) -> Result<Option<KeysetCursor>, Error> {
+    // A count-only query has no page a cursor can point into. Before the
+    // `include` rule, as in `query.rs`: a `limit: 0` query that does both
+    // gets this refusal.
+    if query.after.is_some() && query.limit == Some(0) {
+        return Err(Error::msg(
+            "`after` cursors need a `limit` above zero. Page any other query with `offset`.",
+        ));
+    }
+    if include_sends_cursor(query) {
+        return Err(Error::msg(
+            "`after` cursors page a top-level query only. An `include` sub-query \
+             takes `limit`/`offset`.",
+        ));
+    }
+    let Some(after) = query.after.as_deref() else {
+        return Ok(None);
+    };
+    let cursor = if after.is_empty() {
+        None
+    } else {
+        Some(KeysetCursor::decode(after)?)
+    };
+    let supported = is_timestamp_order(&query.order)
+        && !unordered_containment_walk(query)
+        && per_anchor_limit(query).is_none()
+        && level_limits(query).is_none()
+        && query.limit.is_some_and(|l| l > 0)
+        && query.offset.unwrap_or(0) == 0;
+    if !supported {
+        return Err(Error::msg(
+            "`after` cursors need the timestamp order (no `order`, or one of \
+             timestamp/createdAt/updatedAt), a `limit`, a `where` the store can \
+             evaluate, no non-zero `offset`, and no per-anchor limit or `levels`. \
+             Page any other query with `offset`.",
+        ));
+    }
+    // A cursor from a page read the other way pages the wrong end. The order
+    // here is the timestamp one the checks above already allowed, so its
+    // direction needs no shape to compare.
+    if let Some(c) = &cursor {
+        let direction = query
+            .order
+            .as_ref()
+            .and_then(|o| o.first())
+            .map(|(_, d)| *d)
+            .unwrap_or(OrderDirection::ASC);
+        if c.direction() != direction {
+            return Err(Error::msg(
+                "`after` cursor was issued for the opposite order direction",
+            ));
+        }
+    }
+    Ok(cursor)
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@
 //! target-class shapes (themselves cached).
 
 use super::containment::{contains_patterns, has_child_only, ContainmentEdge};
-use super::cursor::{include_sends_cursor, is_timestamp_order, KeysetCursor};
+use super::cursor::{refuse_unsupported_cursor, KeysetCursor};
 use super::eval_transform::eval_transform;
 use super::filtering::{matches_where, sort_instances};
 use super::getters::evaluate_getters;
@@ -638,17 +638,15 @@ pub(super) async fn execute_model_query_inner(
     // cursor refusals — runs, so the `after` checks have to come first: a
     // count-only query has no page a cursor can point into, and an `include`
     // cursor would be dropped the way it would be on any other early answer.
-    if depth == 0 && is_count_only && query_input.after.is_some() {
-        return Err(Error::msg(
-            "`after` cursors need a `limit` above zero. Page any other query with `offset`.",
-        ));
-    }
-    if depth == 0 && include_sends_cursor(query_input) {
-        return Err(Error::msg(
-            "`after` cursors page a top-level query only. An `include` sub-query \
-             takes `limit`/`offset`.",
-        ));
-    }
+    // `refuse_unsupported_cursor` holds every `after` rule that needs no
+    // shape (`model_query_classes_within` runs it ahead of its own empty
+    // answers) and returns the decoded cursor the keyset block below pages
+    // from; what is still refused there needs the shape.
+    let cursor = if depth == 0 {
+        refuse_unsupported_cursor(query_input)?
+    } else {
+        None
+    };
     if is_count_only && !wants_count {
         return Ok(ModelQueryResult {
             instances: vec![],
@@ -754,39 +752,18 @@ pub(super) async fn execute_model_query_inner(
     // Anything else that sends `after` is refused: a missing `nextCursor`
     // would read as the last page.
     let keyset: Option<Option<KeysetCursor>> = match query_input.after.as_deref() {
-        Some(after) if depth == 0 => {
-            let cursor = if after.is_empty() {
-                None
-            } else {
-                Some(KeysetCursor::decode(after)?)
-            };
-            // `offset: 0` skips nothing.
-            let supported = is_timestamp_order(&query_input.order)
-                && walk_order.is_none()
-                && can_push_pagination
-                && !scope_needs_phases
-                && query_input.limit.is_some_and(|l| l > 0)
-                && query_input.offset.unwrap_or(0) == 0;
-            if !supported {
+        Some(_) if depth == 0 => {
+            // The rules that read only the query ran above; what remains
+            // needs the shape: the page's `where` and `order` must be ones
+            // the store can evaluate, or a `limit` cut in the store would
+            // not be the page the caller asked for.
+            if !can_push_pagination {
                 return Err(Error::msg(
                     "`after` cursors need the timestamp order (no `order`, or one of \
                      timestamp/createdAt/updatedAt), a `limit`, a `where` the store can \
                      evaluate, no non-zero `offset`, and no per-anchor limit or `levels`. \
                      Page any other query with `offset`.",
                 ));
-            }
-            let direction = query_input
-                .order
-                .as_ref()
-                .and_then(|o| o.first())
-                .map(|(_, d)| *d)
-                .unwrap_or(OrderDirection::ASC);
-            if let Some(c) = &cursor {
-                if c.direction() != direction {
-                    return Err(Error::msg(
-                        "`after` cursor was issued for the opposite order direction",
-                    ));
-                }
             }
             Some(cursor)
         }

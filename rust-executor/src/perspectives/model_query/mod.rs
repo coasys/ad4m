@@ -134,7 +134,7 @@ pub(crate) mod types;
 mod union;
 pub(crate) mod utils;
 
-pub(crate) use cursor::KeysetCursor;
+pub(crate) use cursor::{refuse_unsupported_cursor, KeysetCursor};
 /// The per-value condition evaluator, shared with the flow engine so a
 /// `fromRole` rule's `author` condition means the same thing whether it is
 /// applied to a grant row here or to a revocation tombstone there.
