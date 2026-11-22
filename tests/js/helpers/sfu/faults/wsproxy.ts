@@ -8,9 +8,16 @@
  * event never arrived", with every ping, pong and other message delivered.
  *
  * `dropOnce` arms one predicate; the first message matching it, in the armed
- * direction, is eaten and every later message passes. Used for the lost
- * `sfu.callAnswerServerOffer` request and the lost
- * `sfu-call-renegotiation-offer` event rows.
+ * direction, is eaten and every later message passes. `dropReplyOnce` eats
+ * the executor's reply to the first request of a method instead: the call
+ * was applied, its caller never hears so. `dropWhile` eats every matching
+ * message until stopped, and `observeReply` lets a request's reply through
+ * and reports it. Each eaten message carries the time it was eaten.
+ *
+ * Scope: plaintext `ws` only (no TLS). It neither negotiates away nor
+ * decodes permessage-deflate: a compressed message would not match a
+ * predicate (the executor offers no extension today). A half-close is not
+ * kept: either side's end destroys both.
  */
 
 import { connect, createServer, type AddressInfo, type Server, type Socket } from "node:net";
@@ -28,6 +35,16 @@ export interface DroppedMessage {
   bytes: number;
   /** RFC 6455 frames the message was made of. */
   frames: number;
+  /** ms epoch when the proxy ate it. */
+  at: number;
+}
+
+/** A reply the proxy let through, as `observeReply` reports it. */
+export interface ObservedReply {
+  /** The reply's JSON: `result` on success, `error` on a refusal. */
+  reply: { id: unknown; result?: unknown; error?: unknown };
+  /** ms epoch when it crossed the proxy. */
+  at: number;
 }
 
 export interface WsProxyEvent {
@@ -110,7 +127,19 @@ interface DropRule {
   direction: WsDirection | "both";
   match: WsMatch;
   resolve: (dropped: DroppedMessage) => void;
+  /** Eats every match until removed, not only the first. */
+  persistent?: boolean;
 }
+
+/** The reply to a JSON-RPC request with `id`: no `type`, same id. */
+const isReplyTo = (text: string, id: unknown): boolean => {
+  try {
+    const m = JSON.parse(text);
+    return m != null && typeof m === "object" && m.type === undefined && m.id === id;
+  } catch {
+    return false;
+  }
+};
 
 /** Predicates for the messages a scenario drops. */
 export const matchRpc =
@@ -146,6 +175,9 @@ export class WsShaper {
   private rules: DropRule[] = [];
   /** Requests whose reply is to be eaten: armed by `dropReplyOnce`. */
   private replyRules: { method: string; resolve: (dropped: DroppedMessage) => void }[] = [];
+  /** Requests whose reply is to be reported, and then the ids they were sent with. */
+  private replyWatches: { method: string; resolve: (observed: ObservedReply) => void }[] = [];
+  private watchedIds = new Map<unknown, (observed: ObservedReply) => void>();
   port = 0;
   droppedLog: DroppedMessage[] = [];
   constructor(
@@ -193,20 +225,55 @@ export class WsShaper {
     return { dropped };
   }
 
-  /** An up message that is the request a reply rule waits for arms a drop of its reply. */
+  /**
+   * Eat every message matching `match` in `direction` (default both) until
+   * `stop()`. `dropped` lists what was eaten so far, each with its time.
+   */
+  dropWhile(opts: { direction?: WsDirection | "both"; match: WsMatch }): { dropped: DroppedMessage[]; stop(): void } {
+    const dropped: DroppedMessage[] = [];
+    const rule: DropRule = { direction: opts.direction ?? "both", match: opts.match, resolve: (d) => dropped.push(d), persistent: true };
+    this.rules.push(rule);
+    return {
+      dropped,
+      stop: () => {
+        this.rules = this.rules.filter((r) => r !== rule);
+      },
+    };
+  }
+
+  /**
+   * Report the executor's reply to the first `method` request the client
+   * sends from now on, and let it through. Resolves once it crossed.
+   */
+  observeReply(method: string): { reply: Promise<ObservedReply> } {
+    const reply = new Promise<ObservedReply>((resolve) => {
+      this.replyWatches.push({ method, resolve });
+    });
+    return { reply };
+  }
+
+  /** An up request a reply rule or watch waits for: arm the drop or the report of its reply. */
   private armReply(text: string): void {
+    const watch = this.replyWatches.findIndex((r) => matchRpc(r.method)(text, OPCODE_TEXT));
+    if (watch !== -1) {
+      const [w] = this.replyWatches.splice(watch, 1);
+      this.watchedIds.set(JSON.parse(text).id, w.resolve);
+    }
     const idx = this.replyRules.findIndex((r) => matchRpc(r.method)(text, OPCODE_TEXT));
     if (idx === -1) return;
     const [rule] = this.replyRules.splice(idx, 1);
     const id = JSON.parse(text).id;
-    this.rules.push({
-      direction: "down",
-      match: (reply) => {
-        const m = JSON.parse(reply);
-        return m != null && typeof m === "object" && m.type === undefined && m.id === id;
-      },
-      resolve: rule.resolve,
-    });
+    this.rules.push({ direction: "down", match: (reply) => isReplyTo(reply, id), resolve: rule.resolve });
+  }
+
+  /** A down message that answers a watched request: report it. */
+  private reportReply(text: string): void {
+    for (const [id, resolve] of this.watchedIds) {
+      if (!isReplyTo(text, id)) continue;
+      this.watchedIds.delete(id);
+      resolve({ reply: JSON.parse(text), at: Date.now() });
+      return;
+    }
   }
 
   private attach(client: Socket): void {
@@ -235,10 +302,12 @@ export class WsShaper {
       const idx = this.rules.findIndex((r) => (r.direction === "both" || r.direction === dir) && safeMatch(r.match, text, msg.opcode));
       if (idx === -1) {
         forward(dir, msg.raws);
+        if (dir === "down") this.reportReply(text);
         return;
       }
-      const [rule] = this.rules.splice(idx, 1);
-      const dropped: DroppedMessage = { direction: dir, opcode: msg.opcode, text, bytes: msg.raws.reduce((n, r) => n + r.length, 0), frames: msg.raws.length };
+      const rule = this.rules[idx];
+      if (!rule.persistent) this.rules.splice(idx, 1);
+      const dropped: DroppedMessage = { direction: dir, opcode: msg.opcode, text, bytes: msg.raws.reduce((n, r) => n + r.length, 0), frames: msg.raws.length, at: Date.now() };
       this.droppedLog.push(dropped);
       this.onEvent({ t: new Date().toISOString(), conn, what: "drop", direction: dir, text: text.slice(0, 200) });
       rule.resolve(dropped);
