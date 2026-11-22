@@ -19,6 +19,18 @@ const RUNNING: u8 = 0;
 const STOP_CANCELLED: u8 = 1;
 const STOP_DEADLINE: u8 = 2;
 
+/// The wording of the two stop errors [`EvalStop::stopped_err`] builds;
+/// [`is_stop_error`] recognises them by it.
+const CANCELLED_MSG: &str = "query cancelled";
+const DEADLINE_MSG_PREFIX: &str = "SPARQL deadline";
+
+/// Whether `err` is what [`EvalStop::stopped_err`] reports: an eval ended by
+/// its deadline or a cancel. Expected under load, not a failure to act on.
+pub(crate) fn is_stop_error(err: &Error) -> bool {
+    let text = err.to_string();
+    text == CANCELLED_MSG || text.contains(DEADLINE_MSG_PREFIX)
+}
+
 /// Which way of stopping fired for one evaluation, and the deadline that was
 /// armed (the deadline error names it). Shared by the gate that fires and the
 /// evals that report.
@@ -96,9 +108,9 @@ impl EvalStop {
     /// for the deadline's wording.
     pub(crate) fn stopped_err(&self, what: &str) -> Option<Error> {
         match self.stop.kind.load(Ordering::Acquire) {
-            STOP_CANCELLED => Some(anyhow!("query cancelled")),
+            STOP_CANCELLED => Some(anyhow!("{CANCELLED_MSG}")),
             STOP_DEADLINE => Some(anyhow!(
-                "{what} stopped: SPARQL deadline of {:?} passed",
+                "{what} stopped: {DEADLINE_MSG_PREFIX} of {:?} passed",
                 self.stop.deadline
             )),
             _ => None,

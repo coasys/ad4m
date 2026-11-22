@@ -75,6 +75,8 @@ mod shapes;
 pub(crate) use abstract_classes::faults::fail_next_index;
 pub use shapes::{RegisterResult, ShapeSummary};
 mod runner;
+#[cfg(test)]
+pub(crate) use runner::hold_all_but;
 mod subscriptions;
 pub(crate) use subscriptions::{result_json, SubscriptionIdTaken};
 // Which writes re-run a model subscription (#1237).
@@ -844,8 +846,11 @@ impl PerspectiveInstance {
     /// Local-only perspectives (no link language) behave identically
     /// to `get_shape` — a missing class there is a genuine
     /// caller bug, not a sync race, so we surface the error immediately.
+    ///
+    /// The wait ends with `stop`, returning its error.
     pub async fn get_shape_or_wait(
         &self,
+        stop: &EvalStop,
         class_name: &str,
         budget: Duration,
     ) -> Result<Arc<ModelShape>, AnyError> {
@@ -874,7 +879,10 @@ impl PerspectiveInstance {
                 });
             }
             // Never sleep past the deadline: the caller's budget is shared.
-            sleep(poll.min(deadline - now)).await;
+            tokio::select! {
+                _ = sleep(poll.min(deadline - now)) => {}
+                err = runner::stopped(stop) => return Err(err),
+            }
             if let Ok(shape) = self.get_shape(class_name) {
                 return Ok(shape);
             }
@@ -3882,7 +3890,7 @@ impl PerspectiveInstance {
                 continue;
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
-            self.get_shape_or_wait(class_name, remaining).await?;
+            self.get_shape_or_wait(stop, class_name, remaining).await?;
         }
         // An abstract class (#1435) reads the concrete classes that have its
         // names, each through its view; none of them is an empty result.
@@ -3915,8 +3923,15 @@ impl PerspectiveInstance {
         let resolver = self.shape_resolver();
 
         if let Some(filter) = produced_by_flow {
-            let valid = super::flow_instance::produced::flow_valid_outputs(
+            // Inside this run's slot and under its stop: see `runner::InRun`.
+            let outputs = runner::InRun {
+                perspective: self,
+                stop,
+                shape_wait,
+            };
+            let valid = super::flow_instance::produced::flow_valid_outputs_reading(
                 self,
+                &outputs,
                 &filter.flow,
                 filter.state.as_deref(),
             )
@@ -4006,7 +4021,7 @@ impl PerspectiveInstance {
                 return Err(err);
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
-            self.get_shape_or_wait(&missing.class_name, remaining)
+            self.get_shape_or_wait(stop, &missing.class_name, remaining)
                 .await?;
         };
         let mut result = result;
@@ -6072,11 +6087,21 @@ impl PerspectiveInstance {
                     {
                         Ok(result) => Some((ids, result)),
                         Err(e) => {
-                            log::error!(
-                                "❌ 🔗 🧠 model-based subscription query failed (subscriptions {:?}): {}",
-                                ids,
-                                e
-                            );
+                            // A deadline or cancel is expected under load and
+                            // retried next pass; anything else is a warning.
+                            if crate::perspectives::sparql_store::is_stop_error(&e) {
+                                log::debug!(
+                                    "🔗 🧠 model-based subscription query stopped (subscriptions {:?}): {}",
+                                    ids,
+                                    e
+                                );
+                            } else {
+                                log::warn!(
+                                    "⚠️ 🔗 🧠 model-based subscription query failed (subscriptions {:?}): {}",
+                                    ids,
+                                    e
+                                );
+                            }
                             None
                         }
                     }
@@ -6097,11 +6122,19 @@ impl PerspectiveInstance {
                 match self_clone.sparql_query_stopped(&gate.stop(), &query_string) {
                     Ok(result) => Some((ids, result)),
                     Err(e) => {
-                        log::error!(
-                            "❌ 🔗 🔎 SPARQL subscription query failed (subscriptions {:?}): {}",
-                            ids,
-                            e
-                        );
+                        if crate::perspectives::sparql_store::is_stop_error(&e) {
+                            log::debug!(
+                                "🔗 🔎 SPARQL subscription query stopped (subscriptions {:?}): {}",
+                                ids,
+                                e
+                            );
+                        } else {
+                            log::warn!(
+                                "⚠️ 🔗 🔎 SPARQL subscription query failed (subscriptions {:?}): {}",
+                                ids,
+                                e
+                            );
+                        }
                         None
                     }
                 }

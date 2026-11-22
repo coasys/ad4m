@@ -49,6 +49,7 @@ use crate::perspectives::model_query::utils::parse_literal_value;
 use crate::perspectives::perspective_instance::{
     PerspectiveInstance, ShapeSummary, SubjectClassOption,
 };
+use crate::perspectives::sparql_store::EvalStop;
 use crate::types::{LinkExpression, LinkQuery};
 use crate::utils::{normalize_legacy_literal, other_literal_spelling};
 use serde_json::{json, Value};
@@ -292,7 +293,7 @@ pub(crate) async fn resolve_class(
         return Err(error);
     }
     match perspective
-        .get_shape_or_wait(class_name, CLASS_SYNC_WAIT)
+        .get_shape_or_wait(&EvalStop::none(), class_name, CLASS_SYNC_WAIT)
         .await
     {
         Ok(shape) => {

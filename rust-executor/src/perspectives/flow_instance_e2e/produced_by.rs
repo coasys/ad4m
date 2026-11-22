@@ -229,6 +229,48 @@ async fn a_forged_receipt_in_the_graph_neither_lists_nor_passes_the_filter() {
     );
 }
 
+/// A `producedByFlow` query holds a run slot while it reads each output back
+/// through its class. With one slot that inner read must run inside the slot
+/// already held, not wait for another: the query answers, and the slot frees.
+///
+/// Red if the inner read goes back through the scheduled runner (deadlock).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_produced_by_query_reads_its_outputs_inside_its_own_slot() {
+    let mut f = seed_satisfied_fixture(None).await;
+    let instance = f.instance_uri.clone();
+    propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("propose");
+    crate::perspectives::flow_instance::produced::mint_flow_receipt(
+        &mut f.perspective,
+        &instance,
+        &f.ctx,
+    )
+    .await
+    .expect("mint");
+
+    let slots = crate::perspectives::perspective_instance::hold_all_but(1);
+    let read = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        tasks_produced_by(
+            &f,
+            serde_json::json!({ "where": { "producedByFlow": { "flow": f.flow_uri } } }),
+        ),
+    )
+    .await;
+    drop(slots);
+    let (ids, total) = read.expect("the query finished with one slot");
+    assert_eq!(ids, vec![TASK.to_string()]);
+    assert_eq!(total, 1);
+}
+
 /// The live-content check: an output edited AFTER the run completed is no
 /// longer what the quorum committed to, so the enumeration and the filter
 /// stop returning it — while the receipt itself keeps verifying, because a

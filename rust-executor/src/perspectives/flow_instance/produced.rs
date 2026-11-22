@@ -117,7 +117,7 @@ use super::verify::{verify_receipt, ReceiptVerdict};
 use super::FlowInstance;
 use crate::agent::AgentContext;
 use crate::perspectives::flow_context::{load_all_flow_instances, load_shacl_flows};
-use crate::perspectives::flow_evaluator::EvidenceItem;
+use crate::perspectives::flow_evaluator::{EvidenceItem, RequiresQueryable};
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::SHACLFlow;
 use crate::types::{Link, LinkQuery, LinkStatus};
@@ -533,6 +533,19 @@ pub async fn flow_valid_outputs(
     flow_uri: &str,
     state: Option<&str>,
 ) -> anyhow::Result<Vec<ValidOutput>> {
+    flow_valid_outputs_reading(perspective, perspective, flow_uri, state).await
+}
+
+/// [`flow_valid_outputs`] reading each output's live content through
+/// `outputs` instead of the perspective's own scheduled `model_query`. A
+/// `producedByFlow` query calls this from inside its run, which already holds
+/// a run slot and a deadline: its reads must use both, not queue again.
+pub(crate) async fn flow_valid_outputs_reading<Q: RequiresQueryable + ?Sized>(
+    perspective: &PerspectiveInstance,
+    outputs: &Q,
+    flow_uri: &str,
+    state: Option<&str>,
+) -> anyhow::Result<Vec<ValidOutput>> {
     let catalogue = load_shacl_flows(perspective).await?;
     if !catalogue.contains_key(flow_uri) {
         anyhow::bail!(
@@ -550,7 +563,7 @@ pub async fn flow_valid_outputs(
     );
 
     let refs: Vec<OutputRef> = candidates.iter().map(|c| c.output.clone()).collect();
-    let live = super::accept::load_outputs(perspective, &refs).await?;
+    let live = super::accept::load_outputs(outputs, &refs).await?;
     Ok(candidates
         .into_iter()
         .filter(|c| match live.get(&c.output) {

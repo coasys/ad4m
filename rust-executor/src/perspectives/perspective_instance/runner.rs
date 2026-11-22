@@ -9,17 +9,19 @@
 //! the executor's blocking slots ([`RECHECK_SLOTS`]), so a burst of reads never
 //! blocks async workers. A waiter that stops (its deadline, a cancel, a closed
 //! socket) leaves the run going for the others; the last waiter to leave stops
-//! it, as a lone caller's gate always did.
+//! it, as a lone caller's gate always did: a run still queued for a slot never
+//! takes it, one running ends with its stop. A read made inside a run goes
+//! through [`InRun`], never back through the runner.
 
-use super::subscriptions::{run_rechecks, RECHECK_SLOTS};
+use super::subscriptions::{blocking_check, RECHECK_SLOTS};
 use super::PerspectiveInstance;
+use crate::perspectives::flow_evaluator::RequiresQueryable;
 use crate::perspectives::model_query::QueryClasses;
 use crate::perspectives::sparql_store::{query_deadline, EvalGate, EvalStop};
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use futures::future::{BoxFuture, Shared};
 use futures::FutureExt;
-use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -29,8 +31,10 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(super) struct RunKey {
     classes: QueryClasses,
-    /// The query in canonical form: sorted keys, null top-level fields dropped.
-    /// No agent: a result does not depend on who asks, so agents share a run.
+    /// The query text as the caller sent it: key order can matter (a
+    /// multi-key `order` ranks by it), so no spelling is normalised. The SDK
+    /// sends one text for one call. No agent: a result does not depend on who
+    /// asks, so agents share a run.
     query: String,
     /// How long a missing class is waited for: it decides whether the run fails.
     shape_wait: Duration,
@@ -98,7 +102,7 @@ impl PerspectiveInstance {
         if let Some(err) = stop.stopped_err("query") {
             return Err(err);
         }
-        let key = self.run_key(classes, query_json, shape_wait)?;
+        let key = self.run_key(classes, query_json, shape_wait);
         let (reply, _waiter) = self.join_run(key, classes, query_json);
         let reply = tokio::select! {
             reply = reply => reply,
@@ -109,20 +113,15 @@ impl PerspectiveInstance {
             .map_err(|msg| anyhow!(msg.to_string()))
     }
 
-    fn run_key(
-        &self,
-        classes: &QueryClasses,
-        query_json: &str,
-        shape_wait: Duration,
-    ) -> Result<RunKey, AnyError> {
-        Ok(RunKey {
+    fn run_key(&self, classes: &QueryClasses, query_json: &str, shape_wait: Duration) -> RunKey {
+        RunKey {
             classes: classes.clone(),
-            query: canonical_query(query_json)?,
+            query: query_json.to_string(),
             shape_wait,
             // Read before the run starts, as `write_generation` asks.
             writes: self.sparql_store.write_generation(),
             shapes: self.shapes_generation(),
-        })
+        }
     }
 
     /// The run `key` names: the one in flight, or a new one.
@@ -189,7 +188,8 @@ impl PerspectiveInstance {
         )
     }
 
-    /// The run itself, on a blocking slot and under its own deadline gate.
+    /// The run itself, on a blocking slot and under its own deadline gate. A
+    /// run nobody waits for any more leaves the slot queue without running.
     async fn execute_run(
         &self,
         classes: QueryClasses,
@@ -197,6 +197,16 @@ impl PerspectiveInstance {
         shape_wait: Duration,
         cancel: CancellationToken,
     ) -> Reply {
+        const CANCELLED: &str = "model query run cancelled";
+        let permit = tokio::select! {
+            permit = RECHECK_SLOTS.clone().acquire_owned() => {
+                permit.expect("the re-check semaphore is never closed")
+            }
+            _ = cancel.cancelled() => return Err(CANCELLED.into()),
+        };
+        if cancel.is_cancelled() {
+            return Err(CANCELLED.into());
+        }
         let perspective = self.clone();
         let run = async move {
             #[cfg(test)]
@@ -210,44 +220,54 @@ impl PerspectiveInstance {
                 .map(Arc::<str>::from)
                 .map_err(|e| Arc::<str>::from(e.to_string()))
         };
-        run_rechecks(vec![run.boxed()], &RECHECK_SLOTS)
+        let runtime = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(blocking_check(runtime, permit, run.boxed()))
             .await
-            .pop()
-            .unwrap_or_else(|| Err("model query run failed".into()))
+            .unwrap_or_else(|e| Err(format!("model query run failed: {e}").into()))
+    }
+}
+
+/// Test-only: take every run slot but `left`, so a test runs with `left`
+/// permits. Tests run serially, so the slots are free between them.
+#[cfg(test)]
+pub(crate) fn hold_all_but(left: usize) -> tokio::sync::OwnedSemaphorePermit {
+    let free = RECHECK_SLOTS.available_permits();
+    RECHECK_SLOTS
+        .clone()
+        .try_acquire_many_owned((free - left) as u32)
+        .expect("the slots are free between tests")
+}
+
+/// The reads a query makes while it runs (the outputs of a `producedByFlow`
+/// filter). It already holds a run slot and runs under the run's stop, so
+/// they evaluate in that slot under that stop: going back through
+/// [`PerspectiveInstance::run_model_query`] would queue for a second slot,
+/// which with every slot held by such runs never frees.
+pub(super) struct InRun<'a> {
+    pub(super) perspective: &'a PerspectiveInstance,
+    pub(super) stop: &'a EvalStop,
+    pub(super) shape_wait: Duration,
+}
+
+#[async_trait::async_trait]
+impl RequiresQueryable for InRun<'_> {
+    async fn model_query(&self, class_name: &str, query_json: &str) -> Result<String, AnyError> {
+        let classes = QueryClasses::One(class_name.to_string());
+        self.perspective
+            .model_query_classes_within(self.stop, &classes, query_json, self.shape_wait)
+            .await
     }
 }
 
 /// Resolves, with its reason, once the caller's gate has stopped. The gate's
 /// watchdog fires at 25 ms granularity, so this looks that often.
-async fn stopped(stop: &EvalStop) -> AnyError {
+pub(super) async fn stopped(stop: &EvalStop) -> AnyError {
     loop {
         if let Some(err) = stop.stopped_err("query") {
             return err;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-}
-
-/// The query as one text for any spelling of it: keys sorted at every depth,
-/// null top-level fields left out (`ModelQueryInput` reads a null as absent).
-fn canonical_query(query_json: &str) -> Result<String, AnyError> {
-    fn sorted(value: Value) -> Value {
-        match value {
-            Value::Object(map) => {
-                let mut entries: Vec<_> = map.into_iter().map(|(k, v)| (k, sorted(v))).collect();
-                entries.sort_by(|a, b| a.0.cmp(&b.0));
-                Value::Object(entries.into_iter().collect())
-            }
-            Value::Array(items) => Value::Array(items.into_iter().map(sorted).collect()),
-            other => other,
-        }
-    }
-    let mut query: Value = serde_json::from_str(query_json)
-        .map_err(|e| anyhow!("Failed to parse model query: {}", e))?;
-    if let Value::Object(map) = &mut query {
-        map.retain(|_, v| !v.is_null());
-    }
-    Ok(sorted(query).to_string())
 }
 
 #[cfg(test)]
@@ -257,7 +277,6 @@ mod tests {
     use crate::agent::signatures::TestSigner;
     use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
     use crate::types::{Link, LinkExpression, LinkStatus, PerspectiveDiff};
-    use serde_json::json;
     use std::time::Instant;
 
     const TODO_SDNA: &str = r#"{
@@ -267,7 +286,9 @@ mod tests {
       ],
       "properties": [
         {"path":"test://title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
-         "setter":[{"action":"setSingleTarget","source":"this","predicate":"test://title","target":"value"}]}
+         "setter":[{"action":"setSingleTarget","source":"this","predicate":"test://title","target":"value"}]},
+        {"path":"test://rank","name":"rank","datatype":"xsd:string","min_count":0,"max_count":1,"writable":true,
+         "setter":[{"action":"setSingleTarget","source":"this","predicate":"test://rank","target":"value"}]}
       ]
     }"#;
     const QUERY: &str = r#"{"includeUnverified": true}"#;
@@ -337,18 +358,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn equal_queries_in_another_spelling_share_a_run() {
-        let p = perspective().await;
-        let a = r#"{"includeUnverified": true, "where": {"title": "x", "id": "y"}, "limit": 5}"#;
-        let b = r#"{"limit": 5, "offset": null,
-                    "where": {"id": "y", "title": "x"}, "includeUnverified": true}"#;
-        let before = evaluations::count(&p.uuid);
-        let (ra, rb) = tokio::join!(p.model_query("Todo", a), p.model_query("Todo", b));
-        assert_eq!(ra.unwrap(), rb.unwrap());
-        assert_eq!(evaluations::count(&p.uuid) - before, 1);
-    }
-
-    #[tokio::test]
     async fn different_queries_and_classes_run_apart() {
         let p = perspective().await;
         let before = evaluations::count(&p.uuid);
@@ -363,7 +372,7 @@ mod tests {
     async fn a_settled_run_removed_for_a_new_one_is_not_touched_by_the_old_waiter() {
         let p = perspective().await;
         let slots = hold_slots();
-        let key = p.run_key(&todos(), QUERY, Duration::ZERO).unwrap();
+        let key = p.run_key(&todos(), QUERY, Duration::ZERO);
         let (_, old) = p.join_run(key.clone(), &todos(), QUERY);
         // The old run settled and left the map, then a new run took its key.
         p.runs.0.lock().unwrap().runs.remove(&key);
@@ -407,6 +416,7 @@ mod tests {
     async fn the_last_waiter_leaving_stops_the_run() {
         let p = perspective().await;
         let slots = hold_slots();
+        let before = evaluations::count(&p.uuid);
         let only = tokio::spawn({
             let p = p.clone();
             async move { p.model_query("Todo", QUERY).await }
@@ -417,8 +427,73 @@ mod tests {
         let _ = only.await;
         assert_eq!(in_flight(&p), 0);
         drop(slots);
+        // The run nobody wants never takes the slot it queued for.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(evaluations::count(&p.uuid), before, "the run started");
         // A later call starts its own run and is answered.
         p.model_query("Todo", QUERY).await.unwrap();
+        assert_eq!(evaluations::count(&p.uuid) - before, 1);
+    }
+
+    /// A run stopped while it waits for a class that is not stored yet ends
+    /// with the stop, not after the shape-wait budget.
+    #[tokio::test]
+    async fn a_stopped_run_leaves_its_shape_wait() {
+        let p = perspective().await;
+        p.force_shape_sync_wait
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let gate = EvalGate::request(Duration::from_millis(200), None);
+        let started = Instant::now();
+        let err = p
+            .model_query_classes_within(
+                &gate.stop(),
+                &"Missing".into(),
+                QUERY,
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("SPARQL deadline"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    fn write_ranked(p: &PerspectiveInstance, n: usize, title: &str, rank: &str) {
+        for (predicate, target) in [
+            ("rdf://type", "test://Todo".to_string()),
+            ("test://title", format!("literal://string:{title}")),
+            ("test://rank", format!("literal://string:{rank}")),
+        ] {
+            p.sparql_store
+                .add_link(&signed(&format!("test://t{n}"), predicate, &target))
+                .unwrap();
+        }
+    }
+
+    /// `order`'s key order is its priority: the same keys in another order are
+    /// another query, with another first page.
+    #[tokio::test]
+    async fn reversed_multi_key_order_priority_runs_apart() {
+        let p = perspective().await;
+        write_ranked(&p, 1, "a", "2");
+        write_ranked(&p, 2, "b", "1");
+        let by_title =
+            r#"{"includeUnverified": true, "order": {"title": "ASC", "rank": "ASC"}, "limit": 1}"#;
+        let by_rank =
+            r#"{"includeUnverified": true, "order": {"rank": "ASC", "title": "ASC"}, "limit": 1}"#;
+        let before = evaluations::count(&p.uuid);
+        let (a, b) = tokio::join!(
+            p.model_query("Todo", by_title),
+            p.model_query("Todo", by_rank)
+        );
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert!(a.contains("test://t1") && !a.contains("test://t2"), "{a}");
+        assert!(b.contains("test://t2") && !b.contains("test://t1"), "{b}");
+        assert_eq!(evaluations::count(&p.uuid) - before, 2);
     }
 
     #[tokio::test]
@@ -478,31 +553,65 @@ mod tests {
     async fn a_shape_change_runs_the_next_query_again() {
         let p = perspective().await;
         let before = evaluations::count(&p.uuid);
-        p.model_query("Todo", QUERY).await.unwrap();
+        // Every slot taken: the first run stays in flight, so the second call
+        // meets its entry and only its key can tell them apart.
+        let slots = hold_slots();
+        let call = |p: &PerspectiveInstance| {
+            let p = p.clone();
+            tokio::spawn(async move { p.model_query("Todo", QUERY).await })
+        };
+        let first = call(&p);
+        settle().await;
+        assert_eq!(in_flight(&p), 1);
+        // Control: the same call, shapes unchanged, joins the first entry.
+        let joined = call(&p);
+        settle().await;
+        assert_eq!(in_flight(&p), 1);
         let shapes = p.shapes_generation();
         p.abstract_cache.write().unwrap().generation += 1;
         assert_ne!(p.shapes_generation(), shapes);
-        p.model_query("Todo", QUERY).await.unwrap();
+        let after_change = call(&p);
+        settle().await;
+        assert_eq!(in_flight(&p), 2, "a shape change is a distinct entry");
+        drop(slots);
+        for call in [first, joined, after_change] {
+            call.await.unwrap().unwrap();
+        }
         assert_eq!(evaluations::count(&p.uuid) - before, 2);
     }
 
     #[tokio::test]
     async fn a_peer_diff_advances_the_write_generation() {
         let p = perspective().await;
+        let link = signed("test://peer", "rdf://type", "test://Todo");
+        let present = |p: &PerspectiveInstance| {
+            p.sparql_store
+                .get_link(
+                    &EvalStop::none(),
+                    "test://peer",
+                    Some("rdf://type"),
+                    "test://Todo",
+                    &link.author,
+                    &link.timestamp,
+                )
+                .unwrap()
+                .is_some()
+        };
         let before = p.sparql_store.write_generation();
-        p.diff_from_link_language(PerspectiveDiff::from_additions(vec![signed(
-            "test://peer",
-            "rdf://type",
-            "test://Todo",
-        )]))
-        .await
-        .unwrap();
-        assert!(p.sparql_store.write_generation() > before);
+        p.diff_from_link_language(PerspectiveDiff::from_additions(vec![link.clone()]))
+            .await
+            .unwrap();
+        assert!(present(&p), "the added link is stored");
         let after_add = p.sparql_store.write_generation();
+        assert!(after_add > before, "an addition advances the generation");
         let mut removal = PerspectiveDiff::from_additions(vec![]);
-        removal.removals = vec![signed("test://peer", "rdf://type", "test://Todo")];
+        removal.removals = vec![link.clone()];
         p.diff_from_link_language(removal).await.unwrap();
-        assert!(p.sparql_store.write_generation() > after_add);
+        assert!(!present(&p), "the removed link is gone");
+        assert!(
+            p.sparql_store.write_generation() > after_add,
+            "a removal advances the generation"
+        );
     }
 
     #[tokio::test]
@@ -536,29 +645,6 @@ mod tests {
                 .await;
             assert_eq!(evaluations::count(&p.uuid) - before, 1, "write {n}");
         }
-    }
-
-    fn order(q: &str) -> String {
-        canonical_query(q).unwrap()
-    }
-
-    #[test]
-    fn canonical_queries_ignore_key_order_and_null_fields() {
-        let a = canonical_query(r#"{"b": {"y": 1, "x": [{"q":1,"p":2}]}}"#).unwrap();
-        let b = canonical_query(r#"{"b": {"x": [{"p":2,"q":1}], "y": 1}, "limit": null}"#).unwrap();
-        assert_eq!(a, b);
-        // A spelled-out default is a different query: no table of defaults here.
-        assert_ne!(order(r#"{"count": false}"#), order("{}"));
-        assert_ne!(
-            order(r#"{"order": ["a", "b"]}"#),
-            order(r#"{"order": ["b", "a"]}"#)
-        );
-        assert_ne!(order(r#"{"count": true}"#), order("{}"));
-        assert_eq!(json!({"a": 1}).to_string(), order(r#"{"a": 1}"#));
-        assert!(canonical_query("{")
-            .unwrap_err()
-            .to_string()
-            .contains("Failed to parse"));
     }
 
     /// N identical concurrent model queries: each on its own, as before the
