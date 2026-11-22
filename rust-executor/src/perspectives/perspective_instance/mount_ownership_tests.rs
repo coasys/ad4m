@@ -313,8 +313,9 @@ async fn one_shape_set_naming_a_class_twice_is_refused() {
 // --- A mirror an older build wrote is not adopted ---------------------------
 
 /// A perspective holding what a pre-A10 build left of a mount of `lang`:
-/// the Shared mount link, and a version link and a record link written as
-/// ordinary Local links.
+/// the mount link, and a version link and a record link written as
+/// ordinary Local links. (Those builds wrote the mount link Shared; it is
+/// Local here so a restore reaches the older-build check.)
 async fn mirror_from_an_older_build(lang: &str) -> PerspectiveInstance {
     let (mut p, _shapes, ctx) =
         crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
@@ -324,7 +325,7 @@ async fn mirror_from_an_older_build(lang: &str) -> PerspectiveInstance {
             predicate: Some("ad4m://mount".to_string()),
             target: format!("{lang}://project"),
         }],
-        LinkStatus::Shared,
+        LinkStatus::Local,
         None,
         &ctx,
     )

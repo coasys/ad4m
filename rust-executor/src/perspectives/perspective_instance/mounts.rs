@@ -13,9 +13,11 @@
 //! all, and no sync or delta touches anyone else's link there. The mount's own
 //! bookkeeping (the version link under `<lang>://project`) is exempt from
 //! the snapshot sweep. Which classes a mount owns is recorded outside its
-//! address space (`mount_classes`). The mount link itself is `Shared` so
-//! peers see it (design §5.2); `perspective.publishSnapshot` is
-//! unimplemented (api/perspectives_ws.rs), so no RPC ever exports the
+//! address space (`mount_classes`). The mount link itself is `Local` too:
+//! a mount is this agent's, and a mount link a peer shared mounts nothing
+//! here. Shared mounts (design §5.2) need class claims that peers see, and
+//! deactivation on a peer's unmount, first. `perspective.publishSnapshot`
+//! is unimplemented (api/perspectives_ws.rs), so no RPC ever exports the
 //! `Local` mirror.
 
 use std::collections::HashSet;
@@ -39,7 +41,7 @@ use crate::perspectives::{register_mount, unregister_mount};
 use crate::types::{DecoratedLinkExpression, Link, LinkExpression, LinkQuery, LinkStatus};
 
 /// The mount link: `ad4m://self -[ad4m://mount]-> <lang>://project`,
-/// `Shared` (design §5.2).
+/// `Local`. Only a `Local` one counts as a mount (`mount_links`).
 const MOUNT_PREDICATE: &str = "ad4m://mount";
 const MOUNT_SOURCE: &str = "ad4m://self";
 const MOUNT_PROJECT_PATH: &str = "project";
@@ -146,7 +148,7 @@ impl PerspectiveInstance {
                         predicate: Some(MOUNT_PREDICATE.to_string()),
                         target: mount_target(lang_address),
                     }],
-                    LinkStatus::Shared,
+                    LinkStatus::Local,
                     None,
                     &AgentContext::main_agent(),
                 )
@@ -196,12 +198,7 @@ impl PerspectiveInstance {
 
         self.remove_written_under(lang_address).await?;
         let mount_links: Vec<LinkExpression> = self
-            .get_links(&LinkQuery {
-                source: Some(MOUNT_SOURCE.to_string()),
-                predicate: Some(MOUNT_PREDICATE.to_string()),
-                target: Some(mount_target(lang_address)),
-                ..Default::default()
-            })
+            .mount_links(Some(lang_address))
             .await?
             .into_iter()
             .map(LinkExpression::from)
@@ -426,21 +423,31 @@ impl PerspectiveInstance {
         Ok(())
     }
 
-    /// Whether the mount link for `lang` is in the store.
-    async fn has_mount_link(&self, lang_address: &str) -> Result<bool, AnyError> {
-        Ok(!self
+    /// The `Local` mount links, of `lang` or of every language. A mount
+    /// link with another status (one a peer shared) is not a mount here.
+    async fn mount_links(
+        &self,
+        lang_address: Option<&str>,
+    ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+        Ok(self
             .get_links(&LinkQuery {
                 source: Some(MOUNT_SOURCE.to_string()),
                 predicate: Some(MOUNT_PREDICATE.to_string()),
-                target: Some(mount_target(lang_address)),
+                target: lang_address.map(mount_target),
                 ..Default::default()
             })
             .await?
-            .is_empty())
+            .into_iter()
+            .filter(|l| l.status == Some(LinkStatus::Local))
+            .collect())
     }
 
-    /// Make the mount a mount link names active (startup, or a mount link
-    /// a peer shared): register it for pushed deltas under a new
+    /// Whether the mount link for `lang` is in the store.
+    async fn has_mount_link(&self, lang_address: &str) -> Result<bool, AnyError> {
+        Ok(!self.mount_links(Some(lang_address)).await?.is_empty())
+    }
+
+    /// Make the mount a mount link names active (startup): register it for pushed deltas under a new
     /// generation. Returns whether it is active now. Checked under the
     /// apply lock, so a link an `unmount` removed meanwhile activates
     /// nothing.
@@ -462,13 +469,7 @@ impl PerspectiveInstance {
 
     /// The addresses of every mounted language, from the mount links.
     pub async fn mounts(&self) -> Result<Vec<String>, AnyError> {
-        let links = self
-            .get_links(&LinkQuery {
-                source: Some(MOUNT_SOURCE.to_string()),
-                predicate: Some(MOUNT_PREDICATE.to_string()),
-                ..Default::default()
-            })
-            .await?;
+        let links = self.mount_links(None).await?;
         let mut langs: Vec<String> = links
             .iter()
             .filter_map(|l| {

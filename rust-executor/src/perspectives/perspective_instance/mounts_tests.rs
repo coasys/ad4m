@@ -143,8 +143,19 @@ async fn mounted_links_are_local_and_never_committed() {
         );
     }
 
-    // The mount link is Shared but this perspective has no link language,
-    // and no mount write may have queued anything for a commit either way.
+    // The mount link is Local too: a mount is this agent's own.
+    let mount_links = p
+        .get_links(&LinkQuery {
+            source: Some("ad4m://self".to_string()),
+            predicate: Some("ad4m://mount".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(mount_links.len(), 1);
+    assert_eq!(mount_links[0].status, Some(LinkStatus::Local));
+
+    // No mount write may have queued anything for a commit.
     let (diff, _ids) = crate::db_backend::db_backend()
         .get_pending_diffs(&p.uuid, None)
         .unwrap();
@@ -152,6 +163,38 @@ async fn mounted_links_are_local_and_never_committed() {
         diff.additions.is_empty() && diff.removals.is_empty(),
         "mount writes queued pending diffs: {diff:?}"
     );
+}
+
+#[tokio::test]
+async fn a_shared_mount_link_mounts_nothing() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "a"})).await;
+    let (mut p, _shapes, ctx) =
+        crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
+    // What a peer would share: a mount link that is not this agent's.
+    p.add_links(
+        vec![Link {
+            source: "ad4m://self".to_string(),
+            predicate: Some("ad4m://mount".to_string()),
+            target: format!("{lang}://project"),
+        }],
+        LinkStatus::Shared,
+        None,
+        &ctx,
+    )
+    .await
+    .unwrap();
+
+    p.restore_mounts().await;
+    let registered = crate::perspectives::perspectives_for_mount(&lang);
+    crate::perspectives::unregister_mount(&lang, &p.uuid);
+    assert!(registered.is_empty(), "a shared mount link was activated");
+    assert!(p.mounts().await.unwrap().is_empty());
+    assert!(
+        lang_links(&p, &lang).await.is_empty(),
+        "records were mirrored"
+    );
+    assert!(p.sync_mount(&lang).await.is_err(), "a sync ran on it");
 }
 
 #[tokio::test]
