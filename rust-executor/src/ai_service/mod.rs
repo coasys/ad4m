@@ -1,4 +1,4 @@
-use self::error::AIServiceError;
+pub(crate) use self::error::AIServiceError;
 use crate::types::RequestContext;
 use crate::types::{AITask, AITaskInput, Endpoint, Model, ModelInput, ModelType};
 use anyhow::{anyhow, Context};
@@ -15,11 +15,14 @@ use std::pin::Pin;
 pub mod endpoints;
 mod error;
 pub mod harness;
+mod llm_ready;
 pub mod local;
 pub mod providers;
 pub(crate) mod transcription;
 #[cfg(test)]
 mod transcription_e2e;
+#[cfg(test)]
+mod utterance_queue_tests;
 use log::error;
 use providers::{ChatReply, ChatRequest, ChatTurn, RemoteChat, ToolSpec};
 
@@ -62,6 +65,17 @@ pub struct EmbedBatch {
 pub(crate) fn estimate_token_count(text: &str) -> usize {
     let chars = text.chars().count();
     (chars + 3) / 4
+}
+
+/// At least 10% above a chars/4 estimate, rounded up.
+///
+/// A llama-server `/tokenize` of a staging interpretation prompt was 76,870
+/// tokens against an estimate of 70,206. Ceil(70,206 × 1.1) is 77,227, above
+/// that measurement, so the window check refuses a prompt the raw estimate
+/// would send. Billing stays on [`estimate_token_count`]; only the
+/// interpretation budget uses this.
+pub(crate) fn interpretation_budget_tokens(estimated: usize) -> usize {
+    estimated.saturating_mul(11).saturating_add(9) / 10
 }
 
 /// Estimated bytes one context token occupies once a chat request is
@@ -131,8 +145,9 @@ lazy_static! {
 /// its worker ([`transcription::RemoteStream`]) ends once it has answered the utterances
 /// fed before.
 struct TranscriptionSession {
-    /// The worker's queue: it answers each utterance after the ones fed before it.
-    utterances: mpsc::UnboundedSender<transcription::Utterance>,
+    /// At most [`transcription::MAX_WAITING_UTTERANCES`] utterances wait here. One more
+    /// can be in the worker. A further one is refused. That is not eight in flight in total.
+    utterances: mpsc::Sender<transcription::Utterance>,
     /// The model the stream transcribes with: a reload of it closes the stream, whose
     /// worker holds the endpoint's URL and key as they were.
     model_id: String,
@@ -146,6 +161,15 @@ struct TranscriptionSession {
     /// The managed agent that opened the stream, by DID: it pays, and only it reaches the
     /// stream. `None`: the main agent.
     agent_did: Option<String>,
+    /// The worker. Dropping the session detaches it. Tests abort it.
+    #[cfg(test)]
+    worker: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// An utterance the service did not queue. The caller still owns `samples`.
+pub(crate) struct RejectedUtterance {
+    pub samples: Vec<f32>,
+    pub error: anyhow::Error,
 }
 
 type TranscriptionStreams = Arc<Mutex<HashMap<String, TranscriptionSession>>>;
@@ -187,8 +211,8 @@ pub type FeedAnswer = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 #[cfg(test)]
 impl TranscriptionSession {
     /// A session of `owner`, and the queue its worker would read.
-    fn for_test(owner: Option<&str>) -> (Self, mpsc::UnboundedReceiver<transcription::Utterance>) {
-        let (utterances, queue) = mpsc::unbounded_channel();
+    fn for_test(owner: Option<&str>) -> (Self, mpsc::Receiver<transcription::Utterance>) {
+        let (utterances, queue) = mpsc::channel(transcription::MAX_WAITING_UTTERANCES);
         let (text_broadcast_tx, _) = tokio::sync::broadcast::channel(1);
         let session = TranscriptionSession {
             utterances,
@@ -197,6 +221,7 @@ impl TranscriptionSession {
             in_flight: Default::default(),
             text_broadcast_tx,
             agent_did: owner.map(str::to_string),
+            worker: None,
         };
         (session, queue)
     }
@@ -220,6 +245,9 @@ pub struct AIService {
     /// start). Local AI's autostart waits for it: a load after the runtimes register would
     /// put back the clients of the endpoint settings from before.
     loaded: Arc<tokio::sync::watch::Sender<bool>>,
+    /// Bumped whenever the default LLM may have become ready
+    /// ([`Self::watch_llm_readiness`]).
+    llm_readiness: Arc<tokio::sync::watch::Sender<u64>>,
 }
 
 /// What prompts one LLM: the client of its endpoint, and the id the endpoint knows the
@@ -397,22 +425,88 @@ fn estimate_turns_tokens(turns: &[ChatTurn]) -> usize {
             .sum::<usize>()
 }
 
+/// The estimated input tokens of `prompt` sent on `task`: its system prompt and
+/// examples included, counted as [`AIService::prompt_interpretation_pass`] counts them.
+pub(crate) fn estimate_task_prompt_tokens(task: &AITask, prompt: &str) -> usize {
+    estimate_turns_tokens(&turns_for_task(task, prompt.to_string()))
+}
+
 /// A reasoning reply that did not produce a usable answer: nothing came back,
 /// or the provider cut it at the output cap / window.
 fn interpretation_reply_needs_no_thinking(result: &PromptResult) -> bool {
     result.text.trim().is_empty() || result.stop_reason.as_deref() == Some("length")
 }
 
+/// The local window check refused the prompt. A split matches this error.
+/// A sentence that merely contains the same words is not this error.
+#[derive(Debug)]
+pub(crate) struct ContextBudgetExceeded {
+    pub prompt_tokens: usize,
+    pub window: usize,
+    pub room: usize,
+    pub min_output: usize,
+}
+
+impl std::fmt::Display for ContextBudgetExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "context budget: the prompt is about {} tokens and the model's window is {}, leaving {}, under the {} an answer needs. Shorten the input or raise the endpoint's max_num_ctx.",
+            self.prompt_tokens, self.window, self.room, self.min_output
+        )
+    }
+}
+
+impl std::error::Error for ContextBudgetExceeded {}
+
+fn is_local_context_budget(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<ContextBudgetExceeded>())
+}
+
 /// The server refused the request because it did not fit the context window.
 /// Our own pre-flight budget error is not that: retrying it cannot help.
 fn context_was_exceeded(error: &anyhow::Error) -> bool {
+    if is_local_context_budget(error) {
+        return false;
+    }
     let text = error.to_string().to_ascii_lowercase();
     if text.contains("context budget:") {
+        return false;
+    }
+    // Go servers (Ollama among them) report a timeout as "context deadline
+    // exceeded". That is a transient failure, not a window overflow.
+    if text.contains("deadline") {
         return false;
     }
     let about_context = text.contains("context") || text.contains("n_ctx");
     let over = text.contains("exceed") || text.contains("too long") || text.contains("too large");
     about_context && over
+}
+
+/// The prompt will not fit the model window: the budget check said so, or the
+/// server refused it as a context overflow. A transport failure is not this.
+/// The whole error chain counts, so a wrapped `AIService::prompt failed`
+/// still matches. A lookalike sentence does not.
+pub(crate) fn prompt_does_not_fit(error: &anyhow::Error) -> bool {
+    if is_local_context_budget(error) {
+        return true;
+    }
+    // A server answer is judged by its status and body only: the URL and the
+    // wrapping messages can hold "context" or "exceeded" by chance. A rate
+    // limit clears with time, so it never retires a source.
+    if let Some(answered) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<providers::http::UpstreamStatus>())
+    {
+        if answered.status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return false;
+        }
+        return context_was_exceeded(&anyhow::anyhow!("{}", answered.body));
+    }
+    let text = format!("{error:#}").to_ascii_lowercase();
+    context_was_exceeded(&anyhow::anyhow!("{text}"))
 }
 
 /// A system prompt, its examples as alternating user/assistant turns, then `prompt`.
@@ -470,6 +564,7 @@ impl AIService {
             transcription_streams: Arc::new(Mutex::new(HashMap::new())),
             // Nothing to load.
             loaded: Arc::new(tokio::sync::watch::channel(true).0),
+            llm_readiness: Arc::new(tokio::sync::watch::Sender::new(0)),
         }
     }
 
@@ -543,6 +638,7 @@ impl AIService {
             ModelType::Llm => {
                 let chat = ChatModel::new(model, endpoint)?;
                 self.llms.lock().await.insert(model.id.clone(), chat);
+                self.note_llm_readiness();
             }
             ModelType::Embedding => {
                 let embedder = Embedder {
@@ -636,7 +732,11 @@ impl AIService {
 
     pub async fn set_default_model(&self, model_type: ModelType, model_id: String) -> Result<()> {
         // Tasks on "default" resolve it when they are prompted: nothing to move.
-        crate::db_backend::db_backend().set_default_model(model_type, &model_id)
+        crate::db_backend::db_backend().set_default_model(model_type.clone(), &model_id)?;
+        if ModelType::Llm == model_type {
+            self.note_llm_readiness();
+        }
+        Ok(())
     }
 
     /// Every model, as RPC results show it.
@@ -678,6 +778,12 @@ impl AIService {
             .await
             .clone()
             .ok_or(anyhow!(AIServiceError::ServiceNotInitialized))
+    }
+
+    /// Install `service` as the global one. `None` clears it. Tests only.
+    #[cfg(test)]
+    pub(crate) async fn install_global_for_test(service: Option<AIService>) {
+        *AI_SERVICE.lock().await = service;
     }
 
     // -------------------------------------
@@ -912,11 +1018,13 @@ impl AIService {
         };
         let room = window.saturating_sub(prompt_tokens);
         if room < MIN_OUTPUT {
-            return Err(anyhow::anyhow!(
-                "context budget: the prompt is about {prompt_tokens} tokens and the model's \
-                 window is {window}, leaving {room}, under the {MIN_OUTPUT} an answer needs. \
-                 Shorten the input or raise the endpoint's max_num_ctx."
-            ));
+            return Err(ContextBudgetExceeded {
+                prompt_tokens,
+                window,
+                room,
+                min_output: MIN_OUTPUT,
+            }
+            .into());
         }
         Ok(Some(room.min(MAX_OUTPUT) as u32))
     }
@@ -977,6 +1085,13 @@ impl AIService {
             }
         }
         Self::model_context_tokens(model_id)
+    }
+
+    /// The context window `model_id`'s requests run at, in tokens, when it is
+    /// known: the same value [`Self::prompt_interpretation_pass`] checks a
+    /// prompt against. Interpretation sizes its `existing` block from it.
+    pub(crate) async fn context_window_tokens(&self, model_id: &str) -> Option<usize> {
+        self.resolved_context_tokens(model_id).await
     }
 
     /// How many bytes of one outgoing request's message list the model's
@@ -1132,11 +1247,32 @@ impl AIService {
     /// [`Self::prompt_interpretation`] with a flag the parse loop shares.
     /// Once a pass falls back to no reasoning, later calls that see the flag
     /// stay there instead of spending another reasoning attempt.
+    ///
+    /// The empty-content retry (a parsed answer with nothing in it, on a pass
+    /// that had transcript items) is the caller's. It uses
+    /// [`Self::prompt_interpretation_call`] with the size retry off, so this
+    /// pass does not become a second loop.
     pub(crate) async fn prompt_interpretation_pass(
         &self,
         task_id: String,
         prompt: String,
         stick_no_thinking: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<PromptResult> {
+        self.prompt_interpretation_call(task_id, prompt, stick_no_thinking, true)
+            .await
+    }
+
+    /// [`Self::prompt_interpretation_pass`] with the size retry optional.
+    ///
+    /// `allow_size_retry` is false for the one empty-answer retry. That call
+    /// must not nest another thinking-off attempt: a pass makes at most one
+    /// extra model call for emptiness.
+    pub(crate) async fn prompt_interpretation_call(
+        &self,
+        task_id: String,
+        prompt: String,
+        stick_no_thinking: Option<&std::sync::atomic::AtomicBool>,
+        allow_size_retry: bool,
     ) -> Result<PromptResult> {
         let task = crate::db_backend::db_backend()
             .get_task(task_id.clone())
@@ -1145,7 +1281,12 @@ impl AIService {
         let model_id = Self::replace_model_variables(&task.model_id)?;
         // The input is the whole conversation `prompt_with` sends: the task's
         // system prompt and examples count against the window as much as the prompt.
-        let input_tokens = estimate_turns_tokens(&turns_for_task(&task, prompt.clone()));
+        // The chars/4 estimate runs low against a real tokenizer; charge the
+        // margin before comparing it to the window.
+        let input_tokens = interpretation_budget_tokens(estimate_turns_tokens(&turns_for_task(
+            &task,
+            prompt.clone(),
+        )));
         let window = self.resolved_context_tokens(&model_id).await;
         let cap = Self::interpretation_max_output_tokens(window, input_tokens)?;
 
@@ -1157,11 +1298,17 @@ impl AIService {
                 .await;
         }
 
+        if !allow_size_retry {
+            return self
+                .prompt_with(task_id, prompt, None, Some((false, cap)))
+                .await;
+        }
+
         let first = self
             .prompt_with(task_id.clone(), prompt.clone(), None, Some((false, cap)))
             .await;
         let size_problem = match &first {
-            Ok(result) => interpretation_reply_needs_no_thinking(&result),
+            Ok(result) => interpretation_reply_needs_no_thinking(result),
             Err(error) => context_was_exceeded(error),
         };
         if !size_problem {
@@ -1533,8 +1680,57 @@ impl AIService {
         agent_did: Option<String>,
         user_did: String,
     ) -> String {
+        self.open_remote_stream_in(
+            model_id,
+            remote_model,
+            endpoint_id,
+            client,
+            agent_did,
+            user_did,
+            None,
+        )
+        .await
+    }
+
+    /// As [`Self::open_remote_stream`], and the worker sends each completion record here.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    async fn open_remote_stream_observed(
+        &self,
+        model_id: String,
+        remote_model: String,
+        endpoint_id: String,
+        client: Arc<dyn providers::audio::RemoteTranscribe>,
+        agent_did: Option<String>,
+        user_did: String,
+        completions: mpsc::UnboundedSender<transcription::UtteranceCompletion>,
+    ) -> String {
+        self.open_remote_stream_in(
+            model_id,
+            remote_model,
+            endpoint_id,
+            client,
+            agent_did,
+            user_did,
+            Some(completions),
+        )
+        .await
+    }
+
+    /// Eight utterances may wait. One more is in the worker. `try_send` refuses the next.
+    #[allow(clippy::too_many_arguments)]
+    async fn open_remote_stream_in(
+        &self,
+        model_id: String,
+        remote_model: String,
+        endpoint_id: String,
+        client: Arc<dyn providers::audio::RemoteTranscribe>,
+        agent_did: Option<String>,
+        user_did: String,
+        completions: Option<mpsc::UnboundedSender<transcription::UtteranceCompletion>>,
+    ) -> String {
         let stream_id = uuid::Uuid::new_v4().to_string();
-        let (utterances, queue) = mpsc::unbounded_channel();
+        let (utterances, queue) = mpsc::channel(transcription::MAX_WAITING_UTTERANCES);
         let (text_broadcast_tx, _) = tokio::sync::broadcast::channel::<String>(64);
         log::info!("Opening transcription stream {stream_id} on model {model_id} ({remote_model})");
         let worker = transcription::RemoteStream {
@@ -1547,8 +1743,11 @@ impl AIService {
             user_did,
             listeners: text_broadcast_tx.clone(),
             gate: Some(transcription::SpeechGate::new()),
+            completions,
         };
-        tokio::spawn(worker.run(queue));
+        let task = tokio::spawn(worker.run(queue));
+        #[cfg(not(test))]
+        drop(task);
 
         self.transcription_streams.lock().await.insert(
             stream_id.clone(),
@@ -1559,6 +1758,8 @@ impl AIService {
                 in_flight: Default::default(),
                 text_broadcast_tx,
                 agent_did,
+                #[cfg(test)]
+                worker: Some(task),
             },
         );
         stream_id
@@ -1589,23 +1790,70 @@ impl AIService {
         audio_samples: Vec<f32>,
         caller: &RequestContext,
     ) -> Result<FeedAnswer> {
+        self.admit_utterance(stream_id, audio_samples, caller)
+            .await
+            .map_err(|rejected| rejected.error)
+    }
+
+    /// Queue one utterance, or give the samples back with the reason they were not queued.
+    ///
+    /// Ownership is checked before the queue is touched, so a caller who does not own the
+    /// stream learns nothing about how full it is. The map lock is not held across a wait
+    /// for capacity. Only an accepted utterance updates activity and the in-flight count.
+    /// Dropping the returned future releases that count and does not free a queue slot:
+    /// the slot is the channel, and it stays taken until the worker takes the audio.
+    pub(crate) async fn admit_utterance(
+        &self,
+        stream_id: &String,
+        audio_samples: Vec<f32>,
+        caller: &RequestContext,
+    ) -> std::result::Result<FeedAnswer, RejectedUtterance> {
         let map_lock = self.transcription_streams.lock().await;
-        let stream = map_lock
-            .get(stream_id)
-            .ok_or(AIServiceError::StreamNotFound)?;
-        Self::verify_stream_ownership(stream, caller)?;
-        *stream.last_activity.lock().await = tokio::time::Instant::now();
-        // Queued while the map is locked: two feeds keep the order they arrived in.
-        let (done, outcome) = oneshot::channel();
-        stream
-            .utterances
-            .send(transcription::Utterance {
+        let Some(stream) = map_lock.get(stream_id) else {
+            return Err(RejectedUtterance {
                 samples: audio_samples,
-                done,
-            })
-            .map_err(|e| {
-                AIServiceError::CrazyError(format!("Failed to feed stream {stream_id}: {e}"))
-            })?;
+                error: anyhow!(AIServiceError::StreamNotFound),
+            });
+        };
+        if let Err(error) = Self::verify_stream_ownership(stream, caller) {
+            return Err(RejectedUtterance {
+                samples: audio_samples,
+                error,
+            });
+        }
+        let sample_count = audio_samples.len();
+        if sample_count > transcription::MAX_UTTERANCE_SAMPLES {
+            return Err(RejectedUtterance {
+                samples: audio_samples,
+                error: anyhow!(AIServiceError::UtteranceTooLarge {
+                    samples: sample_count,
+                    limit: transcription::MAX_UTTERANCE_SAMPLES,
+                }),
+            });
+        }
+        let (done, outcome) = oneshot::channel();
+        let utterance = transcription::Utterance {
+            samples: audio_samples,
+            done,
+            enqueued_at: tokio::time::Instant::now(),
+        };
+        // Refused here, while the map is still locked, and nothing is queued.
+        match stream.utterances.try_send(utterance) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(utterance)) => {
+                return Err(RejectedUtterance {
+                    samples: utterance.samples,
+                    error: anyhow!(AIServiceError::UtteranceQueueFull),
+                });
+            }
+            Err(mpsc::error::TrySendError::Closed(utterance)) => {
+                return Err(RejectedUtterance {
+                    samples: utterance.samples,
+                    error: anyhow!(AIServiceError::TranscriptionStreamClosed),
+                });
+            }
+        }
+        *stream.last_activity.lock().await = tokio::time::Instant::now();
         // Counted while the map is still locked, so the reaper never sees the utterance
         // queued and not counted. The answer holds it: answered or dropped, it ends.
         let in_flight = InFlight::count(stream);
@@ -1616,6 +1864,17 @@ impl AIService {
                 .await
                 .map_err(|_| anyhow!("Transcription stream {stream_id} ended before it answered"))?
         }))
+    }
+
+    /// Stop the worker. Utterances already accepted then fail, as they do when it panics.
+    #[cfg(test)]
+    async fn abort_transcription_worker(&self, stream_id: &str) {
+        let map = self.transcription_streams.lock().await;
+        if let Some(session) = map.get(stream_id) {
+            if let Some(worker) = &session.worker {
+                worker.abort();
+            }
+        }
     }
 
     /// The text of a stream, as it is published (`/v1/realtime`).
@@ -2458,6 +2717,82 @@ mod tests {
         assert!(super::context_was_exceeded(&length));
         assert!(!super::context_was_exceeded(&budget));
         assert!(!super::context_was_exceeded(&transport));
+    }
+
+    /// A sentence that looks like the budget error is not one. Only the error
+    /// the budget check returns splits a batch. A server overflow still does.
+    #[test]
+    fn overflow_review_budget_lookalike_is_not_an_overflow() {
+        let real = AIService::interpretation_max_output_tokens(Some(100), 90)
+            .expect_err("a prompt with no room is a budget error");
+        assert!(
+            prompt_does_not_fit(&real),
+            "the budget check's own error must split, got {real:#}"
+        );
+        let wrapped = real.context("AIService::prompt failed");
+        assert!(
+            prompt_does_not_fit(&wrapped),
+            "wrapping the budget error must not hide it, got {wrapped:#}"
+        );
+
+        let lookalike = anyhow::anyhow!(
+            "context budget: the prompt is about 10 tokens and the model's window is 20, leaving 0"
+        );
+        assert!(
+            !prompt_does_not_fit(&lookalike),
+            "a matching sentence is not the budget error and must not retire a source"
+        );
+
+        let throttled = anyhow::anyhow!(crate::ai_service::providers::http::UpstreamStatus {
+            url: "https://context.example/api/chat".into(),
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            body: "rate limit exceeded".into(),
+            retry_after: None,
+        });
+        assert!(
+            !prompt_does_not_fit(&throttled.context("AIService::prompt failed")),
+            "a rate limit must not retire a source, whatever its URL says"
+        );
+        let deadline = anyhow::anyhow!(crate::ai_service::providers::http::UpstreamStatus {
+            url: "http://127.0.0.1:11434/api/chat".into(),
+            status: reqwest::StatusCode::GATEWAY_TIMEOUT,
+            body: "context deadline exceeded".into(),
+            retry_after: None,
+        });
+        assert!(
+            !prompt_does_not_fit(&deadline.context("AIService::prompt failed")),
+            "a timeout must leave its source retryable"
+        );
+        assert!(
+            !prompt_does_not_fit(&anyhow::anyhow!("context deadline exceeded")),
+            "a Go timeout message without a server status is not an overflow either"
+        );
+        let url_only = anyhow::anyhow!(crate::ai_service::providers::http::UpstreamStatus {
+            url: "https://context.example/api/chat".into(),
+            status: reqwest::StatusCode::BAD_REQUEST,
+            body: "quota exceeded".into(),
+            retry_after: None,
+        });
+        assert!(
+            !prompt_does_not_fit(&url_only),
+            "only the body names an overflow, not the URL"
+        );
+        let refused = anyhow::anyhow!(crate::ai_service::providers::http::UpstreamStatus {
+            url: "http://127.0.0.1:8080/v1/chat/completions".into(),
+            status: reqwest::StatusCode::BAD_REQUEST,
+            body: "the request exceeds the available context size".into(),
+            retry_after: None,
+        });
+        assert!(
+            prompt_does_not_fit(&refused.context("AIService::prompt failed")),
+            "a server that refuses the prompt as too long must still split"
+        );
+
+        let server = anyhow::anyhow!("context length exceeded");
+        assert!(
+            prompt_does_not_fit(&server.context("AIService::prompt failed")),
+            "a server context overflow must still split"
+        );
     }
 
     fn request_json(request: &mockito::Request) -> serde_json::Value {

@@ -21,6 +21,7 @@ import {
   Ad4mClient,
   Ad4mModel,
   BelongsToMany,
+  BelongsToOne,
   Flag,
   HasMany,
   Link,
@@ -171,7 +172,37 @@ class PolyMarker extends Ad4mModel {
   markedBy: any[] = [];
 }
 
+/** Untyped, declared-polymorphic reverse relation, reached below a polymorphic include. */
+@Model({ name: "PolyNote" })
+class PolyNote extends Ad4mModel {
+  @Flag({ through: "test://poly/note_type", value: "test://poly/note" })
+  noteType = "test://poly/note";
+
+  @BelongsToOne({
+    through: "test://poly/extracted",
+    polymorphic: true,
+    instantiateAs: () => [PolyTextBlock],
+  })
+  extractedFrom: any = null;
+}
+
+/** Holds notes through an untyped polymorphic relation of its own. */
+@Model({ name: "PolyDesk" })
+class PolyDesk extends Ad4mModel {
+  @Flag({ through: "test://poly/desk_type", value: "test://poly/desk" })
+  deskType = "test://poly/desk";
+
+  @HasMany({
+    through: "test://poly/desk_items",
+    polymorphic: true,
+    instantiateAs: () => [PolyNote],
+  })
+  items: any[] = [];
+}
+
 const ALL_MODELS = [
+  PolyNote,
+  PolyDesk,
   PolyPost,
   PolyImagePost,
   PolyFeed,
@@ -300,7 +331,7 @@ describe("Ad4mModel — polymorphic relations", function () {
     expect(gotTask).to.not.be.instanceOf(PolyTaskBlock);
     expect(gotTask.label).to.equal("unknown", "correct data, just untyped");
     expect(gotTask.__subjectClass).to.equal(
-      "PolyTaskBlock",
+      PolyTaskBlock.getTargetClass(),
       "and it names its class, so a caller can dispatch on it",
     );
   });
@@ -340,13 +371,16 @@ describe("Ad4mModel — polymorphic relations", function () {
     // collection declares it builds text blocks before bookmarks, so that is
     // how a node answering to both is read. A convention losing to a statement
     // of what the read is for.
-    expect(child.__subjectClass).to.equal("PolyTextBlock");
+    expect(child.__subjectClass).to.equal(PolyTextBlock.getTargetClass());
     expect(child).to.be.instanceOf(PolyTextBlock);
     expect(child.text).to.equal("hello");
     // The reading that lost, reported rather than dropped, and still ranked by
     // specificity — so the set stays a fact about the node while the choice
     // follows the request. A caller wanting the other has the id.
-    expect(child.__subjectClasses).to.deep.equal(["PolyBookmark", "PolyTextBlock"]);
+    expect(child.__subjectClasses).to.deep.equal([
+      PolyBookmark.getTargetClass(),
+      PolyTextBlock.getTargetClass(),
+    ]);
   });
 
   it("lets the call site name a different reading of the same child", async () => {
@@ -370,7 +404,7 @@ describe("Ad4mModel — polymorphic relations", function () {
     });
 
     const child = (found!.children as any[])[0];
-    expect(child.__subjectClass).to.equal("PolyBookmark");
+    expect(child.__subjectClass).to.equal(PolyBookmark.getTargetClass());
     expect(child).to.be.instanceOf(PolyBookmark);
     // Read through the bookmark's shape, so the bookmark's property is what
     // came back — the choice decides which predicates are fetched, not just
@@ -408,6 +442,33 @@ describe("Ad4mModel — polymorphic relations", function () {
     expect(nested.length).to.equal(1);
     expect(nested[0]).to.be.instanceOf(PolyImageBlock);
     expect(nested[0].src).to.equal("nested.png");
+  });
+
+  it("applies a declared-polymorphic relation's default below a polymorphic include", async () => {
+    // `extractedFrom` is untyped and declared polymorphic on `PolyNote`, which is
+    // only known per concrete class under `items`. The executor reads the
+    // declaration from the note's shape, so `include: { extractedFrom: true }`
+    // needs no `polymorphic` at that depth, and is answerable whether or not
+    // anything was extracted.
+    const desk = await PolyDesk.create(perspective, {});
+    const note = await PolyNote.create(perspective, {});
+    const text = await PolyTextBlock.create(perspective, { text: "source" });
+    await perspective.add(
+      new Link({ source: desk.id, predicate: "test://poly/desk_items", target: note.id }),
+    );
+    await perspective.add(
+      new Link({ source: text.id, predicate: "test://poly/extracted", target: note.id }),
+    );
+
+    const found = await PolyDesk.findOne(perspective, {
+      where: { id: desk.id },
+      include: { items: { include: { extractedFrom: true } } },
+    });
+
+    const items = found!.items as any[];
+    expect(items.length).to.equal(1);
+    expect(items[0]).to.be.instanceOf(PolyNote);
+    expect(items[0].extractedFrom.id).to.equal(text.id);
   });
 
   it("hydrates a reverse include polymorphically too", async () => {
@@ -464,11 +525,14 @@ describe("Ad4mModel — polymorphic relations", function () {
     const entry = entries[0];
     expect(entry).to.be.instanceOf(PolyPost, "constructed as the class the feed declared");
     expect(entry.headline).to.equal("Chocolate cake");
-    expect(entry.__subjectClass).to.equal("PolyPost");
+    expect(entry.__subjectClass).to.equal(PolyPost.getTargetClass());
     // The set stays ranked by specificity whatever was preferred, so it remains
     // a fact about the node — and the caller can see the more specific reading
     // exists, and fetch it by id if it ever wants it.
-    expect(entry.__subjectClasses).to.deep.equal(["PolyImagePost", "PolyPost"]);
+    expect(entry.__subjectClasses).to.deep.equal([
+      PolyImagePost.getTargetClass(),
+      PolyPost.getTargetClass(),
+    ]);
   });
 
   // ── 6. The failure that used to be unreadable ───────────────────────────────

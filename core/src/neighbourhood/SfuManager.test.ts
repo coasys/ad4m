@@ -912,6 +912,29 @@ test("a rejoin that keeps failing reports the error after the window, its connec
     }
 })
 
+test("a rebuild that gives up tells listeners everyone left", async () => {
+    // A rebuild keeps the participants for the rejoin's roster to settle. When
+    // no rejoin succeeds, no roster comes, so the participants must go here.
+    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
+    try {
+        const api = fakeApi()
+        const { manager, left, participants } = recordedManager(api)
+        await manager.join(fakeStream())
+        api.emitRoster(roster([ALICE, BOB]))
+        await flush()
+        api.sfuCallJoin.mockRejectedValue(new Error("Room is full"))
+
+        await iceState("failed")
+        expect(left).toEqual([])
+        await jest.advanceTimersByTimeAsync(130_000)
+
+        expect(left).toEqual([ALICE, BOB])
+        expect(participants()).toEqual([])
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
 test("joins that succeed while ICE keeps failing stop after three reconnects", async () => {
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL)
@@ -923,6 +946,21 @@ test("joins that succeed while ICE keeps failing stop after three reconnects", a
 
     expect(api.sfuCallLeave).toHaveBeenCalledTimes(3)
     expect(errors).toEqual([new Error("SFU reconnect attempts exhausted")])
+})
+
+test("a rebuild that runs out of attempts tells listeners everyone left", async () => {
+    const api = fakeApi()
+    const { manager, left, participants } = recordedManager(api)
+    await manager.join(fakeStream())
+    api.emitRoster(roster([ALICE, BOB]))
+    await flush()
+
+    for (let i = 0; i < 3; i++) await iceState("failed")
+    expect(left).toEqual([])
+    await iceState("failed")
+
+    expect(left).toEqual([ALICE, BOB])
+    expect(participants()).toEqual([])
 })
 
 test("a connection that comes up resets the reconnect count", async () => {
@@ -1424,7 +1462,57 @@ test("ICE disconnected also checks the executor socket once, with the restart", 
     }
 })
 
-test("a restart that has not brought the connection back after 5 s falls back to a rebuild", async () => {
+test("a lost restart offer stays open until the executor can resend it", async () => {
+    // ICE drops, the offer is lost, and signaling returns 2 s later. The
+    // executor resends that offer at 10 s. The restart stays open through
+    // that resend, then long enough for ICE to finish.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        await iceState("connected")
+        api.log.length = 0
+
+        await iceState("disconnected")
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+        await jest.advanceTimersByTimeAsync(2_000)
+        api.emitNetworkChange()
+        await flush()
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
+
+        // t = 7 s. A 5 s window started at t = 2 s would rebuild here.
+        await jest.advanceTimersByTimeAsync(5_000)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        // t = 10 s. The executor's first resend is due. Still no rebuild.
+        await jest.advanceTimersByTimeAsync(3_000)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+
+        // The original peer must apply the resent offer and post its answer
+        // before ICE recovery. `connected` clears the restart timer on its own.
+        const peer = currentPc()
+        api.emitOffer(offer("restart-offer"))
+        await flush()
+        expect(peer.remoteSdps()).toContain("restart-offer")
+        expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledWith(
+            URL,
+            ROOM,
+            MINE,
+            JSON.stringify({ type: "answer", sdp: "local-answer" }),
+        )
+
+        await iceState("connected")
+        await jest.advanceTimersByTimeAsync(30_000)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        expect(FakePeerConnection.instances).toHaveLength(1)
+        expect(manager.getState().peerConnection).toBe(FakePeerConnection.instances[0])
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a restart that has not brought the connection back after 15 s falls back to a rebuild", async () => {
     fakeTimers()
     try {
         const api = fakeApi()
@@ -1433,7 +1521,7 @@ test("a restart that has not brought the connection back after 5 s falls back to
         await iceState("connected")
 
         await iceState("disconnected")
-        await jest.advanceTimersByTimeAsync(4_900)
+        await jest.advanceTimersByTimeAsync(14_900)
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
         await jest.advanceTimersByTimeAsync(200)
         expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
@@ -1458,7 +1546,9 @@ test("a refused restart also waits for the timeout before rebuilding", async () 
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
 
         await iceState("disconnected")
-        await jest.advanceTimersByTimeAsync(5_000)
+        await jest.advanceTimersByTimeAsync(14_900)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        await jest.advanceTimersByTimeAsync(200)
         expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
     } finally {
         jest.useRealTimers()
@@ -1477,7 +1567,7 @@ test("a network change restarts ICE even while the connection still looks connec
         await flush()
         expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
         // Still connected when the timeout comes: nothing to rebuild.
-        await jest.advanceTimersByTimeAsync(10_000)
+        await jest.advanceTimersByTimeAsync(15_000)
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
     } finally {
         jest.useRealTimers()
@@ -1560,7 +1650,7 @@ test("a roster that lists this agent during a restart lets the restart finish in
 
 test("a roster that leaves this agent out during a restart rebuilds after its grace, once", async () => {
     // The server dropped the session: the restart cannot heal it, so the
-    // roster's grace (3 s) ends it before the restart's timeout (5 s).
+    // roster's grace (3 s) ends it before the restart's timeout (15 s).
     fakeTimers()
     try {
         const api = fakeApi()
@@ -1722,4 +1812,42 @@ test("a manager that left sends no restart for its old connection", async () => 
     await flush()
 
     expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+})
+
+// ── A rebuild keeps the roster ──────────────────────────────────────────────
+
+test("a rebuild keeps the participants: nobody leaves, their media is cleared until the new connection brings it", async () => {
+    const api = fakeApi()
+    const { manager, joined, left, removed, participants } = recordedManager(api)
+    await manager.join(fakeStream())
+    api.emitRoster(roster([ALICE, BOB]))
+    await flush()
+    api.emitOffer(offer("tracks", [mapped("1", ALICE, "audio")]))
+    await flush()
+    const aliceTrack = new FakeTrack("audio")
+    currentPc().receive(aliceTrack, "1")
+    const alice = manager.getParticipants().find((p) => p.did === ALICE)!
+    expect(alice.hasAudio).toBe(true)
+
+    await iceState("failed")
+
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+    expect(left).toEqual([])
+    expect(joined).toEqual([ALICE, BOB])
+    expect(participants()).toEqual([ALICE, BOB])
+    // The same participant, and the same stream an app has attached, without the old track.
+    expect(manager.getParticipants().find((p) => p.did === ALICE)).toBe(alice)
+    expect(alice.stream.getTracks()).toEqual([])
+    expect(alice.hasAudio).toBe(false)
+    expect(removed).toEqual([[alice.stream, aliceTrack]])
+
+    // The new connection's media lands in that stream; the room's roster still decides who left.
+    api.emitOffer(offer("tracks-again", [mapped("1", ALICE, "audio")]))
+    await flush()
+    const again = new FakeTrack("audio")
+    currentPc().receive(again, "1")
+    expect(alice.stream.getTracks()).toEqual([again])
+    api.emitRoster(roster([ALICE]))
+    await flush()
+    expect(left).toEqual([BOB])
 })

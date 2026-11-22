@@ -274,8 +274,16 @@ export class SfuManager {
     private static readonly MAX_RECONNECTS = 3
     /** How long one rebuild keeps retrying a join the executor cannot take yet. */
     private static readonly REJOIN_WINDOW_MS = 120_000
-    /** How long an ICE restart has to bring the connection back before a rebuild. */
-    private static readonly RESTART_TIMEOUT_MS = 5_000
+    /** The executor's wait before the first resend of an unanswered offer.
+     *  `OFFER_RETRY_BASE` in `rust-executor/src/sfu/server.rs`. */
+    private static readonly OFFER_RESEND_BASE_MS = 10_000
+    /** How long ICE has to come back after that resend arrives. */
+    private static readonly RESTART_AFTER_RESEND_MS = 5_000
+    /** How long an ICE restart has to bring the connection back before a rebuild.
+     *  The window stays open through the first resend, then the previous 5 s
+     *  for ICE. A restart that connects clears the timer at once. */
+    private static readonly RESTART_TIMEOUT_MS =
+        SfuManager.OFFER_RESEND_BASE_MS + SfuManager.RESTART_AFTER_RESEND_MS
     /** A rebuild is running: a second failure signal joins it rather than starting another. */
     private reconnecting = false
     /** Bumped by `leave()`, so a reconnect in flight stops before rejoining. */
@@ -377,6 +385,7 @@ export class SfuManager {
         if (!stream || this.reconnecting) return
         const generation = this.generation
         if (++this.reconnectAttempts > SfuManager.MAX_RECONNECTS) {
+            this.resetParticipants()
             this.emit("error", new Error("SFU reconnect attempts exhausted"))
             return
         }
@@ -396,7 +405,9 @@ export class SfuManager {
                 }
                 await this.leaveSession()
                 if (generation !== this.generation) return // left or replaced meanwhile
-                this.resetParticipants()
+                // The people in the call have not changed: keep them, drop only
+                // the old connection's media. The rejoin's roster says who left.
+                this.clearMedia()
                 try {
                     await this.join(stream)
                     if (this.qualityPreference) await this.setQualityPreference(this.qualityPreference)
@@ -414,6 +425,8 @@ export class SfuManager {
                     }
                     if (Date.now() + delay > deadline) {
                         console.error("SFU reconnect failed:", e)
+                        // No rejoin, so no roster will settle who is still here.
+                        this.resetParticipants()
                         this.emit("error", e)
                         return
                     }
@@ -961,6 +974,19 @@ export class SfuManager {
         this.stop()
         await this.leaveSession()
         this.resetParticipants()
+    }
+
+    /** Take the old connection's tracks out of every participant's stream,
+     *  keeping the participants and their streams for the new connection. */
+    private clearMedia(): void {
+        for (const participant of this.state.participants.values()) {
+            for (const track of participant.stream.getTracks()) {
+                participant.stream.removeTrack(track)
+                this.emit("stream-removed", participant.stream, track)
+            }
+            this.refreshKinds(participant)
+        }
+        this.midToParticipant.clear()
     }
 
     /** Forget the call's participants, telling listeners each one left. */
