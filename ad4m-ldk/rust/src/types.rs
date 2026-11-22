@@ -137,7 +137,8 @@ pub struct MountShapes {
 }
 
 /// One record shown in the mounted perspective — `class` names the
-/// mounted class, `address` the record's own URL, `data` its fields.
+/// mounted class, `address` the record's expression address without the
+/// `<lang>://` prefix (as in `mount_types.rs`), `data` its fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MountEntry {
     pub class: String,

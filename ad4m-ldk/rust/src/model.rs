@@ -97,7 +97,7 @@ impl MountShapeBuilder {
         local: bool,
         node_kind: Option<&str>,
         relation_kind: Option<&str>,
-        alias: Option<&str>,
+        alias: &[(&str, &str)],
         datatype: Option<&str>,
         setter_calls: &[(&str, &str, &str)],
         adder_calls: &[(&str, &str, &str)],
@@ -129,8 +129,14 @@ impl MountShapeBuilder {
         if let Some(v) = relation_kind {
             p.insert("relation_kind".into(), v.into());
         }
-        if let Some(v) = alias {
-            p.insert("alias".into(), v.into());
+        if !alias.is_empty() {
+            // The TS `Record<string, string>` — the executor's
+            // `PropertyShape.alias: Option<BTreeMap<String, String>>`.
+            let obj: serde_json::Map<String, serde_json::Value> = alias
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).into()))
+                .collect();
+            p.insert("alias".into(), obj.into());
         }
         if let Some(v) = datatype {
             p.insert("datatype".into(), v.into());
@@ -156,30 +162,47 @@ impl MountShapeBuilder {
     }
 }
 
-/// Replace `{language}` with the mounting language's address in every
-/// string of the shape. The placeholder only ever appears in call-action
-/// `source`/`target` fields (a class is decorated before it knows which
-/// language mounts it); the whole-shape walk is the Rust port of the JS
-/// LDK's `resolveMountCallSources`, applied to every string so a
-/// `{language}` in a `path` or `has_value` resolves too.
-fn resolve_language_placeholder(value: &mut serde_json::Value, language_address: &str) {
-    match value {
-        serde_json::Value::String(s) => {
-            if s.contains("{language}") {
-                *s = s.replace("{language}", language_address);
+/// Replace `{language}` with the mounting language's address — in a
+/// call action's `source`/`target` only, the same fields the JS LDK's
+/// `resolveMountCallSources` touches (a class is decorated before it
+/// knows which language mounts it, so `{language}` defers the address
+/// to `mountShapes()` time). A `{language}` inside a `name`, `path` or
+/// `has_value` is a literal the shape keeps.
+fn resolve_action_list(list: &mut serde_json::Value, language_address: &str) {
+    if let serde_json::Value::Array(actions) = list {
+        for action in actions {
+            if let serde_json::Value::Object(map) = action {
+                for key in ["source", "target"] {
+                    if let Some(serde_json::Value::String(s)) = map.get_mut(key) {
+                        if s.contains("{language}") {
+                            *s = s.replace("{language}", language_address);
+                        }
+                    }
+                }
             }
         }
-        serde_json::Value::Array(items) => {
-            for item in items {
-                resolve_language_placeholder(item, language_address);
+    }
+}
+
+fn resolve_language_placeholder(shape: &mut serde_json::Value, language_address: &str) {
+    let serde_json::Value::Object(map) = shape else {
+        return;
+    };
+    for key in ["constructor_actions", "destructor_actions"] {
+        if let Some(list) = map.get_mut(key) {
+            resolve_action_list(list, language_address);
+        }
+    }
+    if let Some(serde_json::Value::Array(props)) = map.get_mut("properties") {
+        for prop in props {
+            if let serde_json::Value::Object(pmap) = prop {
+                for key in ["setter", "adder", "remover"] {
+                    if let Some(list) = pmap.get_mut(key) {
+                        resolve_action_list(list, language_address);
+                    }
+                }
             }
         }
-        serde_json::Value::Object(map) => {
-            for v in map.values_mut() {
-                resolve_language_placeholder(v, language_address);
-            }
-        }
-        _ => {}
     }
 }
 
@@ -191,11 +214,18 @@ impl MountShapes {
     /// `{language}` resolves against this language's own address — the
     /// `languageAddress()` host import.
     ///
-    /// `from_classes` calls the host import, so it only runs inside a
-    /// language runtime; tests and languages that already know their
-    /// address use [`from_classes_at`](Self::from_classes_at).
+    /// `from_classes` calls the host import — but only when a shape
+    /// actually carries `{language}`, the same laziness the JS LDK's
+    /// `mountShapes()` uses, so a class with no placeholder never needs
+    /// a runtime. Tests and languages that already know their address
+    /// use [`from_classes_at`](Self::from_classes_at).
     pub fn from_classes(version: impl Into<String>, classes: &[MountClassShape]) -> Self {
-        Self::from_classes_at(version, classes, &crate::imports::language_address())
+        let address = classes
+            .iter()
+            .any(|c| c.shape.to_string().contains("{language}"))
+            .then(crate::imports::language_address)
+            .unwrap_or_default();
+        Self::from_classes_at(version, classes, &address)
     }
 
     /// As [`from_classes`](Self::from_classes), with the language

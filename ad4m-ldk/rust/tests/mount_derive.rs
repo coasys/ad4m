@@ -132,6 +132,38 @@ fn mount_envelope_resolves_language() {
     assert_eq!(member["remover"][0]["target"], "{\"soft\":true}");
 }
 
+/// The placeholder walker is deliberately narrow — like the JS
+/// `resolveMountCallSources`, only a call action's `source`/`target`
+/// substitutes `{language}`; a `name`, `path` or `has_value` keeps it
+/// verbatim.
+#[allow(dead_code)]
+#[derive(Ad4mModel)]
+#[ad4m(
+    name = "Keep",
+    namespace = "keep://",
+    target_class = "keep://Keep",
+    constructor = call("create", source = "{language}://class/Keep"),
+)]
+struct Keep {
+    #[ad4m_property(
+        through = "keep://data/{language}",
+        flag = "keep://flag-{language}",
+        setter = call("update", source = "{language}://act"),
+    )]
+    p: String,
+}
+
+#[test]
+fn mount_envelope_resolves_language_only_in_call_actions() {
+    let shapes = MountShapes::from_classes_at("1", &[Keep::generate_shacl()], "lang://abc");
+    let prop = &shapes.shapes[0].shape["properties"][0];
+    assert_eq!(prop["path"], "keep://data/{language}");
+    assert_eq!(prop["has_value"], "keep://flag-{language}");
+    assert_eq!(prop["setter"][0]["source"], "lang://abc://act");
+    let ctor = &shapes.shapes[0].shape["constructor_actions"][0];
+    assert_eq!(ctor["source"], "lang://abc://class/Keep");
+}
+
 /// `capabilities: [mount]` on `ad4m_language!` — compile coverage for
 /// the `mountShapes`/`mountSnapshot` shim arm.
 struct MountLang;
