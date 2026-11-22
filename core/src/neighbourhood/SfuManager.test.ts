@@ -2420,6 +2420,49 @@ test.each([
     }
 })
 
+test("an ICE restart a newer restart replaced is not sent again when the socket is back", async () => {
+    // The network change replaced restart A with restart B on the same
+    // peer: A's request is B's problem no longer, so its late socket
+    // fault retains nothing. Only a fault of the restart still in
+    // flight is replayed.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        let failA!: (e: unknown) => void
+        api.sfuCallRestartIce.mockImplementationOnce(() => new Promise((_, reject) => { failA = reject }))
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+
+        await iceState("disconnected") // restart A
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+        api.emitNetworkChange() // restart B replaces A on the same peer
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
+
+        failA(new RpcError(503, "WebSocket connection closed"))
+        await flush()
+        api.emitReconnect()
+        await flush()
+        await flush()
+        await jest.advanceTimersByTimeAsync(2_000)
+
+        // No third request: A's failure kept nothing for the reconnect.
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
+
+        // But a fault of the restart still in flight is replayed, as before.
+        api.sfuCallRestartIce.mockRejectedValueOnce(new RpcError(503, "WebSocket connection closed"))
+        api.emitNetworkChange() // restart C replaces B
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(3)
+        await flush()
+        api.emitReconnect()
+        await flush()
+        await flush()
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(4)
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
 test("an ICE restart refused for a real reason is not sent again when the socket is back", async () => {
     // Only a socket fault is retried: a refusal (an executor that lost this
     // session) leaves the decision to the restart's timeout, as before.
