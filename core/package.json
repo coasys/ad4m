@@ -5,6 +5,20 @@
   "module": "lib/index.js",
   "types": "lib/src/index.d.ts",
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./lib/src/index.d.ts",
+      "import": "./lib/index.js",
+      "require": "./lib/index.cjs"
+    },
+    "./model": {
+      "types": "./lib/src/model.d.ts",
+      "import": "./lib/model.js",
+      "require": "./lib/model.cjs"
+    },
+    "./package.json": "./package.json",
+    "./*": "./*"
+  },
   "scripts": {
     "build": "patch-package && tsc && pnpm run bundle",
     "bundle": "rollup -c rollup.config.js",
