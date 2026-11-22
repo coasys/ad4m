@@ -8,7 +8,7 @@ use ad4m_identity_core::build::Signer;
 use ad4m_identity_core::Multikey;
 use did_key::KeyMaterial;
 
-use crate::agent::{did_for_context, sign_for_context, AgentContext};
+use crate::agent::{did_for_context, sign_for_context, sign_for_context_unfenced, AgentContext};
 
 /// The device `did:key` of `agent`, and its multikey (`z6Mk…`).
 pub fn device_key(agent: &AgentContext) -> Result<(String, Multikey), String> {
@@ -96,6 +96,8 @@ pub struct WalletSigner {
     agent: AgentContext,
     key: Multikey,
     failure: Mutex<Option<String>>,
+    /// Signs through the signing fence (every signer but the one of an `unlink`).
+    fenced: bool,
 }
 
 impl WalletSigner {
@@ -105,6 +107,16 @@ impl WalletSigner {
             agent: agent.clone(),
             key,
             failure: Mutex::new(None),
+            fenced: true,
+        })
+    }
+
+    /// A signer for the `unlink` of `agent`'s own key: it signs although the key is fenced
+    /// (the fence is up before the `unlink` is appended).
+    pub fn for_unlink(agent: &AgentContext) -> Result<Self, String> {
+        Ok(WalletSigner {
+            fenced: false,
+            ..Self::new(agent)?
         })
     }
 
@@ -130,7 +142,12 @@ impl Signer for WalletSigner {
     }
 
     fn sign(&self, bytes: &[u8]) -> [u8; 64] {
-        match sign_for_context(bytes, &self.agent) {
+        let signed = if self.fenced {
+            sign_for_context(bytes, &self.agent)
+        } else {
+            sign_for_context_unfenced(bytes, &self.agent)
+        };
+        match signed {
             Ok(sig) => match <[u8; 64]>::try_from(sig.as_slice()) {
                 Ok(sig) => sig,
                 Err(_) => {
