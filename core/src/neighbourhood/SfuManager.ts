@@ -372,6 +372,10 @@ export class SfuManager {
     /** Whether the last roster this join saw lists this session. A resume
      *  that says the session is gone rebuilds only if none has since. */
     private listedInRoster = true
+    /** The highest roster `revision` this join applied; older rosters and
+     *  resume replies are dropped. Reset per join: a new room's revisions
+     *  start at 1 again. */
+    private rosterRevision = 0
     /** How long the roster may leave this session out before the call is rebuilt. */
     private static readonly UNLISTED_GRACE_MS = 3_000
     /** How long after the socket is back ICE has to be connected before it is restarted. */
@@ -909,6 +913,7 @@ export class SfuManager {
         // A queue per connection: a step stuck on a dropped connection holds nothing of this one.
         this.offerQueue = Promise.resolve()
         this.listedInRoster = true
+        this.rosterRevision = 0
         this.renegotiationUnsubscribe = this.neighbourhood.subscribeSfuCallRenegotiationOffer(
             this.agentDid,
             (event) => {
@@ -925,6 +930,8 @@ export class SfuManager {
         )
         this.rosterUnsubscribe = this.neighbourhood.subscribeSfuRoomRoster((roster) => {
             if (!ours(roster) || this.state.peerConnection !== pc) return
+            if (roster.revision <= this.rosterRevision) return
+            this.rosterRevision = roster.revision
             void joined.then(() => {
                 if (this.state.peerConnection !== pc) return
                 this.applyRoster(roster.participants, true)
@@ -1098,7 +1105,8 @@ export class SfuManager {
             void this.reconnect()
             return
         }
-        if (result.roster) {
+        if (result.roster && result.roster.revision > this.rosterRevision) {
+            this.rosterRevision = result.roster.revision
             this.applyRoster(result.roster.participants, true)
             this.noticeRoster(pc, result.roster.participants)
         }

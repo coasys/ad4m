@@ -157,6 +157,9 @@ function mapped(mid: string, agentDid: string, mediaKind: "audio" | "video", par
     return { mid, participantId, agentDid, mediaKind }
 }
 
+/** The executor numbers every roster publish of a room; successive helpers get newer numbers. */
+let nextRevision = 1
+
 /**
  * The room's roster as the executor publishes it: one session per DID (`pid`),
  * or the sessions given as `[participantId, did]`. This manager's session
@@ -174,14 +177,14 @@ function roster(
         withoutMe || sessions.some((s) => s.participantId === MINE)
             ? sessions
             : [...sessions, { participantId: MINE, agentDid: ME }]
-    return { neighbourhoodUrl: URL, roomName: ROOM, participants: listed, ...overrides }
+    return { neighbourhoodUrl: URL, roomName: ROOM, revision: nextRevision++, participants: listed, ...overrides }
 }
 
 /** `sfu.callResume` saying this session is still listed, its room's roster attached. */
 function resumeListed(overrides: Partial<SfuResumeResult> = {}): SfuResumeResult {
     return {
         listed: true,
-        roster: { participants: [{ participantId: MINE, agentDid: ME }] },
+        roster: { revision: nextRevision++, participants: [{ participantId: MINE, agentDid: ME }] },
         ...overrides,
     }
 }
@@ -505,6 +508,46 @@ test("a participant missing from a later roster leaves, and their media sections
     expect(joined).toEqual([ALICE, BOB])
     expect(added).toEqual([])
     expect(participants()).toEqual([BOB])
+})
+
+test("a roster older than one already applied is dropped", async () => {
+    const api = fakeApi()
+    const { manager, left, participants } = recordedManager(api)
+    await manager.join(fakeStream())
+    const fresh = roster([ALICE, BOB])
+    api.emitRoster(fresh)
+    await flush()
+    expect(participants()).toEqual([ALICE, BOB])
+
+    api.emitRoster(roster([BOB], { revision: fresh.revision - 1 }))
+    await flush()
+    expect(left).toEqual([])
+    expect(participants()).toEqual([ALICE, BOB])
+
+    api.emitRoster(roster([BOB]))
+    await flush()
+    expect(left).toEqual([ALICE])
+})
+
+test("a resume's roster older than an applied roster event is dropped, its offer still applies", async () => {
+    const api = fakeApi()
+    const { manager, left, participants } = recordedManager(api)
+    await manager.join(fakeStream())
+    const fresh = roster([ALICE])
+    api.emitRoster(fresh)
+    await flush()
+    api.sfuCallResume.mockResolvedValueOnce(
+        resumeListed({ roster: { revision: fresh.revision - 1, participants: [{ participantId: MINE, agentDid: ME }] }, offer: offer("R") }),
+    )
+
+    api.emitReconnect()
+    await flush()
+    await flush()
+
+    expect(left).toEqual([])
+    expect(participants()).toEqual([ALICE])
+    expect(currentPc().remoteSdps()).toEqual(["server-answer", "R"])
+    await manager.leave()
 })
 
 test("a roster that arrives before the join completes applies after it", async () => {
@@ -1990,7 +2033,7 @@ test("the roster a resume returns applies like a roster event", async () => {
     const { manager, joined } = recordedManager(api)
     await manager.join(fakeStream())
     api.sfuCallResume.mockResolvedValueOnce(
-        resumeListed({ roster: { participants: [{ participantId: MINE, agentDid: ME }, { participantId: pid(ALICE), agentDid: ALICE }] } }),
+        resumeListed({ roster: { revision: nextRevision++, participants: [{ participantId: MINE, agentDid: ME }, { participantId: pid(ALICE), agentDid: ALICE }] } }),
     )
 
     api.emitReconnect()
