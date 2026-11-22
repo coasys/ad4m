@@ -51,7 +51,12 @@ use std::time::Duration;
 /// reads. Sync delivers a proposal's five links, or a batch of votes, as
 /// separate diffs in quick succession; one pass over all of them is the
 /// same result for a fraction of the work.
+#[cfg(not(test))]
 pub const FLOW_PASS_DEBOUNCE: Duration = Duration::from_millis(300);
+/// Unit tests wait this real time before every pass they trigger, and none
+/// of them depends on its length, so they use a short one.
+#[cfg(test)]
+pub const FLOW_PASS_DEBOUNCE: Duration = Duration::from_millis(10);
 
 /// The parts of a `SHACLFlow` definition the fold reads: states and the
 /// value that picks the genesis, transitions, and consensus rules (on the
