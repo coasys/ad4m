@@ -177,7 +177,7 @@ export function looksLikeUri(value: string): boolean {
  * (`resolveLanguage` unset). Strings that already look like URIs are returned
  * as-is.
  *
- * Exported so write-side helpers (e.g. `Ad4mModel.setProperty`'s literal
+ * Exported so write-side helpers (e.g. `Ad4mModel.planProperty`'s literal
  * resolve path) can keep their on-disk form aligned with what
  * `queryToSPARQL()` filters against — otherwise the same value can be
  * stored as `<literal:string:https%3A...>` from one path while WHERE
