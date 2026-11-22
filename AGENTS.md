@@ -317,7 +317,11 @@ per-node capacity only drives redirects; the server drops a peer after
 (`sfu.callRestartIce`), 15 s after the request. The restart's answer ends
 that grace and the 10 s disconnect clock starts again. An unanswered server
 offer is resent at 10 s and 30 s, then every 30 s, and never drops the peer
-(#1802 dropped it at 70 s, also while its media flowed). The offer carries
+(#1802 dropped it at 70 s, also while its media flowed). A client keeps
+that offer. A pipe that already had a path replaces an unanswered offer
+after those two resends and offers its deferred tracks again. An initial
+pipe that never connects stays through the second resend plus the 15 s
+ICE-restart grace, then is dropped. The offer carries
 an `offerId` that a resend and `sfu.callResume` repeat; the answer echoes
 it. `sfu.callAnswerServerOffer` answers `{ accepted: true }`, or
 `{ accepted: false, reason }` (`stale`, `no-pending`, `unknown-session`),
