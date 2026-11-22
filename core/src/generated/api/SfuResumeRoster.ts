@@ -2,6 +2,12 @@
 import type { SfuRosterParticipant } from "./SfuRosterParticipant";
 
 /**
- * The sessions in a [`SfuResumeResult`].
+ * The sessions in a [`SfuResumeResult`], at one roster revision.
  */
-export type SfuResumeRoster = { participants: Array<SfuRosterParticipant>, };
+export type SfuResumeRoster = { 
+/**
+ * The same `revision` the `sfu-room-roster` event for this publish
+ * carries. A client drops a reply whose revision is older than a
+ * roster event it already has.
+ */
+revision: number, participants: Array<SfuRosterParticipant>, };

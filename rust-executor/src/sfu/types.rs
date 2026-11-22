@@ -289,8 +289,8 @@ pub struct SfuResumeResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub offer: Option<SfuCallRenegotiationOffer>,
-    /// The room's sessions, when the session is listed. The same list the
-    /// roster event carries.
+    /// The room's sessions, when the session is listed. The same list and
+    /// the same `revision` the roster event carries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub roster: Option<SfuResumeRoster>,
@@ -305,23 +305,25 @@ impl SfuResumeResult {
         }
     }
 
-    pub fn listed(
-        offer: Option<SfuCallRenegotiationOffer>,
-        participants: Vec<SfuRosterParticipant>,
-    ) -> Self {
+    pub fn listed(offer: Option<SfuCallRenegotiationOffer>, roster: SfuResumeRoster) -> Self {
         Self {
             listed: true,
             offer,
-            roster: Some(SfuResumeRoster { participants }),
+            roster: Some(roster),
         }
     }
 }
 
-/// The sessions in a [`SfuResumeResult`].
+/// The sessions in a [`SfuResumeResult`], at one roster revision.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct SfuResumeRoster {
+    /// The same `revision` the `sfu-room-roster` event for this publish
+    /// carries. A client drops a reply whose revision is older than a
+    /// roster event it already has.
+    #[ts(type = "number")]
+    pub revision: u64,
     pub participants: Vec<SfuRosterParticipant>,
 }
 
@@ -334,6 +336,11 @@ pub struct SfuResumeRoster {
 pub struct SfuRoomRoster {
     pub neighbourhood_url: String,
     pub room_name: String,
+    /// Increases by one on every publish of this room, starting at 1,
+    /// including a resume. A client drops a roster older than one it
+    /// already applied.
+    #[ts(type = "number")]
+    pub revision: u64,
     /// The room's sessions, sorted by DID, then participant id: this node's,
     /// and those the other cascade nodes in the room announced, whose ids
     /// name their node (`P3@did:key:...`). An agent in the call from two

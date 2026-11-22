@@ -298,13 +298,26 @@ impl std::error::Error for RoomError {}
 #[derive(Debug, Default)]
 pub struct RoomManager {
     rooms: HashMap<RoomId, SfuRoom>,
+    /// One roster revision per room id. It outlives the room: the departure
+    /// roster is published after the room is destroyed, and a later room of
+    /// the same id continues, so a revision never goes backwards.
+    roster_revisions: HashMap<RoomId, u64>,
 }
 
 impl RoomManager {
     pub fn new() -> Self {
         Self {
             rooms: HashMap::new(),
+            roster_revisions: HashMap::new(),
         }
+    }
+
+    /// The next roster revision for `id`: 1 the first time, then one more
+    /// on every publish. Stays at `u64::MAX` rather than wrapping to 0.
+    pub fn next_roster_revision(&mut self, id: &RoomId) -> u64 {
+        let slot = self.roster_revisions.entry(id.clone()).or_insert(0);
+        *slot = slot.saturating_add(1);
+        *slot
     }
 
     /// Create a new room. Returns error if room already exists.

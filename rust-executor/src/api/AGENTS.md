@@ -152,6 +152,12 @@ Notes on some methods:
 - `neighbourhood.*` methods that name a perspective (`publish` by `perspectiveUuid`, the others
   by `uuid`) use `Owns { Perspective }` on the neighbourhood capability: the perspective that
   holds a neighbourhood decides who may use it.
+- `sfu.callResume` answers `{ listed: true, offer?, roster: { revision, participants } }`
+  or `{ listed: false }`. `revision` is the same number the `sfu-room-roster` event
+  carries for that publish: 1 the first time that room is published, then one more
+  every publish. `sfu.callAnswerServerOffer` and `sfu.callResume` are 408 when the
+  event loop has not taken the command and answered within 5 s, including while the
+  command waits for a slot in the bounded queue.
 
 Which guard each method has, generated from the handler map
 (`tests/handler_table_tests.rs::render_guard_table`). `the_guard_table_in_agents_md_is_current`

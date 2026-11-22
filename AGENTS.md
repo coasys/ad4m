@@ -299,7 +299,10 @@ returned, and acts only on that session of the caller's DID; the SDK sends
 none of them without one, so a tab that never joined cannot end another
 tab's call (E19, E21). The executor publishes `sfu-room-roster` (to the
 listed DIDs, plus the departed session's DID on departure) after every join
-and departure, listing sessions (`participantId` + `agentDid`), and the SDK
+and departure, listing sessions (`participantId` + `agentDid`) and a
+`revision` (1 on the room's first publish, then one more on every publish
+of that room, a resume included), so a client can drop a roster whose
+`revision` is older than one it already applied. The SDK
 keys participants by participant id from it; when the roster stops listing
 this session (its `participantId`) for 3 s and `sfu.listRooms` does not list
 it either, the SDK rebuilds the call, but a replaced session never does; tracks are attributed only by the `trackMapping`
@@ -322,9 +325,12 @@ for that session is `{ accepted: true }` and changes nothing. A refused
 answer is that value, not an RPC error. `sfu.callResume` (the session's
 `participantId`) sends the pending offer and the roster again at once, for
 a client whose socket came back, and answers `{ listed: true, offer?,
-roster: { participants } }` with the same offer and the same sessions, or
+roster: { revision, participants } }` with the same offer, the same sessions,
+and the same `revision` as the roster event that resume just published, or
 `{ listed: false }` when the room or the session is not there. A session of
-another agent is 403.
+another agent is 403. `sfu.callAnswerServerOffer` and `sfu.callResume` are
+408 when the event loop has not taken the command and answered within 5 s,
+including while the command waits for a slot in the bounded queue.
 on ICE `disconnected` or a network change the SDK restarts ICE in place (the
 SFU stays the only offerer: the restart comes as a server renegotiation
 offer), and rebuilds the call if that has not reconnected within 15 s; after

@@ -537,6 +537,7 @@ mod tests {
                 &SfuRoomRoster {
                     neighbourhood_url: "n".into(),
                     room_name: "r".into(),
+                    revision: 1,
                     participants: vec![
                         SfuRosterParticipant {
                             agent_did: "did:alice".into(),
