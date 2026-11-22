@@ -92,7 +92,8 @@ pub struct KeyIndexEntry {
     /// "d3".
     pub key_id: String,
     pub added: u64,
-    /// Seq of the revoke or rotate that ended it.
+    /// Seq of the revoke that ended it, the rotate that replaced it (a master key), or the event
+    /// that ended the log. `None` for a key that was only unlinked.
     #[serde(default)]
     pub revoked: Option<u64>,
     /// Seq of the unlink that stopped it signing anything new.

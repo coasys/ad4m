@@ -2987,7 +2987,7 @@ mod tests {
     // the same identity answers StoreUnavailable without asking the store again.
     #[tokio::test]
     async fn a_failed_admission_read_backs_off_per_identity() {
-        let mut world = world(90).await;
+        let world = world(90).await;
         world.operate();
         world.service.cache.note_read(&world.log.scid(), 0);
         world.store.store_down.store(true, Ordering::SeqCst);
@@ -3633,7 +3633,7 @@ mod tests {
     // `checked_at`, or a device revoked on the store during the outage renews for ever.
     #[tokio::test]
     async fn an_outage_renewal_does_not_extend_the_outage_grace() {
-        let mut world = world(230).await;
+        let world = world(230).await;
         world.operate();
         let result = world.login_as(&world.phone).await.unwrap();
         let session = open(&result.token).unwrap();
@@ -3688,7 +3688,7 @@ mod tests {
     // `checked_at` on through the outage. A renewal reads the store whatever the cache's age.
     #[tokio::test]
     async fn a_renewal_after_a_failed_refresh_is_no_check_of_the_key() {
-        let mut world = world(250).await;
+        let world = world(250).await;
         world.operate();
         let result = world.login_as(&world.phone).await.unwrap();
         let session = open(&result.token).unwrap();
@@ -5507,7 +5507,7 @@ mod tests {
             enc_key_of(&device_multikey(&main).unwrap()).unwrap(),
             KeyLife::Standing,
         );
-        let mut world = world.with_store();
+        let world = world.with_store();
         accept_signed(&world.service.cache, &world.log.events).await;
         let _bound = MainBound::to(&world.log.scid());
         let result = world.login_as(&world.phone).await.unwrap();
@@ -5585,7 +5585,7 @@ mod tests {
             enc_key_of(&device_multikey(&main).unwrap()).unwrap(),
             KeyLife::Standing,
         );
-        let mut world = world.with_store();
+        let world = world.with_store();
         accept_signed(&world.service.cache, &world.log.events).await;
         let _bound = MainBound::to(&world.log.scid());
         let repaired = world.log.events[..world.log.events.len() - 1].to_vec();

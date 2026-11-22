@@ -1637,6 +1637,7 @@ mod pass_session_tests {
 
     /// A managed user: a row in the users table, which makes the owner DID a managed agent.
     fn managed_user(email: &str, did: &str) {
+        crate::perspectives::interpretation_test_support::ensure_db_init();
         let known = crate::db::Ad4mDb::with_global_instance(|db| db.get_username_by_did(did))
             .ok()
             .flatten();
