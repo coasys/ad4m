@@ -96,10 +96,10 @@ pub struct SfuPeer {
     pub had_path: bool,
     /// When the peer was made. See [`PEER_ESTABLISH_TIMEOUT`].
     pub created_at: Instant,
-    /// When this pipe first became usable (ICE connected or completed, or
-    /// its control channel opened). The cascade resets a redial count once
-    /// this has stood for [`super::cascade::PIPE_HEALTHY_RESET`]. A client
-    /// peer leaves it unset.
+    /// When this pipe's current usable stretch began (ICE connected or
+    /// completed, or its control channel opened). Cleared on
+    /// `Disconnected`, so that stretch is not counted toward
+    /// [`super::cascade::PIPE_HEALTHY_RESET`]. A client peer leaves it unset.
     usable_since: Option<Instant>,
     /// An ICE restart the client asked for (`sfu.callRestartIce`), from the
     /// request until its answer lands or the offer's retry budget ends.
@@ -332,17 +332,30 @@ impl SfuPeer {
     }
 
     /// Track an ICE state change: `Disconnected` starts the disconnect
-    /// clock, any other state stops it.
+    /// clock, any other state stops it. A pipe's usable stretch starts on
+    /// `Connected` or `Completed` and ends on `Disconnected`, so a
+    /// disconnected stretch does not count as healthy.
     pub fn on_ice_state(&mut self, state: IceConnectionState, now: Instant) {
         self.disconnected_since = match state {
-            IceConnectionState::Disconnected => self.disconnected_since.or(Some(now)),
+            IceConnectionState::Disconnected => {
+                if self.is_pipe {
+                    self.usable_since = None;
+                }
+                self.disconnected_since.or(Some(now))
+            }
             _ => None,
         };
-        if matches!(
-            state,
-            IceConnectionState::Connected | IceConnectionState::Completed
-        ) {
+        if pipe_event_is_usable(Some(state), false) {
             self.had_path = true;
+            self.note_usable(now);
+        }
+    }
+
+    /// Remember the start of this pipe's usable stretch. A second event in
+    /// the same stretch does not move it. A client peer has no stretch.
+    fn note_usable(&mut self, now: Instant) {
+        if self.is_pipe && self.usable_since.is_none() {
+            self.usable_since = Some(now);
         }
     }
 
@@ -857,6 +870,17 @@ impl SfuPeer {
     }
 }
 
+/// A pipe is usable for seeding and for the healthy-interval clock when
+/// ICE is `Connected` or `Completed`, or when its control channel opens.
+/// The event loop and the recovery test share this.
+fn pipe_event_is_usable(ice: Option<IceConnectionState>, channel_opened: bool) -> bool {
+    channel_opened
+        || matches!(
+            ice,
+            Some(IceConnectionState::Connected | IceConnectionState::Completed)
+        )
+}
+
 /// Apply the ICE state `poll_output` just yielded, then whether the
 /// establishment sweep drops the peer. The event loop polls before that
 /// sweep, so a `Connected` queued at [`PEER_ESTABLISH_TIMEOUT`] is visible
@@ -1196,8 +1220,9 @@ pub struct DeadPeer {
     /// that pipe again. A `drop` does the same on the end that dials. The
     /// first consecutive failure still dials at once.
     pub reason: &'static str,
-    /// When this pipe first became usable, if it did. The cascade clears
-    /// its failure count once this stood for the healthy interval.
+    /// When this pipe's current usable stretch began, if it is still
+    /// usable. Cleared on `Disconnected`, so the healthy-interval reset
+    /// does not count a disconnected stretch.
     pub usable_since: Option<Instant>,
 }
 
@@ -1645,16 +1670,7 @@ impl SfuServer {
                             Event::IceConnectionStateChange(state) => {
                                 info!("SFU: peer {} ICE state: {:?}", pid, state);
                                 peer.on_ice_state(state, Instant::now());
-                                if peer.is_pipe
-                                    && matches!(
-                                        state,
-                                        IceConnectionState::Connected
-                                            | IceConnectionState::Completed
-                                    )
-                                {
-                                    if peer.usable_since.is_none() {
-                                        peer.usable_since = Some(Instant::now());
-                                    }
+                                if peer.is_pipe && pipe_event_is_usable(Some(state), false) {
                                     pipes_usable.push(pid.clone());
                                 }
                             }
@@ -1676,10 +1692,8 @@ impl SfuServer {
                                     pid, label, cid
                                 );
                                 peer.channels.insert(cid, label);
-                                if peer.is_pipe {
-                                    if peer.usable_since.is_none() {
-                                        peer.usable_since = Some(Instant::now());
-                                    }
+                                if peer.is_pipe && pipe_event_is_usable(None, true) {
+                                    peer.note_usable(Instant::now());
                                     pipes_usable.push(pid.clone());
                                 }
                             }
@@ -4845,16 +4859,14 @@ mod tests {
             .expect("the caller writes opus");
     }
 
-    /// What the server loop pushes onto `pipes_usable`: ICE Connected or
-    /// Completed, or a data channel opening. A hand-made list is not this.
+    /// What the server loop pushes onto `pipes_usable`: the same events
+    /// [`pipe_event_is_usable`] names. A hand-made list is not this.
     fn pipe_poll_is_usable(seen: &Seen) -> bool {
-        seen.channel.is_some()
-            || seen.ice.iter().any(|(_, state)| {
-                matches!(
-                    state,
-                    IceConnectionState::Connected | IceConnectionState::Completed
-                )
-            })
+        pipe_event_is_usable(None, seen.channel.is_some())
+            || seen
+                .ice
+                .iter()
+                .any(|(_, state)| pipe_event_is_usable(Some(*state), false))
     }
 
     /// Drive the control pipe until `dial` reports that event. Returns
@@ -5471,6 +5483,32 @@ mod tests {
             .establish_pipe("did:key:nodeA", &room)
             .expect("a new pipe can be dialled");
         assert_ne!(replacement.id, pipe.id);
+    }
+
+    /// A disconnected stretch does not stay inside the pipe's usable
+    /// interval. The next connect starts that interval again.
+    #[test]
+    fn a_disconnect_clears_the_pipes_usable_interval() {
+        let (_caller, mut peer) = connected_pair();
+        peer.is_pipe = true;
+        let up = Instant::now();
+        peer.on_ice_state(IceConnectionState::Connected, up);
+        assert_eq!(peer.usable_since, Some(up));
+        let down = up + Duration::from_secs(111);
+        peer.on_ice_state(IceConnectionState::Disconnected, down);
+        assert!(
+            peer.usable_since.is_none(),
+            "a disconnected stretch is not part of the healthy interval"
+        );
+        let back = down + Duration::from_secs(1);
+        peer.on_ice_state(IceConnectionState::Connected, back);
+        assert_eq!(peer.usable_since, Some(back));
+        peer.on_ice_state(IceConnectionState::Completed, back + Duration::from_secs(1));
+        assert_eq!(
+            peer.usable_since,
+            Some(back),
+            "a later connected state in the same stretch does not move the start"
+        );
     }
 
     /// The establishment timeout only ends a peer that never had a path. One
