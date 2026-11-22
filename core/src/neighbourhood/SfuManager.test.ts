@@ -370,7 +370,10 @@ test("offers that arrive before the join completes apply after its answer, the n
     )
 })
 
-test("a second offer waits until the first one is answered", async () => {
+test("a second offer waits only for the first's SDP, not its answer's reply", async () => {
+    // The queue serializes the SDP steps, nothing else: the first answer's
+    // send runs beside the second offer's steps, and the executor matches
+    // it to its offer by id, so the reply can land after either.
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL)
     await manager.join(fakeStream())
@@ -382,12 +385,12 @@ test("a second offer waits until the first one is answered", async () => {
     api.emitOffer(offer("second"))
     await flush()
     const pc = currentPc()
-    expect(pc.remoteSdps()).toEqual(["server-answer", "first"])
+    expect(pc.remoteSdps()).toEqual(["server-answer", "first", "second"])
+    expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(2)
 
     answered.resolve({ accepted: true })
     await flush()
-    expect(pc.remoteSdps()).toEqual(["server-answer", "first", "second"])
-    expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(2)
+    await manager.leave()
 })
 
 test("a resume reply's offer waits behind an offer's SDP step still in flight, and drops as stale", async () => {
@@ -435,9 +438,10 @@ test("a resume reply's offer waits behind an offer's SDP step still in flight, a
     }
 })
 
-test("a slow SDP step on a socket-reconnect resume holds the queue past the step timeout", async () => {
-    // socketBack boxed the whole resume step: past the limit the queue went
-    // on while its SDP work still ran, beside the next offer's.
+test("a slow SDP step on a socket-reconnect resume holds the queue, with no bound", async () => {
+    // socketBack once boxed the whole resume step: past the limit the queue
+    // went on while its SDP work still ran, beside the next offer's. Only the
+    // ask's RPC is bounded; an SDP step always runs to its end.
     jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
     try {
         const api = fakeApi()
@@ -459,7 +463,7 @@ test("a slow SDP step on a socket-reconnect resume holds the queue past the step
             await flush()
             await flush()
 
-            // Long past the step timeout, with the resume's offer still applying.
+            // Long past any bound a step could have, the offer still applying.
             await jest.advanceTimersByTimeAsync(30_000)
             api.emitOffer(offer("next-offer"))
             await flush()
@@ -528,8 +532,13 @@ test("an offer queued for a connection that has since been replaced is dropped",
     const manager = new SfuManager(api, ROOM, ME, URL)
     await manager.join(fakeStream())
     const old = currentPc()
-    const answered = deferred<SfuAnswerResult>()
-    api.sfuCallAnswerServerOffer.mockImplementationOnce(() => answered.promise)
+    // "stale" stays queued behind "first"'s stalled SDP step until the
+    // connection is already replaced.
+    const applying = deferred<void>()
+    jest.spyOn(old, "setRemoteDescription").mockImplementationOnce(async (d) => {
+        await applying.promise
+        old.remoteDescriptions.push(d)
+    })
     api.emitOffer(offer("first"))
     await flush()
     api.emitOffer(offer("stale"))
@@ -538,12 +547,12 @@ test("an offer queued for a connection that has since been replaced is dropped",
     await iceState("failed")
     const replacement = currentPc()
     expect(replacement).not.toBe(old)
-    answered.resolve({ accepted: true })
+    applying.resolve()
     await flush()
 
     expect(old.remoteSdps()).toEqual(["server-answer", "first"])
     expect(replacement.remoteSdps()).toEqual(["server-answer"])
-    expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(1)
+    expect(api.sfuCallAnswerServerOffer).not.toHaveBeenCalled()
 })
 
 test("an answer refused for a replaced connection does not rebuild the new call", async () => {
@@ -1810,6 +1819,57 @@ test("a restart that has not brought the connection back after 15 s falls back t
     }
 })
 
+test("a restart's offer does not wait behind an answer's send still out: its SDP runs at once, inside the window", async () => {
+    // No RPC waits on the offer queue: an answer's send that the executor
+    // holds for 12 s held the restart's offer behind it for the step's
+    // 10 s bound, and the restart's 15 s deadline could pass first.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        const pc = currentPc()
+        await iceState("connected")
+
+        await iceState("disconnected") // restart at t=0, deadline t=15
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+
+        // t=7: an ordinary offer's answer goes out; its reply is held 12 s.
+        await jest.advanceTimersByTimeAsync(7_000)
+        const held = deferred<SfuAnswerResult>()
+        api.sfuCallAnswerServerOffer.mockImplementationOnce(() => held.promise)
+        api.emitOffer(offer("ordinary"))
+        await flush()
+        expect(pc.remoteSdps()).toEqual(["server-answer", "ordinary"])
+        expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(1)
+
+        // t=8: the restart's offer arrives behind the held send. Its SDP
+        // runs at once and its answer goes out inside the window.
+        await jest.advanceTimersByTimeAsync(1_000)
+        api.emitOffer(offer("restart-offer"))
+        await flush()
+        expect(pc.remoteSdps()).toEqual(["server-answer", "ordinary", "restart-offer"])
+        expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(2)
+        expect(api.sfuCallAnswerServerOffer).toHaveBeenLastCalledWith(
+            URL, ROOM, MINE, offer("restart-offer").offerId, expect.any(String),
+        )
+
+        // Media back ends the restart; the held reply lands at t=19 and
+        // still settles its own answer's `accepted`.
+        await iceState("connected")
+        await jest.advanceTimersByTimeAsync(11_000)
+        held.resolve({ accepted: true })
+        await flush()
+        await jest.advanceTimersByTimeAsync(20_000)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+        expect(FakePeerConnection.instances).toHaveLength(1)
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
 test("a refused restart also waits for the timeout before rebuilding", async () => {
     // The executor no longer knows this session: a blip that heals keeps the call.
     fakeTimers()
@@ -2909,7 +2969,7 @@ test("a resume refused with 403 ends the call: the session is another agent's", 
     }
 })
 
-// ── Offer queue: newest only, each step time-boxed (C7) ─────────────────────
+// ── Offer queue: newest only, the SDP steps serial (C7) ────────────────────
 
 test("of several offers waiting, only the newest is applied; the track mappings of all are kept", async () => {
     const api = fakeApi()
@@ -2934,7 +2994,9 @@ test("of several offers waiting, only the newest is applied; the track mappings 
     expect(participants()).toEqual([ALICE, BOB])
 })
 
-test("an offer step that hangs is given up after 10 s, and the next offer is applied", async () => {
+test("an answer's send that never settles holds no offer behind it", async () => {
+    // No RPC is a queue step: the first answer's send running for ever
+    // changes nothing for the offer behind it.
     fakeTimers()
     try {
         const api = fakeApi()
@@ -2947,10 +3009,7 @@ test("an offer step that hangs is given up after 10 s, and the next offer is app
         await flush()
         await jest.advanceTimersByTimeAsync(1_000)
         api.emitOffer(offer("second"))
-        await jest.advanceTimersByTimeAsync(8_999)
-        expect(pc.remoteSdps()).toEqual(["server-answer", "first"])
-
-        await jest.advanceTimersByTimeAsync(1)
+        await flush()
         expect(pc.remoteSdps()).toEqual(["server-answer", "first", "second"])
         expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(2)
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
@@ -2960,7 +3019,7 @@ test("an offer step that hangs is given up after 10 s, and the next offer is app
 })
 
 test("an older offer's answer failing late changes nothing: the newest offer's resend gets the cached answer", async () => {
-    // A's answer outlives its box and B applies; B's answer is the one the
+    // A's answer is still out when B applies; B's answer is the one the
     // cache holds. A's call failing later writes nothing — the socket's
     // return replays nothing, and B's own resend is what gets its answer.
     fakeTimers()
@@ -2977,8 +3036,7 @@ test("an older offer's answer failing late changes nothing: the newest offer's r
         api.emitOffer(offer("A"))
         await flush()
         api.emitOffer(offer("B"))
-        await jest.advanceTimersByTimeAsync(10_000) // A's box ends, B applies, B's answer fails with the socket
-        await flush()
+        await flush() // B applies beside A's send; its own answer fails with the socket
         expect(answersSent(api)).toEqual([answerTo("A"), answerTo("B")])
 
         failA(new RpcError(408, "RPC call 'sfu.callAnswerServerOffer' timed out after 30000ms"))
@@ -2999,7 +3057,7 @@ test("an older offer's answer failing late changes nothing: the newest offer's r
     }
 })
 
-test("an answer given up on that fails after a newer offer was answered sends nothing more", async () => {
+test("an answer still out that fails after a newer offer was answered sends nothing more", async () => {
     fakeTimers()
     try {
         const api = fakeApi()
@@ -3011,7 +3069,7 @@ test("an answer given up on that fails after a newer offer was answered sends no
         api.emitOffer(offer("first"))
         await flush()
         api.emitOffer(offer("second"))
-        await jest.advanceTimersByTimeAsync(10_000)
+        await flush()
         expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(2)
         api.sfuCallAnswerServerOffer.mockClear()
 
@@ -3120,7 +3178,7 @@ test("a newer offer's answer replaces the cache: the socket's return replays not
         api.emitOffer(offer("A"))
         await flush()
         api.emitOffer(offer("B"))
-        await jest.advanceTimersByTimeAsync(10_000)
+        await flush()
         api.emitReconnect()
         await jest.advanceTimersByTimeAsync(0)
         expect(answersSent(api)).toEqual([answerTo("A"), answerTo("B")])
@@ -3158,7 +3216,7 @@ test("a same-mid ICE restart offer is never answered with the answer of the offe
         await iceState("disconnected")
         expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
         api.emitOffer(offer("restart"))
-        await jest.advanceTimersByTimeAsync(10_000)
+        await flush()
         api.emitReconnect()
         await jest.advanceTimersByTimeAsync(0)
 
@@ -3204,27 +3262,6 @@ test("a stalled SDP step for one offer holds the next: a newer offer is applied 
         expect(answersSent(api)).toEqual([answerTo("A"), answerTo("B")])
         expect(setLocal.mock.calls.map(([d]) => d.sdp)).toEqual(["answer-to-A", "answer-to-B"])
         expect(pc.localDescription?.sdp).toBe("answer-to-B")
-        await manager.leave()
-    } finally {
-        jest.useRealTimers()
-    }
-})
-
-test("the answer RPC is still time-boxed: one that hangs lets the next offer go on after 10 s", async () => {
-    fakeTimers()
-    try {
-        const api = fakeApi()
-        const manager = new SfuManager(api, ROOM, ME, URL)
-        await manager.join(fakeStream())
-        const pc = currentPc()
-        api.sfuCallAnswerServerOffer.mockImplementationOnce(() => new Promise(() => {}))
-        api.emitOffer(offer("first"))
-        await flush()
-        api.emitOffer(offer("second"))
-        await jest.advanceTimersByTimeAsync(9_999)
-        expect(pc.remoteSdps()).toEqual(["server-answer", "first"])
-        await jest.advanceTimersByTimeAsync(1)
-        expect(pc.remoteSdps()).toEqual(["server-answer", "first", "second"])
         await manager.leave()
     } finally {
         jest.useRealTimers()
