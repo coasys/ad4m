@@ -345,13 +345,13 @@ export class SfuManager {
     private qualityPreference: SfuQualityPreference | null = null
     /** Server-offer work, one step at a time. Every offer — an event's or a
      *  resume reply's — runs its SDP steps to their end before the next
-     *  offer's start; only an RPC is boxed, an answer's at most
-     *  OFFER_STEP_TIMEOUT_MS. A resume's reply applies its roster and offer
-     *  here, but the ask's own wait is off the queue: the restart offer it
-     *  triggers on the executor must not wait for it. */
+     *  offer's start; no RPC waits here — an answer's send only needs the
+     *  queue to have produced it, and the executor matches each answer to
+     *  its offer by id, so answers need no order between them. A resume's
+     *  reply applies its roster and offer here, but the ask's own wait is
+     *  off the queue: the restart offer it triggers on the executor must
+     *  not wait for it. */
     private offerQueue: Promise<void> = Promise.resolve()
-    /** How long one answer RPC of `offerQueue` may hold the steps behind it. */
-    private static readonly OFFER_STEP_TIMEOUT_MS = 10_000
     /** How long a `sfu.callResume` ask waits for its reply before dropping
      *  it. The RPC's own timeout is 30 s, but an ICE restart has only
      *  RESTART_TIMEOUT_MS to bring media back, and the last
@@ -1021,14 +1021,14 @@ export class SfuManager {
         for (const unsubscribe of previous) unsubscribe?.()
     }
 
-    /** Run one bounded RPC wait of the offer work; after `withinMs` whoever
+    /** Run one bounded RPC wait — the resume's ask; after `withinMs` whoever
      *  waits on it goes on without it. Never an SDP step: one given up on
      *  would go on changing the connection. */
-    private timeBoxed(step: () => Promise<void>, withinMs = SfuManager.OFFER_STEP_TIMEOUT_MS): Promise<void> {
+    private timeBoxed(step: () => Promise<void>, withinMs: number): Promise<void> {
         let timer: ReturnType<typeof setTimeout> | undefined
         const timeout = new Promise<void>((resolve) => {
             timer = setTimeout(() => {
-                console.warn(`SFU: an offer-queue step took over ${withinMs} ms; going on without it`)
+                console.warn(`SFU: an RPC wait took over ${withinMs} ms; going on without it`)
                 resolve()
             }, withinMs)
         })
@@ -1047,7 +1047,8 @@ export class SfuManager {
         const last = this.lastAnswer
         if (last && last.pc === pc && last.offerId === event.offerId) {
             if (last.accepted) return
-            return this.timeBoxed(() => this.sendAnswer(last))
+            void this.sendAnswer(last)
+            return
         }
         // The mapping first: the tracks this offer adds arrive while it is applied.
         for (const entry of offers.flatMap((offer) => offer.trackMapping ?? [])) {
@@ -1072,13 +1073,18 @@ export class SfuManager {
         const answer: CachedAnswer = { pc, offerId: event.offerId, roomName: event.roomName, participantId: event.participantId, sdpAnswer, accepted: false }
         this.appliedOfferId = event.offerId
         this.lastAnswer = answer
-        await this.timeBoxed(() => this.sendAnswer(answer))
+        // The send is not waited on: the reply only marks the answer
+        // accepted or acts on `unknown-session`, and the offer's id already
+        // matches it to its offer — so the next offer's SDP need not wait.
+        void this.sendAnswer(answer)
     }
 
     /**
      * Send an answer to the executor, under the `offerId` of the offer it
      * answers: the executor refuses one that names another offer, so a stale
-     * answer cannot use up a newer same-mid offer. A refusal of `stale` or
+     * answer cannot use up a newer same-mid offer. The send runs beside the
+     * offer queue, not inside it — the reply is nothing a later offer's SDP
+     * steps wait on. A refusal of `stale` or
      * `no-pending` is non-acceptance, not a failure — the offer was settled
      * or superseded, or the server's own SDP step refused it (a str0m
      * rejection, `ChangesOutOfOrder`) — and whether the connection needs
