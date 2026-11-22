@@ -4,6 +4,10 @@
         "did:key:z6MkvPpWxwXAnLtMcoc9sX7GEoJ96oNnQ3VcQJRLspNJfpE7"
     ],
     "seedOutputs": ["mainnet_seed.json", "../rust-executor/src/mainnet_seed.json"],
+    "identityStore": {
+        "url": "https://store.ad4m.dev",
+        "keys": ["z6MkhPbF9K34GSKpCo9n7XVdAoCctP2Kw7SNJeRWLx7bu9Fj"]
+    },
     "languageLanguageRef": "../bootstrap-languages/language-language/build/bundle.js",
     "linkLanguages": [
         {

@@ -11,14 +11,15 @@
  * new publish, new join) — clean-slate coordination per test, no cross-test
  * carry-over.
  *
- * Model/endpoint are overridable via INTERPRETATION_E2E_MODEL /
- * INTERPRETATION_E2E_BASE_URL.
+ * Model/endpoint come from the environment via `addE2eLlm` (defaults:
+ * staging's llama-server at http://127.0.0.1:12460/v1, model
+ * qwen3.8-27b-ud-q4_k_m, kind LLAMA_SERVER).
  */
 import { PerspectiveProxy, Perspective, Link, LinkQuery, InterpretationRun } from "@coasys/ad4m";
 import type { AutoProcessorEvent } from "@coasys/ad4m";
 import { TestContext } from "./integration.test";
 import { pollUntil, sleep } from "../utils/utils";
-import { waitUntil } from "../helpers/index";
+import { addE2eLlm, E2E_PASS_TIMEOUT_MS, waitUntil } from "../helpers/index";
 import fs from "fs";
 import { v4 as uuidv4 } from "uuid";
 import { expect } from "chai";
@@ -26,9 +27,6 @@ import { ConversationSubgroup } from "./model/auto-processor-models";
 import { LinkLangConfig, holochainLinkLang, publishLinkLanguage } from "../utils/linkLangConfig";
 
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
-
-const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
-const MODEL = process.env.INTERPRETATION_E2E_MODEL || "gemma3:12b";
 
 // Speaker and timestamp come off the body link's reifier, not an app-level
 // `ns://author` predicate: `?timestamp` is required (it is what makes a turn
@@ -45,18 +43,14 @@ const SCOPE_QUERY = `SELECT ?speaker ?text ?timestamp WHERE {
 ORDER BY ?timestamp`;
 
 async function registerLlm(ad4m: any): Promise<void> {
-  const modelId = await ad4m.ai.addModel({
-    name: "interpretation-llm",
-    api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OPEN_AI" },
-    modelType: "LLM",
-  });
+  const modelId = await addE2eLlm(ad4m, "interpretation-llm");
   await ad4m.ai.setDefaultModel("LLM", modelId);
 }
 
 
 // LLM E2E gate — this suite drives the executor's real LLM path. Skipped by
 // default (unset `LLM_E2E`); the nightly `llm-e2e` workflow on `dev` runs it
-// against Marvin's Ollama. Run locally with `LLM_E2E=1`, or the umbrella
+// against staging's llama-server. Run locally with `LLM_E2E=1`, or the umbrella
 // `./scripts/run-llm-e2e.sh` at the repo root.
 const describeIfLLM: Mocha.SuiteFunction = (process.env.LLM_E2E === "1"
   ? describe
@@ -70,16 +64,18 @@ export default function autoProcessorNeighbourhoodTests(
 ) {
   return () => {
     describeIfLLM("Auto-processor across two executors", function () {
-      // Cumulative wait budget in the slowest test:
+      // Cumulative wait budget in the slowest test. A processed wait includes
+      // queueing on staging's one llama-server slot; gossip, sync and
+      // converge are graph waits and stay short.
       //   sharedChannel gossip warm-up (up to 180s)
-      // + wave-1 processed (up to 240s)
+      // + wave-1 processed (up to 600s)
       // + wave-1 InterpretationRun synced to the other peer (up to 240s)
-      // + wave-2 processed (up to 240s)
+      // + wave-2 processed (up to 600s)
       // + subgroups converge (up to 120s)
-      // = up to 1_060s. Suite timeout 1_500s gives every waitUntil budget
+      // = up to 1_740s. Suite timeout 2_100s gives every waitUntil budget
       // enough head-room to report its own diagnostic before Mocha times
       // out the whole test.
-      this.timeout(1_500_000);
+      this.timeout(2_100_000);
 
       /**
        * Fresh neighbourhood per test. Alice publishes, Bob joins, both
@@ -211,8 +207,8 @@ export default function autoProcessorNeighbourhoodTests(
           "Right, the payments queue has no way to replay what got dropped last time.",
         );
 
-        // Wait until at least one subgroup is visible — same 4-minute budget as
-        // the wave-division test uses.
+        // Wait until at least one subgroup is visible. The pass may sit
+        // behind staging on the one llama-server slot.
         let subgroups: ConversationSubgroup[] = [];
         await waitUntil(
           async () => {
@@ -220,7 +216,7 @@ export default function autoProcessorNeighbourhoodTests(
             const processedCount = events.filter((e) => e.step === "processed").length;
             return processedCount >= 1 && subgroups.length >= 1;
           },
-          240_000,
+          E2E_PASS_TIMEOUT_MS,
           "a processed event and at least one subgroup",
         );
 
@@ -260,7 +256,7 @@ export default function autoProcessorNeighbourhoodTests(
         // twice, once per executor.
         await say(aliceP, "msg://w1a", "Our webhook retries keep dropping during payment outages.");
         await say(aliceP, "msg://w1b", "Right, the payments queue cannot replay what got dropped.");
-        await waitUntil(() => retired().length >= 2, 240_000, "the first wave to be processed");
+        await waitUntil(() => retired().length >= 2, E2E_PASS_TIMEOUT_MS, "the first wave to be processed");
 
         const firstWave = retired();
 
@@ -318,7 +314,7 @@ export default function autoProcessorNeighbourhoodTests(
 
         await say(bobP, "msg://w2a", "Separately, the retro is moved to Thursday morning.");
         await say(bobP, "msg://w2b", "I'll book the room and send the invite.");
-        await waitUntil(() => retired().length >= 4, 240_000, "the second wave to be processed");
+        await waitUntil(() => retired().length >= 4, E2E_PASS_TIMEOUT_MS, "the second wave to be processed");
 
         // The whole point: four turns, four retirements, no turn twice — across
         // two executors that both saw all four.

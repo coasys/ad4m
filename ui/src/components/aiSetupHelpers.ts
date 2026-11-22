@@ -1,0 +1,271 @@
+import type {
+  Ad4mClient,
+  AiEndpoint,
+  DiscoveredModel,
+  EndpointKind,
+  LocalAiPlannedModel,
+  LocalAiStatus,
+  ModelType,
+} from "@coasys/ad4m";
+
+/** How the launcher names each kind of model server. */
+export const ENDPOINT_KINDS: { kind: EndpointKind; label: string; baseUrl: string }[] = [
+  { kind: "OLLAMA", label: "Ollama", baseUrl: "http://127.0.0.1:11434" },
+  { kind: "LLAMA_SERVER", label: "llama-server", baseUrl: "http://127.0.0.1:9931" },
+  { kind: "VLLM", label: "vLLM", baseUrl: "http://127.0.0.1:8000" },
+  { kind: "OPEN_AI_AUDIO", label: "Transcription server (speaches, Parakeet)", baseUrl: "http://127.0.0.1:8000" },
+  { kind: "OPEN_AI", label: "OpenAI", baseUrl: "https://api.openai.com/v1" },
+  { kind: "ANTHROPIC", label: "Anthropic", baseUrl: "https://api.anthropic.com" },
+  { kind: "OPEN_AI_COMPATIBLE", label: "Other OpenAI-compatible API", baseUrl: "https://" },
+];
+
+export function kindLabel(kind: EndpointKind): string {
+  return ENDPOINT_KINDS.find((k) => k.kind === kind)?.label ?? kind;
+}
+
+/**
+ * How the launcher names an endpoint's server. A managed endpoint (local AI) by the runtime
+ * the executor runs for it, not by the kind's examples: its transcription server is
+ * nemo-speech, which no user-added transcription server need be.
+ */
+export function endpointLabel(endpoint: Pick<AiEndpoint, "kind" | "managed">): string {
+  if (endpoint.managed) {
+    if (endpoint.kind === "LLAMA_SERVER") return "llama-server";
+    if (endpoint.kind === "OPEN_AI_AUDIO") return "nemo-speech (Parakeet)";
+  }
+  return kindLabel(endpoint.kind);
+}
+
+/**
+ * The note beside a planned local model the wind tunnel did not measure on this hardware
+ * (`basis: "default"`: the manifest's smallest model for the service), else none.
+ */
+export function basisNote(model: Pick<LocalAiPlannedModel, "basis">): string | null {
+  return model.basis === "default" ? "not measured on this hardware" : null;
+}
+
+/** The capability a model type needs from its endpoint. */
+export function capabilityOf(modelType: ModelType) {
+  switch (modelType) {
+    case "LLM":
+      return "chat" as const;
+    case "EMBEDDING":
+      return "embeddings" as const;
+    case "TRANSCRIPTION":
+      return "transcription" as const;
+    case "SPEECH":
+      return "speech" as const;
+  }
+}
+
+/** Whether `served` lists `model` (Ollama lists `m` as `m:latest`). */
+export function serves(served: string[], model: string): boolean {
+  return served.some((s) => s === model || s === `${model}:latest`);
+}
+
+/** The ids of the models discovery says chat. */
+export function chatModels(discovered: DiscoveredModel[]): string[] {
+  return discovered.filter((m) => m.capabilities.includes("chat")).map((m) => m.id);
+}
+
+/**
+ * The chat model onboarding preselects: the first one the first detected server already
+ * serves (`servedChat`, by base URL), so a person with a model server can go on without a
+ * download. `null` when none serves one.
+ */
+export function preselectedChat<S extends { baseUrl: string }>(
+  servers: S[],
+  servedChat: Record<string, string[]>
+): { server: S; remoteModel: string } | null {
+  for (const server of servers) {
+    const remoteModel = servedChat[server.baseUrl]?.[0];
+    if (remoteModel) return { server, remoteModel };
+  }
+  return null;
+}
+
+/**
+ * The context-window ceiling typed into the form: `undefined` when empty (the endpoint
+ * keeps none, and Ollama's own window per model applies), the number when it is a whole
+ * number the executor's `u32` holds, `null` when it is neither.
+ */
+export function parseMaxNumCtx(typed: string): number | undefined | null {
+  if (typed.trim() === "") return undefined;
+  const cap = Number(typed);
+  return Number.isSafeInteger(cap) && cap > 0 && cap <= 0xffffffff ? cap : null;
+}
+
+/**
+ * `endpoint` as an update input with `maxNumCtx` as its ceiling and every other setting
+ * as it is (the key is left out, so the stored one stays).
+ */
+export function withMaxNumCtx(endpoint: AiEndpoint, maxNumCtx: number | undefined) {
+  return {
+    name: endpoint.name,
+    kind: endpoint.kind,
+    baseUrl: endpoint.baseUrl,
+    capabilities: endpoint.capabilities,
+    maxNumCtx,
+    requestTimeoutSecs: endpoint.requestTimeoutSecs ?? undefined,
+    maxConcurrent: endpoint.maxConcurrent ?? undefined,
+  };
+}
+
+function sameUrl(a: string, b: string): boolean {
+  return a.replace(/\/+$/, "") === b.replace(/\/+$/, "");
+}
+
+/**
+ * The saved endpoint of `kind` at `baseUrl` (with `apiKey` as its key when one is given),
+ * or a new one (named by its kind and port, suffixed when the name is taken). The executor checks a new endpoint once before it
+ * saves it.
+ */
+export async function endpointFor(
+  client: Ad4mClient,
+  kind: EndpointKind,
+  baseUrl: string,
+  apiKey?: string
+): Promise<AiEndpoint> {
+  const endpoints = await client.ai.endpoints();
+  const saved = endpoints.find((e) => e.kind === kind && sameUrl(e.baseUrl, baseUrl));
+  if (saved) {
+    // A key typed again replaces the stored one; the other settings stay.
+    if (!apiKey) return saved;
+    return client.ai.updateEndpoint(saved.id, {
+      ...withMaxNumCtx(saved, saved.maxNumCtx ?? undefined),
+      apiKey,
+    });
+  }
+  const port = new URL(baseUrl).port;
+  const base = `${kindLabel(kind).split(" ")[0].toLowerCase()}${port ? `-${port}` : ""}`;
+  const taken = new Set(endpoints.map((e) => e.name));
+  let name = base;
+  for (let n = 2; taken.has(name); n++) name = `${base}-${n}`;
+  return client.ai.addEndpoint({ name, kind, baseUrl, apiKey: apiKey || undefined });
+}
+
+/**
+ * Register `remoteModel` on `endpoint` as a `modelType` model, unless it is registered
+ * already, and make it the default of its type when the type has none. Answers its id.
+ */
+export async function registerModel(
+  client: Ad4mClient,
+  endpoint: AiEndpoint,
+  modelType: ModelType,
+  remoteModel: string
+): Promise<string> {
+  const existing = (await client.ai.getModels()).find(
+    (m) =>
+      m.endpointId === endpoint.id &&
+      m.remoteModel === remoteModel &&
+      m.modelType === modelType
+  );
+  const id =
+    existing?.id ??
+    (await client.ai.addModel({
+      name: remoteModel,
+      modelType,
+      endpointId: endpoint.id,
+      remoteModel,
+    }));
+  if (!(await client.ai.getDefaultModel(modelType))) {
+    await client.ai.setDefaultModel(modelType, id);
+  }
+  return id;
+}
+
+/**
+ * Whether local AI's chat model is registered here and the runtime that serves it runs. A
+ * failed or stopped runtime keeps its registered model: that alone is not ready.
+ */
+const LOCAL_SERVICE_TYPES: Record<LocalAiStatus["models"][number]["service"], ModelType> = {
+  llm: "LLM",
+  embeddings: "EMBEDDING",
+  stt: "TRANSCRIPTION",
+  tts: "SPEECH",
+};
+
+/**
+ * The registered local models, each with the model type it becomes the default for. A start
+ * (`ai.localStart`, autostart) keeps the defaults it finds, which may be on a remote server, so
+ * onboarding sets these when the person picks local AI: the panel says nothing leaves the device.
+ */
+export function localDefaults(status: Pick<LocalAiStatus, "models">): [ModelType, string][] {
+  return status.models.flatMap((m) => (m.model ? [[LOCAL_SERVICE_TYPES[m.service], m.model]] : []));
+}
+
+export function localChatReady(status: Pick<LocalAiStatus, "models" | "runtimes"> | null): boolean {
+  if (!status) return false;
+  const registered = status.models.some((m) => m.service === "llm" && !!m.model);
+  const runtime = status.runtimes.find((r) => r.services.includes("llm"));
+  return registered && runtime?.phase === "running";
+}
+
+/**
+ * The defaults to set once local AI is set up: [`localDefaults`] when its chat model runs
+ * ([`localChatReady`]), as onboarding's Next does; `null` while it does not run, so a screen
+ * keeps the defaults it has until a start makes it run.
+ */
+export function readyLocalDefaults(
+  status: Pick<LocalAiStatus, "models" | "runtimes"> | null
+): [ModelType, string][] | null {
+  return status && localChatReady(status) ? localDefaults(status) : null;
+}
+
+/**
+ * What the local AI panel offers: `running` when every runtime of the selection runs, `start`
+ * when it is installed with its files in, else `install`. A selection without the chat model
+ * the plan has (an earlier install for embeddings or transcription only), or whose chat
+ * model is not registered, offers the install, also when the chat model's files are
+ * downloaded already: a start would not add it. Bytes left that no model or runtime names
+ * (macOS's ONNX Runtime after a failed download) do not turn a start into an install.
+ */
+export function localAction(
+  status: Pick<LocalAiStatus, "installed" | "models" | "runtimes"> | null,
+  plan: {
+    models: Pick<LocalAiPlannedModel, "service" | "modelId" | "installed">[];
+    runtimes: { runtimeId: string; installed: boolean }[];
+  },
+  installing: boolean
+): "running" | "start" | "install" {
+  if (!status?.installed || installing) return "install";
+  const lacksChat =
+    plan.models.some((m) => m.service === "llm") &&
+    !status.models.some((m) => m.service === "llm" && !!m.model);
+  if (lacksChat) return "install";
+  const running = status.runtimes.filter((r) => r.phase === "running").length;
+  if (running > 0 && running === status.runtimes.length) return "running";
+  return toDownload(plan).length === 0 ? "start" : "install";
+}
+
+/**
+ * What an install would download, by name: the planned models and runtimes whose files are not
+ * here yet. The plan's `downloadBytes` is their total (with, on macOS, the speech gate's ONNX
+ * Runtime when the plan has transcription).
+ */
+export function toDownload(plan: {
+  models: Pick<LocalAiPlannedModel, "modelId" | "installed">[];
+  runtimes: { runtimeId: string; installed: boolean }[];
+}): string[] {
+  return [
+    ...plan.models.filter((m) => !m.installed).map((m) => m.modelId),
+    ...plan.runtimes.filter((r) => !r.installed).map((r) => r.runtimeId),
+  ];
+}
+
+/**
+ * The model server already running on this computer that the local panel offers instead of a
+ * download: the first detected one that chats, else the first. A server on the port of one of
+ * local AI's own runtimes (`localPorts`) is local AI itself, not an alternative. `null` when
+ * there is none.
+ */
+export function serverInstead<S extends { baseUrl: string; capabilities: string[] }>(
+  detected: S[] | null,
+  localPorts: number[]
+): S | null {
+  const others = (detected ?? []).filter((s) => {
+    const port = Number(new URL(s.baseUrl).port);
+    return !(port && localPorts.includes(port));
+  });
+  return others.find((s) => s.capabilities.includes("chat")) ?? others[0] ?? null;
+}

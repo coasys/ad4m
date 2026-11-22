@@ -1,11 +1,8 @@
 //! `instance_update` + `instance_remove` — mutate or delete an existing
 //! instance of any subject class.
 
-use super::{
-    check_setters, error_json, fetch_instance, instance_uri, not_found, pretty,
-    remove_all_links_of, resolve_class, subject_class, validate_properties, validation_failure,
-    Ad4mMcpHandler, WriteMode,
-};
+use super::{common_error, error_json, pretty, Ad4mMcpHandler};
+use crate::perspectives::instances::{self as shared, CascadeStep, InstanceError, WriteStep};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -48,71 +45,26 @@ impl Ad4mMcpHandler {
                 Ok(v) => v,
                 Err(e) => return e,
             };
-        let (class_name, shape) = match resolve_class(&perspective, &p.class_name).await {
-            Ok(v) => v,
-            Err(e) => return e,
-        };
-        if p.properties.is_empty() {
-            return error_json("properties is empty — pass at least one property to set.");
-        }
-
-        let validated = match validate_properties(&shape, &p.properties, WriteMode::Update) {
-            Ok(v) => v,
-            Err(errors) => return validation_failure(&class_name, &errors),
-        };
-        // Through an abstract class (#1435) the record's own classes' setters
-        // write; `update_subject` checks those.
-        let is_abstract = match perspective.is_abstract_class(&class_name) {
-            Ok(is_abstract) => is_abstract,
-            Err(e) => return error_json(format!("Error reading {class_name}'s shape: {e:#}")),
-        };
-        let setter_errors = match is_abstract {
-            true => vec![],
-            false => check_setters(&perspective, &shape, &validated.scalars).await,
-        };
-        if !setter_errors.is_empty() {
-            return validation_failure(&class_name, &setter_errors);
-        }
-
-        let base_uri = match instance_uri("base_uri", &p.base_uri) {
-            Ok(uri) => uri,
-            Err(e) => return e,
-        };
-        match fetch_instance(&perspective, &class_name, &base_uri).await {
-            Ok(Some(_)) => {}
-            Ok(None) => return not_found(&class_name, &base_uri),
-            Err(e) => return error_json(format!("Error reading {class_name} instance: {e}")),
-        }
-
-        // One batch for the whole update so remove-old + add-new per property
-        // lands atomically (same reasoning as the per-class setters: without
-        // it a peer can observe the property as unset in between).
-        let batch_id = perspective.create_batch().await;
-        if let Err(e) = perspective
-            .update_subject(
-                subject_class(&class_name),
-                base_uri.clone(),
-                Value::Object(validated.scalars.clone()),
-                Some(batch_id.clone()),
-                &agent_context,
-            )
-            .await
+        match shared::update(
+            &mut perspective,
+            &agent_context,
+            shared::InstanceUpdate {
+                class_name: p.class_name.clone(),
+                base_uri: p.base_uri.clone(),
+                properties: p.properties.clone(),
+                batch_id: None,
+            },
+        )
+        .await
         {
-            perspective.discard_batch(&batch_id).await;
-            return error_json(format!(
-                "Error updating {class_name} instance (batch abandoned): {e:#}"
-            ));
+            Ok(updated) => pretty(&json!({
+                "success": true,
+                "class_name": updated.class_name,
+                "base_uri": updated.base_uri,
+                "updated_properties": updated.updated_properties,
+            })),
+            Err(e) => update_error(&e),
         }
-        if let Err(e) = perspective.commit_batch(batch_id, &agent_context).await {
-            return error_json(format!("Error committing update: {e:#}"));
-        }
-
-        pretty(&json!({
-            "success": true,
-            "class_name": class_name,
-            "base_uri": base_uri,
-            "updated_properties": validated.scalars.keys().cloned().collect::<Vec<_>>(),
-        }))
     }
 
     /// Remove an instance and every link touching it.
@@ -126,70 +78,123 @@ impl Ad4mMcpHandler {
                 Ok(v) => v,
                 Err(e) => return e,
             };
-        let (class_name, _shape) = match resolve_class(&perspective, &p.class_name).await {
-            Ok(v) => v,
-            Err(e) => return e,
-        };
-        let base_uri = match instance_uri("base_uri", &p.base_uri) {
-            Ok(uri) => uri,
-            Err(e) => return e,
-        };
-        match fetch_instance(&perspective, &class_name, &base_uri).await {
-            Ok(Some(_)) => {}
-            Ok(None) => return not_found(&class_name, &base_uri),
-            Err(e) => return error_json(format!("Error reading {class_name} instance: {e}")),
-        }
-
-        // Through an abstract class (#1435), the destructors of the record's
-        // classes it reads: the cascade below would delete its other classes.
-        let is_abstract = match perspective.is_abstract_class(&class_name) {
-            Ok(is_abstract) => is_abstract,
-            Err(e) => return error_json(format!("Error reading {class_name}'s shape: {e:#}")),
-        };
-        if is_abstract {
-            return match perspective
-                .remove_subject(
-                    subject_class(&class_name),
-                    base_uri.clone(),
-                    None,
-                    &agent_context,
-                )
-                .await
-            {
-                Ok(()) => pretty(&json!({
+        match shared::remove(
+            &mut perspective,
+            &agent_context,
+            shared::InstanceRemove {
+                class_name: p.class_name.clone(),
+                base_uri: p.base_uri.clone(),
+                batch_id: None,
+            },
+        )
+        .await
+        {
+            Ok(removed) => {
+                let mut result = json!({
                     "success": true,
-                    "class_name": class_name,
-                    "deleted": base_uri,
-                })),
-                Err(e) => error_json(format!("Error removing {class_name} instance: {e:#}")),
-            };
-        }
-
-        // Success only when both link queries and every removal succeeded.
-        // The cascade is not batched, so on failure the links already
-        // removed stay removed: say so, with the count, instead of
-        // reporting a deletion that did not fully happen.
-        let removed = match remove_all_links_of(&mut perspective, &base_uri).await {
-            Ok(removed) => removed,
-            Err(failure) => {
-                return pretty(&json!({
-                    "error": format!(
-                        "Error removing {} instance at '{}': {}. {} link(s) had already been \
-                         removed, so the instance may be partially deleted — inspect what is \
-                         left with query_links (source or target = '{}') and retry.",
-                        class_name, base_uri, failure.error, failure.removed, base_uri
-                    ),
-                    "class_name": class_name,
-                    "base_uri": base_uri,
-                    "links_removed": failure.removed,
-                }))
+                    "class_name": removed.class_name,
+                    "deleted": removed.base_uri,
+                });
+                if let Some(links_removed) = removed.links_removed {
+                    result["links_removed"] = json!(links_removed);
+                }
+                pretty(&result)
             }
-        };
-        pretty(&json!({
-            "success": true,
-            "class_name": class_name,
-            "deleted": base_uri,
-            "links_removed": removed,
-        }))
+            Err(e) => remove_error(&e),
+        }
+    }
+}
+
+/// The class's text when its shape or the instance could not be read; `None` for other steps.
+fn read_failure(
+    class_name: &str,
+    step: &WriteStep,
+    error: &deno_core::anyhow::Error,
+) -> Option<String> {
+    match step {
+        WriteStep::ReadShape => Some(error_json(format!(
+            "Error reading {class_name}'s shape: {error:#}"
+        ))),
+        WriteStep::ReadInstance => Some(error_json(format!(
+            "Error reading {class_name} instance: {error}"
+        ))),
+        _ => None,
+    }
+}
+
+/// `instance_update`'s text for a refused or failed update.
+fn update_error(error: &InstanceError) -> String {
+    if let Some(text) = common_error(error) {
+        return text;
+    }
+    match error {
+        InstanceError::EmptyProperties => {
+            error_json("properties is empty — pass at least one property to set.")
+        }
+        InstanceError::Failed {
+            class_name,
+            step,
+            error,
+        } => read_failure(class_name, step, error).unwrap_or_else(|| {
+            error_json(match step {
+                WriteStep::Commit => format!("Error committing update: {error:#}"),
+                _ => format!("Error updating {class_name} instance (batch abandoned): {error:#}"),
+            })
+        }),
+        other => error_json(format!("{other:?}")),
+    }
+}
+
+/// `instance_remove`'s text for a refused or failed remove.
+fn remove_error(error: &InstanceError) -> String {
+    if let Some(text) = common_error(error) {
+        return text;
+    }
+    match error {
+        InstanceError::Failed {
+            class_name,
+            step,
+            error,
+        } => read_failure(class_name, step, error).unwrap_or_else(|| {
+            error_json(format!("Error removing {class_name} instance: {error:#}"))
+        }),
+        // The cascade is not batched, so on failure the links already removed stay removed:
+        // say so, with the count, instead of reporting a deletion that did not fully happen.
+        InstanceError::PartiallyRemoved {
+            class_name,
+            base_uri,
+            removed,
+            step,
+            error,
+        } => {
+            let failure = match step {
+                CascadeStep::List { uri } => {
+                    format!("listing the links of '{uri}' failed: {error:#}")
+                }
+                CascadeStep::Remove {
+                    source,
+                    predicate,
+                    target,
+                } => format!(
+                    "removing link {} -[{}]-> {} failed: {:#}",
+                    source,
+                    predicate.as_deref().unwrap_or(""),
+                    target,
+                    error
+                ),
+            };
+            pretty(&json!({
+                "error": format!(
+                    "Error removing {} instance at '{}': {}. {} link(s) had already been \
+                     removed, so the instance may be partially deleted — inspect what is \
+                     left with query_links (source or target = '{}') and retry.",
+                    class_name, base_uri, failure, removed, base_uri
+                ),
+                "class_name": class_name,
+                "base_uri": base_uri,
+                "links_removed": removed,
+            }))
+        }
+        other => error_json(format!("{other:?}")),
     }
 }

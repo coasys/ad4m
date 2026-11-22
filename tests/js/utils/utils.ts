@@ -209,6 +209,17 @@ const EXECUTOR_STARTUP_TIMEOUT_MS = 300_000;
 /** Output lines startExecutor() includes when the executor never gets ready. */
 const STARTUP_LOG_TAIL_LINES = 50;
 
+/**
+ * The data folder `startExecutor` runs an executor in for `dataPath`: a short path under the
+ * OS temp dir (socket paths have a length limit), the same for the same `dataPath`.
+ */
+export function executorDataPath(dataPath: string): string {
+    return path.join(
+        os.tmpdir(),
+        `ad4m-${createHash('sha1').update(dataPath).digest('hex').slice(0, 12)}`,
+    );
+}
+
 export async function startExecutor(dataPath: string,
     bootstrapSeedPath: string,
     apiPort: number,
@@ -235,6 +246,8 @@ export async function startExecutor(dataPath: string,
     sharedStores: boolean = true,
     // Added to the executor's environment, e.g. `AD4M_<FLAG>` settings.
     env: Record<string, string> = {},
+    // Added to `ad4m-executor init`, e.g. `--operator <did:scid>`.
+    initArgs: string[] = [],
 ): Promise<ChildProcess> {
     if (runHolochain && (!proxyUrl || !bootstrapUrl)) {
         const services = await ensureSharedLocalServices();
@@ -246,10 +259,7 @@ export async function startExecutor(dataPath: string,
     }
     const command = executorBinary();
 
-    const effectiveDataPath = path.join(
-        os.tmpdir(),
-        `ad4m-${createHash('sha1').update(dataPath).digest('hex').slice(0, 12)}`,
-    );
+    const effectiveDataPath = executorDataPath(dataPath);
 
     console.log(bootstrapSeedPath);
     console.log(dataPath);
@@ -258,7 +268,7 @@ export async function startExecutor(dataPath: string,
     }
     rmSync(dataPath, { recursive: true, force: true })
     rmSync(effectiveDataPath, { recursive: true, force: true })
-    execSync(`${command} init --data-path ${effectiveDataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {cwd: process.cwd()})
+    execSync(`"${command}" init --data-path "${effectiveDataPath}" --network-bootstrap-seed "${bootstrapSeedPath}" ${initArgs.join(' ')}`, {cwd: process.cwd()})
 
     // Shared mode for the local language-language and neighbourhood store,
     // so executors see each other's published languages and neighbourhoods
@@ -343,7 +353,11 @@ export async function spawnExecutor(
     const { enableMcp = false, env = {}, onOutput } = opts;
     const executorProcess = spawn(executorBinary(), args, {
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, ...env },
+        // AD4M_EXIT_WITH_PARENT: the executor ends with this process, however it ends. A
+        // SIGKILLed or cancelled job, or mocha --exit past a test that never stopped its
+        // executor, otherwise leaves it running on the runner. An executor too old to know the
+        // variable ignores it.
+        env: { ...process.env, AD4M_EXIT_WITH_PARENT: 'true', ...env },
     });
     // Decode as a stream, so a multibyte character split across two chunks
     // survives in the startup-failure tail. Every data handler below gets strings.
@@ -370,7 +384,7 @@ export async function spawnExecutor(
         let resolved = false;
 
         // Without these, an executor that dies or stalls before the marker
-        // (e.g. the API port is taken: it logs the bind error and exits 1)
+        // (e.g. the API port is taken: it logs the bind error and exits 80)
         // leaves this promise pending until mocha's 1200 s timeout.
         const fail = (reason: string) => {
             if (resolved) return;
@@ -539,11 +553,6 @@ export async function wipePerspective(
   if (links.length > 0) {
     await perspective.removeLinks(links);
   }
-  // Clear the per-instance SHACL registration cache so that
-  // subsequent register() calls re-add SHACL definitions.
-  if (typeof perspective.clearEnsuredSubjectClasses === 'function') {
-    perspective.clearEnsuredSubjectClasses();
-  }
 }
 
 /**
@@ -552,10 +561,12 @@ export async function wipePerspective(
  * Use this in after() hooks as a safety net.
  */
 export function killByPorts(ports: number[]): void {
+    // Only the process that listens on a port: `lsof -ti:<port>` also lists every process with a
+    // connection to it, and a test that still holds a client connection would kill itself.
     for (const port of ports) {
         try {
             // First try SIGTERM for graceful shutdown
-            execSync(`lsof -ti:${port} | xargs -r kill -TERM`, { stdio: 'ignore' });
+            execSync(`lsof -ti TCP:${port} -s TCP:LISTEN | xargs -r kill -TERM`, { stdio: 'ignore' });
         } catch (e) {
             // Port not in use — fine
         }
@@ -565,7 +576,7 @@ export function killByPorts(ports: number[]): void {
     for (const port of ports) {
         try {
             // SIGKILL anything still lingering
-            execSync(`lsof -ti:${port} | xargs -r kill -9`, { stdio: 'ignore' });
+            execSync(`lsof -ti TCP:${port} -s TCP:LISTEN | xargs -r kill -9`, { stdio: 'ignore' });
         } catch (e) {
             // Port not in use — fine
         }

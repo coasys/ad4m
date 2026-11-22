@@ -622,7 +622,10 @@ pub struct ModelQueryInput {
 #[serde(rename_all = "camelCase")]
 pub struct ModelQueryResult {
     pub instances: Vec<Value>,
-    pub total_count: usize,
+    /// Only when the query asked for it (`count: true`); computing it costs a
+    /// COUNT query on a paged read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_count: Option<usize>,
 }
 
 /// The `where: { producedByFlow: { flow, state? } }` filter, extracted from
@@ -819,6 +822,12 @@ pub(super) struct SparqlPagination {
 pub(super) enum SortKey {
     /// Sort by reifier timestamp (MIN(?_ts) per source).
     Timestamp,
+    /// Sort by the hydrated row's `timestamp` / `createdAt`: the earliest of
+    /// the links hydration reads, under its filters, bound as `?_first_ts`.
+    /// Not [`Self::Timestamp`], whose probe reads one conformance link (the
+    /// flag) and so can be later. A union over several classes pages on this,
+    /// so every class's creation time is the value its rows carry.
+    CreatedAt,
     /// Sort by a property value extracted from its literal IRI.
     Property(String), // predicate IRI
     /// Sort by a projection count — uses `COUNT(DISTINCT ?_proj_t)` in the
@@ -959,6 +968,9 @@ pub struct ShapeProperty {
     /// property node.  `false` when the SDNA declared no identity — a class
     /// with no identity property is never deduplicated.
     pub(crate) identity: bool,
+    /// Allowed values from `sh:in`, in declared order. Entries are as
+    /// written: `{value, label?}` objects or bare values.
+    pub(crate) in_values: Option<Vec<serde_json::Value>>,
     /// Whether this property's links are written with `LinkStatus::Local`,
     /// read back from the `ad4m://local` link on the property node.  Local
     /// links stay in the executor's own store: they are never gossiped to the
@@ -995,12 +1007,32 @@ pub struct ShapeRelation {
     pub(crate) direction: String, // "forward" or "reverse"
     pub(crate) kind: String,      // "hasMany", "hasOne", "belongsToOne", "belongsToMany"
     pub(crate) max_count: Option<usize>,
+    /// The target class's name, for people and prompts.
     pub(crate) target_class_name: String,
     /// Original `sh:class` URI as emitted by the SHACL writer.  Preserved
     /// alongside `target_class_name` so the MCP layer (which exposes the
     /// node-shape URI to clients) can return the full IRI rather than the
     /// bare class name.  Empty when no `sh:class` was set on the property.
     pub(crate) target_class_uri: String,
+    /// The target class IRI: the registered class holding the `sh:class`
+    /// shape. Empty when no registered class holds it.
+    pub(crate) target_class: String,
+    /// The relation's declared `polymorphic` (`ad4m://polymorphic` in SHACL):
+    /// the default for an include of it when the query does not say.
+    pub(crate) polymorphic: bool,
+}
+
+impl ShapeRelation {
+    /// The key the target's shape is read by: its class IRI when a
+    /// registered class holds the relation's shape, else its name. Two
+    /// classes may share a name; the IRI reads the one the relation names.
+    pub(crate) fn target(&self) -> &str {
+        if self.target_class.is_empty() {
+            &self.target_class_name
+        } else {
+            &self.target_class
+        }
+    }
 }
 
 /// Complete shape of a model class — the set of all properties, relations,
@@ -1055,10 +1087,7 @@ impl ModelShape {
 /// typically supply a static implementation pre-populated with `ModelShape`
 /// instances.
 pub trait ShapeResolver: Send + Sync {
-    fn get_shape(
-        &self,
-        class_name: &str,
-    ) -> Result<std::sync::Arc<ModelShape>, deno_core::anyhow::Error>;
+    fn get_shape(&self, class_name: &str) -> Result<std::sync::Arc<ModelShape>, anyhow::Error>;
 }
 
 /// SPARQL execution plan for an instance query.

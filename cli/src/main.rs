@@ -190,8 +190,8 @@ enum Domain {
         sfu_cascade_peers: Option<Vec<String>>,
         /// IP address the SFU media server binds its UDP socket to.
         /// str0m requires a real interface IP (not 0.0.0.0).
-        /// Defaults to 127.0.0.1 (loopback, local-only).  Set to the
-        /// machine's LAN or public IP for cross-machine media.
+        /// Default: 127.0.0.1 and the LAN address, both offered. Set it to
+        /// offer that address only (`127.0.0.1`: media stays on this machine).
         #[arg(long)]
         sfu_bind_addr: Option<String>,
         /// STUN server (`host:port`) that checks a public bind address is
@@ -332,15 +332,10 @@ async fn main() -> Result<()> {
             rust_executor::exit_when_api_fails(api_thread);
         }
         
-        let _ = ctrlc::set_handler(move || {
-            println!("Received CTRL-C! Exiting...");
-            exit(0);
-        });
-
+        // As in ad4m_executor.rs: `rust_executor::run` handles SIGINT and SIGTERM; no
+        // second handler.
         use tokio::time::sleep;
         use std::time::Duration;
-        use std::process::exit;
-        use ctrlc;
 
         loop {
             sleep(Duration::from_secs(2)).await;

@@ -15,7 +15,6 @@ use std::env::current_dir;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
 use tokio::sync::Mutex as TokioMutex;
 use url::Url;
 
@@ -46,16 +45,12 @@ pub struct JsCore {
     loaded_modules: Arc<TokioMutex<HashSet<String>>>,
 }
 
-// Dummy LanguageController placeholder — use a real type if available
-pub type LanguageController = ();
-
 /// Per-language-instance runtime state.
 /// Stored in a thread-local and accessed by Deno ops via languages_extension.rs.
 #[derive(Clone)]
 pub struct IsolateState {
     pub agent_did: Option<String>,
     pub agent_signing_key_id: Option<String>,
-    pub language_controller_ref: Arc<StdMutex<Option<LanguageController>>>,
     /// Language context — set by the runtime before calling init()
     pub language_storage_directory: Option<String>,
     pub language_address: Option<String>,
@@ -67,7 +62,6 @@ impl IsolateState {
         Self {
             agent_did: None,
             agent_signing_key_id: None,
-            language_controller_ref: Arc::new(StdMutex::new(None)),
             language_storage_directory: None,
             language_address: None,
             language_settings: None,

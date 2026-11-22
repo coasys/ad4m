@@ -2,6 +2,8 @@ import { Link } from "../links/Links";
 import { Literal } from "../Literal";
 import type { NodeExpression } from "./NodeExpression";
 import { isNodeExpression } from "./NodeExpression";
+import type { ShapeJson } from "../generated/api/ShapeJson";
+import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 
 /**
  * Extract namespace from a URI
@@ -77,6 +79,36 @@ function parseAlias(raw: string): Record<string, string> | undefined {
     }
   } catch {}
   return undefined;
+}
+
+/**
+ * JSON with every object's keys sorted by UTF-16 code units, as the executor
+ * (`canonical_json` in `rust-executor/src/perspectives/shacl_parser.rs`)
+ * writes the JSON in a shape's literals: one value, one spelling.
+ *
+ * Written by hand: an object built from sorted keys would still put
+ * integer-like keys ("2", "10") first, in numeric order. `Array.prototype.sort`
+ * without a comparator compares UTF-16 code units, the executor's order.
+ */
+function canonicalJson(value: unknown): string {
+  if (value !== null && typeof value === 'object' && typeof (value as any).toJSON === 'function') {
+    return canonicalJson((value as any).toJSON());
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(item => {
+      const s = canonicalJson(item);
+      return s === undefined ? 'null' : s;
+    }).join(',')}]`;
+  }
+  if (value !== null && typeof value === 'object') {
+    const entries: string[] = [];
+    for (const key of Object.keys(value).sort()) {
+      const s = canonicalJson((value as Record<string, unknown>)[key]);
+      if (s !== undefined) entries.push(`${JSON.stringify(key)}:${s}`);
+    }
+    return `{${entries.join(',')}}`;
+  }
+  return JSON.stringify(value);
 }
 
 /** Whether the executor stores a property as a collection (`ad4m://CollectionShape`). */
@@ -234,6 +266,11 @@ export interface SHACLPropertyShape {
    *  Drives direction (forward/reverse), scalar-vs-collection rendering,
    *  and default max-count. */
   relationKind?: 'hasMany' | 'hasOne' | 'belongsToOne' | 'belongsToMany';
+
+  /** AD4M-specific: the relation is read `polymorphic: true` unless the query
+   *  says otherwise (`ad4m://polymorphic`). Carried in the shape so the executor
+   *  applies it at every include depth, below a polymorphic include too. */
+  polymorphic?: boolean;
 
   /** AD4M-specific: target class name (local-name) for a relation property.
    *  Complements `class` (the SHACL node-shape URI) by providing the bare
@@ -393,7 +430,10 @@ export class SHACLShape {
     const statements = (source: string) => links
       .filter(l => l.source === source && l.predicate !== 'sh://property')
       .flatMap(l => l.predicate === 'sh://in'
-        ? [`sh:in ( ${JSON.parse(l.target.slice(15)).map((v: { value: string }) => str(v.value)).join(' ')} )`, `ad4m:in ${obj(l)}`]
+        ? [`sh:in ( ${JSON.parse(l.target.slice(15)).map((v: any) => {
+          const value = v !== null && typeof v === 'object' && 'value' in v ? v.value : v;
+          return typeof value === 'string' ? str(value) : JSON.stringify(value);
+        }).join(' ')} )`, `ad4m:in ${obj(l)}`]
         : [`${pred(l.predicate!)} ${obj(l)}`]);
 
     const properties = links
@@ -455,7 +495,7 @@ export class SHACLShape {
       links.push({
         source: this.nodeShapeUri,
         predicate,
-        target: `literal:string:${JSON.stringify(actions ?? [])}`
+        target: `literal:string:${canonicalJson(actions ?? [])}`
       });
     }
 
@@ -477,23 +517,16 @@ export class SHACLShape {
       });
     }
 
-    // Property shapes (each gets a named URI: {namespace}/{ClassName}.{propertyName})
-    for (let i = 0; i < this.properties.length; i++) {
-      const prop = this.properties[i];
-      
-      // Generate named property shape URI
-      let propShapeId: string;
-      if (prop.name && this.targetClass) {
-        // Extract namespace from targetClass
-        const namespace = extractNamespace(this.targetClass);
-        const className = extractLocalName(this.targetClass);
-        // Use format: {namespace}{ClassName}.{propertyName}
-        propShapeId = `${namespace}${className}.${prop.name}`;
-      } else {
-        // Fallback to blank node if name is missing
-        propShapeId = `_:propShape${i}`;
-      }
-      
+    // Each property on its own node, `{namespace}{ClassName}.{name}`, as the
+    // executor names it: an unnamed property by its path's local name.
+    if (!this.targetClass && this.properties.length > 0) {
+      throw new Error(`Shape ${this.nodeShapeUri} has properties but no target class to name them by.`);
+    }
+    const namespace = this.targetClass ? extractNamespace(this.targetClass) : '';
+    const className = this.targetClass ? extractLocalName(this.targetClass) : '';
+    for (const prop of this.properties) {
+      const propShapeId = `${namespace}${className}.${prop.name ?? extractLocalName(prop.path)}`;
+
       // Link shape to property shape, typed as the executor types it
       links.push({
         source: this.nodeShapeUri,
@@ -618,7 +651,7 @@ export class SHACLShape {
         links.push({
           source: propShapeId,
           predicate: "ad4m://setter",
-          target: `literal:string:${JSON.stringify(prop.setter)}`
+          target: `literal:string:${canonicalJson(prop.setter)}`
         });
       }
 
@@ -626,7 +659,7 @@ export class SHACLShape {
         links.push({
           source: propShapeId,
           predicate: "ad4m://adder",
-          target: `literal:string:${JSON.stringify(prop.adder)}`
+          target: `literal:string:${canonicalJson(prop.adder)}`
         });
       }
 
@@ -634,7 +667,7 @@ export class SHACLShape {
         links.push({
           source: propShapeId,
           predicate: "ad4m://remover",
-          target: `literal:string:${JSON.stringify(prop.remover)}`
+          target: `literal:string:${canonicalJson(prop.remover)}`
         });
       }
 
@@ -650,7 +683,7 @@ export class SHACLShape {
         links.push({
           source: propShapeId,
           predicate: "ad4m://conformanceConditions",
-          target: `literal:string:${JSON.stringify(prop.conformanceConditions)}`
+          target: `literal:string:${canonicalJson(prop.conformanceConditions)}`
         });
       }
 
@@ -662,11 +695,12 @@ export class SHACLShape {
         });
       }
 
-      if (prop.in && prop.in.length > 0) {
+      // `in: []` is a deny-all constraint, not the absence of one — store it.
+      if (prop.in !== undefined) {
         links.push({
           source: propShapeId,
           predicate: "sh://in",
-          target: `literal:string:${JSON.stringify(prop.in)}`
+          target: `literal:string:${canonicalJson(prop.in)}`
         });
       }
 
@@ -675,6 +709,14 @@ export class SHACLShape {
           source: propShapeId,
           predicate: "ad4m://relationKind",
           target: `literal:string:${prop.relationKind}`
+        });
+      }
+
+      if (prop.polymorphic) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://polymorphic",
+          target: `literal:${prop.polymorphic}`
         });
       }
 
@@ -690,7 +732,7 @@ export class SHACLShape {
         links.push({
           source: propShapeId,
           predicate: "ad4m://whereFilter",
-          target: `literal:string:${JSON.stringify(prop.whereFilter)}`
+          target: `literal:string:${canonicalJson(prop.whereFilter)}`
         });
       }
 
@@ -698,7 +740,7 @@ export class SHACLShape {
         links.push({
           source: propShapeId,
           predicate: "ad4m://wherePredicates",
-          target: `literal:string:${JSON.stringify(prop.wherePredicates)}`
+          target: `literal:string:${canonicalJson(prop.wherePredicates)}`
         });
       }
 
@@ -714,7 +756,7 @@ export class SHACLShape {
         links.push({
           source: propShapeId,
           predicate: "ad4m://transform",
-          target: `literal:string:${JSON.stringify(prop.transform)}`
+          target: `literal:string:${canonicalJson(prop.transform)}`
         });
       }
 
@@ -738,7 +780,7 @@ export class SHACLShape {
         links.push({
           source: propShapeId,
           predicate: "ad4m://alias",
-          target: `literal:string:${encodeURIComponent(JSON.stringify(prop.alias))}`
+          target: `literal:string:${encodeURIComponent(canonicalJson(prop.alias))}`
         });
       }
     }
@@ -775,6 +817,9 @@ export class SHACLShape {
     };
 
     const shape = new SHACLShape(shapeUri, target(shapeUri, "sh://targetClass"));
+    const prefix = shape.targetClass
+      ? `${extractNamespace(shape.targetClass)}${extractLocalName(shape.targetClass)}.`
+      : undefined;
     for (const l of links) {
       if (l.source === shapeUri && l.predicate === "sh://node") shape.addParentShape(l.target);
     }
@@ -788,9 +833,9 @@ export class SHACLShape {
       const path = target(id, "sh://path");
       if (!path) continue;
 
-      // Named property shapes are `{namespace}{ClassName}.{propertyName}`.
-      const dot = id.lastIndexOf('.');
-      const name = !id.startsWith('_:') && dot !== -1 ? id.substring(dot + 1) : undefined;
+      // A property node is `{namespace}{ClassName}.{name}`: the name is all
+      // that follows that prefix, dots included.
+      const name = prefix && id.startsWith(prefix) ? id.slice(prefix.length) : undefined;
 
       const relationKind = str(id, "ad4m://relationKind");
       const hasValue = target(id, "sh://hasValue");
@@ -823,6 +868,7 @@ export class SHACLShape {
         in: json(id, "sh://in"),
         relationKind: ['hasMany', 'hasOne', 'belongsToOne', 'belongsToMany'].includes(relationKind!)
           ? relationKind as SHACLPropertyShape['relationKind'] : undefined,
+        polymorphic: bool(id, "ad4m://polymorphic"),
         targetClassName: str(id, "ad4m://targetClassName"),
         whereFilter: json(id, "ad4m://whereFilter"),
         wherePredicates: json(id, "ad4m://wherePredicates"),
@@ -839,15 +885,15 @@ export class SHACLShape {
   }
 
   /**
-   * Convert the shape to a JSON-serializable object.
-   * Useful for passing to addSdna() as shaclJson parameter.
-   * 
-   * @returns JSON-serializable object representing the shape
+   * The shape as `perspective.registerShapes` takes it and
+   * `perspective.shapes` answers it: every field, so
+   * `SHACLShape.fromJSON(shape.toJSON())` is the same shape.
    */
-  toJSON(): object {
+  toJSON(): ShapeJson {
     return {
       node_shape_uri: this.nodeShapeUri,
-      target_class: this.targetClass,
+      // A shape without a target class is refused by the executor.
+      target_class: this.targetClass as string,
       parent_shapes: this.parentShapes.length > 0 ? this.parentShapes : undefined,
       interpretation_hint: this.interpretationHint,
       abstract: this.isAbstract || undefined,
@@ -873,19 +919,19 @@ export class SHACLShape {
         class: p.class,
         in: p.in,
         relation_kind: p.relationKind,
+        polymorphic: p.polymorphic,
         collection: p.collection ?? (isCollection(p) || undefined),
         target_class_name: p.targetClassName,
         where_filter: p.whereFilter,
         where_predicates: p.wherePredicates,
         filter: p.filter,
-        transform: p.transform,
+        transform: p.transform as JsonValue | undefined,
         interpretation_hint: p.interpretationHint,
         identity: p.identity,
         alias: p.alias,
-        // The backend reads the ordering declaration back from the
-        // `ad4m://ordering` link that `parse_shacl_to_links` writes from this
-        // field. `ensureSubjectClass` ships `toJSON()`, so omitting it here
-        // leaves `@HasMany({ ordering })` inert no matter what `toLinks()` does.
+        // The executor reads the ordering declaration back from the
+        // `ad4m://ordering` link it writes from this field: without it
+        // `@HasMany({ ordering })` is inert.
         ordering: p.ordering,
       })),
       constructor_actions: this.constructor_actions,
@@ -896,7 +942,7 @@ export class SHACLShape {
   /**
    * Create a shape from a JSON object (inverse of toJSON)
    */
-  static fromJSON(json: any): SHACLShape {
+  static fromJSON(json: ShapeJson): SHACLShape {
     const shape = json.node_shape_uri
       ? new SHACLShape(json.node_shape_uri, json.target_class)
       : new SHACLShape(json.target_class);
@@ -914,7 +960,7 @@ export class SHACLShape {
         path: p.path,
         name: p.name,
         datatype: p.datatype,
-        nodeKind: p.node_kind,
+        nodeKind: p.node_kind as SHACLPropertyShape['nodeKind'],
         minCount: p.min_count,
         maxCount: p.max_count,
         minInclusive: p.min_inclusive,
@@ -928,16 +974,17 @@ export class SHACLShape {
         adder: p.adder,
         remover: p.remover,
         getter: p.getter,
-        conformanceConditions: p.conformance_conditions,
+        conformanceConditions: p.conformance_conditions as ConformanceCondition[] | undefined,
         class: p.class,
-        in: p.in,
-        relationKind: p.relation_kind,
+        in: p.in as SHACLPropertyShape['in'],
+        relationKind: p.relation_kind as SHACLPropertyShape['relationKind'],
+        polymorphic: p.polymorphic,
         collection: p.collection,
         targetClassName: p.target_class_name,
         whereFilter: p.where_filter,
         wherePredicates: p.where_predicates,
         filter: p.filter,
-        transform: p.transform,
+        transform: p.transform as NodeExpression | undefined,
         interpretationHint: p.interpretation_hint,
         identity: p.identity,
         ordering: p.ordering,

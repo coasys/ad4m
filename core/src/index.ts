@@ -2,6 +2,7 @@ export * from "./Ad4mClient"
 export * from "./Address";
 export * from "./agent/Agent";
 export * from "./agent/AgentStatus";
+export * from "./agent/AgentKind";
 export * from "./cache/PersistentCache";
 export * from "./Exception";
 export * from "./expression/Expression";
@@ -44,9 +45,12 @@ export * from "./DID";
 export * from "./utils";
 export * from "./agent/AgentClient";
 export * from "./ai/AIClient"
+export * from "./identity/IdentityClient"
 export * from "./ai/Tasks"
 export * from "./runtime/RuntimeTypes"
-export { Model as AIModel, ModelApi, TokenizerSource, LocalModel, ModelType, ModelApiInput, TokenizerSourceInput, LocalModelInput, ModelInput, VoiceActivityParamsInput } from "./ai/AITypes"
+// `Model` is the model decorator: the AI model is `AIModel`.
+export type { Model as AIModel } from "./ai/AITypes"
+export * from "./ai/recommendedModels"
 export * from './shacl/SHACLShape'
 export { SHACLFlow, FlowState, FlowTransition, LinkPattern, ModelQuery, PropertyCondition, ConsensusRule } from './shacl/SHACLFlow'
 export * from './shacl/NodeExpression'

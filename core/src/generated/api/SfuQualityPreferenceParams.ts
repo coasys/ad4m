@@ -2,6 +2,10 @@
 
 export type SfuQualityPreferenceParams = { neighbourhoodUrl: string, roomName: string, 
 /**
+ * The caller's session, as its join returned it.
+ */
+participantId: string, 
+/**
  * The service rejects any other value.
  */
 preference: "high" | "medium" | "low" | "auto", };

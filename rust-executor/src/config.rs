@@ -33,6 +33,17 @@ pub fn auto_permit_cap_requests() -> bool {
         .unwrap_or(false)
 }
 
+/// Whether this executor serves the custody channel (`--custody-channel`). `false` without a
+/// global config, so a check on it fails closed. Never panics.
+pub fn custody_channel_on() -> bool {
+    GLOBAL_AD4M_CONFIG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|config| config.custody_channel)
+        .unwrap_or(false)
+}
+
 /// Get a clone of the global Ad4mConfig.
 /// Recovers from a poisoned mutex (see `set_global_config` for rationale).
 pub fn get_global_config() -> Ad4mConfig {
@@ -121,14 +132,42 @@ pub struct Ad4mConfig {
     /// Port for MCP HTTP server (default: 3001)
     pub mcp_port: Option<u16>,
     /// Expose the dynamic per-class MCP tools (`{class}_create`,
-    /// `{class}_set_{property}`, `{class}_add_{collection}`, …) over the MCP
-    /// transport, alongside the static `instance_*` tools. Default `false`:
-    /// external MCP clients see only the fixed static tool surface, so the tool
-    /// list stays constant no matter which social DNA is loaded. The in-process
-    /// interpretation/flow harness is unaffected by this flag either way.
+    /// `{class}_set_{property}`, `{class}_add_{collection}`, …) alongside the
+    /// static `instance_*` tools: over the MCP transport and in the tool list
+    /// an AI session's model is offered. Default `false`: agents see only the
+    /// fixed static tool surface, so the tool list stays constant no matter
+    /// which social DNA is loaded. An interpretation pass sets its own flag
+    /// and is unaffected by this one either way.
     pub dynamic_class_tools: Option<bool>,
     /// Path to write PID file (for test harness cleanup)
     pub pid_file: Option<String>,
+    /// Stop gracefully (exit 0) when stdin reaches its end: a supervisor holds the pipe open,
+    /// so the executor never outlives it (`--watch-stdin`).
+    pub watch_stdin: Option<bool>,
+    /// This executor serves the custody channel: the desktop app's custody service, which keeps
+    /// the master key, reads the main agent's device keys from it and takes a master key sent to
+    /// this computer, which the executor opens from its inbox and passes on without storing it;
+    /// with the admin credential on a loopback listener (`--custody-channel`). Never together
+    /// with multi-user mode ([`refuse_custody_channel_with_multi_user`]).
+    pub custody_channel: Option<bool>,
+    /// The folder of the executor's own rotated log files (`--log-dir`). Unset: stdout.
+    pub log_dir: Option<String>,
+    /// The config file the executor started with (`--config`): the file `runtime.setConfig`
+    /// writes. Unset: no file, and `runtime.setConfig` answers 409.
+    pub config_file: Option<PathBuf>,
+    /// The config file's keys that a flag or an environment variable overrides at this start:
+    /// a write to the file would not take effect while the override stays.
+    #[serde(default)]
+    pub pinned_config_keys: Vec<String>,
+    /// What the flags and environment variables of this start lay over the config file: the
+    /// value of each pinned key. `runtime.setConfig` checks a written file with them, as the
+    /// next start reads it. The file's shape, so no secret.
+    #[serde(default)]
+    pub config_overrides: serde_json::Map<String, serde_json::Value>,
+    /// Shut down once the process that started the executor is gone (unix). For launchers and
+    /// test harnesses that may die without stopping it. Default `false`: a daemonised executor
+    /// (`nohup`, `&` from a shell that then exits) keeps running.
+    pub exit_with_parent: Option<bool>,
     /// Local DID for this SFU node in a cascade cluster.  Required if
     /// any cascade options are set; otherwise the SFU runs single-node.
     pub sfu_local_did: Option<String>,
@@ -142,10 +181,11 @@ pub struct Ad4mConfig {
     /// Peer SFU nodes in the cascade cluster, each `did=host:port`.
     /// Empty list = standalone SFU.
     pub sfu_cascade_peers: Option<Vec<String>>,
-    /// IP address the SFU media server binds to (e.g. `203.0.113.5`).
-    /// str0m rejects `0.0.0.0` as a candidate, so this must be a real
-    /// interface IP.  When unset, the SFU follows `localhost`: loopback
-    /// by default, the machine's outbound IP with `localhost: false`.
+    /// IP address the SFU media server binds to (e.g. `203.0.113.5`), the
+    /// only one it offers. str0m rejects `0.0.0.0` as a candidate, so this
+    /// must be a real interface IP. Unset: loopback and the LAN address
+    /// (re-detected at each call), whatever `localhost` says; see
+    /// [`crate::sfu::hosts`].
     pub sfu_bind_addr: Option<String>,
     /// STUN server (`host:port`) the SFU asks once at startup, from its own
     /// socket, for its public address. Unset: no probe, and reachability is
@@ -162,6 +202,28 @@ pub struct Ad4mConfig {
     /// DID of the cascade node that takes redirected joins first. Unset:
     /// the least-loaded node.
     pub sfu_preferred_node: Option<String>,
+    /// `identity.storeUrl`: the identity store's base URL, given to the agent language as its
+    /// `storeUrl` setting. Unset: the network seed's `identityStore`, else no store.
+    pub identity_store_url: Option<String>,
+    /// `identity.storeKeys`: the store keys (Ed25519 multikeys) a head from the store must be
+    /// signed by. A list, so the store's key can rotate. Unset: the seed's store keys when
+    /// `identity_store_url` is unset too, else none (`IdentitySettings::from_config`).
+    pub identity_store_keys: Option<Vec<String>>,
+    /// `identity.allowPrivateSrc`: let the `src` of a DID URL that `identity.resolve` reads
+    /// reach loopback and private addresses. Off by default; for tests and local development.
+    pub identity_allow_private_src: Option<bool>,
+    /// The config file's `ai_endpoints`, `ai_models` and `ai_defaults`, applied at
+    /// startup (`ai_service::endpoints::config::apply`).
+    pub ai_settings: Option<crate::ai_service::endpoints::config::AiSettings>,
+    /// The per-user store of local AI runtimes and models. Unset: `AD4M_LOCAL_AI_DIR`, else
+    /// `<data local dir>/ad4m/local-ai` (`~/.local/share/ad4m/local-ai` on Linux).
+    pub local_ai_dir: Option<String>,
+    /// Start the installed local AI runtimes with the executor. Unset: yes. It never
+    /// installs or downloads anything: only `ai.localInstall`, `ad4m-executor local-ai
+    /// install` and the Docker image's `INCLUDE_MODELS` do.
+    pub local_ai_autostart: Option<bool>,
+    /// The device local AI plans for. Unset: the best one detected.
+    pub local_ai_device: Option<crate::ai_service::local::hardware::Backend>,
     /// Wallet backend type: "local" (default) or "shared".
     /// "local" keeps keys in-process (self-hosted default).
     /// "shared" delegates to an external HTTP wallet service.
@@ -188,6 +250,11 @@ pub struct Ad4mConfig {
     /// Serialises as `"<redacted>"`, like `admin_credential`.
     #[serde(serialize_with = "crate::secret::serialize_redacted")]
     pub internal_api_token: Option<Secret>,
+
+    /// Seconds one request-driven SPARQL evaluation may run before it is
+    /// stopped (default 30). Covers `perspective.querySparql`,
+    /// `perspective.modelQuery`, live-query opening and their re-checks.
+    pub query_deadline_secs: Option<u64>,
 }
 
 impl Ad4mConfig {
@@ -201,6 +268,14 @@ impl Ad4mConfig {
             Some("shared") => KEY_NAME_PLATFORM.to_string(),
             _ => KEY_NAME_MAIN.to_string(),
         }
+    }
+
+    /// The data folder: `app_data_path`, else the default `prepare` fills in.
+    pub fn data_folder(&self) -> PathBuf {
+        self.app_data_path
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(utils::ad4m_data_directory)
     }
 
     pub fn prepare(&mut self) {
@@ -256,7 +331,7 @@ impl Ad4mConfig {
 
         if self.app_data_path.is_none() {
             self.app_data_path = Some(
-                utils::ad4m_data_directory()
+                self.data_folder()
                     .into_os_string()
                     .into_string()
                     .expect("Could not convert data path to string"),
@@ -354,6 +429,24 @@ impl Ad4mConfig {
                 redact(value);
             }
         }
+        // An endpoint URL's user name and password, for a config built in code (a file
+        // with them is refused at parse).
+        if let Some(endpoints) = json
+            .pointer_mut("/aiSettings/endpoints")
+            .and_then(|e| e.as_array_mut())
+        {
+            for url in endpoints.iter_mut().filter_map(|e| e.get_mut("base_url")) {
+                let Some(mut parsed) = url.as_str().and_then(|u| url::Url::parse(u).ok()) else {
+                    continue;
+                };
+                if crate::ai_service::endpoints::has_credentials(&parsed) {
+                    let _ = parsed.set_username("");
+                    let _ = parsed.set_password(None);
+                    let marker = format!("://{}@", crate::config_file::REDACTED);
+                    *url = parsed.as_str().replacen("://", &marker, 1).into();
+                }
+            }
+        }
         json
     }
 }
@@ -393,6 +486,26 @@ pub fn refuse_multi_user_from_db(
     }
     Ok(())
 }
+
+/// The custody channel and multi-user mode never run together: the channel hands a master key
+/// to whoever holds the admin credential, and on a multi-user executor that is a host, not the
+/// person whose key it is. The one place of this rule: the CLI (exit 78), `run` (with the mode
+/// read from the database) and `user.setMultiUserEnabled` all call it.
+pub fn refuse_custody_channel_with_multi_user(
+    custody_channel: bool,
+    multi_user_on: bool,
+) -> Result<(), String> {
+    if custody_channel && multi_user_on {
+        return Err(CUSTODY_CHANNEL_WITH_MULTI_USER_ERROR.to_string());
+    }
+    Ok(())
+}
+
+/// Why an executor refuses the custody channel with multi-user mode.
+pub const CUSTODY_CHANNEL_WITH_MULTI_USER_ERROR: &str =
+    "Refusing the custody channel with multi-user mode: the channel gives a master key to the \
+     holder of the admin credential, which on a multi-user executor is not the key's owner. \
+     Start without --custody-channel, or turn multi-user mode off.";
 
 /// Why `run` refused to start; names both ways out.
 pub const NO_ADMIN_CREDENTIAL_ERROR: &str =
@@ -500,6 +613,7 @@ impl Ad4mConfig {
     /// bootstrap seed path inside `app_data_path`.
     pub fn unprepared() -> Self {
         Ad4mConfig {
+            query_deadline_secs: None,
             app_data_path: None,
             network_bootstrap_seed: None,
             language_language_only: None,
@@ -529,6 +643,13 @@ impl Ad4mConfig {
             mcp_port: None,
             dynamic_class_tools: None,
             pid_file: None,
+            watch_stdin: None,
+            custody_channel: None,
+            log_dir: None,
+            config_file: None,
+            pinned_config_keys: Vec::new(),
+            config_overrides: serde_json::Map::new(),
+            exit_with_parent: None,
             sfu_local_did: None,
             sfu_max_participants_per_node: None,
             sfu_cascade_listen: None,
@@ -538,6 +659,13 @@ impl Ad4mConfig {
             sfu_udp_port: None,
             sfu_public_addr: None,
             sfu_preferred_node: None,
+            identity_store_url: None,
+            identity_store_keys: None,
+            identity_allow_private_src: None,
+            ai_settings: None,
+            local_ai_dir: None,
+            local_ai_autostart: None,
+            local_ai_device: None,
             wallet_backend: None,
             wallet_backend_url: None,
             wallet_signing_key_name: None,
@@ -656,6 +784,18 @@ mod tests {
         assert!(MULTI_USER_WITHOUT_ADMIN_CREDENTIAL_ERROR.contains("--admin-credential"));
     }
 
+    /// The custody channel refuses multi-user mode, whichever came first; each alone passes.
+    #[test]
+    fn the_custody_channel_refuses_multi_user_mode() {
+        assert_eq!(
+            refuse_custody_channel_with_multi_user(true, true).unwrap_err(),
+            CUSTODY_CHANNEL_WITH_MULTI_USER_ERROR
+        );
+        assert!(refuse_custody_channel_with_multi_user(true, false).is_ok());
+        assert!(refuse_custody_channel_with_multi_user(false, true).is_ok());
+        assert!(refuse_custody_channel_with_multi_user(false, false).is_ok());
+    }
+
     /// Both startup gates for multi-user mode, as `run()` applies them: the start flag
     /// (`check_admin_credential`) and the mode left on in the database
     /// (`refuse_multi_user_from_db`). Without a credential either refuses; with one, both pass.
@@ -722,6 +862,39 @@ mod tests {
         assert_eq!(json["adminCredential"], "<redacted>");
         assert_eq!(json["smtpConfig"]["password"], "<redacted>");
         assert!(Ad4mConfig::default().redacted_json()["adminCredential"].is_null());
+    }
+
+    /// `config print` (`redacted_json`) hides the user name and password of an AI
+    /// endpoint URL, and prints a URL without them as it is.
+    #[test]
+    fn redacted_json_hides_ai_endpoint_url_credentials() {
+        let settings: crate::ai_service::endpoints::config::AiSettings =
+            serde_json::from_value(serde_json::json!({
+                "endpoints": [
+                    { "name": "plain", "kind": "OLLAMA", "base_url": "http://127.0.0.1:11434/" },
+                    { "name": "other", "kind": "OPEN_AI", "base_url": "https://api.example/v1" },
+                ],
+                "models": [],
+                "defaults": {},
+            }))
+            .unwrap();
+        let mut config = Ad4mConfig {
+            ai_settings: Some(settings),
+            ..Default::default()
+        };
+        let endpoints = &mut config.ai_settings.as_mut().unwrap().endpoints;
+        endpoints[1].base_url = url::Url::parse("https://alice:hunter2@api.example/v1").unwrap();
+
+        let printed = serde_json::to_string_pretty(&config.redacted_json()).unwrap();
+        assert!(!printed.contains("hunter2"), "{printed}");
+        assert!(!printed.contains("alice"), "{printed}");
+        let endpoints = &config.redacted_json()["aiSettings"]["endpoints"];
+        assert_eq!(endpoints[0]["base_url"], "http://127.0.0.1:11434/");
+        assert_eq!(
+            endpoints[1]["base_url"],
+            "https://<redacted>@api.example/v1"
+        );
+        assert!(!format!("{config:?}").contains("hunter2"));
     }
 
     /// Plain serialisation (`get_json`) never writes the admin credential

@@ -135,12 +135,41 @@ pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
     ("language_meta", SideEffect::Read),
 ];
 
-/// Look up the declared side-effect for a static `#[tool]` name, or
-/// classify a dynamic per-class tool by its verb suffix.
-///
-/// Static tools take precedence — an explicit table row always wins over
-/// suffix matching (defense in depth: a static tool renamed to collide
-/// with a dynamic pattern doesn't silently reclassify).
+/// The side-effect a static `#[tool]` name declares in
+/// [`STATIC_TOOL_SIDE_EFFECTS`], or `None` for a name the table does not
+/// know — a dynamic per-class name, or no tool at all.
+pub(crate) fn static_side_effect(name: &str) -> Option<SideEffect> {
+    STATIC_TOOL_SIDE_EFFECTS
+        .iter()
+        .find_map(|(n, se)| (*n == name).then_some(*se))
+}
+
+/// Read verbs of a generated per-class tool. Position 1 of
+/// `<class>_<verb>[_<prop>]`. Dispatch and the classifier share this list.
+pub(crate) const GENERATED_READ_VERBS: &[&str] = &["query", "list", "get"];
+
+/// Write verbs of a generated per-class tool. `update` is a write that
+/// dispatch accepts. No generator emits `<class>_update` today. The
+/// classifier still counts it, so a later emitter cannot pass the harness
+/// read-only cut as a read.
+pub(crate) const GENERATED_WRITE_VERBS: &[&str] =
+    &["create", "delete", "set", "add", "remove", "update"];
+
+/// `Some(true)` when `verb` writes, `Some(false)` when it only reads,
+/// `None` when dispatch does not accept the verb.
+pub(crate) fn generated_verb_writes(verb: &str) -> Option<bool> {
+    if GENERATED_READ_VERBS.contains(&verb) {
+        Some(false)
+    } else if GENERATED_WRITE_VERBS.contains(&verb) {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+/// The side-effect a generated per-class tool name declares by its verb —
+/// `None` when the name carries no known verb (it is not a generated tool
+/// name, or one of a shape the generators learn later).
 ///
 /// Dynamic per-class tools follow the strict shape
 /// `<class_lower>_<verb>[_<prop_or_coll>]` emitted by the `dynamic.rs::make_*`
@@ -157,6 +186,7 @@ pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
 /// | `_set_<prop>`         | Write       | `make_set_property_tool` |
 /// | `_add_<coll>`         | Write       | `make_collection_add_tool` |
 /// | `_remove_<coll>`      | Write       | `make_collection_remove_tool` |
+/// | `_update`             | Write       | dispatch only (`handle_dynamic_update`); no generator emits it |
 ///
 /// The classifier looks at the **second token only** (position 1 after
 /// the class-name prefix), NOT at every token. That's how it stops
@@ -165,43 +195,45 @@ pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
 /// Weir's 2026-08-25 false-positive example: fixed structurally by not
 /// consulting position-0 tokens.
 ///
-/// Unknown shapes fall back to [`SideEffect::Read`] — the safer default.
-/// Propose-* wrappers (`<class>_create` / `<class>_propose_link_child`)
-/// declare their own side_effect at construction site
-/// (`ai_service::harness::propose`) and never come through this path.
-pub(crate) fn side_effect_of(name: &str) -> SideEffect {
-    if let Some(se) = STATIC_TOOL_SIDE_EFFECTS
-        .iter()
-        .find_map(|(n, se)| (*n == name).then_some(*se))
-    {
-        return se;
-    }
-    classify_dynamic_tool_by_verb_suffix(name)
-}
-
-/// Classify a dynamic per-class tool name by its position-1 verb.
-///
-/// The generators in `mcp/tools/dynamic.rs` always emit
-/// `<class_lower>_<verb>[…]`. This function ignores position 0 (the class
-/// name — user-controlled, can legitimately collide with the verb
-/// vocabulary) and reads only position 1. That's the structural fix for
-/// the `Signal` false-positive: `signal_query` → position 0 = `signal`
-/// (ignored), position 1 = `query` → Read.
-fn classify_dynamic_tool_by_verb_suffix(name: &str) -> SideEffect {
+/// Dispatch (`dynamic::handle_dynamic_tool`) and this classifier share
+/// [`GENERATED_READ_VERBS`] and [`GENERATED_WRITE_VERBS`].
+pub(crate) fn dynamic_tool_side_effect(name: &str) -> Option<SideEffect> {
     let mut tokens = name.splitn(3, '_');
     let _class = tokens.next(); // position 0 — user-controlled, ignored
     let verb = tokens.next(); // position 1 — the classifier's only input
 
-    match verb {
-        Some("query" | "list" | "get") => SideEffect::Read,
-        Some("create" | "delete" | "set" | "add" | "remove") => SideEffect::Write,
-        // No verb (single-token name) or unknown verb → default Read.
-        // An unknown-verb read never triggers an accidental mutation;
-        // the failure direction is "misses the read cut for a would-be
-        // legitimate tool the harness doesn't yet expose", not "silently
-        // writes when it shouldn't". Safer failure mode.
-        _ => SideEffect::Read,
+    match verb.and_then(generated_verb_writes) {
+        Some(true) => Some(SideEffect::Write),
+        Some(false) => Some(SideEffect::Read),
+        // No verb (single-token name) or unknown verb → not a generated
+        // tool name this knows.
+        None => None,
     }
+}
+
+/// Look up the declared side-effect for a static `#[tool]` name, or
+/// classify a dynamic per-class tool by its verb suffix.
+///
+/// Static tools take precedence — an explicit table row always wins over
+/// suffix matching (defense in depth: a static tool renamed to collide
+/// with a dynamic pattern doesn't silently reclassify).
+///
+/// Unknown shapes fall back to [`SideEffect::Read`] — the safer default for
+/// the read-only cut: an unknown-verb read never triggers an accidental
+/// mutation; the failure direction is "misses the read cut for a would-be
+/// legitimate tool the harness doesn't yet expose", not "silently writes
+/// when it shouldn't". Callers that need the conservative answer for a
+/// *flag* (`did this step write?`) take the [`Option`]-returning lookups
+/// and pick their own default — `agent_session::tool_writes` does.
+///
+/// Propose-* wrappers (`<class>_create` / `<class>_propose_link_child`)
+/// declare their own side_effect at construction site
+/// (`ai_service::harness::propose`) and never come through this path.
+pub(crate) fn side_effect_of(name: &str) -> SideEffect {
+    static_side_effect(name)
+        .or_else(|| dynamic_tool_side_effect(name))
+        // See above: unknown → Read, the safer default for the read cut.
+        .unwrap_or(SideEffect::Read)
 }
 
 #[cfg(test)]
@@ -227,6 +259,49 @@ mod tests {
         );
     }
 
+    /// Dispatch accepts an `update` verb (`dynamic::handle_dynamic_tool`).
+    /// The classifier has to call it a write too: `side_effect_of` turns an
+    /// unknown verb into Read, and the harness read-only cut would then let
+    /// a `<Class>_update` tool through.
+    #[test]
+    fn dynamic_classifier_counts_update_as_a_write() {
+        assert_eq!(
+            side_effect_of("Task_update"),
+            SideEffect::Write,
+            "the update verb is a write, the same as dispatch"
+        );
+        assert_eq!(
+            dynamic_tool_side_effect("Task_update"),
+            Some(SideEffect::Write),
+            "Task_update carries a known write verb"
+        );
+        assert!(
+            GENERATED_WRITE_VERBS.contains(&"update"),
+            "dispatch and the classifier share GENERATED_WRITE_VERBS"
+        );
+        for verb in GENERATED_READ_VERBS {
+            assert!(
+                !GENERATED_WRITE_VERBS.contains(verb),
+                "{verb} is both a read verb and a write verb"
+            );
+            assert_eq!(generated_verb_writes(verb), Some(false), "{verb}");
+            assert_eq!(
+                side_effect_of(&format!("Task_{verb}")),
+                SideEffect::Read,
+                "{verb}"
+            );
+        }
+        for verb in GENERATED_WRITE_VERBS {
+            assert_eq!(generated_verb_writes(verb), Some(true), "{verb}");
+            assert_eq!(
+                side_effect_of(&format!("Task_{verb}")),
+                SideEffect::Write,
+                "{verb}"
+            );
+        }
+        assert_eq!(generated_verb_writes("frobnicate"), None);
+    }
+
     #[test]
     fn dynamic_classifier_reads_position_one_verb() {
         // Standard dynamic-tool shape: `<class>_<verb>[_<prop>]`.
@@ -241,6 +316,7 @@ mod tests {
             ("task_set_title", SideEffect::Write),
             ("channel_add_messages", SideEffect::Write),
             ("channel_remove_messages", SideEffect::Write),
+            ("task_update", SideEffect::Write),
         ] {
             assert_eq!(
                 side_effect_of(name),
