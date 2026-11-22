@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use log::{info, warn};
+use log::{debug, info, warn};
 use str0m::change::SdpOffer;
 use str0m::{Candidate, Rtc};
 
@@ -174,6 +174,33 @@ impl CascadeSignal {
     }
 }
 
+/// How long the cascade waits before redialling a pipe that was ended
+/// because its offer was refused or still unanswered after the second
+/// resend. Announce arrives every 10 s, so the next announce is not this
+/// wait: it would rebuild the pipe while the other end still held its
+/// entry, and a pipe that failed the same way would end and redial about
+/// every minute. The first end waits this long. Each further end doubles
+/// the wait, up to [`PIPE_REDIAL_BACKOFF_CAP`].
+pub const PIPE_REDIAL_BACKOFF: Duration = Duration::from_secs(30);
+
+/// The longest redial wait. Further failures of the same pipe stay here.
+pub const PIPE_REDIAL_BACKOFF_CAP: Duration = Duration::from_secs(120);
+
+/// One pipe's run of refused or unanswered offers, and when it may be dialled.
+struct PipeRedial {
+    failures: u32,
+    not_before: Instant,
+}
+
+/// The wait after `failures` ends. `1` is [`PIPE_REDIAL_BACKOFF`].
+fn pipe_redial_wait(failures: u32) -> Duration {
+    let mut wait = PIPE_REDIAL_BACKOFF;
+    for _ in 1..failures {
+        wait = wait.saturating_mul(2).min(PIPE_REDIAL_BACKOFF_CAP);
+    }
+    wait
+}
+
 /// Manages the cascade cluster for a single SFU node.
 ///
 /// Tracks known peer SFU nodes, the bookkeeping side of pipe transports
@@ -197,6 +224,14 @@ pub struct CascadeManager {
     /// Per-room cooldown: last time a rebalance migration was issued.
     /// Prevents rapid-fire migrations (anti-pingpong).
     rebalance_cooldowns: HashMap<String, Instant>,
+    /// Pipes ended because an established offer was refused or unanswered,
+    /// keyed by `(room_id, remote_did)`. Absent when that pair has not
+    /// ended that way. See [`PIPE_REDIAL_BACKOFF`].
+    redials: HashMap<(String, String), PipeRedial>,
+    /// Tests set the clock [`Self::establish_pipe`] compares to the redial
+    /// wait. Production leaves it unset.
+    #[cfg(test)]
+    test_now: Option<Instant>,
 }
 
 impl CascadeManager {
@@ -212,7 +247,65 @@ impl CascadeManager {
             pipes: HashMap::new(),
             max_participants_per_node,
             rebalance_cooldowns: HashMap::new(),
+            redials: HashMap::new(),
+            #[cfg(test)]
+            test_now: None,
         }
+    }
+
+    /// The clock a redial wait is compared to.
+    fn dial_instant(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(now) = self.test_now {
+            return now;
+        }
+        Instant::now()
+    }
+
+    /// Pin the redial clock. Production never calls this.
+    #[cfg(test)]
+    pub(crate) fn set_now(&mut self, now: Instant) {
+        self.test_now = Some(now);
+    }
+
+    /// An established pipe to `remote_did` was ended because its offer was
+    /// refused or unanswered. The next [`Self::establish_pipe`] waits.
+    fn note_pipe_offer_ended(&mut self, room_id: &str, remote_did: &str, now: Instant) {
+        let key = (room_id.to_string(), remote_did.to_string());
+        let failures = self
+            .redials
+            .get(&key)
+            .map(|redial| redial.failures)
+            .unwrap_or(0)
+            .saturating_add(1);
+        let wait = pipe_redial_wait(failures);
+        debug!(
+            "SFU cascade: pipe to {remote_did} for room {room_id} ended ({failures}); redial waits {} s",
+            wait.as_secs()
+        );
+        self.redials.insert(
+            key,
+            PipeRedial {
+                failures,
+                not_before: now + wait,
+            },
+        );
+    }
+
+    /// A pipe peer died. `reason` `"offer"` arms the redial wait. Any other
+    /// reason only drops the entry, so a timeout or a leave can dial on the
+    /// next announce.
+    pub fn on_pipe_died(
+        &mut self,
+        room_id: &str,
+        remote_did: &str,
+        reason: &str,
+        now: Instant,
+    ) -> Option<ParticipantId> {
+        if reason == "offer" {
+            self.note_pipe_offer_ended(room_id, remote_did, now);
+        }
+        self.remove_node_from_room(room_id, remote_did)
     }
 
     /// Add a host candidate for each address the SFU offers now.
@@ -351,6 +444,19 @@ impl CascadeManager {
 
         if self.pipes.contains_key(&pipe_key) {
             return Err("Pipe transport already exists".to_string());
+        }
+        if let Some(redial) = self.redials.get(&pipe_key) {
+            let now = self.dial_instant();
+            if now < redial.not_before {
+                return Err(format!(
+                    "pipe redial waits {} s",
+                    redial.not_before.saturating_duration_since(now).as_secs()
+                ));
+            }
+            warn!(
+                "SFU cascade: redialling pipe to {remote_did} for room {room_key} after {} ended offers",
+                redial.failures
+            );
         }
 
         let mut rtc = Rtc::builder().build(Instant::now());
@@ -1101,5 +1207,70 @@ mod tests {
 
         // Room B should still allow rebalancing (independent cooldown)
         assert!(mgr.suggest_rebalance(room_b, 9).is_some());
+    }
+
+    /// A pipe ended for an unanswered or refused offer is not dialled again
+    /// on the spot. The wait doubles, and it stops at the cap. A pipe that
+    /// died for another reason dials at once.
+    #[test]
+    fn a_redialled_pipe_that_fails_again_waits_out_its_backoff() {
+        let room = RoomId::new("nh", "r");
+        let remote = "did:key:nodeA";
+        let key = room.to_string();
+        let t0 = Instant::now();
+
+        let mut dropped = CascadeManager::new("did:key:nodeB".into(), test_addr(10020), 8);
+        dropped.set_now(t0);
+        dropped.establish_pipe(remote, &room).unwrap();
+        dropped.on_pipe_died(&key, remote, "drop", t0);
+        dropped
+            .establish_pipe(remote, &room)
+            .expect("a dropped pipe dials on the next announce");
+
+        let mut mgr = CascadeManager::new("did:key:nodeB".into(), test_addr(10021), 8);
+        mgr.set_now(t0);
+        let (first, _) = mgr.establish_pipe(remote, &room).unwrap();
+        let first_id = first.id.clone();
+        mgr.on_pipe_died(&key, remote, "offer", t0);
+        assert!(
+            !mgr.has_pipe(&key, remote),
+            "the ended pipe's entry is gone"
+        );
+        assert!(
+            mgr.establish_pipe(remote, &room).is_err(),
+            "the redial does not happen in the same moment"
+        );
+        mgr.set_now(t0 + PIPE_REDIAL_BACKOFF - Duration::from_millis(1));
+        assert!(mgr.establish_pipe(remote, &room).is_err());
+        mgr.set_now(t0 + PIPE_REDIAL_BACKOFF);
+        let (second, _) = mgr
+            .establish_pipe(remote, &room)
+            .expect("the first redial waits one backoff");
+        assert_ne!(second.id, first_id);
+
+        let t1 = t0 + PIPE_REDIAL_BACKOFF;
+        mgr.on_pipe_died(&key, remote, "offer", t1);
+        mgr.set_now(t1 + PIPE_REDIAL_BACKOFF);
+        assert!(
+            mgr.establish_pipe(remote, &room).is_err(),
+            "a redialled pipe that fails again is not redialled on the same wait"
+        );
+        mgr.set_now(t1 + PIPE_REDIAL_BACKOFF * 2);
+        mgr.establish_pipe(remote, &room)
+            .expect("the second failure waits twice as long");
+
+        let t2 = t1 + PIPE_REDIAL_BACKOFF * 2;
+        mgr.on_pipe_died(&key, remote, "offer", t2);
+        mgr.set_now(t2 + PIPE_REDIAL_BACKOFF_CAP - Duration::from_millis(1));
+        assert!(mgr.establish_pipe(remote, &room).is_err());
+        mgr.set_now(t2 + PIPE_REDIAL_BACKOFF_CAP);
+        mgr.establish_pipe(remote, &room)
+            .expect("the wait reaches the cap");
+
+        let t3 = t2 + PIPE_REDIAL_BACKOFF_CAP;
+        mgr.on_pipe_died(&key, remote, "offer", t3);
+        mgr.set_now(t3 + PIPE_REDIAL_BACKOFF_CAP);
+        mgr.establish_pipe(remote, &room)
+            .expect("a further failure stays at the cap");
     }
 }

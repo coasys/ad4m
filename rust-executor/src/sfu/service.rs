@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use log::{debug, info, warn};
 use once_cell::sync::OnceCell;
@@ -843,14 +843,18 @@ impl SfuService {
                     let Some(dead) = dead else { return; };
                     if dead.is_pipe {
                         info!(
-                            "SFU cascade cleanup: pipe peer {} (room {} ↔ {}) died, removing",
-                            dead.participant_id, dead.room_id, dead.agent_did
+                            "SFU cascade cleanup: pipe peer {} (room {} ↔ {}) died ({}); removing",
+                            dead.participant_id, dead.room_id, dead.agent_did, dead.reason
                         );
                         let room_key = dead.room_id.to_string();
-                        self.cascade_manager
-                            .write()
-                            .await
-                            .remove_node_from_room(&room_key, &dead.agent_did);
+                        // `offer` waits before the next dial. A timeout or an
+                        // ICE drop only removes the entry.
+                        self.cascade_manager.write().await.on_pipe_died(
+                            &room_key,
+                            &dead.agent_did,
+                            dead.reason,
+                            Instant::now(),
+                        );
                         self.republish_roster(&room_key, "drop").await;
                     } else {
                         self.remove_dead_participant(dead).await;

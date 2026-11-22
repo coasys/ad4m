@@ -318,12 +318,17 @@ per-node capacity only drives redirects; the server drops a peer after
 10 s of ICE `Disconnected`, or, once the client asked for an ICE restart
 (`sfu.callRestartIce`), 15 s after the request. The restart's answer ends
 that grace and the 10 s disconnect clock starts again. An unanswered server
-offer is resent at 10 s and 30 s, then every 30 s, and never drops the peer
-(#1802 dropped it at 70 s, also while its media flowed). A client keeps
-that offer. A pipe that already had a path replaces an unanswered offer
-after those two resends and offers its deferred tracks again. An initial
-pipe that never connects stays through the second resend plus the 15 s
-ICE-restart grace, then is dropped. The offer carries
+offer is resent at 10 s and 30 s, then every 30 s, and never drops a client
+peer (#1802 dropped it at 70 s, also while its media flowed). A client keeps
+that offer. An established pipe whose offer is refused, or still unanswered
+after those two resends, is disconnected. The other end drops the pipe when
+its ICE fails, so neither side keeps the entry, and the cascade dials a new
+pipe. The first redial waits 30 s, then 60 s, then 120 s, and stays at 120 s.
+An Announce arrives every 10 s, so the announce alone would dial again on
+the next heartbeat. A crossed offer (`ChangesOutOfOrder`) keeps the pipe
+and queues the tracks again. An initial pipe that never connects stays
+through the second resend plus the 15 s ICE-restart grace, then is dropped.
+The offer carries
 an `offerId` that a resend and `sfu.callResume` repeat; the answer echoes
 it. `sfu.callAnswerServerOffer` answers `{ accepted: true }`, or
 `{ accepted: false, reason }` (`stale`, `no-pending`, `unknown-session`),
