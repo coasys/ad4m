@@ -80,11 +80,21 @@ check "repo from CIRCLE_REPOSITORY_URL" 0 '^run:' CIRCLE_BRANCH=feat/x \
 grep -q 'repos/someone/fork/pulls?.*head=someone%3Afeat%2Fx$' "$TMP/curl.log" \
   || { echo "  FAIL: repo URL: $(cat "$TMP/curl.log")"; FAILED=1; }
 
-# Fails open.
-check "API failure runs" 0 '^run: GitHub API request failed' CIRCLE_BRANCH=feat/x FAKE_FAIL=1
-check "API rate-limit body (an object, no number) runs" 0 '^run: unexpected GitHub API answer' \
+# Fails open: runs, with exit 11 so a caller can tell "run because the PR asks for it"
+# from "run because the lookup failed".
+check "API failure runs (exit 11: unsure)" 11 '^run: GitHub API request failed' CIRCLE_BRANCH=feat/x FAKE_FAIL=1
+check "API rate-limit body (an object, no number) runs" 11 '^run: unexpected GitHub API answer' \
   CIRCLE_BRANCH=feat/x FAKE_BODY='{"message":"API rate limit exceeded"}'
-check "API garbage runs" 0 '^run: could not read' CIRCLE_BRANCH=feat/x FAKE_BODY='<html>'
+check "API garbage runs" 11 '^run: could not read' CIRCLE_BRANCH=feat/x FAKE_BODY='<html>'
+mkdir -p "$TMP/nojq"; for t in bash env sed cat tr mkdir find git; do ln -sf "$(command -v $t)" "$TMP/nojq/$t" 2>/dev/null; done
+ln -sf "$TMP/bin/curl" "$TMP/nojq/curl"
+out_nojq="$(env -i PATH="$TMP/nojq" HOME="$TMP" FAKE_LOG="$TMP/curl.log" HEAVY_GATE_COMMIT_MSG=x \
+  CIRCLE_BRANCH=feat/x "$TMP/nojq/bash" "$SCRIPT")"; rc_nojq=$?
+if [ "$rc_nojq" = 11 ] && grep -q '^run: jq not installed' <<<"$out_nojq"; then
+  echo "  ok: jq missing runs, exit 11 -> $out_nojq"
+else
+  echo "  FAIL: jq missing: exit $rc_nojq (want 11), output: $out_nojq"; FAILED=1
+fi
 
 # One request per workflow: the second job reads the first one's answer; a failed
 # lookup is not kept, and another workflow (a rerun) asks again.
@@ -96,7 +106,7 @@ check "workflow cache: second job reuses, no API call" 10 'cached for this workf
 [ -s "$TMP/curl.log" ] && { echo "  FAIL: cached answer still called the API"; FAILED=1; }
 check "workflow cache: a rerun asks again" 0 '^run: PR #20 targets dev$' \
   CIRCLE_BRANCH=feat/x CIRCLE_WORKFLOW_ID=wf2 FAKE_BODY="[$(pr 20 false dev)]"
-check "workflow cache: a failure is not kept" 0 '^run: GitHub API request failed' \
+check "workflow cache: a failure is not kept" 11 '^run: GitHub API request failed' \
   CIRCLE_BRANCH=feat/y CIRCLE_WORKFLOW_ID=wf3 FAKE_FAIL=1
 check "workflow cache: next job after a failure asks again" 10 '^skip: no open PR for this branch$' \
   CIRCLE_BRANCH=feat/y CIRCLE_WORKFLOW_ID=wf3 FAKE_BODY='[]'
