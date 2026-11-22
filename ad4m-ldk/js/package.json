@@ -17,7 +17,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "node --experimental-vm-modules --import tsx --test tests/*.test.ts"
+    "test": "TSX_TSCONFIG_PATH=../tsconfig.test.json node --experimental-vm-modules --import tsx --test tests/*.test.ts"
   },
   "license": "CAL-1.0",
   "author": {
