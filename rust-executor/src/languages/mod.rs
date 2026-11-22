@@ -16,6 +16,7 @@ pub mod language_runtime;
 pub mod language_runtime_handle;
 pub mod literal;
 mod metas;
+mod metrics;
 #[cfg(test)]
 pub(crate) mod mount_tests;
 pub mod mount_types;

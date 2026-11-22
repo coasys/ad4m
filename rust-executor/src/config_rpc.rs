@@ -336,7 +336,6 @@ fn next_start_accepts(values: &Map<String, Value>, start: &Ad4mConfig) -> Result
     // `run` stops on SFU addresses it cannot use.
     crate::sfu::server::sfu_media_addrs(
         next.sfu_bind_addr.as_deref(),
-        next.localhost.unwrap_or(true),
         next.sfu_udp_port,
         next.sfu_public_addr.as_deref(),
     )?;
