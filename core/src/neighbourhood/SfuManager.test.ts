@@ -948,6 +948,21 @@ test("joins that succeed while ICE keeps failing stop after three reconnects", a
     expect(errors).toEqual([new Error("SFU reconnect attempts exhausted")])
 })
 
+test("a rebuild that runs out of attempts tells listeners everyone left", async () => {
+    const api = fakeApi()
+    const { manager, left, participants } = recordedManager(api)
+    await manager.join(fakeStream())
+    api.emitRoster(roster([ALICE, BOB]))
+    await flush()
+
+    for (let i = 0; i < 3; i++) await iceState("failed")
+    expect(left).toEqual([])
+    await iceState("failed")
+
+    expect(left).toEqual([ALICE, BOB])
+    expect(participants()).toEqual([])
+})
+
 test("a connection that comes up resets the reconnect count", async () => {
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL)

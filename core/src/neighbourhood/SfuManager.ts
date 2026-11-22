@@ -385,6 +385,7 @@ export class SfuManager {
         if (!stream || this.reconnecting) return
         const generation = this.generation
         if (++this.reconnectAttempts > SfuManager.MAX_RECONNECTS) {
+            this.resetParticipants()
             this.emit("error", new Error("SFU reconnect attempts exhausted"))
             return
         }
