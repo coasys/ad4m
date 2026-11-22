@@ -1011,8 +1011,11 @@ export class SfuManager {
      * Send an answer to the executor, under the `offerId` of the offer it
      * answers: the executor refuses one that names another offer, so a stale
      * answer cannot use up a newer same-mid offer. A refusal of `stale` or
-     * `no-pending` is not a failure — a newer offer is coming or was settled
-     * — and one of `unknown-session` rebuilds the call. A socket fault (503,
+     * `no-pending` is non-acceptance, not a failure — the offer was settled
+     * or superseded, or the server's own SDP step refused it (a str0m
+     * rejection, `ChangesOutOfOrder`) — and whether the connection needs
+     * repair is media and session evidence's call, not a rebuild's here.
+     * One of `unknown-session` rebuilds the call. A socket fault (503,
      * 408) keeps the answer for the next socket or the executor's resend of
      * the offer; anything else leaves the verdict to ICE and the roster,
      * which see whether the session is really gone.
@@ -1041,7 +1044,8 @@ export class SfuManager {
                 console.warn("SFU: the executor no longer holds this session; rebuilding the call")
                 void this.reconnect()
             }
-            // `stale` or `no-pending`: a newer offer is coming or was settled.
+            // `stale` or `no-pending`: not accepted — the offer was settled or
+            // superseded, or the server's own SDP step refused it.
         } catch (err) {
             if (this.state.peerConnection !== answer.pc) return
             if (isSocketFault(err)) {

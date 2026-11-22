@@ -35,7 +35,9 @@ export type SessionEvent =
     | "replaced"
     /**
      * `(SfuCallEnded)` — the SFU call ended on its own: it could not be rebuilt
-     * (`reason: "gave-up"`). The session is idle; show the reason and offer to join again.
+     * (`reason: "gave-up"`), or the executor said this session is another
+     * agent's (`reason: "refused"`). The session is idle; show the reason and
+     * offer to join again.
      */
     | "call-ended"
     | "error"

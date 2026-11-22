@@ -304,7 +304,7 @@ and departure, listing sessions (`participantId` + `agentDid`) and a
 of that room, a resume included), so a client can drop a roster whose
 `revision` is older than one it already applied. The SDK
 keys participants by participant id from it; when the roster stops listing
-this session (its `participantId`) for 3 s and `sfu.listRooms` does not list
+this session (its `participantId`) for 3 s and `sfu.callResume` does not list
 it either, the SDK rebuilds the call, but a replaced session never does; tracks are attributed only by the `trackMapping`
 mids (which name
 the participant id); a session never receives its own media or its own
@@ -343,7 +343,9 @@ idle) for the UI to show; a new `join` starts over. A rebuild keeps
 the participants and clears only their media. Only an SDP the connection
 cannot apply rebuilds from a renegotiation: the answer names its offer's
 `offerId`, and the server refuses one naming another — `stale` or
-`no-pending` change nothing for the client, `unknown-session` rebuilds the
+`no-pending` (a settled or superseded offer, or the server's own SDP step
+refusing it, as `ChangesOutOfOrder`) is non-acceptance: repair is left to
+media and session evidence, not a rebuild; `unknown-session` rebuilds the
 call. An answer a socket fault kept (503, 408) goes out again once the
 socket is back, and `sfu.callResume` then returns what went by — the
 session's pending offer and the room's roster, applied like the events
