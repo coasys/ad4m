@@ -3,14 +3,14 @@ import { languageAddress, emitSignal } from "ad4m:host";
 export const name = "mount-test";
 const CLASS = "MountThing";
 
-// address -> data object { title, done, tags }
+// address -> data object { title, done, tags, children? }
 const records = new Map();
 // every executed interaction, in order: { address, name, params }
 const calls = [];
 let counter = 0;
 // version reported by mountShapes(); setVersion changes it so a remount
 // can be told apart from the first install
-let mountVersion = "1";
+let mountVersion = "2";
 
 export async function init() {}
 export function isPublic() { return false; }
@@ -27,14 +27,16 @@ export function interactions(address) {
   if (address === "class/" + CLASS) {
     return [{
       label: "Create", name: "create",
-      parameters: [{ name: "title", type: "string" }, { name: "done", type: "boolean" }, { name: "tags", type: "array" }],
+      parameters: [{ name: "title", type: "string" }, { name: "done", type: "boolean" }, { name: "tags", type: "array" }, { name: "children", type: "array" }],
       execute: async (params) => {
         const p = plain(params);
         calls.push({ address, name: "create", params: p });
         if (p.fail) throw new Error("create: " + p.fail);
         counter += 1;
         const id = "t" + counter;
-        records.set(id, { title: p.title ?? null, done: p.done ?? false, tags: p.tags ?? [] });
+        const record = { title: p.title ?? null, done: p.done ?? false, tags: p.tags ?? [] };
+        if (p.children !== undefined) record.children = p.children;
+        records.set(id, record);
         // A result that is not a MountDelta: its changed entry has no class.
         if (p.malformed) return { address: id, changed: [{ address: id, data: records.get(id) }] };
         return delta(id);
@@ -103,9 +105,10 @@ export function mountShapes() {
         destructor_actions: [{ action: "call", source: "this", predicate: "delete", target: "{}" }],
         properties: [
           { path: "rdf://type", name: "type", has_value: "mounttest://Thing", min_count: 1, max_count: 1 },
-          { path: "mounttest://title", name: "title", max_count: 1, writable: true, setter: update },
+          { path: "mounttest://title", name: "title", max_count: 1, writable: true, alias: { TextContent: "text" }, setter: update },
           { path: "mounttest://done", name: "done", max_count: 1, writable: true, setter: update },
           { path: "mounttest://tag", name: "tags", collection: true, writable: true, setter: update },
+          { path: "mounttest://child", name: "children", collection: true, node_kind: "IRI", relation_kind: "hasMany", alias: { Container: "children" } },
         ],
       },
     }],
