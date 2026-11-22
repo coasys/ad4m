@@ -5,6 +5,8 @@
 //! consumed by the WS RPC handlers in `crate::api::sfu_ws`.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,8 +37,10 @@ pub const MAX_ROOMS_PER_NEIGHBOURHOOD: usize = 16;
 /// An empty room — one `startRoom` opened that nobody joined — closes after
 /// this long. A room whose last participant leaves closes at once.
 pub const EMPTY_ROOM_TTL: Duration = Duration::from_secs(600);
-/// How long `call_answer_server_offer` and `call_resume` wait for the event
-/// loop. Past this, or if the loop closes the reply, the RPC is 408.
+/// How long `call_answer_server_offer` and `call_resume` wait to hand their
+/// command to the event loop and to hear back. The command queue is
+/// bounded, so a loop that is not draining is part of this wait. Past it,
+/// or if the loop closes the reply, the RPC is 408.
 const SFU_LOOP_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Most calls one DID is in at once on this node. Within one call, each
 /// device is a session of its own, up to `room::MAX_DEVICES_PER_DID`.
@@ -200,15 +204,40 @@ impl std::fmt::Display for SfuCallError {
 
 impl std::error::Error for SfuCallError {}
 
-/// The event loop's reply, or 408 when it does not answer. A receiver whose
-/// sender was dropped fails at once: the suite does not wait out the timeout.
-async fn loop_reply<T>(rx: tokio::sync::oneshot::Receiver<T>) -> Result<T, SfuCallError> {
-    match tokio::time::timeout(SFU_LOOP_REPLY_TIMEOUT, rx).await {
+/// Enqueue `send` and wait for `rx` under one deadline. The deadline covers
+/// the enqueue: a full command queue waits inside `send`, and that wait is
+/// the RPC's time. A dropped reply, a closed queue, or the deadline is 408.
+async fn send_and_await<T, F>(
+    timeout: Duration,
+    send: F,
+    rx: tokio::sync::oneshot::Receiver<T>,
+) -> Result<T, SfuCallError>
+where
+    F: Future<Output = Result<(), tokio::sync::mpsc::error::SendError<SfuCommand>>>,
+{
+    let queued = async move {
+        send.await.map_err(|_| ())?;
+        rx.await.map_err(|_| ())
+    };
+    match tokio::time::timeout(timeout, queued).await {
         Ok(Ok(value)) => Ok(value),
-        Ok(Err(_)) | Err(_) => Err(SfuCallError::Timeout(
+        Ok(Err(())) | Err(_) => Err(SfuCallError::Timeout(
             "the event loop did not answer in time".into(),
         )),
     }
+}
+
+/// The event loop's reply, or 408 when it does not answer. A receiver whose
+/// sender was dropped fails at once: the suite does not wait out the timeout.
+/// Production waits go through [`send_and_await`], which also covers the enqueue.
+#[cfg(test)]
+async fn loop_reply<T>(rx: tokio::sync::oneshot::Receiver<T>) -> Result<T, SfuCallError> {
+    send_and_await(
+        SFU_LOOP_REPLY_TIMEOUT,
+        async { Ok::<(), tokio::sync::mpsc::error::SendError<SfuCommand>>(()) },
+        rx,
+    )
+    .await
 }
 
 /// How `agent_did` stands toward the named session, without holding the
@@ -248,8 +277,12 @@ pub struct SfuService {
     /// (`--sfu-cascade-peers`).
     cascade_peer_dids: Vec<String>,
     /// Serialises [`Self::publish_roster`]: a roster read before another
-    /// join must not be published after that join's roster.
+    /// join must not be published after that join's roster. Held across
+    /// the rooms lock that takes the next revision.
     roster_order: tokio::sync::Mutex<()>,
+    /// Milliseconds an answer or a resume waits to enqueue and to hear
+    /// back. Tests shorten it; production stays at [`SFU_LOOP_REPLY_TIMEOUT`].
+    loop_reply_timeout_ms: AtomicU64,
 }
 
 /// Record one roster republish. The first reason for a room wins.
@@ -262,6 +295,7 @@ fn note_roster(changed: &mut Vec<(String, &'static str)>, room_id: String, reaso
 
 async fn emit_roster(
     room_id: &RoomId,
+    revision: u64,
     participants: Vec<super::SfuRosterParticipant>,
     recipients: Vec<String>,
     reason: &'static str,
@@ -269,10 +303,11 @@ async fn emit_roster(
     let roster = super::SfuRoomRoster {
         neighbourhood_url: room_id.neighbourhood_url.clone(),
         room_name: room_id.room_name.clone(),
+        revision,
         participants,
     };
     info!(
-        "SFU roster: {reason} room {room_id} sessions {}",
+        "SFU roster: {reason} room {room_id} revision {revision} sessions {}",
         roster.participants.len()
     );
     crate::pubsub::get_global_pubsub()
@@ -322,6 +357,7 @@ impl SfuService {
             preferred_node,
             cascade_peer_dids,
             roster_order: tokio::sync::Mutex::new(()),
+            loop_reply_timeout_ms: AtomicU64::new(SFU_LOOP_REPLY_TIMEOUT.as_millis() as u64),
         });
 
         if let Some(rx) = gossip.take_inbound() {
@@ -1007,7 +1043,34 @@ impl SfuService {
                 .collect(),
         };
         let participants = self.with_remote_sessions(room_id, local).await;
-        emit_roster(room_id, participants, recipients, reason).await;
+        let revision = self.bump_roster_revision(room_id).await;
+        emit_roster(room_id, revision, participants, recipients, reason).await;
+    }
+
+    /// The next revision for `room_id`. Caller holds `roster_order`, so this
+    /// number and the snapshot published with it are one publish.
+    async fn bump_roster_revision(&self, room_id: &RoomId) -> u64 {
+        self.rooms.write().await.next_roster_revision(room_id)
+    }
+
+    fn loop_reply_timeout(&self) -> Duration {
+        Duration::from_millis(self.loop_reply_timeout_ms.load(Ordering::Relaxed))
+    }
+
+    /// Hand `command` to the event loop and wait for `rx`, under one deadline.
+    async fn enqueue_and_wait<T>(
+        &self,
+        command: SfuCommand,
+        rx: tokio::sync::oneshot::Receiver<T>,
+    ) -> Result<T, SfuCallError> {
+        let send = self.server.command_tx.send(command);
+        send_and_await(self.loop_reply_timeout(), send, rx).await
+    }
+
+    #[cfg(test)]
+    fn set_loop_reply_timeout(&self, timeout: Duration) {
+        self.loop_reply_timeout_ms
+            .store(timeout.as_millis() as u64, Ordering::Relaxed);
     }
 
     /// `local` plus the sessions other cascade nodes announced, sorted.
@@ -1625,23 +1688,16 @@ impl SfuService {
             }
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
-        if self
-            .server
-            .command_tx
-            .send(SfuCommand::ApplyServerAnswer {
+        self.enqueue_and_wait(
+            SfuCommand::ApplyServerAnswer {
                 participant_id: pid,
                 offer_id: Some(offer_id.to_string()),
                 sdp_answer_json: sdp_answer_json.to_string(),
                 reply: Some(tx),
-            })
-            .await
-            .is_err()
-        {
-            return Err(SfuCallError::Timeout(
-                "the event loop did not answer in time".into(),
-            ));
-        }
-        loop_reply(rx).await
+            },
+            rx,
+        )
+        .await
     }
 
     /// The client asks for an ICE restart of its own session `participant_id`,
@@ -1675,8 +1731,9 @@ impl SfuService {
     /// back (`sfu.callResume`). Offers and roster events published while it
     /// was gone did not reach it: the event loop publishes the pending
     /// server offer, if any, again at once, and this publishes the room's
-    /// roster to `agent_did`. The reply carries the same offer and the same
-    /// sessions. The session itself never depended on the socket.
+    /// roster to `agent_did`. The reply carries the same offer, the same
+    /// sessions, and that publish's `revision`. The session itself never
+    /// depended on the socket.
     /// `{ listed: false }` when the room or the session is not there:
     /// nothing is sent. An error when the session belongs to another agent
     /// (403), or when the loop does not answer (408). The check is by DID
@@ -1702,21 +1759,15 @@ impl SfuService {
             }
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
-        if self
-            .server
-            .command_tx
-            .send(SfuCommand::Resume {
-                participant_id: pid.clone(),
-                reply: tx,
-            })
-            .await
-            .is_err()
-        {
-            return Err(SfuCallError::Timeout(
-                "the event loop did not answer in time".into(),
-            ));
-        }
-        let report = loop_reply(rx).await?;
+        let report = self
+            .enqueue_and_wait(
+                SfuCommand::Resume {
+                    participant_id: pid.clone(),
+                    reply: tx,
+                },
+                rx,
+            )
+            .await?;
         if !report.listed {
             return Ok(SfuResumeResult::unlisted());
         }
@@ -1727,14 +1778,22 @@ impl SfuService {
         let Some(participants) = self.roster_if_own(&room_id, &pid, agent_did).await else {
             return Ok(SfuResumeResult::unlisted());
         };
+        let revision = self.bump_roster_revision(&room_id).await;
         emit_roster(
             &room_id,
+            revision,
             participants.clone(),
             vec![agent_did.to_string()],
             "resume",
         )
         .await;
-        Ok(SfuResumeResult::listed(report.offer, participants))
+        Ok(SfuResumeResult::listed(
+            report.offer,
+            super::SfuResumeRoster {
+                revision,
+                participants,
+            },
+        ))
     }
 
     /// Trickle ICE: add a remote ICE candidate to a participant's
@@ -2119,6 +2178,7 @@ async fn fresh_test_service() -> Arc<SfuService> {
         preferred_node: None,
         cascade_peer_dids: vec![],
         roster_order: tokio::sync::Mutex::new(()),
+        loop_reply_timeout_ms: AtomicU64::new(SFU_LOOP_REPLY_TIMEOUT.as_millis() as u64),
     })
 }
 
@@ -3230,6 +3290,132 @@ mod tests {
             published(&seen, Topic::SfuRoomRoster, url).is_empty(),
             "a session the loop has dropped publishes no roster"
         );
+    }
+
+    fn revision_of(roster: &serde_json::Value) -> u64 {
+        roster["revision"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("roster has no revision: {roster}"))
+    }
+
+    /// Two publishes of one room carry increasing revisions. The first
+    /// publish of a room is revision 1.
+    #[tokio::test]
+    async fn two_roster_publishes_carry_increasing_revisions() {
+        let svc = test_service().await;
+        let url = "neighbourhood://roster-revision";
+        let mut events = crate::pubsub::get_global_pubsub().await.subscribe_events();
+        join(&svc, url, "did:a", "laptop").await;
+        let first = revision_of(&next_roster_event(&mut events, url).await.payload);
+        join(&svc, url, "did:b", "phone").await;
+        let second = revision_of(&next_roster_event(&mut events, url).await.payload);
+        assert_eq!(first, 1, "the first publish of a room is revision 1");
+        assert!(
+            second > first,
+            "two publishes: revision {first} then {second}"
+        );
+    }
+
+    /// A resume reply carries the revision of the roster event it just
+    /// published. A later publish is newer, so a client that already has
+    /// that event drops the reply.
+    #[tokio::test]
+    async fn a_resume_reply_carries_the_rooms_current_roster_revision() {
+        let svc = test_service().await;
+        let url = "neighbourhood://resume-revision";
+        let mut events = crate::pubsub::get_global_pubsub().await.subscribe_events();
+        let laptop = join(&svc, url, "did:a", "laptop").await;
+        let _ = next_roster_event(&mut events, url).await;
+        join(&svc, url, "did:b", "phone").await;
+        let before = revision_of(&next_roster_event(&mut events, url).await.payload);
+
+        let reply = svc.call_resume(url, "r", "did:a", &laptop).await.unwrap();
+        let reply_revision = reply
+            .roster
+            .expect("a listed resume names the sessions")
+            .revision;
+        let published = revision_of(&next_roster_event(&mut events, url).await.payload);
+        assert_eq!(
+            reply_revision, published,
+            "the resume reply is older than the roster event a client may already have"
+        );
+        assert!(
+            reply_revision > before,
+            "resume published revision {reply_revision}, the room was already at {before}"
+        );
+
+        join(&svc, url, "did:c", "laptop").await;
+        let later = revision_of(&next_roster_event(&mut events, url).await.payload);
+        assert!(
+            later > reply_revision,
+            "a client that already has revision {later} drops the resume reply at {reply_revision}"
+        );
+    }
+
+    /// The deadline covers the enqueue. A full command queue, which nobody
+    /// drains, is 408 inside that deadline for both RPCs that wait on the loop.
+    #[tokio::test]
+    async fn a_full_command_queue_is_408_within_the_deadline() {
+        let mut svc = test_service().await;
+        let url = "neighbourhood://full-queue";
+        let laptop = join(&svc, url, "did:a", "laptop").await;
+        let deadline = Duration::from_millis(200);
+        svc.set_loop_reply_timeout(deadline);
+
+        // Capacity one, already full, and held open so the send waits
+        // instead of failing because the channel closed.
+        let (tx, _held) = tokio::sync::mpsc::channel(1);
+        tx.send(SfuCommand::RemovePeer(ParticipantId::next()))
+            .await
+            .unwrap();
+        Arc::get_mut(&mut svc).unwrap().server.command_tx = tx;
+
+        let answer = svc.call_answer_server_offer(url, "r", "did:a", &laptop, "o1", "{}");
+        assert_408_within_deadline("callAnswerServerOffer", deadline, answer).await;
+        let resume = svc.call_resume(url, "r", "did:a", &laptop);
+        assert_408_within_deadline("callResume", deadline, resume).await;
+    }
+
+    async fn assert_408_within_deadline<T: std::fmt::Debug>(
+        label: &str,
+        deadline: Duration,
+        call: impl std::future::Future<Output = Result<T, SfuCallError>>,
+    ) {
+        let started = std::time::Instant::now();
+        let returned = tokio::time::timeout(Duration::from_secs(2), call).await;
+        let result = returned
+            .unwrap_or_else(|_| panic!("{label}: the RPC did not return within the deadline"));
+        let err = result.unwrap_err();
+        assert_eq!(err.status_code(), 408, "{label}: {err}");
+        assert!(err.to_string().contains("did not answer"), "{label}: {err}");
+        let elapsed = started.elapsed();
+        assert!(elapsed < Duration::from_secs(2), "{label} took {elapsed:?}");
+        assert!(
+            elapsed + Duration::from_millis(50) >= deadline,
+            "{label} returned in {elapsed:?}, before the {deadline:?} deadline"
+        );
+    }
+
+    /// The deadline elapses when the loop keeps the reply and never sends it.
+    /// A dropped sender is the other 408, and it does not wait.
+    #[tokio::test]
+    async fn a_loop_that_holds_the_reply_is_408_when_the_deadline_elapses() {
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(1);
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<SfuAnswerResult>();
+        let deadline = Duration::from_millis(200);
+        let started = std::time::Instant::now();
+        let err = send_and_await(deadline, cmd_tx.send(SfuCommand::Shutdown), reply_rx)
+            .await
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        assert_eq!(err.status_code(), 408, "{err}");
+        assert!(err.to_string().contains("did not answer"), "{err}");
+        assert!(
+            elapsed + Duration::from_millis(50) >= deadline,
+            "returned in {elapsed:?}, before the deadline"
+        );
+        assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
+        drop(reply_tx);
     }
 
     /// A reply channel the loop closed is 408, without waiting out the timeout.

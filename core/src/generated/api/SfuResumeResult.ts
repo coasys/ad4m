@@ -13,7 +13,7 @@ export type SfuResumeResult = { listed: boolean,
  */
 offer?: SfuCallRenegotiationOffer, 
 /**
- * The room's sessions, when the session is listed. The same list the
- * roster event carries.
+ * The room's sessions, when the session is listed. The same list and
+ * the same `revision` the roster event carries.
  */
 roster?: SfuResumeRoster, };

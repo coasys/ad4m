@@ -2311,6 +2311,7 @@ mod event_spec_tests {
                 serde_json::to_value(crate::sfu::SfuRoomRoster {
                     neighbourhood_url: "n".into(),
                     room_name: "r".into(),
+                    revision: 1,
                     participants: vec![crate::sfu::SfuRosterParticipant {
                         agent_did: "did:a".into(),
                         participant_id: "P1".into(),

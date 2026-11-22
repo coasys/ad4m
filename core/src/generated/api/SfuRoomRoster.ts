@@ -8,6 +8,12 @@ import type { SfuRosterParticipant } from "./SfuRosterParticipant";
  */
 export type SfuRoomRoster = { neighbourhoodUrl: string, roomName: string, 
 /**
+ * Increases by one on every publish of this room, starting at 1,
+ * including a resume. A client drops a roster older than one it
+ * already applied.
+ */
+revision: number, 
+/**
  * The room's sessions, sorted by DID, then participant id: this node's,
  * and those the other cascade nodes in the room announced, whose ids
  * name their node (`P3@did:key:...`). An agent in the call from two
