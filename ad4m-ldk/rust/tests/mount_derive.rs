@@ -9,28 +9,27 @@ use ad4m_ldk::prelude::*;
 use ad4m_ldk::types::{MountShapes, MountSnapshot};
 
 /// Same class as the `GoldenRecord` in `ad4m-ldk/tests/mount-fixtures.ts`:
-/// flag, optional literal, collection, read-only, `hasOne`, `hasMany`
-/// with call adder/remover, call setter, call constructor/destructor.
+/// flag, optional literal, collection, an ordinary writable property
+/// with an alias map, read-only, `hasOne`, `hasMany` with call
+/// adder/remover, a `datatype` hasMany (`node_kind` Literal), call
+/// setter, call constructor/destructor. `members` declares before every
+/// property, yet the namespace still derives from the first property
+/// entry (`rdf://type` → `rdf://`) and the shape still lists properties
+/// before relations. `T` occurs only in the undecorated `scratch`
+/// field — the derive's `split_for_impl` keeps the generated `impl`
+/// generic, which this golden test also proves.
+#[allow(dead_code)] // fields carry the shape only — never read in Rust
 #[derive(Ad4mModel)]
 #[ad4m(
     name = "GoldenRecord",
-    namespace = "mountgold://",
     target_class = "mountgold://Record",
     constructor = call("create", source = "{language}://class/GoldenRecord"),
     constructor = call("index", source = "{language}://class/GoldenRecord", params = "{\"kind\":\"record\"}"),
     destructor = call("delete"),
 )]
-struct GoldenRecord {
-    #[ad4m_property(through = "rdf://type", flag = "mountgold://Record")]
-    r#type: String,
-    #[ad4m_property(through = "mountgold://title", setter = call("update"))]
-    title: String,
-    #[ad4m_property(through = "mountgold://tag", collection, setter = call("update"))]
-    tags: Vec<String>,
-    #[ad4m_property(through = "mountgold://created", read_only)]
-    created: String,
-    #[ad4m_relation(kind = one, through = "mountgold://owner", read_only)]
-    owner: String,
+struct GoldenRecord<T> {
+    /// Declared first — a `kind = many` relation, so its `through`
+    /// never enters the namespace rule.
     #[ad4m_relation(
         kind = many,
         through = "mountgold://member",
@@ -38,19 +37,69 @@ struct GoldenRecord {
         remover = call("remove_member", params = "{\"soft\":true}"),
     )]
     members: Vec<String>,
-    /// Plain state field — carries no `ad4m_*` attribute, so the shape
-    /// never sees it.
-    #[allow(dead_code)]
-    scratch: String,
+    #[ad4m_property(through = "rdf://type", flag = "mountgold://Record")]
+    r#type: String,
+    #[ad4m_property(through = "mountgold://title", setter = call("update"))]
+    title: String,
+    #[ad4m_property(through = "mountgold://tag", collection, setter = call("update"))]
+    tags: Vec<String>,
+    #[ad4m_property(through = "mountgold://note", alias(TextContent = "text"))]
+    note: String,
+    #[ad4m_property(through = "mountgold://created", read_only)]
+    created: String,
+    #[ad4m_relation(kind = one, through = "mountgold://owner", read_only)]
+    owner: String,
+    /// A `datatype` relation holds literal values — `node_kind` Literal.
+    #[ad4m_relation(kind = many, through = "mountgold://score", datatype = "xsd://integer")]
+    scores: Vec<u32>,
+    /// `T` occurs only here — a plain state field carries no `ad4m_*`
+    /// attribute, so the shape never sees it.
+    scratch: T,
 }
 
 #[test]
 fn derived_shape_equals_ts_golden() {
-    let gen = GoldenRecord::generate_shacl();
+    let gen = GoldenRecord::<()>::generate_shacl();
     assert_eq!(gen.name, "GoldenRecord");
     let golden: serde_json::Value =
         serde_json::from_str(include_str!("../../tests/golden_record_shape.json")).unwrap();
     assert_eq!(gen.shape, golden);
+}
+
+/// A `kind = one` relation registers a property shadow in TS (a
+/// `HasOne` reads through its predicate as a property), so a HasOne
+/// declared first still feeds the namespace — the merged property
+/// map's first entry is its shadow, measured on the TS side.
+#[allow(dead_code)]
+#[derive(Ad4mModel)]
+#[ad4m(name = "Shadow", target_class = "shadow://S")]
+struct Shadow {
+    #[ad4m_relation(kind = one, through = "shadowrel://owner", read_only)]
+    owner: String,
+    #[ad4m_property(through = "propns://title")]
+    title: String,
+}
+
+#[test]
+fn namespace_derives_from_first_property_or_hasone_through() {
+    let gen = Shadow::generate_shacl();
+    assert_eq!(gen.shape["node_shape_uri"], "shadowrel://ShadowShape");
+}
+
+/// No `through` scheme at all — the TS `ad4m://` fallback.
+#[allow(dead_code)]
+#[derive(Ad4mModel)]
+#[ad4m(name = "Fallback")]
+struct Fallback {
+    #[ad4m_property(through = "literal")]
+    title: String,
+}
+
+#[test]
+fn namespace_falls_back_to_ad4m_scheme() {
+    let gen = Fallback::generate_shacl();
+    assert_eq!(gen.shape["node_shape_uri"], "ad4m://FallbackShape");
+    assert_eq!(gen.shape["target_class"], "ad4m://Fallback");
 }
 
 /// The `mount.classes` envelope: `node_shape_uri` drops (the executor
@@ -59,7 +108,8 @@ fn derived_shape_equals_ts_golden() {
 /// since `from_classes`'s host import only exists inside the runtime.
 #[test]
 fn mount_envelope_resolves_language() {
-    let shapes = MountShapes::from_classes_at("1", &[GoldenRecord::generate_shacl()], "lang://abc");
+    let shapes =
+        MountShapes::from_classes_at("1", &[GoldenRecord::<()>::generate_shacl()], "lang://abc");
     assert_eq!(shapes.version, "1");
     assert_eq!(shapes.shapes.len(), 1);
     let entry = &shapes.shapes[0];
@@ -102,7 +152,7 @@ impl MountCapability for MountLang {
     fn mount_shapes(&mut self) -> LanguageResult<MountShapes> {
         Ok(MountShapes::from_classes_at(
             "1",
-            &[GoldenRecord::generate_shacl()],
+            &[GoldenRecord::<()>::generate_shacl()],
             "lang://abc",
         ))
     }

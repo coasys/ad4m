@@ -29,12 +29,14 @@
 //! ```
 //!
 //! Grammar — class `#[ad4m(...)]`: `name`, `namespace` (defaults to the
-//! scheme of the first `through`, as the TS decorators infer it),
+//! scheme of the first property's `through`, as the TS decorators
+//! infer it — `ad4m://` when nothing provides one),
 //! `target_class`, repeatable `constructor`/`destructor` `call(...)`s.
 //! Property `#[ad4m_property(...)]`: `through` (required), `name`,
 //! `required`, `collection`, `flag = "iri"` (a `has_value` constant,
 //! implies `required`), `read_only`, `writable`, `local`, `datatype`,
-//! `node_kind`, `relation_kind`, `alias`, `setter = call(...)`.
+//! `node_kind`, `relation_kind`, `alias(Key = "name")` (a `K = "v"`
+//! map), `setter = call(...)`.
 //! Relation `#[ad4m_relation(...)]`: `kind = one|many` (required —
 //! `many` also sets `collection`), `through`, plus the property options
 //! and `adder`/`remover = call(...)`. `call("interaction", source =
@@ -102,12 +104,15 @@ impl Parse for CallSpec {
     }
 }
 
-/// One `key`, `key = "value"`, `key = word` or `key = call(...)` item of
-/// an attribute's comma list.
+/// One `key`, `key = "value"`, `key = word`, `key = call(...)` or
+/// `key(K = "v", ...)` item of an attribute's comma list.
 enum AttrVal {
     Flag,
     Str(String),
     Call(CallSpec),
+    /// `alias(TextContent = "text", …)` — the `K = "v"` map; only
+    /// `alias` takes this form.
+    Map(Vec<(String, String)>),
 }
 
 struct AttrItem {
@@ -135,6 +140,23 @@ impl Parse for AttrItem {
                     "expected a string, a word, or `call(...)`",
                 ));
             }
+        } else if input.peek(syn::token::Paren) {
+            // `key(K = "v", …)` — a map, e.g. `alias(TextContent = "text")`.
+            let inner;
+            parenthesized!(inner in input);
+            let mut map = Vec::new();
+            while !inner.is_empty() {
+                let k: Ident = inner.parse()?;
+                inner.parse::<Token![=]>()?;
+                let v: LitStr = inner.parse()?;
+                map.push((k.to_string(), v.value()));
+                if inner.peek(Token![,]) {
+                    inner.parse::<Token![,]>()?;
+                } else {
+                    break;
+                }
+            }
+            AttrVal::Map(map)
         } else {
             AttrVal::Flag
         };
@@ -206,6 +228,17 @@ fn field_name(field: &syn::Field) -> String {
     raw.strip_prefix("r#").unwrap_or(&raw).to_string()
 }
 
+/// The `x://` scheme part of a `through`/`predicate` IRI — the TS
+/// `deriveNamespace` regex `^([^:]+:\/\/)`: the scheme holds no `:`,
+/// so `a:b://x` derives nothing.
+fn scheme_namespace(through: &str) -> Option<String> {
+    let pos = through.find("://")?;
+    if pos == 0 || through[..pos].contains(':') {
+        return None;
+    }
+    Some(format!("{}://", &through[..pos]))
+}
+
 fn opt_lit(v: &Option<String>) -> proc_macro2::TokenStream {
     match v {
         Some(s) => {
@@ -263,7 +296,18 @@ fn derive_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         }
     };
 
-    let mut props: Vec<proc_macro2::TokenStream> = Vec::new();
+    // `prop_ts` before `rel_ts` in the emitted shape — the TS generator
+    // lists every property before every relation, whichever order the
+    // fields declare. `first_{prop,rel}_through` feed the namespace
+    // fallback the TS way: `deriveNamespace` reads the first entry of
+    // the merged property map — which holds `ad4m_property`s AND the
+    // property shadow a `kind = one` relation registers (`HasOne` reads
+    // through its predicate as a property) — and consults relations
+    // only when that map is empty.
+    let mut prop_ts: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut rel_ts: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut first_prop_through: Option<String> = None;
+    let mut first_rel_through: Option<String> = None;
     for field in fields {
         let mut prop_attr = None;
         let mut rel_attr = None;
@@ -297,7 +341,7 @@ fn derive_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         let mut local = false;
         let mut node_kind: Option<String> = None;
         let mut relation_kind: Option<String> = None;
-        let mut alias: Option<String> = None;
+        let mut alias: Option<Vec<(String, String)>> = None;
         let mut datatype: Option<String> = None;
         let mut setters: Vec<&CallSpec> = Vec::new();
         let mut adders: Vec<&CallSpec> = Vec::new();
@@ -318,12 +362,24 @@ fn derive_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 ("local", AttrVal::Flag) => local = true,
                 ("node_kind", AttrVal::Str(v)) => node_kind = Some(v.clone()),
                 ("relation_kind", AttrVal::Str(v)) => relation_kind = Some(v.clone()),
-                ("alias", AttrVal::Str(v)) => alias = Some(v.clone()),
+                ("alias", AttrVal::Map(m)) => alias = Some(m.clone()),
+                ("alias", _) => {
+                    return Err(Error::new(
+                        item.key_span,
+                        "`alias` takes a `K = \"v\"` map — `alias(TextContent = \"text\")`",
+                    ))
+                }
                 ("datatype", AttrVal::Str(v)) => datatype = Some(v.clone()),
                 ("setter", AttrVal::Call(c)) => setters.push(c),
                 ("adder", AttrVal::Call(c)) => adders.push(c),
                 ("remover", AttrVal::Call(c)) => removers.push(c),
                 ("kind", AttrVal::Str(v)) if is_relation => kind = Some(v.clone()),
+                (k, AttrVal::Map(_)) => {
+                    return Err(Error::new(
+                        item.key_span,
+                        format!("`{k}` takes no `K = \"v\"` map — only `alias` does"),
+                    ))
+                }
                 (k, _) => {
                     return Err(Error::new(
                         item.key_span,
@@ -339,12 +395,16 @@ fn derive_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             )
         })?;
 
-        // The first `through` also provides the namespace fallback, as
-        // the TS decorators derive it: the scheme part (`x://`).
-        if namespace.is_none() {
-            if let Some(pos) = through.find("://") {
-                namespace = Some(format!("{}://", &through[..pos]));
-            }
+        // The first `through` each TS registry would see feeds the
+        // namespace fallback below: properties and `kind = one` shadows
+        // count toward the first property slot (`@HasOne` registers in
+        // `propertyRegistry` — a `HasMany` does not).
+        let prop_like = !is_relation || kind.as_deref() == Some("one");
+        if prop_like {
+            first_prop_through.get_or_insert_with(|| through.clone());
+        }
+        if is_relation {
+            first_rel_through.get_or_insert_with(|| through.clone());
         }
 
         // Cross-checks mirrored from the TS decorators: a read-only
@@ -382,41 +442,72 @@ fn derive_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     ))
                 }
             }
-            node_kind.get_or_insert_with(|| "IRI".into());
+            // A `datatype` relation holds encoded literal values — the
+            // TS `@HasMany({ datatype })` emits `node_kind: Literal`;
+            // everything else is a URI relation (`IRI`).
+            node_kind.get_or_insert_with(|| {
+                if datatype.is_some() {
+                    "Literal".into()
+                } else {
+                    "IRI".into()
+                }
+            });
         }
-        // A declared setter marks the property writable — a writer the
-        // mount exposes.
-        if !setters.is_empty() {
-            writable = true;
-        }
+        // The TS `writable` computation: `readOnly ? false : (through ?
+        // true : false)` — an ordinary `through` property is writable,
+        // `flag` and `read_only` are not. Relations never carry
+        // `writable` on the mount wire; a declared setter or the
+        // `writable` option still forces it.
+        writable =
+            writable || !setters.is_empty() || (!is_relation && !read_only && flag.is_none());
 
         let name_lit = LitStr::new(&prop_name, field.ident.as_ref().unwrap().span());
         let path_lit = LitStr::new(&through, field.ident.as_ref().unwrap().span());
         let flag_lit = opt_lit(&flag);
         let nk_lit = opt_lit(&node_kind);
         let rk_lit = opt_lit(&relation_kind);
-        let alias_lit = opt_lit(&alias);
+        let alias_ts = match &alias {
+            Some(map) => {
+                let pairs = map.iter().map(|(k, v)| {
+                    let k = LitStr::new(k, Span::call_site());
+                    let v = LitStr::new(v, Span::call_site());
+                    quote! { (#k, #v) }
+                });
+                quote! { &[ #(#pairs),* ] }
+            }
+            None => quote! { &[] },
+        };
         let dt_lit = opt_lit(&datatype);
         let setter_ts = call_tuples(&setters, Some("this"))?;
         let adder_ts = call_tuples(&adders, Some("this"))?;
         let remover_ts = call_tuples(&removers, Some("this"))?;
-        props.push(quote! {
+        let member_ts = quote! {
             shape.property(
                 #name_lit, #path_lit,
                 #required, #collection,
                 #flag_lit, #writable, #local,
-                #nk_lit, #rk_lit, #alias_lit, #dt_lit,
+                #nk_lit, #rk_lit, #alias_ts, #dt_lit,
                 &[ #(#setter_ts),* ], &[ #(#adder_ts),* ], &[ #(#remover_ts),* ],
             );
-        });
+        };
+        if is_relation {
+            rel_ts.push(member_ts);
+        } else {
+            prop_ts.push(member_ts);
+        }
     }
 
-    let namespace = namespace.ok_or_else(|| {
-        Error::new(
-            struct_name.span(),
-            "no `namespace` and no `through` to derive one from",
-        )
-    })?;
+    // The TS `deriveNamespace`: the first property's `through` scheme —
+    // a relation's `through` only when the class declares no property
+    // at all — else `ad4m://`.
+    let candidate = if first_prop_through.is_some() {
+        first_prop_through.as_deref()
+    } else {
+        first_rel_through.as_deref()
+    };
+    let namespace = namespace
+        .or_else(|| candidate.and_then(scheme_namespace))
+        .unwrap_or_else(|| "ad4m://".into());
     let target_class = target_class.unwrap_or_else(|| format!("{namespace}{name}"));
     let shape_uri = format!("{namespace}{name}Shape");
 
@@ -425,9 +516,10 @@ fn derive_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let name_lit = LitStr::new(&name, struct_name.span());
     let shape_uri_lit = LitStr::new(&shape_uri, struct_name.span());
     let target_class_lit = LitStr::new(&target_class, struct_name.span());
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
     Ok(quote! {
-        impl #struct_name {
+        impl #impl_generics #struct_name #ty_generics #where_clause {
             /// `{ name, shape }` for `mount.classes` — the mount SHACL
             /// shape `generateSHACL()` emits for the equivalent
             /// TS-decorated class.
@@ -437,7 +529,8 @@ fn derive_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 );
                 shape.constructor_actions(&[ #(#ctor_ts),* ]);
                 shape.destructor_actions(&[ #(#dtor_ts),* ]);
-                #(#props)*
+                #(#prop_ts)*
+                #(#rel_ts)*
                 ::ad4m_ldk::model::MountClassShape {
                     name: #name_lit.to_string(),
                     shape: shape.finish(),

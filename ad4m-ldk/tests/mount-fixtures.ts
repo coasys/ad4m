@@ -7,8 +7,13 @@
  * (jest) and `ad4m-ldk/js/tests/mount-classes.test.ts` (tsx).
  *
  * `GoldenRecord` exercises every property kind a mounted class can
- * declare. Its canonical `generateSHACL().shape.toJSON()` is the golden
- * fixture `ad4m-ldk/tests/golden_record_shape.json`, which the Rust
+ * declare — including the four parity edges round 2 added to the Rust
+ * derive: an alias map, a `datatype` hasMany (`node_kind` Literal),
+ * namespace inference (a relation declares before every property, yet
+ * the namespace still comes from the first property's `through`), and
+ * an ordinary writable property with no setter. Its canonical
+ * `generateSHACL().shape.toJSON()` is the golden fixture
+ * `ad4m-ldk/tests/golden_record_shape.json`, which the Rust
  * `#[derive(Ad4mModel)]` parity test produces as well — one class, one
  * JSON, two producers.
  *
@@ -55,7 +60,11 @@ export class MountThing {
 
 @Model({
     name: "GoldenRecord",
-    namespace: "mountgold://",
+    // No `namespace`: it derives from the first entry of the merged
+    // property map (`rdf://type` → `rdf://`). `members` declares before
+    // every property but is a `@HasMany` — it registers no property
+    // entry — so it never enters the namespace rule. The emitted shape
+    // still lists properties before relations.
     targetClass: "mountgold://Record",
     mount: true,
     constructorActions: [
@@ -65,6 +74,13 @@ export class MountThing {
     destructorActions: { interaction: "delete" },
 })
 export class GoldenRecord {
+    @HasMany({
+        through: "mountgold://member",
+        adder: { interaction: "add_member" },
+        remover: { interaction: "remove_member", params: { soft: true } },
+    })
+    members!: unknown[];
+
     @Flag({ through: "rdf://type", value: "mountgold://Record" })
     type!: string;
 
@@ -74,16 +90,18 @@ export class GoldenRecord {
     @Optional({ through: "mountgold://tag", collection: true, setter: { interaction: "update" } })
     tags!: string[];
 
+    // An ordinary writable property — `writable: true` — carrying an
+    // alias map for abstract-class conformance.
+    @Optional({ through: "mountgold://note", alias: { TextContent: "text" } })
+    note!: string;
+
     @ReadOnly({ through: "mountgold://created" })
     created!: string;
 
     @HasOne({ through: "mountgold://owner", readOnly: true })
     owner!: unknown;
 
-    @HasMany({
-        through: "mountgold://member",
-        adder: { interaction: "add_member" },
-        remover: { interaction: "remove_member", params: { soft: true } },
-    })
-    members!: unknown[];
+    // A `datatype` relation holds literal values — `node_kind` Literal.
+    @HasMany({ through: "mountgold://score", datatype: "xsd://integer" })
+    scores!: number[];
 }
