@@ -404,7 +404,9 @@ export class SfuManager {
                 }
                 await this.leaveSession()
                 if (generation !== this.generation) return // left or replaced meanwhile
-                this.resetParticipants()
+                // The people in the call have not changed: keep them, drop only
+                // the old connection's media. The rejoin's roster says who left.
+                this.clearMedia()
                 try {
                     await this.join(stream)
                     if (this.qualityPreference) await this.setQualityPreference(this.qualityPreference)
@@ -969,6 +971,19 @@ export class SfuManager {
         this.stop()
         await this.leaveSession()
         this.resetParticipants()
+    }
+
+    /** Take the old connection's tracks out of every participant's stream,
+     *  keeping the participants and their streams for the new connection. */
+    private clearMedia(): void {
+        for (const participant of this.state.participants.values()) {
+            for (const track of participant.stream.getTracks()) {
+                participant.stream.removeTrack(track)
+                this.emit("stream-removed", participant.stream, track)
+            }
+            this.refreshKinds(participant)
+        }
+        this.midToParticipant.clear()
     }
 
     /** Forget the call's participants, telling listeners each one left. */

@@ -1775,3 +1775,41 @@ test("a manager that left sends no restart for its old connection", async () => 
 
     expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
 })
+
+// ── A rebuild keeps the roster ──────────────────────────────────────────────
+
+test("a rebuild keeps the participants: nobody leaves, their media is cleared until the new connection brings it", async () => {
+    const api = fakeApi()
+    const { manager, joined, left, removed, participants } = recordedManager(api)
+    await manager.join(fakeStream())
+    api.emitRoster(roster([ALICE, BOB]))
+    await flush()
+    api.emitOffer(offer("tracks", [mapped("1", ALICE, "audio")]))
+    await flush()
+    const aliceTrack = new FakeTrack("audio")
+    currentPc().receive(aliceTrack, "1")
+    const alice = manager.getParticipants().find((p) => p.did === ALICE)!
+    expect(alice.hasAudio).toBe(true)
+
+    await iceState("failed")
+
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+    expect(left).toEqual([])
+    expect(joined).toEqual([ALICE, BOB])
+    expect(participants()).toEqual([ALICE, BOB])
+    // The same participant, and the same stream an app has attached, without the old track.
+    expect(manager.getParticipants().find((p) => p.did === ALICE)).toBe(alice)
+    expect(alice.stream.getTracks()).toEqual([])
+    expect(alice.hasAudio).toBe(false)
+    expect(removed).toEqual([[alice.stream, aliceTrack]])
+
+    // The new connection's media lands in that stream; the room's roster still decides who left.
+    api.emitOffer(offer("tracks-again", [mapped("1", ALICE, "audio")]))
+    await flush()
+    const again = new FakeTrack("audio")
+    currentPc().receive(again, "1")
+    expect(alice.stream.getTracks()).toEqual([again])
+    api.emitRoster(roster([ALICE]))
+    await flush()
+    expect(left).toEqual([BOB])
+})
