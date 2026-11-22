@@ -38,7 +38,10 @@ import { e22TwoDevices } from "../helpers/sfu/e2e/scenarios/e22-two-devices.js";
 import { e23MainAgentDevices } from "../helpers/sfu/e2e/scenarios/e23-main-agent-devices.js";
 import { e24SocketCut } from "../helpers/sfu/e2e/scenarios/e24-socket-cut.js";
 import { e25SocketSilent } from "../helpers/sfu/e2e/scenarios/e25-socket-silent.js";
-import { e26LostMessages } from "../helpers/sfu/e2e/scenarios/e26-lost-messages.js";
+import { e26LostAnswer } from "../helpers/sfu/e2e/scenarios/e26-lost-answer.js";
+import { e27LostOffer } from "../helpers/sfu/e2e/scenarios/e27-lost-offer.js";
+import { e28LostAnswerReply } from "../helpers/sfu/e2e/scenarios/e28-lost-answer-reply.js";
+import { e29MissedState } from "../helpers/sfu/e2e/scenarios/e29-missed-state.js";
 import type { Scenario } from "../helpers/sfu/scenario.js";
 
 /** `E2E_ONLY=e19,e21` runs only those scenarios; unset, all of them. */
@@ -369,6 +372,9 @@ describe("SFU: end to end through the SDK", function () {
   scenario(e23MainAgentDevices, 600_000);
   scenario(e24SocketCut, 600_000);
   scenario(e25SocketSilent, 600_000);
-  scenario(e26LostMessages, 600_000);
+  scenario(e26LostAnswer, 600_000);
+  scenario(e27LostOffer, 600_000);
+  scenario(e28LostAnswerReply, 600_000);
+  scenario(e29MissedState, 600_000);
   checkOnly();
 });
