@@ -180,16 +180,24 @@ impl PerspectiveInstance {
     }
 
     /// The own-link triple sets cached beside the registry, keyed by target
-    /// class IRI: `register_shapes` compares a registration's expected
+    /// class IRI, with the shapes generation they belong to (read under one
+    /// lock: `forget_derived_shapes` bumps the generation and drops the sets
+    /// together). `register_shapes` compares a registration's expected
     /// links against them for its fast path. Filled through
     /// `shape_registry` when cold. `None` when a fill raced a shape change
     /// and was not kept: the caller then takes the slow path.
-    fn shape_own_links(&self) -> Result<Option<Arc<OwnLinks>>, AnyError> {
-        if let Some(own_links) = &self.abstract_cache.read().unwrap().own_links {
-            return Ok(Some(own_links.clone()));
+    fn shape_own_links(&self) -> Result<Option<(Arc<OwnLinks>, u64)>, AnyError> {
+        let snapshot = |cache: &super::abstract_classes::AbstractCache| {
+            cache
+                .own_links
+                .clone()
+                .map(|own_links| (own_links, cache.generation))
+        };
+        if let Some(cached) = snapshot(&self.abstract_cache.read().unwrap()) {
+            return Ok(Some(cached));
         }
         self.shape_registry()?;
-        Ok(self.abstract_cache.read().unwrap().own_links.clone())
+        Ok(snapshot(&self.abstract_cache.read().unwrap()))
     }
 
     /// The registered classes `names` names (all of them for `None`), each
@@ -318,7 +326,7 @@ impl PerspectiveInstance {
         // committed after it — the answer describes the state just before
         // its commit, what this call would see had it taken the mutex
         // first.
-        if let Some(own_links) = self.shape_own_links()? {
+        if let Some((own_links, generation)) = self.shape_own_links()? {
             let all_unchanged = expected.iter().all(|(target_class, links)| {
                 let wanted: BTreeSet<Triple> = links.iter().map(triple).collect();
                 own_links.get(target_class) == Some(&wanted)
@@ -328,7 +336,7 @@ impl PerspectiveInstance {
                 return Ok(RegisterResult {
                     unchanged: expected.keys().cloned().collect(),
                     written: Vec::new(),
-                    generation: self.shapes_generation(),
+                    generation,
                 });
             }
         }

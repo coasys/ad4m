@@ -2465,17 +2465,19 @@ impl PerspectiveInstance {
             self.persist_link_diff(&diff)
                 .await?
                 .fold_into(&mut decorated_diff);
+            // An update publishes its own topic rather than going through
+            // `pubsub_publish_diff`, so it drops the cached shapes itself:
+            // here, before the next await, so a caller that cancels cannot
+            // leave the write committed and the cache stale.
+            if inbound_touches_shacl(&decorated_diff) {
+                self.clear_shape_cache();
+            }
 
             // Queue the Prolog fact update and the notification + live-query checks
             self.update_prolog_engines(decorated_diff.clone()).await;
 
-            // An update publishes its own topic rather than going through
-            // `pubsub_publish_diff`, so it queues the definition sweep and
-            // the SHACL invalidation here.
+            // For the same reason, it queues the definition sweep here.
             self.schedule_flow_pass_on_definition_change(&decorated_diff);
-            if inbound_touches_shacl(&decorated_diff) {
-                self.clear_shape_cache();
-            }
 
             // One event, to all of the owners.
             super::publish_to_owners(
