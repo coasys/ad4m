@@ -1162,6 +1162,44 @@ test("a rejoin that keeps failing reports the error after the window, its connec
     }
 })
 
+test("a rejoin that runs out the window ends the call like a spent budget: error, then call-ended gave-up", async () => {
+    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
+    try {
+        const api = fakeApi()
+        const { manager, left, participants } = recordedManager(api)
+        const order: string[] = []
+        manager.on("participant-left", (p: SfuParticipantState) => order.push(`left:${p.did}`))
+        manager.on("error", () => order.push("error"))
+        const ended: unknown[] = []
+        manager.on("call-ended", (event: unknown) => { ended.push(event); order.push("call-ended") })
+        await manager.join(fakeStream())
+        api.emitRoster(roster([ALICE, BOB]))
+        await flush()
+        api.sfuCallJoin.mockRejectedValue(new Error("Room is full"))
+
+        await iceState("failed")
+        await jest.advanceTimersByTimeAsync(130_000)
+
+        // The same terminal give-up as a spent budget: the participants are
+        // told first — no rejoin means no roster will settle them — then the
+        // error, then call-ended gave-up, and no later signal rebuilds it.
+        expect(order).toEqual(["left:did:key:alice", "left:did:key:bob", "error", "call-ended"])
+        expect(ended).toEqual([{ reason: "gave-up", error: new Error("Room is full") }])
+        expect(left).toEqual([ALICE, BOB])
+        expect(participants()).toEqual([])
+        expect(FakePeerConnection.instances.every((pc) => pc.closed)).toBe(true)
+        expect(manager.getState().participantId).toBeNull()
+
+        const joins = api.sfuCallJoin.mock.calls.length
+        api.emitNetworkChange()
+        api.emitReconnect()
+        await jest.advanceTimersByTimeAsync(30_000)
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(joins)
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
 test("a rebuild that gives up tells listeners everyone left", async () => {
     // A rebuild keeps the participants for the rejoin's roster to settle. When
     // no rejoin succeeds, no roster comes, so the participants must go here.
