@@ -853,16 +853,21 @@ impl SfuService {
                         // timeout only removes the entry. A pipe that stayed
                         // usable for the healthy interval starts that count
                         // again.
-                        let mut mgr = self.cascade_manager.write().await;
-                        if let Some(since) = dead.usable_since {
-                            mgr.note_pipe_connected(&room_key, &dead.agent_did, since);
+                        // The guard ends before the roster publish. That
+                        // publish reads `cascade_manager` on this same task,
+                        // and a tokio `RwLock` does not reenter.
+                        {
+                            let mut mgr = self.cascade_manager.write().await;
+                            if let Some(since) = dead.usable_since {
+                                mgr.note_pipe_connected(&room_key, &dead.agent_did, since);
+                            }
+                            mgr.on_pipe_died(
+                                &room_key,
+                                &dead.agent_did,
+                                dead.reason,
+                                Instant::now(),
+                            );
                         }
-                        mgr.on_pipe_died(
-                            &room_key,
-                            &dead.agent_did,
-                            dead.reason,
-                            Instant::now(),
-                        );
                         self.republish_roster(&room_key, "drop").await;
                     } else {
                         self.remove_dead_participant(dead).await;
@@ -2484,6 +2489,56 @@ mod tests {
             next_roster(&mut events, url).await,
             serde_json::json!([{ "agentDid": "did:a", "participantId": local }])
         );
+    }
+
+    /// A pipe death in a room this node serves republishes the roster, and
+    /// a later roster read returns. The cleanup takes the cascade write
+    /// lock to record the death; the publish reads that lock. Both have to
+    /// finish.
+    #[tokio::test]
+    async fn a_pipe_death_in_a_served_room_republishes_the_roster() {
+        let svc = test_service().await;
+        let url = "neighbourhood://pipe-death-roster";
+        let local = join(&svc, url, "did:a", "laptop").await;
+        assert_eq!(
+            sessions(&svc, url).await.len(),
+            1,
+            "the room is served on this node"
+        );
+        let mut events = crate::pubsub::get_global_pubsub().await.subscribe_events();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(svc.clone().run_cascade_cleanup(rx));
+        let room_id = RoomId::new(url, "r");
+        tx.send(super::super::server::DeadPeer {
+            room_id: room_id.clone(),
+            agent_did: "did:remote-node".into(),
+            participant_id: ParticipantId::next(),
+            is_pipe: true,
+            reason: "drop",
+            usable_since: None,
+        })
+        .expect("the cleanup is still receiving");
+
+        let republished = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let event = events.recv().await.expect("the roster stream closed");
+                if event.topic == Topic::SfuRoomRoster && event.payload["neighbourhoodUrl"] == url {
+                    return event;
+                }
+            }
+        })
+        .await;
+        let event = republished
+            .expect("timeout: a pipe death in a served room did not republish the roster");
+        assert_eq!(
+            event.payload["participants"],
+            serde_json::json!([{ "agentDid": "did:a", "participantId": local }])
+        );
+
+        let snapshot = tokio::time::timeout(Duration::from_secs(3), svc.roster_snapshot(&room_id))
+            .await
+            .expect("timeout: a roster read after the pipe death did not return");
+        assert_eq!(snapshot.local.len(), 1);
     }
 
     /// Two joins from the same device overlap: the second replaces the
