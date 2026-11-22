@@ -183,6 +183,9 @@ async function run(command: Command): Promise<unknown> {
     case "networkChanged":
       (globalThis as unknown as EventTarget).dispatchEvent(new Event("online"));
       return;
+    case "probe":
+      await client!.agent.me();
+      return;
     case "snapshot":
       return snapshot();
     case "close":

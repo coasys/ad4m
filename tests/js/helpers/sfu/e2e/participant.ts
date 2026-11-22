@@ -88,6 +88,8 @@ export class Participant {
   snapshot(): Promise<Snapshot> { return this.send<Snapshot>({ kind: "snapshot" }); }
   /** Tell the process its network changed, as a browser's `online` event does. */
   networkChanged(): Promise<void> { return this.send({ kind: "networkChanged" }); }
+  /** One RPC over the participant's app socket; resolves once it is answered. */
+  probe(): Promise<void> { return this.send({ kind: "probe" }); }
 
   /** End the process at once, as a closed tab or a lost device does: no leave, no goodbye. */
   kill(): void {
