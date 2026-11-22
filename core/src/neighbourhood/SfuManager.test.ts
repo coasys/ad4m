@@ -3162,6 +3162,37 @@ test("a resume the socket fails (503) changes nothing: the next reconnect asks a
     await manager.leave()
 })
 
+test("an unlisted-session ask the socket faults is asked again within the grace, not left for a reconnect", async () => {
+    // The roster still omits this session and the ask's reply never arrived
+    // (408): nothing resolved the omission, so the grace asks again rather
+    // than waiting for a socket reconnect — and the fault alone rebuilds
+    // nothing.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        api.sfuCallResume.mockRejectedValueOnce(new RpcError(408, "request timed out"))
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await flush()
+        await jest.advanceTimersByTimeAsync(3_000)
+        await flush()
+        await flush()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+
+        await jest.advanceTimersByTimeAsync(3_000)
+        await flush()
+        await flush()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(2)
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
 test("a resume refused with 403 ends the call, not a rebuild: the session is another agent's", async () => {
     const api = fakeApi()
     api.sfuCallResume.mockRejectedValue(new RpcError(403, "Session P1 belongs to another agent"))
