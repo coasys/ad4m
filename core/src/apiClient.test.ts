@@ -1068,6 +1068,41 @@ describe('ApiClient on a network change', () => {
         expect(socket(0).sent.at(-1)?.type).toBe('ping')
     })
 
+    // Desktop Chromium exposes no `type`: a Wi-Fi-to-Ethernet switch fires
+    // `change` with the reported key unmoved, as a moved estimate does. The
+    // socket decides which it was — its drop redials, its answer keeps it;
+    // the estimate itself never marks a change.
+    it('judges the socket on a change with the same reported state when the platform hides connection.type', () => {
+        const changed = jest.fn()
+        client.onNetworkChange(changed)
+        open()
+        socket(0).open()
+
+        connection.dispatchEvent(new Event('change'))
+        expect(socket(0).sent.at(-1)?.type).toBe('ping')
+        expect(changed).not.toHaveBeenCalled()
+        // The socket stays silent on the path that went: the probe drops
+        // it and redials — socket evidence, so no onNetworkChange.
+        jest.advanceTimersByTime(9_000)
+        expect(TestSocket.instances).toHaveLength(2)
+        expect(changed).not.toHaveBeenCalled()
+    })
+
+    it('keeps a socket that answers the probe a type-less change ran, and marks nothing', () => {
+        TestSocket.answersPings = true
+        const changed = jest.fn()
+        client.onNetworkChange(changed)
+        open()
+        socket(0).open()
+
+        connection.dispatchEvent(new Event('change'))
+        expect(socket(0).sent.at(-1)?.type).toBe('ping')
+        socket(0).reply({ type: 'pong' })
+        jest.advanceTimersByTime(9_000)
+        expect(TestSocket.instances).toHaveLength(1)
+        expect(changed).not.toHaveBeenCalled()
+    })
+
     it('redials at once on "online": a sent write fails, a sent read is resent, and onNetworkChange fires once the new socket opens', async () => {
         const changed = jest.fn()
         client.onNetworkChange(changed)
