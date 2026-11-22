@@ -1,6 +1,6 @@
-# Flow spawn and guards
+# Flow spawn and transition guards
 
-A flow instance starts in one of two ways. A client starts it by hand (`FlowInstance.start` in the SDK), or the executor **spawns** it after an interpretation run. Spawn happens when a newly created instance's subject class is in the flow's `inputTypes`. After the same run, the **flow evaluator** checks the **guards** of the states reachable from each affected flow instance. It writes a transition proposal for every guard that now holds. An optional **semantic check** asks the LLM to confirm a transition first.
+A flow instance starts in one of two ways. A client starts it by hand (`FlowInstance.start` in the SDK), or the executor **spawns** it after an interpretation run. Spawn happens when a newly created instance's subject class is in the flow's `inputTypes`. After the same run, the **flow evaluator** checks the **transition guards** of the states reachable from each affected flow instance. It writes a transition proposal for every transition guard that now holds. An optional **semantic check** asks the LLM to confirm a transition first.
 
 **Why:** Interpretation writes the evidence (a scope, a deliverable), but an LLM often forgets to propose the transition that the evidence allows. A deterministic pass after every run keeps flows moving without trusting the LLM's own proposals. Spawn needs an explicit class match, so automatic starts stay opt-in; a catch-all flow would otherwise start on every instance.
 
@@ -17,14 +17,14 @@ A flow instance starts in one of two ways. A client starts it by hand (`FlowInst
 
 Spawn runs only after interpretation: an instance that app code creates does not auto-spawn a flow; the app calls `FlowInstance.start`.
 
-Before the run, `flow_context` loads the live instances in the run's scope and renders an "Active flows" block into the prompt, with the next states and their guards in plain English.
+Before the run, `flow_context` loads the live instances in the run's scope and renders an "Active flows" block into the prompt, with the next states and their transition guards in plain English.
 
 </details>
 
 <details><summary>Where in the code</summary>
 
 - [perspectives/flow_spawn.rs](../../../../rust-executor/src/perspectives/flow_spawn.rs): `spawn_candidates`, `run_flow_spawn_pass`, `created_bases_of`, `initial_state_of`.
-- [perspectives/flow_evaluator.rs](../../../../rust-executor/src/perspectives/flow_evaluator.rs): guard evaluation and proposal writing.
+- [perspectives/flow_evaluator.rs](../../../../rust-executor/src/perspectives/flow_evaluator.rs): transition guard evaluation and proposal writing.
 - [perspectives/flow_semantic_check.rs](../../../../rust-executor/src/perspectives/flow_semantic_check.rs): the yes/no LLM confirmation.
 - [perspectives/flow_context/](../../../../rust-executor/src/perspectives/flow_context): `FlowContext`, `FlowInstanceRecord`, prompt rendering ([render.rs](../../../../rust-executor/src/perspectives/flow_context/render.rs)), loading ([loader.rs](../../../../rust-executor/src/perspectives/flow_context/loader.rs)).
 - [perspectives/flow_classes.rs](../../../../rust-executor/src/perspectives/flow_classes.rs): `mint_flow_instance`.

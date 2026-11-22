@@ -19,7 +19,7 @@
 3. Call the LLM through the AI service's interpretation task (`ensure_interpretation_task_for_model`; see [AI service](../../../agents/executor/services/ai.md)). Make up to 5 attempts when the JSON does not parse (`retry_interpretation_parse`).
 4. Drop proposals already present, then plan the writes: an `id` means update, no `id` means create; relation values resolve to existing ids or `new:<Class>:<n>` refs (`plan_interpretation_ops_with_context`).
 5. Drop no-op updates; apply all writes in one batch with overlays (`apply_with_overlay`).
-6. Run flow spawn and the flow evaluator ([Flow spawn and guards](../flows/spawn-and-guards.md)).
+6. Run flow spawn and the flow evaluator ([Flow spawn and transition guards](../flows/spawn-and-guards.md)).
 
 The RPC answers after all six steps: its handler awaits `run_interpretation_observed`, which runs `apply_ops_and_run_flow_passes`, and returns only the written base URIs.
 

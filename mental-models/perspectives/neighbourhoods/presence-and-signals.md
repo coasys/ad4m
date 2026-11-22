@@ -10,7 +10,7 @@
 
 | RPC | Behaviour |
 |---|---|
-| `neighbourhood.setOnlineStatus` | sign the status as the caller; keep it per agent in `hosted_status`; publish one **bundle** with the signed statuses of all active hosted agents through the link language |
+| `neighbourhood.setOnlineStatus` | sign the status as the caller; keep it per agent in `hosted_status`; publish one **bundle** with the signed statuses of all active managed agents through the link language |
 | `neighbourhood.onlineAgents` | the link language's online agents, by the link language's own rule (bundles unpacked, each bundled status kept only if its signature verifies), plus co-owners whose `last_seen` is less than 300 s old (`LOCAL_ONLINE_THRESHOLD_SECS`); an authenticated API call writes `last_seen` at most once per 300 s (`LAST_SEEN_WRITE_THROTTLE_S`) |
 | `neighbourhood.ownOnlineStatus` | the caller's last status on this executor |
 | `neighbourhood.otherAgents` | the link language's `others()` plus all `owners`, without the caller; needs neighbourhood READ on a perspective the caller reaches (`Owns { Perspective }`, as every method here) |

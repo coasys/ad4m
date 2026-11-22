@@ -1,6 +1,6 @@
 # Flows
 
-A **flow** (`SHACLFlow`) is a state machine stored as SDNA: named states with values, transitions, optional **guards** (model queries that must match) and a **consensus rule** (how many distinct DIDs, optionally holding a role, must sign). A **flow instance** binds one flow to one **base**. No link stores the instance's current state; every executor **derives** it from the signed **transition proposals** and votes in the perspective.
+A **flow** (`SHACLFlow`) is a state machine stored as SDNA: named states with values, transitions, optional **transition guards** (model queries that must match) and a **consensus rule** (how many distinct DIDs, optionally holding a role, must sign). A **flow instance** binds one flow to one **base**. No link stores the instance's current state; every executor **derives** it from the signed **transition proposals** and votes in the perspective.
 
 **Why:** A group process, such as a task moving to "done", must reach the same answer on every executor without a coordinator. State derived from signed links is the same for anyone with the same links, also for a verifier outside the neighbourhood.
 
@@ -8,13 +8,13 @@ A **flow** (`SHACLFlow`) is a state machine stored as SDNA: named states with va
 
 ## Parts
 - [Flow consensus](consensus.md): proposals, votes, role gates, and the fold that derives a flow instance's state.
-- [Flow spawn and guards](spawn-and-guards.md): how flow instances start (by hand or after interpretation), and how guards write proposals.
+- [Flow spawn and transition guards](spawn-and-guards.md): how flow instances start (by hand or after interpretation), and how transition guards write proposals.
 - [Flow receipts](receipts.md): the record a finished flow run leaves, and how any executor checks it.
 
 <details><summary>How it works</summary>
 
 ```
-SHACLFlow (SDNA, has_flow)              ── states, transitions, guards, consensusRule
+SHACLFlow (SDNA, has_flow)              ── states, transitions, transition guards, consensusRule
    │
 FlowInstance  ad4m://flow/instance/{id} ── subject = base (e.g. a Task)
    │

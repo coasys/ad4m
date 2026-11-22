@@ -5,7 +5,7 @@ The **wallet** stores every Ed25519 key of the executor by name: `main` for the 
 - `LocalWallet` holds the keys in memory and writes them as an encrypted **keystore** into `agent.json`. It is **locked** until the operator gives the passphrase. A locked wallet cannot sign or check a token.
 - `SharedWallet` fetches keys over HTTP from a **hosting service**. It is never locked.
 
-**Why:** All keys of one executor sit in one keystore under one passphrase, so one unlock makes every hosted agent usable. A managed agent is an account on the executor: in a local wallet the operator's passphrase encrypts its key, and the code has no key export. A managed agent's key is named by its DID, so no lookup goes through an email. A shared wallet cannot rename keys, so there a managed agent's key keeps the user's email as its name.
+**Why:** All keys of one executor sit in one keystore under one passphrase, so one unlock makes every managed agent usable. A managed agent is an account on the executor: in a local wallet the operator's passphrase encrypts its key, and the code has no key export. A managed agent's key is named by its DID, so no lookup goes through an email. A shared wallet cannot rename keys, so there a managed agent's key keeps the user's email as its name.
 
 **Parent:** [Identity](README.md)
 

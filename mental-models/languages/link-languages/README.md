@@ -25,7 +25,7 @@ A link language exports `perspectiveCommit`, and usually `perspectiveSyncSync`, 
 
 1. Remote diffs reach the executor through `emitPerspectiveDiff(diff)` or the `linkSyncAddCallback` setter; both end in op `perspective_diff_received`.
 2. `handle_perspective_diff_from_link_language` finds the perspective for the address and calls `diff_from_link_language`, which stores the links as `Shared` ([Link write path](../../perspectives/links/write-path.md)). The routing cache `LINK_LANG_TO_PERSPECTIVE_HANDLE` holds one perspective per address; on a miss it takes the first perspective whose `neighbourhood.data.link_language` equals the address. Join reuses a perspective by neighbourhood URL, which makes a second local agent a co-owner.
-3. Sync state has two writers. The executor sets `Synced` after every successful `sync()` call (`nh_sync_loop`). The language reports state through `emitSyncStateChange`; p-diff-sync reports `LinkLanguageInstalledButNotSynced` when peer revisions differ. The last write sets the perspective's state.
+3. The perspective state has two writers. The executor sets `Synced` after every successful `sync()` call (`nh_sync_loop`). The language reports its **link language sync status** through `emitSyncStateChange`; p-diff-sync reports `LinkLanguageInstalledButNotSynced` when peer revisions differ. The last write sets the perspective's state.
 4. Telepresence signals go back through `emitTelepresenceSignal`.
 
 </details>

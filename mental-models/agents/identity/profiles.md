@@ -1,6 +1,6 @@
 # Agent profiles
 
-An **agent profile** is the `Agent` record: a DID, its **public perspective** (signed links that describe the agent) and the address of its **direct-message language**. The executor stores the profile on disk and publishes it as an expression of the **agent language**, keyed by the DID. `agent.byDid` reads the main agent's profile from memory and every other profile from the agent language.
+An **agent profile** is a DID, its **public perspective** (signed links that describe the agent) and the address of its **direct-message language** (the `Agent` type in the SDK). The executor stores the profile on disk and publishes it as an expression of the **agent language**, keyed by the DID. `agent.byDid` reads the main agent's profile from memory and every other profile from the agent language.
 
 **Why:** Other agents find a profile by DID alone. The agent language behind the lookup can be a Holochain DNA, a central service or a local stub. The default agent language (`centralized-agent-language`) posts profiles over HTTP to a development profile directory ([Agent languages](../../languages/other-kinds/agent-languages.md)).
 

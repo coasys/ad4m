@@ -124,7 +124,7 @@ Beside agents, languages and perspectives, the executor holds AI, SFU, Holochain
       - [Subject classes](perspectives/social-dna/subject-classes.md)
       - [Flows](perspectives/social-dna/flows/README.md)
         - [Flow consensus](perspectives/social-dna/flows/consensus.md)
-        - [Flow spawn and guards](perspectives/social-dna/flows/spawn-and-guards.md)
+        - [Flow spawn and transition guards](perspectives/social-dna/flows/spawn-and-guards.md)
         - [Flow receipts](perspectives/social-dna/flows/receipts.md)
       - [Interpretation](perspectives/social-dna/interpretation/README.md)
         - [Interpretation overlay](perspectives/social-dna/interpretation/overlay.md)
