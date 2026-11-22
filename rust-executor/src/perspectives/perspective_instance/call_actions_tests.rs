@@ -222,10 +222,34 @@ async fn a_constructor_must_return_an_address() {
         .create_subject(class("MountBad"), "ignored".to_string(), None, None, &ctx)
         .await
         .unwrap_err();
+    // An array is a malformed result: the call ran, so the error says so.
+    let err = err.to_string();
     assert!(
-        err.to_string().contains("create returned no address"),
+        err.contains("the call succeeded but its result was malformed"),
         "{err}"
     );
+    assert!(err.contains("names no address"), "{err}");
+}
+
+#[tokio::test]
+async fn a_malformed_create_result_keeps_its_address() {
+    let lang = load_mount_test_language().await;
+    let (mut p, ctx) = mounted("MountThing", thing_shape(&lang).await).await;
+
+    // `malformed` makes `create` answer a `changed` entry without a
+    // `class`: not a `MountDelta`, but its `address` names the record.
+    let url = p
+        .create_subject(
+            class("MountThing"),
+            "ignored".to_string(),
+            Some(json!({"title": "a", "malformed": true})),
+            None,
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert_eq!(url, Some(format!("{lang}://t1")));
+    assert_eq!(calls(&lang).await.len(), 1);
 }
 
 #[tokio::test]
@@ -305,6 +329,39 @@ async fn a_request_without_expression_update_may_not_make_a_call() {
     .await
     .unwrap();
     assert_eq!(url, Some(format!("{lang}://t1")));
+}
+
+#[test]
+fn a_call_result_parses_or_says_why_not() {
+    use super::call_actions::parse_call_result;
+
+    let none = parse_call_result(None);
+    assert_eq!(
+        none.delta,
+        crate::languages::mount_types::MountDelta::default()
+    );
+    assert!(none.malformed.is_none());
+    assert!(parse_call_result(Some("null")).malformed.is_none());
+
+    let good = parse_call_result(Some(
+        r#"{"address":"a","changed":[{"class":"C","address":"a","data":{}}]}"#,
+    ));
+    assert!(good.malformed.is_none());
+    assert_eq!(good.delta.changed.len(), 1);
+
+    // A bad `changed` entry drops the delta but keeps the address.
+    let bad_changed = parse_call_result(Some(r#"{"address":"a","changed":[{"address":"a"}]}"#));
+    assert!(bad_changed.malformed.is_some());
+    assert_eq!(bad_changed.delta.address.as_deref(), Some("a"));
+    assert!(bad_changed.delta.changed.is_empty());
+
+    // A bad `address` is lost, and said so.
+    let bad_address = parse_call_result(Some(r#"{"address":42}"#));
+    assert!(bad_address.malformed.is_some());
+    assert_eq!(bad_address.delta.address, None);
+
+    assert!(parse_call_result(Some("[1]")).malformed.is_some());
+    assert!(parse_call_result(Some("not json")).malformed.is_some());
 }
 
 #[tokio::test]

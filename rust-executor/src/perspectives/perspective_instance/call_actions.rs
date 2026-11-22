@@ -92,6 +92,61 @@ impl CallGroup {
     }
 }
 
+/// What one call answered: its `MountDelta`, and why its result did
+/// not parse as one, if it did not.
+pub(super) struct CallAnswer {
+    pub(super) delta: MountDelta,
+    pub(super) malformed: Option<String>,
+}
+
+/// The `CallAnswer` of a call that returned `result`. No result, or JSON
+/// `null`, is no delta: accepted, the next resync picks the change up
+/// (§3.4). A result that is not a `MountDelta` object is malformed: the
+/// call still happened, so it is not an error here, but its delta is
+/// dropped and its `address`, when that alone is a string, kept.
+pub(super) fn parse_call_result(result: Option<&str>) -> CallAnswer {
+    let malformed = |delta: MountDelta, why: String| CallAnswer {
+        delta,
+        malformed: Some(why),
+    };
+    let Some(text) = result else {
+        return CallAnswer {
+            delta: MountDelta::default(),
+            malformed: None,
+        };
+    };
+    let value = match serde_json::from_str::<Value>(text) {
+        Ok(Value::Null) => {
+            return CallAnswer {
+                delta: MountDelta::default(),
+                malformed: None,
+            }
+        }
+        Ok(value @ Value::Object(_)) => value,
+        Ok(_) => return malformed(MountDelta::default(), "not a JSON object".into()),
+        Err(e) => return malformed(MountDelta::default(), format!("not JSON: {e}")),
+    };
+    match serde_json::from_value::<MountDelta>(value.clone()) {
+        Ok(delta) => CallAnswer {
+            delta,
+            malformed: None,
+        },
+        Err(e) => {
+            let address = value
+                .get("address")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            malformed(
+                MountDelta {
+                    address,
+                    ..MountDelta::default()
+                },
+                e.to_string(),
+            )
+        }
+    }
+}
+
 impl PerspectiveInstance {
     /// Split `commands` into call actions and link actions. A list that
     /// contains a call must contain only calls — anything else would be a
@@ -215,13 +270,13 @@ impl PerspectiveInstance {
     /// Run `calls` in order and hand each returned `MountDelta` to
     /// `apply_call_delta`. A caller batch is refused before the first
     /// call: a language call cannot be rolled back with the batch's
-    /// links. Returns the deltas in call order.
+    /// links. Returns the answers in call order.
     pub(super) async fn run_call_actions(
         &self,
         calls: &[CallRun],
         batch_id: Option<&str>,
         context: &AgentContext,
-    ) -> Result<Vec<MountDelta>, AnyError> {
+    ) -> Result<Vec<CallAnswer>, AnyError> {
         if calls.is_empty() {
             return Ok(Vec::new());
         }
@@ -229,22 +284,29 @@ impl PerspectiveInstance {
         if batch_id.is_some() {
             return Err(anyhow!("call actions cannot run inside a batch"));
         }
-        let mut deltas = Vec::with_capacity(calls.len());
+        let mut answers = Vec::with_capacity(calls.len());
         for run in calls {
-            let delta = self.execute_call(run).await?;
+            let answer = self.execute_call(run).await?;
             let (lang, _) = LanguageController::parse_expr_url(&run.source)
                 .map_err(|e| anyhow!("call action source {:?}: {e}", run.source))?;
-            self.apply_call_delta(&lang, &delta, context).await;
-            deltas.push(delta);
+            if let Some(why) = &answer.malformed {
+                log::warn!(
+                    "call {} on {}: the call succeeded but its result is not a delta ({why}); \
+                     its changes wait for the next resync",
+                    run.name,
+                    run.source
+                );
+            }
+            self.apply_call_delta(&lang, &answer.delta, context).await;
+            answers.push(answer);
         }
-        Ok(deltas)
+        Ok(answers)
     }
 
     /// One call: `run.name` on `run.source` with `run.params` as the
-    /// single JSON object argument. Returns the `MountDelta` the language
-    /// answered, an empty one when the result is no delta object at all —
-    /// accepted, the next resync picks the change up (§3.4).
-    async fn execute_call(&self, run: &CallRun) -> Result<MountDelta, AnyError> {
+    /// single JSON object argument. Returns what the language answered
+    /// (`parse_call_result`).
+    async fn execute_call(&self, run: &CallRun) -> Result<CallAnswer, AnyError> {
         // `expression_interact` takes no agent context, so the call runs
         // as the executor's main agent: whatever the language signs or
         // writes during it (zome calls, its own links) is the main agent's.
@@ -260,13 +322,7 @@ impl PerspectiveInstance {
             )
             .await
             .map_err(|e| anyhow!("{e}"))?;
-        let Some(text) = result else {
-            return Ok(MountDelta::default());
-        };
-        let Ok(value) = serde_json::from_str::<Value>(&text) else {
-            return Ok(MountDelta::default());
-        };
-        Ok(serde_json::from_value(value).unwrap_or_default())
+        Ok(parse_call_result(result.as_deref()))
     }
 
     /// Where the delta a `call` returns becomes links. A stub until A4:
@@ -307,11 +363,20 @@ impl PerspectiveInstance {
             // A constructor has no instance for `source: "this"` to mean.
             calls.push(Self::call_run(command, None, values.clone(), &where_)?);
         }
-        let deltas = self
+        let answers = self
             .run_call_actions(&calls, batch_id.as_deref(), context)
             .await?;
-        let Some(address) = deltas.first().and_then(|d| d.address.clone()) else {
-            return Err(anyhow!("create returned no address"));
+        let first = answers.first();
+        let Some(address) = first.and_then(|a| a.delta.address.clone()) else {
+            // The record may exist in the language now: say so, so a
+            // client does not retry and make a second one.
+            return Err(match first.and_then(|a| a.malformed.as_deref()) {
+                Some(why) => anyhow!(
+                    "{where_}: the call succeeded but its result was malformed ({why}) and \
+                     names no address; the record may exist, do not retry"
+                ),
+                None => anyhow!("create returned no address"),
+            });
         };
         let (scheme, _) =
             LanguageController::parse_expr_url(&calls[0].source).map_err(|e| anyhow!("{e}"))?;

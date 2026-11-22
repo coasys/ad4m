@@ -35,6 +35,8 @@ export function interactions(address) {
         counter += 1;
         const id = "t" + counter;
         records.set(id, { title: p.title ?? null, done: p.done ?? false, tags: p.tags ?? [] });
+        // A result that is not a MountDelta: its changed entry has no class.
+        if (p.malformed) return { address: id, changed: [{ address: id, data: records.get(id) }] };
         return delta(id);
       },
     }];
