@@ -78,6 +78,7 @@ fn check_keys(chain: &KelChain, did: &str, key_ids: &[KeyId]) -> Result<(), Clie
 /// log. The record write after the publish reads the newest version with its receipt: a
 /// version a revoked key wrote before the revocation still opens (the writer is checked at
 /// the seq the store accepted it), so the write builds on it and keeps what it says.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn revoke_with<R: ExecutorRpc>(
     executor: &ViaExecutor<R>,
     vault: &dyn Vault,

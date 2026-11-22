@@ -102,6 +102,20 @@ export class IdentityClient {
         return this.#apiClient.call("identity.publish", { events: events as any[] });
     }
 
+    /**
+     * This executor's device key leaves the agent's identity, signed with the key itself: no
+     * master key. The key is dead on this executor from then on and the agent is signed out
+     * (every session and app token of it ends, this call's included once it answers): the main
+     * agent gets a new `did:key`, a user's agent needs a new one to be used again. Answers the
+     * log's head after the `unlink`. 409 `no-identity` for an agent without an identity,
+     * `not-listed` for a key the log does not list, `key-dead` for a key already unlinked or
+     * revoked. A user's session for its own agent or the operator (the admin credential, for
+     * the main agent), never an app token: 403 for an app, even one the user approved.
+     */
+    async unlinkSelf(): Promise<SignedHead> {
+        return this.#apiClient.call("identity.unlinkSelf", {});
+    }
+
     async openOffer(signedOffer: SignedOffer): Promise<OfferOpened> {
         return this.#apiClient.call("identity.openOffer", { signedOffer });
     }
