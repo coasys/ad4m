@@ -85,6 +85,7 @@ handler. `HandlerMap::admit` runs the steps before the handler alone.
 | `Cap(cap)` | none: any caller holding `cap`. An anonymous caller holds only the anonymous set (request a capability, redeem it, sign up, log in, verify an email); the handler acts on `ctx.acts_as()` |
 | `Executor(cap)` | the operator or a grant on the main agent: 403 naming the method to a session on a managed agent, whatever its capabilities, and to an anonymous caller. A grant on the main agent passes (D5): WE web administers a local executor with an app token holding `*` |
 | `UserOrOperator(cap)` | the operator, or a session on a managed agent (a user, or an app the user approved): 403 "<method> for the main agent needs the admin credential" to a grant on the main agent, whatever its capabilities, and to an anonymous caller. For calls that bind the caller's agent for good (`identity.cosignIncept`, `identity.publish`): every app holds their capabilities by default |
+| `UserLoginOrOperator(cap)` | the operator, or a user's login on a managed agent (`LiveGrant::is_login`: the grant answers no capability request): 403 "<method> may not be called by an app, a user must call it" to an app the user approved, though it holds the capability; 403 "<method> for the main agent needs the admin credential" to a grant on the main agent and to an anonymous caller. For a call that ends the device's key for good (`identity.unlinkSelf`) |
 | `Owns { cap, id, owner }` | the resource `id` reads from the params exists and the operator or the session's agent owns it (`guards::owns`), else 404, missing or not |
 
 `Owns` per `Owner` (who owns the resource; the operator reaches all):
@@ -164,7 +165,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-237 methods: Cap 81, CapAnyPointer 1, Executor 43, Open 5, Operator 28, Owns 76, UserOrOperator 3. Local only (the operator on this machine): 5.
+237 methods: Cap 81, CapAnyPointer 1, Executor 43, Open 5, Operator 28, Owns 76, UserLoginOrOperator 1, UserOrOperator 2. Local only (the operator on this machine): 5.
 
 | Method | Guard |
 |---|---|
@@ -254,7 +255,7 @@ the guard checked:
 | `identity.resetLog` | `Operator` |
 | `identity.resolve` | `Cap(agent:READ)` |
 | `identity.status` | `Cap(agent:READ)` |
-| `identity.unlinkSelf` | `UserOrOperator(agent:UPDATE)` |
+| `identity.unlinkSelf` | `UserLoginOrOperator(agent:UPDATE)` |
 | `language.all` | `Cap(language:READ)` |
 | `language.applyTemplate` | `Cap(language:CREATE)` |
 | `language.get` | `Cap(language:READ)` |
