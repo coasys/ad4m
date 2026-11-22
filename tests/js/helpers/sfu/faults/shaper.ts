@@ -151,8 +151,20 @@ export class TcpShaper {
       if (wait > 0) {
         client.pause();
         this.sockets.add(client);
+        // A held dial that resets or closes meanwhile goes away quietly: no
+        // unhandled `error`, no timer left to proxy a dead socket.
+        const gone = () => {
+          clearTimeout(timer);
+          this.timers.delete(timer);
+          this.sockets.delete(client);
+          client.destroy();
+        };
+        client.on("error", gone);
+        client.on("close", gone);
         const timer = setTimeout(() => {
           this.timers.delete(timer);
+          client.off("error", gone);
+          client.off("close", gone);
           if (client.destroyed || this.closed) return;
           this.proxy(client);
           client.resume();
