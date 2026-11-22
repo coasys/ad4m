@@ -2269,6 +2269,9 @@ mod tests {
         fn key_exists(&self, name: &str) -> bool {
             crate::wallet::WalletBackend::key_exists(&self.0, name)
         }
+        fn destroy_key(&self, name: &str) -> Result<(), AnyError> {
+            crate::wallet::WalletBackend::destroy_key(&self.0, name)
+        }
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }

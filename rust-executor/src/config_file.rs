@@ -271,6 +271,11 @@ pub struct ExecutorConfigFile {
     /// encrypted at rest. Default false: such a file is refused.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_secret_on_data_disk: Option<bool>,
+    /// What this executor offers as a host (AR-05 4.3): the sign-up setting, a tenant cap, the
+    /// name and whether Coasys runs it. Written into the stored policy at start; a field the
+    /// file names in `pinned` cannot be changed over RPC.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<crate::hosting::policy::HostConfigSection>,
     /// AI endpoints registered at startup, by name. A key comes from the
     /// environment variable an entry's `api_key_env` names.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -663,6 +668,7 @@ impl ExecutorConfigFile {
             admin_credential: secrets.admin_credential.clone(),
             storage_secret: secrets.storage_secret.clone(),
             allow_secret_on_data_disk: self.allow_secret_on_data_disk,
+            host: self.host.clone(),
             ..Ad4mConfig::unprepared()
         })
     }
@@ -684,6 +690,36 @@ mod tests {
             .to_ad4m_config(&ExecutorSecrets::default())
             .unwrap();
         assert_eq!(config.log_dir.as_deref(), Some("/data/adam/logs"));
+    }
+
+    /// The `host` section reaches the executor's config, and the settings file Coasys cloud
+    /// ships (`deploy/coasys-cloud/executor-config.json`) loads with it: by invite, no cap.
+    #[test]
+    fn the_host_section_reaches_the_executor_config() {
+        let shipped = parse(include_str!(
+            "../../deploy/coasys-cloud/executor-config.json"
+        ))
+        .unwrap();
+        let host = shipped
+            .to_ad4m_config(&ExecutorSecrets::default())
+            .unwrap()
+            .host
+            .unwrap();
+        assert_eq!(
+            host.signup,
+            Some(crate::hosting::policy::SignupPolicy::ByInvite)
+        );
+        assert_eq!(host.max_tenants, None);
+        assert_eq!(host.display.unwrap().name, "Coasys cloud");
+        assert!(parse(r#"{"host": {"signups": "anyone"}}"#).is_err());
+        assert_eq!(
+            parse("{}")
+                .unwrap()
+                .to_ad4m_config(&ExecutorSecrets::default())
+                .unwrap()
+                .host,
+            None
+        );
     }
 
     /// `identity.storeUrl` and `identity.storeKeys` reach the executor's config.

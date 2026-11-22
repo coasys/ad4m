@@ -240,6 +240,7 @@ fn params(method: &str, fx: &Fixture) -> Value {
             json!({ "didUrl": "did:scid:coasys:1:QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG" })
         }
         "identity.joinStatus" => json!({ "offerId": "leak-offer" }),
+        "host.joinStatus" => json!({ "joinHandle": "leak-join" }),
         "identity.keyOwner" => json!({ "key": "z6MkLeak" }),
         "bot.grant" | "bot.log" => json!({ "bot": fx.main_did }),
         "identity.offers" => json!({ "request": {

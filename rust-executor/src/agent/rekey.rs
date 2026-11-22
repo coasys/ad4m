@@ -231,6 +231,9 @@ pub(crate) mod tests {
         fn retire_key(&self, name: &str, retired_name: &str) -> Result<(), AnyError> {
             self.inner.retire_key(name, retired_name)
         }
+        fn destroy_key(&self, name: &str) -> Result<(), AnyError> {
+            self.inner.destroy_key(name)
+        }
         fn destroy_secret(&self, name: &str) -> Result<(), AnyError> {
             self.inner.destroy_secret(name)
         }

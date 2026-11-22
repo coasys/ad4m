@@ -435,6 +435,18 @@ impl Wallet {
         Ok(())
     }
 
+    /// Removes the key `name` for good: its secret is dropped (the key type zeroes it).
+    pub fn destroy_key(&mut self, name: &str) -> Result<(), AnyError> {
+        let keys = self
+            .keys
+            .as_mut()
+            .ok_or_else(|| anyhow!("wallet is locked"))?;
+        keys.by_name
+            .remove(name)
+            .map(drop)
+            .ok_or_else(|| anyhow!("no key named {}", name))
+    }
+
     /// Deletes the secret of the key `name` and keeps its public key under that name, so what
     /// the key signed still verifies and the key is still listed. Nothing can sign with it
     /// again, and the next [`Wallet::lock`] or [`Wallet::export`] writes the keystore without
@@ -569,6 +581,10 @@ pub trait WalletBackend: Send + Sync {
     fn retire_key(&self, _name: &str, _retired_name: &str) -> Result<(), AnyError> {
         Err(anyhow!("this wallet backend cannot rename keys"))
     }
+
+    /// Destroys the key `name` for good (a tenant's device key at its leave). The caller saves
+    /// the wallet. A shared wallet's service has no such call.
+    fn destroy_key(&self, name: &str) -> Result<(), AnyError>;
 
     /// Opens a device-inbox message sealed for `address` to the X25519 `enc` key of the key
     /// `name` (the key `did_key` derives from the Ed25519 key, no second secret). The secret
@@ -806,6 +822,11 @@ impl WalletBackend for LocalWallet {
         wallet.retire_key(name, retired_name)
     }
 
+    fn destroy_key(&self, name: &str) -> Result<(), AnyError> {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        wallet.destroy_key(name)
+    }
+
     fn destroy_secret(&self, name: &str) -> Result<(), AnyError> {
         let mut wallet = self.inner.lock().expect("wallet lock");
         wallet.destroy_secret(name)
@@ -909,6 +930,10 @@ impl SharedWallet {
 }
 
 impl WalletBackend for SharedWallet {
+    fn destroy_key(&self, _name: &str) -> Result<(), AnyError> {
+        Err(anyhow!("shared wallet: the service cannot destroy a key"))
+    }
+
     fn generate_keypair(&self, name: &str) -> Result<(), AnyError> {
         let url = format!("{}/keys/{}", self.base_url, urlencoding::encode(name));
         let resp = self
