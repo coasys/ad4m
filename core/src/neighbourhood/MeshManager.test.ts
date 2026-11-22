@@ -136,6 +136,21 @@ class FakePeerConnection {
     /** Hold `negotiationneeded` until the next turn, so an offer can arrive first. */
     static deferNegotiation = false
 
+    /** An offer describes a second video section, beside the one `declareSending` made. */
+    static extraVideoSection = false
+
+    /**
+     * `replaceTrack` stays pending until this resolves. An adoption that awaits
+     * it can be disconnected in between, which is the leak under test.
+     */
+    static replaceGate: Promise<void> | null = null
+
+    /** The next N `replaceTrack` calls reject, as a closed connection's can. */
+    static rejectNextReplace = 0
+
+    /** How many `replaceTrack` calls have started, including ones still gated. */
+    static replaceCalls = 0
+
     /** Kinds an offer described, so the answerer can open those sections and no others. */
     static offerSections = new Map<string, string[]>()
 
@@ -216,17 +231,29 @@ class FakePeerConnection {
         const sender = {
             track,
             replaceTrack(next: MediaStreamTrack | null) {
-                if (!FakePeerConnection.deferReplace) {
-                    sender.track = next
-                    return Promise.resolve()
+                FakePeerConnection.replaceCalls += 1
+                if (FakePeerConnection.rejectNextReplace > 0) {
+                    FakePeerConnection.rejectNextReplace -= 1
+                    return Promise.reject(new Error("replace failed"))
                 }
-                // As a browser: the track lands after the offer that `addTransceiver` queued.
-                return new Promise<void>((resolve) => {
-                    queueMicrotask(() => {
-                        sender.track = next
-                        resolve()
+                const apply = () => {
+                    sender.track = next
+                }
+                const run = () => {
+                    if (!FakePeerConnection.deferReplace) {
+                        apply()
+                        return Promise.resolve()
+                    }
+                    // As a browser: the track lands after the offer that `addTransceiver` queued.
+                    return new Promise<void>((resolve) => {
+                        queueMicrotask(() => {
+                            apply()
+                            resolve()
+                        })
                     })
-                })
+                }
+                const gate = FakePeerConnection.replaceGate
+                return gate ? gate.then(run) : run()
             },
         }
         this.senders.push(sender)
@@ -285,7 +312,9 @@ class FakePeerConnection {
             included.forEach((transceiver, index) => {
                 if (transceiver.mid == null) transceiver.mid = String(index)
             })
-            FakePeerConnection.offerSections.set(sdp, included.map((transceiver) => transceiver.kind))
+            const kinds = included.map((transceiver) => transceiver.kind)
+            if (FakePeerConnection.extraVideoSection) kinds.push("video")
+            FakePeerConnection.offerSections.set(sdp, kinds)
         }
         this.localDescription = { type: type as RTCSdpType, sdp }
         this.signalingState = type === "offer" ? "have-local-offer" : "stable"
@@ -542,6 +571,14 @@ const settleAll = async () => {
 }
 
 afterEach(async () => {
+    FakePeerConnection.deferReplace = false
+    FakePeerConnection.separateSections = false
+    FakePeerConnection.deferNegotiation = false
+    FakePeerConnection.extraVideoSection = false
+    FakePeerConnection.replaceGate = null
+    FakePeerConnection.rejectNextReplace = 0
+    FakePeerConnection.replaceCalls = 0
+    FakePeerConnection.offerSections.clear()
     for (const mesh of meshes.splice(0)) await mesh.destroy()
 })
 
@@ -1090,6 +1127,38 @@ describe("call mesh", () => {
         expect(asFake(camera).readyState).toBe("live")
     })
 
+    it("keeps the sender's clone when the replacement is refused", async () => {
+        // `replaceTrack` can reject after a clone was minted — the connection
+        // closed underneath it. The refused clone stops. The one the sender
+        // still holds keeps running.
+        const alice = await makeMesh(bus, "did:alice", CALL_ID)
+        alice.mesh.setRoster(["did:alice", "did:bob"])
+        await settle()
+
+        const camera = new FakeTrack("video")
+        await alice.mesh.replaceTrack("video", camera as unknown as MediaStreamTrack)
+        const sender = alice.connections[0].getSenders().find((item) => item.track?.kind === "video")!
+        const held = asFake(sender.track)
+
+        const next = new FakeTrack("video")
+        const refused: FakeTrack[] = []
+        const original = next.clone.bind(next)
+        next.clone = () => {
+            const copy = original()
+            refused.push(copy)
+            return copy
+        }
+        FakePeerConnection.rejectNextReplace = 1
+        await alice.mesh.replaceTrack("video", next as unknown as MediaStreamTrack)
+
+        expect(refused).toHaveLength(1)
+        expect(refused[0].readyState).toBe("ended")
+        expect(sender.track).toBe(held)
+        expect(held.readyState).toBe("live")
+        expect(next.readyState).toBe("live")
+        expect(alice.errors.map((error) => error.message).join("\n")).toMatch(/replacing video track/)
+    })
+
     it("sends a peer joining mid-call the media already being sent", async () => {
         const alice = await makeMesh(bus, "did:alice", CALL_ID)
         alice.mesh.setRoster(["did:alice"])
@@ -1182,6 +1251,128 @@ describe("call mesh", () => {
         }
     })
 
+    it("answers sendrecv with the camera off, and a later camera uses that section", async () => {
+        // The offer arrives first. This side has a mic and no camera, so the
+        // video section used to stay recvonly. Turning the camera on later is
+        // a `replaceTrack` on that sender and does not renegotiate; a recvonly
+        // section never delivers it.
+        FakePeerConnection.separateSections = true
+        FakePeerConnection.deferNegotiation = true
+        try {
+            const alice = await makeMesh(bus, "did:alice", CALL_ID, { localStream: stream(track("audio"), track("video")) })
+            const mic = track("audio")
+            const camera = track("video")
+            const bob = await makeMesh(bus, "did:bob", CALL_ID, { localStream: stream(mic) })
+            alice.mesh.setRoster(["did:alice", "did:bob"])
+            bob.mesh.setRoster(["did:alice", "did:bob"])
+            await settleAll()
+
+            const answered = bob.live()
+            expect(answered.localDescription?.type).toBe("answer")
+            const video = answered.transceivers.filter((item) => item.kind === "video")
+            expect(video).toHaveLength(1)
+            expect(video[0].direction).toBe("sendrecv")
+            expect(video[0].sender?.track ?? null).toBeNull()
+
+            await bob.mesh.replaceTrack("video", camera)
+            const sent = asFake(video[0].sender?.track)
+            expect(sent.clonedFrom).toBe(camera)
+            expect(sent).not.toBe(camera)
+            expect(sent.readyState).toBe("live")
+            expect(video[0].direction).toBe("sendrecv")
+            // Same answer, same section: the camera did not need a new offer.
+            expect(answered.localDescription?.type).toBe("answer")
+            expect(answered.transceivers.filter((item) => item.kind === "video")).toHaveLength(1)
+            expect(asFake(camera).readyState).toBe("live")
+            expect(alice.errors).toEqual([])
+            expect(bob.errors).toEqual([])
+        } finally {
+            FakePeerConnection.separateSections = false
+            FakePeerConnection.deferNegotiation = false
+            FakePeerConnection.offerSections.clear()
+        }
+    })
+
+    it("sends on one video section when the offer has two, and mute stops that clone", async () => {
+        FakePeerConnection.separateSections = true
+        FakePeerConnection.deferNegotiation = true
+        FakePeerConnection.extraVideoSection = true
+        try {
+            const camera = track("video")
+            const alice = await makeMesh(bus, "did:alice", CALL_ID, { localStream: stream(track("audio"), track("video")) })
+            const bob = await makeMesh(bus, "did:bob", CALL_ID, { localStream: stream(track("audio"), camera) })
+            alice.mesh.setRoster(["did:alice", "did:bob"])
+            bob.mesh.setRoster(["did:alice", "did:bob"])
+            await settleAll()
+
+            const answered = bob.live()
+            const videos = answered.transceivers.filter((item) => item.kind === "video")
+            expect(videos.map((item) => item.direction)).toEqual(["sendrecv", "sendrecv"])
+            const live = answered.getSenders().filter((sender) => sender.track?.kind === "video" && asFake(sender.track).readyState === "live")
+            expect(live).toHaveLength(1)
+            expect(asFake(live[0].track).clonedFrom).toBe(camera)
+
+            await bob.mesh.replaceTrack("video", null)
+            const still = answered.getSenders().filter((sender) =>
+                sender.track?.kind === "video" && asFake(sender.track).readyState === "live")
+            expect(still).toHaveLength(0)
+            expect(asFake(camera).readyState).toBe("live")
+            expect(alice.errors).toEqual([])
+            expect(bob.errors).toEqual([])
+        } finally {
+            FakePeerConnection.separateSections = false
+            FakePeerConnection.deferNegotiation = false
+            FakePeerConnection.extraVideoSection = false
+            FakePeerConnection.offerSections.clear()
+        }
+    })
+
+    it("stops clones when the peer leaves while an offer is being adopted", async () => {
+        FakePeerConnection.separateSections = true
+        FakePeerConnection.deferNegotiation = true
+        let releaseGate!: () => void
+        FakePeerConnection.replaceGate = new Promise<void>((resolve) => { releaseGate = resolve })
+        FakePeerConnection.replaceCalls = 0
+        const bobMic = new FakeTrack("audio")
+        const bobCamera = new FakeTrack("video")
+        const bobClones: FakeTrack[] = []
+        for (const source of [bobMic, bobCamera]) {
+            const original = source.clone.bind(source)
+            source.clone = () => {
+                const copy = original()
+                bobClones.push(copy)
+                return copy
+            }
+        }
+        try {
+            const alice = await makeMesh(bus, "did:alice", CALL_ID, { localStream: stream(track("audio"), track("video")) })
+            const bob = await makeMesh(bus, "did:bob", CALL_ID, {
+                localStream: stream(bobMic as unknown as MediaStreamTrack, bobCamera as unknown as MediaStreamTrack),
+            })
+            alice.mesh.setRoster(["did:alice", "did:bob"])
+            bob.mesh.setRoster(["did:alice", "did:bob"])
+            for (let i = 0; i < 20 && FakePeerConnection.replaceCalls === 0; i += 1) await settle()
+            expect(FakePeerConnection.replaceCalls).toBeGreaterThan(0)
+
+            // The roster drops Alice while Bob is still attaching the offer's first section.
+            bob.mesh.setRoster(["did:bob"])
+            releaseGate()
+            await settleAll()
+
+            expect(bobClones.length).toBeGreaterThan(0)
+            expect(bobClones.every((clone) => clone.readyState === "ended")).toBe(true)
+            expect(bobMic.readyState).toBe("live")
+            expect(bobCamera.readyState).toBe("live")
+            expect(alice.errors).toEqual([])
+        } finally {
+            releaseGate()
+            FakePeerConnection.separateSections = false
+            FakePeerConnection.deferNegotiation = false
+            FakePeerConnection.replaceGate = null
+            FakePeerConnection.offerSections.clear()
+        }
+    })
+
     it("attaches the tracks handed to join, one per kind", async () => {
         const mic = track("audio")
         const camera = track("video")
@@ -1201,9 +1392,9 @@ describe("call mesh", () => {
     })
 
     it("gives each connection its own clone of a track, and stopping one leaves the others", async () => {
-        // One camera on two connections shares an encoder. Closing one changes
-        // the SSRC the other still sends, and Firefox keeps demuxing the old
-        // one, so that video freezes while the transport stays up.
+        // Closing one connection that shared a track has been seen to freeze the
+        // survivor's video while the transport stays up. Each connection encodes
+        // its own clone, and stopping that clone leaves the others and the camera.
         const camera = new FakeTrack("video")
         const alice = await makeMesh(bus, "did:alice", CALL_ID, {
             localStream: stream(camera as unknown as MediaStreamTrack),
