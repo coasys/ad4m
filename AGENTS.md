@@ -335,19 +335,21 @@ call: it closes the connection, leaves the session, emits `error` and then
 `call-ended` (`{ reason: "gave-up" }`, also on the `Session`, which goes
 idle) for the UI to show; a new `join` starts over. A rebuild keeps
 the participants and clears only their media. Only an SDP the connection
-cannot apply rebuilds from a renegotiation: once the socket is back the SDK
-calls `sfu.callResume` first, and an answer the socket lost (503, 408) goes
-again only for the offer the resume sends again (directly when the executor
-has no `sfu.callResume`); a resume refused other than by the socket (an executor
-without it answers 404 "Unknown type") rejoins if `sfu.listRooms` no longer
-lists the session, and otherwise waits for the executor's own resend. Of the server offers waiting, only the newest
+cannot apply rebuilds from a renegotiation: the answer names its offer's
+`offerId`, and the server refuses one naming another — `stale` or
+`no-pending` change nothing for the client, `unknown-session` rebuilds the
+call. An answer a socket fault kept (503, 408) goes out again once the
+socket is back, and `sfu.callResume` then returns what went by — the
+session's pending offer and the room's roster, applied like the events
+that carry them; a resume the socket fails keeps the call, and a 403 ends
+it (`call-ended`, `{ reason: "refused" }`: the session is another
+agent's). Of the server offers waiting, only the newest
 is applied, and each step of the offer queue gets 10 s. The restart names the session's `participantId` (only that session
 restarts, never another device of the agent), and a manager with no session
 (join not back, left, replaced) sends none. A room roster that leaves this
-session out for 3 s also rebuilds the call once `sfu.listRooms` confirms it
-(the executor sends the departure roster to the departed DID too; a room read
-the socket fails keeps the call); a roster that lists it, as during a restart
-in place, changes nothing.
+session out for 3 s asks `sfu.callResume` and rebuilds the call when its
+reply says the session is not listed; a roster that lists it, as during a
+restart in place, changes nothing.
 `ApiClient` drops an executor socket whose ping stays unanswered for a ping
 interval (10 s, `PING_INTERVAL_MS`; longer while a large write it sent may
 still be crossing a 16 kB/s link) and dials a new one, so a
@@ -355,9 +357,7 @@ socket a network switch left OPEN is noticed in 10 to 20 s. `online` redials
 at once; `change` on `navigator.connection` (only when its `type` or
 `navigator.onLine` changed) and ICE `disconnected` run `checkConnection`,
 which sends no probe when the socket delivered a message in the last 5 s and
-drops a socket only after two probes in a row got nothing for 8 s each
-(3 s each on ICE `disconnected`, so a dead socket is redialled well inside
-the 15 s restart window).
+drops a socket that answered nothing for 8 s after one probe.
 
 SFU behind NAT (`rust-executor/src/sfu/{server,reachability}.rs`): the SFU
 binds `sfu_bind_addr` on `sfu_udp_port` (0/unset: ephemeral; a fixed port
