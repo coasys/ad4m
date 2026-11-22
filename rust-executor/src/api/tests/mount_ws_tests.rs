@@ -77,3 +77,18 @@ async fn the_main_agent_may_mount_and_sync() {
     assert_eq!(perspective.mounts().await.unwrap(), vec![lang.clone()]);
     crate::perspectives::unregister_mount(&lang, &p.0);
 }
+
+#[test]
+fn a_mount_and_a_sync_get_the_long_timeout() {
+    // A first mount fetches and writes the whole snapshot inside the call,
+    // like a sync: on the short timeout a client gives up while it runs.
+    let map = build_handler_map();
+    for method in ["perspective.mount", "perspective.syncMount"] {
+        let spec = map
+            .specs()
+            .into_iter()
+            .find(|s| s.name == method)
+            .unwrap_or_else(|| panic!("{method} is not registered"));
+        assert!(spec.long, "{method} has the short timeout");
+    }
+}

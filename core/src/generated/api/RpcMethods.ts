@@ -608,6 +608,7 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "language.publish",
   "neighbourhood.join",
   "neighbourhood.publish",
+  "perspective.mount",
   "perspective.runAgent",
   "perspective.runInterpretation",
   "perspective.runInterpretationWithHarness",

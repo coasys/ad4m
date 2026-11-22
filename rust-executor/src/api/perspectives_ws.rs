@@ -2400,7 +2400,9 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     )
     .read()
     .guard(query());
+    // A first mount fetches and writes the whole snapshot inside the call.
     map.method::<PerspectiveMountParams, bool>("perspective.mount", mount_handler)
+        .long()
         .guard(update());
     map.method::<PerspectiveMountParams, bool>("perspective.unmount", unmount_handler)
         .guard(update());
