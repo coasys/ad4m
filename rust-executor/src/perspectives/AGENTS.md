@@ -125,6 +125,21 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 - Background loops (`nh_sync_loop`, `pending_diffs_loop`, `fallback_sync_loop`,
   `subscribed_queries_loop`, `notification_check_loop`, auto-processor supervisor) exit on
   `is_teardown`; `teardown_background_tasks` must be called on remove.
+- Every model query runs through the runner (`perspective_instance/runner.rs`): a
+  `perspective.modelQuery`, a model subscription's first run and its re-check after a write.
+  Identical runs in flight share one store run, keyed by the classes, the canonical query (keys
+  sorted, null top-level fields dropped; no table of defaults), the shape-wait budget,
+  `SparqlStore::write_generation` and `shapes_generation` (a shape change alters a result without a link write; a peer diff and a
+  local commit both advance the write generation through `note_write`). The run is spawned under
+  its own deadline gate and takes one of `RECHECK_SLOTS`, so store reads never block async
+  workers; the entry leaves the map when the run settles. A waiter's own gate (deadline, cancel,
+  closed socket) ends its wait only; the last waiter to leave stops the run. The connection's
+  running-query slot is held by the waiter, not the run. The agent is not in the key: a model
+  query's result does not depend on who asks (nothing under `model_query/` reads `AgentContext`),
+  so two agents' identical queries share one run. A re-check pass groups its subscriptions by
+  classes and query (`evaluation_key`), so N identical subscriptions, of any agents, cost one run
+  per write. A new way to run a model query must call
+  `PerspectiveInstance::run_model_query`, not `model_query_classes_within`.
 - `SparqlStore` bumps a write generation after every committed write (`write_generation`,
   `watch_writes`). The auto-processor watch loop sleeps on it while idle (60 s fallback); a
   write-woken idle tick still waits out the old idle back-off (doubling 0.5 s to 4 s) since the

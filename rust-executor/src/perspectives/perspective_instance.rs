@@ -74,6 +74,7 @@ mod shapes;
 #[cfg(test)]
 pub(crate) use abstract_classes::faults::fail_next_index;
 pub use shapes::{RegisterResult, ShapeSummary};
+mod runner;
 mod subscriptions;
 pub(crate) use subscriptions::{result_json, SubscriptionIdTaken};
 // Which writes re-run a model subscription (#1237).
@@ -627,6 +628,8 @@ pub struct PerspectiveInstance {
     /// of every diff committed after it.
     commit_order: Arc<Mutex<()>>,
     subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
+    /// Model query runs in flight, shared by identical calls (see `runner.rs`).
+    runs: runner::Runs,
     batch_store: Arc<RwLock<HashMap<String, TimestampedBatch>>>,
     // Fallback sync tracking for ensure_public_links_are_shared
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
@@ -771,6 +774,7 @@ impl PerspectiveInstance {
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
             commit_order: Arc::new(Mutex::new(())),
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
+            runs: runner::Runs::default(),
             batch_store: Arc::new(RwLock::new(HashMap::new())),
             last_successful_fallback_sync: Arc::new(Mutex::new(None)),
             fallback_sync_interval: Arc::new(Mutex::new(Duration::from_secs(30))),
@@ -3772,21 +3776,8 @@ impl PerspectiveInstance {
         class_name: &str,
         query_json: &str,
     ) -> Result<String, deno_core::anyhow::Error> {
-        self.model_query_stopped(&EvalStop::none(), class_name, query_json)
-            .await
-    }
-
-    /// [`Self::model_query`] under `stop`: every evaluation the query makes
-    /// ends when the call's gate fires, reporting why.
-    pub async fn model_query_stopped(
-        &self,
-        stop: &EvalStop,
-        class_name: &str,
-        query_json: &str,
-    ) -> Result<String, deno_core::anyhow::Error> {
         let classes = super::model_query::QueryClasses::One(class_name.to_string());
-        self.model_query_classes_within(stop, &classes, query_json, MODEL_QUERY_SHAPE_WAIT)
-            .await
+        self.model_query_classes(&classes, query_json).await
     }
 
     /// [`Self::model_query`] over one class or a union of classes (#1238).
@@ -3795,24 +3786,19 @@ impl PerspectiveInstance {
         classes: &super::model_query::QueryClasses,
         query_json: &str,
     ) -> Result<String, deno_core::anyhow::Error> {
-        self.model_query_classes_within(
-            &EvalStop::none(),
-            classes,
-            query_json,
-            MODEL_QUERY_SHAPE_WAIT,
-        )
-        .await
+        self.model_query_classes_stopped(&EvalStop::none(), classes, query_json)
+            .await
     }
 
-    /// [`Self::model_query_classes`] under `stop` — every evaluation the
-    /// query makes ends when the call's gate fires.
+    /// [`Self::model_query_classes`] under `stop`: `stop` ends this call's
+    /// wait; the run itself is the runner's (see `runner.rs`).
     pub async fn model_query_classes_stopped(
         &self,
         stop: &EvalStop,
         classes: &super::model_query::QueryClasses,
         query_json: &str,
     ) -> Result<String, deno_core::anyhow::Error> {
-        self.model_query_classes_within(stop, classes, query_json, MODEL_QUERY_SHAPE_WAIT)
+        self.run_model_query(stop, classes, query_json, MODEL_QUERY_SHAPE_WAIT)
             .await
     }
 
@@ -3826,7 +3812,7 @@ impl PerspectiveInstance {
         shape_wait: Duration,
     ) -> Result<String, deno_core::anyhow::Error> {
         let classes = super::model_query::QueryClasses::One(class_name.to_string());
-        self.model_query_classes_within(&EvalStop::none(), &classes, query_json, shape_wait)
+        self.run_model_query(&EvalStop::none(), &classes, query_json, shape_wait)
             .await
     }
 
@@ -5923,7 +5909,7 @@ impl PerspectiveInstance {
             subscriber,
         };
         let first_result =
-            self.model_query_classes_within(stop, &classes, &query_json, MODEL_QUERY_SHAPE_WAIT);
+            self.run_model_query(stop, &classes, &query_json, MODEL_QUERY_SHAPE_WAIT);
         self.open_subscription(subscription_id, subscribed_query, first_result)
             .await
     }
@@ -5971,7 +5957,11 @@ impl PerspectiveInstance {
         // First, so the queries collected below carry the new class lists.
         let reresolved = self.refresh_abstract_subscriptions().await;
 
+        // SPARQL subscriptions' re-checks, run on the re-check slots here, and
+        // the model subscriptions', whose runs take a slot themselves.
         let mut query_futures: Vec<future::BoxFuture<'static, Option<(Vec<String>, String)>>> =
+            Vec::new();
+        let mut model_futures: Vec<future::BoxFuture<'static, Option<(Vec<String>, String)>>> =
             Vec::new();
 
         // Collect only the minimal data needed: ID, query string, predicates,
@@ -6059,61 +6049,63 @@ impl PerspectiveInstance {
             // Each future returns Option<(ids, new_result)> instead of locking individually.
             // This avoids a lock convoy where N futures all contend on subscribed_queries.
             let self_clone = self.clone();
-            let query_future = Box::pin(async move {
-                #[cfg(test)]
-                subscriptions::evaluations::note(&self_clone.uuid);
-                // Model subscriptions: re-run execute_model_query instead of raw SPARQL.
-                // With no shape wait: every subscription on the perspective is
-                // re-checked in the one pass below, so a wait here for one
-                // subscription's unsynced class would hold back every other
-                // subscription's update. A class still missing fails this pass
-                // at once and is retried on the next one.
-                // A re-check runs under its own deadline gate: one slow
-                // subscription's eval stops there and is skipped for this
-                // pass — it does not kill the subscription or hold back the
-                // others. The gate drops with the future, so an eval still
-                // stopping is still ended.
-                let gate = crate::perspectives::sparql_store::EvalGate::request(
-                    crate::perspectives::sparql_store::query_deadline(),
-                    None,
-                );
-                let stop = gate.stop();
-                let result_string = if let Some(ref params) = model_params {
+            if let Some(params) = model_params {
+                // Model subscriptions run through the runner, which puts the
+                // run on a blocking slot itself and shares it with identical
+                // runs in flight. With no shape wait: every subscription on
+                // the perspective is re-checked in the one pass below, so a
+                // wait here for one subscription's unsynced class would hold
+                // back every other subscription's update. A class still
+                // missing fails this pass at once and is retried on the next
+                // one. The run has its own deadline: one slow subscription is
+                // skipped for this pass, it does not kill the subscription or
+                // hold back the others.
+                model_futures.push(Box::pin(async move {
                     match self_clone
-                        .model_query_classes_within(
-                            &stop,
+                        .run_model_query(
+                            &EvalStop::none(),
                             &params.classes,
                             &params.query_json,
                             Duration::ZERO,
                         )
                         .await
                     {
-                        Ok(r) => r,
+                        Ok(result) => Some((ids, result)),
                         Err(e) => {
                             log::error!(
                                 "❌ 🔗 🧠 model-based subscription query failed (subscriptions {:?}): {}",
                                 ids,
                                 e
                             );
-                            return None;
+                            None
                         }
                     }
-                } else {
-                    match self_clone.sparql_query_stopped(&stop, &query_string) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            log::error!(
-                                "❌ 🔗 🔎 SPARQL subscription query failed (subscriptions {:?}): {}",
-                                ids,
-                                e
-                            );
-                            return None;
-                        }
+                }));
+                continue;
+            }
+            // A re-check runs under its own deadline gate: one slow
+            // subscription's eval stops there and is skipped for this
+            // pass. The gate drops with the future, so an eval still
+            // stopping is still ended.
+            query_futures.push(Box::pin(async move {
+                #[cfg(test)]
+                subscriptions::evaluations::note(&self_clone.uuid);
+                let gate = crate::perspectives::sparql_store::EvalGate::request(
+                    crate::perspectives::sparql_store::query_deadline(),
+                    None,
+                );
+                match self_clone.sparql_query_stopped(&gate.stop(), &query_string) {
+                    Ok(result) => Some((ids, result)),
+                    Err(e) => {
+                        log::error!(
+                            "❌ 🔗 🔎 SPARQL subscription query failed (subscriptions {:?}): {}",
+                            ids,
+                            e
+                        );
+                        None
                     }
-                };
-                Some((ids, result_string))
-            });
-            query_futures.push(query_future);
+                }
+            }));
         }
 
         // Run the re-checks off the async workers, a bounded number at once
@@ -6121,8 +6113,12 @@ impl PerspectiveInstance {
         // held meanwhile. Each subscription runs at most once per pass and
         // passes run one after another, so the results compared below are
         // the newest.
-        let results =
-            subscriptions::run_rechecks(query_futures, &subscriptions::RECHECK_SLOTS).await;
+        let (results, model_results) = future::join(
+            subscriptions::run_rechecks(query_futures, &subscriptions::RECHECK_SLOTS),
+            future::join_all(model_futures),
+        )
+        .await;
+        let results = results.into_iter().chain(model_results);
 
         // Single lock acquisition to compare and update all results
         let mut delta_updates = Vec::new();

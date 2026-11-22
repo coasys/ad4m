@@ -608,3 +608,97 @@ describe('PerspectiveClient builds SDK classes from wire data', () => {
         ])
     })
 })
+
+describe('PerspectiveClient.modelQuery shares in-flight calls', () => {
+    const QUERY = '{"where":{"title":"x"}}'
+
+    function modelQueryCalls() {
+        return mockCall.mock.calls.filter(([method]) => method === 'perspective.modelQuery').length
+    }
+
+    beforeEach(() => {
+        mockCall.mockReset().mockResolvedValue(JSON.stringify({ instances: [{ id: 'a' }] }))
+        mockOn.mockReset().mockReturnValue(() => {})
+    })
+
+    it('identical concurrent calls send one RPC and each caller gets its own object', async () => {
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        const [a, b, c] = await Promise.all([
+            client.modelQuery('uuid-m', 'Todo', QUERY),
+            client.modelQuery('uuid-m', 'Todo', QUERY),
+            client.modelQuery('uuid-m', 'Todo', QUERY),
+        ])
+        expect(modelQueryCalls()).toBe(1)
+        expect(a).toEqual({ instances: [{ id: 'a' }] })
+        expect(a).not.toBe(b)
+        a.instances[0].id = 'changed'
+        expect(b).toEqual({ instances: [{ id: 'a' }] })
+        expect(c).toEqual(b)
+    })
+
+    it('does not share between perspectives, classes, unions or queries', async () => {
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        await Promise.all([
+            client.modelQuery('p1', 'Todo', QUERY),
+            client.modelQuery('p2', 'Todo', QUERY),
+            client.modelQuery('p1', 'Note', QUERY),
+            client.modelQuery('p1', ['Todo', 'Note'], QUERY),
+            client.modelQuery('p1', 'Todo', '{}'),
+        ])
+        expect(modelQueryCalls()).toBe(5)
+    })
+
+    it('a call after the shared one settled makes a new RPC', async () => {
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        await client.modelQuery('uuid-m', 'Todo', QUERY)
+        await client.modelQuery('uuid-m', 'Todo', QUERY)
+        expect(modelQueryCalls()).toBe(2)
+    })
+
+    it('a call with options makes its own RPC', async () => {
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        const controller = new AbortController()
+        await Promise.all([
+            client.modelQuery('uuid-m', 'Todo', QUERY),
+            client.modelQuery('uuid-m', 'Todo', QUERY, { signal: controller.signal }),
+        ])
+        expect(modelQueryCalls()).toBe(2)
+    })
+
+    it('a failed call rejects every sharer, and the next call retries', async () => {
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        mockCall.mockRejectedValueOnce(new Error('boom'))
+        const results = await Promise.allSettled([
+            client.modelQuery('uuid-m', 'Todo', QUERY),
+            client.modelQuery('uuid-m', 'Todo', QUERY),
+        ])
+        expect(results.map(r => r.status)).toEqual(['rejected', 'rejected'])
+        expect(await client.modelQuery('uuid-m', 'Todo', QUERY)).toEqual({ instances: [{ id: 'a' }] })
+        expect(modelQueryCalls()).toBe(2)
+    })
+
+    // A query sent before a write answers with the state before it, so the
+    // same query started after the write settled must not join it.
+    it('a read after a settled write does not join the older in-flight reply', async () => {
+        let rows = [{ id: 'old' }]
+        const pending: Array<() => void> = []
+        mockCall.mockImplementation((method: string) => {
+            if (method === 'perspective.modelQuery') {
+                const answer = JSON.stringify({ instances: rows })
+                return new Promise(resolve => pending.push(() => resolve(answer)))
+            }
+            rows = [{ id: 'old' }, { id: 'new' }]
+            return Promise.resolve({ id: 'new' })
+        })
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        const before = client.modelQuery('uuid-m', 'Todo', QUERY)
+        const sharing = client.modelQuery('uuid-m', 'Todo', QUERY)
+        await client.instanceCreate('uuid-m', { className: 'Todo', id: 'new' } as any)
+        const after = client.modelQuery('uuid-m', 'Todo', QUERY)
+        pending.splice(0).forEach(resolve => resolve())
+        expect((await before).instances).toEqual([{ id: 'old' }])
+        expect((await sharing).instances).toEqual([{ id: 'old' }])
+        expect((await after).instances).toEqual([{ id: 'old' }, { id: 'new' }])
+        expect(modelQueryCalls()).toBe(2)
+    })
+})

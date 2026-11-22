@@ -58,6 +58,7 @@ export class PerspectiveClient {
     #neighbourhoodClient?: NeighbourhoodClient
     #aiClient?: AIClient
     #sparqlInFlight = new Map<string, Promise<string>>()
+    #modelQueryInFlight = new Map<string, Promise<string>>()
     /** Per perspective, how many writes through this client have settled; part of the in-flight key. */
     #writeGeneration = new Map<string, number>()
 
@@ -199,12 +200,24 @@ export class PerspectiveClient {
         )
     }
 
-    /** `className` may name several classes: one query over their union (#1238). */
+    /**
+     * `className` may name several classes: one query over their union (#1238).
+     * Concurrent identical calls (same perspective, classes and query, no
+     * `options`) share one RPC, as {@link querySparql} does: each caller parses
+     * its own copy of the reply, and a call made after a write through this
+     * client settled makes a new RPC.
+     */
     async modelQuery(uuid: string, className: string | string[], queryJson: string, options?: CallOptions): Promise<any> {
-        const resultJson = await this.#apiClient.call(
-            'perspective.modelQuery', { uuid, ...classParams(className), query_json: queryJson }, options
-        )
-        return JSON.parse(resultJson)
+        const params = { uuid, ...classParams(className), query_json: queryJson }
+        if (options) return JSON.parse(await this.#apiClient.call('perspective.modelQuery', params, options))
+        const key = `${uuid}\n${this.#writeGeneration.get(uuid) ?? 0}\n${JSON.stringify(className)}\n${queryJson}`
+        let reply = this.#modelQueryInFlight.get(key)
+        if (!reply) {
+            reply = this.#apiClient.call('perspective.modelQuery', params)
+                .finally(() => this.#modelQueryInFlight.delete(key))
+            this.#modelQueryInFlight.set(key, reply)
+        }
+        return JSON.parse(await reply)
     }
 
     async subjectClassesOf(uuid: string, uris: string[]): Promise<Record<string, string[]>> {

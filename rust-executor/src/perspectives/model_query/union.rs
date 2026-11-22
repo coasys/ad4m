@@ -75,7 +75,7 @@ use std::sync::Arc;
 ///
 /// A one-element union is still a union: its rows carry `__subjectClass`, which
 /// a single-class query's rows do not.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum QueryClasses {
     One(String),
     Union(Vec<String>),
