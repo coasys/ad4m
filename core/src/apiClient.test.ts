@@ -877,6 +877,111 @@ describe('ApiClient pending-request probe', () => {
     })
 })
 
+describe('ApiClient urgent pending-request probe', () => {
+    // A request that cannot wait the normal socket check is sent urgent:
+    // on a socket nothing arrived on since it went out it probes after
+    // 1 s, not 4, and the probe judges a still-silent socket after 3 s,
+    // not 8 — the redial lands at about +4 s. A frame still proves the
+    // socket, a large send ahead of the probe's ping still gets its drain
+    // time, and one probe at a time stands.
+    beforeEach(() => {
+        TestSocket.autoOpen = false
+        TestSocket.closeHangs = true
+        TestSocket.answersPings = false
+        jest.useFakeTimers()
+    })
+    afterEach(() => jest.useRealTimers())
+
+    const pings = (i: number) => socket(i).sent.filter(m => m.type === 'ping').length
+
+    it('probes an urgent request after 1 s of silence and drops a still-silent socket 3 s later — the redial lands at about +4 s', async () => {
+        const changed = jest.fn()
+        const reconnected = jest.fn()
+        client.onNetworkChange(changed)
+        client.onReconnect(reconnected)
+        open()
+        socket(0).open()
+        const read = call<string[]>('perspective.all', {}, { timeoutMs: 120_000, urgent: true })
+
+        // A normal request would probe at +4 s; the urgent one at +1 s.
+        await jest.advanceTimersByTimeAsync(999)
+        expect(pings(0)).toBe(0)
+        await jest.advanceTimersByTimeAsync(1)
+        expect(pings(0)).toBe(1)
+
+        // The probe judges the socket after 3 s, not 8: drop at +4 s.
+        await jest.advanceTimersByTimeAsync(2_999)
+        expect(socket(0).readyState).toBe(1)
+        await jest.advanceTimersByTimeAsync(1)
+        expect(socket(0).readyState).toBe(2)
+        expect(TestSocket.instances).toHaveLength(2)
+        expect(changed).not.toHaveBeenCalled()
+
+        socket(1).open()
+        expect(reconnected).toHaveBeenCalledTimes(1)
+        socket(1).reply({ id: socket(1).sent.find(m => m.type === 'perspective.all')!.id, result: ['p'] })
+        await expect(read).resolves.toEqual(['p'])
+    })
+
+    it('never probes an urgent request on a socket that keeps delivering: each frame proves it', async () => {
+        open()
+        socket(0).open()
+        const read = outcomeOf(call('perspective.all', {}, { timeoutMs: 30_000, urgent: true }))
+        // Events keep arriving: each postdates the request's send and proves
+        // the socket for it, so no probe ping goes out. The unanswered
+        // request is just slow and waits for its reply.
+        for (let t = 0; t < 12; t++) {
+            await jest.advanceTimersByTimeAsync(800)
+            socket(0).reply({ type: 'agent-updated' })
+        }
+        expect(pings(0)).toBe(0)
+        expect(read()).toBe('pending')
+        expect(socket(0).readyState).toBe(1)
+    })
+
+    it('lets the urgent probe\'s ping wait out a large send ahead of it before the socket is judged dead', async () => {
+        open()
+        socket(0).open()
+        // About 37.5 s of drain on the slowest link ahead of the urgent request.
+        call('perspective.addLink', { uuid: 'u', blob: 'x'.repeat(600_000) }, { timeoutMs: 120_000 })
+        call('perspective.all', {}, { timeoutMs: 120_000, urgent: true })
+
+        // The urgent wait still fires at +1 s; the ping queues behind the write.
+        await jest.advanceTimersByTimeAsync(1_000)
+        expect(pings(0)).toBe(1)
+
+        // The verdict waits the drain plus the urgent share: still open at
+        // +38 s, dropped after. The normal request's +4 s wake adds no
+        // second ping while the urgent probe runs.
+        await jest.advanceTimersByTimeAsync(4_000)
+        expect(pings(0)).toBe(1)
+        await jest.advanceTimersByTimeAsync(32_900)
+        expect(socket(0).readyState).toBe(1)
+        await jest.advanceTimersByTimeAsync(2_000)
+        expect(socket(0).readyState).toBe(2)
+    })
+
+    it('does not restart a probe already running when an urgent request falls due', async () => {
+        open()
+        socket(0).open()
+        call('agent.get', {}, { timeoutMs: 120_000 })
+        // The normal request's probe starts at +4 s and runs 8 s.
+        await jest.advanceTimersByTimeAsync(4_000)
+        expect(pings(0)).toBe(1)
+
+        await jest.advanceTimersByTimeAsync(500)
+        call('perspective.all', {}, { timeoutMs: 120_000, urgent: true })
+        // The urgent request falls due at +5.5 s inside the running probe:
+        // one probe at a time, still the 8 s deadline — the drop lands at +12 s.
+        await jest.advanceTimersByTimeAsync(1_000)
+        expect(pings(0)).toBe(1)
+        await jest.advanceTimersByTimeAsync(6_499)
+        expect(socket(0).readyState).toBe(1)
+        await jest.advanceTimersByTimeAsync(1)
+        expect(socket(0).readyState).toBe(2)
+    })
+})
+
 describe('ApiClient on a network change', () => {
     // A browser says the network changed with `online` on the window and
     // `change` on `navigator.connection` (Chromium). Node has neither, so the
