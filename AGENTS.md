@@ -301,8 +301,10 @@ none of them without one, so a tab that never joined cannot end another
 tab's call (E19, E21). The executor publishes `sfu-room-roster` (to the
 listed DIDs, plus the departed session's DID on departure) after every join
 and departure, listing sessions (`participantId` + `agentDid`) and a
-`revision` (1 on the room's first publish, then one more on every publish
-of that room, a resume included), so a client can drop a roster whose
+`revision` (one sequence for every roster this process publishes: 1 the
+first time, then one more on every publish, a resume included; a later
+room, and a room created again, continues it, so a roster from an earlier
+life of the room is older), so a client can drop a roster whose
 `revision` is older than one it already applied. The SDK
 keys participants by participant id from it; when the roster stops listing
 this session (its `participantId`) for 3 s, the SDK rebuilds the call, but a
@@ -334,8 +336,9 @@ roster: { revision, participants } }` with the same offer, the same sessions,
 and the same `revision` as the roster event that resume just published, or
 `{ listed: false }` when the room or the session is not there. A session of
 another agent is 403. `sfu.callAnswerServerOffer` and `sfu.callResume` are
-408 when the event loop has not taken the command and answered within 5 s,
-including while the command waits for a slot in the bounded queue.
+408 when they have not finished within 5 s. That wait starts before the
+rooms lock, so a join that holds the lock counts, and it covers the resume
+roster publish as well as the command waiting for a slot in the bounded queue.
 on ICE `disconnected` or a network change the SDK restarts ICE in place (the
 SFU stays the only offerer: the restart comes as a server renegotiation
 offer), and rebuilds the call if that has not reconnected within 15 s; a

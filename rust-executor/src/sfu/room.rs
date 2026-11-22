@@ -298,26 +298,28 @@ impl std::error::Error for RoomError {}
 #[derive(Debug, Default)]
 pub struct RoomManager {
     rooms: HashMap<RoomId, SfuRoom>,
-    /// One roster revision per room id. It outlives the room: the departure
-    /// roster is published after the room is destroyed, and a later room of
-    /// the same id continues, so a revision never goes backwards.
-    roster_revisions: HashMap<RoomId, u64>,
+    /// One revision for every roster this process publishes. It outlives
+    /// every room: a later room, and a room created again, continues the
+    /// sequence, so a revision never looks older than one a client applied.
+    /// A map keyed by room id grew without bound as names came and went.
+    roster_revision: u64,
 }
 
 impl RoomManager {
     pub fn new() -> Self {
         Self {
             rooms: HashMap::new(),
-            roster_revisions: HashMap::new(),
+            roster_revision: 0,
         }
     }
 
-    /// The next roster revision for `id`: 1 the first time, then one more
-    /// on every publish. Stays at `u64::MAX` rather than wrapping to 0.
-    pub fn next_roster_revision(&mut self, id: &RoomId) -> u64 {
-        let slot = self.roster_revisions.entry(id.clone()).or_insert(0);
-        *slot = slot.saturating_add(1);
-        *slot
+    /// The next roster revision. 1 the first time this process publishes,
+    /// then one more on every publish, whichever room it is. `id` names the
+    /// room the caller is publishing; the number is not per room. Stays at
+    /// `u64::MAX` rather than wrapping to 0.
+    pub fn next_roster_revision(&mut self, _id: &RoomId) -> u64 {
+        self.roster_revision = self.roster_revision.saturating_add(1);
+        self.roster_revision
     }
 
     /// Create a new room. Returns error if room already exists.
@@ -548,6 +550,28 @@ mod tests {
         assert_eq!(room.session_of("P999999999", "did:a"), None);
         assert_eq!(room.session_of("", "did:a"), None);
         assert_eq!(room.session_of(&laptop.0.to_string(), "did:a"), None);
+    }
+
+    /// Roster revisions are one sequence for the process. A second room
+    /// does not start again at 1, and a room created again does not go
+    /// backwards.
+    #[test]
+    fn roster_revisions_are_one_sequence_across_rooms() {
+        let mut rooms = RoomManager::new();
+        let a = RoomId::new("n", "a");
+        let b = RoomId::new("n", "b");
+        assert_eq!(rooms.next_roster_revision(&a), 1);
+        assert_eq!(rooms.next_roster_revision(&a), 2);
+        rooms.create_room(a.clone(), None).unwrap();
+        rooms.destroy_room(&a).unwrap();
+        let b_first = rooms.next_roster_revision(&b);
+        assert!(b_first > 2, "room b restarted at {b_first}");
+        let b_last = rooms.next_roster_revision(&b);
+        let again = rooms.next_roster_revision(&a);
+        assert!(
+            again > b_last,
+            "a recreated room went backwards to {again}, after {b_last}"
+        );
     }
 
     #[test]

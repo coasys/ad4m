@@ -37,10 +37,11 @@ pub const MAX_ROOMS_PER_NEIGHBOURHOOD: usize = 16;
 /// An empty room — one `startRoom` opened that nobody joined — closes after
 /// this long. A room whose last participant leaves closes at once.
 pub const EMPTY_ROOM_TTL: Duration = Duration::from_secs(600);
-/// How long `call_answer_server_offer` and `call_resume` wait to hand their
-/// command to the event loop and to hear back. The command queue is
-/// bounded, so a loop that is not draining is part of this wait. Past it,
-/// or if the loop closes the reply, the RPC is 408.
+/// How long `call_answer_server_offer` and `call_resume` wait, from the
+/// start of the call. The wait covers the rooms lock (a join holds it
+/// while it enqueues), the bounded command queue, the event loop's reply,
+/// and, for a resume, the roster publish after that reply. Past it, or if
+/// the loop closes the reply, the RPC is 408.
 const SFU_LOOP_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Most calls one DID is in at once on this node. Within one call, each
 /// device is a session of its own, up to `room::MAX_DEVICES_PER_DID`.
@@ -240,6 +241,13 @@ async fn loop_reply<T>(rx: tokio::sync::oneshot::Receiver<T>) -> Result<T, SfuCa
     .await
 }
 
+/// One roster publish's local sessions, and the full list (local plus
+/// announced remote sessions, sorted). Recipients are the local DIDs only.
+struct RosterSnapshot {
+    local: Vec<super::SfuRosterParticipant>,
+    participants: Vec<super::SfuRosterParticipant>,
+}
+
 /// How `agent_did` stands toward the named session, without holding the
 /// rooms lock across a later wait on the event loop.
 enum SessionGate {
@@ -280,8 +288,8 @@ pub struct SfuService {
     /// join must not be published after that join's roster. Held across
     /// the rooms lock that takes the next revision.
     roster_order: tokio::sync::Mutex<()>,
-    /// Milliseconds an answer or a resume waits to enqueue and to hear
-    /// back. Tests shorten it; production stays at [`SFU_LOOP_REPLY_TIMEOUT`].
+    /// Milliseconds an answer or a resume waits, from the start of the call.
+    /// Tests shorten it; production stays at [`SFU_LOOP_REPLY_TIMEOUT`].
     loop_reply_timeout_ms: AtomicU64,
 }
 
@@ -1033,18 +1041,21 @@ impl SfuService {
         reason: &'static str,
     ) {
         let _order = self.roster_order.lock().await;
-        let local = self.local_sessions(room_id).await;
+        // One snapshot: cascade then rooms, the same order as a join. The
+        // two reads used to be separate, so a session could join between
+        // them and the published list matched neither moment.
+        let snapshot = self.roster_snapshot(room_id).await;
         let recipients: Vec<String> = match only {
             Some(did) => vec![did.to_string()],
-            None => local
+            None => snapshot
+                .local
                 .iter()
                 .map(|p| p.agent_did.clone())
                 .chain(departed.map(str::to_string))
                 .collect(),
         };
-        let participants = self.with_remote_sessions(room_id, local).await;
         let revision = self.bump_roster_revision(room_id).await;
-        emit_roster(room_id, revision, participants, recipients, reason).await;
+        emit_roster(room_id, revision, snapshot.participants, recipients, reason).await;
     }
 
     /// The next revision for `room_id`. Caller holds `roster_order`, so this
@@ -1057,14 +1068,17 @@ impl SfuService {
         Duration::from_millis(self.loop_reply_timeout_ms.load(Ordering::Relaxed))
     }
 
-    /// Hand `command` to the event loop and wait for `rx`, under one deadline.
+    /// Hand `command` to the event loop and wait for `rx`, under `timeout`.
+    /// The caller starts that budget before it waits on the rooms lock, and
+    /// passes what is left.
     async fn enqueue_and_wait<T>(
         &self,
+        timeout: Duration,
         command: SfuCommand,
         rx: tokio::sync::oneshot::Receiver<T>,
     ) -> Result<T, SfuCallError> {
         let send = self.server.command_tx.send(command);
-        send_and_await(self.loop_reply_timeout(), send, rx).await
+        send_and_await(timeout, send, rx).await
     }
 
     #[cfg(test)]
@@ -1073,47 +1087,65 @@ impl SfuService {
             .store(timeout.as_millis() as u64, Ordering::Relaxed);
     }
 
-    /// `local` plus the sessions other cascade nodes announced, sorted.
-    async fn with_remote_sessions(
-        &self,
-        room_id: &RoomId,
-        mut participants: Vec<super::SfuRosterParticipant>,
-    ) -> Vec<super::SfuRosterParticipant> {
-        participants.extend(
-            self.cascade_manager
-                .read()
-                .await
-                .remote_sessions(&room_id.to_string()),
-        );
+    /// This node's sessions and the sessions other nodes announced, read
+    /// together. Cascade is taken first, then rooms: a join takes them in
+    /// that order too.
+    async fn roster_snapshot(&self, room_id: &RoomId) -> RosterSnapshot {
+        let cascade = self.cascade_manager.read().await;
+        let rooms = self.rooms.read().await;
+        let mut local = rooms
+            .get_room(room_id)
+            .map(|room| {
+                room.participants
+                    .values()
+                    .map(|p| super::SfuRosterParticipant {
+                        agent_did: p.agent_did.clone(),
+                        participant_id: p.id.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        local.sort();
+        let mut participants = local.clone();
+        participants.extend(cascade.remote_sessions(&room_id.to_string()));
+        drop(rooms);
+        drop(cascade);
         participants.sort();
-        participants
+        RosterSnapshot {
+            local,
+            participants,
+        }
     }
 
-    /// The room's sessions when `pid` is still `agent_did`'s, read in one
-    /// pass with the local list. `None` when the session is gone, so a
-    /// resume does not publish a roster for it.
+    /// The room's sessions when `pid` is still `agent_did`'s, from the same
+    /// snapshot as [`Self::roster_snapshot`]. `None` when the session is
+    /// gone, so a resume does not publish a roster for it.
     async fn roster_if_own(
         &self,
         room_id: &RoomId,
         pid: &ParticipantId,
         agent_did: &str,
     ) -> Option<Vec<super::SfuRosterParticipant>> {
-        let local = {
-            let rooms = self.rooms.read().await;
-            let room = rooms.get_room(room_id)?;
-            match room.session_access(&pid.to_string(), agent_did) {
-                SessionAccess::Own(_) => {}
-                SessionAccess::Absent | SessionAccess::OtherAgent => return None,
-            }
-            room.participants
-                .values()
-                .map(|p| super::SfuRosterParticipant {
-                    agent_did: p.agent_did.clone(),
-                    participant_id: p.id.to_string(),
-                })
-                .collect()
-        };
-        Some(self.with_remote_sessions(room_id, local).await)
+        let cascade = self.cascade_manager.read().await;
+        let rooms = self.rooms.read().await;
+        let room = rooms.get_room(room_id)?;
+        match room.session_access(&pid.to_string(), agent_did) {
+            SessionAccess::Own(_) => {}
+            SessionAccess::Absent | SessionAccess::OtherAgent => return None,
+        }
+        let mut participants: Vec<_> = room
+            .participants
+            .values()
+            .map(|p| super::SfuRosterParticipant {
+                agent_did: p.agent_did.clone(),
+                participant_id: p.id.to_string(),
+            })
+            .collect();
+        participants.extend(cascade.remote_sessions(&room_id.to_string()));
+        drop(rooms);
+        drop(cascade);
+        participants.sort();
+        Some(participants)
     }
 
     /// Get the local address of the SFU server.
@@ -1675,9 +1707,16 @@ impl SfuService {
         offer_id: &str,
         sdp_answer_json: &str,
     ) -> Result<SfuAnswerResult, SfuCallError> {
+        let deadline = tokio::time::Instant::now() + self.loop_reply_timeout();
         let pid = match self
-            .session_gate(neighbourhood_url, room_name, agent_did, participant_id)
-            .await
+            .session_gate_within(
+                deadline,
+                neighbourhood_url,
+                room_name,
+                agent_did,
+                participant_id,
+            )
+            .await?
         {
             SessionGate::Own(pid) => pid,
             SessionGate::Unknown => {
@@ -1691,6 +1730,7 @@ impl SfuService {
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.enqueue_and_wait(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
             SfuCommand::ApplyServerAnswer {
                 participant_id: pid,
                 offer_id: Some(offer_id.to_string()),
@@ -1748,9 +1788,16 @@ impl SfuService {
         agent_did: &str,
         participant_id: &str,
     ) -> Result<SfuResumeResult, SfuCallError> {
+        let deadline = tokio::time::Instant::now() + self.loop_reply_timeout();
         let pid = match self
-            .session_gate(neighbourhood_url, room_name, agent_did, participant_id)
-            .await
+            .session_gate_within(
+                deadline,
+                neighbourhood_url,
+                room_name,
+                agent_did,
+                participant_id,
+            )
+            .await?
         {
             SessionGate::Own(pid) => pid,
             SessionGate::Unknown => return Ok(SfuResumeResult::unlisted()),
@@ -1763,6 +1810,7 @@ impl SfuService {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let report = self
             .enqueue_and_wait(
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
                 SfuCommand::Resume {
                     participant_id: pid.clone(),
                     reply: tx,
@@ -1773,29 +1821,37 @@ impl SfuService {
         if !report.listed {
             return Ok(SfuResumeResult::unlisted());
         }
-        // Same lock order as [`Self::publish_roster_to`]: the roster lock,
-        // then the room.
-        let _order = self.roster_order.lock().await;
-        let room_id = RoomId::new(neighbourhood_url, room_name);
-        let Some(participants) = self.roster_if_own(&room_id, &pid, agent_did).await else {
-            return Ok(SfuResumeResult::unlisted());
-        };
-        let revision = self.bump_roster_revision(&room_id).await;
-        emit_roster(
-            &room_id,
-            revision,
-            participants.clone(),
-            vec![agent_did.to_string()],
-            "resume",
-        )
-        .await;
-        Ok(SfuResumeResult::listed(
-            report.offer,
-            super::SfuResumeRoster {
+        // Same deadline. The roster locks are part of the wait: a publish
+        // that cannot take them before it elapses is 408, not a hang.
+        let published = async {
+            let _order = self.roster_order.lock().await;
+            let room_id = RoomId::new(neighbourhood_url, room_name);
+            let Some(participants) = self.roster_if_own(&room_id, &pid, agent_did).await else {
+                return SfuResumeResult::unlisted();
+            };
+            let revision = self.bump_roster_revision(&room_id).await;
+            emit_roster(
+                &room_id,
                 revision,
-                participants,
-            },
-        ))
+                participants.clone(),
+                vec![agent_did.to_string()],
+                "resume",
+            )
+            .await;
+            SfuResumeResult::listed(
+                report.offer,
+                super::SfuResumeRoster {
+                    revision,
+                    participants,
+                },
+            )
+        };
+        match tokio::time::timeout_at(deadline, published).await {
+            Ok(result) => Ok(result),
+            Err(_) => Err(SfuCallError::Timeout(
+                "the event loop did not answer in time".into(),
+            )),
+        }
     }
 
     /// Trickle ICE: add a remote ICE candidate to a participant's
@@ -1886,22 +1942,33 @@ impl SfuService {
         }
     }
 
-    async fn session_gate(
+    /// Who `agent_did` is toward the named session. The rooms lock is part
+    /// of `deadline`. The deadline elapsing while the lock is held is 408.
+    /// A lock taken in time still answers unknown or forbidden at once.
+    async fn session_gate_within(
         &self,
+        deadline: tokio::time::Instant,
         neighbourhood_url: &str,
         room_name: &str,
         agent_did: &str,
         participant_id: &str,
-    ) -> SessionGate {
-        let rooms = self.rooms.read().await;
-        let Some(room) = rooms.get_room(&RoomId::new(neighbourhood_url, room_name)) else {
-            return SessionGate::Unknown;
+    ) -> Result<SessionGate, SfuCallError> {
+        let rooms = match tokio::time::timeout_at(deadline, self.rooms.read()).await {
+            Ok(rooms) => rooms,
+            Err(_) => {
+                return Err(SfuCallError::Timeout(
+                    "the event loop did not answer in time".into(),
+                ));
+            }
         };
-        match room.session_access(participant_id, agent_did) {
+        let Some(room) = rooms.get_room(&RoomId::new(neighbourhood_url, room_name)) else {
+            return Ok(SessionGate::Unknown);
+        };
+        Ok(match room.session_access(participant_id, agent_did) {
             SessionAccess::Own(pid) => SessionGate::Own(pid),
             SessionAccess::Absent => SessionGate::Unknown,
             SessionAccess::OtherAgent => SessionGate::Forbidden,
-        }
+        })
     }
 
     /// The session `participant_id` of `agent_did` in the call, or why there
@@ -3376,6 +3443,89 @@ mod tests {
         assert_408_within_deadline("callAnswerServerOffer", deadline, answer).await;
         let resume = svc.call_resume(url, "r", "did:a", &laptop);
         assert_408_within_deadline("callResume", deadline, resume).await;
+    }
+
+    /// A join holds the rooms write lock while its `AddPeer` waits on a full
+    /// command queue. Answer and resume used to wait on that lock before
+    /// their deadline started, so they hung past it. Both are 408 inside the
+    /// deadline, and the join is the one holding the lock.
+    #[tokio::test]
+    async fn a_join_holding_the_room_lock_is_408_within_the_deadline() {
+        let mut svc = test_service().await;
+        let url = "neighbourhood://room-lock";
+        let laptop = join(&svc, url, "did:a", "laptop").await;
+        let deadline = Duration::from_millis(200);
+        svc.set_loop_reply_timeout(deadline);
+
+        let (tx, _held) = tokio::sync::mpsc::channel(1);
+        tx.send(SfuCommand::RemovePeer(ParticipantId::next()))
+            .await
+            .unwrap();
+        Arc::get_mut(&mut svc)
+            .expect("the test service is not shared yet")
+            .server
+            .command_tx = tx;
+
+        // The join queues behind this guard, then takes the write lock and
+        // blocks on the full send. The RPCs start only once that has happened,
+        // so a 408 from the full queue alone cannot pass the test.
+        let gate = svc.rooms.write().await;
+        let svc_join = Arc::clone(&svc);
+        let url_join = url.to_string();
+        let join_task = tokio::spawn(async move {
+            svc_join
+                .call_join(
+                    &url_join,
+                    "r",
+                    "did:b",
+                    "phone",
+                    "key-room-lock",
+                    &offer(),
+                    false,
+                    || true,
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !join_task.is_finished(),
+            "the join ran before the lock was free"
+        );
+        drop(gate);
+
+        // Wait until the join is the one holding the write lock. A free lock
+        // returns at once, so a fixed number of tries can end before SDP
+        // setup reaches it. Two misses in a row: one slow poll on a loaded
+        // host is not the join.
+        let probe_until = tokio::time::Instant::now() + Duration::from_secs(2);
+        let mut join_holds_write = false;
+        let mut misses = 0;
+        while tokio::time::Instant::now() < probe_until {
+            if join_task.is_finished() {
+                panic!("join finished before blocking: {:?}", join_task.await);
+            }
+            match tokio::time::timeout(Duration::from_millis(30), svc.rooms.write()).await {
+                Ok(guard) => {
+                    misses = 0;
+                    drop(guard);
+                    tokio::task::yield_now().await;
+                }
+                Err(_) => {
+                    misses += 1;
+                    if misses == 2 {
+                        join_holds_write = true;
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(join_holds_write, "the join never held the room lock");
+
+        let answer = svc.call_answer_server_offer(url, "r", "did:a", &laptop, "o1", "{}");
+        assert_408_within_deadline("callAnswerServerOffer", deadline, answer).await;
+        let resume = svc.call_resume(url, "r", "did:a", &laptop);
+        assert_408_within_deadline("callResume", deadline, resume).await;
+        join_task.abort();
     }
 
     async fn assert_408_within_deadline<T: std::fmt::Debug>(
