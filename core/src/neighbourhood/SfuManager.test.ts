@@ -3211,6 +3211,26 @@ test("a resume refused with 403 ends the call, not a rebuild: the session is ano
     expect(manager.getState().participantId).toBeNull()
 })
 
+test("a resume refused with 403 that names no other agent still ends refused, with the executor's error", async () => {
+    // A former member's own session is refused the same way: the refusal is
+    // the executor's access refusal, not proof of another agent's session.
+    const api = fakeApi()
+    api.sfuCallResume.mockRejectedValue(new RpcError(403, "Not a member of this neighbourhood"))
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    const ended: { reason: string; error: Error }[] = []
+    manager.on("call-ended", (event: { reason: string; error: Error }) => ended.push(event))
+    await manager.join(fakeStream())
+
+    api.emitReconnect()
+    await flush()
+    await flush()
+
+    expect(ended).toHaveLength(1)
+    expect(ended[0].reason).toBe("refused")
+    expect(ended[0].error.message).toContain("Not a member of this neighbourhood")
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+})
+
 // ── Round 2: resumes before a rebuild do not pile up ────────────────────────
 
 test("a resume that answers after a roster listed this session again rebuilds nothing, and the next unlisted roster asks again", async () => {

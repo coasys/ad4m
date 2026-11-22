@@ -151,8 +151,8 @@ export type SfuEvent =
     /** `(SfuSessionReplaced)` — a later join from this device took the call over; this manager stopped. */
     | "replaced"
     /** `(SfuCallEnded)` — the call ended on its own and will not come back without a new `join`:
-     *  rebuilding gave up on it (`reason: "gave-up"`), or the executor said this session is
-     *  another agent's (`reason: "refused"`). The manager has stopped. */
+     *  rebuilding gave up on it (`reason: "gave-up"`), or the executor refused this session's
+     *  resume (`reason: "refused"`). The manager has stopped. */
     | "call-ended"
     | "error"
 
@@ -160,7 +160,9 @@ export type SfuEvent =
 export interface SfuCallEnded {
     /** `gave-up`: rebuilding could not keep the call up — MAX_REBUILDS within
      *  REBUILD_WINDOW_MS, or a rejoin window spent without a rejoin.
-     *  `refused`: the executor said this session is another agent's (403). */
+     *  `refused`: the executor refused this session's resume (403) — the
+     *  session is another agent's, or this agent is no longer a member of
+     *  the neighbourhood; `error` carries the executor's message. */
     reason: "gave-up" | "refused"
     error: Error
 }
@@ -1187,8 +1189,9 @@ export class SfuManager {
      * A socket fault (503, 408) keeps the call: an ask a roster left this
      * session out for (`retryUnlisted`) is asked again within the grace
      * while the roster still omits it; the others wait for the next
-     * reconnect. A 403 ends it: the session the join returned is another
-     * agent's, so there is no call to keep.
+     * reconnect. A 403 ends it: the executor refused this session's
+     * resume — it is another agent's, or this agent lost its membership —
+     * and a refusal does not heal.
      */
     private resume(pc: RTCPeerConnection, retryUnlisted = false): void {
         const participantId = this.state.participantId
@@ -1252,7 +1255,15 @@ export class SfuManager {
                 return
             }
             if (err instanceof RpcError && err.status === 403) {
-                console.error("SFU: the session is another agent's; the call ends:", err)
+                // The executor refused this session's resume — an ownership
+                // mismatch only when its message says so; it refuses a
+                // former member's own session the same way.
+                console.error(
+                    err.body.includes("another agent")
+                        ? "SFU: the session is another agent's; the call ends:"
+                        : "SFU: the executor refused this session's resume; the call ends:",
+                    err,
+                )
                 this.endCall({ reason: "refused", error: err })
                 return
             }
