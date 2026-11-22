@@ -1279,18 +1279,25 @@ export class SfuManager {
         // executor holds its current offer and resends it, so the drop
         // loses nothing; while `appliedOfferId` is still the ask's, the
         // reply's offer applies.
-        const offer = result.offer
-        if (offer && offer.participantId === participantId && this.appliedOfferId === askedAtOfferId) {
+        const offer = result.offer?.participantId === participantId ? result.offer : undefined
+        if (offer && this.appliedOfferId === askedAtOfferId) {
             await this.applyServerOffers(pc, [offer])
         }
-        // No offer in the reply means the executor holds no pending offer
-        // for this session — a restart request it never saw is the usual
-        // cause while a restart is in flight and ICE is still down, so a
-        // fresh one is asked for then. An offer in the reply is the
-        // restart already, and ICE `checking` says its answer reached the
-        // executor, so neither case is owed one.
-        if (!offer && this.restartTimer && (pc.iceConnectionState === "disconnected" || pc.iceConnectionState === "failed")) {
-            this.sendRestart(pc, participantId)
+        // While a restart is in flight and ICE is still down, the reply
+        // decides what is owed next. No offer for this session means the
+        // executor holds no pending offer for it — a restart request it
+        // never saw is the usual cause, so a fresh one is asked for. An
+        // offer may be the restart already, or only an ordinary
+        // renegotiation the drop hid — the wire does not say — so once it
+        // is answered the executor is asked again: its next reply carries
+        // the next pending offer (answered the same way) or, carrying
+        // none, asks for the restart. Each such ask inherits the restart's
+        // remaining window, so the chain cannot ask past the deadline the
+        // restart already had. ICE `checking` says the restart's answer
+        // reached the executor — nothing is owed then.
+        if (this.restartTimer && (pc.iceConnectionState === "disconnected" || pc.iceConnectionState === "failed")) {
+            if (offer) this.resume(pc)
+            else this.sendRestart(pc, participantId)
         }
     }
 
