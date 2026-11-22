@@ -7,7 +7,9 @@ use super::model_query::types::{ModelShape, ShapeResolver};
 use super::monotonic::{committable, drop_monotonic_removals, refuse_monotonic_removal};
 use super::sdna::{generic_link_fact, is_sdna_link};
 use super::shacl_parser::check_consensus_rule_links;
+use super::shacl_parser::is_own_link;
 use super::shacl_parser::property_node_name;
+use super::shacl_parser::ShapeNode;
 use super::sparql_store::EvalStop;
 use super::update_perspective_with;
 use super::utils::prolog_get_all_string_bindings;
@@ -124,45 +126,32 @@ fn notification_pool_name(uuid: &str) -> String {
     format!("notification_{}", uuid)
 }
 
-/// True iff any addition or removal in the diff carries a triple
-/// that would alter a class's stored SHACL definition:
-///   * a class's `ad4m://shape` index link,
-///   * a class-level `rdf://type ad4m://SubjectClass` marker (only
-///     that specific target — normal `rdf://type ns://SomeClass`
-///     application links must not flush the cache), or
-///   * any SHACL-vocabulary predicate (`sh://...`) which only
-///     appears on property-shape triples written by the SHACL
-///     writer, not on regular application data, or
-///   * an abstract-class marker or alias (#1435).
+/// True iff any addition or removal in the diff could be a class's own
+/// link on any of its nodes — [`is_own_link`] tried with each
+/// [`ShapeNode`], since a diff does not say which of a class's nodes its
+/// link sits on. Used by `diff_from_link_language` and
+/// `pubsub_publish_diff` to decide whether a write changed a stored
+/// SHACL definition and the cached shapes (registry, own-link sets,
+/// `shape_cache`) must be dropped.
 ///
-/// Used by `diff_from_link_language` to decide whether to
-/// invalidate the shape cache. The scan is one loop over
-/// (additions + removals) per inbound diff — cheap next to the
-/// SPARQL write. Kept intentionally narrow so that a chatty
-/// application (Flux message writes, etc.) doesn't churn the
-/// cache. `ad4m://resolveLanguage`, `getter`, `transform`,
-/// `interpretation_hint`, `identity` etc. also appear on live
-/// application data (a `@Property` decorator emits them onto every
-/// instance's property URI) and MUST NOT trigger invalidation.
+/// The match is the whole own-link vocabulary, the same one the
+/// registry's cached triple sets hold. Only the SHACL writers
+/// (`SHACLShape.toLinks`, the MCP model tools) put `ad4m://constructor`,
+/// `setter`, `resolveLanguage` etc. on shape and property nodes, so
+/// application writes do not clear the cache. A link outside a shape that
+/// still uses one of those predicates only costs a refill. An own-link
+/// change the scan misses would leave `register_shapes` answering a
+/// stale `unchanged`, so matching too much is safe and too little is not.
 fn inbound_touches_shacl(diff: &DecoratedPerspectiveDiff) -> bool {
-    let iter = diff.additions.iter().chain(diff.removals.iter());
-    for decorated in iter {
-        let predicate = decorated.data.predicate.as_deref().unwrap_or("");
-        if predicate.starts_with("sh://") {
-            return true;
-        }
-        match predicate {
-            super::shacl_parser::SHAPE_PREDICATE => return true,
-            // The abstract-class marker and aliases (#1435) can sync apart
-            // from the rest of a shape.
-            super::shacl_parser::ABSTRACT_PREDICATE | super::shacl_parser::ALIAS_PREDICATE => {
-                return true
-            }
-            "rdf://type" if decorated.data.target == "ad4m://SubjectClass" => return true,
-            _ => {}
-        }
-    }
-    false
+    diff.additions
+        .iter()
+        .chain(diff.removals.iter())
+        .any(|decorated| {
+            let predicate = decorated.data.predicate.as_deref().unwrap_or("");
+            [ShapeNode::Class, ShapeNode::Shape, ShapeNode::Property]
+                .into_iter()
+                .any(|node| is_own_link(node, predicate, &decorated.data.target))
+        })
 }
 
 /// The error a live query that is not SPARQL gets. Live queries are SPARQL or
@@ -318,12 +307,13 @@ mod inbound_touches_shacl_tests {
     }
 
     #[test]
-    fn ad4m_predicates_that_also_ride_application_data_do_not_invalidate() {
+    fn own_link_predicates_invalidate_on_any_node() {
         // `resolveLanguage`, `getter`, `interpretation_hint`, `identity`
-        // appear on live property URIs on real instances (a @Property
-        // decorator writes them per-instance). They must NOT invalidate
-        // the class-shape cache — the check keys off the SHACL writer's
-        // structural triples only.
+        // are own-link predicates of a property shape. The check cannot
+        // tell which node a diff's link sits on, so it clears the cache on
+        // any node: an over-clear only costs a refill, and a missed
+        // own-link change would leave the registry answering a stale
+        // `unchanged`.
         for predicate in [
             "ad4m://resolveLanguage",
             "ad4m://getter",
@@ -332,12 +322,12 @@ mod inbound_touches_shacl_tests {
             "ad4m://transform",
         ] {
             assert!(
-                !inbound_touches_shacl(&diff(vec![link(
+                inbound_touches_shacl(&diff(vec![link(
                     "flux://message/abc.body",
                     predicate,
                     "some-value"
                 )])),
-                "predicate `{predicate}` should NOT invalidate on plain instance data"
+                "predicate `{predicate}` is in the own-link vocabulary, so it invalidates"
             );
         }
     }
@@ -2480,8 +2470,12 @@ impl PerspectiveInstance {
             self.update_prolog_engines(decorated_diff.clone()).await;
 
             // An update publishes its own topic rather than going through
-            // `pubsub_publish_diff`, so it queues the definition sweep here.
+            // `pubsub_publish_diff`, so it queues the definition sweep and
+            // the SHACL invalidation here.
             self.schedule_flow_pass_on_definition_change(&decorated_diff);
+            if inbound_touches_shacl(&decorated_diff) {
+                self.clear_shape_cache();
+            }
 
             // One event, to all of the owners.
             super::publish_to_owners(

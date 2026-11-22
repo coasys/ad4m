@@ -58,7 +58,6 @@ export class PerspectiveClient {
     #neighbourhoodClient?: NeighbourhoodClient
     #aiClient?: AIClient
     #sparqlInFlight = new Map<string, Promise<string>>()
-    #registerShapesInFlight = new Map<string, Promise<RegisterResult>>()
     /** Per perspective, how many writes through this client have settled; part of the in-flight key. */
     #writeGeneration = new Map<string, number>()
 
@@ -544,22 +543,9 @@ export class PerspectiveClient {
      * class whose stored shape already is the given one is left alone; the
      * others are rewritten in one diff. Answers once the executor reads the
      * new shapes.
-     *
-     * Concurrent identical calls (same perspective and shapes) share one
-     * RPC, as {@link querySparql} calls do: every caller gets the one reply,
-     * which still goes through `#wrote` once. A call made after the shared
-     * one settled — or after another write to the perspective settled —
-     * makes a new RPC.
      */
     async registerShapes(uuid: string, shapes: ShapeJson[]): Promise<RegisterResult> {
-        const key = `${uuid}\n${this.#writeGeneration.get(uuid) ?? 0}\n${JSON.stringify(shapes)}`
-        let reply = this.#registerShapesInFlight.get(key)
-        if (!reply) {
-            reply = this.#wrote(uuid, this.#apiClient.call('perspective.registerShapes', { uuid, shapes }))
-                .finally(() => this.#registerShapesInFlight.delete(key))
-            this.#registerShapesInFlight.set(key, reply)
-        }
-        return reply
+        return this.#wrote(uuid, this.#apiClient.call('perspective.registerShapes', { uuid, shapes }))
     }
 
     /** The registered classes (only those in `names` when given), sorted by name. */

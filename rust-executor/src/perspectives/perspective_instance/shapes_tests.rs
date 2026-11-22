@@ -116,11 +116,7 @@ async fn register_twice_writes_no_link() {
     assert_eq!(second.unchanged, vec!["ns://Note".to_string()]);
     assert!(second.written.is_empty());
     assert_eq!(second.generation, first.generation);
-    assert_eq!(
-        probe::count(),
-        0,
-        "the repeat reads the cache, not the store"
-    );
+    assert_eq!(probe::count(), 0, "zero own-link reads on the repeat");
     assert_eq!(all_links(&perspective), before, "links and timestamps stay");
 }
 
@@ -619,6 +615,228 @@ async fn a_synced_shape_link_is_rewritten_not_read_as_unchanged() {
     );
 }
 
+/// The stored expression of `source -[predicate]-> _` (exactly one must
+/// be stored), as a write or a diff's removal needs it: author and
+/// timestamp included.
+fn stored_link(
+    perspective: &PerspectiveInstance,
+    source: &str,
+    predicate: &str,
+) -> crate::types::DecoratedLinkExpression {
+    let stored = perspective
+        .sparql_store
+        .query_links(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            Some(source),
+            Some(predicate),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(stored.len(), 1, "one {predicate} link on {source}");
+    stored[0].clone()
+}
+
+/// A class's `ad4m://constructor` is one of its own links (on the shape
+/// node, `is_own_link`). Removed locally, the cached own-link sets must
+/// be dropped: the next registration rewrites it rather than answering
+/// `unchanged` from the stale cache.
+#[tokio::test]
+async fn a_removed_shape_own_link_is_rewritten_not_read_as_unchanged() {
+    let (mut perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
+    perspective
+        .register_shapes(vec![note()], &ctx)
+        .await
+        .unwrap();
+    // The registration leaves the own-link cache warm; prove it answers.
+    let repeat = perspective
+        .register_shapes(vec![note()], &ctx)
+        .await
+        .unwrap();
+    assert_eq!(repeat.unchanged, vec!["ns://Note".to_string()]);
+
+    let constructor = stored_link(&perspective, "ns://NoteShape", "ad4m://constructor");
+    perspective
+        .remove_link(constructor.clone().into(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        count(
+            &perspective,
+            "ns://NoteShape",
+            "ad4m://constructor",
+            &constructor.data.target
+        ),
+        0
+    );
+
+    let result = perspective
+        .register_shapes(vec![note()], &ctx)
+        .await
+        .unwrap();
+
+    assert_eq!(result.written, vec!["ns://Note".to_string()]);
+    assert!(result.unchanged.is_empty());
+    assert_eq!(
+        count(
+            &perspective,
+            "ns://NoteShape",
+            "ad4m://constructor",
+            &constructor.data.target
+        ),
+        1,
+        "the constructor link is back"
+    );
+}
+
+/// `update_link` publishes its own event, not through
+/// `pubsub_publish_diff`, so it clears the own-link cache itself: an
+/// edited constructor link is rewritten by the next registration.
+#[tokio::test]
+async fn an_updated_shape_own_link_is_rewritten_not_read_as_unchanged() {
+    let (mut perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
+    perspective
+        .register_shapes(vec![note()], &ctx)
+        .await
+        .unwrap();
+    let repeat = perspective
+        .register_shapes(vec![note()], &ctx)
+        .await
+        .unwrap();
+    assert_eq!(repeat.unchanged, vec!["ns://Note".to_string()]);
+
+    let constructor = stored_link(&perspective, "ns://NoteShape", "ad4m://constructor");
+    perspective
+        .update_link(
+            constructor.clone().into(),
+            crate::types::Link {
+                source: "ns://NoteShape".into(),
+                predicate: Some("ad4m://constructor".into()),
+                target: "literal://string:edited".into(),
+            },
+            None,
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    let result = perspective
+        .register_shapes(vec![note()], &ctx)
+        .await
+        .unwrap();
+
+    assert_eq!(result.written, vec!["ns://Note".to_string()]);
+    assert!(result.unchanged.is_empty());
+    assert_eq!(
+        count(
+            &perspective,
+            "ns://NoteShape",
+            "ad4m://constructor",
+            &constructor.data.target
+        ),
+        1,
+        "the registered constructor link is back"
+    );
+}
+
+/// A property's `ad4m://setter` is a class's own link on the property
+/// node: a local removal drops the cache as the shape node's links do.
+#[tokio::test]
+async fn a_removed_property_setter_is_rewritten_not_read_as_unchanged() {
+    let (mut perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
+    perspective
+        .register_shapes(vec![note()], &ctx)
+        .await
+        .unwrap();
+    let repeat = perspective
+        .register_shapes(vec![note()], &ctx)
+        .await
+        .unwrap();
+    assert_eq!(repeat.unchanged, vec!["ns://Note".to_string()]);
+
+    let setter = stored_link(&perspective, &property_node("title"), "ad4m://setter");
+    perspective
+        .remove_link(setter.clone().into(), None)
+        .await
+        .unwrap();
+
+    let result = perspective
+        .register_shapes(vec![note()], &ctx)
+        .await
+        .unwrap();
+
+    assert_eq!(result.written, vec!["ns://Note".to_string()]);
+    assert!(result.unchanged.is_empty());
+    assert_eq!(
+        count(
+            &perspective,
+            &property_node("title"),
+            "ad4m://setter",
+            &setter.data.target
+        ),
+        1,
+        "the setter link is back"
+    );
+}
+
+/// The same for an own link a peer's diff removes: the inbound SHACL
+/// invalidation covers the whole own-link vocabulary, so the warm cache
+/// is dropped and the next registration rewrites the link.
+#[tokio::test]
+async fn a_synced_own_link_removal_is_rewritten_not_read_as_unchanged() {
+    let (mut perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
+    perspective
+        .register_shapes(vec![note()], &ctx)
+        .await
+        .unwrap();
+    let repeat = perspective
+        .register_shapes(vec![note()], &ctx)
+        .await
+        .unwrap();
+    assert_eq!(repeat.unchanged, vec!["ns://Note".to_string()]);
+
+    // A removal names the link by its reifier (author, triple, timestamp),
+    // so it is the stored expression itself that the diff carries — as a
+    // peer removes the copy it authored.
+    let constructor = stored_link(&perspective, "ns://NoteShape", "ad4m://constructor");
+    perspective
+        .diff_from_link_language(crate::types::PerspectiveDiff {
+            additions: vec![],
+            removals: vec![constructor.clone().into()],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        count(
+            &perspective,
+            "ns://NoteShape",
+            "ad4m://constructor",
+            &constructor.data.target
+        ),
+        0
+    );
+
+    let result = perspective
+        .register_shapes(vec![note()], &ctx)
+        .await
+        .unwrap();
+
+    assert_eq!(result.written, vec!["ns://Note".to_string()]);
+    assert!(result.unchanged.is_empty());
+    assert_eq!(
+        count(
+            &perspective,
+            "ns://NoteShape",
+            "ad4m://constructor",
+            &constructor.data.target
+        ),
+        1,
+        "the constructor link is back"
+    );
+}
+
 /// The holder check also runs on the fast path: a shape URI a node that
 /// is not the class holds is refused from the cache, without a store
 /// read per node. The foreign link is injected straight into the store,
@@ -654,7 +872,7 @@ async fn a_shape_uri_held_elsewhere_is_refused_on_the_fast_path() {
     assert_eq!(
         probe::count(),
         0,
-        "the refusal came from the cached sets, not a store read"
+        "zero own-link reads: the refusal ran without re-reading the classes"
     );
     assert_eq!(all_links(&perspective), before, "nothing was written");
 }

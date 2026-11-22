@@ -1153,10 +1153,6 @@ export class PerspectiveProxy {
      * lists name classes by target class IRI. Answers once the executor
      * reads the new shapes.
      *
-     * Concurrent identical calls share one RPC (see `querySparql`), so the
-     * same registration sent by several places at once reaches the
-     * executor once.
-     *
      * Rejects, writing nothing, when two shapes name one class or share a
      * shape URI, or when another class holds a shape URI given here.
      */

@@ -404,22 +404,29 @@ impl PerspectiveInstance {
 
 #[cfg(test)]
 pub(super) mod probe {
-    //! Test hook: how often `own_shape_links` read the store, so a test
-    //! can see an unchanged `register_shapes` ran the fast path (no reads).
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    //! Test hook: how often `own_shape_links` read the store on the
+    //! calling thread, so a test can see an unchanged `register_shapes`
+    //! ran the fast path (no reads). Thread-local: tests run in parallel
+    //! on their own threads and would disturb a shared counter. It stays
+    //! exact because every `own_shape_links` call a test makes runs on
+    //! the test's own thread — `#[tokio::test]`'s current-thread runtime,
+    //! and no `spawn_blocking` or other thread reaches it.
+    use std::cell::Cell;
 
-    static OWN_SHAPE_READS: AtomicUsize = AtomicUsize::new(0);
+    thread_local! {
+        static OWN_SHAPE_READS: Cell<usize> = const { Cell::new(0) };
+    }
 
     pub(super) fn count() -> usize {
-        OWN_SHAPE_READS.load(Ordering::SeqCst)
+        OWN_SHAPE_READS.get()
     }
 
     pub(super) fn reset() {
-        OWN_SHAPE_READS.store(0, Ordering::SeqCst);
+        OWN_SHAPE_READS.set(0);
     }
 
     pub(super) fn bump() {
-        OWN_SHAPE_READS.fetch_add(1, Ordering::SeqCst);
+        OWN_SHAPE_READS.set(OWN_SHAPE_READS.get() + 1);
     }
 }
 
