@@ -370,6 +370,10 @@ async fn a_foreign_reifier_of_a_mount_triple_survives() {
     create(&lang, json!({"title": "a"})).await;
     let (mut p, ctx) = mounted(&lang).await;
     let source = format!("{lang}://t1");
+    // A link is its author, triple and timestamp. Both writers here are the
+    // main agent, so in the same millisecond as the mount's own title link
+    // this would be that link, not a second one.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     let mine = p
         .add_links(
             vec![Link {
