@@ -2564,7 +2564,12 @@ test("a resume reply with no offer while a restart runs and ICE is down asks for
     }
 })
 
-test("a resume reply carrying the restart's offer asks for no restart: that offer is the restart", async () => {
+test("an ordinary offer in a resume reply is answered, then the executor asked again — its offer-less reply re-requests the restart", async () => {
+    // The executor can hold an ordinary renegotiation offer the drop hid,
+    // and the wire does not say it is not the restart. Answering it is no
+    // proof the restart request arrived, so while the restart runs and
+    // ICE is down the executor is asked again: its next reply carries no
+    // offer, so the restart is asked for afresh.
     fakeTimers()
     try {
         const api = fakeApi()
@@ -2575,13 +2580,63 @@ test("a resume reply carrying the restart's offer asks for no restart: that offe
         await iceState("disconnected")
         expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
 
-        api.sfuCallResume.mockResolvedValueOnce({ listed: true, offer: offer("restart-offer") })
+        api.sfuCallResume
+            .mockResolvedValueOnce({ listed: true, offer: offer("renegotiate") })
+            .mockResolvedValueOnce(resumeListed())
         api.emitReconnect()
         await flush()
         await flush()
+        await flush()
+        await flush()
 
+        expect(currentPc().remoteSdps()).toEqual(["server-answer", "renegotiate"])
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(2)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("offers in resume replies are answered until the reply carries none — then the restart is asked for", async () => {
+    // Each offer-carrying reply while the restart runs and ICE is down is
+    // asked after once more: an ordinary offer first, the restart's own
+    // offer behind it — both answered on this connection — and only the
+    // reply that holds no pending offer re-requests the restart.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        await iceState("connected")
+
+        await iceState("disconnected")
         expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
-        expect(currentPc().remoteSdps()).toEqual(["server-answer", "restart-offer"])
+
+        api.sfuCallResume
+            .mockResolvedValueOnce({ listed: true, offer: offer("renegotiate") })
+            .mockResolvedValueOnce({ listed: true, offer: offer("restart-offer") })
+            .mockResolvedValueOnce(resumeListed())
+        api.emitReconnect()
+        await flush()
+        await flush()
+        await flush()
+        await flush()
+        await flush()
+
+        const pc = currentPc()
+        expect(pc.remoteSdps()).toEqual(["server-answer", "renegotiate", "restart-offer"])
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(3)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
+
+        // ICE `checking` says the restart's answer reached the executor: a
+        // further offer-less reply asks for none.
+        await iceState("checking")
+        api.emitReconnect()
+        await flush()
+        await flush()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(4)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
         await manager.leave()
     } finally {
         jest.useRealTimers()
