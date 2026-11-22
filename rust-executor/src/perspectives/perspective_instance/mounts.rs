@@ -659,9 +659,8 @@ impl PerspectiveInstance {
     /// (`modelQuery("MountThing")`), while `load_shape` finds a class by the
     /// basename of its `sh:targetClass` (`mounttest://Thing` → `Thing`).
     /// When the two differ — the mount contract separates them on purpose
-    /// (design §2.3: prefixed names, stable class IRIs) — the name-mapping
-    /// node `literal:string:shacl://<name>` that `parse_shacl_to_links`
-    /// already wrote becomes an alias class node: typed
+    /// (design §2.3: prefixed names, stable class IRIs) — a second class node
+    /// `literal:string:shacl://<name>` becomes the alias: typed
     /// `ad4m://SubjectClass` and pointing at the same shape URI, so
     /// `get_shape` and `model_query` resolve the name to the shape. The
     /// `target_class` node stays too, so its basename still resolves.
@@ -672,17 +671,17 @@ impl PerspectiveInstance {
             if target_class.is_empty() || local_name(target_class) == shape.name {
                 continue;
             }
-            let name_node = format!("literal:string:shacl://{}", shape.name);
             let shape_uri = self
                 .get_links(&LinkQuery {
-                    source: Some(name_node.clone()),
-                    predicate: Some("ad4m://shacl_shape_uri".to_string()),
+                    source: Some(target_class.to_string()),
+                    predicate: Some("ad4m://shape".to_string()),
                     ..Default::default()
                 })
                 .await?
                 .first()
                 .map(|l| l.data.target.clone())
                 .ok_or_else(|| anyhow!("mounted class '{}' has no shape URI", shape.name))?;
+            let name_node = format!("literal:string:shacl://{}", shape.name);
             links.push(Link {
                 source: name_node.clone(),
                 predicate: Some("rdf://type".to_string()),
