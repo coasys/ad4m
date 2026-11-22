@@ -496,6 +496,31 @@ test("an offer the executor sends again after it was answered is not answered tw
     expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(2)
 })
 
+test("a new session's offer is answered though its id was answered in the old one", async () => {
+    // The executor's offer counter restarts with the executor: a rebuilt
+    // session's first offer can carry an id the old session answered.
+    const api = fakeApi()
+    api.sfuCallJoin.mockResolvedValueOnce(session()).mockResolvedValueOnce(session({ participantId: "P2" }))
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+
+    api.emitOffer(offer("restart"))
+    await flush()
+    expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(1)
+
+    await iceState("failed")
+    await flush()
+    const replacement = currentPc()
+
+    api.emitOffer(offer("restart", undefined, "P2"))
+    await flush()
+    await flush()
+
+    expect(replacement.remoteSdps()).toEqual(["server-answer", "restart"])
+    expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(2)
+    await manager.leave()
+})
+
 test("an offer queued for a connection that has since been replaced is dropped", async () => {
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL)

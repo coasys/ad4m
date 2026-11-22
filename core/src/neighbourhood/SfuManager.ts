@@ -913,6 +913,11 @@ export class SfuManager {
         this.offerQueue = Promise.resolve()
         this.listedAtRevision = 0
         this.rosterRevision = 0
+        // Per-session offer state: the executor's offer counter restarts
+        // with it, so this session decides on its own ids afresh, and an
+        // answer kept for the old session's connection is not its to send.
+        this.answeredOfferId = null
+        this.unsentAnswer = null
         this.renegotiationUnsubscribe = this.neighbourhood.subscribeSfuCallRenegotiationOffer(
             this.agentDid,
             (event) => {
