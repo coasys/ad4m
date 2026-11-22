@@ -2138,6 +2138,28 @@ test("an offer the executor resends while its answer is unsent gets that answer,
     expect(api.sfuCallLeave).not.toHaveBeenCalled()
 })
 
+test("an offer the executor resends gets the answer this connection last produced for it, without applying the SDP a second time", async () => {
+    // The executor keeps its pending offer until an answer lands and resends
+    // it: a resend names the offer this connection last answered, so it is
+    // sent that answer back, whatever became of the first send — here a
+    // plain refusal, which keeps nothing.
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    const pc = currentPc()
+    api.sfuCallAnswerServerOffer.mockRejectedValueOnce(new RpcError(500, "SFU answer failed"))
+
+    api.emitOffer(offer("renegotiate"))
+    await flush()
+    api.emitOffer(offer("renegotiate"))
+    await flush()
+
+    expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(2)
+    expect(pc.remoteSdps()).toEqual(["server-answer", "renegotiate"])
+    expect(api.sfuCallLeave).not.toHaveBeenCalled()
+    await manager.leave()
+})
+
 test("an executor that fails the answer's RPC does not make the client rebuild", async () => {
     // Whether the server still has the session is for the roster and ICE to say.
     const api = fakeApi()
@@ -2544,6 +2566,82 @@ test("an ICE restart refused for a real reason is not sent again when the socket
         await flush()
         await flush()
         await jest.advanceTimersByTimeAsync(3_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a resume reply with no offer while a restart runs and ICE is down asks for a fresh restart", async () => {
+    // The reply carrying no offer means the executor holds no pending offer
+    // for this session — the restart's request never reached it. Nothing is
+    // kept to replay, so a fresh request goes out while the restart is
+    // still in flight and ICE is still down.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        await iceState("connected")
+
+        await iceState("disconnected")
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+
+        api.emitReconnect()
+        await flush()
+        await flush()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a resume reply carrying the restart's offer asks for no restart: that offer is the restart", async () => {
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        await iceState("connected")
+
+        await iceState("disconnected")
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+
+        api.sfuCallResume.mockResolvedValueOnce({ listed: true, offer: offer("restart-offer") })
+        api.emitReconnect()
+        await flush()
+        await flush()
+
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+        expect(currentPc().remoteSdps()).toEqual(["server-answer", "restart-offer"])
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a resume reply with no offer while a restart runs and ICE is checking asks for none", async () => {
+    // ICE `checking` says the restart's offer reached the executor and its
+    // answer came back — nothing is owed.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        await iceState("connected")
+
+        await iceState("disconnected")
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+        await iceState("checking")
+
+        api.emitReconnect()
+        await flush()
+        await flush()
+
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
         expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
         await manager.leave()
     } finally {
