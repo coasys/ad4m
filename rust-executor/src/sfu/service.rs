@@ -850,22 +850,20 @@ impl SfuService {
                         // An ended offer counts a failure before the next dial,
                         // and so does an ICE drop on the end that dials. The
                         // first consecutive one still dials at once. A
-                        // timeout only removes the entry. A pipe that stayed
-                        // usable for the healthy interval starts that count
-                        // again.
+                        // timeout only removes the entry. A connected stretch
+                        // that reached the healthy interval, recorded when
+                        // ICE went Disconnected, starts that count again.
                         // The guard ends before the roster publish. That
                         // publish reads `cascade_manager` on this same task,
                         // and a tokio `RwLock` does not reenter.
                         {
                             let mut mgr = self.cascade_manager.write().await;
-                            if let Some(since) = dead.usable_since {
-                                mgr.note_pipe_connected(&room_key, &dead.agent_did, since);
-                            }
-                            mgr.on_pipe_died(
+                            mgr.apply_pipe_death(
                                 &room_key,
                                 &dead.agent_did,
                                 dead.reason,
                                 Instant::now(),
+                                dead.healthy_stretch,
                             );
                         }
                         self.republish_roster(&room_key, "drop").await;
@@ -2515,7 +2513,7 @@ mod tests {
             participant_id: ParticipantId::next(),
             is_pipe: true,
             reason: "drop",
-            usable_since: None,
+            healthy_stretch: false,
         })
         .expect("the cleanup is still receiving");
 
@@ -2660,7 +2658,7 @@ mod tests {
             participant_id: ParticipantId::parse(&p1).unwrap(),
             is_pipe: false,
             reason: "drop",
-            usable_since: None,
+            healthy_stretch: false,
         })
         .await;
         assert!(sessions(&svc, url).await.is_empty());
@@ -3844,7 +3842,7 @@ mod tests {
                             participant_id: ParticipantId(1),
                             is_pipe: false,
                             reason: "drop",
-                            usable_since: None,
+                            healthy_stretch: false,
                         })
                         .await;
                 } else {
