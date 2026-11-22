@@ -320,6 +320,46 @@ async fn a_stopped_produced_by_read_ends_with_the_stop_error_and_verifies_nothin
     );
 }
 
+/// A run cancelled **during** receipt verification stops verifying at once:
+/// it does not finish the loop while holding its blocking slot, and it
+/// answers the stop error, never the receipts verified so far. Four honest
+/// receipts; the stop fires right after the first verification, so exactly
+/// one is verified.
+///
+/// Red when `verified_outputs` ignores the stop: all four are verified and
+/// the partial list reaches the caller.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_cancelled_mid_verification_stops_verifying_and_errors() {
+    use crate::perspectives::flow_instance::produced::flow_valid_outputs_reading;
+    use crate::perspectives::sparql_store::EvalStop;
+
+    const N: usize = 4;
+    let mut f = seed_satisfied_fixture(None).await;
+    for i in 0..N {
+        let task = format!("ad4m://task/cancelled-{i}");
+        f.seed_task(&task, &format!("Cancelled {i}")).await;
+        let receipt = fixture_minted_receipt(&f, &format!("run-{i}"), &task).await;
+        plant_receipt(&mut f, &receipt).await;
+    }
+    let memo = f.perspective.receipt_verdict_memo.clone();
+    let before = memo.verifications();
+
+    let stop = EvalStop::none();
+    memo.cancel_after_next_verification(stop.clone());
+    let err = flow_valid_outputs_reading(&stop, &f.perspective, &f.perspective, &f.flow_uri, None)
+        .await
+        .expect_err("a run cancelled mid-verification does not answer a partial list");
+    assert!(
+        err.to_string().contains("query cancelled"),
+        "the stop's own error - got: {err:#}"
+    );
+    assert_eq!(
+        memo.verifications() - before,
+        1,
+        "verification ended at the stop: one receipt verified, not all {N}"
+    );
+}
+
 /// The live-content check: an output edited AFTER the run completed is no
 /// longer what the quorum committed to, so the enumeration and the filter
 /// stop returning it — while the receipt itself keeps verifying, because a

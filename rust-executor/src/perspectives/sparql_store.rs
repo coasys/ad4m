@@ -92,9 +92,16 @@ impl EvalStop {
     #[cfg(test)]
     pub(crate) fn cancelled() -> EvalStop {
         let stop = EvalStop::none();
-        stop.stop.mark(STOP_CANCELLED);
-        stop.token.cancel();
+        stop.cancel();
         stop
+    }
+
+    /// Fire this stop (and every clone) as cancelled: for tests that cancel
+    /// a run part-way.
+    #[cfg(test)]
+    pub(crate) fn cancel(&self) {
+        self.stop.mark(STOP_CANCELLED);
+        self.token.cancel();
     }
 
     /// Whether the eval carrying this stop must end. The evaluator checks the

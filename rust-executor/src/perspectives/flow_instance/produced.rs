@@ -164,17 +164,22 @@ pub struct ValidOutput {
 /// `memo`, when given, answers a receipt already verified under the same
 /// held definition from memory ([`VerdictMemo`]); the answer is the same
 /// without it.
+///
+/// A fired `stop` ends verification early; the list is then partial, and only
+/// a caller that checks the stop afterwards may use it.
 pub fn valid_outputs(
+    stop: &EvalStop,
     catalogue: &HashMap<String, SHACLFlow>,
     flow_uri: &str,
     state: Option<&str>,
     receipts: &[FlowReceipt],
     memo: Option<&VerdictMemo>,
 ) -> Vec<ValidOutput> {
-    let mut out: Vec<ValidOutput> = verified_outputs(catalogue, flow_uri, state, receipts, memo)
-        .into_iter()
-        .map(|(output, _)| output)
-        .collect();
+    let mut out: Vec<ValidOutput> =
+        verified_outputs(stop, catalogue, flow_uri, state, receipts, memo)
+            .into_iter()
+            .map(|(output, _)| output)
+            .collect();
     out.sort_by(|a, b| {
         (&a.output, &a.terminal_state, &a.content, &a.receipt_uri).cmp(&(
             &b.output,
@@ -194,7 +199,11 @@ pub fn valid_outputs(
 /// deduplicated. The one place the verdict is taken, so [`valid_outputs`],
 /// [`produced_by_flow`] and [`first_produced_at`] cannot disagree about
 /// which receipts count.
+///
+/// A fired `stop` ends verification early; the result is then partial, and
+/// only a caller that checks the stop may use it.
 fn verified_outputs(
+    stop: &EvalStop,
     catalogue: &HashMap<String, SHACLFlow>,
     flow_uri: &str,
     state: Option<&str>,
@@ -203,6 +212,9 @@ fn verified_outputs(
 ) -> Vec<(ValidOutput, String)> {
     let mut out = Vec::new();
     for receipt in receipts {
+        if stop.is_stopped() {
+            break;
+        }
         // Cheap pre-check, but also a correctness one: a receipt for another
         // flow may legitimately verify, and must still not answer a question
         // about this one.
@@ -260,7 +272,11 @@ fn verified_outputs(
 /// [`FlowReceipt::speaks_for`] does (#1108): the quorum committed to the
 /// node's content as read through one class, and the same node read
 /// through another is other content it never saw.
+///
+/// A fired `stop` ends verification early; the answer is then partial, and
+/// only a caller that checks the stop may use it.
 pub fn produced_by_flow(
+    stop: &EvalStop,
     catalogue: &HashMap<String, SHACLFlow>,
     output: &OutputRef,
     flow_uri: &str,
@@ -268,7 +284,7 @@ pub fn produced_by_flow(
     receipts: &[FlowReceipt],
     memo: Option<&VerdictMemo>,
 ) -> bool {
-    valid_outputs(catalogue, flow_uri, state, receipts, memo)
+    valid_outputs(stop, catalogue, flow_uri, state, receipts, memo)
         .iter()
         .any(|v| &v.output == output)
 }
@@ -291,7 +307,11 @@ pub fn produced_by_flow(
 /// Like [`valid_outputs`] it applies no live-content check: a grant dated
 /// from a quorum stays granted after the role instance gains links (module
 /// header, § *The live-content check*).
+///
+/// A fired `stop` ends verification early; the map is then partial, and only
+/// a caller that checks the stop may use it.
 pub(crate) fn first_produced_at(
+    stop: &EvalStop,
     catalogue: &HashMap<String, SHACLFlow>,
     flow_uri: &str,
     state: Option<&str>,
@@ -299,7 +319,7 @@ pub(crate) fn first_produced_at(
     memo: Option<&VerdictMemo>,
 ) -> BTreeMap<OutputRef, String> {
     let mut first: BTreeMap<OutputRef, String> = BTreeMap::new();
-    for (valid, settled_at) in verified_outputs(catalogue, flow_uri, state, receipts, memo) {
+    for (valid, settled_at) in verified_outputs(stop, catalogue, flow_uri, state, receipts, memo) {
         let earliest = match first.remove(&valid.output) {
             Some(seen) => earlier_of(seen, settled_at),
             None => settled_at,
@@ -574,12 +594,16 @@ pub(crate) async fn flow_valid_outputs_reading<Q: RequiresQueryable + ?Sized>(
     }
     let receipts = load_flow_receipts(stop, perspective, flow_uri).await?;
     let candidates = valid_outputs(
+        stop,
         &catalogue,
         flow_uri,
         state,
         &receipts,
         Some(&perspective.receipt_verdict_memo),
     );
+    if let Some(err) = stop.stopped_err("receipt verification") {
+        return Err(err);
+    }
 
     let refs: Vec<OutputRef> = candidates.iter().map(|c| c.output.clone()).collect();
     let live = super::accept::load_outputs(outputs, &refs).await?;
@@ -860,7 +884,14 @@ mod tests {
         let receipt = honest();
         let cat = catalogue(vec![flow_named("Delivery")]);
 
-        let outputs = valid_outputs(&cat, FLOW, None, std::slice::from_ref(&receipt), None);
+        let outputs = valid_outputs(
+            &EvalStop::none(),
+            &cat,
+            FLOW,
+            None,
+            std::slice::from_ref(&receipt),
+            None,
+        );
         assert_eq!(
             outputs,
             vec![ValidOutput {
@@ -871,6 +902,7 @@ mod tests {
             }]
         );
         assert!(produced_by_flow(
+            &EvalStop::none(),
             &cat,
             &out_ref(OUTPUT),
             FLOW,
@@ -879,6 +911,7 @@ mod tests {
             None
         ));
         assert!(produced_by_flow(
+            &EvalStop::none(),
             &cat,
             &out_ref(OUTPUT),
             FLOW,
@@ -889,6 +922,7 @@ mod tests {
         // The same node named through another class is not what the quorum
         // committed to (#1108): membership is by `(class, id)`, never by id.
         assert!(!produced_by_flow(
+            &EvalStop::none(),
             &cat,
             &OutputRef {
                 class_name: "coasys://Role".into(),
@@ -910,6 +944,7 @@ mod tests {
         for not_an_output in [BASE, ATTACKER, INSTANCE] {
             assert!(
                 !produced_by_flow(
+                    &EvalStop::none(),
                     &cat,
                     &out_ref(not_an_output),
                     FLOW,
@@ -940,7 +975,7 @@ mod tests {
         let cat = catalogue(vec![flow_named("Delivery")]);
 
         let receipts = [forged, honest];
-        let outputs = valid_outputs(&cat, FLOW, None, &receipts, None);
+        let outputs = valid_outputs(&EvalStop::none(), &cat, FLOW, None, &receipts, None);
         assert!(
             outputs.iter().all(|v| v.output.id != ATTACKER),
             "a forged receipt's outputs must not be listed: {outputs:?}"
@@ -950,6 +985,7 @@ mod tests {
             "the honest receipt beside the forgery must still answer: {outputs:?}"
         );
         assert!(!produced_by_flow(
+            &EvalStop::none(),
             &cat,
             &out_ref(ATTACKER),
             FLOW,
@@ -971,7 +1007,15 @@ mod tests {
         let cat = catalogue(vec![flow_named("Delivery")]);
 
         assert!(
-            valid_outputs(&cat, FLOW, None, std::slice::from_ref(&edited), None).is_empty(),
+            valid_outputs(
+                &EvalStop::none(),
+                &cat,
+                FLOW,
+                None,
+                std::slice::from_ref(&edited),
+                None
+            )
+            .is_empty(),
             "content the quorum did not sign must not be listed"
         );
     }
@@ -990,6 +1034,7 @@ mod tests {
         // FlowUnknown: the reader holds no definition at all.
         assert!(
             valid_outputs(
+                &EvalStop::none(),
                 &catalogue(Vec::new()),
                 FLOW,
                 None,
@@ -1008,6 +1053,7 @@ mod tests {
         );
         assert!(
             valid_outputs(
+                &EvalStop::none(),
                 &catalogue(vec![other_dna]),
                 FLOW,
                 None,
@@ -1035,16 +1081,33 @@ mod tests {
         let cat = catalogue(vec![delivery, other]);
 
         assert!(
-            valid_outputs(&cat, FLOW, None, std::slice::from_ref(&foreign), None).is_empty(),
+            valid_outputs(
+                &EvalStop::none(),
+                &cat,
+                FLOW,
+                None,
+                std::slice::from_ref(&foreign),
+                None
+            )
+            .is_empty(),
             "completing Onboarding must not produce Delivery outputs"
         );
         assert_eq!(
-            valid_outputs(&cat, &other_uri, None, std::slice::from_ref(&foreign), None).len(),
+            valid_outputs(
+                &EvalStop::none(),
+                &cat,
+                &other_uri,
+                None,
+                std::slice::from_ref(&foreign),
+                None
+            )
+            .len(),
             1,
             "the same receipt answers for its own flow"
         );
         assert!(
             valid_outputs(
+                &EvalStop::none(),
                 &cat,
                 &other_uri,
                 Some("open"),
@@ -1184,6 +1247,7 @@ mod tests {
         assert!(memo.settled(&same_dna, &receipt).is_some());
         assert_eq!(
             valid_outputs(
+                &EvalStop::none(),
                 &same_dna,
                 FLOW,
                 None,
@@ -1207,6 +1271,7 @@ mod tests {
         );
         assert!(
             valid_outputs(
+                &EvalStop::none(),
                 &other_dna,
                 FLOW,
                 None,
@@ -1242,7 +1307,7 @@ mod tests {
         ];
         let memo = VerdictMemo::default();
 
-        let first = valid_outputs(&cat, FLOW, None, &receipts, Some(&memo));
+        let first = valid_outputs(&EvalStop::none(), &cat, FLOW, None, &receipts, Some(&memo));
         assert_eq!(first.len(), 3, "{first:?}");
         assert_eq!(
             memo.verifications(),
@@ -1250,9 +1315,10 @@ mod tests {
             "the first read verifies every candidate once, the forgery included"
         );
 
-        let second = valid_outputs(&cat, FLOW, None, &receipts, Some(&memo));
+        let second = valid_outputs(&EvalStop::none(), &cat, FLOW, None, &receipts, Some(&memo));
         assert_eq!(second, first, "the memo changes nothing about the answer");
         assert!(produced_by_flow(
+            &EvalStop::none(),
             &cat,
             &out_ref(OUTPUT),
             FLOW,
@@ -1261,7 +1327,7 @@ mod tests {
             Some(&memo)
         ));
         assert_eq!(
-            first_produced_at(&cat, FLOW, None, &receipts, Some(&memo)).len(),
+            first_produced_at(&EvalStop::none(), &cat, FLOW, None, &receipts, Some(&memo)).len(),
             3
         );
         assert_eq!(
@@ -1344,8 +1410,8 @@ mod tests {
         let receipts = [mint(&flow, &[OUTPUT]), forged, edited];
         let memo = VerdictMemo::default();
 
-        let plain = valid_outputs(&cat, FLOW, None, &receipts, None);
-        let plain_at = first_produced_at(&cat, FLOW, None, &receipts, None);
+        let plain = valid_outputs(&EvalStop::none(), &cat, FLOW, None, &receipts, None);
+        let plain_at = first_produced_at(&EvalStop::none(), &cat, FLOW, None, &receipts, None);
         assert_eq!(
             plain.len(),
             1,
@@ -1358,12 +1424,12 @@ mod tests {
         );
         for read in ["first read", "second read"] {
             assert_eq!(
-                valid_outputs(&cat, FLOW, None, &receipts, Some(&memo)),
+                valid_outputs(&EvalStop::none(), &cat, FLOW, None, &receipts, Some(&memo)),
                 plain,
                 "{read}"
             );
             assert_eq!(
-                first_produced_at(&cat, FLOW, None, &receipts, Some(&memo)),
+                first_produced_at(&EvalStop::none(), &cat, FLOW, None, &receipts, Some(&memo)),
                 plain_at,
                 "{read}"
             );
@@ -1444,7 +1510,7 @@ mod tests {
         let twin_a = mint(&flow, &[OUTPUT, "ad4m://deliverable/d2"]);
         let twin_b = twin_a.clone();
 
-        let outputs = valid_outputs(&cat, FLOW, None, &[twin_a, twin_b], None);
+        let outputs = valid_outputs(&EvalStop::none(), &cat, FLOW, None, &[twin_a, twin_b], None);
         let ids: Vec<&str> = outputs.iter().map(|v| v.output.id.as_str()).collect();
         assert_eq!(ids, vec![OUTPUT, "ad4m://deliverable/d2"]);
     }
