@@ -3876,3 +3876,101 @@ test("a socket back late in a restart bounds the resume's wait by the restart's 
         jest.useRealTimers()
     }
 })
+
+// ── Round 5: the resume's ask is single-flight ────────────────────────────
+
+test("triggers while a resume ask is out start no second RPC — one follow-up runs once the reply lands", async () => {
+    // e18 had five asks within a second (the socket's return, ICE still
+    // down during the restart, the chain after an answered offer), each
+    // making the executor resend its pending offer. One ask per connection
+    // at a time: the triggers mark a follow-up and wait for the reply.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        await iceState("connected")
+
+        // ICE down: the restart goes out and keeps its window.
+        await iceState("disconnected")
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+
+        const resuming = deferred<SfuResumeResult>()
+        api.sfuCallResume
+            .mockImplementationOnce(() => resuming.promise)
+            .mockResolvedValue(resumeListed())
+        api.emitReconnect()
+        await flush()
+        await flush()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+
+        // Three triggers within the ask's flight — the socket again, ICE
+        // still down during the restart, the socket once more: no RPC.
+        api.emitReconnect()
+        await iceState("disconnected")
+        api.emitReconnect()
+        await flush()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+
+        // The reply lands: exactly one follow-up asks. Its own reply lands
+        // too — no trigger was left over, so a third never goes out.
+        resuming.resolve(resumeListed())
+        await flush()
+        await flush()
+        await flush()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(2)
+
+        await jest.advanceTimersByTimeAsync(20_000)
+        await flush()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(2)
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a trigger for the connection a rebuild replaced starts no ask — its follow-up mark dies with it", async () => {
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const resuming = deferred<SfuResumeResult>()
+        api.sfuCallResume.mockImplementationOnce(() => resuming.promise).mockResolvedValue(resumeListed())
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        const oldPc = currentPc()
+
+        await iceState("disconnected")
+        api.emitReconnect()
+        await flush()
+        await flush()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+
+        // A trigger marks the follow-up while the ask is out...
+        api.emitReconnect()
+        await flush()
+
+        // ...then ICE fails and the call is rebuilt on a new connection.
+        await iceState("failed")
+        await flush()
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+        expect(currentPc()).not.toBe(oldPc)
+
+        // The old connection reporting ICE down now belongs to no call.
+        ;(oldPc as any).iceConnectionState = "disconnected"
+        oldPc.oniceconnectionstatechange?.()
+        await flush()
+
+        // Nor does the old ask's reply, landing now, run the follow-up the
+        // old connection's trigger marked.
+        resuming.resolve(resumeListed())
+        await flush()
+        await flush()
+        await jest.advanceTimersByTimeAsync(20_000)
+        await flush()
+
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
