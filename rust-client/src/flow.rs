@@ -5,7 +5,7 @@
 //!
 //! A [`ShaclFlow`] is the flow definition — states, transitions, consensus
 //! rules — stored on the perspective as links and registered with
-//! [`FlowApi::add_flow`] (`perspective.addSdna`, `sdnaType: "flow"`). A
+//! [`FlowApi::add_flow`] (a `perspective.linkMutations` diff). A
 //! [`FlowInstance`] wraps a `FlowInstance` graph record plus its parsed
 //! definition: `start` mints or reuses the record, `find_all` reads them,
 //! and `propose_transition` / `accept_proposal` / `reject_proposal` are the
@@ -84,8 +84,8 @@ pub struct FlowState {
     pub consensus_rule: Option<ConsensusRule>,
 }
 
-/// A state edge — TS `FlowTransition`. The executor's serde keeps the
-/// snake_case field names; that is the shape `addSdna` parses.
+/// A state edge — TS `FlowTransition`. The executor's `SHACLFlow` serde
+/// keeps the snake_case field names; that is its flow JSON.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlowTransition {
     pub action_name: String,
@@ -96,7 +96,7 @@ pub struct FlowTransition {
 }
 
 /// A flow definition — TS `SHACLFlow`, executor `SHACLFlow`. Serializes to
-/// the JSON `perspective.addSdna` parses for `sdnaType: "flow"`.
+/// the executor's `SHACLFlow` JSON.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ShaclFlow {
     pub name: String,
@@ -668,17 +668,6 @@ pub struct FlowApi {
     uuid: String,
 }
 
-/// The hardwired `FlowInstance` class shape — identical bytes to the
-/// executor's `hardwired_sdna/flow_instance.json`, so registering it writes
-/// the shape the engine itself would (the TS/Rust parity tests lock these).
-/// Bundled inside the crate: a published `ad4m-client` cannot reach the
-/// executor's file, and `sdna_matches_the_executor`s test keeps the copies
-/// in step where the repo is present.
-const FLOW_INSTANCE_SDNA: &str = include_str!("sdna/flow_instance.json");
-/// The hardwired `FlowTransitionProposal` class shape — bundled like
-/// [`FLOW_INSTANCE_SDNA`].
-const FLOW_TRANSITION_PROPOSAL_SDNA: &str = include_str!("sdna/flow_transition_proposal.json");
-
 impl FlowApi {
     pub fn new(ws: &Arc<WsRpcClient>, uuid: impl Into<String>) -> Self {
         Self {
@@ -725,8 +714,8 @@ impl FlowApi {
     /// `perspective.linkMutations`. An unchanged re-add writes nothing.
     ///
     /// The runtime classes (`FlowInstance`, `FlowTransitionProposal`) are
-    /// not registered here — TS leaves that to `FlowInstance.start`'s
-    /// `registerAll`, which [`ensure_flow_classes`] mirrors.
+    /// not registered here or anywhere in the client: the executor
+    /// hard-wires them and registers each before its first instance write.
     pub async fn add_flow(&self, name: &str, flow: &ShaclFlow) -> Result<()> {
         let name_literal = Literal::from_string(name.to_string()).to_url()?;
         let flow_uri = flow.flow_uri();
@@ -926,33 +915,6 @@ impl FlowApi {
         Ok(out)
     }
 
-    /// Register the hardwired `FlowInstance` + `FlowTransitionProposal`
-    /// classes — `FlowInstance.start`'s write path (`registerAll`), a single
-    /// batched `perspective.addSdna` the executor no-ops when present.
-    async fn ensure_flow_classes(&self) -> Result<()> {
-        self.ws
-            .call::<Value>(
-                "perspective.addSdna",
-                json!({
-                    "uuid": self.uuid,
-                    "entries": [
-                        {
-                            "name": "FlowInstance",
-                            "sdnaType": "subject_class",
-                            "shaclJson": FLOW_INSTANCE_SDNA,
-                        },
-                        {
-                            "name": "FlowTransitionProposal",
-                            "sdnaType": "subject_class",
-                            "shaclJson": FLOW_TRANSITION_PROPOSAL_SDNA,
-                        },
-                    ],
-                }),
-            )
-            .await?;
-        Ok(())
-    }
-
     /// `perspective.flowStates` — this agent's derived state per instance.
     /// `None` asks for every instance the agent has derived.
     pub async fn flow_states(&self, instances: Option<&[String]>) -> Result<Vec<FlowStateEntry>> {
@@ -1107,8 +1069,8 @@ impl FlowInstance {
 
     /// `FlowInstance.start` — mint a new run of `flow_name` on `subject`,
     /// or return the one already running (earliest record, `createdAt` then
-    /// `id`). Registers the hardwired runtime classes on first call; refuses
-    /// an unknown flow or one with zero states, as TS does.
+    /// `id`). Refuses an unknown flow or one with zero states, as TS does.
+    /// The executor registers the runtime classes before the first write.
     pub async fn start(api: &FlowApi, flow_name: &str, subject: &str) -> Result<Self> {
         let flow = api
             .get_flow(flow_name)
@@ -1119,7 +1081,6 @@ impl FlowInstance {
                 "Flow \"{flow_name}\" has no states — FlowInstance.start is for stateful flows only; zero-state flows fire via the atomic-action path"
             ));
         }
-        api.ensure_flow_classes().await?;
 
         let model = Self::model(api);
         let mut existing = model
@@ -1556,8 +1517,8 @@ mod tests {
     /// are not in the new definition go — through one
     /// `perspective.linkMutations` — including a stale `flow_uri` mapping
     /// left by an earlier namespace and a retired `stateCheck`, while
-    /// non-definition links on the same URIs (an app's label, the
-    /// addSdna-era `ad4m://sdna` link) stay.
+    /// non-definition links on the same URIs (an app's label, a legacy
+    /// `ad4m://sdna` link) stay.
     #[tokio::test]
     async fn re_adding_a_flow_replaces_the_stored_definition() {
         use crate::testkit::{FakeExecutor, LinkStore};
@@ -1609,13 +1570,13 @@ mod tests {
             async move { api.add_flow("F", &flow).await }
         });
         let mut saw_mutations = 0;
-        let mut saw_add_sdna = false;
+        let mut saw_register_shapes = false;
         loop {
             tokio::select! {
                 req = server.next_request() => {
                     match req["type"].as_str() {
                         Some("perspective.linkMutations") => saw_mutations += 1,
-                        Some("perspective.addSdna") => saw_add_sdna = true,
+                        Some("perspective.registerShapes") => saw_register_shapes = true,
                         _ => {}
                     }
                     match store.handle(&req) {
@@ -1632,8 +1593,8 @@ mod tests {
             "re-registering must write the diff through perspective.linkMutations"
         );
         assert!(
-            !saw_add_sdna,
-            "TS addFlow writes links itself; addSdna is the subject-class path"
+            !saw_register_shapes,
+            "TS addFlow writes links itself; registerShapes is the class-registration path"
         );
 
         let triples: BTreeSet<(String, String, String)> = store.triples().into_iter().collect();
@@ -1978,33 +1939,5 @@ mod tests {
             assert!(is_missing_shape_error(msg), "{msg}");
         }
         assert!(!is_missing_shape_error("connection reset"));
-    }
-
-    /// The bundled hardwired class JSONs must stay byte-identical with the
-    /// executor's — both sides register the same shape, so any drift in
-    /// either direction changes what a perspective holds. Repo-only: in the
-    /// packaged crate the executor's tree is absent and the check is out of
-    /// place (the `include_str!`s above are what a publish compiles).
-    #[test]
-    fn bundled_sdna_matches_the_executors() {
-        let executor_sdna = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../rust-executor/src/perspectives/hardwired_sdna");
-        if !executor_sdna.is_dir() {
-            eprintln!("SKIP: executor tree not present (packaged crate)");
-            return;
-        }
-        for (bundled, executor_file) in [
-            (FLOW_INSTANCE_SDNA, "flow_instance.json"),
-            (
-                FLOW_TRANSITION_PROPOSAL_SDNA,
-                "flow_transition_proposal.json",
-            ),
-        ] {
-            let theirs = std::fs::read_to_string(executor_sdna.join(executor_file)).unwrap();
-            assert_eq!(
-                bundled, theirs,
-                "{executor_file}: bundled copy drifted from the executor's"
-            );
-        }
     }
 }

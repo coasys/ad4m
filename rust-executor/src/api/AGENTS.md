@@ -9,6 +9,7 @@ REST/WS shim. Split plan: spec item 6.
 |---|---|---|
 | `GET /api/v1/ws` | `ws_rpc.rs` | JSON-RPC-ish: `{type, id, ...params}` → `HandlerMap::dispatch`. Auth once at upgrade (`auth.rs`). Per-request cancel token (`request.cancel`). An `identity.publish` or `identity.cosignIncept` frame whose event names a member twice, or that repeats `params`, `events` or `event`, is refused from the frame's text (`identity_ws::duplicate_member_refusal`, 400 `invalid: DuplicateMember`): the params `Value` keeps only the last. The refusal comes after `HandlerMap::admit`, so a caller the guard refuses gets the access answer. **Also carries events** (`events_ws::build_event_stream`, filtered by `events.watch`) and the connection's live query updates; the only event socket |
 | `GET /health`, `POST /internal/shutdown` | `internal.rs` | `INTERNAL_API_TOKEN` |
+| `GET /metrics` | `metrics.rs` | Prometheus text of `crate::metrics::snapshot()`. Operator only (the `Guard::Operator` rule through the `RequestContext` extractor): 403 to every other caller, 401 for a token that opens no session. Users and perspectives are labels, so the output is personal data |
 | `/v1/*`, `/api/v1/openai/v1/*` | `openai_compat/router.rs` | chat/completions, embeddings, audio (`audio/transcriptions` passes through to the model's endpoint), realtime WS (`input_audio_buffer.commit` = one utterance) |
 
 ## Handler modules
@@ -164,7 +165,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-239 methods: Cap 81, CapAnyPointer 1, Executor 43, Open 5, Operator 28, Owns 79, UserOrOperator 2. Local only (the operator on this machine): 5.
+236 methods: Cap 81, CapAnyPointer 1, Executor 43, Open 5, Operator 28, Owns 76, UserOrOperator 2. Local only (the operator on this machine): 5.
 
 | Method | Guard |
 |---|---|
@@ -277,7 +278,6 @@ the guard checked:
 | `perspective.addLink` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.addLinkExpression` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.addLinks` | `Owns(Perspective uuid, perspective:UPDATE)` |
-| `perspective.addSdna` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.all` | `CapAnyPointer(perspective:READ)` |
 | `perspective.commitBatch` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.create` | `Cap(perspective:CREATE)` |
@@ -292,10 +292,6 @@ the guard checked:
 | `perspective.flowStates` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.flowValidOutputs` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.get` | `Owns(Perspective uuid, perspective:READ)`, 404 → `null` |
-| `perspective.getAllShacl` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.getShacl` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.getShaclNames` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.getShaclTargetClass` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.getSubjectData` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.instanceAddToCollection` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.instanceCreate` | `Owns(Perspective uuid, perspective:UPDATE)` |
@@ -312,6 +308,7 @@ the guard checked:
 | `perspective.queryLinks` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.queryProlog` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.querySparql` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.registerShapes` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.rejectFlowProposal` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.rejectInterpretation` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.remove` | `Owns(Perspective uuid, perspective:DELETE)` |
@@ -323,6 +320,7 @@ the guard checked:
 | `perspective.runAgent` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.runInterpretation` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.runInterpretationWithHarness` | `Owns(Perspective uuid, perspective:UPDATE)` |
+| `perspective.shapes` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.snapshot` | `Owns(Perspective uuid, perspective:READ)`, 404 → `null` |
 | `perspective.subjectClassesOf` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.subscribeQuery` | `Owns(Perspective uuid, perspective:READ)` |

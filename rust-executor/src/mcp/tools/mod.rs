@@ -212,7 +212,14 @@ impl ServerHandler for Ad4mMcpHandler {
             .admit_tool_call(&tool_name, RequestAuth::of(&context))
             .await
         {
-            Ok(this) => this.dispatch_tool(request, context).await,
+            // The link writes the tool makes count for its caller's agent
+            // (`GET /metrics`), as they do for an RPC call
+            // (`metrics::as_caller` in `HandlerMap::dispatch`).
+            Ok(this) => {
+                let did = this.session().await.ok().and_then(|s| s.acts_as_did());
+                crate::metrics::as_caller(did.as_deref(), this.dispatch_tool(request, context))
+                    .await
+            }
             Err(refusal) => Ok(refusal),
         }
     }
@@ -688,6 +695,29 @@ impl Ad4mMcpHandler {
         Ok(perspective)
     }
 
+    /// [`Self::get_readable_perspective`], and the gate its query runs under: the one every
+    /// RPC query call gets (`sparql_store::query_gate`) — the configured deadline, and one
+    /// `GET /metrics` query counted for the call however many evaluations run under it.
+    /// An MCP session has no RPC connection, so no `request.cancel` and no query slots.
+    pub(crate) async fn gated_readable_perspective(
+        &self,
+        perspective_id: &str,
+    ) -> Result<
+        (
+            PerspectiveInstance,
+            crate::perspectives::sparql_store::EvalGate,
+        ),
+        String,
+    > {
+        let (perspective, session) = self
+            .admitted_perspective(perspective_id, perspective_query_capability)
+            .await?;
+        let gate =
+            crate::perspectives::sparql_store::query_gate(&request_context(session), &perspective)
+                .await;
+        Ok((perspective, gate))
+    }
+
     /// Perspective `perspective_id` and the agent the caller writes as, if the caller may
     /// change it: the guard of the perspective RPC methods that write,
     /// `Guard::perspective(perspective_update_capability)`.
@@ -736,51 +766,16 @@ impl Ad4mMcpHandler {
         instances::link_target(value)
     }
 
-    /// Get the SHACL name literal for a class, trying both encoded and raw formats.
-    /// Flux's TypeScript Literal doesn't URL-encode inner URIs, producing
-    /// "literal:string:shacl://Class", while Rust's Literal produces
-    /// "literal:string:shacl%3A%2F%2FClass". Returns (encoded, raw).
-    pub(crate) fn shacl_name_variants(class_name: &str) -> (String, String) {
-        let encoded = Self::encode_literal(&format!("shacl://{}", class_name));
-        let raw = format!("literal:string:shacl://{}", class_name);
-        (encoded, raw)
-    }
-
-    /// Query SHACL shape links for a class, trying encoded then raw name format.
-    pub(crate) async fn get_shacl_shape_links(
+    /// The shape node URI of the registered class `class_name`.
+    pub(crate) fn class_shape_uri(
         perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
         class_name: &str,
-    ) -> Vec<crate::types::DecoratedLinkExpression> {
-        let (encoded, raw) = Self::shacl_name_variants(class_name);
-        let links = perspective
-            .get_links(&crate::types::LinkQuery {
-                source: Some(encoded),
-                predicate: Some("ad4m://shacl_shape_uri".to_string()),
-                ..Default::default()
-            })
-            .await
-            .unwrap_or_default();
-        if !links.is_empty() {
-            return links;
-        }
+    ) -> Option<String> {
         perspective
-            .get_links(&crate::types::LinkQuery {
-                source: Some(raw),
-                predicate: Some("ad4m://shacl_shape_uri".to_string()),
-                ..Default::default()
-            })
-            .await
-            .unwrap_or_default()
-    }
-
-    /// Escape string for safe use in Prolog queries
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn escape_prolog_string(s: &str) -> String {
-        s.replace('\\', "\\\\")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r")
-            .replace('"', "\\\"")
-            .replace('\'', "\\'")
+            .shapes(Some(vec![class_name.to_string()]))
+            .ok()?
+            .into_iter()
+            .find_map(|summary| summary.shape.node_shape_uri)
     }
 
     /// Resolve a property name to its predicate URI using SHACL shape links.
@@ -1178,6 +1173,8 @@ mod agent_context_tests {
 
     #[tokio::test]
     async fn without_a_credential_no_token_is_the_operator_only_on_loopback() {
+        setup_wallet();
+        setup_agent();
         ensure_test_db();
         let local = Ad4mMcpHandler::new(McpContext::new(None, ListenerReach::Loopback, false));
         assert!(local.session().await.unwrap().is_operator());

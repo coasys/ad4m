@@ -66,6 +66,13 @@ commands:
             if [ -e .git ] && ! git rev-parse --git-dir >/dev/null 2>&1; then
               heal "corrupted .git (git rev-parse fails)"
             fi
+            # A .git that opens but has no origin remote fails checkout with "No such remote
+            # 'origin'" (seen 2026-11-20, after the runner's disk filled during checkout). Checkout
+            # sets origin's URL but never adds the remote, so add it back here.
+            if [ -e .git ] && ! git remote get-url origin >/dev/null 2>&1; then
+              echo "fix_workdir: no origin remote -- adding it"
+              git remote add origin "$CIRCLE_REPOSITORY_URL"
+            fi
             # A .git that opens but lacks objects its refs reach passes the check above and then
             # fails checkout with "pack has N unresolved deltas": checkout offers the local refs as
             # haves, GitHub sends a thin pack against them, and the bases are not there. A
@@ -107,6 +114,14 @@ commands:
             if [ -e .git ]; then
               if head_sha="$(git rev-parse --verify -q HEAD)"; then
                 git update-ref --no-deref HEAD "$head_sha"
+                # Every build output and cache is gitignored, so an untracked file that no
+                # .gitignore covers is left from a checkout that stopped part way (seen 2026-11-20,
+                # after the disk filled: another branch's core/src/host/HostClient.ts broke tsc).
+                # git clean without -x keeps the ignored caches.
+                cleaned="$(git clean -fd)"
+                if [ -n "$cleaned" ]; then
+                  echo "fix_workdir: removed $(wc -l \<<<"$cleaned") untracked path(s) no .gitignore covers"
+                fi
               fi
               # Records after the first are the linked worktrees (the first is this one).
               held="$(git worktree list --porcelain | awk -v RS= 'NR > 1' | sed -n 's/^branch //p')"
