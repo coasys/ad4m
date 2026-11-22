@@ -7,6 +7,7 @@ import { PerspectiveHandle } from "../perspectives/PerspectiveHandle"
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy"
 import type {
     CallSessionInfo,
+    SfuAnswerResult,
     SfuCallRenegotiationOffer,
     SfuCascadeStatus,
     SfuConfig,
@@ -14,6 +15,7 @@ import type {
     SfuMigrateEvent,
     SfuParticipantQualityPreference,
     SfuQualityPreference,
+    SfuResumeResult,
     SfuRoomInfo,
     SfuRoomRoster,
     SfuSessionReplaced,
@@ -211,16 +213,24 @@ export class NeighbourhoodClient {
         })
     }
 
+    /** Answer a server offer. `offerId` is the id the
+     *  `sfu-call-renegotiation-offer` carried; the executor applies the
+     *  answer to that offer and replies whether it took it: `{ accepted:
+     *  true }` (also for a repeat of an answer already accepted), or
+     *  `{ accepted: false, reason }` (`stale`, `no-pending`,
+     *  `unknown-session`). A refusal is this value, not an RPC error. */
     async sfuCallAnswerServerOffer(
         neighbourhoodUrl: string,
         roomName: string,
         participantId: string,
+        offerId: string,
         sdpAnswer: string,
-    ): Promise<boolean> {
+    ): Promise<SfuAnswerResult> {
         return this.#apiClient.call("sfu.callAnswerServerOffer", {
             neighbourhoodUrl,
             roomName,
             participantId,
+            offerId,
             sdpAnswer,
         })
     }
@@ -239,13 +249,13 @@ export class NeighbourhoodClient {
         return this.#apiClient.onNetworkChange(callback)
     }
 
-    /** Ask the SFU to send the session `participantId`'s pending offer and the
-     *  room's roster again, after this client's socket came back. An executor
-     *  older than `sfu.callResume` refuses it with 404 "Unknown type". */
-    async sfuCallResume(neighbourhoodUrl: string, roomName: string, participantId: string): Promise<boolean> {
-        // Not in the generated method table until the executor that has it regenerates it.
-        const call = this.#apiClient.call as unknown as (method: string, params: unknown) => Promise<boolean>
-        return call.call(this.#apiClient, "sfu.callResume", { neighbourhoodUrl, roomName, participantId })
+    /** Ask the SFU for the session `participantId`'s state, after this
+     *  client's socket came back: `{ listed: false }` when the room or the
+     *  session is gone, `{ listed: true, offer?, roster? }` with the pending
+     *  offer and the room's sessions when it is listed. A session of another
+     *  agent is 403; an event loop that does not answer is 408. */
+    async sfuCallResume(neighbourhoodUrl: string, roomName: string, participantId: string): Promise<SfuResumeResult> {
+        return this.#apiClient.call("sfu.callResume", { neighbourhoodUrl, roomName, participantId })
     }
 
     /** Fires after the client's socket opened again after a drop. See {@link ApiClient.onReconnect}. */
@@ -255,8 +265,8 @@ export class NeighbourhoodClient {
 
     /** Check the client's socket now: one that says nothing within a
      *  deadline is treated as a network change. See {@link ApiClient.checkConnection}. */
-    checkConnection(deadlineMs?: number): void {
-        this.#apiClient.checkConnection(deadlineMs)
+    checkConnection(): void {
+        this.#apiClient.checkConnection()
     }
 
     async sfuGetConfig(neighbourhoodUrl: string): Promise<SfuConfig> {
@@ -380,6 +390,7 @@ export class NeighbourhoodClient {
             callback({
                 targetDid: event.targetDid,
                 participantId: event.participantId,
+                offerId: event.offerId,
                 neighbourhoodUrl: event.neighbourhoodUrl,
                 roomName: event.roomName,
                 sdpOffer: event.sdpOffer,
