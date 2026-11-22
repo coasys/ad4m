@@ -8,9 +8,11 @@ import type { SfuRosterParticipant } from "./SfuRosterParticipant";
  */
 export type SfuRoomRoster = { neighbourhoodUrl: string, roomName: string, 
 /**
- * Increases by one on every publish of this room, starting at 1,
- * including a resume. A client drops a roster older than one it
- * already applied.
+ * One sequence for every roster this process publishes: 1 the first
+ * time, then one more on every publish, a resume included. A later
+ * room, and a room created again, continues it, so a roster from an
+ * earlier life of the room is older. A client drops a roster older
+ * than one it already applied.
  */
 revision: number, 
 /**

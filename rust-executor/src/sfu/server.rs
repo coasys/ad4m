@@ -147,6 +147,9 @@ enum OfferDeadline {
     Wait,
     /// Publish the cached SDP again. The token stays pending.
     Resend,
+    /// A pipe that already had a path has resent this offer through the
+    /// back-off. Drop the token and offer the deferred tracks again.
+    Replace,
 }
 
 /// A client's ICE restart in flight. The SFU stays the only offerer: the
@@ -192,7 +195,14 @@ pub const ICE_RESTART_GRACE: Duration = Duration::from_secs(15);
 /// entry goes ([`super::service`]'s dead-pipe cleanup) and the next announce
 /// dials a new pipe. A client that never connects ends the same way. A peer
 /// that had a path is never ended by this.
-pub const PEER_ESTABLISH_TIMEOUT: Duration = Duration::from_secs(30);
+///
+/// The second resend of the initial offer is due at 30 s. The window runs
+/// that long plus [`ICE_RESTART_GRACE`], so an answer that arrives with the
+/// second resend still has time to complete ICE before the pipe is swept.
+pub const PEER_ESTABLISH_TIMEOUT: Duration = Duration::from_secs(
+    // Second resend at 30 s, then [`ICE_RESTART_GRACE`] for ICE to finish.
+    OFFER_RETRY_BASE.as_secs() * 3 + ICE_RESTART_GRACE.as_secs(),
+);
 
 /// Wait before the first resend of an unanswered offer. The wait doubles
 /// once: resends at t=10s and t=30s, then every [`OFFER_RESEND_STEADY`]
@@ -200,12 +210,24 @@ pub const PEER_ESTABLISH_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// An unanswered offer never drops the peer. #1802 dropped it at t=70s,
 /// also while ICE was up and its media flowed: a client whose socket was
-/// down for a minute lost a healthy call. A peer whose client is gone ends
-/// by the ICE rules ([`ICE_DISCONNECT_GRACE`], [`ICE_RESTART_GRACE`]).
+/// down for a minute lost a healthy call. A client keeps the offer and
+/// resends it. A pipe that already had a path replaces the offer after the
+/// back-off resends ([`PIPE_OFFER_RESEND_LIMIT`]): the token is dropped and
+/// the tracks are offered again. A pipe that never had a path keeps the
+/// initial offer until [`PEER_ESTABLISH_TIMEOUT`]. A peer whose client is
+/// gone ends by the ICE rules ([`ICE_DISCONNECT_GRACE`], [`ICE_RESTART_GRACE`]).
 const OFFER_RETRY_BASE: Duration = Duration::from_secs(10);
 
 /// Resends that back off from [`OFFER_RETRY_BASE`] before the steady wait.
 const OFFER_BACKOFF_RESENDS: u32 = 2;
+
+/// A pipe that already had a path replaces an unanswered offer after this
+/// many resends (the back-off: t=10 s and t=30 s). The next deadline drops
+/// the token so deferred tracks can be offered again. An initial pipe
+/// offer, before any path, is not replaced: it carries the pipe-control
+/// channel, and [`PEER_ESTABLISH_TIMEOUT`] drops that pipe. A client offer
+/// is never replaced.
+const PIPE_OFFER_RESEND_LIMIT: u32 = OFFER_BACKOFF_RESENDS;
 
 /// Wait between resends after the back-off, and after a `sfu.callResume`.
 const OFFER_RESEND_STEADY: Duration = Duration::from_secs(30);
@@ -467,9 +489,16 @@ impl SfuPeer {
         }
         let pending = self.pending.take().expect("the offer was pending above");
         let carries_restart = pending.carries_restart;
+        let track_mapping = pending.track_mapping.clone();
         match self.rtc.sdp_api().accept_answer(pending.token, answer) {
             Ok(()) => {}
-            Err(RtcError::ChangesOutOfOrder) => return Err(ServerAnswerError::OutOfOrder),
+            Err(RtcError::ChangesOutOfOrder) => {
+                // The token is already consumed. The mids were recorded when
+                // the offer was built and str0m never added them: queue them
+                // again or the next negotiation skips them.
+                self.requeue_offer_tracks(&track_mapping);
+                return Err(ServerAnswerError::OutOfOrder);
+            }
             Err(e) => return Err(ServerAnswerError::Rejected(format!("{e:?}"))),
         }
         if carries_restart {
@@ -562,6 +591,48 @@ impl SfuPeer {
         self.install_pending(token, sdp, Vec::new(), now, false);
     }
 
+    /// Put `track_mapping`'s outbound mids back on the deferred queue. The
+    /// maps were written when the offer was built; str0m has no writer for
+    /// them until the answer is accepted, and a later offer skips a mid
+    /// that is still in `tracks_out_rev`.
+    fn requeue_offer_tracks(&mut self, track_mapping: &[crate::sfu::TrackMapEntry]) {
+        for entry in track_mapping {
+            let mid = Mid::from(entry.mid.as_str());
+            let Some((origin_pid, origin_mid)) = self.tracks_out.remove(&mid) else {
+                continue;
+            };
+            self.tracks_out_rev
+                .remove(&(origin_pid.clone(), origin_mid));
+            let kind = if entry.media_kind == "video" {
+                MediaKind::Video
+            } else {
+                MediaKind::Audio
+            };
+            self.deferred_tracks.push((
+                origin_pid,
+                origin_mid,
+                kind,
+                TrackOrigin {
+                    participant_id: entry.participant_id.clone(),
+                    agent_did: entry.agent_did.clone(),
+                },
+            ));
+        }
+    }
+
+    /// Drop the pending offer's token and queue its tracks again, so the
+    /// next drain offers them. str0m has made no session change until the
+    /// answer is accepted; dropping the token is the rollback. An ICE
+    /// restart request stays, so the next offer still carries it. No-op
+    /// when nothing is pending.
+    fn rollback_pending(&mut self) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        drop(pending.token);
+        self.requeue_offer_tracks(&pending.track_mapping);
+    }
+
     fn install_pending(
         &mut self,
         token: str0m::change::SdpPendingOffer,
@@ -624,7 +695,7 @@ impl SfuPeer {
         ))
     }
 
-    /// One info line from str0m's `PeerStats`: media bitrate in and out
+    /// One debug line from str0m's `PeerStats`: media bitrate in and out
     /// since the last line (bytes in and out in total), loss each way, RTT,
     /// the simulcast layer of each video track it receives (`-`: none
     /// forwarded yet), its quality preference, and how long ago its media
@@ -699,9 +770,19 @@ impl SfuPeer {
     /// `now` reached the pending offer's deadline. One call publishes at
     /// most one resend and moves the deadline, so repeated ticks at the
     /// same instant publish once. The token stays pending across resends,
-    /// and the peer stays: see [`OFFER_RETRY_BASE`].
+    /// and the peer stays: see [`OFFER_RETRY_BASE`]. A pipe that already
+    /// had a path and has used its back-off resends is [`OfferDeadline::Replace`]
+    /// instead: the token is dropped and the tracks are offered again.
     fn on_offer_deadline(&mut self, now: Instant) -> OfferDeadline {
         let media_flowing = self.media_flowing(now);
+        let replace = self.is_pipe
+            && self.had_path
+            && self.pending.as_ref().is_some_and(|pending| {
+                now >= pending.next_deadline && pending.resends >= PIPE_OFFER_RESEND_LIMIT
+            });
+        if replace {
+            return OfferDeadline::Replace;
+        }
         let Some(pending) = self.pending.as_mut() else {
             return OfferDeadline::Wait;
         };
@@ -1301,46 +1382,13 @@ impl SfuServer {
                             );
                             continue;
                         }
-                        let offer: SdpOffer = match serde_json::from_str(&sdp_offer_json) {
-                            Ok(o) => o,
-                            Err(e) => {
-                                warn!(
-                                    "SFU: ApplyPipeRenegotiationOffer parse failed for {}: {}",
-                                    participant_id, e
-                                );
-                                continue;
-                            }
-                        };
-                        // Before the tracks open: they are attributed as they do.
-                        peer.note_remote_origins(&track_mapping);
-                        match peer.rtc.sdp_api().accept_offer(offer) {
-                            Ok(answer) => match serde_json::to_string(&answer) {
-                                Ok(answer_json) => {
-                                    let payload = crate::sfu::SfuPipeRenegotiationAnswer {
-                                        remote_did,
-                                        room_id,
-                                        sdp_answer: answer_json,
-                                    };
-                                    super::pipe_bus::publish_answer(payload);
-                                    info!(
-                                        "SFU: pipe renegotiation answer published for {}",
-                                        participant_id
-                                    );
-                                }
-                                Err(e) => {
-                                    warn!(
-                                            "SFU: serialize pipe renegotiation answer for {} failed: {}",
-                                            participant_id, e
-                                        );
-                                }
-                            },
-                            Err(e) => {
-                                warn!(
-                                    "SFU: accept_offer for pipe {} failed: {:?}",
-                                    participant_id, e
-                                );
-                            }
-                        }
+                        apply_pipe_renegotiation_offer(
+                            peer,
+                            &sdp_offer_json,
+                            remote_did,
+                            room_id,
+                            &track_mapping,
+                        );
                     }
                     Ok(SfuCommand::AddIceCandidate {
                         participant_id,
@@ -1445,40 +1493,7 @@ impl SfuServer {
                         reply,
                     }) => {
                         let report = if let Some(peer) = peers.get_mut(&participant_id) {
-                            if peer.is_pipe {
-                                warn!("SFU: Resume for pipe {} ignored", participant_id);
-                                ResumeLoopReply {
-                                    listed: false,
-                                    offer: None,
-                                }
-                            } else {
-                                let offer = match peer.resume_offer(Instant::now()) {
-                                    Some((offer_id, sdp, track_mapping)) => {
-                                        info!(
-                                            "SFU: peer {} resumed; pending offer {offer_id} sent again",
-                                            participant_id
-                                        );
-                                        publish_renegotiation_offer(
-                                            peer,
-                                            &participant_id,
-                                            &offer_id,
-                                            sdp,
-                                            track_mapping,
-                                        )
-                                    }
-                                    None => {
-                                        info!(
-                                            "SFU: peer {} resumed; no offer pending",
-                                            participant_id
-                                        );
-                                        None
-                                    }
-                                };
-                                ResumeLoopReply {
-                                    listed: true,
-                                    offer,
-                                }
-                            }
+                            resume_loop_reply(peer, Instant::now())
                         } else {
                             debug!("SFU: Resume for unknown participant {}", participant_id);
                             ResumeLoopReply {
@@ -1644,6 +1659,8 @@ impl SfuServer {
                             }
                             Event::PeerStats(stats) => {
                                 // The layer of each video track this peer receives.
+                                // One line per peer per interval: debug, not info.
+                                // A timer must not sit on info.
                                 let layers_in: Vec<Option<Rid>> = peer
                                     .tracks_out
                                     .iter()
@@ -1654,7 +1671,7 @@ impl SfuServer {
                                     })
                                     .map(|(_, track)| layers.layer_of(pid, track))
                                     .collect();
-                                info!(
+                                debug!(
                                     "{}",
                                     peer.stats_line(
                                         &stats,
@@ -1784,7 +1801,9 @@ impl SfuServer {
             // cleared.  Running here — AFTER poll_output — ensures str0m
             // has fully processed the previous accept_answer before we
             // create a new SDP offer via sdp_api().apply().  A resend does
-            // not clear the pending offer, so it does not drain here.
+            // not clear the pending offer, so it does not drain here. A
+            // pipe offer rolled back on this tick does, and its tracks go
+            // out as a new offer.
             for (pid, peer) in peers.iter_mut() {
                 if peer.pending.is_none() && peer.has_deferred_changes() {
                     if let Some((sdp_offer_json, track_mapping)) =
@@ -2369,13 +2388,113 @@ fn publish_renegotiation_offer(
         let age_ms = Instant::now()
             .saturating_duration_since(pending.sent_at)
             .as_millis();
-        info!(
-            "SFU: renegotiation offer {kind} {offer_id} for peer {pid} attempt {} age_ms {age_ms} sdp {:016x}",
-            pending.resends,
-            sdp_fingerprint(&pending.sdp),
-        );
+        let attempt = pending.resends;
+        let fingerprint = sdp_fingerprint(&pending.sdp);
+        // A resend is on a timer. The first publication of an offer is not.
+        if attempt == 0 {
+            info!(
+                "SFU: renegotiation offer {kind} {offer_id} for peer {pid} attempt {attempt} age_ms {age_ms} sdp {fingerprint:016x}"
+            );
+        } else {
+            debug!(
+                "SFU: renegotiation offer {kind} {offer_id} for peer {pid} attempt {attempt} age_ms {age_ms} sdp {fingerprint:016x}"
+            );
+        }
     }
     client_offer
+}
+
+/// What `sfu.callResume` answers for a peer the loop still holds. A pipe is
+/// not a client session. A client whose RTC has already closed is not
+/// listed: the disconnect sweep removes it after this command drain, so a
+/// resume in the same tick would otherwise report it as resumable.
+fn resume_loop_reply(peer: &mut SfuPeer, now: Instant) -> ResumeLoopReply {
+    if peer.is_pipe {
+        warn!("SFU: Resume for pipe {} ignored", peer.id);
+        return ResumeLoopReply {
+            listed: false,
+            offer: None,
+        };
+    }
+    if !peer.rtc.is_alive() {
+        debug!(
+            "SFU: Resume for {} ignored; its RTC is already closed",
+            peer.id
+        );
+        return ResumeLoopReply {
+            listed: false,
+            offer: None,
+        };
+    }
+    let pid = peer.id.clone();
+    let offer = match peer.resume_offer(now) {
+        Some((offer_id, sdp, track_mapping)) => {
+            info!("SFU: peer {pid} resumed; pending offer {offer_id} sent again");
+            publish_renegotiation_offer(peer, &pid, &offer_id, sdp, track_mapping)
+        }
+        None => {
+            info!("SFU: peer {pid} resumed; no offer pending");
+            None
+        }
+    };
+    ResumeLoopReply {
+        listed: true,
+        offer,
+    }
+}
+
+/// Apply a remote pipe's renegotiation offer. `accept_offer` bumps str0m's
+/// change id before it validates the SDP, so the local pending offer is
+/// dead whether the remote offer is taken or refused: roll it back and
+/// queue its tracks again. A JSON parse failure does not touch str0m, so
+/// that offer stays pending.
+fn apply_pipe_renegotiation_offer(
+    peer: &mut SfuPeer,
+    sdp_offer_json: &str,
+    remote_did: String,
+    room_id: String,
+    track_mapping: &[crate::sfu::TrackMapEntry],
+) {
+    let offer: SdpOffer = match serde_json::from_str(sdp_offer_json) {
+        Ok(offer) => offer,
+        Err(e) => {
+            warn!(
+                "SFU: ApplyPipeRenegotiationOffer parse failed for {}: {}",
+                peer.id, e
+            );
+            return;
+        }
+    };
+    let answer = match peer.rtc.sdp_api().accept_offer(offer) {
+        Ok(answer) => answer,
+        Err(e) => {
+            warn!("SFU: accept_offer for pipe {} failed: {:?}", peer.id, e);
+            peer.rollback_pending();
+            return;
+        }
+    };
+    // Only once the offer is in the session: a refused offer names nothing.
+    peer.note_remote_origins(track_mapping);
+    // The local token was invalidated by accept_offer. Its tracks were
+    // never negotiated.
+    peer.rollback_pending();
+    match serde_json::to_string(&answer) {
+        Ok(answer_json) => {
+            let payload = crate::sfu::SfuPipeRenegotiationAnswer {
+                remote_did,
+                room_id,
+                sdp_answer: answer_json,
+            };
+            super::pipe_bus::publish_answer(payload);
+            info!("SFU: pipe renegotiation answer published for {}", peer.id);
+        }
+        Err(e) => {
+            warn!(
+                "SFU: serialize pipe renegotiation answer for {} failed: {}",
+                peer.id, e
+            );
+        }
+    }
 }
 
 /// Ordered `a=mid` values in SDP text.
@@ -2417,7 +2536,8 @@ struct DueResend {
 }
 
 /// Advance every pending offer's deadline by one step. A resend is returned
-/// for publication after poll. No peer is dropped here.
+/// for publication after poll. A pipe offer past its back-off is rolled
+/// back here; no peer is dropped.
 fn sweep_offer_deadlines(
     peers: &mut HashMap<ParticipantId, SfuPeer>,
     now: Instant,
@@ -2437,6 +2557,17 @@ fn sweep_offer_deadlines(
                     sdp: pending.sdp.clone(),
                     track_mapping: pending.track_mapping.clone(),
                 });
+            }
+            OfferDeadline::Replace => {
+                let (offer_id, resends) = peer
+                    .pending
+                    .as_ref()
+                    .map(|pending| (pending.offer_id.clone(), pending.resends))
+                    .unwrap_or_default();
+                warn!(
+                    "SFU: pipe {pid} offer {offer_id} unanswered after {resends} resends; replacing it"
+                );
+                peer.rollback_pending();
             }
         }
     }
@@ -4211,15 +4342,226 @@ mod tests {
         assert!(line.contains("media 31.5 s ago"), "{line}");
     }
 
+    /// The establishment window covers the second resend (t=30 s) and the
+    /// ICE grace after it. A shorter window drops the pipe on the tick that
+    /// queues that resend.
+    #[test]
+    fn the_establishment_timeout_covers_the_second_resend_and_ice() {
+        let second_resend = OFFER_RETRY_BASE + OFFER_RETRY_BASE * 2;
+        assert_eq!(second_resend, Duration::from_secs(30));
+        assert!(
+            PEER_ESTABLISH_TIMEOUT >= second_resend + ICE_RESTART_GRACE,
+            "establishment {} s ends before the second resend plus ICE ({} s)",
+            PEER_ESTABLISH_TIMEOUT.as_secs(),
+            (second_resend + ICE_RESTART_GRACE).as_secs(),
+        );
+    }
+
+    /// The SDP of a pipe's first offer.
+    fn pipe_offer_sdp(signal: super::super::cascade::CascadeSignal) -> String {
+        match signal {
+            super::super::cascade::CascadeSignal::PipeOffer { sdp_offer, .. } => sdp_offer,
+            _ => panic!("establish_pipe returns a pipe offer"),
+        }
+    }
+
+    /// An initial pipe is still up when its second resend is due, and an
+    /// answer that lands after the first resend and before the second does
+    /// not get the pipe swept while ICE is still checking.
+    #[test]
+    fn an_initial_pipe_is_alive_at_the_second_resend() {
+        let mut mgr = super::super::cascade::CascadeManager::new(
+            "did:key:nodeB".into(),
+            "127.0.0.1:10041".parse::<std::net::SocketAddr>().unwrap(),
+            8,
+        );
+        let room = RoomId::new("neighbourhood://pipe-resend", "r");
+        let before = Instant::now();
+        let (pipe, signal) = mgr.establish_pipe("did:key:nodeA", &room).unwrap();
+        let after = Instant::now();
+        let sdp = pipe_offer_sdp(signal);
+        let pid = pipe.id.clone();
+        let mut peers = HashMap::from([(pid.clone(), pipe)]);
+
+        let first = sweep_offer_deadlines(&mut peers, after + OFFER_RETRY_BASE);
+        assert_eq!(first.len(), 1, "the first resend is due");
+        assert_eq!(first[0].sdp, sdp);
+        let second_at = after + OFFER_RETRY_BASE * 3;
+        let second = sweep_offer_deadlines(&mut peers, second_at);
+        assert_eq!(second.len(), 1, "the second resend is still this offer");
+        assert_eq!(second[0].sdp, sdp);
+        assert!(peers[&pid].rtc.is_alive());
+        assert!(
+            !peers[&pid].never_established(second_at),
+            "the pipe is swept on the tick of its second resend"
+        );
+        assert!(!peers[&pid].stayed_disconnected(second_at));
+        assert!(before <= peers[&pid].created_at && peers[&pid].created_at <= after);
+
+        let (mut answered, signal) = mgr.establish_pipe("did:key:nodeC", &room).unwrap();
+        let answered_after = Instant::now();
+        let sdp = pipe_offer_sdp(signal);
+        let mut remote = Rtc::builder().build(answered_after);
+        let answer = remote
+            .sdp_api()
+            .accept_offer(serde_json::from_str(&sdp).unwrap())
+            .expect("the remote accepts the initial pipe offer");
+        answered
+            .accept_current_answer(&serde_json::to_string(&answer).unwrap())
+            .unwrap();
+        assert!(answered.pending.is_none(), "the answer landed");
+        assert!(!answered.had_path, "ICE has not connected");
+        assert!(!answered.never_established(answered_after + Duration::from_secs(30)));
+        assert!(!answered.never_established(
+            answered.created_at + PEER_ESTABLISH_TIMEOUT - Duration::from_millis(1)
+        ));
+        assert!(answered.rtc.is_alive());
+        assert!(answered.never_established(answered.created_at + PEER_ESTABLISH_TIMEOUT));
+    }
+
+    /// One more outbound audio track, held until the pending offer clears.
+    fn defer_extra_audio(peer: &mut SfuPeer) {
+        let origin = ParticipantId::next();
+        peer.deferred_tracks.push((
+            origin.clone(),
+            Mid::from("o2"),
+            MediaKind::Audio,
+            TrackOrigin {
+                participant_id: origin.to_string(),
+                agent_did: "did:key:extra".to_string(),
+            },
+        ));
+    }
+
+    /// An established pipe resends an unanswered offer through the back-off,
+    /// then drops that offer and negotiates the tracks that were waiting,
+    /// including the one the dropped offer carried.
+    #[test]
+    fn a_pipe_replaces_an_offer_the_remote_never_answers_and_offers_the_deferred_track() {
+        let now = Instant::now();
+        let (mut pipe, mut remote, established) = negotiated_pipe_ends();
+        pipe.on_ice_state(IceConnectionState::Connected, now);
+        let (sdp, _, unanswered) = offer_outbound_audio(&mut pipe, now);
+        let old_id = pipe.pending_offer_id().unwrap().to_string();
+        defer_extra_audio(&mut pipe);
+        let pid = pipe.id.clone();
+        let mut peers = HashMap::from([(pid.clone(), pipe)]);
+
+        let at_10 = sweep_offer_deadlines(&mut peers, now + OFFER_RETRY_BASE);
+        assert_eq!(at_10.len(), 1);
+        assert_eq!(at_10[0].sdp, sdp);
+        assert!(apply_deferred_tracks(peers.get_mut(&pid).unwrap(), now).is_none());
+
+        let at_30 = sweep_offer_deadlines(&mut peers, now + Duration::from_secs(30));
+        assert_eq!(at_30.len(), 1);
+        assert_eq!(at_30[0].sdp, sdp);
+        assert!(apply_deferred_tracks(peers.get_mut(&pid).unwrap(), now).is_none());
+
+        let at_60 = sweep_offer_deadlines(&mut peers, now + Duration::from_secs(60));
+        assert!(
+            at_60.is_empty(),
+            "the pipe replaces the offer instead of resending it"
+        );
+        let pipe = peers.get_mut(&pid).unwrap();
+        assert!(
+            pipe.pending.is_none(),
+            "the unanswered offer is no longer pending"
+        );
+        assert!(pipe.rtc.is_alive());
+        assert!(
+            pipe.rtc.writer(unanswered).is_none(),
+            "the unanswered mid was never negotiated"
+        );
+        assert_audio_writer(pipe, established);
+
+        let (new_sdp, new_mapping) = apply_deferred_tracks(pipe, now + Duration::from_secs(60))
+            .expect("the deferred tracks are offered again");
+        assert_ne!(new_sdp, sdp);
+        let new_id = pipe.pending_offer_id().unwrap().to_string();
+        assert_ne!(new_id, old_id);
+        assert!(
+            new_mapping.len() >= 2,
+            "both tracks are in the new offer: {}",
+            new_mapping.len()
+        );
+        let new_offer: SdpOffer = serde_json::from_str(&new_sdp).unwrap();
+        let answer = remote
+            .rtc
+            .sdp_api()
+            .accept_offer(new_offer)
+            .expect("the remote takes the replacement offer");
+        pipe.accept_current_answer(&serde_json::to_string(&answer).unwrap())
+            .unwrap();
+        for entry in &new_mapping {
+            assert_audio_writer(pipe, Mid::from(entry.mid.as_str()));
+        }
+    }
+
+    /// A remote offer str0m refuses still bumps the change id, so the local
+    /// offer can no longer be answered. Its tracks are offered again, and
+    /// the track that was already negotiated keeps its writer.
+    #[test]
+    fn a_pipe_whose_accept_offer_fails_offers_its_deferred_tracks_again() {
+        let now = Instant::now();
+        let (mut pipe, _remote, established) = negotiated_pipe_ends();
+        pipe.on_ice_state(IceConnectionState::Connected, now);
+        let (_sdp, _, unanswered) = offer_outbound_audio(&mut pipe, now);
+        defer_extra_audio(&mut pipe);
+        let bare = SdpOffer::from_sdp_string("v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n")
+            .expect("a session-only offer parses");
+        let json = serde_json::to_string(&bare).unwrap();
+        let room_id = pipe.room_id.to_string();
+        apply_pipe_renegotiation_offer(
+            &mut pipe,
+            &json,
+            "did:key:node-a".to_string(),
+            room_id,
+            &[],
+        );
+        assert!(
+            pipe.pending.is_none(),
+            "a refused remote offer does not leave the local offer pending"
+        );
+        assert!(pipe.rtc.is_alive());
+        assert_audio_writer(&mut pipe, established);
+        assert!(pipe.rtc.writer(unanswered).is_none());
+        let (again, _) =
+            apply_deferred_tracks(&mut pipe, now).expect("deferred tracks are offered again");
+        assert_ne!(again, json);
+    }
+
+    /// Resume of a peer whose RTC has already closed is unlisted, and it
+    /// does not spend a resend of the offer still recorded. A live peer
+    /// with nothing pending is listed.
+    #[test]
+    fn a_resume_of_a_closed_rtc_is_unlisted() {
+        let (_caller, mut peer) = connected_pair();
+        let now = Instant::now();
+        offer_outbound_audio(&mut peer, now);
+        let resends = peer.pending.as_ref().unwrap().resends;
+        peer.rtc.disconnect();
+        let reply = resume_loop_reply(&mut peer, now);
+        assert!(!reply.listed, "a closed RTC is not resumable");
+        assert!(reply.offer.is_none());
+        assert!(peer.pending.is_some());
+        assert_eq!(peer.pending.as_ref().unwrap().resends, resends);
+
+        let (_caller, mut live) = connected_pair();
+        let reply = resume_loop_reply(&mut live, now);
+        assert!(reply.listed);
+        assert!(reply.offer.is_none());
+    }
+
     /// A cascade pipe whose answer never arrives has no remote candidate, so
     /// ICE never leaves `Checking` and never reports `Disconnected`. Before
     /// this PR the 70 s offer expiry ended it; without that, nothing did, and
     /// `has_pipe` kept the node from dialling again. A peer that never had a
-    /// path is dropped 30 s after it was made; the dead-pipe cleanup removes
-    /// its entry, and the next announce dials a new pipe.
+    /// path is dropped [`PEER_ESTABLISH_TIMEOUT`] after it was made; the
+    /// dead-pipe cleanup removes its entry, and the next announce dials a
+    /// new pipe.
     #[test]
     fn a_pipe_that_never_gets_a_path_is_dropped_and_can_be_replaced() {
-        let establish = Duration::from_secs(30);
+        let establish = PEER_ESTABLISH_TIMEOUT;
         let mut mgr = super::super::cascade::CascadeManager::new(
             "did:key:nodeB".into(),
             "127.0.0.1:10040".parse::<std::net::SocketAddr>().unwrap(),
@@ -4246,7 +4588,8 @@ mod tests {
         assert!(!pipe.stayed_disconnected(start + establish - Duration::from_secs(1)));
         assert!(
             pipe.stayed_disconnected(start + establish),
-            "a pipe with no path for 30 s is dropped"
+            "a pipe with no path for {} s is dropped",
+            establish.as_secs()
         );
 
         // What the cascade cleanup does with the dead pipe.

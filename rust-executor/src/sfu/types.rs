@@ -336,9 +336,11 @@ pub struct SfuResumeRoster {
 pub struct SfuRoomRoster {
     pub neighbourhood_url: String,
     pub room_name: String,
-    /// Increases by one on every publish of this room, starting at 1,
-    /// including a resume. A client drops a roster older than one it
-    /// already applied.
+    /// One sequence for every roster this process publishes: 1 the first
+    /// time, then one more on every publish, a resume included. A later
+    /// room, and a room created again, continues it, so a roster from an
+    /// earlier life of the room is older. A client drops a roster older
+    /// than one it already applied.
     #[ts(type = "number")]
     pub revision: u64,
     /// The room's sessions, sorted by DID, then participant id: this node's,
