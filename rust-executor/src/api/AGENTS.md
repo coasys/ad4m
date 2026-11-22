@@ -164,7 +164,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-239 methods: Cap 81, CapAnyPointer 1, Executor 43, Open 5, Operator 28, Owns 79, UserOrOperator 2. Local only (the operator on this machine): 5.
+240 methods: Cap 82, CapAnyPointer 1, Executor 43, Open 5, Operator 28, Owns 79, UserOrOperator 2. Local only (the operator on this machine): 5.
 
 | Method | Guard |
 |---|---|
@@ -380,6 +380,7 @@ the guard checked:
 | `sfu.callJoin` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.callLeave` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.callRestartIce` | `Cap(neighbourhood:UPDATE)` |
+| `sfu.callResume` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.callSetQualityPreference` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.cascadeStatus` | `Cap(neighbourhood:READ)` |
 | `sfu.ensureMembership` | `Operator` |

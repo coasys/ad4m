@@ -449,7 +449,7 @@ impl CascadeManager {
     /// Handle an incoming pipe answer from a remote SFU node.  Returns
     /// the local pipe's `ParticipantId` and the raw answer JSON so the
     /// caller can dispatch
-    /// `SfuCommand::ApplyServerAnswer { participant_id, sdp_answer_json }`
+    /// `SfuCommand::ApplyServerAnswer { participant_id, offer_id: None, sdp_answer_json, reply: None }`
     /// to the SFU event loop (the pipe's RTC lives in the peers map).
     pub fn handle_pipe_answer(
         &mut self,

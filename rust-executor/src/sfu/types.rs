@@ -164,6 +164,10 @@ pub struct SfuCallRenegotiationOffer {
     /// The session the offer is for. Every session of `target_did` gets
     /// it; only this one applies it.
     pub participant_id: String,
+    /// The id of this offer. A resend and `sfu.callResume` repeat it.
+    /// The answer names it (`sfu.callAnswerServerOffer`); an answer that
+    /// names another id is refused.
+    pub offer_id: String,
     pub neighbourhood_url: String,
     pub room_name: String,
     /// JSON-encoded `RTCSessionDescriptionInit` for the new offer.
@@ -228,6 +232,97 @@ pub struct SfuMigrateEvent {
     pub room_name: String,
     /// DID of the SFU node the participant should reconnect to.
     pub migrate_to_did: String,
+}
+
+/// What `sfu.callAnswerServerOffer` answers. A refusal is this value, not
+/// an RPC error. The event loop sends it after it has applied the answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SfuAnswerResult {
+    pub accepted: bool,
+    /// Set only when `accepted` is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reason: Option<SfuAnswerRefusal>,
+}
+
+impl SfuAnswerResult {
+    pub fn accepted() -> Self {
+        Self {
+            accepted: true,
+            reason: None,
+        }
+    }
+
+    pub fn refused(reason: SfuAnswerRefusal) -> Self {
+        Self {
+            accepted: false,
+            reason: Some(reason),
+        }
+    }
+}
+
+/// Why an answer was not applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "kebab-case")]
+#[ts(export)]
+pub enum SfuAnswerRefusal {
+    /// The id is not the pending offer's, and it is not the offer already
+    /// accepted for this session.
+    Stale,
+    /// This session has no offer waiting.
+    NoPending,
+    /// The event loop has no such session.
+    UnknownSession,
+}
+
+/// What `sfu.callResume` answers. `listed: false` is the room or the
+/// session gone. A session of another agent is an RPC error, not this.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SfuResumeResult {
+    pub listed: bool,
+    /// The pending server offer, when the session is listed and one waits.
+    /// The same value the offer event carries, including its `offerId`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub offer: Option<SfuCallRenegotiationOffer>,
+    /// The room's sessions, when the session is listed. The same list the
+    /// roster event carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub roster: Option<SfuResumeRoster>,
+}
+
+impl SfuResumeResult {
+    pub fn unlisted() -> Self {
+        Self {
+            listed: false,
+            offer: None,
+            roster: None,
+        }
+    }
+
+    pub fn listed(
+        offer: Option<SfuCallRenegotiationOffer>,
+        participants: Vec<SfuRosterParticipant>,
+    ) -> Self {
+        Self {
+            listed: true,
+            offer,
+            roster: Some(SfuResumeRoster { participants }),
+        }
+    }
+}
+
+/// The sessions in a [`SfuResumeResult`].
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SfuResumeRoster {
+    pub participants: Vec<SfuRosterParticipant>,
 }
 
 /// Who is in a call room now. Published whenever the room's participants
