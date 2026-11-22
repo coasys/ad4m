@@ -361,9 +361,14 @@ interval (10 s, `PING_INTERVAL_MS`; longer while a large write it sent may
 still be crossing a 16 kB/s link) and dials a new one, so a
 socket a network switch left OPEN is noticed in 10 to 20 s. `online` redials
 at once; `change` on `navigator.connection` (only when its `type` or
-`navigator.onLine` changed) and ICE `disconnected` run `checkConnection`,
-which sends no probe when the socket delivered a message in the last 5 s and
-drops a socket that answered nothing for 8 s after one probe.
+`navigator.onLine` changed) runs `checkConnection`, and so does a request
+that has had no reply for 4 s (`PENDING_PROBE_MS`) on a socket nothing
+arrived on since it was sent. The probe sends no ping when the socket
+delivered a message in the last 5 s and drops a socket that answered
+nothing for 8 s after one probe; any frame proves the socket, so a slow
+request on a socket that keeps delivering fails as an RPC timeout, not a
+dead socket. The call layer never probes the socket: ICE `disconnected` is
+media evidence, and its whole answer is the ICE restart.
 
 SFU behind NAT (`rust-executor/src/sfu/{server,reachability}.rs`): the SFU
 binds `sfu_bind_addr` on `sfu_udp_port` (0/unset: ephemeral; a fixed port

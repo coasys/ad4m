@@ -834,11 +834,12 @@ export class ApiClient {
      * and if nothing at all arrives on that socket within
      * CHECK_CONNECTION_DEADLINE_MS, treat it as a network change (drop it,
      * dial the next one at once, `onNetworkChange` callbacks fire when it
-     * opens). Any message keeps it. For a caller that has seen its network
-     * path break, e.g. ICE going disconnected, where the platform fired no
-     * `online` event. Without an open socket, while a check runs, or when
-     * the socket delivered a message in the last CHECK_CONNECTION_HEARD_MS,
-     * this does nothing.
+     * opens). Any message keeps it. The client runs it itself when the
+     * network path may have changed (`navigator.connection`), and when a
+     * request has had no reply for PENDING_PROBE_MS on a socket nothing
+     * arrived on since it was sent. Without an open socket, while a check
+     * runs, or when the socket delivered a message in the last
+     * CHECK_CONNECTION_HEARD_MS, this does nothing.
      */
     checkConnection(): void {
         const ws = this._ws
