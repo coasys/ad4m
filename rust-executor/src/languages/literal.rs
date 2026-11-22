@@ -40,6 +40,21 @@ pub fn literal_encode(value: &JsonValue) -> String {
     }
 }
 
+/// Percent-decode `input` and validate it as UTF-8. The decode error
+/// becomes a `LanguageError::SerializationError` whose message is
+/// `error_prefix` plus `: {error}` — each `literal_decode` branch passes
+/// its own prefix.
+fn decode_literal_component<'a>(
+    input: &'a str,
+    error_prefix: &'static str,
+) -> Result<std::borrow::Cow<'a, str>, LanguageError> {
+    percent_decode_str(input)
+        .decode_utf8()
+        .map_err(|e| LanguageError::SerializationError {
+            message: format!("{}: {}", error_prefix, e),
+        })
+}
+
 /// Decode a literal URL expression part back into a JSON value.
 ///
 /// Mirrors the TypeScript `Literal.fromUrl("literal:<expression_part>").get()`.
@@ -49,18 +64,10 @@ pub fn literal_encode(value: &JsonValue) -> String {
 /// it is the caller's job to interpret that shape.
 pub fn literal_decode(expression_part: &str) -> Result<JsonValue, LanguageError> {
     let value = if let Some(rest) = expression_part.strip_prefix("string:") {
-        let decoded = percent_decode_str(rest).decode_utf8().map_err(|e| {
-            LanguageError::SerializationError {
-                message: format!("Failed to decode literal string: {}", e),
-            }
-        })?;
+        let decoded = decode_literal_component(rest, "Failed to decode literal string")?;
         JsonValue::String(decoded.to_string())
     } else if let Some(rest) = expression_part.strip_prefix("number:") {
-        let decoded = percent_decode_str(rest).decode_utf8().map_err(|e| {
-            LanguageError::SerializationError {
-                message: format!("Failed to decode literal number: {}", e),
-            }
-        })?;
+        let decoded = decode_literal_component(rest, "Failed to decode literal number")?;
         let num: serde_json::Number =
             decoded
                 .parse()
@@ -69,11 +76,7 @@ pub fn literal_decode(expression_part: &str) -> Result<JsonValue, LanguageError>
                 })?;
         JsonValue::Number(num)
     } else if let Some(rest) = expression_part.strip_prefix("boolean:") {
-        let decoded = percent_decode_str(rest).decode_utf8().map_err(|e| {
-            LanguageError::SerializationError {
-                message: format!("Failed to decode literal boolean: {}", e),
-            }
-        })?;
+        let decoded = decode_literal_component(rest, "Failed to decode literal boolean")?;
         let b: bool = decoded.parse().map_err(|e: std::str::ParseBoolError| {
             LanguageError::SerializationError {
                 message: format!("Failed to parse literal boolean: {}", e),
@@ -81,21 +84,13 @@ pub fn literal_decode(expression_part: &str) -> Result<JsonValue, LanguageError>
         })?;
         JsonValue::Bool(b)
     } else if let Some(rest) = expression_part.strip_prefix("json:") {
-        let decoded = percent_decode_str(rest).decode_utf8().map_err(|e| {
-            LanguageError::SerializationError {
-                message: format!("Failed to decode literal JSON: {}", e),
-            }
-        })?;
+        let decoded = decode_literal_component(rest, "Failed to decode literal JSON")?;
         serde_json::from_str(&decoded).map_err(|e| LanguageError::SerializationError {
             message: format!("Failed to parse literal JSON: {}", e),
         })?
     } else {
         // Fallback: try to percent-decode and parse as JSON
-        let decoded = percent_decode_str(expression_part)
-            .decode_utf8()
-            .map_err(|e| LanguageError::SerializationError {
-                message: format!("Failed to decode literal: {}", e),
-            })?;
+        let decoded = decode_literal_component(expression_part, "Failed to decode literal")?;
         serde_json::from_str(&decoded).unwrap_or(JsonValue::String(decoded.to_string()))
     };
 
