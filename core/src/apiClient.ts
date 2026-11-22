@@ -43,6 +43,15 @@ export interface CallOptions {
      *  cancelled there when it times out, as when `signal` aborts it; any other
      *  call that times out still runs to its end. */
     timeoutMs?: number
+    /** `true` for a request that cannot wait the normal socket check. On a
+     *  socket nothing arrived on since it went out, it probes after
+     *  URGENT_PENDING_PROBE_MS rather than PENDING_PROBE_MS, and that probe
+     *  waits URGENT_CHECK_CONNECTION_DEADLINE_MS rather than
+     *  CHECK_CONNECTION_DEADLINE_MS for any frame — with the same drain
+     *  allowance for a large send ahead of the probe's ping. It shortens
+     *  only this request's wait: any frame still proves the socket, and a
+     *  request without it keeps the 4 s / 8 s timing. */
+    urgent?: boolean
 }
 
 /** Narrows an {@link ApiClient.on} handler to one perspective's events. */
@@ -106,6 +115,19 @@ const CHECK_CONNECTION_HEARD_MS = 5_000
  *  times out as an RPC failure — the frames that did arrive prove it. */
 const PENDING_PROBE_MS = 4_000
 
+/** The PENDING_PROBE_MS wait for a request that cannot last it
+ *  (`CallOptions.urgent`): media lost to a dead socket is restarted inside
+ *  a window the normal wait cannot meet. It shortens only that request's
+ *  wait — the heard-skip and the one-probe rule are unchanged. */
+const URGENT_PENDING_PROBE_MS = 1_000
+
+/** The CHECK_CONNECTION_DEADLINE_MS verdict for a probe an urgent request
+ *  started, with the same drain allowance: a large send ahead of the
+ *  probe's ping still gets its crossing time plus half of this for the
+ *  pong. Shorter only because the urgent request cannot wait longer —
+ *  a busy socket's pong still gets the deadline above. */
+const URGENT_CHECK_CONNECTION_DEADLINE_MS = 3_000
+
 /** The bytes `text` takes as UTF-8, as a WebSocket text frame sends it. */
 function utf8Length(text: string): number {
     let bytes = text.length
@@ -141,6 +163,8 @@ interface PendingCall {
     retry: boolean
     /** An `events.watch`: it serves the subscribers, so it does not keep the socket open. */
     watch: boolean
+    /** A request that cannot wait the normal probe timing (`CallOptions.urgent`). */
+    urgent: boolean
     resolve: (value: unknown) => void
     reject: (reason: unknown) => void
 }
@@ -570,8 +594,9 @@ export class ApiClient {
     /**
      * A request sent on the open socket that nothing has answered — no reply,
      * and no other frame since it went out — asks the socket itself after
-     * PENDING_PROBE_MS. The check is one wake for the earliest such request;
-     * it fires into `checkConnection`, so an active probe covers it and the
+     * PENDING_PROBE_MS, or URGENT_PENDING_PROBE_MS for one sent urgent. The
+     * check is one wake for the earliest such request; it fires into
+     * `checkConnection`, so an active probe covers it and the
      * CHECK_CONNECTION_HEARD_MS silence rule applies. A request the socket
      * outlives (resent after a reconnect) is armed again when it goes out.
      */
@@ -583,7 +608,7 @@ export class ApiClient {
             if (!pending.sent || this._wsHeardAt >= pending.sentAt) continue
             // The heard-skip is built into the wait rather than retried.
             const at = Math.max(
-                pending.sentAt + PENDING_PROBE_MS,
+                pending.sentAt + (pending.urgent ? URGENT_PENDING_PROBE_MS : PENDING_PROBE_MS),
                 this._wsHeardAt + CHECK_CONNECTION_HEARD_MS,
             )
             // A request already due got its probe (or is covered by a running one).
@@ -600,13 +625,17 @@ export class ApiClient {
             this._wsPendingProbeTimer = null
             this._wsPendingProbeAt = 0
             const now = performance.now()
+            // One probe covers every pending call; an urgent request's own
+            // wait falling due asks for the urgent deadline.
+            let probe = false, urgent = false
             for (const pending of this._pendingCalls.values()) {
                 if (!pending.sent || this._wsHeardAt >= pending.sentAt) continue
-                if (now - pending.sentAt >= PENDING_PROBE_MS) {
-                    this.checkConnection()
-                    break
+                if (now - pending.sentAt >= (pending.urgent ? URGENT_PENDING_PROBE_MS : PENDING_PROBE_MS)) {
+                    probe = true
+                    if (pending.urgent) { urgent = true; break }
                 }
             }
+            if (probe) this.checkConnection(urgent)
             this._armPendingProbe()
         }, due - now)
     }
@@ -681,6 +710,7 @@ export class ApiClient {
      * (`generated/api/RpcMethods.ts`).
      * @param options - `signal` to cancel, `timeoutMs` to override the
      *   default timeout. The timeout covers connecting and the reply.
+     *   `urgent` shortens the socket check an unanswered request starts.
      */
     call<M extends RpcMethod>(method: M, params: RpcMethods[M]['params'], options?: CallOptions): Promise<RpcMethods[M]['result']> {
         // A listener added before this call needs its `events.watch` on the
@@ -737,6 +767,7 @@ export class ApiClient {
                 failedConnects: 0,
                 retry: (READ_METHODS as ReadonlySet<string>).has(type),
                 watch: type === 'events.watch',
+                urgent: options?.urgent === true,
                 resolve: (value) => settle(() => resolve(value)),
                 reject: (reason) => settle(() => reject(reason)),
             }
@@ -898,24 +929,27 @@ export class ApiClient {
     /**
      * Check the open socket now rather than at the next ping: send a ping,
      * and if nothing at all arrives on that socket within
-     * CHECK_CONNECTION_DEADLINE_MS, drop it and dial the next one at once —
-     * socket evidence, not a network change, so the redial fires
-     * `onReconnect` but no `onNetworkChange`. Any message keeps it. The
-     * client runs it itself when the network path may have changed
+     * CHECK_CONNECTION_DEADLINE_MS — URGENT_CHECK_CONNECTION_DEADLINE_MS
+     * for `urgent` — drop it and dial the next one at once — socket
+     * evidence, not a network change, so the redial fires `onReconnect`
+     * but no `onNetworkChange`. Any message keeps it. The client runs it
+     * itself when the network path may have changed
      * (`navigator.connection`, where the change itself is what notifies),
      * and when a request has had no reply for PENDING_PROBE_MS on a socket
-     * nothing arrived on since it was sent. Without an open socket, while a
-     * check runs, or when the socket delivered a message in the last
-     * CHECK_CONNECTION_HEARD_MS, this does nothing.
+     * nothing arrived on since it was sent — an urgent request's own wait
+     * is URGENT_PENDING_PROBE_MS and its probe asks for the urgent
+     * deadline. Without an open socket, while a check runs, or when the
+     * socket delivered a message in the last CHECK_CONNECTION_HEARD_MS,
+     * this does nothing.
      */
-    checkConnection(): void {
+    checkConnection(urgent = false): void {
         const ws = this._ws
         if (!ws || ws.readyState !== 1 /* OPEN */ || this._wsProbeTimer) return
         if (performance.now() - this._wsHeardAt < CHECK_CONNECTION_HEARD_MS) return
-        this._probe(ws)
+        this._probe(ws, urgent ? URGENT_CHECK_CONNECTION_DEADLINE_MS : CHECK_CONNECTION_DEADLINE_MS)
     }
 
-    private _probe(ws: WebSocket): void {
+    private _probe(ws: WebSocket, deadline: number): void {
         const first = this._wsPingedAt === null
         if (first) this._wsPingedAt = performance.now()
         this._send(ws, JSON.stringify({ type: 'ping' }))
@@ -924,8 +958,8 @@ export class ApiClient {
         // The ping reaches the executor only after what was sent before it,
         // and its pong gets half the deadline to come back after that.
         const wait = Math.max(
-            CHECK_CONNECTION_DEADLINE_MS,
-            this._wsSentBy - performance.now() + CHECK_CONNECTION_DEADLINE_MS / 2,
+            deadline,
+            this._wsSentBy - performance.now() + deadline / 2,
         )
         this._wsProbeTimer = setTimeout(() => {
             this._wsProbeTimer = null
