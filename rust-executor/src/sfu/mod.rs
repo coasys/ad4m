@@ -15,6 +15,7 @@
 pub mod cascade;
 pub mod config_store;
 pub mod gossip;
+pub mod hosts;
 pub(crate) mod pipe_bus;
 pub mod reachability;
 pub mod relay;
@@ -40,24 +41,31 @@ pub use types::{
     SfuRoomInfo, SfuRoomRoster, SfuRosterParticipant, SfuSessionReplaced, TrackMapEntry,
 };
 
-/// Detect the default outbound IP address of this machine.
+/// Detect this machine's LAN address: the IPv4 address of the interface its
+/// default route leaves from.
 ///
 /// Creates a UDP socket and connects it to a public address (8.8.8.8:80).
 /// The OS routing table selects the appropriate interface — no packet
 /// leaves the machine.  Returns the local IP the OS chose, which on a
 /// single-NIC server equals the publicly reachable address.
 ///
-/// Falls back to `127.0.0.1` when detection fails (no network, no
-/// default route, containerised environment with no outbound).
-pub fn detect_outbound_ip() -> std::net::IpAddr {
-    let fallback = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
-    let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") else {
-        return fallback;
-    };
+/// Fails, saying why, when there is none: no network, no default route, a
+/// containerised environment with no outbound, or a route that leaves from
+/// loopback.
+pub fn detect_outbound_ip() -> Result<std::net::IpAddr, String> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0")
+        .map_err(|e| format!("no IPv4 socket for the route lookup: {}", e))?;
     // connect() on a UDP socket sets the default destination without
     // sending anything.  The kernel selects the outbound interface.
-    if socket.connect("8.8.8.8:80").is_err() {
-        return fallback;
+    socket
+        .connect("8.8.8.8:80")
+        .map_err(|e| format!("no default route: {}", e))?;
+    let ip = socket
+        .local_addr()
+        .map_err(|e| format!("the route lookup gave no address: {}", e))?
+        .ip();
+    if ip.is_unspecified() || ip.is_loopback() {
+        return Err(format!("the default route leaves from {}", ip));
     }
-    socket.local_addr().map(|a| a.ip()).unwrap_or(fallback)
+    Ok(ip)
 }
