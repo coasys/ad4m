@@ -53,7 +53,8 @@ causes no side effect.
 | `list_perspectives`, `add_perspective` | `perspective.all`, `perspective.create` |
 | `add_link` | `perspective.addLink` |
 | `query_links`, `get_flows` | `perspective.queryLinks` |
-| `add_model`, `add_flow` | `perspective.addSdna` |
+| `add_model` | `perspective.registerShapes` |
+| `add_flow` | `perspective.addLinks` (the flow's links and its `ad4m://has_flow` name link) |
 | `execute_commands` | `perspective.executeCommands` |
 | `flow_proposal_accept`, `flow_proposal_reject`, `flow_valid_outputs` | `perspective.acceptFlowProposal`, `.rejectFlowProposal`, `.flowValidOutputs` |
 | `language_meta` | `language.meta` |

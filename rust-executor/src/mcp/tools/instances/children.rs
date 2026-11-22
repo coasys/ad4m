@@ -14,9 +14,9 @@
 //! write and read.
 
 use super::{
-    error_json, link_target, pretty, run_model_query, Ad4mMcpHandler, DEFAULT_QUERY_LIMIT,
-    MAX_QUERY_LIMIT,
+    error_json, link_target, pretty, Ad4mMcpHandler, DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT,
 };
+use crate::perspectives::instances::run_model_query_stopped;
 use crate::perspectives::model_query::builtin_classes::CONTAINER_URI;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
@@ -87,8 +87,8 @@ impl Ad4mMcpHandler {
     )]
     pub async fn get_children(&self, params: Parameters<GetChildrenParams>) -> String {
         let p = &params.0;
-        let perspective = match self.get_readable_perspective(&p.perspective_id).await {
-            Ok(perspective) => perspective,
+        let (perspective, gate) = match self.gated_readable_perspective(&p.perspective_id).await {
+            Ok(v) => v,
             Err(e) => return e,
         };
         let parent = p.parent.trim();
@@ -103,7 +103,9 @@ impl Ad4mMcpHandler {
             "properties": ["children"],
             "links": ["children"],
         });
-        let rows = match run_model_query(&perspective, CONTAINER_URI, &query).await {
+        let rows = match run_model_query_stopped(&gate.stop(), &perspective, CONTAINER_URI, &query)
+            .await
+        {
             Ok((rows, _)) => rows,
             Err(e) => return error_json(format!("Error getting children: {e}")),
         };

@@ -1705,6 +1705,7 @@ describe("buildWakeMessage", () => {
       { address: "msg-2", parents: ["channel-abc"], ancestors: [], verified: false },
     ]);
     expect(msg).toContain("You were @mentioned in an AD4M neighbourhood.");
+    expect(msg).toContain("When you reply, mention whoever you answer");
     expect(msg).toContain("Agent DID: did:key:z6Mk123");
     expect(msg).toContain("Perspective: uuid-123");
     expect(msg).toContain("Mentioned items (2):");

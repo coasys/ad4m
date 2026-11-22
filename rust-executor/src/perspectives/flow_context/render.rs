@@ -104,17 +104,6 @@ impl<'a> FlowTokens<'a> {
         .iter()
         .any(|t| s.contains(t))
     }
-
-    /// Build tokens from a [`FlowContext`]. `did` is left empty — the
-    /// prompt path preserves `$did` verbatim; the evaluator fills it in.
-    #[allow(dead_code)]
-    pub fn from_context(fc: &'a FlowContext) -> FlowTokens<'a> {
-        FlowTokens {
-            subject: &fc.subject,
-            instance_uri: &fc.instance_uri,
-            did: "",
-        }
-    }
 }
 
 /// Every state reachable from `current_state` via one transition, in

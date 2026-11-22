@@ -16,6 +16,7 @@ pub mod holochain_service;
 pub mod identity;
 pub mod js_core;
 pub mod mcp;
+pub mod metrics;
 pub mod perspective_snapshot;
 pub mod perspectives;
 pub mod presence;
@@ -51,7 +52,7 @@ pub mod types;
 use std::thread::JoinHandle;
 
 use deno_core::error::AnyError;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 
 use crate::prolog_service::init_prolog_service;
 use crate::{
@@ -703,7 +704,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
             if let Err(e) = crate::db_backend::db_backend().cleanup_expired_codes() {
                 error!("Failed to cleanup expired verification codes: {}", e);
             } else {
-                info!("Cleaned up expired verification codes");
+                debug!("Cleaned up expired verification codes");
             }
         }
     });
@@ -736,7 +737,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         let gossip: std::sync::Arc<dyn crate::sfu::CascadeGossip> = build_sfu_gossip(&config).await;
         let (bind_addr, public_ip) = crate::sfu::server::sfu_media_addrs(
             config.sfu_bind_addr.as_deref(),
-            config.localhost.unwrap_or(true),
             config.sfu_udp_port,
             config.sfu_public_addr.as_deref(),
         )
