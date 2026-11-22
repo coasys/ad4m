@@ -343,7 +343,7 @@ impl SfuService {
         // gossip is a NoopGossip (Send/Receive go nowhere).
         let cascade_manager = CascadeManager::new(
             gossip.local_did().to_string(),
-            server.local_addr,
+            server.sockets.clone(),
             gossip.max_participants_per_node(),
         );
 
@@ -1370,8 +1370,10 @@ impl SfuService {
 
         let (rtc, sdp_answer) = SfuServer::create_rtc_for_offer(
             offer,
-            self.server.local_addr,
-            self.server.advertised.map(|a| a.addr),
+            &self.server.sockets.host_addrs(),
+            self.server
+                .advertised
+                .map(|a| (a.addr, self.server.sockets.primary())),
         )?;
 
         let peer = SfuPeer::new(
@@ -2167,7 +2169,7 @@ async fn fresh_test_service() -> Arc<SfuService> {
     Arc::new(SfuService {
         cascade_manager: Arc::new(RwLock::new(CascadeManager::new(
             "did:node".into(),
-            server.local_addr,
+            server.sockets.clone(),
             8,
         ))),
         reachability: server.reachability.clone(),
