@@ -49,7 +49,7 @@ where
             listener_reach(parts),
         )
         .map_err(|e| match e {
-            AuthError::Locked => ApiError::Unavailable(e.to_string()),
+            AuthError::Locked | AuthError::Sealed => ApiError::Unavailable(e.to_string()),
             e => ApiError::Unauthorized(e.to_string()),
         })?;
 

@@ -531,7 +531,7 @@ mod tests {
             .to_ad4m_config(&ExecutorSecrets {
                 admin_credential: Some("uuid".into()),
                 smtp_password,
-                unlock_passphrase: None,
+                ..Default::default()
             })
             .unwrap();
         let tls = config.tls.as_ref().unwrap();

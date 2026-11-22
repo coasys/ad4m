@@ -16,9 +16,25 @@ WorkingDirectory=%h
 # Secrets: systemd copies the 0600 files into a directory only this unit can
 # read (%d, mode 0400); the executor reads them from there.
 LoadCredential=admin-credential:%h/.config/ad4m-staging/secrets/admin-credential
-LoadCredential=unlock-passphrase:%h/.config/ad4m-staging/secrets/unlock-passphrase
 Environment=AD4M_ADMIN_CREDENTIAL_FILE=%d/admin-credential
-Environment=AD4M_UNLOCK_PASSPHRASE_FILE=%d/unlock-passphrase
+# The storage secret opens the keyring that encrypts the data folder. update.sh
+# makes it once (mode 0600) if it is missing and never replaces it. Without it
+# the data cannot be opened again: keep a copy off this machine.
+# It is named directly, not through LoadCredential: the executor checks which
+# disk the file is on, and a copy in %d would hide that.
+Environment=AD4M_STORAGE_SECRET_FILE=%h/.config/ad4m-staging/secrets/storage-secret
+# The secret and the data folder are both in this user's home, the only place
+# update.sh (run as this user, without root) can write, so on one disk. The
+# executor refuses a secret on the data folder's disk unless this is set, and
+# then reports the data as not encrypted at rest (whoever takes the disk has
+# both). Move the secret to another disk and drop this line when the host has
+# one (README, "The storage secret and the encrypted data folder").
+Environment=AD4M_ALLOW_SECRET_ON_DATA_DISK=true
+# An agent made before the keyring: its first start with the storage secret
+# reads the passphrase from AD4M_UNLOCK_PASSPHRASE_FILE once and keeps it in
+# the keyring. Those two lines live in a drop-in for that one start
+# (capture-passphrase.conf; README, "Upgrading to the encrypted data
+# folder"); a new agent never needs them.
 # With an admin credential set, MCP binds 0.0.0.0 unless told otherwise.
 Environment=MCP_HOST=127.0.0.1
 ExecStart=%h/.local/share/ad4m-staging/current/ad4m-executor run --config %h/.config/ad4m-staging/executor-config.json

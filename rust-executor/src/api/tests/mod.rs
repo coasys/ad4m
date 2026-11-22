@@ -3,6 +3,8 @@
 #[cfg(test)]
 pub mod agent_did_document_tests;
 #[cfg(test)]
+pub mod agent_passphrase_tests;
+#[cfg(test)]
 pub mod ai_task_access_tests;
 #[cfg(test)]
 pub mod anonymous_access_tests;

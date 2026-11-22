@@ -47,6 +47,9 @@ use crate::commands::app::{
     validate_tls_config,
 };
 use crate::commands::state::{get_port, request_credential};
+use crate::commands::storage::{
+    storage_secret_get, storage_secret_restore_file, storage_secret_set,
+};
 use crate::config::log_path;
 
 use crate::menu::reveal_log_file;
@@ -293,7 +296,10 @@ pub fn run() {
             get_mcp_config,
             set_mcp_config,
             get_host_registration,
-            set_host_registration
+            set_host_registration,
+            storage_secret_set,
+            storage_secret_get,
+            storage_secret_restore_file
         ])
         .setup(move |app| {
             // Hides the dock icon
@@ -323,11 +329,35 @@ pub fn run() {
             // produce: an SMTP password is always set (possibly "", which is
             // valid here), and free_port + 1 cannot overflow. Should that
             // change, setup fails with the reason logged instead of a panic.
+            // Without the OS keyring the executor starts sealed: `ad4m-executor storage
+            // unlock` on this machine opens it. A `None` here is the missing-secret case:
+            // the data folder holds sealed data but the OS keyring lost the secret, so no
+            // new one is made — the UI asks the user for it.
+            let storage_secret = match encryption::storage_secret(&app_path) {
+                Ok(secret) => {
+                    if secret.is_none() {
+                        error!(
+                            "The storage secret is missing: the OS keyring holds none and \
+                             the data folder has sealed data. The launcher asks the user \
+                             for the secret."
+                        );
+                    }
+                    secret
+                }
+                Err(e) => {
+                    error!(
+                        "No storage secret from the OS keyring ({e}): the executor starts \
+                         sealed until `ad4m-executor storage unlock`"
+                    );
+                    None
+                }
+            };
             let mut config = config_file
                 .to_ad4m_config(&ExecutorSecrets {
                     admin_credential: Some(req_credential.clone().into()),
                     smtp_password,
                     unlock_passphrase: None,
+                    storage_secret,
                 })
                 .map_err(|e| {
                     error!("Cannot start the executor with the launcher's settings: {e}");

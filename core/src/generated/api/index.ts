@@ -73,6 +73,8 @@ export type { SetMultiUserRequest } from "./SetMultiUserRequest";
 export type { SetStatusRequest } from "./SetStatusRequest";
 export type { SetUnytMembraneProofRequest } from "./SetUnytMembraneProofRequest";
 export type { SignMessageRequest } from "./SignMessageRequest";
+export type { StorageStatus } from "./StorageStatus";
+export type { StorageUnlockResult } from "./StorageUnlockResult";
 export type { TranscriptTurn } from "./TranscriptTurn";
 export type { TrustedAgentsRequest } from "./TrustedAgentsRequest";
 export type { UnlockAgentRequest } from "./UnlockAgentRequest";

@@ -77,6 +77,32 @@ pub fn exit_code_of(error: &AnyError) -> i32 {
         .map_or(1, |refused| refused.reason.code())
 }
 
+/// Ends the process with `code` now, from any thread, while other threads still run.
+///
+/// Not `std::process::exit`: that runs the C `atexit` handlers, and SQLCipher registers one
+/// (`sqlcipher_atexit`) that frees its crypto provider, its private heap and its mutexes. A
+/// stop that comes while another thread still opens or reads a database (a stop during
+/// start-up: `--watch-stdin` with stdin already closed; a start `run` refuses with exit 78
+/// after the databases are open) then crashed that thread with SIGSEGV
+/// and the executor ended by a signal instead of with `code`. `_exit` runs no handler; nothing
+/// the executor needs runs in one: the log file is written unbuffered, the PID file is removed
+/// by the graceful stop, and the data folder lock is released with the process. Stdout's
+/// buffer is flushed first, as `std::process::exit` does, but never waited on for long: a
+/// write blocked on a pipe nobody drains must not keep the process alive.
+pub fn exit_now(code: i32) -> ! {
+    let (flushed_tx, flushed_rx) = std::sync::mpsc::channel();
+    let flush = std::thread::Builder::new().spawn(move || {
+        log::logger().flush();
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let _ = flushed_tx.send(());
+    });
+    if flush.is_ok() {
+        let _ = flushed_rx.recv_timeout(std::time::Duration::from_millis(200));
+    }
+    // SAFETY: `_exit` takes a plain value and ends the process; it touches no Rust state.
+    unsafe { libc::_exit(code) }
+}
+
 /// The sender of the graceful stop: `run` sets it, and the stop exits with the reason sent.
 pub(crate) static SHUTDOWN_TX: Mutex<Option<tokio::sync::oneshot::Sender<ExitReason>>> =
     Mutex::new(None);
@@ -95,7 +121,7 @@ pub fn request_shutdown(reason: ExitReason) {
         }
         // Set up, and its sender taken: a stop runs already.
         None if STOP_SET_UP.load(std::sync::atomic::Ordering::SeqCst) => {}
-        None => std::process::exit(reason.code()),
+        None => exit_now(reason.code()),
     }
 }
 
@@ -150,13 +176,13 @@ impl DataFolderLock {
     /// another, is [`ExitReason::DataFolderBusy`]; a folder that cannot hold the file is a
     /// crash (1).
     pub fn take(folder: &Path) -> Result<DataFolderLock, AnyError> {
-        std::fs::create_dir_all(folder)?;
+        crate::at_rest::files::create_private_dir_all(folder)?;
         let path = folder.join(Self::FILE_NAME);
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(false).write(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, crate::at_rest::files::FILE_MODE);
+        let file = options.open(&path)?;
         match file.try_lock() {
             Ok(()) => Ok(DataFolderLock { _file: file }),
             Err(std::fs::TryLockError::WouldBlock) => Err(StartRefused::new(
@@ -191,9 +217,10 @@ pub(crate) fn hold_data_folder(folder: &Path) -> Result<(), AnyError> {
     Ok(())
 }
 
-/// No core file and no debugger attach for the executor: its memory holds the wallet's keys
-/// once unlocked. Linux only; macOS writes no core file by default.
-#[cfg(target_os = "linux")]
+/// No core file and no debugger attach for the executor: its memory holds the storage keys and
+/// the wallet's keys. Linux: `RLIMIT_CORE` 0 and `PR_SET_DUMPABLE` 0; macOS: `RLIMIT_CORE` 0.
+/// The executor binaries call it first thing in `main`, `run` again for embedders.
+#[cfg(unix)]
 pub fn forbid_core_dumps() -> std::io::Result<()> {
     let none = libc::rlimit {
         rlim_cur: 0,
@@ -203,6 +230,7 @@ pub fn forbid_core_dumps() -> std::io::Result<()> {
     if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &none) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
+    #[cfg(target_os = "linux")]
     if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -220,6 +248,47 @@ mod tests {
         assert_eq!(ExitReason::ConfigRefused.code(), 78);
         assert_eq!(ExitReason::DataFolderBusy.code(), 79);
         assert_eq!(ExitReason::BindFailed.code(), 80);
+    }
+
+    /// Set in the child that `exit_now_ends_with_its_code_and_runs_no_atexit_handler` starts.
+    const EXIT_NOW_CHILD: &str = "AD4M_TEST_EXIT_NOW_CHILD";
+
+    /// `exit_now` ends with its code, keeps what was printed, and runs no C `atexit` handler:
+    /// SQLCipher's handler frees its crypto provider under threads still using it, and the
+    /// executor stopped during start-up ended with SIGSEGV instead of 0. The test runs itself
+    /// again as a child process, which registers a handler and calls `exit_now`.
+    #[cfg(unix)]
+    #[test]
+    fn exit_now_ends_with_its_code_and_runs_no_atexit_handler() {
+        extern "C" fn handler() {
+            // An atexit handler that ran prints this; `exit_now` must not run it.
+            let line = b"atexit ran\n";
+            unsafe { libc::write(1, line.as_ptr().cast(), line.len()) };
+        }
+        if std::env::var_os(EXIT_NOW_CHILD).is_some() {
+            // SAFETY: registers a plain C function.
+            assert_eq!(unsafe { libc::atexit(handler) }, 0);
+            print!("printed before the exit, no newline");
+            exit_now(42);
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "exit::tests::exit_now_ends_with_its_code_and_runs_no_atexit_handler",
+                "--nocapture",
+                "--test-threads",
+                "1",
+            ])
+            .env(EXIT_NOW_CHILD, "1")
+            .output()
+            .expect("the test binary runs again");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(42), "{stdout}");
+        assert!(
+            stdout.contains("printed before the exit, no newline"),
+            "{stdout}"
+        );
+        assert!(!stdout.contains("atexit ran"), "{stdout}");
     }
 
     #[test]
@@ -280,12 +349,12 @@ mod tests {
         assert!(folder.join(DataFolderLock::FILE_NAME).exists());
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[test]
     fn the_executor_is_not_dumpable_and_writes_no_core_file() {
         forbid_core_dumps().unwrap();
-        let dumpable = unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) };
-        assert_eq!(dumpable, 0);
+        #[cfg(target_os = "linux")]
+        assert_eq!(unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) }, 0);
         let mut limit = libc::rlimit {
             rlim_cur: 1,
             rlim_max: 1,

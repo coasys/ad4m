@@ -132,10 +132,13 @@ After restarting the executor, unlock the agent:
 ad4m --executor-url http://localhost:12000 agent unlock --passphrase <passphrase> --holochain true
 ```
 
-A service can skip this step: with `AD4M_UNLOCK_PASSPHRASE_FILE` pointing at
-a mode-600 file holding the passphrase, the executor unlocks the agent
-itself at every start (see "Unlocking at startup" in
-`pages/developer-guides/executor-config.mdx`).
+An executor with a keyring skips this step: it unlocks the agent itself at
+every start, from the agent passphrase its keyring holds. An agent generated
+on it has a passphrase derived from the keyring; an agent generated before
+the keyring is unlocked this way once, and from then on the keyring holds its
+passphrase (see "Storage secret" in
+`pages/developer-guides/executor-config.mdx`). `AD4M_UNLOCK_PASSPHRASE_FILE`
+is retired: it only serves that first unlock.
 
 `--holochain true` starts the Holochain conductor during unlock. Same caveat
 as Step 3: this is WS-RPC (`agent.unlock`), not a REST endpoint.

@@ -24,7 +24,7 @@ from there.
 | SFU media | UDP 40000 on the LAN address, forwarded by the router (see "SFU") |
 | Units | `ad4m-staging.service`, `ad4m-staging-update.service`, `ad4m-staging-update.timer` |
 | Config | `~/.config/ad4m-staging/executor-config.json` |
-| Secrets | `~/.config/ad4m-staging/secrets/admin-credential`, `…/unlock-passphrase` |
+| Secrets | `~/.config/ad4m-staging/secrets/admin-credential`, `…/storage-secret` (made by `update.sh`; keep a copy off the box), `…/unlock-passphrase` (only until an agent made before the keyring has started once with the storage secret) |
 | Builds | `~/.local/share/ad4m-staging/releases/<sha>/`, links `current` and `previous` |
 | Data | `~/.ad4m-staging`; snapshots in `~/.local/share/ad4m-staging/snapshots/` |
 | Source | `~/ad4m-staging-src`, a detached worktree of `~/nico/ad4m` (never of a CI workdir), own `target/` |
@@ -32,7 +32,8 @@ from there.
 
 | File | Installed to | What it does |
 |---|---|---|
-| `ad4m-staging.service` | `~/.config/systemd/user/` | Runs `current/ad4m-executor run --config …`; secrets through `LoadCredential=`; `LimitNOFILE=65536` |
+| `ad4m-staging.service` | `~/.config/systemd/user/` | Runs `current/ad4m-executor run --config …`; admin credential through `LoadCredential=`, storage secret by path (`AD4M_STORAGE_SECRET_FILE`, allowed on the data disk); `LimitNOFILE=65536` |
+| `capture-passphrase.conf` | `~/.config/systemd/user/ad4m-staging.service.d/`, for one start only | Hands an agent made before the keyring its passphrase once (see "Upgrading to the encrypted data folder") |
 | `ad4m-staging-update.service` | `~/.config/systemd/user/` | Runs `update.sh` once, at the lowest CPU and IO priority |
 | `ad4m-staging-update.timer` | `~/.config/systemd/user/` | Starts the update 10 minutes after the last one finished |
 | `update.sh` | `~/.local/share/ad4m-staging/bin/` | Fetch, build, snapshot, swap, gate, roll back; writes `status.json`. `update.sh rollback` goes back one build by hand |
@@ -56,8 +57,9 @@ deploy/staging/test/update.test.sh
 
 Every 10 minutes `update.sh` fetches the head of the `staging` branch (by
 its full ref name; a tag called `origin/staging` does not count). When it has
-moved, the script builds it, stops the executor, snapshots the data
-directory, points `current` at the new build, runs `ad4m-executor init`,
+moved, the script builds it, makes the storage secret if there is none yet
+(see "The storage secret and the encrypted data folder"), stops the
+executor, snapshots the data directory, points `current` at the new build, runs `ad4m-executor init`,
 starts the executor and waits up to 180 s for `/health` and an unlocked
 agent. A node that never had an agent passes on `/health` alone; once an
 agent has been unlocked, a build that finds none fails. If the new build
@@ -159,19 +161,18 @@ service user without root.
 
    Expected: no output. `FileExistsError` means there already is one; keep it.
 
-8. **The unlock passphrase**, the same way:
-
-   ```bash
-   python3 -c 'import os,secrets,sys; fd=os.open(sys.argv[1], os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o600); os.write(fd, secrets.token_urlsafe(32).encode()); os.close(fd)' ~/.config/ad4m-staging/secrets/unlock-passphrase
-   ```
-
-   Expected: no output. Check both files:
+8. **The storage secret** is not made by hand: the first deploy (step 12)
+   makes it with the new build's `ad4m-executor storage new-secret`,
+   straight into `secrets/storage-secret` (mode 0600, never printed), and
+   no later deploy replaces it. Nothing to do now; step 12 says what to do
+   with it. There is no unlock passphrase: a new agent's passphrase comes
+   from the keyring. Check the file so far:
 
    ```bash
    stat -c '%a %n' ~/.config/ad4m-staging/secrets/*
    ```
 
-   Expected: `600 …/admin-credential` and `600 …/unlock-passphrase`.
+   Expected: `600 …/admin-credential`.
 
 9. **PATH for the build.** The update service does not read a login shell,
    so it gets the directories of `node`, `pnpm`, `cargo` and `deno` from a
@@ -223,16 +224,30 @@ service user without root.
     does not have the config-file support the unit needs yet; the timer
     deploys by itself once it does.
 
-13. **Create the agent** (first deploy only). `agent.mjs` reads the admin
-    credential and the passphrase from their files:
+    The deploy made the storage secret. **Copy it off the box now**, into
+    the team's secret store: without it the data folder cannot be opened
+    again, and a disk that dies takes both. Copy the file without printing
+    it (for example `scp` from your own machine into the store); then
+    check that it is there and private:
 
     ```bash
-    AD4M_ADMIN_CREDENTIAL_FILE=~/.config/ad4m-staging/secrets/admin-credential AD4M_UNLOCK_PASSPHRASE_FILE=~/.config/ad4m-staging/secrets/unlock-passphrase node ~/.local/share/ad4m-staging/bin/agent.mjs generate
+    stat -c '%a %s %n' ~/.config/ad4m-staging/secrets/storage-secret
+    ```
+
+    Expected: `600 65 …/storage-secret` (64 hex characters and a newline).
+
+13. **Create the agent** (first deploy only). `agent.mjs` reads the admin
+    credential from its file; the executor derives the agent's passphrase
+    from its keyring:
+
+    ```bash
+    AD4M_ADMIN_CREDENTIAL_FILE=~/.config/ad4m-staging/secrets/admin-credential node ~/.local/share/ad4m-staging/bin/agent.mjs generate
     ```
 
     Expected, after about two minutes (Holochain starts and the system
     languages install): `generated did:key:z6Mk…`. From now on every start
-    unlocks the agent from the passphrase file.
+    opens the keyring with the storage secret and unlocks the agent from it
+    (`Agent unlocked at startup from the keyring` in the log).
 
 14. **Check** with the health commands below.
 
@@ -260,9 +275,12 @@ service user without root.
    AD4M_ADMIN_CREDENTIAL_FILE=~/.config/ad4m-staging/secrets/admin-credential node ~/.local/share/ad4m-staging/bin/agent.mjs status
    ```
 
-   Expected: `unlocked`. `locked` means the passphrase file does not match
-   the agent (`journalctl --user -u ad4m-staging | grep 'Unlocking the agent at startup'`);
-   `no-agent` means step 13 of the setup has not run.
+   Expected: `unlocked`. `sealed` means the executor did not get its
+   storage secret and waits for it (`journalctl --user -u ad4m-staging | grep -i 'storage'`:
+   no `AD4M_STORAGE_SECRET_FILE` in the unit, a missing file, or a secret
+   that does not open the keyring). `locked` means the keyring does not hold
+   the passphrase of an agent made before it (see "Upgrading to the
+   encrypted data folder"); `no-agent` means step 13 of the setup has not run.
 
 4. The deployed commit, as the team sees it:
 
@@ -328,6 +346,7 @@ outcome.
 | `rolling back by hand from <new sha> to <previous sha>` | A rollback by hand is running |
 | `rolled_back by hand: <new sha>; <previous sha> failed the gate too (agent: …)` / `error: the rollback by hand from <new sha> to <previous sha> was interrupted; left to the operator` | A rollback by hand failed its check or was killed. After a failed check or a kill during it, `<previous sha>` is current, on its restored data; after a kill before that, `current` is still `<new sha>`, staging may be stopped, and the data directory may be half a snapshot. The timer deploys nothing until this is resolved by hand; see "Roll back" |
 | `error: could not restore the data of <sha>; staging is stopped` | A rollback could not move the data directory aside or copy the snapshot back (a full disk, most likely). Nothing runs, `current` is removed, and the timer deploys nothing until the data is restored by hand; see "Roll back" |
+| `error: secret file storage-secret is missing, and the data folder has a keyring only it opens; …` | The storage secret is gone but the data is encrypted under it. Nothing was built or stopped, and no new secret is made, since it could not open the data: put the copy from the secret store back (mode 0600) |
 | `error: …` (other) | A precondition failed (missing config or secret, wrong file mode, `git fetch` failed); nothing changed |
 
 `update.sh` does not build a commit again that failed. After fixing what
@@ -422,6 +441,90 @@ Callers join the SFU of the executor they are signed in to. Everyone in a
 call must sign in to staging itself: someone on another executor (a local
 one, or the team node) is in a separate call with the same name.
 
+## The storage secret and the encrypted data folder
+
+An executor with a keyring keeps its data folder encrypted at rest, under
+keys that the storage secret opens. On staging:
+
+- **The file.** `~/.config/ad4m-staging/secrets/storage-secret`, mode 0600,
+  64 hex characters. `update.sh` makes it once, before it stops anything,
+  with the build it is about to deploy, and only when it is missing; it
+  never replaces it and never prints it. A build from before the keyring
+  cannot make one; it is deployed without (it does not read the file), and
+  the first deploy of a build with the keyring makes it.
+- **Named by path.** The unit sets `AD4M_STORAGE_SECRET_FILE` to the file
+  itself, not to a `LoadCredential=` copy: the executor checks which disk
+  the file is on, and a copy in the unit's credentials directory would hide
+  that.
+- **Same disk as the data, allowed.** The secret lives in the service
+  user's home, where `update.sh` (run as that user, without root) can write
+  it; the data folder is in the same home, so both are on one disk unless
+  the home spans several (`df --output=source ~/.config/ad4m-staging ~/.ad4m-staging`
+  shows one device twice when they share it). The executor refuses a secret on the
+  data folder's disk unless `AD4M_ALLOW_SECRET_ON_DATA_DISK=true`, which the
+  unit sets, and then reports the data as not encrypted at rest
+  (`encrypted_at_rest: false`, `secret_on_data_disk: true` in
+  `runtime.storageStatus`): whoever takes the disk has both. On a host with
+  a second disk, move the file there (mode 0600, owned by the service user,
+  in a 0700 directory), point the unit's `AD4M_STORAGE_SECRET_FILE` at it,
+  add `AD4M_STAGING_STORAGE_SECRET=<that path>` to
+  `~/.config/ad4m-staging/update.env` so `update.sh` checks that file, and
+  drop the allow line from the unit.
+- **Lost secret, lost data.** Keep the copy from setup step 12. If the file
+  goes missing while the data folder has a keyring, `update.sh` stops with
+  an error instead of making a new one; put the copy back.
+- **Other installs** that run `update.sh` against their own unit need the
+  same two `Environment=` lines. Without them a build with the keyring
+  starts sealed, fails the check (`agent: sealed`) and is rolled back; the
+  agent and its data stay as they were.
+
+### Upgrading to the encrypted data folder
+
+For a staging executor whose agent was made before the keyring (it unlocks
+from `secrets/unlock-passphrase`). The first start of a build with the
+keyring opens the keyring with the storage secret, reads the passphrase
+file once and keeps the passphrase in the keyring; after that the file is
+not needed. Do steps 1 to 3 before the timer deploys such a build, or after
+a deploy of one failed with `agent: sealed`.
+
+1. Install the scripts (setup step 5), the units (setup step 10) and the
+   passphrase drop-in. The new unit has no passphrase lines; the drop-in
+   adds them back for the upgrade. Both still run the build that runs now:
+
+   ```bash
+   install -D -m 0644 deploy/staging/capture-passphrase.conf ~/.config/systemd/user/ad4m-staging.service.d/capture-passphrase.conf && systemctl --user daemon-reload
+   ```
+
+   Expected: no output.
+
+2. Deploy. The timer does it when `staging` moves; after a deploy that
+   failed with `agent: sealed`, build it again with
+   `AD4M_STAGING_RETRY=1` (see "Update"). `update.sh` makes the storage
+   secret before it stops the executor. Expected: `last_result` is
+   `deployed`.
+
+3. Check that the keyring holds the passphrase:
+
+   ```bash
+   journalctl --user -u ad4m-staging --since today | grep -E 'keyring now holds the agent passphrase|AD4M_UNLOCK_PASSPHRASE_FILE is no longer needed'
+   ```
+
+   Expected: at least one line. Copy the storage secret off the box (setup
+   step 12).
+
+4. Keep the drop-in and the passphrase file while `previous` is a build
+   from before the keyring: a rollback to it runs on its old data and
+   unlocks from the file. Once the next deploy has passed its check
+   (`previous_sha` is then a build with the keyring), remove the drop-in,
+   then the file, and restart:
+
+   ```bash
+   rm ~/.config/systemd/user/ad4m-staging.service.d/capture-passphrase.conf && systemctl --user daemon-reload && rm ~/.config/ad4m-staging/secrets/unlock-passphrase && systemctl --user restart ad4m-staging.service
+   ```
+
+   Expected: no output; health check 3 prints `unlocked`. Remove the drop-in
+   first: while it is installed, the unit does not start without the file.
+
 ## Rotate secrets
 
 **Admin credential.** As in the guide, with the staging paths:
@@ -432,16 +535,19 @@ python3 -c 'import os,secrets,sys; fd=os.open(sys.argv[1], os.O_WRONLY|os.O_CREA
 
 Expected: no output. Then health check 3 prints `unlocked`.
 
-**Unlock passphrase.** On staging, rotating it means a new, empty agent, and
-no deploy may run in between: until step 13 has run again, `status.json`
-still says an agent was unlocked, so a deploy would fail its check, and so
-would its rollback.
+**Storage secret and agent.** The storage secret cannot be rotated by this
+script: a new one does not open the keyring. On staging, starting over means
+a new, empty agent and data folder, and no deploy may run in between: until
+step 13 has run again, `status.json` still says an agent was unlocked, so a
+deploy would fail its check, and so would its rollback.
 
 1. Stop the timer and wait for a running update to end (or stop it):
    `systemctl --user stop ad4m-staging-update.timer ad4m-staging-update.service`
 2. Stop the executor: `systemctl --user stop ad4m-staging`.
-3. Move `~/.ad4m-staging` aside, write a new passphrase file as in setup
-   step 8, and run `~/.local/share/ad4m-staging/current/ad4m-executor init --data-path ~/.ad4m-staging`.
+3. Move `~/.ad4m-staging` aside, move `secrets/storage-secret` aside with
+   it (it opens only that folder), make a new one with the running build
+   (`(umask 077 && ~/.local/share/ad4m-staging/current/ad4m-executor storage new-secret | head -n 1 > ~/.config/ad4m-staging/secrets/storage-secret)`;
+   expected: no output), and run `~/.local/share/ad4m-staging/current/ad4m-executor init --data-path ~/.ad4m-staging`.
 4. Start the executor and repeat setup step 13.
 5. Start the timer again: `systemctl --user start ad4m-staging-update.timer`.
 
@@ -582,7 +688,10 @@ server on `127.0.0.1:8080`, multi-user on, SMTP set. Follow the guide's
   `smtp_config` with `password_file`, `mcp_enabled: true`, `mcp_port: 3001`,
   `run_dapp_server: true`.
 - Secrets: `~/.config/ad4m-team/secrets/` with `admin-credential` (new),
-  `unlock-passphrase` (the existing one) and `smtp-password`.
+  `unlock-passphrase` (the existing one, for its first start with the
+  keyring only; see "Upgrading to the encrypted data folder"),
+  `storage-secret` (made with `ad4m-executor storage new-secret`; on a
+  disk other than the data where the box has one) and `smtp-password`.
 - Unit: `~/.config/systemd/user/ad4m-team.service`, a copy of
   `ad4m-staging.service` with the `ad4m-team` paths, `ExecStart=` on an
   `ad4m-executor` built from the commit the launcher runs, a third

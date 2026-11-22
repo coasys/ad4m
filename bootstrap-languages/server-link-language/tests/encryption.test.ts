@@ -6,6 +6,7 @@
  * or a swapped key fails the round trip.
  */
 
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ed25519, x25519 } from "@noble/curves/ed25519";
@@ -103,6 +104,21 @@ describe("encryption: the sealed box format", () => {
             ciphertext: "11b99acbd7bdf173901c669b2ed8c4794cb801ac9c2ac9642531fd873dfde2cc",
         });
         assert.equal(new TextDecoder().decode(openSealed(sealed, secret)), "ad4m room key v1");
+    });
+
+    it("seals the room keys of ad4m-keyring's vectors byte for byte", () => {
+        // `ad4m-keyring` (Rust and its wasm build) gives these same envelopes from the same
+        // inputs and opens them; changing the seal here breaks both.
+        const file = new URL("../../../ad4m-keyring/vectors/room-key-seal.json", import.meta.url);
+        const { vectors } = JSON.parse(readFileSync(file, "utf8"));
+        assert.ok(vectors.length > 0);
+        for (const v of vectors) {
+            const seed = hexToBytes(v.ed25519Seed);
+            assert.equal(didForEd25519PublicKey(ed25519.getPublicKey(seed)), v.did);
+            const sealed = sealToDid(v.did, hexToBytes(v.roomKey), hexToBytes(v.ephemeralSecret), hexToBytes(v.nonce));
+            assert.deepEqual(sealed, v.sealed);
+            assert.equal(bytesToHex(openSealed(sealed, seed)), v.roomKey);
+        }
     });
 });
 

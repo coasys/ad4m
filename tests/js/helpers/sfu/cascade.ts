@@ -23,6 +23,7 @@ import { join } from "node:path";
 import { InstrumentedClient } from "./client.js";
 import { ISOLATED_HOLOCHAIN_ARGS } from "./executor.js";
 import { getFreePorts, registerPorts, deregisterPorts } from "../ports.js";
+import { testStorageSecretEnv } from "../../utils/utils.js";
 
 const ADMIN_TOKEN = process.env.AD4M_ADMIN_TOKEN ?? "test123";
 
@@ -208,7 +209,7 @@ export async function startCluster(opts: CascadeClusterOptions): Promise<Cascade
       const proc = spawn(bin, args, {
         stdio: ["ignore", "pipe", "pipe"],
         // Ends with this process, however it ends (see spawnExecutor in utils/utils.ts).
-        env: { ...process.env, RUST_LOG: "info", AD4M_EXIT_WITH_PARENT: "true" },
+        env: { ...process.env, ...testStorageSecretEnv(), RUST_LOG: "info", AD4M_EXIT_WITH_PARENT: "true" },
       });
       spawnedProcs.push(proc);
       try {

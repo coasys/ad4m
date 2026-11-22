@@ -152,6 +152,11 @@ describe("Multi-User Simple integration tests", () => {
             expect(userResult2.success).to.be.true;
             expect(userResult2.did).to.match(/^did:key:.+/);
             console.log("✅ User creation works after enabling multi-user mode");
+
+            // The new user has its own data key and its own store in the keyring.
+            const keyring = JSON.parse(fs.readFileSync(path.join(appDataPath, "ad4m", "keyring.json"), "utf8"));
+            expect(Object.keys(keyring.persons)).to.include("user:working@example.com");
+            expect(Object.keys(keyring.stores)).to.include("person:user:working@example.com");
         });
 
         it("should return empty array when multi-user is disabled", async () => {

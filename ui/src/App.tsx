@@ -14,6 +14,7 @@ import Perspectives from "./components/Perspectives";
 import Hosting from "./components/Hosting";
 import Settings from "./components/Settings";
 import Splashscreen from "./components/Splashscreen";
+import StorageSecret from "./components/StorageSecret";
 import TrayMessage from "./components/TrayMessage";
 import TrustAgent from "./components/TrustAgent";
 import { Ad4minContext } from "./context/Ad4minContext";
@@ -23,7 +24,7 @@ const appWindow = getCurrentWebviewWindow();
 const App = () => {
   const [opened, setOpened] = useState(false);
   const {
-    state: { candidate, did, auth, notifications },
+    state: { candidate, did, auth, notifications, storageSealed },
     methods: { handleTrustAgent },
   } = useContext(Ad4minContext);
 
@@ -48,6 +49,9 @@ const App = () => {
 
   return (
     <div className="App">
+      {storageSealed ? (
+        <StorageSecret />
+      ) : (
       <Routes>
         <Route path="/splashscreen" element={<Splashscreen />} />
         <Route path="/tray_message" element={<TrayMessage />} />
@@ -87,6 +91,7 @@ const App = () => {
         </Route>
         <Route path="/connect" element={<Connect />} />
       </Routes>
+      )}
       {candidate && (
         <TrustAgent candidate={candidate} handleTrustAgent={handleTrustAgent} />
       )}
