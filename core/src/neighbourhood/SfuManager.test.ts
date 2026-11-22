@@ -3703,6 +3703,39 @@ test("a restart's offer is answered while the resume's ask is still out", async 
     }
 })
 
+test("a wall-clock jump does not eat the restart's window: its remaining time is measured on a monotonic clock", async () => {
+    // The restart timer counts elapsed time on its own clock; a remaining
+    // window read off `Date.now` lies whenever the wall clock moves — a
+    // forward jump ends it early, a backward one lets an ask outlive the
+    // window. `performance.now` cannot jump.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+
+        await iceState("disconnected") // restart at t=0, deadline t=15
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+        await jest.advanceTimersByTimeAsync(11_000)
+
+        // The wall clock jumps 20 s ahead; the restart still has 4 s, so
+        // the socket's return still asks the resume.
+        const wallNow = Date.now
+        try {
+            Date.now = () => wallNow() + 20_000
+            api.emitReconnect()
+            await flush()
+            await flush()
+        } finally {
+            Date.now = wallNow
+        }
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
 test("a socket back late in a restart bounds the resume's wait by the restart's remaining time", async () => {
     // The restart had 15 s from its start; the socket came back at t=11,
     // so the ask's bound is the restart's remaining 4 s — a reply after
