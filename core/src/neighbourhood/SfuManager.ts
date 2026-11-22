@@ -1132,8 +1132,14 @@ export class SfuManager {
         const pc = this.state.peerConnection
         if (!pc || this.reconnecting) return
         this.checkIceSoon()
+        // A join may still be settling — its SDP step and its stream mapping
+        // are part of this call's state, so recovery waits them out on the
+        // queue before it rechecks the peer.
+        const joined = this.joinSettled
         this.offerQueue = this.offerQueue
+            .then(() => joined)
             .then(async () => {
+                if (this.state.peerConnection !== pc) return
                 const unsent = this.unsentAnswer
                 // The box is on the RPCs only: one given up on while its SDP
                 // step still ran would free the queue to mutate `pc` beside it.
