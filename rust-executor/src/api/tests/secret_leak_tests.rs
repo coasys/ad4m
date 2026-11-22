@@ -206,6 +206,7 @@ fn params(method: &str, fx: &Fixture) -> Value {
         | "neighbourhood.onlineAgents"
         | "neighbourhood.otherAgents"
         | "perspective.get"
+        | "perspective.mounts"
         | "perspective.shapes"
         | "perspective.interpretationOverlays"
         | "perspective.queryLinks"
