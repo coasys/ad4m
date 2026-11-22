@@ -71,8 +71,12 @@ mod abstract_classes;
 mod containment;
 // Class registration and the registry of shapes.
 mod shapes;
+// Name-keyed SDNA writes: `add_sdna`/`add_sdna_batch`, kept for mount
+// installs (their class names are not the target-class basename).
+mod sdna_writes;
 #[cfg(test)]
 pub(crate) use abstract_classes::faults::fail_next_index;
+pub use sdna_writes::SdnaType;
 pub use shapes::{RegisterResult, ShapeSummary};
 mod subscriptions;
 pub(crate) use subscriptions::{result_json, SubscriptionIdTaken};
