@@ -3035,3 +3035,122 @@ test("a resume from before a rebuild is not used for the rebuilt session", async
         jest.useRealTimers()
     }
 })
+
+// ── Round 4: the resume's RPC is time-boxed ─────────────────────────────────
+
+test("an offer behind a resume that outlives its box still makes its restart window", async () => {
+    // The resume RPC could wait out the executor's 30 s timeout while an ICE
+    // restart has 15 s to bring media back; the offer queued behind it never
+    // got its answer out. Boxed, the resume holds the queue only within the
+    // restart window's offer share.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const resuming = deferred<SfuResumeResult>()
+        api.sfuCallResume.mockImplementation(() => resuming.promise)
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        const pc = currentPc()
+
+        // A restart in flight, then the socket comes back and the resume's
+        // ask stalls on the executor.
+        await iceState("disconnected")
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+        api.emitReconnect()
+        await flush()
+        await flush()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+
+        api.emitOffer(offer("restart-offer"))
+        await flush()
+        // Held just inside the bound...
+        await jest.advanceTimersByTimeAsync(9_999)
+        expect(pc.remoteSdps()).toEqual(["server-answer"])
+        // ...and free at it: the restart's offer goes on and is answered.
+        await jest.advanceTimersByTimeAsync(1)
+        await flush()
+        await flush()
+        expect(pc.remoteSdps()).toEqual(["server-answer", "restart-offer"])
+        expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledWith(URL, ROOM, MINE, offer("restart-offer").offerId, expect.any(String))
+
+        // Media back ends the restart: nothing rebuilds.
+        await iceState("connected")
+        await jest.advanceTimersByTimeAsync(20_000)
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a resume's reply that lands after its box applies no roster and no offer", async () => {
+    // Whatever the RPC says once the queue went on belongs to a call that is
+    // not this one any more: it must not join anyone or negotiate.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const resuming = deferred<SfuResumeResult>()
+        api.sfuCallResume.mockImplementation(() => resuming.promise)
+        const { manager, joined } = recordedManager(api)
+        await manager.join(fakeStream())
+        const pc = currentPc()
+
+        // The unlisted-roster grace sends the ask. The room is empty but for
+        // this session gone, so only the reply's roster could join anyone.
+        api.emitRoster(roster([], {}, { withoutMe: true }))
+        await flush()
+        await jest.advanceTimersByTimeAsync(3_000)
+        await flush()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+
+        await jest.advanceTimersByTimeAsync(10_000)
+        resuming.resolve(
+            resumeListed({
+                roster: { revision: nextRevision++, participants: [{ participantId: MINE, agentDid: ME }, { participantId: pid(ALICE), agentDid: ALICE }] },
+                offer: offer("late"),
+            }),
+        )
+        await flush()
+        await flush()
+        await jest.advanceTimersByTimeAsync(1_000)
+
+        expect(joined).toEqual([])
+        expect(pc.remoteSdps()).toEqual(["server-answer"])
+        expect(api.sfuCallAnswerServerOffer).not.toHaveBeenCalled()
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("a listed:false that lands after the box rebuilds nothing", async () => {
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const resuming = deferred<SfuResumeResult>()
+        api.sfuCallResume.mockImplementation(() => resuming.promise)
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        const pc = currentPc()
+        ;(pc as any).iceConnectionState = "connected"
+
+        api.emitReconnect()
+        await flush()
+        await flush()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+
+        await jest.advanceTimersByTimeAsync(10_000)
+        resuming.resolve({ listed: false })
+        await flush()
+        await flush()
+        await jest.advanceTimersByTimeAsync(1_000)
+
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        expect(currentPc().closed).toBe(false)
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})

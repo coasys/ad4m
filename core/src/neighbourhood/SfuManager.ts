@@ -337,11 +337,18 @@ export class SfuManager {
     private qualityPreference: SfuQualityPreference | null = null
     /** Server-offer work, one step at a time. Every offer — an event's or a
      *  resume reply's — runs its SDP steps to their end before the next
-     *  offer's start; only an answer RPC is boxed, at most
-     *  OFFER_STEP_TIMEOUT_MS. */
+     *  offer's start; only an RPC is boxed: an answer's at most
+     *  OFFER_STEP_TIMEOUT_MS, a resume's RESUME_STEP_TIMEOUT_MS. */
     private offerQueue: Promise<void> = Promise.resolve()
     /** How long one answer RPC of `offerQueue` may hold the steps behind it. */
     private static readonly OFFER_STEP_TIMEOUT_MS = 10_000
+    /** How long the `sfu.callResume` RPC may hold `offerQueue`. The RPC's own
+     *  timeout is 30 s, but an ICE restart has only RESTART_TIMEOUT_MS to
+     *  bring media back, and the last RESTART_AFTER_RESEND_MS of that is the
+     *  resent offer's share once its answer is out. A resume that started
+     *  when a restart did must be out of the queue by then. */
+    private static readonly RESUME_STEP_TIMEOUT_MS =
+        SfuManager.RESTART_TIMEOUT_MS - SfuManager.RESTART_AFTER_RESEND_MS
     /** The `offerId` of the last server offer the executor took an answer
      *  for. Its resends are not answered again. */
     private answeredOfferId: string | null = null
@@ -992,15 +999,15 @@ export class SfuManager {
         for (const unsubscribe of previous) unsubscribe?.()
     }
 
-    /** Run one RPC step of `offerQueue`; after OFFER_STEP_TIMEOUT_MS the steps behind it go on
+    /** Run one RPC step of `offerQueue`; after `withinMs` the steps behind it go on
      *  without it. Never an SDP step: one given up on would go on changing the connection. */
-    private timeBoxed(step: () => Promise<void>): Promise<void> {
+    private timeBoxed(step: () => Promise<void>, withinMs = SfuManager.OFFER_STEP_TIMEOUT_MS): Promise<void> {
         let timer: ReturnType<typeof setTimeout> | undefined
         const timeout = new Promise<void>((resolve) => {
             timer = setTimeout(() => {
-                console.warn(`SFU: a server-offer step took over ${SfuManager.OFFER_STEP_TIMEOUT_MS} ms; going on without it`)
+                console.warn(`SFU: an offer-queue step took over ${withinMs} ms; going on without it`)
                 resolve()
-            }, SfuManager.OFFER_STEP_TIMEOUT_MS)
+            }, withinMs)
         })
         const run = step().catch((err) => console.warn("SFU: a server-offer step failed:", err))
         return Promise.race([run, timeout]).finally(() => clearTimeout(timer))
@@ -1132,6 +1139,12 @@ export class SfuManager {
      * reply's roster and pending offer apply like the events that carry
      * them. `listed: false` — the room or the session gone — rebuilds the
      * call, unless a roster newer than the ask listed it again meanwhile.
+     * The RPC is boxed at RESUME_STEP_TIMEOUT_MS so a slow executor cannot
+     * hold the offers queued behind it past a restart's window; a reply
+     * that lands after the box is dropped — it must not list or unlist,
+     * roster, offer or rebuild a call that already went on. Only the RPC
+     * is bounded: the SDP steps a reply starts run to their end like any
+     * offer's.
      * A socket fault (503,
      * 408) keeps the call: the next reconnect asks again. A 403 ends it: the
      * session the join returned is another agent's, so there is no call to
@@ -1141,10 +1154,19 @@ export class SfuManager {
         const participantId = this.state.participantId
         if (!participantId || this.state.peerConnection !== pc) return
         const askedAtRevision = this.rosterRevision
-        let result: SfuResumeResult
-        try {
-            result = await this.neighbourhood.sfuCallResume(this.neighbourhoodUrl, this.roomId, participantId)
-        } catch (err) {
+        let reply: { result: SfuResumeResult } | { error: unknown } | null = null
+        await this.timeBoxed(async () => {
+            try {
+                reply = { result: await this.neighbourhood.sfuCallResume(this.neighbourhoodUrl, this.roomId, participantId) }
+            } catch (error) {
+                reply = { error }
+            }
+        }, SfuManager.RESUME_STEP_TIMEOUT_MS)
+        // The box won: whatever the RPC answers now belongs to a call that
+        // went on without it.
+        if (reply === null) return
+        if ("error" in reply) {
+            const err = reply.error
             if (this.state.peerConnection !== pc || this.state.participantId !== participantId) return
             if (isSocketFault(err)) {
                 console.warn("SFU: resuming the session failed with the socket; the next reconnect asks again:", err)
@@ -1158,6 +1180,7 @@ export class SfuManager {
             console.warn("SFU: resuming the session failed; keeping the call:", err)
             return
         }
+        const result = reply.result
         if (this.state.peerConnection !== pc || this.state.participantId !== participantId) return
         if (!result.listed) {
             // Only a roster applied since the request went out, and listing
