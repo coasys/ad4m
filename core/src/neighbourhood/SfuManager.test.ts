@@ -2275,6 +2275,78 @@ test("ICE that comes back within the 2 s after the socket does is not restarted"
     }
 })
 
+test.each([
+    ["503 (the socket closed while the request was out)", new RpcError(503, "WebSocket connection closed")],
+    ["408 (the request timed out)", new RpcError(408, "RPC call 'sfu.callRestartIce' timed out after 30000ms")],
+])("an ICE restart that fails with a %s is sent again once the socket is back", async (_name, fault) => {
+    // The request died with the socket the network change closed: the
+    // restart in flight keeps its timeout, and the request goes out again
+    // the moment signalling can take it (e17).
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        api.sfuCallRestartIce.mockRejectedValueOnce(fault)
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+
+        await iceState("disconnected")
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+
+        api.emitReconnect()
+        await flush()
+        await flush()
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
+        expect(api.sfuCallResume).toHaveBeenCalledWith(URL, ROOM, MINE)
+
+        // The reconnect's own 2 s check does not pile another request onto
+        // the restart in flight, and once the resent request reached the
+        // executor nothing is kept: a later reconnect sends nothing.
+        await jest.advanceTimersByTimeAsync(2_000)
+        api.emitReconnect()
+        await flush()
+        await flush()
+        await jest.advanceTimersByTimeAsync(2_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
+
+        // The resent request's offer is applied and answered on the same
+        // connection, and a working path ends the restart.
+        api.emitOffer(offer("restart-offer"))
+        await flush()
+        expect(currentPc().remoteSdps()).toContain("restart-offer")
+        await iceState("connected")
+        await jest.advanceTimersByTimeAsync(30_000)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        expect(FakePeerConnection.instances).toHaveLength(1)
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("an ICE restart refused for a real reason is not sent again when the socket is back", async () => {
+    // Only a socket fault is retried: a refusal (an executor that lost this
+    // session) leaves the decision to the restart's timeout, as before.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        api.sfuCallRestartIce.mockRejectedValueOnce(new Error("Session P1 is not in this call"))
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+
+        await iceState("disconnected")
+        await flush()
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+
+        api.emitReconnect()
+        await flush()
+        await flush()
+        await jest.advanceTimersByTimeAsync(3_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
 test("leave drops a pending check of ICE after the socket", async () => {
     fakeTimers()
     try {

@@ -349,6 +349,11 @@ export class SfuManager {
      *  connection is fine, so it goes out again once the socket is back, or
      *  when the executor sends its offer again. */
     private unsentAnswer: UnsentAnswer | null = null
+    /** An ICE restart request a socket fault (503, 408) kept from the
+     *  executor: the restart it belongs to stays in flight, and the request
+     *  goes out again from `socketBack`. Set only while a restart is in
+     *  flight — the restart's timeout still decides when the wait is over. */
+    private unsentRestart: { pc: RTCPeerConnection; participantId: string } | null = null
     private reconnectUnsubscribe: (() => void) | null = null
     private renegotiationUnsubscribe: (() => void) | null = null
     private rosterUnsubscribe: (() => void) | null = null
@@ -530,9 +535,26 @@ export class SfuManager {
             if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") return
             void this.reconnect()
         }, SfuManager.RESTART_TIMEOUT_MS)
-        // A refusal (an executor that lost this session) leaves the decision
-        // to the timeout: a blip may still heal.
+        this.sendRestart(pc, participantId)
+    }
+
+    /**
+     * Ask the executor to restart ICE on `pc`'s session. A socket fault
+     * (503, 408) means the request may never have arrived — the socket the
+     * network change closed rejected it — so it is kept for `socketBack`
+     * to send again. A refusal (an executor that lost this session) leaves
+     * the decision to the restart's timeout: a blip may still heal.
+     */
+    private sendRestart(pc: RTCPeerConnection, participantId: string): void {
         this.neighbourhood.sfuCallRestartIce(this.neighbourhoodUrl, this.roomId, participantId).catch((err) => {
+            if (isSocketFault(err) && this.restartTimer && this.state.peerConnection === pc) {
+                console.warn(
+                    "SFU: the ICE restart did not reach the executor; it goes out again once the socket is back:",
+                    err,
+                )
+                this.unsentRestart = { pc, participantId }
+                return
+            }
             console.warn("SFU: ICE restart refused:", err)
         })
     }
@@ -541,19 +563,19 @@ export class SfuManager {
      * The socket came back with no network change: the path ICE uses is the
      * one it had, so media that kept flowing through the fault is left
      * alone, and ICE is restarted only if it is still not connected
-     * ICE_CHECK_AFTER_SOCKET_MS later. A restart in flight is replaced:
-     * its request may have gone out on the dead socket. (A network change
-     * is a different call: the path changed, so it restarts ICE at once —
-     * see the `onNetworkChange` handler in `join`.)
+     * ICE_CHECK_AFTER_SOCKET_MS later. A restart already in flight is left
+     * alone too: a request the dead socket kept went out again already
+     * (`unsentRestart`), and a new one would only restart its gathering.
+     * (A network change is a different call: the path changed, so it
+     * restarts ICE at once — see the `onNetworkChange` handler in `join`.)
      */
     private checkIceSoon(): void {
         if (this.iceCheckTimer) clearTimeout(this.iceCheckTimer)
         this.iceCheckTimer = setTimeout(() => {
             this.iceCheckTimer = null
             const pc = this.state.peerConnection
-            if (!pc || this.reconnecting) return
+            if (!pc || this.reconnecting || this.restartTimer) return
             if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") return
-            this.endRestart()
             this.restartIce(pc)
         }, SfuManager.ICE_CHECK_AFTER_SOCKET_MS)
     }
@@ -563,6 +585,7 @@ export class SfuManager {
             clearTimeout(this.restartTimer)
             this.restartTimer = null
         }
+        this.unsentRestart = null
     }
 
     on(event: SfuEvent, callback: SfuEventCallback): void {
@@ -931,6 +954,7 @@ export class SfuManager {
         // answer kept for the old session's connection is not its to send.
         this.answeredOfferId = null
         this.unsentAnswer = null
+        this.unsentRestart = null
         this.renegotiationUnsubscribe = this.neighbourhood.subscribeSfuCallRenegotiationOffer(
             this.agentDid,
             (event) => {
@@ -1075,10 +1099,13 @@ export class SfuManager {
     }
 
     /**
-     * The executor socket opened again: the answer a socket fault kept goes
-     * out now — the executor refuses it by its offer id if it is stale —
-     * then `sfu.callResume` returns what went by while the socket was down
-     * (an offer, a roster).
+     * The executor socket opened again: what a socket fault kept goes out
+     * now — the kept answer, which the executor refuses by its offer id if
+     * it is stale, and a restart request it never saw — then
+     * `sfu.callResume` returns what went by while the socket was down (an
+     * offer, a roster). The kept restart is read inside the queue, so a
+     * network change that opened this socket has already dropped it for
+     * the immediate restart the change runs instead.
      */
     private socketBack(): void {
         const pc = this.state.peerConnection
@@ -1090,6 +1117,11 @@ export class SfuManager {
                 // The box is on the RPCs only: one given up on while its SDP
                 // step still ran would free the queue to mutate `pc` beside it.
                 if (unsent?.pc === pc) await this.timeBoxed(() => this.sendAnswer(unsent))
+                const restart = this.unsentRestart
+                if (restart?.pc === pc) {
+                    this.unsentRestart = null
+                    this.sendRestart(pc, restart.participantId)
+                }
                 await this.resume(pc)
             })
             .catch((err) => console.warn("SFU: recovering after the socket's return failed:", err))
@@ -1236,6 +1268,7 @@ export class SfuManager {
             this.iceCheckTimer = null
         }
         this.unsentAnswer = null
+        this.unsentRestart = null
         this.senders.clear()
         this.replacedTracks.clear()
         this.qualityPreference = null
