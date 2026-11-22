@@ -109,7 +109,8 @@ export class IdentityClient {
      * agent gets a new `did:key`, a user's agent needs a new one to be used again. Answers the
      * log's head after the `unlink`. 409 `no-identity` for an agent without an identity,
      * `not-listed` for a key the log does not list, `key-dead` for a key already unlinked or
-     * revoked. For the main agent the admin credential only; a user's session for its own agent.
+     * revoked. A user's session for its own agent or the operator (the admin credential, for
+     * the main agent), never an app token: 403 for an app, even one the user approved.
      */
     async unlinkSelf(): Promise<SignedHead> {
         return this.#apiClient.call("identity.unlinkSelf", {});
