@@ -146,7 +146,13 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   a run (a `producedByFlow` filter reads each output back) already holds a slot and the run's
   stop, so it must not go back through the runner (a second slot deadlocks when every slot is
   held by such runs): it goes through `runner::InRun`, a `RequiresQueryable` that calls
-  `model_query_classes_within` with the run's stop.
+  `model_query_classes_within` with the run's stop. The filter's other reads run under that
+  stop too: `flow_valid_outputs_reading` hands it to `load_shacl_flows` and
+  `load_flow_receipts`, which read links with `get_links_stopped` and check
+  `stop.stopped_err` per flow and per receipt entry, so an abandoned run frees its slot
+  instead of finishing a catalogue or receipt-index scan nobody waits on. Callers with no
+  eval bound (flow passes, role gates, `flow_valid_outputs`, `mint_flow_receipt`,
+  `verify_flow_receipt`) pass `EvalStop::none()`.
 - `SparqlStore` bumps a write generation after every committed write (`write_generation`,
   `watch_writes`). The auto-processor watch loop sleeps on it while idle (60 s fallback); a
   write-woken idle tick still waits out the old idle back-off (doubling 0.5 s to 4 s) since the

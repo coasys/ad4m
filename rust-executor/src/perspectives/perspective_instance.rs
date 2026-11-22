@@ -3930,6 +3930,7 @@ impl PerspectiveInstance {
                 shape_wait,
             };
             let valid = super::flow_instance::produced::flow_valid_outputs_reading(
+                stop,
                 self,
                 &outputs,
                 &filter.flow,

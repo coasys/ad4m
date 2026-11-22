@@ -120,6 +120,7 @@ use crate::perspectives::flow_context::{load_all_flow_instances, load_shacl_flow
 use crate::perspectives::flow_evaluator::{EvidenceItem, RequiresQueryable};
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::SHACLFlow;
+use crate::perspectives::sparql_store::EvalStop;
 use crate::types::{Link, LinkQuery, LinkStatus};
 use ad4m_client::literal::{Literal, LiteralValue};
 use serde::Serialize;
@@ -403,16 +404,25 @@ pub const FLOW_RECEIPT_INDEX_PREDICATE: &str = "ad4m://flow/flow_receipt";
 /// Deterministic: entries and bodies are read in sorted order. Under one
 /// entry the first body that satisfies (2) to (4) is the receipt; any other
 /// body that satisfied them would be the same content.
+///
+/// The index and body reads run under `stop` (`get_links_stopped`), and the
+/// stop is checked before each entry's checks — an abandoned `producedByFlow`
+/// query ends here with the stop's error instead of scanning a receipt index
+/// nobody waits on. Callers with no eval bound pass [`EvalStop::none`].
 pub async fn load_flow_receipts(
+    stop: &EvalStop,
     perspective: &PerspectiveInstance,
     flow_uri: &str,
 ) -> anyhow::Result<Vec<FlowReceipt>> {
     let mut uris: Vec<String> = perspective
-        .get_links(&LinkQuery {
-            source: Some(flow_uri.to_string()),
-            predicate: Some(FLOW_RECEIPT_INDEX_PREDICATE.to_string()),
-            ..Default::default()
-        })
+        .get_links_stopped(
+            stop,
+            &LinkQuery {
+                source: Some(flow_uri.to_string()),
+                predicate: Some(FLOW_RECEIPT_INDEX_PREDICATE.to_string()),
+                ..Default::default()
+            },
+        )
         .await?
         .into_iter()
         .map(|l| l.data.target)
@@ -422,6 +432,9 @@ pub async fn load_flow_receipts(
 
     let mut receipts = Vec::new();
     for uri in uris {
+        if let Some(err) = stop.stopped_err("receipt scan") {
+            return Err(err);
+        }
         if !is_canonical_receipt_uri(&uri) {
             log::warn!(
                 "load_flow_receipts: `{uri}` is filed under flow `{flow_uri}` but is not a \
@@ -430,11 +443,14 @@ pub async fn load_flow_receipts(
             continue;
         }
         let mut bodies: Vec<String> = perspective
-            .get_links(&LinkQuery {
-                source: Some(uri.clone()),
-                predicate: Some(FLOW_RECEIPT_CONTENT_PREDICATE.to_string()),
-                ..Default::default()
-            })
+            .get_links_stopped(
+                stop,
+                &LinkQuery {
+                    source: Some(uri.clone()),
+                    predicate: Some(FLOW_RECEIPT_CONTENT_PREDICATE.to_string()),
+                    ..Default::default()
+                },
+            )
             .await?
             .into_iter()
             .map(|l| l.data.target)
@@ -533,27 +549,30 @@ pub async fn flow_valid_outputs(
     flow_uri: &str,
     state: Option<&str>,
 ) -> anyhow::Result<Vec<ValidOutput>> {
-    flow_valid_outputs_reading(perspective, perspective, flow_uri, state).await
+    flow_valid_outputs_reading(&EvalStop::none(), perspective, perspective, flow_uri, state).await
 }
 
 /// [`flow_valid_outputs`] reading each output's live content through
 /// `outputs` instead of the perspective's own scheduled `model_query`. A
 /// `producedByFlow` query calls this from inside its run, which already holds
-/// a run slot and a deadline: its reads must use both, not queue again.
+/// a run slot and a deadline: its reads must use both, not queue again, and
+/// the catalogue and receipt loads run under the run's own `stop`, so an
+/// abandoned run frees its slot instead of finishing their scans.
 pub(crate) async fn flow_valid_outputs_reading<Q: RequiresQueryable + ?Sized>(
+    stop: &EvalStop,
     perspective: &PerspectiveInstance,
     outputs: &Q,
     flow_uri: &str,
     state: Option<&str>,
 ) -> anyhow::Result<Vec<ValidOutput>> {
-    let catalogue = load_shacl_flows(perspective).await?;
+    let catalogue = load_shacl_flows(stop, perspective).await?;
     if !catalogue.contains_key(flow_uri) {
         anyhow::bail!(
             "flow_valid_outputs: flow `{flow_uri}` is not on this perspective — nothing about \
              its outputs can be decided here"
         );
     }
-    let receipts = load_flow_receipts(perspective, flow_uri).await?;
+    let receipts = load_flow_receipts(stop, perspective, flow_uri).await?;
     let candidates = valid_outputs(
         &catalogue,
         flow_uri,
@@ -599,7 +618,7 @@ pub async fn verify_flow_receipt(
     perspective: &PerspectiveInstance,
     receipt: &FlowReceipt,
 ) -> anyhow::Result<ReceiptVerdict> {
-    let catalogue = load_shacl_flows(perspective).await?;
+    let catalogue = load_shacl_flows(&EvalStop::none(), perspective).await?;
     Ok(verify_receipt(&catalogue, receipt))
 }
 
@@ -658,7 +677,7 @@ pub async fn mint_flow_receipt(
     use super::receipt::EvidencePreimage;
     use crate::perspectives::flow_evaluator::{recompute_evidence_seal, EvidenceSeal};
 
-    let catalogue = load_shacl_flows(perspective).await?;
+    let catalogue = load_shacl_flows(&EvalStop::none(), perspective).await?;
     let records = load_all_flow_instances(perspective).await?;
     let record = records
         .iter()
