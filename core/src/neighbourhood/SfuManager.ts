@@ -1201,6 +1201,10 @@ export class SfuManager {
             // The join the ask waited for may not be this call's any more.
             if (this.state.peerConnection !== pc || this.state.participantId !== participantId) return
             const askedAtRevision = this.rosterRevision
+            // What `askedAtRevision` is for the roster, this is for offers:
+            // the reply's offer applies only while the offer last applied
+            // is still the one the ask went out under — see `applyResume`.
+            const askedAtOfferId = this.appliedOfferId
             // A restart in flight owns its remaining window: a socket that
             // came back late in it bounds the ask by what is left, or
             // drops it.
@@ -1218,20 +1222,22 @@ export class SfuManager {
             // that went on without it.
             if (reply === null) return
             this.offerQueue = this.offerQueue
-                .then(() => this.applyResume(pc, participantId, askedAtRevision, reply!, retryUnlisted))
+                .then(() => this.applyResume(pc, participantId, askedAtRevision, askedAtOfferId, reply!, retryUnlisted))
                 .catch((err) => console.warn("SFU: applying the resume's reply failed:", err))
         })
     }
 
     /**
      * Apply a `sfu.callResume` reply on the offer queue: `resume` asked it,
-     * `askedAtRevision` is the roster revision when it did. See `resume`
-     * for what each answer means for the call.
+     * `askedAtRevision` is the roster revision and `askedAtOfferId` the
+     * last applied offer when it did. See `resume` for what each answer
+     * means for the call.
      */
     private async applyResume(
         pc: RTCPeerConnection,
         participantId: string,
         askedAtRevision: number,
+        askedAtOfferId: string | null,
         reply: { result: SfuResumeResult } | { error: unknown },
         retryUnlisted: boolean,
     ): Promise<void> {
@@ -1287,8 +1293,18 @@ export class SfuManager {
             this.applyRoster(result.roster.participants, true)
             this.noticeRoster(pc, result.roster.participants, result.roster.revision)
         }
+        // The ask's wait ran off the queue: an offer event could apply
+        // while the reply was out, and `appliedOfferId` then moved to what
+        // the reply carries or past it — the executor snapshotted its
+        // pending offer when the ask reached it, so nothing it sent since
+        // is older. Applying the reply's offer anyway would take the
+        // connection back to the older SDP, and its answer comes back
+        // `stale` while the newer offer's ICE credentials are lost. The
+        // executor holds its current offer and resends it, so the drop
+        // loses nothing; while `appliedOfferId` is still the ask's, the
+        // reply's offer applies — a kept answer for it replaying as ever.
         const offer = result.offer
-        if (offer && offer.participantId === participantId) {
+        if (offer && offer.participantId === participantId && this.appliedOfferId === askedAtOfferId) {
             await this.applyServerOffers(pc, [offer])
         }
     }
