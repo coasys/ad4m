@@ -142,25 +142,23 @@ fn clean_llm_json(raw: &str) -> String {
     // this is where a legitimate sole-`[]` "no instances" response lands,
     // so it stays parseable. When even that misses, keep the first valid
     // value — old behaviour.
-    let strict_candidates: Vec<String> = top_level_starts
+    // Parse each candidate once: extraction keeps the parsed value beside
+    // the exact source span, and `candidate_rank` classifies it — the
+    // ranking predicates used to re-parse this same text once per tier.
+    let strict_candidates: Vec<StrictCandidate> = top_level_starts
         .iter()
         .filter_map(|&i| extract_first_json_value(candidate, i))
+        .map(|(text, value)| StrictCandidate {
+            text,
+            rank: candidate_rank(&value),
+        })
         .collect();
+    // The best tier wins; within a tier the earliest candidate in the
+    // source is taken (`min_by_key` returns the first of equal minima).
     let extracted = strict_candidates
         .iter()
-        .find(|c| parses_as_nonempty_interpretation_payload(c))
-        .or_else(|| {
-            strict_candidates
-                .iter()
-                .find(|c| looks_like_nonempty_interpretation_payload(c))
-        })
-        .or_else(|| {
-            strict_candidates
-                .iter()
-                .find(|c| looks_like_interpretation_payload(c))
-        })
-        .or_else(|| strict_candidates.first())
-        .cloned()
+        .min_by_key(|c| c.rank)
+        .map(|c| c.text.clone())
         .or_else(|| extract_bracketed(candidate, '[', ']'))
         .or_else(|| extract_bracketed(candidate, '{', '}'))
         .unwrap_or_else(|| candidate.to_string());
@@ -171,70 +169,87 @@ fn clean_llm_json(raw: &str) -> String {
     strip_trailing_commas(&extracted)
 }
 
-/// Semantic payload check used as the first ranking tier for strict
-/// candidates: does this JSON actually deserialize into one of the two
-/// accepted payload shapes (bare instance array, or wrapper object) *with
-/// content*? An unrelated scalar array like `["Task"]` parses as JSON and
-/// passes the structural check below, but fails here — so the real payload
-/// behind it still wins. An **empty** array in prose ("No changes: []")
-/// deserializes fine but is rejected by the non-empty requirement, or it
-/// would silently yield zero instances with the real payload sitting right
-/// behind it. A wrapper counts as non-empty when either `instances` or
-/// `flow_proposals` carries entries — a proposals-only payload is real
-/// work.
-///
-/// Load-bearing detail: `InterpretationOutput::instances` has NO
-/// `#[serde(default)]`, which is what makes a prose object like
-/// `{"model": "gemma3"}` fail this tier. If `instances` ever gains a
-/// default, any prose object starts winning here.
-fn parses_as_nonempty_interpretation_payload(candidate: &str) -> bool {
-    match serde_json::from_str::<serde_json::Value>(candidate) {
-        Ok(v @ serde_json::Value::Array(_)) => serde_json::from_value::<Vec<ProposedInstance>>(v)
-            .map(|instances| !instances.is_empty())
-            .unwrap_or(false),
-        Ok(v @ serde_json::Value::Object(_)) => serde_json::from_value::<InterpretationOutput>(v)
-            .map(|out| !out.instances.is_empty() || !out.flow_proposals.is_empty())
-            .unwrap_or(false),
-        _ => false,
-    }
+/// One strict-parse candidate at a depth-0 position: its exact source
+/// span — the substring that comma cleanup and error lengths still see —
+/// plus the rank [`candidate_rank`] computed from the value extraction
+/// already parsed.
+struct StrictCandidate {
+    text: String,
+    rank: u8,
 }
 
-/// Structural (not semantic) non-empty payload check — second ranking tier:
-/// an array with at least one element, or an object whose `instances` key
-/// holds a non-empty array. Keeps a slightly-malformed real payload ranked
-/// above prose values — including a prose `[]` — so the semantic parse
-/// error points at the payload, not the prose.
-fn looks_like_nonempty_interpretation_payload(candidate: &str) -> bool {
-    match serde_json::from_str::<serde_json::Value>(candidate) {
-        Ok(serde_json::Value::Array(items)) => !items.is_empty(),
-        Ok(serde_json::Value::Object(map)) => map
+/// The selection rank of one strict candidate, best tier first. Tiers:
+///
+/// 0. *semantically valid* non-empty payload: a bare array that
+///    deserializes to a non-empty `Vec<ProposedInstance>`, or a wrapper
+///    object that deserializes to `InterpretationOutput` with `instances`
+///    or `flow_proposals` entries (a proposals-only payload is real
+///    work). An unrelated scalar array like `["Task"]` parses as JSON
+///    but fails here, so the real payload behind it still wins; an
+///    **empty** array in prose ("No changes: []") deserializes fine but
+///    is rejected by the non-empty requirement, or it would silently
+///    yield zero instances with the real payload sitting right behind
+///    it. This is deliberately NOT the final parser: a wrapper object
+///    inside a single-element array is not unwrapped here, so a
+///    `[{wrapper}]` cannot outrank a real payload behind it.
+///    Load-bearing detail: `InterpretationOutput::instances` has NO
+///    `#[serde(default)]`, which is what makes a prose object like
+///    `{"model": "gemma3"}` fail this tier — if `instances` ever gains
+///    a default, any prose object starts winning here.
+/// 1. *structurally* (not semantically) non-empty payload: an array with
+///    at least one element, or an object whose `instances` key holds a
+///    non-empty array. Keeps a slightly-malformed real payload ranked
+///    above prose values — including a prose `[]` — so the semantic
+///    parse error points at the payload, not the prose.
+/// 2. payload-shaped: an array (empty included), or an object carrying
+///    an `instances` key. A legitimate sole-`[]` "no instances"
+///    response lands here, so it stays parseable while never
+///    outranking real content.
+/// 3. any other valid value — old behaviour.
+fn candidate_rank(value: &serde_json::Value) -> u8 {
+    let semantically_valid_nonempty = match value {
+        serde_json::Value::Array(_) => {
+            serde_json::from_value::<Vec<ProposedInstance>>(value.clone())
+                .map(|instances| !instances.is_empty())
+                .unwrap_or(false)
+        }
+        serde_json::Value::Object(_) => {
+            serde_json::from_value::<InterpretationOutput>(value.clone())
+                .map(|out| !out.instances.is_empty() || !out.flow_proposals.is_empty())
+                .unwrap_or(false)
+        }
+        _ => false,
+    };
+    if semantically_valid_nonempty {
+        return 0;
+    }
+    let structurally_nonempty = match value {
+        serde_json::Value::Array(items) => !items.is_empty(),
+        serde_json::Value::Object(map) => map
             .get("instances")
             .and_then(|v| v.as_array())
             .map(|items| !items.is_empty())
             .unwrap_or(false),
         _ => false,
+    };
+    if structurally_nonempty {
+        return 1;
     }
-}
-
-/// Any-payload-shaped check — third ranking tier: an array (empty included),
-/// or an object carrying an `instances` key. This is where a legitimate
-/// sole-`[]` "no instances" response is picked up, so it stays parseable
-/// while never outranking real content.
-fn looks_like_interpretation_payload(candidate: &str) -> bool {
-    match serde_json::from_str::<serde_json::Value>(candidate) {
-        Ok(serde_json::Value::Array(_)) => true,
-        Ok(serde_json::Value::Object(map)) => map.contains_key("instances"),
-        _ => false,
+    match value {
+        serde_json::Value::Array(_) => 2,
+        serde_json::Value::Object(map) if map.contains_key("instances") => 2,
+        _ => 3,
     }
 }
 
 /// Strictly parse one JSON value starting at `start` and return exactly its
-/// span, so trailing prose is not swallowed into the payload.
-fn extract_first_json_value(s: &str, start: usize) -> Option<String> {
+/// span together with the parsed value, so trailing prose is not swallowed
+/// into the payload and ranking never re-parses the same text.
+fn extract_first_json_value(s: &str, start: usize) -> Option<(String, serde_json::Value)> {
     let mut stream =
         serde_json::Deserializer::from_str(&s[start..]).into_iter::<serde_json::Value>();
-    stream.next()?.ok()?;
-    Some(s[start..start + stream.byte_offset()].to_string())
+    let value = stream.next()?.ok()?;
+    Some((s[start..start + stream.byte_offset()].to_string(), value))
 }
 
 /// Return the substring from the first `open` to the matching last `close`,
@@ -667,7 +682,8 @@ mod tests {
     fn equally_ranked_candidates_the_first_wins() {
         // Two candidates in the same top tier — both deserialize as
         // non-empty payloads — the earlier one in the source wins.
-        let raw = r#"Draft: [{"class":"Task","title":"A"}] — final: [{"class":"Task","title":"B"}]"#;
+        let raw =
+            r#"Draft: [{"class":"Task","title":"A"}] — final: [{"class":"Task","title":"B"}]"#;
         let out = parse_interpretation_response(raw).unwrap();
         assert_eq!(prop_values(&out, "title"), vec!["A"]);
 
