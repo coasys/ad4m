@@ -239,8 +239,13 @@ fn command_line_exit_code(error: &clap::Error) -> i32 {
     }
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> Result<()> {
+/// The executor's main runtime has at most
+/// [`rust_executor::thread_pools::MAIN_RUNTIME_MAX_WORKERS`] workers, not one per CPU.
+fn main() -> Result<()> {
+    rust_executor::thread_pools::main_runtime()?.block_on(run_main())
+}
+
+async fn run_main() -> Result<()> {
     let args = ClapApp::try_parse().unwrap_or_else(|e| {
         let code = command_line_exit_code(&e);
         let _ = e.print();

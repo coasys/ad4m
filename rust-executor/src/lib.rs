@@ -23,6 +23,7 @@ mod prolog_service;
 pub mod runtime_service;
 pub mod secret;
 pub mod sfu;
+pub mod thread_pools;
 pub mod unyt_service;
 pub mod user_management;
 pub mod utils;
@@ -818,11 +819,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
 
     if let Some(true) = config.run_dapp_server {
         std::thread::spawn(|| {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .thread_name(String::from("dapp_server"))
-                .enable_all()
-                .build()
-                .unwrap();
+            let runtime = thread_pools::multi_thread_runtime(
+                "dapp_server",
+                thread_pools::DAPP_RUNTIME_WORKERS,
+            )
+            .unwrap();
             if let Err(e) = runtime.block_on(serve_dapp(8080, app_dir)) {
                 error!("Failed to start dapp server: {:?}", e);
             }
@@ -968,11 +969,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         );
 
         std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .thread_name(String::from("mcp_server"))
-                .enable_all()
-                .build()
-                .unwrap();
+            let runtime = thread_pools::multi_thread_runtime(
+                "mcp_server",
+                thread_pools::capped_workers(thread_pools::MCP_RUNTIME_MAX_WORKERS),
+            )
+            .unwrap();
             let mcp_config = mcp::server::McpServerConfig {
                 port: config.mcp_port.unwrap_or(3001),
                 dynamic_class_tools: config.dynamic_class_tools.unwrap_or(false),
@@ -990,11 +991,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     info!("Starting REST API server...");
 
     std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .thread_name(String::from("rest_server"))
-            .enable_all()
-            .build()
-            .unwrap();
+        let runtime = thread_pools::multi_thread_runtime(
+            "rest_server",
+            thread_pools::capped_workers(thread_pools::API_RUNTIME_MAX_WORKERS),
+        )
+        .unwrap();
         let result = runtime.block_on(api::start_server(config));
         if let Err(e) = &result {
             error!("REST API server failed: {:?}", e);
