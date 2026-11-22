@@ -680,8 +680,10 @@ impl Walk<'_> {
                 IncludeValue::Bool(true) => ModelQueryInput::default(),
                 IncludeValue::SubQuery(sub) => (**sub).clone(),
             };
-            // The query skips a relation the shape does not declare.
-            let Some(rel) = shape.include_relations.iter().find(|r| r.name == *name) else {
+            // The relation the query reads, declared or named by `through`.
+            // One the query skips, or refuses (it then has no result to
+            // keep current), is not watched.
+            let Ok(Some(rel)) = shape.include_relation(name, &sub) else {
                 continue;
             };
             self.rules.via.add(&rel.predicate);

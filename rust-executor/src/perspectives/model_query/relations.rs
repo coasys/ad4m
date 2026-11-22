@@ -20,6 +20,7 @@
 
 use anyhow::{anyhow, Error};
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 
 use super::query::{execute_model_query_inner, order_fully_pushable};
@@ -28,8 +29,8 @@ use super::types::{
     IncludeValue, ModelQueryInput, ModelShape, OrderDirection, Scope, ScopeDirection,
     ShapeRelation, ShapeResolver, WhereCondition,
 };
-use super::utils::{validate_iri, values_or_str_filter};
-use crate::perspectives::shacl_parser::class_name_of;
+use super::utils::{emittable_iri, validate_iri, values_or_str_filter};
+use crate::perspectives::shacl_parser::{class_name_of, RESERVED_PROPERTY_NAMES};
 use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
 use crate::types::LinkStatus;
 
@@ -154,16 +155,17 @@ pub(super) async fn resolve_includes_recursive(
             _ => {}
         }
 
-        let rel = match shape.include_relations.iter().find(|r| r.name == *rel_name) {
-            Some(r) => r,
-            None => continue,
-        };
-
         let mut sub_query = match include_val {
             IncludeValue::Bool(true) => ModelQueryInput::default(),
             IncludeValue::SubQuery(sq) => *sq.clone(),
             _ => continue,
         };
+
+        // Not a relation of this class, and nothing says which link it means.
+        let Some(rel) = shape.include_relation(rel_name, &sub_query)? else {
+            continue;
+        };
+        let rel = rel.as_ref();
         if sub_query.link_status.is_none() {
             sub_query.link_status = link_status.cloned();
         }
@@ -203,6 +205,118 @@ pub(super) async fn resolve_includes_recursive(
         }
     }
     Ok(())
+}
+
+impl ModelShape {
+    /// The relation an include under `name` reads: the one the class declares
+    /// under that name, or, when the include names its link with `through`,
+    /// the [`undeclared_relation`] it describes. `None` when it is neither:
+    /// the include is skipped.
+    ///
+    /// The query and the subscription trigger both read an include through
+    /// this, so a live query watches the same links its query reads.
+    pub(crate) fn include_relation(
+        &self,
+        name: &str,
+        sub_query: &ModelQueryInput,
+    ) -> Result<Option<Cow<'_, ShapeRelation>>, Error> {
+        let declared = self.include_relations.iter().find(|r| r.name == name);
+        match (declared, sub_query.through.as_deref()) {
+            (Some(r), None) => Ok(Some(Cow::Borrowed(r))),
+            (Some(r), Some(through)) => {
+                if r.predicate != through {
+                    return Err(anyhow!(
+                        "include on relation '{name}': the class declares it through \
+                         '{}', and the include names '{through}'. Drop `through` to read \
+                         the declared relation, or include it under another name.",
+                        r.predicate
+                    ));
+                }
+                Ok(Some(Cow::Borrowed(r)))
+            }
+            (None, Some(_)) => {
+                // The include's result is written onto each instance under
+                // its name, so a name the instance already carries would be
+                // replaced: `id` by an object or null, a property by the
+                // sources read.
+                if RESERVED_PROPERTY_NAMES.contains(&name) || name.starts_with("__") {
+                    return Err(anyhow!(
+                        "include on relation '{name}': every instance already carries \
+                         '{name}', so the include would replace it. Include it under \
+                         another name."
+                    ));
+                }
+                if self.properties.iter().any(|p| p.name == name) {
+                    return Err(anyhow!(
+                        "include on relation '{name}': the class has a property named \
+                         '{name}', so the include would replace it. Include it under \
+                         another name."
+                    ));
+                }
+                undeclared_relation(name, sub_query).map(|r| Some(Cow::Owned(r)))
+            }
+            (None, None) => Ok(None),
+        }
+    }
+}
+
+/// The relation an include names with `through` and `kind`, for a class that
+/// does not declare it.
+///
+/// It names no target class, since the class reading it knows nothing about
+/// what links to it, so its sources are hydrated as the classes they are:
+/// `polymorphic` is its default, as for a declared untyped relation, and an
+/// explicit `polymorphic: false` is refused by the same check.
+///
+/// Only the reverse kinds. An outgoing link the class does not declare has no
+/// targets in the hydrated instance to read, and is reachable through `links`.
+pub(super) fn undeclared_relation(
+    rel_name: &str,
+    sub_query: &ModelQueryInput,
+) -> Result<ShapeRelation, Error> {
+    let through = sub_query.through.as_deref().unwrap_or_default();
+    // `emittable_iri` and not `validate_iri`: the predicate is written into
+    // the query as `<…>`, where an empty string or a relative name would not
+    // be the absolute IRI any link is stored under.
+    if !emittable_iri(through) {
+        return Err(anyhow!(
+            "include on relation '{rel_name}': `through` must be a predicate IRI, got '{through}'"
+        ));
+    }
+    let predicate = through;
+    let kind = match sub_query.kind.as_deref() {
+        Some(kind @ ("belongsToOne" | "belongsToMany")) => kind,
+        Some(kind @ ("hasOne" | "hasMany")) => {
+            return Err(anyhow!(
+                "include on relation '{rel_name}': `kind: {kind}` reads an outgoing link, \
+                 and only the links pointing at an instance can be read through a relation \
+                 its class does not declare. Read an outgoing one with `links`."
+            ))
+        }
+        Some(other) => {
+            return Err(anyhow!(
+                "include on relation '{rel_name}': `kind` must be `belongsToOne` or \
+                 `belongsToMany`, got '{other}'"
+            ))
+        }
+        None => {
+            return Err(anyhow!(
+                "include on relation '{rel_name}': `through` needs a `kind` \
+                 (`belongsToOne` or `belongsToMany`) to say how many it reads"
+            ))
+        }
+    };
+    Ok(ShapeRelation {
+        name: rel_name.to_string(),
+        predicate: predicate.to_string(),
+        direction: "reverse".to_string(),
+        kind: kind.to_string(),
+        max_count: (kind == "belongsToOne").then_some(1),
+        target_class_name: String::new(),
+        target_class_uri: String::new(),
+        target_class: String::new(),
+        polymorphic: true,
+    })
 }
 
 /// Refuse `limit`/`offset` on a polymorphic include.
@@ -997,34 +1111,26 @@ async fn resolve_reverse_include(
         let inst_id = inst["id"].as_str().unwrap_or("").to_string();
         let source_ids = sources_by_target.get(&inst_id).cloned().unwrap_or_default();
 
-        let resolved = if rel.kind == "belongsToOne" || rel.max_count == Some(1) {
-            let first = match &page {
-                Some(page) => page
-                    .select(&ordered_result_ids, &source_ids, !has_sub_order)
-                    .first()
-                    .map(|id| id.to_string()),
-                None => source_ids.first().cloned(),
-            };
-            first
-                .and_then(|id| hydrated.get(&id).cloned())
-                .unwrap_or(Value::Null)
-        } else {
-            let iter_ids: Vec<&str> = if let Some(page) = &page {
-                page.select(&ordered_result_ids, &source_ids, !has_sub_order)
-            } else if has_sub_order {
-                ordered_result_ids
-                    .iter()
-                    .filter(|id| source_ids.contains(id))
-                    .map(|s| s.as_str())
-                    .collect()
-            } else {
-                source_ids.iter().map(|s| s.as_str()).collect()
-            };
-            let items: Vec<Value> = iter_ids
+        let iter_ids: Vec<&str> = if let Some(page) = &page {
+            page.select(&ordered_result_ids, &source_ids, !has_sub_order)
+        } else if has_sub_order {
+            ordered_result_ids
                 .iter()
-                .filter_map(|id| hydrated.get(*id).cloned())
-                .collect();
-            Value::Array(items)
+                .filter(|id| source_ids.contains(id))
+                .map(|s| s.as_str())
+                .collect()
+        } else {
+            source_ids.iter().map(|s| s.as_str()).collect()
+        };
+        let mut items = iter_ids.iter().filter_map(|id| hydrated.get(*id).cloned());
+        // To one: the first source the sub-query kept, in the order a list
+        // would give. Not the first source linked: the sub-query's `where`,
+        // or a source of no registered class, can leave that one out while
+        // a later one matches.
+        let resolved = if rel.kind == "belongsToOne" || rel.max_count == Some(1) {
+            items.next().unwrap_or(Value::Null)
+        } else {
+            Value::Array(items.collect())
         };
         inst.as_object_mut()
             .map(|obj| obj.insert(rel.name.clone(), resolved));

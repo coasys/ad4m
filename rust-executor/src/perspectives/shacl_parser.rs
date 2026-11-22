@@ -1539,7 +1539,7 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
 ///
 /// `__links` is written only when a query asks for `links` (#1046 §3/§4), after
 /// every property — the same silent-overwrite direction as the second group.
-const RESERVED_PROPERTY_NAMES: [&str; 7] = [
+pub(crate) const RESERVED_PROPERTY_NAMES: [&str; 7] = [
     "id",
     "baseExpression",
     "createdAt",

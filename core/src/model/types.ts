@@ -533,7 +533,42 @@ export type LinksMap = Record<string, LinkRow[]>;
  * await post.get({ include: { comments: { order: { createdAt: 'DESC' }, limit: 5 } } });
  * ```
  */
-export type RelationSubQuery = Omit<Query, 'parent' | 'count'>;
+export type RelationSubQuery = Omit<Query, 'parent' | 'count'> & {
+  /**
+   * Read this include through a link its class does not declare: the
+   * predicate, as a relation decorator's `through` names it. Needs `kind`.
+   *
+   * A class says which links it reads, and an include of any other name is
+   * skipped. That is wrong for a link that is there all the same: a
+   * conversation links to the action items it produced, and the action item's
+   * class, written by another app, says nothing about conversations.
+   *
+   * ```typescript
+   * await perspective.modelQuery('ActionItem', JSON.stringify({
+   *   include: { extractedFrom: { through: 'we://extracted', kind: 'belongsToOne' } },
+   * }));
+   * ```
+   *
+   * Untyped only: {@link TypedIncludeMap} accepts just the names a class
+   * declares, so a typed query (`findAll`, `query().include()`) on a class with
+   * declared fields refuses an undeclared name at compile time.
+   *
+   * The linking instances are hydrated as the classes they are (`polymorphic`),
+   * since the reading class names none. Where the class declares the name, the
+   * declaration wins, and a different predicate here is an error.
+   *
+   * An absolute IRI. The include's name cannot be one every instance carries
+   * (`id`, `author`, ...) or a property of the class: the result is written
+   * under it.
+   */
+  through?: string;
+  /**
+   * With `through`: how many instances link to this one, in the relation
+   * decorators' words. Only the reverse kinds; an outgoing link the class does
+   * not declare is read with {@link Query.links}.
+   */
+  kind?: 'belongsToOne' | 'belongsToMany';
+};
 
 // ---------------------------------------------------------------------------
 // Typed Query DSL — Phase 1 of PLAN_6_TYPED_QUERIES.md
