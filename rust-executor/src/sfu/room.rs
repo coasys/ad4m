@@ -10,8 +10,26 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
 use std::time::Instant;
 use std::time::SystemTime;
+
+/// A random `u64` with the high bit set (`>= 2^63`).
+///
+/// Process-local id counters start here. A restarted process does not hand
+/// out the low ids a client may still hold from the previous one.
+pub(crate) fn random_upper_half_u64() -> u64 {
+    rand::random::<u64>() | (1u64 << 63)
+}
+
+static PARTICIPANT_IDS: LazyLock<AtomicU64> =
+    LazyLock::new(|| AtomicU64::new(random_upper_half_u64()));
+
+/// The next participant id starts again, as it does when the process starts.
+#[cfg(test)]
+pub fn restart_participant_ids() {
+    PARTICIPANT_IDS.store(random_upper_half_u64(), Ordering::SeqCst);
+}
 
 /// Unique identifier for a participant in the SFU.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -19,8 +37,7 @@ pub struct ParticipantId(pub u64);
 
 impl ParticipantId {
     pub fn next() -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(1);
-        Self(COUNTER.fetch_add(1, Ordering::SeqCst))
+        Self(PARTICIPANT_IDS.fetch_add(1, Ordering::SeqCst))
     }
 
     /// Read back the `Display` form (`P{n}`) a join returned.
@@ -581,5 +598,42 @@ mod tests {
         assert_eq!(ParticipantId::parse("P"), None);
         assert_eq!(ParticipantId::parse("Q1"), None);
         assert_eq!(ParticipantId::parse("P-1"), None);
+    }
+
+    /// A fresh process does not hand out a low id. After a restart a client
+    /// can still hold a session from the previous process; numbering from 1
+    /// again lets that id name another device's session.
+    #[test]
+    fn a_fresh_participant_id_starts_in_the_upper_half_and_round_trips() {
+        let first = ParticipantId::next();
+        let second = ParticipantId::next();
+        let n = first.0;
+        assert!(n >= 1u64 << 63, "fresh participant id {n} is below 2^63");
+        assert_eq!(
+            second.0,
+            n + 1,
+            "consecutive participant ids {n} then {}",
+            second.0
+        );
+        assert_eq!(first.to_string(), format!("P{n}"));
+        assert_eq!(ParticipantId::parse(&first.to_string()), Some(first));
+    }
+
+    /// A second process start does not hand out the first process's first id.
+    /// A client can still hold that id, and a new session must not take it.
+    #[test]
+    fn two_boots_do_not_hand_out_the_same_first_participant_id() {
+        restart_participant_ids();
+        let first = ParticipantId::next();
+        restart_participant_ids();
+        let second = ParticipantId::next();
+        assert_ne!(
+            first, second,
+            "two boots handed out the same first participant id {first}"
+        );
+        assert!(
+            first.0 >= 1u64 << 63 && second.0 >= 1u64 << 63,
+            "a restarted participant id is below 2^63: {first} then {second}"
+        );
     }
 }

@@ -4,6 +4,8 @@
 use std::collections::{HashMap, HashSet};
 use std::mem::Discriminant;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 
@@ -23,7 +25,7 @@ use tokio::sync::mpsc;
 use super::hosts::{socket_for, MediaSockets};
 use super::reachability::{assess, stun_reflexive, Advertised, SfuReachability};
 use super::relay::MediaRelay;
-use super::room::{ParticipantId, RoomId};
+use super::room::{random_upper_half_u64, ParticipantId, RoomId};
 use super::simulcast::{is_keyframe, LayerSelector};
 use super::types::{SfuAnswerRefusal, SfuAnswerResult, SfuCallRenegotiationOffer};
 
@@ -79,6 +81,10 @@ pub struct SfuPeer {
     /// Affects how renegotiation offers are routed and how forward
     /// loops treat the participant.
     pub is_pipe: bool,
+    /// Pipe only: the room's existing origins have been offered once, when
+    /// the pipe became usable. Later tracks use the fresh-track path. A
+    /// client peer leaves this false.
+    origins_seeded: bool,
     /// Open data channels: ChannelId → label.  Populated from
     /// `Event::ChannelOpen`; used for data relay routing.
     pub channels: HashMap<ChannelId, String>,
@@ -90,6 +96,11 @@ pub struct SfuPeer {
     pub had_path: bool,
     /// When the peer was made. See [`PEER_ESTABLISH_TIMEOUT`].
     pub created_at: Instant,
+    /// When this pipe's current usable stretch began (ICE connected or
+    /// completed, or its control channel opened). Cleared on
+    /// `Disconnected`, so that stretch is not counted toward
+    /// [`super::cascade::PIPE_HEALTHY_RESET`]. A client peer leaves it unset.
+    usable_since: Option<Instant>,
     /// An ICE restart the client asked for (`sfu.callRestartIce`), from the
     /// request until its answer lands or the offer's retry budget ends.
     /// The offer SDP lives in [`PendingNegotiation`].
@@ -224,8 +235,10 @@ const OFFER_BACKOFF_RESENDS: u32 = 2;
 
 /// An established pipe ends an unanswered offer after this many resends
 /// (the back-off: t=10 s and t=30 s). The next deadline disconnects the
-/// pipe. The cascade redials it after [`super::cascade::PIPE_REDIAL_BACKOFF`],
-/// which doubles when the new pipe fails the same way. An initial pipe
+/// pipe. The cascade redials the first end at once. The next consecutive
+/// failure waits [`super::cascade::PIPE_REDIAL_BACKOFF`], which doubles up
+/// to the cap, and a pipe that stayed connected for
+/// [`super::cascade::PIPE_HEALTHY_RESET`] starts that count again. An initial pipe
 /// offer, before any path, is not ended here: it carries the pipe-control
 /// channel, and [`PEER_ESTABLISH_TIMEOUT`] drops that pipe. A client offer
 /// is never ended here. A crossed offer ([`RtcError::ChangesOutOfOrder`])
@@ -259,10 +272,16 @@ fn offer_retry_wait(resends_done: u32) -> Duration {
 
 /// An id for one server offer. Minted once in [`SfuPeer::install_pending`]
 /// and kept for every resend of that offer.
+static OFFER_IDS: LazyLock<AtomicU64> = LazyLock::new(|| AtomicU64::new(random_upper_half_u64()));
+
 fn next_offer_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    format!("o{}", NEXT.fetch_add(1, Ordering::Relaxed))
+    format!("o{}", OFFER_IDS.fetch_add(1, Ordering::Relaxed))
+}
+
+/// The next offer id starts again, as it does when the process starts.
+#[cfg(test)]
+pub(crate) fn restart_offer_ids() {
+    OFFER_IDS.store(random_upper_half_u64(), Ordering::SeqCst);
 }
 
 impl SfuPeer {
@@ -286,10 +305,12 @@ impl SfuPeer {
             deferred_tracks: Vec::new(),
             remote_origins: HashMap::new(),
             is_pipe,
+            origins_seeded: false,
             channels: HashMap::new(),
             disconnected_since: None,
             had_path: false,
             created_at: Instant::now(),
+            usable_since: None,
             ice_restart: None,
             drops_logged: HashSet::new(),
             write_errors_logged: HashSet::new(),
@@ -311,17 +332,30 @@ impl SfuPeer {
     }
 
     /// Track an ICE state change: `Disconnected` starts the disconnect
-    /// clock, any other state stops it.
+    /// clock, any other state stops it. A pipe's usable stretch starts on
+    /// `Connected` or `Completed` and ends on `Disconnected`, so a
+    /// disconnected stretch does not count as healthy.
     pub fn on_ice_state(&mut self, state: IceConnectionState, now: Instant) {
         self.disconnected_since = match state {
-            IceConnectionState::Disconnected => self.disconnected_since.or(Some(now)),
+            IceConnectionState::Disconnected => {
+                if self.is_pipe {
+                    self.usable_since = None;
+                }
+                self.disconnected_since.or(Some(now))
+            }
             _ => None,
         };
-        if matches!(
-            state,
-            IceConnectionState::Connected | IceConnectionState::Completed
-        ) {
+        if pipe_event_is_usable(Some(state), false) {
             self.had_path = true;
+            self.note_usable(now);
+        }
+    }
+
+    /// Remember the start of this pipe's usable stretch. A second event in
+    /// the same stretch does not move it. A client peer has no stretch.
+    fn note_usable(&mut self, now: Instant) {
+        if self.is_pipe && self.usable_since.is_none() {
+            self.usable_since = Some(now);
         }
     }
 
@@ -337,14 +371,15 @@ impl SfuPeer {
         self.end_reason
     }
 
-    /// Disconnect an established pipe whose offer was refused or went
-    /// unanswered after the second resend. One warning: the pipe ended.
-    /// The pending token stays, so this tick does not offer those tracks
-    /// again on the pipe that is going away. The cascade removes the entry
-    /// and redials.
+    /// Disconnect an established pipe whose answer str0m rejected locally,
+    /// or whose offer went unanswered after the second resend. One warning:
+    /// the pipe ended. The pending token stays, so this tick does not offer
+    /// those tracks again on the pipe that is going away. The cascade
+    /// removes the entry and redials. This is not a remote refusal: a pipe
+    /// answer carries none.
     fn end_for_offer(&mut self, why: &'static str) {
         warn!(
-            "SFU: pipe {} offer {why}; ending it so the cascade can redial",
+            "SFU: pipe {} ended ({why}); the cascade can redial",
             self.id
         );
         self.end_reason = Some("offer");
@@ -476,8 +511,8 @@ impl SfuPeer {
     /// until it is answered. `offer_id` is the match: an answer that names
     /// another offer stays pending, and so does one whose m-lines are not
     /// this offer's. A JSON parse failure leaves the pending negotiation
-    /// unchanged. str0m consuming the token and refusing
-    /// the answer does not: the caller disconnects the peer. An answer that
+    /// unchanged. str0m consuming the token and rejecting
+    /// the answer locally does not: the caller disconnects the peer. An answer that
     /// crossed another offer has consumed the token; the caller keeps the peer.
     fn accept_server_answer(
         &mut self,
@@ -549,10 +584,10 @@ impl SfuPeer {
 
     /// Apply an answer the way the event loop does, and say what the RPC
     /// answers. Only an answer that belongs to the pending offer and that
-    /// str0m refused disconnects the peer. A late answer, an answer for an
-    /// older offer, and an answer that crossed another offer leave the peer
-    /// and its media in place. A repeat of an offer already accepted is
-    /// accepted and changes nothing.
+    /// str0m rejected locally disconnects an established pipe. A late
+    /// answer, an answer for an older offer, and an answer that crossed
+    /// another offer leave the peer and its media in place. A repeat of an
+    /// offer already accepted is accepted and changes nothing.
     ///
     /// The reply has three refusals. An answer that does not parse, or whose
     /// m-lines are not the pending offer's, leaves that offer pending
@@ -577,11 +612,14 @@ impl SfuPeer {
                 SfuAnswerResult::accepted()
             }
             Err(ServerAnswerError::Rejected(error)) => {
-                // str0m consumed the token. A resend would answer a change
-                // that no longer exists. An established pipe ends, so the
-                // cascade can redial it. A crossed offer is not this arm.
+                // str0m consumed the token and rejected the answer locally.
+                // A pipe answer carries no refusal, and a remote that rejects
+                // an offer only logs it, so that sender waits until the offer
+                // goes unanswered. A resend would answer a change that no
+                // longer exists. An established pipe ends, so the cascade can
+                // redial it. A crossed offer is not this arm.
                 if self.is_pipe && self.had_path {
-                    self.end_for_offer("refused");
+                    self.end_for_offer("answer rejected locally");
                 } else {
                     warn!("SFU: ApplyServerAnswer for {}: {error}", self.id);
                     self.rtc.disconnect();
@@ -832,6 +870,17 @@ impl SfuPeer {
     }
 }
 
+/// A pipe is usable for seeding and for the healthy-interval clock when
+/// ICE is `Connected` or `Completed`, or when its control channel opens.
+/// The event loop and the recovery test share this.
+fn pipe_event_is_usable(ice: Option<IceConnectionState>, channel_opened: bool) -> bool {
+    channel_opened
+        || matches!(
+            ice,
+            Some(IceConnectionState::Connected | IceConnectionState::Completed)
+        )
+}
+
 /// Apply the ICE state `poll_output` just yielded, then whether the
 /// establishment sweep drops the peer. The event loop polls before that
 /// sweep, so a `Connected` queued at [`PEER_ESTABLISH_TIMEOUT`] is visible
@@ -849,7 +898,7 @@ fn establishment_expired_after_poll(
     peer.never_established(now) || peer.stayed_disconnected(now)
 }
 
-/// Why [`SfuPeer::accept_server_answer`] refused an answer.
+/// Why [`SfuPeer::accept_server_answer`] rejected an answer.
 #[derive(Debug)]
 enum ServerAnswerError {
     /// This peer has no offer waiting.
@@ -861,7 +910,7 @@ enum ServerAnswerError {
     NotThisOffer,
     /// The answer crossed another offer. str0m has already dropped the token.
     OutOfOrder,
-    /// str0m took the token and refused the answer.
+    /// str0m took the token and rejected the answer locally.
     Rejected(String),
 }
 
@@ -1166,9 +1215,15 @@ pub struct DeadPeer {
     pub is_pipe: bool,
     /// Why the peer was dropped: `timeout` when it never connected,
     /// `drop` when it stayed disconnected or died otherwise, `offer` when
-    /// an established pipe's offer was refused or went unanswered. `offer`
-    /// is what makes the cascade wait before it dials that pipe again.
+    /// an established pipe's answer was rejected locally or its offer went
+    /// unanswered. `offer` makes the cascade count a failure before it dials
+    /// that pipe again. A `drop` does the same on the end that dials. The
+    /// first consecutive failure still dials at once.
     pub reason: &'static str,
+    /// When this pipe's current usable stretch began, if it is still
+    /// usable. Cleared on `Disconnected`, so the healthy-interval reset
+    /// does not count a disconnected stretch.
+    pub usable_since: Option<Instant>,
 }
 
 /// The SFU server. Owns the UDP sockets and drives the str0m event loop.
@@ -1345,9 +1400,8 @@ impl SfuServer {
                             pid, peer.agent_did, room_id
                         );
 
-                        // Register existing tracks from other peers as outgoing tracks for the new peer
-                        // This will be handled during negotiation
-
+                        // Existing origins are offered when a pipe becomes usable
+                        // (ICE connected, or its control channel opens), not here.
                         peers.insert(pid, peer);
                     }
                     Ok(SfuCommand::RemovePeer(pid)) => {
@@ -1578,6 +1632,10 @@ impl SfuServer {
             let mut earliest_timeout = Instant::now() + Duration::from_millis(100);
             let mut media_to_relay: Vec<(ParticipantId, MediaData)> = Vec::new();
             let mut tracks_opened: Vec<(ParticipantId, Mid, MediaKind)> = Vec::new();
+            // Pipe peers that reached ICE Connected/Completed, or opened a
+            // channel, this tick. A control-only pipe never opens an inbound
+            // track, so this is what seeds it with the room's existing origins.
+            let mut pipes_usable: Vec<ParticipantId> = Vec::new();
             let mut keyframe_requests: Vec<(ParticipantId, KeyframeRequest)> = Vec::new();
             // Data channel messages, published once the poll loop no longer borrows `peers`.
             let mut data_received: Vec<(ParticipantId, crate::sfu::types::SfuDataMessage)> =
@@ -1612,6 +1670,9 @@ impl SfuServer {
                             Event::IceConnectionStateChange(state) => {
                                 info!("SFU: peer {} ICE state: {:?}", pid, state);
                                 peer.on_ice_state(state, Instant::now());
+                                if peer.is_pipe && pipe_event_is_usable(Some(state), false) {
+                                    pipes_usable.push(pid.clone());
+                                }
                             }
                             Event::MediaAdded(e) => {
                                 info!("SFU: peer {} added {:?} track mid={}", pid, e.kind, e.mid);
@@ -1631,6 +1692,10 @@ impl SfuServer {
                                     pid, label, cid
                                 );
                                 peer.channels.insert(cid, label);
+                                if peer.is_pipe && pipe_event_is_usable(None, true) {
+                                    peer.note_usable(Instant::now());
+                                    pipes_usable.push(pid.clone());
+                                }
                             }
                             Event::ChannelData(data) => {
                                 // Relay data to all other peers in the same
@@ -1736,6 +1801,7 @@ impl SfuServer {
                             participant_id: pid.clone(),
                             is_pipe: peer.is_pipe,
                             reason: peer.end_reason.unwrap_or("drop"),
+                            usable_since: peer.usable_since,
                         });
                         false
                     } else {
@@ -1880,90 +1946,7 @@ impl SfuServer {
                 }
             }
 
-            // Propagate freshly-opened inbound tracks bidirectionally.
-            //
-            // When peer X opens a new inbound track, the SFU needs to
-            // (a) plumb that track outbound on every OTHER peer Y so Y
-            // receives it, AND (b) plumb every OTHER peer's existing
-            // inbound tracks outbound on X so X receives them.  Without
-            // (b) the newly-joined peer never gets forwarded media.
-            //
-            // We collect the per-target (kind, origin_pid, origin_mid)
-            // triples first, then materialise the add_media + publish
-            // for each target.  str0m only allows one in-flight change
-            // per peer, so we skip targets that already have a pending
-            // offer; the next tick (after the answer lands) will retry.
-            //
-            // Identify "new" peers in this tick — peers that opened at
-            // least one inbound track.  These are the peers that need
-            // both (a) outbound on others and (b) outbound for others'
-            // existing tracks on themselves.
-            let mut adds_per_target: HashMap<ParticipantId, Vec<(MediaKind, ParticipantId, Mid)>> =
-                HashMap::new();
-            let mut new_peers: HashSet<ParticipantId> = HashSet::new();
-            for (origin_pid, _mid, _kind) in &tracks_opened {
-                new_peers.insert(origin_pid.clone());
-            }
-
-            // (a) For each freshly-opened track, every OTHER peer in
-            // the same room gets an outbound m-line for it.
-            for (origin_pid, mid, kind) in &tracks_opened {
-                let Some(origin_peer) = peers.get(origin_pid) else {
-                    continue;
-                };
-                let room_id = origin_peer.room_id.clone();
-                for (target_pid, target_peer) in peers.iter() {
-                    if target_pid == origin_pid {
-                        continue;
-                    }
-                    if target_peer.room_id != room_id {
-                        continue;
-                    }
-                    adds_per_target
-                        .entry(target_pid.clone())
-                        .or_default()
-                        .push((*kind, origin_pid.clone(), *mid));
-                }
-            }
-
-            // (b) For each newly-joined peer, plumb every OTHER peer's
-            // pre-existing inbound tracks outbound on the new peer.
-            // This covers the asymmetric case where Y was already in
-            // the room when X joined.  We skip tracks_in entries that
-            // were opened in *this* tick because (a) already handled
-            // them, but checking is cheap and idempotency saves a bug.
-            for new_pid in &new_peers {
-                let Some(new_peer) = peers.get(new_pid) else {
-                    continue;
-                };
-                let room_id = new_peer.room_id.clone();
-                for (other_pid, other_peer) in peers.iter() {
-                    if other_pid == new_pid {
-                        continue;
-                    }
-                    if other_peer.room_id != room_id {
-                        continue;
-                    }
-                    for (other_mid, other_kind) in &other_peer.tracks_in {
-                        // Skip if this triple was already added via (a).
-                        let already_added = adds_per_target
-                            .get(new_pid)
-                            .map(|v| {
-                                v.iter()
-                                    .any(|(_, opid, omid)| opid == other_pid && omid == other_mid)
-                            })
-                            .unwrap_or(false);
-                        if already_added {
-                            continue;
-                        }
-                        adds_per_target.entry(new_pid.clone()).or_default().push((
-                            *other_kind,
-                            other_pid.clone(),
-                            *other_mid,
-                        ));
-                    }
-                }
-            }
+            let adds_per_target = outbound_adds(&mut peers, &tracks_opened, &pipes_usable);
 
             for (target_pid, sdp_offer_json, track_mapping) in
                 offer_new_tracks(&mut peers, adds_per_target)
@@ -2289,6 +2272,98 @@ fn mapping_entry(mid: Mid, kind: MediaKind, origin: &TrackOrigin) -> crate::sfu:
     }
 }
 
+/// Outbound tracks to offer this tick: `(target, [(kind, origin peer, origin mid)])`.
+///
+/// When peer X opens an inbound track, every other peer in the room is
+/// offered it, and X is offered every other peer's existing inbound tracks.
+/// `pipes_usable` names pipe peers that became usable this tick (ICE
+/// connected, or the control channel opened). A control-only pipe opens no
+/// inbound track, so without it a dialled pipe never takes that second path
+/// and media waits for some later track.
+fn outbound_adds(
+    peers: &mut HashMap<ParticipantId, SfuPeer>,
+    tracks_opened: &[(ParticipantId, Mid, MediaKind)],
+    pipes_usable: &[ParticipantId],
+) -> HashMap<ParticipantId, Vec<(MediaKind, ParticipantId, Mid)>> {
+    let mut adds_per_target: HashMap<ParticipantId, Vec<(MediaKind, ParticipantId, Mid)>> =
+        HashMap::new();
+    let mut new_peers: HashSet<ParticipantId> = HashSet::new();
+    for (origin_pid, _, _) in tracks_opened {
+        new_peers.insert(origin_pid.clone());
+    }
+
+    // (a) Each freshly-opened track goes outbound on every other peer in the room.
+    for (origin_pid, mid, kind) in tracks_opened {
+        let Some(origin_peer) = peers.get(origin_pid) else {
+            continue;
+        };
+        let room_id = origin_peer.room_id.clone();
+        for (target_pid, target_peer) in peers.iter() {
+            if target_pid == origin_pid {
+                continue;
+            }
+            if target_peer.room_id != room_id {
+                continue;
+            }
+            adds_per_target
+                .entry(target_pid.clone())
+                .or_default()
+                .push((*kind, origin_pid.clone(), *mid));
+        }
+    }
+
+    // A control-only pipe opens no inbound track, so it is not in
+    // `tracks_opened`. Once it is usable, offer it the origins already in
+    // the room, once. A later track uses path (a).
+    for pid in pipes_usable {
+        let Some(peer) = peers.get_mut(pid) else {
+            continue;
+        };
+        if !peer.is_pipe || peer.origins_seeded {
+            continue;
+        }
+        peer.origins_seeded = true;
+        new_peers.insert(pid.clone());
+    }
+
+    // (b) A peer that just opened a track, or a pipe that just became
+    // usable, also receives everyone else's existing inbound tracks.
+    // Tracks opened this tick are already in (a).
+    for new_pid in &new_peers {
+        let Some(new_peer) = peers.get(new_pid) else {
+            continue;
+        };
+        let room_id = new_peer.room_id.clone();
+        for (other_pid, other_peer) in peers.iter() {
+            if other_pid == new_pid {
+                continue;
+            }
+            if other_peer.room_id != room_id {
+                continue;
+            }
+            for (other_mid, other_kind) in &other_peer.tracks_in {
+                let already_added = adds_per_target
+                    .get(new_pid)
+                    .map(|v| {
+                        v.iter()
+                            .any(|(_, opid, omid)| opid == other_pid && omid == other_mid)
+                    })
+                    .unwrap_or(false);
+                if already_added {
+                    continue;
+                }
+                adds_per_target.entry(new_pid.clone()).or_default().push((
+                    *other_kind,
+                    other_pid.clone(),
+                    *other_mid,
+                ));
+            }
+        }
+    }
+
+    adds_per_target
+}
+
 /// Offer each target peer the tracks of `adds_per_target` it does not send
 /// yet, `(kind, origin peer, origin mid)`: one SDP change per target, with
 /// the track mapping naming the session each new m-line carries. A target
@@ -2499,10 +2574,12 @@ fn resume_loop_reply(peer: &mut SfuPeer, now: Instant) -> ResumeLoopReply {
 
 /// Apply a remote pipe's renegotiation offer. `accept_offer` bumps str0m's
 /// change id before it validates the SDP, so the local pending offer is
-/// dead whether the remote offer is taken or refused: drop the token and
-/// queue its tracks again on this same pipe. A JSON parse failure does not
-/// touch str0m, so that offer stays pending. This is the crossed-offer
-/// case. It does not end the pipe.
+/// dead whether the remote offer is taken or rejected locally: drop the
+/// token and queue its tracks again on this same pipe. A rejection here
+/// only logs. A pipe answer carries no refusal, so the sender keeps
+/// waiting until its offer goes unanswered. A JSON parse failure does not
+/// touch str0m, so that offer stays pending. A crossed offer
+/// (`ChangesOutOfOrder`) does not end the pipe.
 fn apply_pipe_renegotiation_offer(
     peer: &mut SfuPeer,
     sdp_offer_json: &str,
@@ -2528,7 +2605,7 @@ fn apply_pipe_renegotiation_offer(
             return;
         }
     };
-    // Only once the offer is in the session: a refused offer names nothing.
+    // Only once the offer is in the session: an offer rejected locally names nothing.
     peer.note_remote_origins(track_mapping);
     // The local token was invalidated by accept_offer. Its tracks were
     // never negotiated.
@@ -2643,7 +2720,7 @@ pub fn parse_trickle_candidate(sdp: &str) -> Result<Option<Candidate>, str0m::er
 
 #[cfg(test)]
 mod tests {
-    use super::super::cascade::{CascadeManager, CascadeSignal, PIPE_REDIAL_BACKOFF};
+    use super::super::cascade::{CascadeManager, CascadeSignal};
     use super::*;
 
     /// A browser's offer: one audio section, as a caller sends to join.
@@ -4046,6 +4123,55 @@ mod tests {
         assert_eq!(mapping.len(), 1);
     }
 
+    /// A fresh process does not hand out a low offer id, and the wire form
+    /// stays `o{n}`. Consecutive mints still increase by one.
+    #[test]
+    fn a_fresh_offer_id_starts_in_the_upper_half_and_keeps_its_form() {
+        let first = next_offer_id();
+        let second = next_offer_id();
+        let n1: u64 = first[1..]
+            .parse()
+            .unwrap_or_else(|_| panic!("offer id {first} is not o{{n}}"));
+        let n2: u64 = second[1..]
+            .parse()
+            .unwrap_or_else(|_| panic!("offer id {second} is not o{{n}}"));
+        assert!(
+            first.starts_with('o') && first == format!("o{n1}"),
+            "offer id {first} lost its o{{n}} form"
+        );
+        assert!(n1 >= 1u64 << 63, "fresh offer id {first} is below 2^63");
+        assert_eq!(n2, n1 + 1, "consecutive offer ids {first} then {second}");
+        assert_eq!(second, format!("o{n2}"));
+    }
+
+    /// A second process start does not hand out the first process's first
+    /// offer id. The wire form stays `o{n}`.
+    #[test]
+    fn two_boots_do_not_hand_out_the_same_first_offer_id() {
+        restart_offer_ids();
+        let first = next_offer_id();
+        restart_offer_ids();
+        let second = next_offer_id();
+        assert_ne!(
+            first, second,
+            "two boots handed out the same first offer id {first}"
+        );
+        let n1: u64 = first[1..]
+            .parse()
+            .unwrap_or_else(|_| panic!("offer id {first} is not o{{n}}"));
+        let n2: u64 = second[1..]
+            .parse()
+            .unwrap_or_else(|_| panic!("offer id {second} is not o{{n}}"));
+        assert!(
+            first == format!("o{n1}") && second == format!("o{n2}"),
+            "a restarted offer id lost its o{{n}} form: {first} then {second}"
+        );
+        assert!(
+            n1 >= 1u64 << 63 && n2 >= 1u64 << 63,
+            "a restarted offer id is below 2^63: {first} then {second}"
+        );
+    }
+
     /// An answer that carries this offer's SDP but another offer's id is
     /// refused. The pending offer stays, and the answer that names it is
     /// accepted. Two offers can share a mid list (an ICE restart reuses
@@ -4572,8 +4698,9 @@ mod tests {
         (dialer, answerer, dial, answer, room)
     }
 
-    /// The answer, with a different ICE ufrag, so str0m refuses it as an
-    /// ICE restart this offer did not ask for. The m-lines stay this offer's.
+    /// The answer, with a different ICE ufrag, so str0m rejects it locally
+    /// as an ICE restart this offer did not ask for. The m-lines stay this
+    /// offer's. There is no refusal on the wire.
     fn with_other_ice_ufrag(answer_json: &str) -> String {
         let mut value: serde_json::Value = serde_json::from_str(answer_json).unwrap();
         let sdp = value["sdp"].as_str().unwrap();
@@ -4581,7 +4708,7 @@ mod tests {
         for line in sdp.split_inclusive('\n') {
             let bare = line.trim_end_matches(['\r', '\n']);
             if bare.starts_with("a=ice-ufrag:") {
-                out.push_str("a=ice-ufrag:refused1");
+                out.push_str("a=ice-ufrag:rejected1");
                 out.push_str(&line[bare.len()..]);
             } else {
                 out.push_str(line);
@@ -4591,9 +4718,413 @@ mod tests {
         serde_json::to_string(&value).unwrap()
     }
 
+    /// One caller whose audio the SFU already receives. `tracks_in` is what
+    /// the event loop records on `MediaAdded`.
+    struct AudioLeg {
+        caller: Rtc,
+        peer: SfuPeer,
+        mid: Mid,
+        caller_addr: SocketAddr,
+        bind: SocketAddr,
+    }
+
+    impl AudioLeg {
+        fn new(room: &RoomId, did: &str, caller_addr: &str, bind: &str) -> Self {
+            let caller_addr: SocketAddr = caller_addr.parse().unwrap();
+            let bind: SocketAddr = bind.parse().unwrap();
+            let mut caller = Rtc::builder().build(Instant::now());
+            caller.add_local_candidate(Candidate::host(caller_addr, "udp").unwrap());
+            let mut change = caller.sdp_api();
+            let mid = change.add_media(
+                MediaKind::Audio,
+                str0m::media::Direction::SendRecv,
+                None,
+                None,
+                None,
+            );
+            let (offer, pending) = change.apply().unwrap();
+            let (rtc, answer) = SfuServer::create_rtc_for_offer(offer, &[bind], None).unwrap();
+            caller
+                .sdp_api()
+                .accept_answer(pending, serde_json::from_str(&answer).unwrap())
+                .unwrap();
+            let mut peer = SfuPeer::new(
+                ParticipantId::next(),
+                room.clone(),
+                did.to_string(),
+                rtc,
+                false,
+            );
+            peer.tracks_in.insert(mid, MediaKind::Audio);
+            Self {
+                caller,
+                peer,
+                mid,
+                caller_addr,
+                bind,
+            }
+        }
+    }
+
+    /// Move packets between two RTCs for one step. Media each side emits is
+    /// appended. The clock stays on the simulated timeline the other sfu
+    /// tests use (`drive` / `receive`), never wall-clock sleep.
+    fn pump_pair(
+        left: &mut Rtc,
+        left_addr: SocketAddr,
+        right: &mut Rtc,
+        right_addr: SocketAddr,
+        now: &mut Instant,
+        start: Instant,
+        left_media: &mut Vec<MediaData>,
+        right_media: &mut Vec<MediaData>,
+    ) -> (bool, bool) {
+        let mut sent = Vec::new();
+        let mut left_seen = Seen::default();
+        let mut right_seen = Seen::default();
+        let left_next = drive(left, *now, start, &mut left_seen, &mut sent);
+        for (src, dst, data) in sent.drain(..) {
+            if dst == right_addr {
+                receive(right, *now, src, dst, &data);
+            }
+        }
+        let right_next = drive(right, *now, start, &mut right_seen, &mut sent);
+        for (src, dst, data) in sent.drain(..) {
+            if dst == left_addr {
+                receive(left, *now, src, dst, &data);
+            }
+        }
+        left_media.append(&mut left_seen.media);
+        right_media.append(&mut right_seen.media);
+        let step = left_next.min(right_next);
+        *now = step.clamp(
+            *now + Duration::from_millis(1),
+            *now + Duration::from_millis(20),
+        );
+        let up = |seen: &Seen| {
+            seen.ice.iter().any(|(_, state)| {
+                matches!(
+                    state,
+                    IceConnectionState::Connected | IceConnectionState::Completed
+                )
+            })
+        };
+        (up(&left_seen), up(&right_seen))
+    }
+
+    fn connect_pair(
+        left: &mut Rtc,
+        left_addr: SocketAddr,
+        right: &mut Rtc,
+        right_addr: SocketAddr,
+        now: &mut Instant,
+        start: Instant,
+    ) {
+        let deadline = *now + Duration::from_secs(5);
+        let mut left_up = false;
+        let mut right_up = false;
+        let mut left_discard = Vec::new();
+        let mut right_discard = Vec::new();
+        while !left_up || !right_up {
+            assert!(
+                *now < deadline,
+                "ICE did not connect between {left_addr} and {right_addr}"
+            );
+            let (left_step, right_step) = pump_pair(
+                left,
+                left_addr,
+                right,
+                right_addr,
+                now,
+                start,
+                &mut left_discard,
+                &mut right_discard,
+            );
+            left_up |= left_step;
+            right_up |= right_step;
+        }
+    }
+
+    fn write_opus(caller: &mut Rtc, mid: Mid, now: Instant, ticks: u64, frame: &[u8]) {
+        let pt = caller
+            .codec_config()
+            .find(|params| params.spec().codec == Codec::Opus)
+            .expect("the caller negotiated opus")
+            .pt();
+        let time = MediaTime::new(ticks * 960, str0m::media::Frequency::FORTY_EIGHT_KHZ);
+        caller
+            .writer(mid)
+            .expect("the caller has an audio writer")
+            .write(pt, now, time, frame.to_vec())
+            .expect("the caller writes opus");
+    }
+
+    /// What the server loop pushes onto `pipes_usable`: the same events
+    /// [`pipe_event_is_usable`] names. A hand-made list is not this.
+    fn pipe_poll_is_usable(seen: &Seen) -> bool {
+        pipe_event_is_usable(None, seen.channel.is_some())
+            || seen
+                .ice
+                .iter()
+                .any(|(_, state)| pipe_event_is_usable(Some(*state), false))
+    }
+
+    /// Drive the control pipe until `dial` reports that event. Returns
+    /// whether it was seen. The seed offer is not built before this.
+    fn dial_saw_usable_pipe(
+        dial: &mut Rtc,
+        dial_addr: SocketAddr,
+        remote: &mut Rtc,
+        remote_addr: SocketAddr,
+        now: &mut Instant,
+        start: Instant,
+    ) -> bool {
+        let deadline = *now + Duration::from_secs(5);
+        loop {
+            assert!(
+                *now < deadline,
+                "the pipe did not reach Connected or open its control channel"
+            );
+            let mut sent = Vec::new();
+            let mut left_seen = Seen::default();
+            let mut right_seen = Seen::default();
+            let left_next = drive(dial, *now, start, &mut left_seen, &mut sent);
+            for (src, dst, data) in sent.drain(..) {
+                if dst == remote_addr {
+                    receive(remote, *now, src, dst, &data);
+                }
+            }
+            let right_next = drive(remote, *now, start, &mut right_seen, &mut sent);
+            for (src, dst, data) in sent.drain(..) {
+                if dst == dial_addr {
+                    receive(dial, *now, src, dst, &data);
+                }
+            }
+            let step = left_next.min(right_next);
+            *now = step.clamp(
+                *now + Duration::from_millis(1),
+                *now + Duration::from_millis(20),
+            );
+            if pipe_poll_is_usable(&left_seen) {
+                return true;
+            }
+        }
+    }
+
+    /// Seed `dial` (a control-only pipe) with the room's existing origins and
+    /// return how many tracks were offered, plus how many of Alice's and
+    /// Bob's RTP payloads arrived on the remote end of that pipe.
+    ///
+    /// The exchange is the one `media_crossing_peers_arrives_on_the_receivers_payload_type`
+    /// uses: write a frame, move the packets, count `MediaData`. Here the
+    /// receiver is the new pipe, not a second caller. The usable list is the
+    /// Connected or channel-open event from that exchange, not a list passed
+    /// in ahead of it.
+    fn rtp_counts_for_control_pipe(
+        room: &RoomId,
+        dial: SfuPeer,
+        remote: &mut SfuPeer,
+        dial_addr: SocketAddr,
+        remote_addr: SocketAddr,
+    ) -> (usize, usize, usize) {
+        let alice_frame: &[u8] = b"alice-rtp-on-the-new-pipe";
+        let bob_frame: &[u8] = b"bob-rtp-on-the-new-pipe";
+        let mut alice = AudioLeg::new(
+            room,
+            "did:key:alice",
+            "203.0.113.40:50100",
+            "192.168.0.40:42100",
+        );
+        let mut bob = AudioLeg::new(
+            room,
+            "did:key:bob",
+            "203.0.113.41:50101",
+            "192.168.0.41:42101",
+        );
+        let pipe_id = dial.id.clone();
+        let alice_id = alice.peer.id.clone();
+        let bob_id = bob.peer.id.clone();
+        let alice_mid = alice.mid;
+        let bob_mid = bob.mid;
+        let mut peers = HashMap::from([
+            (alice_id.clone(), alice.peer),
+            (bob_id.clone(), bob.peer),
+            (pipe_id.clone(), dial),
+        ]);
+        // The pipe opened no inbound track. Drive it until the same event
+        // the loop records, and seed from that list only.
+        let start = Instant::now();
+        let mut now = start;
+        let saw_usable = dial_saw_usable_pipe(
+            &mut peers.get_mut(&pipe_id).unwrap().rtc,
+            dial_addr,
+            &mut remote.rtc,
+            remote_addr,
+            &mut now,
+            start,
+        );
+        let usable: Vec<ParticipantId> = if saw_usable {
+            vec![pipe_id.clone()]
+        } else {
+            Vec::new()
+        };
+        let adds = outbound_adds(&mut peers, &[], &usable);
+        let seeded = adds.get(&pipe_id).map(|tracks| tracks.len()).unwrap_or(0);
+        let offers = offer_new_tracks(&mut peers, adds);
+        if offers.is_empty() {
+            return (0, 0, seeded);
+        }
+        assert_eq!(offers.len(), 1, "one offer carries every existing origin");
+        let (_pid, sdp, mapping) = offers.into_iter().next().unwrap();
+        let dids: Vec<&str> = mapping
+            .iter()
+            .map(|entry| entry.agent_did.as_str())
+            .collect();
+        assert!(
+            dids.contains(&"did:key:alice") && dids.contains(&"did:key:bob"),
+            "the seeded offer names both origins: {dids:?}"
+        );
+        let offer: SdpOffer = serde_json::from_str(&sdp).unwrap();
+        let answer = remote
+            .rtc
+            .sdp_api()
+            .accept_offer(offer)
+            .expect("the new pipe takes the existing origins");
+        peers
+            .get_mut(&pipe_id)
+            .unwrap()
+            .accept_current_answer(&serde_json::to_string(&answer).unwrap())
+            .unwrap();
+
+        connect_pair(
+            &mut alice.caller,
+            alice.caller_addr,
+            &mut peers.get_mut(&alice_id).unwrap().rtc,
+            alice.bind,
+            &mut now,
+            start,
+        );
+        connect_pair(
+            &mut bob.caller,
+            bob.caller_addr,
+            &mut peers.get_mut(&bob_id).unwrap().rtc,
+            bob.bind,
+            &mut now,
+            start,
+        );
+        // The pipe is already up: `dial_saw_usable_pipe` drove it until the
+        // Connected or channel-open event the seed used. A second wait never
+        // sees that event again.
+
+        // Write again across the exchange. A frame queued before SRTP has
+        // keys is dropped on the next poll, the same way the payload-type
+        // test keeps the room running while media moves.
+        let mut alice_media = Vec::new();
+        let mut bob_media = Vec::new();
+        let mut on_pipe = Vec::new();
+        let mut alice_fwd = 0usize;
+        let mut bob_fwd = 0usize;
+        for step in 0..80 {
+            let ticks = step as u64 + 1;
+            write_opus(&mut alice.caller, alice_mid, now, ticks, alice_frame);
+            write_opus(&mut bob.caller, bob_mid, now, ticks, bob_frame);
+            let mut discard = Vec::new();
+            pump_pair(
+                &mut alice.caller,
+                alice.caller_addr,
+                &mut peers.get_mut(&alice_id).unwrap().rtc,
+                alice.bind,
+                &mut now,
+                start,
+                &mut discard,
+                &mut alice_media,
+            );
+            pump_pair(
+                &mut bob.caller,
+                bob.caller_addr,
+                &mut peers.get_mut(&bob_id).unwrap().rtc,
+                bob.bind,
+                &mut now,
+                start,
+                &mut discard,
+                &mut bob_media,
+            );
+            let mut left_discard = Vec::new();
+            pump_pair(
+                &mut peers.get_mut(&pipe_id).unwrap().rtc,
+                dial_addr,
+                &mut remote.rtc,
+                remote_addr,
+                &mut now,
+                start,
+                &mut left_discard,
+                &mut on_pipe,
+            );
+            let dial = peers.get_mut(&pipe_id).unwrap();
+            for data in alice_media
+                .iter()
+                .skip(alice_fwd)
+                .chain(bob_media.iter().skip(bob_fwd))
+            {
+                let origin = if &*data.data == alice_frame {
+                    &alice_id
+                } else if &*data.data == bob_frame {
+                    &bob_id
+                } else {
+                    continue;
+                };
+                let mid = data.mid;
+                let expected = if origin == &alice_id {
+                    alice_mid
+                } else {
+                    bob_mid
+                };
+                assert_eq!(mid, expected, "MediaData mid is the origin's inbound mid");
+                let out_mid = *dial
+                    .tracks_out_rev
+                    .get(&(origin.clone(), mid))
+                    .expect("the seeded pipe forwards this origin");
+                write_forwarded(dial, out_mid, data, data.time);
+            }
+            alice_fwd = alice_media.len();
+            bob_fwd = bob_media.len();
+            let alice_n = on_pipe
+                .iter()
+                .filter(|data| &*data.data == alice_frame)
+                .count();
+            let bob_n = on_pipe
+                .iter()
+                .filter(|data| &*data.data == bob_frame)
+                .count();
+            if alice_n >= 1 && bob_n >= 1 {
+                return (alice_n, bob_n, seeded);
+            }
+        }
+        let mut left_discard = Vec::new();
+        pump_pair(
+            &mut peers.get_mut(&pipe_id).unwrap().rtc,
+            dial_addr,
+            &mut remote.rtc,
+            remote_addr,
+            &mut now,
+            start,
+            &mut left_discard,
+            &mut on_pipe,
+        );
+        let alice_n = on_pipe
+            .iter()
+            .filter(|data| &*data.data == alice_frame)
+            .count();
+        let bob_n = on_pipe
+            .iter()
+            .filter(|data| &*data.data == bob_frame)
+            .count();
+        (alice_n, bob_n, seeded)
+    }
+
     /// Both cascade entries are gone before the redial. The far end drops
-    /// when ICE stays down. The dialler waits out the backoff, then the new
-    /// pipe carries both origins.
+    /// when ICE stays down. The first end redials at once, then each
+    /// origin's RTP arrives on the new pipe.
     fn both_ends_drop_then_redial(
         dialer: &mut CascadeManager,
         answerer: &mut CascadeManager,
@@ -4630,16 +5161,9 @@ mod tests {
         );
 
         dialer.set_now(ended);
-        assert!(dialer.establish_pipe("did:key:nodeA", room).is_err());
-        dialer.set_now(ended + PIPE_REDIAL_BACKOFF - Duration::from_millis(1));
-        assert!(
-            dialer.establish_pipe("did:key:nodeA", room).is_err(),
-            "the redial waits out the backoff"
-        );
-        dialer.set_now(ended + PIPE_REDIAL_BACKOFF);
         let (mut redial, offer) = dialer
             .establish_pipe("did:key:nodeA", room)
-            .expect("the cascade redials after the backoff");
+            .expect("the first end redials at once");
         assert_ne!(&redial.id, old_id);
 
         let (mut remote, answer_signal) = answerer
@@ -4651,43 +5175,99 @@ mod tests {
             .unwrap();
         redial.accept_current_answer(&json).unwrap();
 
-        let (sdp, mapping) = offer_two_origins(&mut redial, ended + PIPE_REDIAL_BACKOFF);
-        let renegotiation: SdpOffer = serde_json::from_str(&sdp).unwrap();
-        let reneg_answer = remote
+        let (alice_n, bob_n, _) = rtp_counts_for_control_pipe(
+            room,
+            redial,
+            &mut remote,
+            "192.168.0.22:41022".parse().unwrap(),
+            "192.168.0.21:41021".parse().unwrap(),
+        );
+        assert!(
+            alice_n >= 1,
+            "RTP for alice did not arrive on the new pipe ({alice_n} packets)"
+        );
+        assert!(
+            bob_n >= 1,
+            "RTP for bob did not arrive on the new pipe ({bob_n} packets)"
+        );
+    }
+
+    /// A pipe dialled again while the room already has media is control-only.
+    /// Becoming usable seeds the existing origins, and each origin's RTP
+    /// arrives on that new pipe.
+    #[test]
+    fn a_redialled_control_only_pipe_is_seeded_and_carries_each_origins_rtp() {
+        let (mut dialer, mut answerer, dial, answer, room) = connected_cascade_pipe();
+        drop((dial, answer));
+        let key = room.to_string();
+        let now = Instant::now();
+        // A timeout is not an ended offer, so the redial is not waiting out
+        // a backoff. The new pipe is still only the control channel.
+        dialer.on_pipe_died(&key, "did:key:nodeA", "timeout", now);
+        answerer.on_pipe_died(&key, "did:key:nodeB", "timeout", now);
+        let (mut redial, offer) = dialer
+            .establish_pipe("did:key:nodeA", &room)
+            .expect("the timeout redials at once");
+        let (mut remote, answer_signal) = answerer
+            .handle_pipe_offer("did:key:nodeB", &key, &pipe_offer_sdp(offer))
+            .unwrap();
+        let answer_json = pipe_answer_sdp(answer_signal);
+        let (_pid, json) = dialer
+            .handle_pipe_answer("did:key:nodeA", &key, &answer_json)
+            .unwrap();
+        redial.accept_current_answer(&json).unwrap();
+        assert!(
+            redial.tracks_out.is_empty(),
+            "the redialled pipe negotiated only its control channel"
+        );
+
+        let (alice_n, bob_n, seeded) = rtp_counts_for_control_pipe(
+            &room,
+            redial,
+            &mut remote,
+            "192.168.0.22:41022".parse().unwrap(),
+            "192.168.0.21:41021".parse().unwrap(),
+        );
+        assert!(
+            seeded >= 2,
+            "a redialled control-only pipe is seeded with the existing tracks (got {seeded})"
+        );
+        assert!(
+            alice_n >= 1,
+            "alice's RTP arrived on the new pipe ({alice_n} packets)"
+        );
+        assert!(
+            bob_n >= 1,
+            "bob's RTP arrived on the new pipe ({bob_n} packets)"
+        );
+    }
+
+    /// Hand `sdp` to the remote pipe and drop the answer it produces. The
+    /// sender keeps its pending offer: that is the lost-answer state.
+    fn hand_the_remote_the_offer_and_drop_the_answer(remote: &mut SfuPeer, sdp: &str) {
+        let offer: SdpOffer = serde_json::from_str(sdp).expect("the offer is SDP");
+        let _answer = remote
             .rtc
             .sdp_api()
-            .accept_offer(renegotiation)
-            .expect("the new pipe takes both origins");
-        redial
-            .accept_current_answer(&serde_json::to_string(&reneg_answer).unwrap())
-            .unwrap();
-        let mut names = Vec::new();
-        for entry in &mapping {
-            let mid = Mid::from(entry.mid.as_str());
-            assert_audio_writer(&mut redial, mid);
-            let media = remote
-                .rtc
-                .media(mid)
-                .expect("the far end has the origin's mid");
-            assert!(
-                media.kind().is_audio(),
-                "media for {} is audio",
-                entry.participant_id
-            );
-            names.push(entry.participant_id.as_str());
-        }
-        assert!(names.contains(&"P-alice"), "{names:?}");
-        assert!(names.contains(&"P-bob"), "{names:?}");
+            .accept_offer(offer)
+            .expect("the remote takes the offer; the answer is dropped");
     }
 
     /// Lose the answers to an established pipe's offer, and both resends.
-    /// The pipe ends on both ends, the cascade redials, and each origin's
-    /// audio is on the new pipe.
+    /// Each one is delivered to the remote. The pipe ends on both ends, the
+    /// cascade redials, and each origin's audio is on the new pipe.
     #[test]
     fn an_unanswered_established_pipe_ends_and_the_cascade_redials() {
         let now = Instant::now();
         let (mut dialer, mut answerer, mut dial, mut answer, room) = connected_cascade_pipe();
         let (sdp, mapping) = offer_two_origins(&mut dial, now);
+        let offer_id = dial.pending_offer_id().unwrap().to_string();
+        hand_the_remote_the_offer_and_drop_the_answer(&mut answer, &sdp);
+        assert_eq!(
+            dial.pending_offer_id().map(str::to_string),
+            Some(offer_id.clone()),
+            "the answer to the offer was dropped"
+        );
         let old_id = dial.id.clone();
         let pid = dial.id.clone();
         let mut peers = HashMap::from([(pid.clone(), dial)]);
@@ -4696,9 +5276,21 @@ mod tests {
         assert_eq!(at_10.len(), 1);
         assert_eq!(at_10[0].sdp, sdp);
         assert_same_mapping(&at_10[0].track_mapping, &mapping);
+        hand_the_remote_the_offer_and_drop_the_answer(&mut answer, &at_10[0].sdp);
+        assert_eq!(
+            peers[&pid].pending_offer_id(),
+            Some(offer_id.as_str()),
+            "the answer to the first resend was dropped"
+        );
         let at_30 = sweep_offer_deadlines(&mut peers, now + Duration::from_secs(30));
         assert_eq!(at_30.len(), 1);
         assert_eq!(at_30[0].sdp, sdp);
+        hand_the_remote_the_offer_and_drop_the_answer(&mut answer, &at_30[0].sdp);
+        assert_eq!(
+            peers[&pid].pending_offer_id(),
+            Some(offer_id.as_str()),
+            "the answer to the second resend was dropped"
+        );
         assert!(apply_deferred_tracks(peers.get_mut(&pid).unwrap(), now).is_none());
 
         let ended = now + Duration::from_secs(60);
@@ -4729,9 +5321,12 @@ mod tests {
         );
     }
 
-    /// An explicit refusal of a valid offer ends the pipe the same way.
+    /// An answer str0m rejects locally, for an offer whose shape it had
+    /// accepted, ends the pipe the same way. A remote that rejects an
+    /// offer only logs it, and this end then waits until the offer goes
+    /// unanswered.
     #[test]
-    fn a_refused_established_pipe_ends_and_the_cascade_redials() {
+    fn a_locally_rejected_answer_ends_the_pipe_and_the_cascade_redials() {
         let now = Instant::now();
         let (mut dialer, mut answerer, mut dial, mut answer, room) = connected_cascade_pipe();
         let (sdp, _mapping) = offer_two_origins(&mut dial, now);
@@ -4743,20 +5338,20 @@ mod tests {
             .accept_offer(offer)
             .expect("the far end can answer this offer");
         let answer_json = serde_json::to_string(&real).unwrap();
-        let refused = with_other_ice_ufrag(&answer_json);
-        assert_ne!(refused, answer_json);
+        let rejected = with_other_ice_ufrag(&answer_json);
+        assert_ne!(rejected, answer_json);
         let id = dial.pending_offer_id().unwrap().to_string();
-        let verdict = dial.settle_answer(&id, &refused);
+        let verdict = dial.settle_answer(&id, &rejected);
         assert!(!verdict.accepted);
         assert!(!dial.rtc.is_alive());
         assert_eq!(dial.drop_reason(), Some("offer"));
         assert!(
             dial.pending.is_none(),
-            "str0m took the token when it refused the answer"
+            "str0m took the token when it rejected the answer locally"
         );
         assert!(
             apply_deferred_tracks(&mut dial, now).is_none(),
-            "the refused offer is not replaced on the dying pipe"
+            "the locally rejected offer is not replaced on the dying pipe"
         );
 
         both_ends_drop_then_redial(&mut dialer, &mut answerer, &mut answer, &room, now, &old_id);
@@ -4808,7 +5403,7 @@ mod tests {
         );
         assert!(
             pipe.pending.is_none(),
-            "a refused remote offer does not leave the local offer pending"
+            "a remote offer rejected locally does not leave the local offer pending"
         );
         assert!(pipe.rtc.is_alive());
         assert_audio_writer(&mut pipe, established);
@@ -4888,6 +5483,32 @@ mod tests {
             .establish_pipe("did:key:nodeA", &room)
             .expect("a new pipe can be dialled");
         assert_ne!(replacement.id, pipe.id);
+    }
+
+    /// A disconnected stretch does not stay inside the pipe's usable
+    /// interval. The next connect starts that interval again.
+    #[test]
+    fn a_disconnect_clears_the_pipes_usable_interval() {
+        let (_caller, mut peer) = connected_pair();
+        peer.is_pipe = true;
+        let up = Instant::now();
+        peer.on_ice_state(IceConnectionState::Connected, up);
+        assert_eq!(peer.usable_since, Some(up));
+        let down = up + Duration::from_secs(111);
+        peer.on_ice_state(IceConnectionState::Disconnected, down);
+        assert!(
+            peer.usable_since.is_none(),
+            "a disconnected stretch is not part of the healthy interval"
+        );
+        let back = down + Duration::from_secs(1);
+        peer.on_ice_state(IceConnectionState::Connected, back);
+        assert_eq!(peer.usable_since, Some(back));
+        peer.on_ice_state(IceConnectionState::Completed, back + Duration::from_secs(1));
+        assert_eq!(
+            peer.usable_since,
+            Some(back),
+            "a later connected state in the same stretch does not move the start"
+        );
     }
 
     /// The establishment timeout only ends a peer that never had a path. One
