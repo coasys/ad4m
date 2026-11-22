@@ -29,7 +29,7 @@ use super::types::{IncludeValue, ModelQueryInput, OrderDirection};
 /// Position after the last row of a page: its first-link timestamp and id,
 /// plus the direction the page was read in.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(super) struct KeysetCursor {
+pub(crate) struct KeysetCursor {
     pub(super) ts: String,
     pub(super) id: String,
     pub(super) desc: bool,
@@ -50,7 +50,7 @@ impl KeysetCursor {
         ENGINE.encode(serde_json::to_vec(self).expect("cursor serializes"))
     }
 
-    pub(super) fn decode(s: &str) -> Result<Self, Error> {
+    pub(crate) fn decode(s: &str) -> Result<Self, Error> {
         let bytes = ENGINE
             .decode(s)
             .map_err(|_| anyhow!("Invalid `after` cursor"))?;
@@ -512,5 +512,34 @@ mod pipeline_tests {
         execute_model_query(&store, &shape, &input, &resolver)
             .await
             .unwrap();
+    }
+
+    /// `limit: 0` is a count, not a page: there is no page a cursor can point
+    /// into. Both count-only returns sit ahead of the cursor checks, so the
+    /// refusal has to come first — as does the `include` one, or the same
+    /// early answer would drop it.
+    #[tokio::test]
+    async fn a_cursor_on_a_count_only_query_is_refused() {
+        let store = store();
+        let first = run(&store, json!({ "after": "", "limit": 3 }))
+            .await
+            .unwrap();
+        let cursor = first.next_cursor.unwrap();
+        for query in [
+            json!({ "after": "", "limit": 0 }),
+            json!({ "after": "", "limit": 0, "count": true }),
+            json!({ "after": cursor, "limit": 0, "count": true }),
+            json!({ "limit": 0, "count": true, "include": { "rel": { "after": "" } } }),
+        ] {
+            let err = run(&store, query.clone())
+                .await
+                .expect_err(&format!("refused: {query}"));
+            assert!(err.to_string().contains("`after`"), "{query}: {err}");
+        }
+        // A plain count still counts.
+        let r = run(&store, json!({ "limit": 0, "count": true }))
+            .await
+            .unwrap();
+        assert_eq!(r.total_count, Some(10));
     }
 }

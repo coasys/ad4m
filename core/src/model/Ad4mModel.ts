@@ -1637,6 +1637,12 @@ export class Ad4mModel {
    * refuses any other order, and `offset` is dropped. Use `paginate()` for
    * page numbers or other orders.
    *
+   * `nextCursor` is `undefined` on the last page — and `undefined` (or `""`)
+   * as `after` asks for the first page, so loop on the cursor:
+   * `while (page.nextCursor)`. A `do … while (page.results.length)` loop
+   * passes `page?.nextCursor` — `undefined` again on the last page — and
+   * re-reads page one forever.
+   *
    * @example
    * ```typescript
    * let page = await Message.page(perspective, 50, undefined, { order: { createdAt: "DESC" } });
@@ -1696,7 +1702,9 @@ export class Ad4mModel {
     query?: TypedQuery<T>,
     options?: CallOptions,
   ): Promise<number> {
-    return requireTotalCount(await this.executeModelQuery(perspective, { ...((query ?? {}) as Query), limit: 0, count: true }, undefined, options));
+    // A total is one figure over the whole scope; a cursor pages it, so `after` is dropped like `paginate` does.
+    const { after: _after, ...countQuery } = (query ?? {}) as Query;
+    return requireTotalCount(await this.executeModelQuery(perspective, { ...countQuery, limit: 0, count: true }, undefined, options));
   }
 
   /** The `executeAction` write that sets property `key` to `value`; none for an empty value. */

@@ -343,6 +343,15 @@ pub(crate) fn refuse_union_reads(query: &ModelQueryInput) -> Result<(), Error> {
              classes. Page the union with `limit`/`offset`, or query one class at a time."
         ));
     }
+    // An `include` cursor is refused here too: the selection query clears
+    // `include`, and an empty page never reaches the per-class fetch that
+    // refuses it (query.rs), so whether it errored would depend on the rows.
+    if super::cursor::include_sends_cursor(query) {
+        return Err(anyhow!(
+            "classNames / abstract class: `after` cursors page a top-level query only. \
+             An `include` sub-query takes `limit`/`offset`."
+        ));
+    }
     // A per-anchor limit and a walk pick their rows inside the store, once per
     // class, so `limitPerAnchor: 5` would keep five per anchor *per class*.
     if let Some(Scope::Traverse {

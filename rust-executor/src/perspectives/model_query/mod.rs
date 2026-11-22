@@ -134,6 +134,7 @@ pub(crate) mod types;
 mod union;
 pub(crate) mod utils;
 
+pub(crate) use cursor::KeysetCursor;
 /// The per-value condition evaluator, shared with the flow engine so a
 /// `fromRole` rule's `author` condition means the same thing whether it is
 /// applied to a grant row here or to a revocation tombstone there.
@@ -149,11 +150,11 @@ pub use types::{
     ModelShape, OrderDirection, ProducedByFlowFilter, ProjectionInput, Scope, ShapeResolver,
     WhereCondition, WhereOps,
 };
+pub(crate) use union::refuse_union_reads;
+pub use union::{execute_union_query, execute_union_query_with_views, QueryClasses};
 /// Re-export the shared IRI-safety predicate so write-side callers
 /// (e.g. `perspective_instance::resolve_property_value`,
 /// `mcp::tools::create_property_expression`) can gate raw-`NamedNode`
 /// storage on the same rule the SPARQL query builder uses.  See
 /// [`utils::is_safe_iri_target`] for the full contract.
-pub(crate) use union::refuse_union_reads;
-pub use union::{execute_union_query, execute_union_query_with_views, QueryClasses};
 pub use utils::is_safe_iri_target;

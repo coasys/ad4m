@@ -848,6 +848,25 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
       expect(q.offset).toBe(20);
     });
 
+    it("count() drops a cursor from the query", async () => {
+      mockPerspective.modelQuery.mockResolvedValue({ instances: [], totalCount: 7 });
+
+      const count = await Recipe.count(mockPerspective, { after: "c1" } as any);
+
+      const q = sentQuery();
+      expect(q.after).toBeUndefined();
+      expect(q.limit).toBe(0);
+      expect(q.count).toBe(true);
+      expect(count).toBe(7);
+
+      // The builder's count() drops it too — a seeded cursor counts the same scope.
+      const viaBuilder = await Recipe.query(mockPerspective, { after: "c1" } as any).count();
+      const q2 = sentQuery(1);
+      expect(q2.after).toBeUndefined();
+      expect(q2.limit).toBe(0);
+      expect(viaBuilder).toBe(7);
+    });
+
     it("findAll forwards `after` and executeModelQuery returns nextCursor", async () => {
       mockPerspective.modelQuery.mockResolvedValue({ instances: [], nextCursor: "c3" });
 

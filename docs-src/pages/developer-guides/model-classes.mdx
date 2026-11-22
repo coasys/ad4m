@@ -829,19 +829,20 @@ if (first.nextCursor) {
 - Under the hood they send `limit: pageSize` and `after` (`""` for the first page). You can send `after` yourself in a query; the result then carries `nextCursor`.
 - `nextCursor` is there while a full page came back. When it is missing, you are on the last page. If the last rows fill a whole page exactly, the page after it is empty and has no `nextCursor`.
 - A cursor is opaque. Pass it back as it came; do not build one.
+- A cursor page has no `totalCount`; `page()` drops `count` along with `offset`. Use `paginate()` or `count()` for the total.
 
-**Supported orders.** No `order`, or one of `timestamp`, `createdAt` or `updatedAt`, `ASC` or `DESC`. Rows are ordered by their first link's timestamp, for `updatedAt` too. The instance id breaks ties, so no row is repeated or skipped.
+**Supported orders.** No `order`, or one of `timestamp`, `createdAt` or `updatedAt`, `ASC` or `DESC`. Rows are ordered by their first link's timestamp, for `updatedAt` too. The instance id breaks ties, so no row is repeated or skipped. That holds while the link the timestamp is read from stays put: a class with a flag is probed on its flag link, which never moves; a class without one is probed on its first required property's link — or any link — so replacing that link moves the row, and an `ASC` walk can repeat it while a `DESC` walk skips it.
 
 **Refused.** The executor returns an error, rather than a wrong page, for a query that sends `after` (even `""`) and has:
 
 - an order on a property, or more than one order key,
-- no `limit`,
+- no `limit` above zero (`limit: 0` is a count, not a page — `count()` drops `after` for you),
 - a non-zero `offset` (`page()` drops `offset` for you),
 - a cursor taken from a page in the other direction, or a malformed cursor,
 - several classes (`Ad4mModel.queryOf`), or an abstract class (it reads every class that has its properties); page those with `limit`/`offset`,
 - a `where` the store cannot evaluate,
 - a `parent` scope with `limitPerAnchor` or `levels`,
-- `after` inside an `include` sub-query (page a relation with `limit`/`offset`).
+- `after` inside an `include` sub-query (page a relation with `limit`/`offset`), on one class or over several.
 
 Subscriptions refuse `after` too: a subscription re-runs one query, so it would re-read the same page forever. `subscribe()`, `countSubscribe()` and `paginateSubscribe()` leave it out.
 

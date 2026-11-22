@@ -534,7 +534,9 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async count(): Promise<number> {
-    return requireTotalCount(await this.execute({ ...this.queryParams, limit: 0, count: true }));
+    // A count has no page a cursor can continue from — as paginate(), it is not sent.
+    const { after: _after, ...cursorless } = this.queryParams || {};
+    return requireTotalCount(await this.execute({ ...cursorless, limit: 0, count: true }));
   }
 
   /**

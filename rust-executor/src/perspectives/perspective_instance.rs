@@ -3858,6 +3858,16 @@ impl PerspectiveInstance {
         let mut query_input: super::model_query::ModelQueryInput = serde_json::from_str(query_json)
             .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
 
+        // A malformed `after` fails the same way however the query would have
+        // been answered: the empty results below (a hard-wired class nothing
+        // wrote yet, a producedByFlow filter nothing passes) must not take an
+        // unparseable cursor for a last page.
+        if let Some(after) = query_input.after.as_deref() {
+            if !after.is_empty() {
+                super::model_query::KeysetCursor::decode(after)?;
+            }
+        }
+
         // `where.producedByFlow` is resolved here, not in the pipeline: it
         // needs the perspective (receipts, flow catalogue) and signature
         // verification, neither of which SPARQL or the post-hydration filter
@@ -9016,6 +9026,52 @@ mod tests {
         assert!(
             msg.contains("No SHACL shape stored for class 'Unknown'"),
             "error should name the class, got: {msg}"
+        );
+    }
+
+    /// A malformed `after` fails even when the query would answer empty:
+    /// `ad4m://FlowInstance` is a hard-wired class nothing wrote here, so the
+    /// query returns before the pipeline's decode could run. A valid first
+    /// page still answers empty — and writes nothing.
+    #[tokio::test]
+    async fn test_model_query_decodes_after_before_an_empty_answer() {
+        use base64::Engine;
+        let perspective = setup().await;
+        let err = perspective
+            .model_query_within(
+                "ad4m://FlowInstance",
+                r#"{"after":"!","limit":1}"#,
+                Duration::from_secs(1),
+            )
+            .await
+            .expect_err("a malformed cursor is an error, not an empty page");
+        assert!(err.to_string().contains("Invalid `after` cursor"), "{err}");
+
+        let first = perspective
+            .model_query_within(
+                "ad4m://FlowInstance",
+                r#"{"after":"","limit":1}"#,
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("a first page of an unstored class reads empty");
+        let first: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(first["instances"].as_array().unwrap().len(), 0);
+        // And a well-formed cursor decodes and reads empty too.
+        let cursor = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"ts":"2026-01-01T00:00:00.000Z","id":"ns://a","desc":false}"#);
+        let query = format!(r#"{{"after":"{cursor}","limit":1}}"#);
+        perspective
+            .model_query_within("ad4m://FlowInstance", &query, Duration::from_secs(1))
+            .await
+            .expect("a well-formed cursor decodes");
+        assert!(
+            perspective
+                .get_links(&LinkQuery::default())
+                .await
+                .unwrap()
+                .is_empty(),
+            "the empty answers wrote nothing"
         );
     }
 
