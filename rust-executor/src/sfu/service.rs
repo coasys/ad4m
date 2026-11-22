@@ -17,7 +17,7 @@ use super::cascade::{CascadeManager, CascadeSignal};
 use super::config_store;
 use super::gossip::{CascadeGossip, GossipTarget};
 use super::reachability::SfuReachability;
-use super::room::{ParticipantId, RoomError, RoomId, RoomManager, SfuRoom};
+use super::room::{ParticipantId, RoomError, RoomId, RoomManager, SessionAccess, SfuRoom};
 use super::server::{SfuCommand, SfuPeer, SfuServer, SfuServerConfig};
 use super::types::{SfuMigrateEvent, TrackMapEntry};
 
@@ -191,6 +191,14 @@ pub struct SfuService {
     /// Serialises [`Self::publish_roster`]: a roster read before another
     /// join must not be published after that join's roster.
     roster_order: tokio::sync::Mutex<()>,
+}
+
+/// Record one roster republish. The first reason for a room wins.
+fn note_roster(changed: &mut Vec<(String, &'static str)>, room_id: String, reason: &'static str) {
+    if changed.iter().any(|(id, _)| id == &room_id) {
+        return;
+    }
+    changed.push((room_id, reason));
 }
 
 impl SfuService {
@@ -394,7 +402,7 @@ impl SfuService {
             // Rooms whose remote sessions changed (a node announced
             // other sessions, left or went stale): their local roster
             // is republished once the cascade lock is released.
-            let mut rosters_changed: Vec<String> = Vec::new();
+            let mut rosters_changed: Vec<(String, &'static str)> = Vec::new();
             // Quality preferences to set on pipe peers — collected from
             // QualityPreference gossip messages.
             let mut pipe_quality_prefs: Vec<(ParticipantId, String)> = Vec::new();
@@ -426,14 +434,14 @@ impl SfuService {
                             capacity_hint,
                             sessions,
                         ) {
-                            rosters_changed.push(room_id.clone());
+                            note_roster(&mut rosters_changed, room_id.clone(), "announce");
                         }
 
                         // Evict nodes that stopped announcing (>30s stale).
                         // Cheap: one HashMap scan per Announce.
                         let evicted = mgr.evict_stale_nodes(Duration::from_secs(30));
                         for (evicted_room, evicted_did) in evicted {
-                            rosters_changed.push(evicted_room.clone());
+                            note_roster(&mut rosters_changed, evicted_room.clone(), "timeout");
                             if let Some(pid) =
                                 mgr.remove_node_from_room(&evicted_room, &evicted_did)
                             {
@@ -476,7 +484,7 @@ impl SfuService {
                         // we had a pipe SfuPeer for that pair, the
                         // returned ParticipantId tells the event loop
                         // which entry to drop.
-                        rosters_changed.push(room_id.clone());
+                        note_roster(&mut rosters_changed, room_id.clone(), "leave");
                         if let Some(pid) = mgr.remove_node_from_room(&room_id, &did) {
                             pipes_to_drop.push(pid);
                         }
@@ -594,6 +602,7 @@ impl SfuService {
                     .command_tx
                     .send(SfuCommand::ApplyServerAnswer {
                         participant_id: pid,
+                        offer_id: None,
                         sdp_answer_json,
                     })
                     .await
@@ -653,10 +662,9 @@ impl SfuService {
                 }
             }
 
-            rosters_changed.sort();
-            rosters_changed.dedup();
-            for room_key in rosters_changed {
-                self.republish_roster(&room_key).await;
+            rosters_changed.sort_by(|a, b| a.0.cmp(&b.0));
+            for (room_key, reason) in rosters_changed {
+                self.republish_roster(&room_key, reason).await;
             }
 
             for (target, signal) in outbound {
@@ -719,7 +727,7 @@ impl SfuService {
                             .write()
                             .await
                             .remove_node_from_room(&room_key, &dead.agent_did);
-                        self.republish_roster(&room_key).await;
+                        self.republish_roster(&room_key, "drop").await;
                     } else {
                         self.remove_dead_participant(dead).await;
                     }
@@ -727,7 +735,7 @@ impl SfuService {
                 _ = sweep_interval.tick() => {
                     self.reap_empty_rooms().await;
                     let mut pipes_to_drop: Vec<ParticipantId> = Vec::new();
-                    let mut rosters_changed: Vec<String> = Vec::new();
+                    let mut rosters_changed: Vec<(String, &'static str)> = Vec::new();
                     {
                         let mut mgr = self.cascade_manager.write().await;
                         let evicted = mgr.evict_stale_nodes(Duration::from_secs(30));
@@ -736,7 +744,7 @@ impl SfuService {
                                 "SFU cascade sweep: evicting stale node {} from room {}",
                                 did, room_id
                             );
-                            rosters_changed.push(room_id.clone());
+                            note_roster(&mut rosters_changed, room_id.clone(), "timeout");
                             if let Some(pid) = mgr.remove_node_from_room(&room_id, &did) {
                                 pipes_to_drop.push(pid);
                             }
@@ -749,10 +757,9 @@ impl SfuService {
                             .send(SfuCommand::RemovePeer(pid))
                             .await;
                     }
-                    rosters_changed.sort();
-                    rosters_changed.dedup();
-                    for room_key in rosters_changed {
-                        self.republish_roster(&room_key).await;
+                    rosters_changed.sort_by(|a, b| a.0.cmp(&b.0));
+                    for (room_key, reason) in rosters_changed {
+                        self.republish_roster(&room_key, reason).await;
                     }
 
                     // ── Rebalance check ──
@@ -828,9 +835,10 @@ impl SfuService {
     /// remote sessions changed (a cascade node announced other
     /// sessions, left, died or went stale). A room this node does not
     /// serve has no local listeners, so nothing is sent.
-    async fn republish_roster(&self, room_key: &str) {
+    async fn republish_roster(&self, room_key: &str, reason: &'static str) {
         if self.local_has_room(room_key).await {
-            self.publish_roster(&RoomId::parse(room_key), None).await;
+            self.publish_roster(&RoomId::parse(room_key), None, reason)
+                .await;
         }
     }
 
@@ -892,17 +900,21 @@ impl SfuService {
     /// clients follow membership without inferring it from media. A
     /// departure also reaches the removed DID, including when the room
     /// became empty; the payload still lists only current participants.
-    async fn publish_roster(&self, room_id: &RoomId, departed: Option<&str>) {
-        self.publish_roster_to(room_id, departed, None).await
+    async fn publish_roster(&self, room_id: &RoomId, departed: Option<&str>, reason: &'static str) {
+        self.publish_roster_to(room_id, departed, None, reason)
+            .await
     }
 
     /// [`Self::publish_roster`], to `only` when it is set: a client that
     /// asked for the roster again gets it without everyone else.
+    /// `reason` is the one word on the roster log line (`join`, `leave`,
+    /// `drop`, `timeout`, `announce`, `resume`).
     async fn publish_roster_to(
         &self,
         room_id: &RoomId,
         departed: Option<&str>,
         only: Option<&str>,
+        reason: &'static str,
     ) {
         let _order = self.roster_order.lock().await;
         let mut participants = self.local_sessions(room_id).await;
@@ -926,6 +938,10 @@ impl SfuService {
             room_name: room_id.room_name.clone(),
             participants,
         };
+        info!(
+            "SFU roster: {reason} room {room_id} sessions {}",
+            roster.participants.len()
+        );
         crate::pubsub::get_global_pubsub()
             .await
             .publish_event(crate::events::Event::sfu_room_roster(&roster, recipients));
@@ -1306,7 +1322,7 @@ impl SfuService {
         };
 
         self.announce_room(&room_id).await;
-        self.publish_roster(&room_id, None).await;
+        self.publish_roster(&room_id, None, "join").await;
 
         Ok(CallSessionInfo {
             room_name: room_name.to_string(),
@@ -1375,7 +1391,7 @@ impl SfuService {
             .send(SfuCommand::RemovePeer(pid.clone()))
             .await;
 
-        self.after_participant_left(&room_id, &pid, agent_did, local_count)
+        self.after_participant_left(&room_id, &pid, agent_did, local_count, "leave")
             .await;
         Ok(true)
     }
@@ -1403,6 +1419,7 @@ impl SfuService {
             &dead.participant_id,
             &dead.agent_did,
             local_count,
+            dead.reason,
         )
         .await;
     }
@@ -1431,6 +1448,7 @@ impl SfuService {
         pid: &ParticipantId,
         agent_did: &str,
         local_count: u32,
+        reason: &'static str,
     ) {
         // Always re-announce the fresh local count (lets healthy peers
         // refresh their view).  If the room is now empty on this node,
@@ -1441,7 +1459,7 @@ impl SfuService {
         // room will never come.
         let room_key = room_id.to_string();
         self.announce_room(room_id).await;
-        self.publish_roster(room_id, Some(agent_did)).await;
+        self.publish_roster(room_id, Some(agent_did), reason).await;
         if local_count == 0 {
             let signal = CascadeSignal::Leave {
                 did: self.gossip.local_did().to_string(),
@@ -1482,6 +1500,7 @@ impl SfuService {
         room_name: &str,
         agent_did: &str,
         participant_id: &str,
+        offer_id: &str,
         sdp_answer_json: &str,
     ) -> Result<bool, String> {
         let pid = self
@@ -1492,6 +1511,7 @@ impl SfuService {
             .command_tx
             .send(SfuCommand::ApplyServerAnswer {
                 participant_id: pid,
+                offer_id: Some(offer_id.to_string()),
                 sdp_answer_json: sdp_answer_json.to_string(),
             })
             .await;
@@ -1529,10 +1549,12 @@ impl SfuService {
     /// back (`sfu.callResume`). Offers and roster events published while it
     /// was gone did not reach it: the SFU publishes the pending server offer,
     /// if any, again at once, and the room's roster to `agent_did`. The
-    /// session itself never depended on the socket. Refused when the session
-    /// is not `agent_did`'s or is no longer in the room. The check is by DID
-    /// ([`super::room::SfuRoom::session_of`]): another device of the same agent
-    /// may resume this session, and the roster reaches every device of it.
+    /// session itself never depended on the socket. `Ok(false)` when the
+    /// room or the session is not there: nothing is sent. An error when the
+    /// session belongs to another agent, or when the command cannot be sent.
+    /// The check is by DID ([`SfuRoom::session_access`]): another device of
+    /// the same agent may resume this session, and the roster reaches every
+    /// device of it.
     pub async fn call_resume(
         &self,
         neighbourhood_url: &str,
@@ -1540,9 +1562,19 @@ impl SfuService {
         agent_did: &str,
         participant_id: &str,
     ) -> Result<bool, String> {
-        let pid = self
-            .own_session(neighbourhood_url, room_name, agent_did, participant_id)
-            .await?;
+        let pid = {
+            let rooms = self.rooms.read().await;
+            let Some(room) = rooms.get_room(&RoomId::new(neighbourhood_url, room_name)) else {
+                return Ok(false);
+            };
+            match room.session_access(participant_id, agent_did) {
+                SessionAccess::Own(pid) => pid,
+                SessionAccess::Absent => return Ok(false),
+                SessionAccess::OtherAgent => {
+                    return Err(format!("Session {participant_id} belongs to another agent"));
+                }
+            }
+        };
         self.server
             .command_tx
             .send(SfuCommand::Resume {
@@ -1554,6 +1586,7 @@ impl SfuService {
             &RoomId::new(neighbourhood_url, room_name),
             None,
             Some(agent_did),
+            "resume",
         )
         .await;
         Ok(true)
@@ -2246,6 +2279,7 @@ mod tests {
             agent_did: "did:a".to_string(),
             participant_id: ParticipantId::parse(&p1).unwrap(),
             is_pipe: false,
+            reason: "drop",
         })
         .await;
         assert!(sessions(&svc, url).await.is_empty());
@@ -2470,11 +2504,19 @@ mod tests {
                 "{did} {pid}"
             );
             assert!(svc
-                .call_answer_server_offer(url, "r", did, pid, "{}")
+                .call_answer_server_offer(url, "r", did, pid, "o1", "{}")
                 .await
                 .is_err());
             assert!(svc.call_restart_ice(url, "r", did, pid).await.is_err());
-            assert!(svc.call_resume(url, "r", did, pid).await.is_err());
+            // A session of another agent is an error. One that is not in
+            // the room returns false.
+            let resumed = svc.call_resume(url, "r", did, pid).await;
+            if pid == "P0" || pid.is_empty() {
+                assert_eq!(resumed.unwrap(), false, "{did} {pid}");
+            } else {
+                let err = resumed.expect_err(&format!("{did} {pid}"));
+                assert!(err.contains("another agent"), "{err}");
+            }
             assert!(svc
                 .add_ice_candidate(
                     url,
@@ -2594,12 +2636,13 @@ mod tests {
         let phone = join(&svc, url, "did:a", "phone").await;
         let bobs = join(&svc, url, "did:b", "laptop").await;
 
-        let offers_to = |seen: &[Arc<crate::events::Event>]| -> Vec<(String, String)> {
+        let offers_to = |seen: &[Arc<crate::events::Event>]| -> Vec<(String, String, String)> {
             published(seen, Topic::SfuCallRenegotiationOffer, url)
                 .into_iter()
                 .map(|o| {
                     (
                         o["participantId"].as_str().unwrap().to_string(),
+                        o["offerId"].as_str().unwrap().to_string(),
                         o["sdpOffer"].as_str().unwrap().to_string(),
                     )
                 })
@@ -2632,15 +2675,26 @@ mod tests {
         assert_eq!(pending[0].0, laptop);
         settle(&svc, &mut events).await;
 
-        // Refused: another agent, a replaced session, a room that does not exist.
-        for (did, pid, room_url) in [
-            ("did:b", laptop.as_str(), url),
-            ("did:a", replaced.as_str(), url),
-            ("did:a", bobs.as_str(), url),
-            ("did:a", laptop.as_str(), "neighbourhood://no-such-room"),
+        // Another agent's session is an error. A replaced session, and a
+        // room that does not exist, return false. None of them sends.
+        for (did, pid, room_url, missing) in [
+            ("did:b", laptop.as_str(), url, false),
+            ("did:a", replaced.as_str(), url, true),
+            ("did:a", bobs.as_str(), url, false),
+            (
+                "did:a",
+                laptop.as_str(),
+                "neighbourhood://no-such-room",
+                true,
+            ),
         ] {
-            let refused = svc.call_resume(room_url, "r", did, pid).await;
-            assert!(refused.is_err(), "{did} {pid} {room_url}");
+            let resumed = svc.call_resume(room_url, "r", did, pid).await;
+            if missing {
+                assert_eq!(resumed.unwrap(), false, "{did} {pid} {room_url}");
+            } else {
+                let err = resumed.expect_err(&format!("{did} {pid} {room_url}"));
+                assert!(err.contains("another agent"), "{err}");
+            }
         }
         let seen = settle(&svc, &mut events).await;
         assert!(
@@ -2680,6 +2734,122 @@ mod tests {
         let seen = settle(&svc, &mut events).await;
         assert!(offers_to(&seen).is_empty());
         assert_eq!(published(&seen, Topic::SfuRoomRoster, url).len(), 1);
+    }
+
+    /// A room that is not there, or a session that is not in it, is not an
+    /// error: `call_resume` returns false and sends nothing. A session of
+    /// another agent is an error. A session that is still joined returns true.
+    #[tokio::test]
+    async fn call_resume_is_false_when_the_room_or_the_session_is_gone() {
+        let svc = test_service().await;
+        let url = "neighbourhood://resume-missing";
+        let mut events = crate::pubsub::get_global_pubsub().await.subscribe_events();
+        let laptop = join(&svc, url, "did:a", "laptop").await;
+        let replaced = join(&svc, url, "did:a", "phone").await;
+        let _phone = join(&svc, url, "did:a", "phone").await;
+        let bobs = join(&svc, url, "did:b", "laptop").await;
+        let _ = drain(&mut events);
+
+        assert_eq!(
+            svc.call_resume("neighbourhood://no-such-room", "r", "did:a", &laptop)
+                .await
+                .unwrap(),
+            false
+        );
+        assert_eq!(
+            svc.call_resume(url, "r", "did:a", &replaced).await.unwrap(),
+            false
+        );
+        assert_eq!(
+            svc.call_resume(url, "r", "did:a", "P0").await.unwrap(),
+            false
+        );
+
+        let err = svc.call_resume(url, "r", "did:a", &bobs).await.unwrap_err();
+        assert!(err.contains("another agent"), "{err}");
+        let err = svc
+            .call_resume(url, "r", "did:b", &laptop)
+            .await
+            .unwrap_err();
+        assert!(err.contains("another agent"), "{err}");
+
+        let seen = drain(&mut events);
+        assert!(
+            published(&seen, Topic::SfuRoomRoster, url).is_empty(),
+            "a resume that is not the caller's session sends no roster"
+        );
+        assert!(published(&seen, Topic::SfuCallRenegotiationOffer, url).is_empty());
+
+        assert!(svc.call_resume(url, "r", "did:a", &laptop).await.unwrap());
+    }
+
+    /// A roster published while one session still has an unanswered offer
+    /// lists every session that is still joined, including that one.
+    #[tokio::test]
+    async fn a_published_roster_lists_every_session_still_joined() {
+        let svc = test_service().await;
+        let url = "neighbourhood://roster-complete";
+        let mut events = crate::pubsub::get_global_pubsub().await.subscribe_events();
+        let laptop = join(&svc, url, "did:a", "laptop").await;
+        let phone = join(&svc, url, "did:a", "phone").await;
+
+        svc.call_restart_ice(url, "r", "did:a", &laptop)
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let seen = drain(&mut events);
+                if published(&seen, Topic::SfuCallRenegotiationOffer, url)
+                    .iter()
+                    .any(|offer| offer["participantId"] == laptop)
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the laptop's offer was not published");
+
+        let bob = join(&svc, url, "did:b", "phone").await;
+        let seen = drain(&mut events);
+        let rosters = published(&seen, Topic::SfuRoomRoster, url);
+        let mut listed = roster_ids(rosters.last().expect("bob's join publishes a roster"));
+        let mut everyone = vec![laptop.clone(), phone.clone(), bob.clone()];
+        everyone.sort();
+        listed.sort();
+        assert_eq!(
+            listed, everyone,
+            "a roster published while an offer is unanswered lists every joined session"
+        );
+
+        assert!(svc.call_resume(url, "r", "did:a", &laptop).await.unwrap());
+        svc.get_quality_preferences().await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let seen = drain(&mut events);
+        let rosters = published(&seen, Topic::SfuRoomRoster, url);
+        assert_eq!(rosters.len(), 1);
+        let mut listed = roster_ids(&rosters[0]);
+        listed.sort();
+        assert_eq!(listed, everyone);
+
+        assert!(svc.call_leave(url, "r", "did:b", &bob).await.unwrap());
+        let seen = drain(&mut events);
+        let rosters = published(&seen, Topic::SfuRoomRoster, url);
+        let mut listed = roster_ids(rosters.last().expect("bob's leave publishes a roster"));
+        listed.sort();
+        let mut staying = vec![laptop, phone];
+        staying.sort();
+        assert_eq!(listed, staying);
+    }
+
+    fn roster_ids(roster: &serde_json::Value) -> Vec<String> {
+        roster["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|participant| participant["participantId"].as_str().unwrap().to_string())
+            .collect()
     }
 
     #[tokio::test]
@@ -2831,6 +3001,7 @@ mod tests {
                             agent_did: "did:departed".into(),
                             participant_id: ParticipantId(1),
                             is_pipe: false,
+                            reason: "drop",
                         })
                         .await;
                 } else {

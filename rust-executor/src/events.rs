@@ -521,6 +521,7 @@ mod tests {
             Event::sfu_renegotiation_offer(&SfuCallRenegotiationOffer {
                 target_did: "did:alice".into(),
                 participant_id: "P1".into(),
+                offer_id: "o1".into(),
                 neighbourhood_url: "n".into(),
                 room_name: "r".into(),
                 sdp_offer: "{}".into(),

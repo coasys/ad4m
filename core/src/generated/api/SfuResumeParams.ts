@@ -6,8 +6,8 @@
 export type SfuResumeParams = { neighbourhoodUrl: string, roomName: string, 
 /**
  * A session of the caller's agent in this room, as its join returned
- * it. Another agent's session, or one no longer in the room, is
- * refused. The check is by DID: another device of the same agent may
- * resume this session.
+ * it. A session that is not in the room, or a room that is not there,
+ * returns false. A session of another agent is refused. The check is
+ * by DID: another device of the same agent may resume this session.
  */
 participantId: string, };

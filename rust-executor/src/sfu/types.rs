@@ -164,6 +164,10 @@ pub struct SfuCallRenegotiationOffer {
     /// The session the offer is for. Every session of `target_did` gets
     /// it; only this one applies it.
     pub participant_id: String,
+    /// The id of this offer. A resend and `sfu.callResume` repeat it.
+    /// The answer names it (`sfu.callAnswerServerOffer`); an answer that
+    /// names another id is refused.
+    pub offer_id: String,
     pub neighbourhood_url: String,
     pub room_name: String,
     /// JSON-encoded `RTCSessionDescriptionInit` for the new offer.

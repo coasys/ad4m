@@ -55,9 +55,9 @@ pub struct SfuPeer {
     pub tracks_in: HashMap<Mid, MediaKind>,
     /// Maps outgoing Mid (media we send to the peer) to the source (origin participant, origin mid)
     pub tracks_out: HashMap<Mid, (ParticipantId, Mid)>,
-    /// The one in-flight server offer. str0m allows one change at a time,
-    /// and an answer names no offer id, so a retry republishes this record's
-    /// SDP instead of building another.
+    /// The one in-flight server offer. str0m allows one change at a time.
+    /// The offer has an id the answer echoes, so a retry republishes this
+    /// record's SDP and id instead of building another.
     pending: Option<PendingNegotiation>,
     /// Reverse index: (origin_pid, origin_mid) -> outbound Mid on this peer.
     /// Provides O(1) lookup during media relay instead of scanning `tracks_out`.
@@ -99,6 +99,9 @@ pub struct SfuPeer {
     /// When media (RTP) from this peer last arrived, or `None`.
     /// See [`MEDIA_LIVE_WINDOW`].
     pub last_media_at: Option<Instant>,
+    /// Why this peer is being dropped, set before `rtc.disconnect()`.
+    /// `None` when the peer died for a reason the sweep did not name.
+    end_reason: Option<&'static str>,
     /// The media byte counters of the last stats line, for its bitrates.
     /// See [`PEER_STATS_INTERVAL`].
     stats_last: Option<StatsSample>,
@@ -112,10 +115,13 @@ struct StatsSample {
     bytes_tx: u64,
 }
 
-/// One server offer waiting for its answer: the str0m token, and the exact
-/// SDP and track mapping to publish again. Answers carry no offer id, so
-/// this record stays until the answer lands or the retry budget ends.
+/// One server offer waiting for its answer: the str0m token, the id the
+/// answer echoes, and the exact SDP and track mapping to publish again.
+/// The id is minted once. A resend keeps it. The record stays until the
+/// answer lands.
 struct PendingNegotiation {
+    /// Minted in [`SfuPeer::install_pending`]. A resend does not change it.
+    offer_id: String,
     token: str0m::change::SdpPendingOffer,
     /// When the offer was first published. A resend does not move it.
     sent_at: Instant,
@@ -220,6 +226,14 @@ fn offer_retry_wait(resends_done: u32) -> Duration {
     }
 }
 
+/// An id for one server offer. Minted once in [`SfuPeer::install_pending`]
+/// and kept for every resend of that offer.
+fn next_offer_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    format!("o{}", NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
 impl SfuPeer {
     pub fn new(
         id: ParticipantId,
@@ -249,6 +263,7 @@ impl SfuPeer {
             write_errors_logged: HashSet::new(),
             last_media_at: None,
             stats_last: None,
+            end_reason: None,
         }
     }
 
@@ -406,21 +421,33 @@ impl SfuPeer {
     /// trickled meanwhile, then starts the next restart if one was asked for.
     ///
     /// An answer is taken however late it comes: the offer stays pending
-    /// until it is answered. An answer whose m-lines are not this offer's
-    /// stays pending. A JSON parse failure leaves the pending negotiation
+    /// until it is answered. `offer_id` is the match: an answer that names
+    /// another offer stays pending, and so does one whose m-lines are not
+    /// this offer's. A JSON parse failure leaves the pending negotiation
     /// unchanged. str0m consuming the token and refusing
     /// the answer does not: the caller disconnects the peer. An answer that
     /// crossed another offer has consumed the token; the caller keeps the peer.
-    fn accept_server_answer(&mut self, sdp_answer_json: &str) -> Result<(), ServerAnswerError> {
+    fn accept_server_answer(
+        &mut self,
+        offer_id: &str,
+        sdp_answer_json: &str,
+    ) -> Result<(), ServerAnswerError> {
         let Some(pending) = self.pending.as_ref() else {
             return Err(ServerAnswerError::NoPending);
         };
+        // The offer id is the match. An ICE restart reuses m-lines, so two
+        // offers can share a mid list; a stale answer with those mids must
+        // not be taken. The id is minted once and kept across resends.
+        if pending.offer_id != offer_id {
+            return Err(ServerAnswerError::NotThisOffer);
+        }
         let answer: str0m::change::SdpAnswer = match serde_json::from_str(sdp_answer_json) {
             Ok(answer) => answer,
             Err(e) => return Err(ServerAnswerError::Parse(e.to_string())),
         };
-        // Before the token is taken. A mismatched answer can change the
-        // session inside str0m before str0m rejects it.
+        // After the id matches, and before the token is taken. A right id
+        // with the wrong SDP can still change the session inside str0m
+        // before str0m rejects it. The mid list is that check, not the match.
         let offer_mids = sdp_mid_list(&stored_offer_sdp_text(&pending.sdp));
         let answer_mids = sdp_mid_list(&answer.to_sdp_string());
         if offer_mids != answer_mids {
@@ -459,8 +486,8 @@ impl SfuPeer {
     /// belongs to the pending offer and that str0m refused disconnects the
     /// peer. A late answer, an answer for an older offer, and an answer that
     /// crossed another offer leave the peer and its media in place.
-    fn settle_answer(&mut self, sdp_answer_json: &str) {
-        match self.accept_server_answer(sdp_answer_json) {
+    fn settle_answer(&mut self, offer_id: &str, sdp_answer_json: &str) {
+        match self.accept_server_answer(offer_id, sdp_answer_json) {
             Ok(()) => info!(
                 "SFU: server-offer answer accepted for {} ({} outbound tracks live)",
                 self.id,
@@ -501,6 +528,7 @@ impl SfuPeer {
         carries_restart: bool,
     ) {
         self.pending = Some(PendingNegotiation {
+            offer_id: next_offer_id(),
             token,
             sent_at: now,
             sdp,
@@ -511,19 +539,46 @@ impl SfuPeer {
         });
     }
 
+    /// The id of the pending offer, when one waits.
+    #[cfg(test)]
+    fn pending_offer_id(&self) -> Option<&str> {
+        self.pending
+            .as_ref()
+            .map(|pending| pending.offer_id.as_str())
+    }
+
+    /// [`Self::accept_server_answer`] for the offer that is pending now.
+    #[cfg(test)]
+    fn accept_current_answer(&mut self, sdp_answer_json: &str) -> Result<(), ServerAnswerError> {
+        let id = self.pending_offer_id().unwrap_or("").to_string();
+        self.accept_server_answer(&id, sdp_answer_json)
+    }
+
+    /// [`Self::settle_answer`] for the offer that is pending now.
+    #[cfg(test)]
+    fn settle_current_answer(&mut self, sdp_answer_json: &str) {
+        let id = self.pending_offer_id().unwrap_or("").to_string();
+        self.settle_answer(&id, sdp_answer_json)
+    }
+
     /// The client asked for its call state again (`sfu.callResume`), e.g.
     /// after its socket came back: an offer published meanwhile may never
-    /// have reached it. Returns the pending offer's SDP and mapping to
-    /// publish at once, or `None` when no offer waits. The resend counts as
-    /// one, so the next deadline resend comes [`OFFER_RESEND_STEADY`] later.
+    /// have reached it. Returns the pending offer's id, SDP and mapping to
+    /// publish at once, or `None` when no offer waits. The id is the one
+    /// minted for this offer. The resend counts as one, so the next
+    /// deadline resend comes [`OFFER_RESEND_STEADY`] later.
     pub fn resume_offer(
         &mut self,
         now: Instant,
-    ) -> Option<(String, Vec<crate::sfu::TrackMapEntry>)> {
+    ) -> Option<(String, String, Vec<crate::sfu::TrackMapEntry>)> {
         let pending = self.pending.as_mut()?;
         pending.resends += 1;
         pending.next_deadline = now + OFFER_RESEND_STEADY;
-        Some((pending.sdp.clone(), pending.track_mapping.clone()))
+        Some((
+            pending.offer_id.clone(),
+            pending.sdp.clone(),
+            pending.track_mapping.clone(),
+        ))
     }
 
     /// One info line from str0m's `PeerStats`: media bitrate in and out
@@ -633,7 +688,8 @@ enum ServerAnswerError {
     NoPending,
     /// The JSON did not parse. The pending negotiation is unchanged.
     Parse(String),
-    /// The answer's m-lines are not the pending offer's. The token stays.
+    /// The answer does not name the pending offer, or its m-lines are not
+    /// that offer's. The token stays.
     NotThisOffer,
     /// The answer crossed another offer. str0m has already dropped the token.
     OutOfOrder,
@@ -700,6 +756,9 @@ pub enum SfuCommand {
     /// the room) become live.
     ApplyServerAnswer {
         participant_id: ParticipantId,
+        /// The offer this answer names. `None` is a pipe: the cascade wire
+        /// has no offer id, so the pending offer's id is used.
+        offer_id: Option<String>,
         sdp_answer_json: String,
     },
     /// A remote SFU sent a renegotiation offer over the cascade
@@ -917,6 +976,9 @@ pub struct DeadPeer {
     pub agent_did: String,
     pub participant_id: ParticipantId,
     pub is_pipe: bool,
+    /// Why the peer was dropped: `timeout` when it never connected,
+    /// `drop` when it stayed disconnected or died otherwise.
+    pub reason: &'static str,
 }
 
 /// The SFU server. Owns the UDP socket and drives the str0m event loop.
@@ -1100,6 +1162,7 @@ impl SfuServer {
                     }
                     Ok(SfuCommand::ApplyServerAnswer {
                         participant_id,
+                        offer_id,
                         sdp_answer_json,
                     }) => {
                         let Some(peer) = peers.get_mut(&participant_id) else {
@@ -1109,9 +1172,18 @@ impl SfuServer {
                             );
                             continue;
                         };
+                        // A pipe answer names no offer id: the cascade wire
+                        // has none, so the pending offer's id is used. A
+                        // client answer names the offer it belongs to.
+                        let id = offer_id.unwrap_or_else(|| {
+                            peer.pending
+                                .as_ref()
+                                .map(|pending| pending.offer_id.clone())
+                                .unwrap_or_default()
+                        });
                         // Settled before the deadline sweep below: an answer
                         // in the tick of a resend cancels that resend.
-                        peer.settle_answer(&sdp_answer_json);
+                        peer.settle_answer(&id, &sdp_answer_json);
                         // Deferred tracks drain AFTER poll_output — see
                         // the post-poll sweep below.  Draining here would
                         // call sdp_api().apply() before str0m has
@@ -1288,14 +1360,15 @@ impl SfuServer {
                             continue;
                         }
                         match peer.resume_offer(Instant::now()) {
-                            Some((sdp, track_mapping)) => {
+                            Some((offer_id, sdp, track_mapping)) => {
                                 info!(
-                                    "SFU: peer {} resumed; pending offer sent again",
+                                    "SFU: peer {} resumed; pending offer {offer_id} sent again",
                                     participant_id
                                 );
                                 publish_renegotiation_offer(
                                     peer,
                                     &participant_id,
+                                    &offer_id,
                                     sdp,
                                     track_mapping,
                                 );
@@ -1339,9 +1412,11 @@ impl SfuServer {
                             pid,
                             PEER_ESTABLISH_TIMEOUT.as_secs()
                         );
+                        peer.end_reason = Some("timeout");
                         peer.rtc.disconnect();
                     } else if peer.stayed_disconnected(now) {
                         info!("SFU: peer {} stayed disconnected, dropping it", pid);
+                        peer.end_reason = Some("drop");
                         peer.rtc.disconnect();
                     }
                 }
@@ -1356,6 +1431,7 @@ impl SfuServer {
                             agent_did: peer.agent_did.clone(),
                             participant_id: pid.clone(),
                             is_pipe: peer.is_pipe,
+                            reason: peer.end_reason.unwrap_or("drop"),
                         });
                         false
                     } else {
@@ -1579,7 +1655,13 @@ impl SfuServer {
                 if !peer.rtc.is_alive() {
                     continue;
                 }
-                publish_renegotiation_offer(peer, &due.pid, due.sdp, due.track_mapping);
+                publish_renegotiation_offer(
+                    peer,
+                    &due.pid,
+                    &due.offer_id,
+                    due.sdp,
+                    due.track_mapping,
+                );
             }
 
             // Drain deferred tracks for peers whose pending offer just
@@ -1592,7 +1674,19 @@ impl SfuServer {
                     if let Some((sdp_offer_json, track_mapping)) =
                         apply_deferred_tracks(peer, Instant::now())
                     {
-                        publish_renegotiation_offer(peer, pid, sdp_offer_json, track_mapping);
+                        let offer_id = peer
+                            .pending
+                            .as_ref()
+                            .expect("the deferred offer was installed")
+                            .offer_id
+                            .clone();
+                        publish_renegotiation_offer(
+                            peer,
+                            pid,
+                            &offer_id,
+                            sdp_offer_json,
+                            track_mapping,
+                        );
                     }
                 }
             }
@@ -1686,9 +1780,16 @@ impl SfuServer {
                 offer_new_tracks(&mut peers, adds_per_target)
             {
                 if let Some(target_peer) = peers.get(&target_pid) {
+                    let offer_id = target_peer
+                        .pending
+                        .as_ref()
+                        .expect("the new-track offer was installed")
+                        .offer_id
+                        .clone();
                     publish_renegotiation_offer(
                         target_peer,
                         &target_pid,
+                        &offer_id,
                         sdp_offer_json,
                         track_mapping,
                     );
@@ -1881,7 +1982,8 @@ fn offer_send_only(
 /// Drain deferred changes from a peer — tracks, and an ICE restart not yet
 /// offered — into one renegotiation offer. Returns `(sdp_offer_json,
 /// track_mapping)` or `None` when nothing actionable remains, or when an
-/// offer is already pending (that offer is resent, not replaced).
+/// offer is already pending (that offer is resent, not replaced). The
+/// offer's id is on the pending negotiation.
 fn apply_deferred_tracks(
     peer: &mut SfuPeer,
     now: Instant,
@@ -2046,8 +2148,13 @@ fn offer_new_tracks(
         else {
             continue;
         };
+        let offer_id = target_peer
+            .pending
+            .as_ref()
+            .map(|pending| pending.offer_id.as_str())
+            .unwrap_or("");
         info!(
-            "SFU: peer {} renegotiation offer prepared ({} new outbound m-lines)",
+            "SFU: peer {} renegotiation offer {offer_id} prepared ({} new outbound m-lines)",
             target_pid, m_lines
         );
         offers.push((target_pid, sdp_offer_json, track_mapping));
@@ -2081,6 +2188,7 @@ fn data_recipients(
 fn publish_renegotiation_offer(
     peer: &SfuPeer,
     pid: &ParticipantId,
+    offer_id: &str,
     sdp_offer_json: String,
     track_mapping: Vec<crate::sfu::TrackMapEntry>,
 ) {
@@ -2096,6 +2204,7 @@ fn publish_renegotiation_offer(
         let payload = crate::sfu::SfuCallRenegotiationOffer {
             target_did: peer.agent_did.clone(),
             participant_id: pid.to_string(),
+            offer_id: offer_id.to_string(),
             neighbourhood_url: peer.room_id.neighbourhood_url.clone(),
             room_name: peer.room_id.room_name.clone(),
             sdp_offer: sdp_offer_json,
@@ -2114,7 +2223,7 @@ fn publish_renegotiation_offer(
             .saturating_duration_since(pending.sent_at)
             .as_millis();
         info!(
-            "SFU: renegotiation offer {kind} for peer {pid} attempt {} age_ms {age_ms} sdp {:016x}",
+            "SFU: renegotiation offer {kind} {offer_id} for peer {pid} attempt {} age_ms {age_ms} sdp {:016x}",
             pending.resends,
             sdp_fingerprint(&pending.sdp),
         );
@@ -2154,6 +2263,7 @@ fn sdp_fingerprint(sdp: &str) -> u64 {
 /// One cached offer whose deadline fired on this tick.
 struct DueResend {
     pid: ParticipantId,
+    offer_id: String,
     sdp: String,
     track_mapping: Vec<crate::sfu::TrackMapEntry>,
 }
@@ -2175,6 +2285,7 @@ fn sweep_offer_deadlines(
                     .expect("a resend leaves the offer pending");
                 due.push(DueResend {
                     pid: pid.clone(),
+                    offer_id: pending.offer_id.clone(),
                     sdp: pending.sdp.clone(),
                     track_mapping: pending.track_mapping.clone(),
                 });
@@ -2792,7 +2903,7 @@ mod tests {
             }
             if answer_due.as_ref().is_some_and(|(at, _)| t >= *at) {
                 let (_, answer) = answer_due.take().unwrap();
-                peer.accept_server_answer(&answer).unwrap();
+                peer.accept_current_answer(&answer).unwrap();
             }
 
             let mut sent = Vec::new();
@@ -2941,7 +3052,7 @@ mod tests {
             .sdp_api()
             .accept_offer(serde_json::from_str(&track_sdp).unwrap())
             .unwrap();
-        peer.accept_server_answer(&serde_json::to_string(&answer).unwrap())
+        peer.accept_current_answer(&serde_json::to_string(&answer).unwrap())
             .unwrap();
         let (restart_sdp, _) =
             apply_deferred_tracks(&mut peer, now).expect("the restart is offered");
@@ -3006,7 +3117,7 @@ mod tests {
             .sdp_api()
             .accept_offer(serde_json::from_str(&first).unwrap())
             .unwrap();
-        peer.accept_server_answer(&serde_json::to_string(&answer).unwrap())
+        peer.accept_current_answer(&serde_json::to_string(&answer).unwrap())
             .unwrap();
         assert!(peer.has_deferred_changes(), "the second request is pending");
         let (second, _) = apply_deferred_tracks(&mut peer, now).expect("a fresh restart");
@@ -3016,7 +3127,7 @@ mod tests {
             .sdp_api()
             .accept_offer(serde_json::from_str(&second).unwrap())
             .unwrap();
-        peer.accept_server_answer(&serde_json::to_string(&answer).unwrap())
+        peer.accept_current_answer(&serde_json::to_string(&answer).unwrap())
             .unwrap();
         assert!(peer.ice_restart.is_none());
         assert!(!peer.has_deferred_changes());
@@ -3068,7 +3179,7 @@ mod tests {
             .sdp_api()
             .accept_offer(serde_json::from_str(&offer).unwrap())
             .unwrap();
-        peer.accept_server_answer(&serde_json::to_string(&answer).unwrap())
+        peer.accept_current_answer(&serde_json::to_string(&answer).unwrap())
             .unwrap();
         assert!(
             !peer.stayed_disconnected(Instant::now()),
@@ -3142,7 +3253,7 @@ mod tests {
             .sdp_api()
             .accept_offer(serde_json::from_str(&offer).unwrap())
             .unwrap();
-        peer.accept_server_answer(&serde_json::to_string(&answer).unwrap())
+        peer.accept_current_answer(&serde_json::to_string(&answer).unwrap())
             .unwrap();
         assert!(peer.ice_restart.is_none(), "handed over with the answer");
     }
@@ -3348,7 +3459,7 @@ mod tests {
         assert!(peer.rtc.writer(mid).is_none());
 
         let answer = answer_json(&mut caller, &resend[0].sdp);
-        peer.accept_server_answer(&answer).unwrap();
+        peer.accept_current_answer(&answer).unwrap();
         assert!(peer.pending.is_none(), "the answer cancels the resend");
         exchange_until(
             &mut caller,
@@ -3399,7 +3510,7 @@ mod tests {
         let mut peers = HashMap::from([(pid.clone(), peer)]);
         let deadline = final_offer_deadline(&mut peers, &pid, now, &sdp);
         let peer = peers.get_mut(&pid).unwrap();
-        peer.accept_server_answer(&answer).unwrap();
+        peer.accept_current_answer(&answer).unwrap();
         assert!(peer.pending.is_none(), "the answer cancels the resend");
         assert!(peer.rtc.is_alive());
         assert!(sweep_offer_deadlines(&mut peers, deadline).is_empty());
@@ -3424,7 +3535,7 @@ mod tests {
         let now = Instant::now();
         let (sdp, _, mid) = offer_outbound_audio(&mut peer, now);
         let answer = answer_json(&mut caller, &sdp);
-        peer.accept_server_answer(&answer).unwrap();
+        peer.accept_current_answer(&answer).unwrap();
         assert!(peer.pending.is_none());
         assert!(matches!(
             peer.on_offer_deadline(now + OFFER_RETRY_BASE),
@@ -3447,7 +3558,7 @@ mod tests {
         let deadline = final_offer_deadline(&mut peers, &pid, now, &sdp);
 
         let peer = peers.get_mut(&pid).unwrap();
-        peer.accept_server_answer(&answer).unwrap();
+        peer.accept_current_answer(&answer).unwrap();
         assert!(peer.pending.is_none());
         assert_audio_writer(peer, mid);
         assert!(sweep_offer_deadlines(&mut peers, deadline).is_empty());
@@ -3463,7 +3574,7 @@ mod tests {
         assert_eq!(resent.len(), 1, "the sweep resends instead of dropping");
         assert!(peers[&pid].rtc.is_alive());
         let peer = peers.get_mut(&pid).unwrap();
-        peer.accept_server_answer(&answer).unwrap();
+        peer.accept_current_answer(&answer).unwrap();
         assert!(peer.pending.is_none());
         assert_audio_writer(peer, mid);
     }
@@ -3494,43 +3605,65 @@ mod tests {
             .expect("the crossed offer applies on the right pipe");
 
         let err = left
-            .accept_server_answer(&serde_json::to_string(&answer_for_left).unwrap())
+            .accept_current_answer(&serde_json::to_string(&answer_for_left).unwrap())
             .unwrap_err();
         assert!(matches!(err, ServerAnswerError::OutOfOrder));
         assert!(left.pending.is_none(), "the crossed offer took the token");
         assert!(left.rtc.is_alive());
         assert_audio_writer(&mut left, mid);
 
-        right.settle_answer(&serde_json::to_string(&answer_for_right).unwrap());
+        right.settle_current_answer(&serde_json::to_string(&answer_for_right).unwrap());
         assert!(right.rtc.is_alive(), "the loop keeps the pipe");
         assert!(right.pending.is_none());
     }
 
+    /// An answer that carries this offer's SDP but another offer's id is
+    /// refused. The pending offer stays, and the answer that names it is
+    /// accepted. Two offers can share a mid list (an ICE restart reuses
+    /// the m-lines), so the id is what tells them apart.
+    #[test]
+    fn an_answer_with_the_wrong_offer_id_is_refused() {
+        let (mut caller, mut peer) = connected_pair();
+        let now = Instant::now();
+        let (sdp, _, mid) = offer_outbound_audio(&mut peer, now);
+        let id = peer.pending_offer_id().unwrap().to_string();
+        let answer = answer_json(&mut caller, &sdp);
+        let err = peer.accept_server_answer("o-other", &answer).unwrap_err();
+        assert!(matches!(err, ServerAnswerError::NotThisOffer));
+        assert_eq!(peer.pending_offer_id(), Some(id.as_str()));
+        peer.accept_server_answer(&id, &answer).unwrap();
+        assert!(peer.pending.is_none());
+        assert_audio_writer(&mut peer, mid);
+    }
+
     /// A copy of the answer to offer A arrives after offer B, which added an
-    /// m-line. The copy does not take B's token, and B's own answer still
-    /// negotiates.
+    /// m-line. The copy names A's id, so it does not take B's token, and
+    /// B's own answer still negotiates.
     #[test]
     fn a_delayed_answer_for_an_older_offer_keeps_the_peer() {
         let (bind, caller_addr) = pair_addrs();
         let (mut caller, mut peer) = connected_pair();
         let now = Instant::now();
         let (sdp_a, _, mid_a) = offer_outbound_audio(&mut peer, now);
+        let id_a = peer.pending_offer_id().unwrap().to_string();
         let answer_a = answer_json(&mut caller, &sdp_a);
-        peer.accept_server_answer(&answer_a).unwrap();
+        peer.accept_server_answer(&id_a, &answer_a).unwrap();
         assert_audio_writer(&mut peer, mid_a);
 
         let (sdp_b, _, mid_b) = offer_outbound_audio(&mut peer, now);
+        let id_b = peer.pending_offer_id().unwrap().to_string();
+        assert_ne!(id_a, id_b);
         assert_ne!(sdp_mids(&sdp_a), sdp_mids(&sdp_b));
-        let err = peer.accept_server_answer(&answer_a).unwrap_err();
+        let err = peer.accept_server_answer(&id_a, &answer_a).unwrap_err();
         assert!(matches!(err, ServerAnswerError::NotThisOffer));
-        peer.settle_answer(&answer_a);
+        peer.settle_answer(&id_a, &answer_a);
         assert!(peer.rtc.is_alive());
         assert_eq!(peer.pending.as_ref().unwrap().sdp, sdp_b);
         assert_audio_writer(&mut peer, mid_a);
         assert!(peer.rtc.writer(mid_b).is_none());
 
         let answer_b = answer_json(&mut caller, &sdp_b);
-        peer.settle_answer(&answer_b);
+        peer.settle_answer(&id_b, &answer_b);
         assert!(peer.pending.is_none());
         assert!(peer.rtc.is_alive());
         exchange_until(
@@ -3643,7 +3776,7 @@ mod tests {
 
         let answer = answer_json(&mut caller, &sdp);
         let peer = peers.get_mut(&pid).unwrap();
-        peer.accept_server_answer(&answer).unwrap();
+        peer.accept_current_answer(&answer).unwrap();
         assert!(peer.pending.is_none());
         assert_audio_writer(peer, mid);
     }
@@ -3671,6 +3804,30 @@ mod tests {
         assert_eq!(peers[&pid].pending.as_ref().unwrap().sdp, sdp);
     }
 
+    /// A deadline resend and `sfu.callResume` publish the id minted with
+    /// the offer. Neither draws a new one.
+    #[test]
+    fn a_resend_and_a_resume_keep_the_same_offer_id() {
+        let (_caller, mut peer) = connected_pair();
+        let now = Instant::now();
+        let (sdp, _, _) = offer_outbound_audio(&mut peer, now);
+        let id = peer.pending_offer_id().unwrap().to_string();
+        let pid = peer.id.clone();
+        let mut peers = HashMap::from([(pid.clone(), peer)]);
+        let due = sweep_offer_deadlines(&mut peers, now + OFFER_RETRY_BASE);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].offer_id, id);
+        assert_eq!(due[0].sdp, sdp);
+        assert_eq!(peers[&pid].pending_offer_id(), Some(id.as_str()));
+        let peer = peers.get_mut(&pid).unwrap();
+        let (resumed_id, resumed_sdp, _) = peer
+            .resume_offer(now + Duration::from_secs(20))
+            .expect("the offer waits");
+        assert_eq!(resumed_id, id);
+        assert_eq!(resumed_sdp, sdp);
+        assert_eq!(peer.pending_offer_id(), Some(id.as_str()));
+    }
+
     /// `sfu.callResume` while an offer waits: the pending offer goes out
     /// again at once, the same SDP and mapping, and the next deadline resend
     /// waits 30 s from the resume. Without a pending offer it sends nothing.
@@ -3688,7 +3845,7 @@ mod tests {
 
         let resumed_at = now + Duration::from_secs(95);
         let peer = peers.get_mut(&pid).unwrap();
-        let (resumed_sdp, resumed_mapping) =
+        let (_resumed_id, resumed_sdp, resumed_mapping) =
             peer.resume_offer(resumed_at).expect("the offer waits");
         assert_eq!(resumed_sdp, sdp);
         assert_same_mapping(&resumed_mapping, &mapping);
@@ -3704,7 +3861,7 @@ mod tests {
         );
 
         let peer = peers.get_mut(&pid).unwrap();
-        peer.accept_server_answer(&answer_json(&mut caller, &resumed_sdp))
+        peer.accept_current_answer(&answer_json(&mut caller, &resumed_sdp))
             .unwrap();
         assert_audio_writer(peer, mid);
         assert!(peer.resume_offer(resumed_at).is_none());
@@ -3933,7 +4090,7 @@ mod tests {
 
         let client = peers.get_mut(&client_id).unwrap();
         let answer = answer_json(&mut caller, &sdp);
-        client.accept_server_answer(&answer).unwrap();
+        client.accept_current_answer(&answer).unwrap();
         assert!(client.pending.is_none());
         assert_audio_writer(client, mid);
 
@@ -3944,7 +4101,7 @@ mod tests {
         let second_mid = Mid::from(second_mapping[0].mid.as_str());
         assert!(client.rtc.writer(second_mid).is_none());
         let second_answer = answer_json(&mut caller, &second_sdp);
-        client.accept_server_answer(&second_answer).unwrap();
+        client.accept_current_answer(&second_answer).unwrap();
         exchange_until(
             &mut caller,
             &mut client.rtc,
@@ -3969,7 +4126,7 @@ mod tests {
         let now = Instant::now();
         let (sdp, _, mid) = offer_outbound_audio(&mut peer, now);
         assert!(peer.rtc.writer(mid).is_none());
-        peer.accept_server_answer(&answer_json(&mut caller, &sdp))
+        peer.accept_current_answer(&answer_json(&mut caller, &sdp))
             .unwrap();
         assert!(peer.pending.is_none());
         assert!(matches!(
@@ -3999,7 +4156,7 @@ mod tests {
         let now = Instant::now();
         let (sdp, mapping, _) = offer_outbound_audio(&mut peer, now);
         let deadline = peer.pending.as_ref().unwrap().next_deadline;
-        let err = peer.accept_server_answer("{").unwrap_err();
+        let err = peer.accept_current_answer("{").unwrap_err();
         assert!(matches!(err, ServerAnswerError::Parse(_)));
         let pending = peer.pending.as_ref().unwrap();
         assert_eq!(pending.sdp, sdp);
@@ -4562,7 +4719,7 @@ mod tests {
                 .install_pending(pending, sdp, Vec::new(), Instant::now(), false);
             let answer = end.caller.sdp_api().accept_offer(offer).unwrap();
             end.peer
-                .accept_server_answer(&serde_json::to_string(&answer).unwrap())
+                .accept_current_answer(&serde_json::to_string(&answer).unwrap())
                 .unwrap();
             for ((origin_mid, _), out_mid) in tracks.iter().zip(&mids) {
                 end.peer

@@ -220,21 +220,46 @@ impl SfuRoom {
         self.participants.is_empty()
     }
 
+    /// How the caller `did` relates to the session `participant_id` names.
+    pub fn session_access(&self, participant_id: &str, did: &str) -> SessionAccess {
+        let Some(pid) = ParticipantId::parse(participant_id) else {
+            return SessionAccess::Absent;
+        };
+        match self.participants.get(&pid) {
+            Some(participant) if participant.agent_did == did => {
+                SessionAccess::Own(participant.id.clone())
+            }
+            Some(_) => SessionAccess::OtherAgent,
+            None => SessionAccess::Absent,
+        }
+    }
+
     /// The session `participant_id` names, when it is in the room and is
     /// `did`'s: a caller acts on its own sessions only, never on another
     /// session of its DID by accident or on someone else's.
     pub fn session_of(&self, participant_id: &str, did: &str) -> Option<ParticipantId> {
-        let pid = ParticipantId::parse(participant_id)?;
-        self.participants
-            .get(&pid)
-            .filter(|p| p.agent_did == did)
-            .map(|p| p.id.clone())
+        match self.session_access(participant_id, did) {
+            SessionAccess::Own(pid) => Some(pid),
+            SessionAccess::Absent | SessionAccess::OtherAgent => None,
+        }
     }
 
     /// Whether `did` is in the room, on any device.
     pub fn has_did(&self, did: &str) -> bool {
         self.participants.values().any(|p| p.agent_did == did)
     }
+}
+
+/// How a caller's DID relates to a named session. [`SfuRoom::session_of`]
+/// is the own-session case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionAccess {
+    /// The session is in the room and is this DID's.
+    Own(ParticipantId),
+    /// No such session in the room, or the id does not parse.
+    Absent,
+    /// The session is in the room and belongs to another agent.
+    OtherAgent,
 }
 
 /// Room management errors.

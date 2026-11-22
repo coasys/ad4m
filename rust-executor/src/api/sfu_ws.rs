@@ -296,6 +296,7 @@ async fn call_answer_server_offer(
             &p.room_name,
             &agent_did,
             &p.participant_id,
+            &p.offer_id,
             &p.sdp_answer,
         )
         .await
@@ -662,6 +663,8 @@ pub struct SfuAnswerServerOfferParams {
     pub room_name: String,
     /// The caller's session, as its join returned it.
     pub participant_id: String,
+    /// The `offerId` of the `sfu-call-renegotiation-offer` this answers.
+    pub offer_id: String,
     /// JSON-encoded `RTCSessionDescriptionInit`.
     pub sdp_answer: String,
 }
@@ -686,9 +689,9 @@ pub struct SfuResumeParams {
     pub neighbourhood_url: String,
     pub room_name: String,
     /// A session of the caller's agent in this room, as its join returned
-    /// it. Another agent's session, or one no longer in the room, is
-    /// refused. The check is by DID: another device of the same agent may
-    /// resume this session.
+    /// it. A session that is not in the room, or a room that is not there,
+    /// returns false. A session of another agent is refused. The check is
+    /// by DID: another device of the same agent may resume this session.
     pub participant_id: String,
 }
 

@@ -692,7 +692,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     (
         "sfu.callAnswerServerOffer",
-        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1", "sdpAnswer": "{}" }),
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1", "offerId": "o1", "sdpAnswer": "{}" }),
     ),
     (
         "sfu.addIceCandidate",
