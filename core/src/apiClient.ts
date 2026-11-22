@@ -602,9 +602,11 @@ export class ApiClient {
      * and no other frame since it went out — asks the socket itself after
      * PENDING_PROBE_MS, or URGENT_PENDING_PROBE_MS for one sent urgent. The
      * check is one wake for the earliest such request; it fires into
-     * `checkConnection`, so an active probe covers it and the
-     * CHECK_CONNECTION_HEARD_MS silence rule applies. A request the socket
-     * outlives (resent after a reconnect) is armed again when it goes out.
+     * `checkConnection`, so a running probe covers a normal request, an
+     * urgent one moves that probe's verdict earlier to its own wait, and
+     * the CHECK_CONNECTION_HEARD_MS silence rule applies. A request the
+     * socket outlives (resent after a reconnect) is armed again when it
+     * goes out.
      */
     private _armPendingProbe(): void {
         const now = performance.now()
