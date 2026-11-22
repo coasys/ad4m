@@ -264,6 +264,9 @@ fn render_guard(guard: &Guard) -> String {
         }
         Guard::Executor(cap) => format!("`Executor({})`", render_capability(cap)),
         Guard::UserOrOperator(cap) => format!("`UserOrOperator({})`", render_capability(cap)),
+        Guard::UserLoginOrOperator(cap) => {
+            format!("`UserLoginOrOperator({})`", render_capability(cap))
+        }
         Guard::Owns { cap, id, owner } => format!(
             "`Owns({owner:?} {id}, {})`",
             render_capability(&cap(vec!["*".to_string()]))
@@ -284,6 +287,7 @@ pub(crate) fn render_guard_table(map: &HandlerMap) -> String {
         Some(Guard::CapAnyPointer(_)) => "CapAnyPointer",
         Some(Guard::Executor(_)) => "Executor",
         Some(Guard::UserOrOperator(_)) => "UserOrOperator",
+        Some(Guard::UserLoginOrOperator(_)) => "UserLoginOrOperator",
         Some(Guard::Owns { .. }) => "Owns",
         None => "none",
     };
