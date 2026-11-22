@@ -567,9 +567,11 @@ describe('ApiClient checkConnection', () => {
 
     const pings = (i: number) => socket(i).sent.filter(m => m.type === 'ping').length
 
-    it('pings at once; a socket silent for the probe is dropped, the next dialled at once, and onNetworkChange fires when it opens', async () => {
+    it('pings at once; a socket silent for the probe is dropped and the next dialled at once, but no onNetworkChange fires — socket evidence is no network change; onReconnect still does', async () => {
         const changed = jest.fn()
+        const reconnected = jest.fn()
         client.onNetworkChange(changed)
+        client.onReconnect(reconnected)
         open()
         socket(0).open()
         const read = call<string[]>('perspective.all', {}, { timeoutMs: 120_000 })
@@ -582,14 +584,16 @@ describe('ApiClient checkConnection', () => {
 
         await jest.advanceTimersByTimeAsync(1)
         // Silent for the whole probe: dropped, and the next socket dialled
-        // now, with no backoff.
+        // now, with no backoff. The redial is socket evidence only, so it
+        // is not told as a network change.
         expect(pings(0)).toBe(1)
         expect(socket(0).readyState).toBe(2)
         expect(TestSocket.instances).toHaveLength(2)
         expect(changed).not.toHaveBeenCalled()
 
         socket(1).open()
-        expect(changed).toHaveBeenCalledTimes(1)
+        expect(changed).not.toHaveBeenCalled()
+        expect(reconnected).toHaveBeenCalledTimes(1)
         const sent = socket(1).sent.map(m => m.type)
         expect(sent[0]).toBe('events.watch')
         expect(sent).toContain('perspective.all')
@@ -638,7 +642,9 @@ describe('ApiClient checkConnection', () => {
 
     it('sends one probe for several calls while one is pending', async () => {
         const changed = jest.fn()
+        const reconnected = jest.fn()
         client.onNetworkChange(changed)
+        client.onReconnect(reconnected)
         open()
         socket(0).open()
         client.checkConnection()
@@ -649,7 +655,8 @@ describe('ApiClient checkConnection', () => {
         await jest.advanceTimersByTimeAsync(15_500)
         expect(TestSocket.instances).toHaveLength(2)
         socket(1).open()
-        expect(changed).toHaveBeenCalledTimes(1)
+        expect(changed).not.toHaveBeenCalled()
+        expect(reconnected).toHaveBeenCalledTimes(1)
         await jest.advanceTimersByTimeAsync(10_000)
         expect(TestSocket.instances).toHaveLength(2)
     })
@@ -765,9 +772,11 @@ describe('ApiClient pending-request probe', () => {
 
     const pings = (i: number) => socket(i).sent.filter(m => m.type === 'ping').length
 
-    it('probes once a request has had no reply for 4 s and nothing arrived since it was sent', async () => {
+    it('probes once a request has had no reply for 4 s and nothing arrived since it was sent; a give-up redials with no onNetworkChange, only onReconnect', async () => {
         const changed = jest.fn()
+        const reconnected = jest.fn()
         client.onNetworkChange(changed)
+        client.onReconnect(reconnected)
         open()
         socket(0).open()
         const read = call<string[]>('perspective.all', {}, { timeoutMs: 120_000 })
@@ -781,8 +790,11 @@ describe('ApiClient pending-request probe', () => {
         await jest.advanceTimersByTimeAsync(8_000)
         expect(socket(0).readyState).toBe(2)
         expect(TestSocket.instances).toHaveLength(2)
+        expect(changed).not.toHaveBeenCalled()
+
         socket(1).open()
-        expect(changed).toHaveBeenCalledTimes(1)
+        expect(changed).not.toHaveBeenCalled()
+        expect(reconnected).toHaveBeenCalledTimes(1)
         socket(1).reply({ id: socket(1).sent.find(m => m.type === 'perspective.all')!.id, result: ['p'] })
         await expect(read).resolves.toEqual(['p'])
     })
@@ -952,7 +964,7 @@ describe('ApiClient on a network change', () => {
         await expect(read).resolves.toEqual(['p'])
     })
 
-    it('checks the socket when navigator.connection changes type: one that answers stays', () => {
+    it('checks the socket when navigator.connection changes type: one that answers stays, and the change is told once on it', () => {
         setNet({ type: 'wifi' })
         const changed = jest.fn()
         client.onNetworkChange(changed)
@@ -962,27 +974,75 @@ describe('ApiClient on a network change', () => {
         setNet({ type: 'cellular' })
         connection.dispatchEvent(new Event('change'))
         expect(socket(0).sent.at(-1)?.type).toBe('ping')
+        // The path changed whatever the socket says, so the callback is
+        // coming; it waits for the socket to prove itself first.
+        expect(changed).not.toHaveBeenCalled()
         socket(0).reply({ type: 'pong' })
+        expect(changed).toHaveBeenCalledTimes(1)
         jest.advanceTimersByTime(5_000)
         expect(socket(0).readyState).toBe(1)
         expect(TestSocket.instances).toHaveLength(1)
-        expect(changed).not.toHaveBeenCalled()
+        expect(changed).toHaveBeenCalledTimes(1)
     })
 
-    it('redials on a change of navigator.connection when the socket stays silent', () => {
-        setNet({ type: 'wifi' })
+    it('tells a connection change at once on a socket just heard from', () => {
+        setNet({ type: 'wifi', onLine: true })
         const changed = jest.fn()
         client.onNetworkChange(changed)
+        open()
+        socket(0).open()
+        socket(0).reply({ type: 'pong' })
+
+        setNet({ type: 'cellular' })
+        connection.dispatchEvent(new Event('change'))
+        // The socket delivered moments ago and needs no probe: it is open
+        // and proven, so the callback goes out on it now.
+        expect(changed).toHaveBeenCalledTimes(1)
+        expect(socket(0).sent.every(m => m.type !== 'ping')).toBe(true)
+        jest.advanceTimersByTime(10_000)
+        expect(changed).toHaveBeenCalledTimes(1)
+    })
+
+    it('redials on a change of navigator.connection when the socket stays silent, and still tells the change once', () => {
+        setNet({ type: 'wifi' })
+        const changed = jest.fn()
+        const reconnected = jest.fn()
+        client.onNetworkChange(changed)
+        client.onReconnect(reconnected)
         open()
         socket(0).open()
 
         setNet({ type: 'cellular' })
         connection.dispatchEvent(new Event('change'))
-        connection.dispatchEvent(new Event('change'))
+        connection.dispatchEvent(new Event('change')) // same path: no second mark
         expect(TestSocket.instances).toHaveLength(1)
         jest.advanceTimersByTime(16_000)
+        // The probe gave up: that is socket evidence and only redials —
+        // the change's own mark still waits for a socket to tell it on.
         expect(TestSocket.instances).toHaveLength(2)
         socket(1).open()
+        expect(reconnected).toHaveBeenCalledTimes(1)
+        expect(changed).toHaveBeenCalledTimes(1)
+        jest.advanceTimersByTime(30_000)
+        expect(changed).toHaveBeenCalledTimes(1)
+    })
+
+    it('cuts the reconnect backoff short on a connection change and tells the change once the socket opens', () => {
+        setNet({ type: 'wifi' })
+        const changed = jest.fn()
+        client.onNetworkChange(changed)
+        open()
+        socket(0).open()
+        socket(0).drop()
+        jest.advanceTimersByTime(500)
+        socket(1).drop()
+        // Backing off for 1 s now; the path change ends the wait.
+        expect(TestSocket.instances).toHaveLength(2)
+        setNet({ type: 'cellular' })
+        connection.dispatchEvent(new Event('change'))
+        expect(changed).not.toHaveBeenCalled()
+        expect(TestSocket.instances).toHaveLength(3)
+        socket(2).open()
         expect(changed).toHaveBeenCalledTimes(1)
     })
 

@@ -334,7 +334,7 @@ including while the command waits for a slot in the bounded queue.
 on ICE `disconnected` or a network change the SDK restarts ICE in place (the
 SFU stays the only offerer: the restart comes as a server renegotiation
 offer), and rebuilds the call if that has not reconnected within 15 s; after
-a socket reconnect or a network change it restarts ICE only if ICE is not
+a socket reconnect with no network change it restarts ICE only if ICE is not
 connected 2 s later; a failed connection is rebuilt at once, a rebuild
 retries the join for 120 s, and after 3 rebuilds in 2 min the SDK ends the
 call: it closes the connection, leaves the session, emits `error` and then
@@ -361,16 +361,25 @@ restart in place, changes nothing.
 `ApiClient` drops an executor socket whose ping stays unanswered for a ping
 interval (10 s, `PING_INTERVAL_MS`; longer while a large write it sent may
 still be crossing a 16 kB/s link) and dials a new one, so a
-socket a network switch left OPEN is noticed in 10 to 20 s. `online` redials
-at once; `change` on `navigator.connection` (only when its `type` or
-`navigator.onLine` changed) runs `checkConnection`, and so does a request
-that has had no reply for 4 s (`PENDING_PROBE_MS`) on a socket nothing
+socket a network switch left OPEN is noticed in 10 to 20 s. `onNetworkChange`
+fires only for platform network events: `online` redials at once and tells
+it once the new socket is open, and `change` on `navigator.connection`
+(only when its `type` or `navigator.onLine` changed) marks a change that is
+told once an open socket is proven — the local path changed, so media must
+restart — while the socket itself is judged by socket evidence through
+`checkConnection`, which also runs when a request
+has had no reply for 4 s (`PENDING_PROBE_MS`) on a socket nothing
 arrived on since it was sent. The probe sends no ping when the socket
 delivered a message in the last 5 s and drops a socket that answered
 nothing for 8 s after one probe; any frame proves the socket, so a slow
 request on a socket that keeps delivering fails as an RPC timeout, not a
-dead socket. The call layer never probes the socket: ICE `disconnected` is
-media evidence, and its whole answer is the ICE restart.
+dead socket. A probe that gives up only redials, at once and without
+backoff — socket evidence is not a network change, so no `onNetworkChange`
+fires for it; `onReconnect` on the new socket is its signal, and the SFU
+answers that with `socketBack` (resend what a fault kept, `sfu.callResume`,
+`checkIceSoon`), not an immediate ICE restart. The call layer never probes
+the socket: ICE `disconnected` is media evidence, and its whole answer is
+the ICE restart.
 
 SFU behind NAT (`rust-executor/src/sfu/{server,reachability}.rs`): the SFU
 binds `sfu_bind_addr` on `sfu_udp_port` (0/unset: ephemeral; a fixed port

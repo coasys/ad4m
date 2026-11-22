@@ -221,7 +221,7 @@ export class ApiClient {
     private _networkCallbacks = new Set<() => void>()
     /** Removes the network-change listeners; null while not listening. */
     private _unlistenNetwork: (() => void) | null = null
-    /** A network change waits for its socket to open, then tells `onNetworkChange`. */
+    /** A network change waits for an open socket to tell `onNetworkChange` on. */
     private _networkChanged = false
     /** The socket dialled for the last network change. */
     private _networkDial: WebSocket | null = null
@@ -270,6 +270,12 @@ export class ApiClient {
                 this._wsHeardAt = performance.now()
                 this._endProbe()
                 this._armPendingProbe()
+                // A frame also proves the socket a path change was judging:
+                // the change's callbacks can go out on it now.
+                if (this._networkChanged) {
+                    this._networkChanged = false
+                    this._notifyNetworkChange()
+                }
             }
             let parsed: Record<string, unknown>
             try { parsed = JSON.parse(event.data) } catch (e) {
@@ -346,10 +352,11 @@ export class ApiClient {
 
     /**
      * Hear of network changes where the platform says so: `online` on the
-     * global object (browsers, Deno) redials at once, and `change` on
-     * `navigator.connection` (Chromium) runs `checkConnection`. Elsewhere,
-     * e.g. Node, nothing is heard and the ping deadline notices a dead
-     * socket on its own.
+     * global object (browsers, Deno) redials at once and tells
+     * `onNetworkChange`, and a `change` on `navigator.connection` (Chromium)
+     * whose connection type or online state moved marks a change and runs
+     * `checkConnection` on the socket. Elsewhere, e.g. Node, nothing is
+     * heard and the ping deadline notices a dead socket on its own.
      */
     private _listenForNetworkChanges(): void {
         if (this._unlistenNetwork) return
@@ -365,46 +372,102 @@ export class ApiClient {
         if (typeof connection?.addEventListener === 'function') {
             // `change` also fires when Chromium's downlink or rtt estimate
             // moves, as a busy call makes it do. Only a new connection type or
-            // a new online state says the path may have changed: probe then.
+            // a new online state says the path may have changed.
             const path = () => `${connection.type}|${navigator?.onLine}`
             let lastPath = path()
-            const probe = () => {
+            const onPathChange = () => {
                 const now = path()
                 if (now === lastPath) return
                 lastPath = now
-                this.checkConnection()
+                this._onConnectionChange()
             }
-            connection.addEventListener('change', probe)
-            removers.push(() => connection.removeEventListener?.('change', probe))
+            connection.addEventListener('change', onPathChange)
+            removers.push(() => connection.removeEventListener?.('change', onPathChange))
         }
         this._unlistenNetwork = () => { for (const remove of removers) remove() }
     }
 
     /**
-     * The network changed: the open socket most likely runs over a path that
-     * is gone, and nothing would say so before the ping deadline. Drop it as
-     * a silent socket is dropped and dial the next one now, without backoff.
-     * `onNetworkChange` callbacks fire once that socket opens.
+     * `online` says the network changed: the open socket most likely runs
+     * over a path that is gone, and nothing would say so before the ping
+     * deadline. Drop it as a silent socket is dropped and dial the next one
+     * now, without backoff. `onNetworkChange` callbacks fire once that
+     * socket opens.
      */
     private _onNetworkChange(): void {
         if (this._authFailed !== null) return
         const ws = this._ws
         // A socket dialled for an earlier change is on the new network already.
         if (ws && ws === this._networkDial && ws.readyState === 0 /* CONNECTING */) return
-        if (ws) {
-            console.info('Network changed; reconnecting the WebSocket')
-            this._onClose(ws)
-            ws.close()
-        }
-        this._cancelReconnect()
-        this._wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
+        if (ws) console.info('Network changed; reconnecting the WebSocket')
+        this._redialNow()
         if (this._handlers.size === 0 && this._pendingCalls.size === 0) {
             this._notifyNetworkChange()
             return
         }
         this._networkChanged = true
-        this._ensureWs()
         this._networkDial = this._ws
+    }
+
+    /**
+     * The local path changed (`navigator.connection` reported a new `type`
+     * or `onLine`): media must restart, so `onNetworkChange` fires even if
+     * the socket survives. The socket itself is judged by socket evidence —
+     * `checkConnection` — and a probe that gives up only redials
+     * (`_redialNow`), which raises no second notification: the mark here is
+     * this change's one.
+     *
+     * The callbacks still run once a socket is open, so calls they make go
+     * out on it rather than dying on a doomed one: a socket just heard from
+     * needs no probe, so they run on it at once; with a probe in flight the
+     * verdict decides — a frame notifies from `onmessage`, a drop notifies
+     * on the next socket's open; a dial in flight or due notifies on open.
+     */
+    private _onConnectionChange(): void {
+        if (this._authFailed !== null) return
+        this._networkChanged = true
+        const ws = this._ws
+        if (ws?.readyState === 1 /* OPEN */) {
+            this.checkConnection()
+            // A probe, new or already running, decides the socket now.
+            if (this._wsProbeTimer) return
+            // checkConnection saw no need to probe (a frame just arrived):
+            // the socket is open and proven, so the callbacks go out on it.
+            this._networkChanged = false
+            this._notifyNetworkChange()
+            return
+        }
+        // No open socket to judge: a dial in flight or the backoff's one
+        // notifies when it opens; cut that wait short, as `online` does —
+        // the new path may reach the executor sooner.
+        if (this._handlers.size === 0 && this._pendingCalls.size === 0) {
+            this._networkChanged = false
+            this._notifyNetworkChange()
+            return
+        }
+        this._cancelReconnect()
+        this._wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
+        if (!ws) this._ensureWs()
+        this._networkDial = this._ws
+    }
+
+    /**
+     * Drop the open socket, if there is one, and dial the next one at once,
+     * without the reconnect backoff. A probe that gave up on a silent
+     * socket takes this path too — socket evidence, not a network change —
+     * so it marks no `_networkChanged` and fires no `onNetworkChange`
+     * callback; `onReconnect` on the new socket is the only signal it
+     * sends.
+     */
+    private _redialNow(): void {
+        const ws = this._ws
+        if (ws) {
+            this._onClose(ws)
+            ws.close()
+        }
+        this._cancelReconnect()
+        this._wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
+        if (this._handlers.size > 0 || this._pendingCalls.size > 0) this._ensureWs()
     }
 
     private _notifyNetworkChange(): void {
@@ -819,10 +882,13 @@ export class ApiClient {
         return () => { this._reconnectCallbacks.delete(callback) }
     }
 
-    /** Register a callback that fires after the network changed (`online`,
-     *  or a socket that failed `checkConnection`), once the socket dialled for the
-     *  new network is open and its event watch sent. Calls made from it go
-     *  out on that socket. Returns an unsubscribe function. */
+    /** Register a callback that fires after the network changed — `online`
+     *  on the global object, or a `navigator.connection` `change` whose
+     *  connection type or online state moved — once a socket is open and its
+     *  event watch sent. Calls made from it go out on that socket. A socket
+     *  dropped for answering a probe with silence is not a network change:
+     *  `onReconnect` fires for it, this does not. Returns an unsubscribe
+     *  function. */
     onNetworkChange(callback: () => void): () => void {
         this._networkCallbacks.add(callback)
         this._listenForNetworkChanges()
@@ -832,13 +898,14 @@ export class ApiClient {
     /**
      * Check the open socket now rather than at the next ping: send a ping,
      * and if nothing at all arrives on that socket within
-     * CHECK_CONNECTION_DEADLINE_MS, treat it as a network change (drop it,
-     * dial the next one at once, `onNetworkChange` callbacks fire when it
-     * opens). Any message keeps it. The client runs it itself when the
-     * network path may have changed (`navigator.connection`), and when a
-     * request has had no reply for PENDING_PROBE_MS on a socket nothing
-     * arrived on since it was sent. Without an open socket, while a check
-     * runs, or when the socket delivered a message in the last
+     * CHECK_CONNECTION_DEADLINE_MS, drop it and dial the next one at once —
+     * socket evidence, not a network change, so the redial fires
+     * `onReconnect` but no `onNetworkChange`. Any message keeps it. The
+     * client runs it itself when the network path may have changed
+     * (`navigator.connection`, where the change itself is what notifies),
+     * and when a request has had no reply for PENDING_PROBE_MS on a socket
+     * nothing arrived on since it was sent. Without an open socket, while a
+     * check runs, or when the socket delivered a message in the last
      * CHECK_CONNECTION_HEARD_MS, this does nothing.
      */
     checkConnection(): void {
@@ -864,7 +931,8 @@ export class ApiClient {
             this._wsProbeTimer = null
             if (this._ws !== ws) return
             console.warn(`WebSocket silent for ${wait} ms after a check; reconnecting`)
-            this._onNetworkChange()
+            // Socket evidence, not a network change: only redial.
+            this._redialNow()
         }, wait)
     }
 
