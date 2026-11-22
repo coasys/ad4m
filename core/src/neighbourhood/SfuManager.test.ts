@@ -2639,6 +2639,48 @@ test("a resume that says the session is not listed rejoins the call", async () =
     await manager.leave()
 })
 
+test("a resume that says the session is not listed rejoins though the last roster listed it", async () => {
+    // The socket drop that took the session took the departure roster with
+    // it, so the newest roster this client holds still lists it.
+    const api = fakeApi()
+    api.sfuCallResume.mockResolvedValue({ listed: false })
+    api.sfuCallJoin.mockResolvedValueOnce(session()).mockResolvedValueOnce(session({ participantId: "P2" }))
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    api.emitRoster(roster([ALICE, ME]))
+    await flush()
+
+    api.emitReconnect()
+    await flush()
+    await flush()
+
+    expect(api.sfuCallResume).toHaveBeenCalledWith(URL, ROOM, MINE)
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+    expect(manager.getState().participantId).toBe("P2")
+    await manager.leave()
+})
+
+test("a roster newer than the resume's ask that lists this session again cancels the listed:false rebuild", async () => {
+    const api = fakeApi()
+    const resuming = deferred<SfuResumeResult>()
+    api.sfuCallResume.mockImplementation(() => resuming.promise)
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+    await flush()
+
+    api.emitReconnect()
+    await flush()
+    // Newer than the ask, and listing again: the session is back.
+    api.emitRoster(roster([ALICE, ME]))
+    await flush()
+    resuming.resolve({ listed: false })
+    await flush()
+
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+    await manager.leave()
+})
+
 test("a resume that lists the session keeps the call", async () => {
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL)

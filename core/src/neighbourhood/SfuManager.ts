@@ -364,9 +364,10 @@ export class SfuManager {
     private networkUnsubscribe: (() => void) | null = null
     /** Running while the room's roster leaves this session out: see `noticeRoster`. */
     private unlistedTimer: ReturnType<typeof setTimeout> | null = null
-    /** Whether the last roster this join saw lists this session. A resume
-     *  that says the session is gone rebuilds only if none has since. */
-    private listedInRoster = true
+    /** The revision of the newest applied roster that listed this session.
+     *  A resume's `listed: false` stands unless a roster newer than its ask
+     *  listed the session meanwhile — a boolean could not order the two. */
+    private listedAtRevision = 0
     /** The highest roster `revision` this join applied; older rosters and
      *  resume replies are dropped. Reset per join: a new room's revisions
      *  start at 1 again. */
@@ -831,14 +832,13 @@ export class SfuManager {
      * replaced session never rejoins and never takes the call back from the
      * newer tab.
      */
-    private noticeRoster(pc: RTCPeerConnection, sessions: SfuRosterParticipant[]): void {
+    private noticeRoster(pc: RTCPeerConnection, sessions: SfuRosterParticipant[], revision: number): void {
         const participantId = this.state.participantId
         if (!participantId || sessions.some((s) => s.participantId === participantId)) {
-            this.listedInRoster = true
+            if (participantId) this.listedAtRevision = revision
             this.clearUnlistedTimer()
             return
         }
-        this.listedInRoster = false
         if (this.unlistedTimer) return
         this.unlistedTimer = setTimeout(() => {
             this.unlistedTimer = null
@@ -906,7 +906,7 @@ export class SfuManager {
         const waiting: SfuCallRenegotiationOffer[] = []
         // A queue per connection: a step stuck on a dropped connection holds nothing of this one.
         this.offerQueue = Promise.resolve()
-        this.listedInRoster = true
+        this.listedAtRevision = 0
         this.rosterRevision = 0
         this.renegotiationUnsubscribe = this.neighbourhood.subscribeSfuCallRenegotiationOffer(
             this.agentDid,
@@ -929,7 +929,7 @@ export class SfuManager {
             void joined.then(() => {
                 if (this.state.peerConnection !== pc) return
                 this.applyRoster(roster.participants, true)
-                this.noticeRoster(pc, roster.participants)
+                this.noticeRoster(pc, roster.participants, roster.revision)
             })
         })
         // A notice can name the id the join in flight is about to return.
@@ -1065,7 +1065,8 @@ export class SfuManager {
      * Ask the executor for this session's state (`sfu.callResume`). The
      * reply's roster and pending offer apply like the events that carry
      * them. `listed: false` — the room or the session gone — rebuilds the
-     * call, unless a roster listed it again meanwhile. A socket fault (503,
+     * call, unless a roster newer than the ask listed it again meanwhile.
+     * A socket fault (503,
      * 408) keeps the call: the next reconnect asks again. A 403 ends it: the
      * session the join returned is another agent's, so there is no call to
      * keep.
@@ -1073,6 +1074,7 @@ export class SfuManager {
     private async resume(pc: RTCPeerConnection): Promise<void> {
         const participantId = this.state.participantId
         if (!participantId || this.state.peerConnection !== pc) return
+        const askedAtRevision = this.rosterRevision
         let result: SfuResumeResult
         try {
             result = await this.neighbourhood.sfuCallResume(this.neighbourhoodUrl, this.roomId, participantId)
@@ -1092,9 +1094,11 @@ export class SfuManager {
         }
         if (this.state.peerConnection !== pc || this.state.participantId !== participantId) return
         if (!result.listed) {
-            // A roster published between the question and the reply can list
-            // this session again; it cancels the rebuild.
-            if (this.listedInRoster) return
+            // Only a roster applied since the request went out, and listing
+            // this session, cancels the rebuild: the last one it knows of may
+            // predate the socket drop that took the session and its departure
+            // roster with it.
+            if (this.listedAtRevision > askedAtRevision) return
             console.info("SFU: the executor no longer lists this session, rebuilding the call")
             void this.reconnect()
             return
@@ -1102,7 +1106,7 @@ export class SfuManager {
         if (result.roster && result.roster.revision > this.rosterRevision) {
             this.rosterRevision = result.roster.revision
             this.applyRoster(result.roster.participants, true)
-            this.noticeRoster(pc, result.roster.participants)
+            this.noticeRoster(pc, result.roster.participants, result.roster.revision)
         }
         const offer = result.offer
         if (offer && offer.participantId === participantId) {
