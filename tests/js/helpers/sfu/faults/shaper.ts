@@ -38,6 +38,8 @@ export interface Shape {
 /** Bytes a direction may hold before its source is paused, as a path's buffers fill. */
 const HIGH_WATER = 256 * 1024;
 const LOW_WATER = 64 * 1024;
+/** setTimeout's longest delay: a hold for good (`silence()`) waits this, again and again. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
 /** The largest piece sent at once, so a rate limit paces evenly. */
 const SLICE = 4 * 1024;
 
@@ -101,7 +103,7 @@ class Direction {
         this.timer = setTimeout(() => {
           this.timer = null;
           this.pump();
-        }, due - now);
+        }, Math.min(due - now, MAX_TIMER_MS));
         return;
       }
       this.queue.shift();
