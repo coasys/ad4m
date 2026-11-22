@@ -101,10 +101,11 @@ import { RpcError } from "../apiClient"
 import { defaultDeviceId, SfuManager, type SfuNeighbourhoodApi, type SfuParticipantState } from "./SfuManager"
 import type {
     CallSessionInfo,
+    SfuAnswerResult,
     SfuCallRenegotiationOffer,
     SfuConfig,
     SfuDataMessage,
-    SfuRoomInfo,
+    SfuResumeResult,
     SfuRoomRoster,
     SfuSessionReplaced,
     TrackMapEntry,
@@ -139,10 +140,12 @@ function session(overrides: Partial<CallSessionInfo> = {}): CallSessionInfo {
     }
 }
 
+/** A server offer; its `offerId` names it, so a resend of the same offer carries the same id. */
 function offer(sdp: string, trackMapping?: TrackMapEntry[], participantId = MINE): SfuCallRenegotiationOffer {
     return {
         targetDid: ME,
         participantId,
+        offerId: `offer-${sdp}`,
         neighbourhoodUrl: URL,
         roomName: ROOM,
         sdpOffer: JSON.stringify({ type: "offer", sdp }),
@@ -174,20 +177,12 @@ function roster(
     return { neighbourhoodUrl: URL, roomName: ROOM, participants: listed, ...overrides }
 }
 
-/** The room as `sfu.listRooms` returns it, with the sessions given as `[participantId, did]`. */
-function room(...sessions: [string, string][]): SfuRoomInfo {
+/** `sfu.callResume` saying this session is still listed, its room's roster attached. */
+function resumeListed(overrides: Partial<SfuResumeResult> = {}): SfuResumeResult {
     return {
-        neighbourhoodUrl: URL,
-        roomName: ROOM,
-        participantCount: sessions.length,
-        participants: sessions.map(([participantId, agentDid]) => ({
-            participantId,
-            agentDid,
-            hasAudio: false,
-            hasVideo: false,
-            isActiveSpeaker: false,
-        })),
-        createdAtMs: 0,
+        listed: true,
+        roster: { participants: [{ participantId: MINE, agentDid: ME }] },
+        ...overrides,
     }
 }
 
@@ -241,9 +236,9 @@ function fakeApi() {
             return true
         }),
         sfuCallSetQualityPreference: jest.fn(async () => true),
-        sfuCallAnswerServerOffer: jest.fn(async () => {
+        sfuCallAnswerServerOffer: jest.fn(async (): Promise<SfuAnswerResult> => {
             log.push("sfuCallAnswerServerOffer")
-            return true
+            return { accepted: true }
         }),
         subscribeSfuCallRenegotiationOffer: jest.fn(
             (_did: string, handler: (e: SfuCallRenegotiationOffer) => void) => {
@@ -282,12 +277,10 @@ function fakeApi() {
             reconnectHandlers.add(handler)
             return () => { reconnectHandlers.delete(handler) }
         }),
-        sfuCallResume: jest.fn(async (_url: string, _room: string, _participantId: string) => {
+        sfuCallResume: jest.fn(async (): Promise<SfuResumeResult> => {
             log.push("sfuCallResume")
-            return true
+            return resumeListed()
         }),
-        // The room read before an unlisted rebuild: by default the executor lists nobody.
-        sfuListRooms: jest.fn(async (): Promise<SfuRoomInfo[]> => []),
         sfuAddIceCandidate: jest.fn(async () => true),
         sfuSendData: jest.fn(async () => true),
         subscribeSfuDataChannel: jest.fn(() => () => {}),
@@ -369,6 +362,7 @@ test("offers that arrive before the join completes apply after its answer, the n
         URL,
         ROOM,
         MINE,
+        offer("early-2").offerId,
         JSON.stringify({ type: "answer", sdp: "local-answer" }),
     )
 })
@@ -377,7 +371,7 @@ test("a second offer waits until the first one is answered", async () => {
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL)
     await manager.join(fakeStream())
-    const answered = deferred<boolean>()
+    const answered = deferred<SfuAnswerResult>()
     api.sfuCallAnswerServerOffer.mockImplementationOnce(() => answered.promise)
 
     api.emitOffer(offer("first"))
@@ -387,7 +381,7 @@ test("a second offer waits until the first one is answered", async () => {
     const pc = currentPc()
     expect(pc.remoteSdps()).toEqual(["server-answer", "first"])
 
-    answered.resolve(true)
+    answered.resolve({ accepted: true })
     await flush()
     expect(pc.remoteSdps()).toEqual(["server-answer", "first", "second"])
     expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(2)
@@ -417,7 +411,7 @@ test("an offer queued for a connection that has since been replaced is dropped",
     const manager = new SfuManager(api, ROOM, ME, URL)
     await manager.join(fakeStream())
     const old = currentPc()
-    const answered = deferred<boolean>()
+    const answered = deferred<SfuAnswerResult>()
     api.sfuCallAnswerServerOffer.mockImplementationOnce(() => answered.promise)
     api.emitOffer(offer("first"))
     await flush()
@@ -427,7 +421,7 @@ test("an offer queued for a connection that has since been replaced is dropped",
     await iceState("failed")
     const replacement = currentPc()
     expect(replacement).not.toBe(old)
-    answered.resolve(true)
+    answered.resolve({ accepted: true })
     await flush()
 
     expect(old.remoteSdps()).toEqual(["server-answer", "first"])
@@ -679,6 +673,11 @@ test("a roster that leaves this session out rebuilds the call after the grace", 
     jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
     try {
         const api = fakeApi()
+        // The executor's answer to the resume: the session is gone.
+        api.sfuCallResume.mockImplementation(async () => {
+            api.log.push("sfuCallResume")
+            return { listed: false }
+        })
         const manager = new SfuManager(api, ROOM, ME, URL)
         await manager.join(fakeStream())
         const dropped = currentPc()
@@ -692,6 +691,7 @@ test("a roster that leaves this session out rebuilds the call after the grace", 
         await jest.advanceTimersByTimeAsync(1)
         expect(dropped.closed).toBe(true)
         expect(api.log).toEqual([
+            "sfuCallResume",
             "unsubscribe-offer",
             "unsubscribe-roster",
             "sfuCallLeave",
@@ -759,6 +759,7 @@ test("after a cancelled grace, a later roster without this session starts a new 
         await jest.advanceTimersByTimeAsync(10_000)
         expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
 
+        api.sfuCallResume.mockResolvedValue({ listed: false })
         api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
         await flush()
         await jest.advanceTimersByTimeAsync(3_000)
@@ -806,6 +807,7 @@ test("a rebuild for ICE ends the old grace, and the new connection gets its own"
         await iceState("failed")
         expect(FakePeerConnection.instances).toHaveLength(2)
 
+        api.sfuCallResume.mockResolvedValue({ listed: false })
         api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
         await flush()
         await jest.advanceTimersByTimeAsync(2_999)
@@ -823,6 +825,7 @@ test("a roster that lists another device of this agent but not this session rebu
     try {
         const api = fakeApi()
         const manager = new SfuManager(api, ROOM, ME, URL, undefined, undefined, DEVICE)
+        api.sfuCallResume.mockResolvedValue({ listed: false })
         await manager.join(fakeStream())
         const dropped = currentPc()
         api.log.length = 0
@@ -1146,7 +1149,7 @@ test("the join sends the device id; every later call names the participant id th
         [URL, ROOM, MINE, "early"],
         [URL, ROOM, MINE, "late"],
     ])
-    expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledWith(URL, ROOM, MINE, expect.any(String))
+    expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledWith(URL, ROOM, MINE, offer("next").offerId, expect.any(String))
     expect(api.sfuCallSetQualityPreference).toHaveBeenCalledWith(URL, ROOM, MINE, "low")
     expect(api.sfuSendData).toHaveBeenCalledWith(URL, ROOM, MINE, "chat", "hi", false)
     expect(api.sfuCallLeave.mock.calls).toEqual([[URL, ROOM, MINE]])
@@ -1446,9 +1449,8 @@ test("ICE disconnected also checks the executor socket once, with the restart", 
     }
 })
 
-test("ICE disconnected checks the socket with a 3 s deadline, so a dead socket is redialled before the 15 s restart timeout", async () => {
-    // Two probes of 8 s (16 s) outlast the restart's 15 s; ICE going
-    // disconnected is its own proof of a broken path.
+test("ICE disconnected checks the socket with the shared deadline", async () => {
+    // One probe, no SFU override: the same wait the other callers get.
     fakeTimers()
     try {
         const api = fakeApi()
@@ -1457,7 +1459,7 @@ test("ICE disconnected checks the socket with a 3 s deadline, so a dead socket i
         await iceState("connected")
 
         await iceState("disconnected")
-        expect(api.checkConnection.mock.calls).toEqual([[3_000]])
+        expect(api.checkConnection.mock.calls).toEqual([[]])
         await manager.leave()
     } finally {
         jest.useRealTimers()
@@ -1502,6 +1504,7 @@ test("a lost restart offer stays open until the executor can resend it", async (
             URL,
             ROOM,
             MINE,
+            offer("restart-offer").offerId,
             JSON.stringify({ type: "answer", sdp: "local-answer" }),
         )
 
@@ -1639,6 +1642,7 @@ test("a roster that leaves this agent out during a restart rebuilds after its gr
     fakeTimers()
     try {
         const api = fakeApi()
+        api.sfuCallResume.mockResolvedValue({ listed: false })
         const manager = new SfuManager(api, ROOM, ME, URL)
         await manager.join(fakeStream())
         await iceState("connected")
@@ -1819,19 +1823,17 @@ test.each([
     expect(api.sfuCallLeave).not.toHaveBeenCalled()
     expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
 
-    // The executor never got the answer: the resume sends its offer again.
-    api.sfuCallResume.mockImplementationOnce(async () => {
-        api.emitOffer(offer("renegotiate"))
-        return true
-    })
+    // The socket is back: the answer it kept goes out again, and the
+    // manager asks the executor for what it missed (`sfu.callResume`).
     api.emitReconnect()
     await flush()
     await flush()
     const answer = JSON.stringify({ type: "answer", sdp: "local-answer" })
     expect(api.sfuCallAnswerServerOffer.mock.calls).toEqual([
-        [URL, ROOM, MINE, answer],
-        [URL, ROOM, MINE, answer],
+        [URL, ROOM, MINE, "offer-renegotiate", answer],
+        [URL, ROOM, MINE, "offer-renegotiate", answer],
     ])
+    expect(api.sfuCallResume).toHaveBeenCalledWith(URL, ROOM, MINE)
     // Applied once: the second send is the same answer, not a second negotiation.
     expect(pc.remoteSdps()).toEqual(["server-answer", "renegotiate"])
 
@@ -1861,7 +1863,7 @@ test("an offer the executor resends while its answer is unsent gets that answer,
     expect(api.sfuCallLeave).not.toHaveBeenCalled()
 })
 
-test("an executor that refuses the answer does not make the client rebuild", async () => {
+test("an executor that fails the answer's RPC does not make the client rebuild", async () => {
     // Whether the server still has the session is for the roster and ICE to say.
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL)
@@ -1874,6 +1876,36 @@ test("an executor that refuses the answer does not make the client rebuild", asy
     expect(currentPc().closed).toBe(false)
     expect(api.sfuCallLeave).not.toHaveBeenCalled()
     expect(manager.getState().participantId).toBe(MINE)
+})
+
+test.each(["stale", "no-pending"] as const)("an answer refused as %s changes nothing: a newer offer is coming or was settled", async (reason) => {
+    // The server names why it did not take the answer; both mean this offer
+    // is settled elsewhere, not that the session is gone.
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    api.sfuCallAnswerServerOffer.mockResolvedValueOnce({ accepted: false, reason })
+
+    api.emitOffer(offer("renegotiate"))
+    await flush()
+
+    expect(currentPc().closed).toBe(false)
+    expect(api.sfuCallLeave).not.toHaveBeenCalled()
+    expect(manager.getState().participantId).toBe(MINE)
+})
+
+test("an answer refused as unknown-session rebuilds the call", async () => {
+    // The event loop no longer holds this session: the call cannot go on with it.
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    api.sfuCallAnswerServerOffer.mockResolvedValueOnce({ accepted: false, reason: "unknown-session" })
+
+    api.emitOffer(offer("renegotiate"))
+    await flush()
+
+    expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
 })
 
 test("an offer the connection cannot apply still rebuilds the call", async () => {
@@ -1909,9 +1941,10 @@ test("after the socket reconnects the manager asks the executor to resume its se
     await manager.leave()
 })
 
-test("after the socket is back the resume goes first: a restart offer whose event was lost is answered, never with the answer kept for the offer before it", async () => {
-    // The server matches an answer by its mid list only (#1834): the answer
-    // kept for X, sent first, would use up R's token.
+test("after the socket is back a restart offer whose event was lost is answered through the resume's reply", async () => {
+    // X's answer was lost with the socket; the server now waits on a restart
+    // offer R whose event never arrived. The answer kept for X is refused by
+    // its offer id, and R is applied through the same path the event uses.
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL)
     await manager.join(fakeStream())
@@ -1919,24 +1952,21 @@ test("after the socket is back the resume goes first: a restart offer whose even
     api.sfuCallAnswerServerOffer.mockRejectedValueOnce(new RpcError(503, "WebSocket connection closed"))
     api.emitOffer(offer("X"))
     await flush()
-    // The server applied X's answer, then started a restart R; R's event was lost.
-    api.sfuCallResume.mockImplementationOnce(async () => {
-        api.log.push("sfuCallResume")
-        api.emitOffer(offer("R"))
-        return true
-    })
-    api.log.length = 0
+    api.sfuCallAnswerServerOffer.mockResolvedValueOnce({ accepted: false, reason: "stale" })
+    api.sfuCallResume.mockResolvedValueOnce({ listed: true, offer: offer("R") })
 
     api.emitReconnect()
     await flush()
     await flush()
 
-    expect(answersSent(api)).toEqual([answerTo("X"), answerTo("R")])
-    expect(api.log[0]).toBe("sfuCallResume")
+    // X's first send never arrived; the kept one goes again and is refused
+    // `stale`, and R gets its own answer.
+    expect(answersSent(api)).toEqual([answerTo("X"), answerTo("X"), answerTo("R")])
+    expect(currentPc().remoteSdps()).toEqual(["server-answer", "X", "R"])
     await manager.leave()
 })
 
-test("an offer the resume sends again gets the answer the socket kept for it, without being applied again", async () => {
+test("the offer a resume returns gets the answer the socket kept for it, without being applied again", async () => {
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL)
     await manager.join(fakeStream())
@@ -1944,11 +1974,7 @@ test("an offer the resume sends again gets the answer the socket kept for it, wi
     api.sfuCallAnswerServerOffer.mockRejectedValueOnce(new RpcError(503, "WebSocket connection closed"))
     api.emitOffer(offer("X"))
     await flush()
-    api.sfuCallResume.mockImplementationOnce(async () => {
-        api.log.push("sfuCallResume")
-        api.emitOffer(offer("X"))
-        return true
-    })
+    api.sfuCallResume.mockResolvedValueOnce({ listed: true, offer: offer("X") })
 
     api.emitReconnect()
     await flush()
@@ -1959,79 +1985,20 @@ test("an offer the resume sends again gets the answer the socket kept for it, wi
     await manager.leave()
 })
 
-test("an executor without sfu.callResume (404) gets the answer the socket kept, after the refusal", async () => {
+test("the roster a resume returns applies like a roster event", async () => {
     const api = fakeApi()
-    api.sfuCallResume.mockImplementation(async () => {
-        api.log.push("sfuCallResume")
-        throw new RpcError(404, "Unknown type: sfu.callResume")
-    })
-    api.sfuListRooms.mockResolvedValue([room([MINE, ME])])
-    const manager = new SfuManager(api, ROOM, ME, URL)
+    const { manager, joined } = recordedManager(api)
     await manager.join(fakeStream())
-    api.sfuCallAnswerServerOffer.mockRejectedValueOnce(new RpcError(503, "WebSocket connection closed"))
-    api.emitOffer(offer("renegotiate"))
-    await flush()
-    api.log.length = 0
+    api.sfuCallResume.mockResolvedValueOnce(
+        resumeListed({ roster: { participants: [{ participantId: MINE, agentDid: ME }, { participantId: pid(ALICE), agentDid: ALICE }] } }),
+    )
 
     api.emitReconnect()
     await flush()
     await flush()
 
-    expect(api.log).toEqual(["sfuCallResume", "sfuCallAnswerServerOffer"])
-    expect(api.sfuCallLeave).not.toHaveBeenCalled()
+    expect(joined).toEqual([ALICE])
     await manager.leave()
-})
-
-test("an api without sfuCallResume sends the answer the socket kept once the socket is back", async () => {
-    const api = fakeApi() as Partial<ReturnType<typeof fakeApi>>
-    delete api.sfuCallResume
-    const full = api as ReturnType<typeof fakeApi>
-    const manager = new SfuManager(api as SfuNeighbourhoodApi, ROOM, ME, URL)
-    await manager.join(fakeStream())
-    full.sfuCallAnswerServerOffer.mockRejectedValueOnce(new RpcError(503, "WebSocket connection closed"))
-    full.emitOffer(offer("renegotiate"))
-    await flush()
-    full.log.length = 0
-
-    full.emitReconnect()
-    await flush()
-
-    expect(full.log).toEqual(["sfuCallAnswerServerOffer"])
-    await manager.leave()
-})
-
-test("an executor without sfu.callResume: the manager waits for its resend, keeps the call, and asks again next time", async () => {
-    const api = fakeApi()
-    api.sfuCallResume.mockRejectedValue(new RpcError(404, "Unknown type: sfu.callResume"))
-    // The executor still holds the session: no rejoin.
-    api.sfuListRooms.mockResolvedValue([room([MINE, ME])])
-    const manager = new SfuManager(api, ROOM, ME, URL)
-    const errors: unknown[] = []
-    manager.on("error", (e) => errors.push(e))
-    await manager.join(fakeStream())
-
-    api.emitReconnect()
-    await flush()
-    // The executor resends its pending offer on its own (10 s, 30 s).
-    api.emitOffer(offer("resent"))
-    await flush()
-    api.emitReconnect()
-    await flush()
-
-    expect(currentPc().remoteSdps()).toEqual(["server-answer", "resent"])
-    expect(api.sfuCallResume).toHaveBeenCalledTimes(2)
-    expect(api.sfuCallLeave).not.toHaveBeenCalled()
-    expect(errors).toEqual([])
-    await manager.leave()
-})
-
-test("an api without onReconnect or sfuCallResume still joins and keeps its call", async () => {
-    const api = fakeApi() as Partial<ReturnType<typeof fakeApi>>
-    delete api.onReconnect
-    delete api.sfuCallResume
-    const manager = new SfuManager(api as SfuNeighbourhoodApi, ROOM, ME, URL)
-    await manager.join(fakeStream())
-    expect(manager.getState().participantId).toBe(MINE)
 })
 
 test("no resume goes out without a session, and none after leave", async () => {
@@ -2191,11 +2158,10 @@ test("a new join by the user after the budget ran out starts with a fresh one", 
 // ── Ask the executor before an unlisted rebuild (C5) ────────────────────────
 
 test("a roster that leaves this session out does not rebuild while the executor still lists it", async () => {
-    // One roster event can be stale or out of order; the room read is current.
+    // One roster event can be stale or out of order; the resume's reply is current.
     fakeTimers()
     try {
         const api = fakeApi()
-        api.sfuListRooms.mockResolvedValue([room([MINE, ME], [pid(ALICE), ALICE])])
         const manager = new SfuManager(api, ROOM, ME, URL)
         await manager.join(fakeStream())
 
@@ -2203,7 +2169,8 @@ test("a roster that leaves this session out does not rebuild while the executor 
         await flush()
         await jest.advanceTimersByTimeAsync(10_000)
 
-        expect(api.sfuListRooms).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallResume).toHaveBeenCalledWith(URL, ROOM, MINE)
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
         expect(currentPc().closed).toBe(false)
     } finally {
@@ -2211,11 +2178,11 @@ test("a roster that leaves this session out does not rebuild while the executor 
     }
 })
 
-test("an unlisted session is rebuilt once the executor's room read confirms it is gone", async () => {
+test("an unlisted session is rebuilt once the resume's reply confirms it is gone", async () => {
     fakeTimers()
     try {
         const api = fakeApi()
-        api.sfuListRooms.mockResolvedValue([room([pid(ALICE), ALICE])])
+        api.sfuCallResume.mockResolvedValue({ listed: false })
         const manager = new SfuManager(api, ROOM, ME, URL)
         await manager.join(fakeStream())
 
@@ -2223,20 +2190,20 @@ test("an unlisted session is rebuilt once the executor's room read confirms it i
         await flush()
         await jest.advanceTimersByTimeAsync(3_000)
 
-        expect(api.sfuListRooms).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
         expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
-        expect(api.sfuListRooms.mock.invocationCallOrder[0]).toBeLessThan(api.sfuCallLeave.mock.invocationCallOrder[0])
+        expect(api.sfuCallResume.mock.invocationCallOrder[0]).toBeLessThan(api.sfuCallLeave.mock.invocationCallOrder[0])
     } finally {
         jest.useRealTimers()
     }
 })
 
-test("a room read that fails does not rebuild the call", async () => {
+test("a resume the socket fails does not rebuild the call", async () => {
     // The socket is down: the server's state cannot be read, so nothing is torn down for it.
     fakeTimers()
     try {
         const api = fakeApi()
-        api.sfuListRooms.mockRejectedValue(new RpcError(503, "WebSocket connection closed"))
+        api.sfuCallResume.mockRejectedValue(new RpcError(503, "WebSocket connection closed"))
         const manager = new SfuManager(api, ROOM, ME, URL)
         await manager.join(fakeStream())
 
@@ -2250,12 +2217,12 @@ test("a room read that fails does not rebuild the call", async () => {
     }
 })
 
-test("a roster that lists this session while the room read is out cancels the rebuild", async () => {
+test("a roster that lists this session while the resume is out cancels the rebuild", async () => {
     fakeTimers()
     try {
         const api = fakeApi()
-        const read = deferred<SfuRoomInfo[]>()
-        api.sfuListRooms.mockImplementation(() => read.promise)
+        const resuming = deferred<SfuResumeResult>()
+        api.sfuCallResume.mockImplementation(() => resuming.promise)
         const manager = new SfuManager(api, ROOM, ME, URL)
         await manager.join(fakeStream())
 
@@ -2264,7 +2231,7 @@ test("a roster that lists this session while the room read is out cancels the re
         await jest.advanceTimersByTimeAsync(3_000)
         api.emitRoster(roster([ALICE, ME]))
         await flush()
-        read.resolve([])
+        resuming.resolve(resumeListed())
         await jest.advanceTimersByTimeAsync(1_000)
 
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
@@ -2273,19 +2240,26 @@ test("a roster that lists this session while the room read is out cancels the re
     }
 })
 
-test("a room read the executor refuses (not a socket fault) goes by the roster and rebuilds", async () => {
+test("a resume refused with 403 ends the call: the session is another agent's", async () => {
     fakeTimers()
     try {
         const api = fakeApi()
-        api.sfuListRooms.mockRejectedValue(new RpcError(403, "Capability check failed"))
-        const manager = new SfuManager(api, ROOM, ME, URL)
+        api.sfuCallResume.mockRejectedValue(new RpcError(403, "Session P1 belongs to another agent"))
+        const { manager } = recordedManager(api)
+        const ended: unknown[] = []
+        manager.on("call-ended", (event: unknown) => ended.push(event))
         await manager.join(fakeStream())
 
         api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
         await flush()
         await jest.advanceTimersByTimeAsync(3_000)
 
-        expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
+        // Ended, not rebuilt: the session is left, no new join goes out.
+        expect(ended).toHaveLength(1)
+        expect((ended[0] as { reason: string }).reason).toBe("refused")
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+        expect(manager.getState().participantId).toBeNull()
+        expect(manager.getState().peerConnection).toBeNull()
     } finally {
         jest.useRealTimers()
     }
@@ -2341,7 +2315,7 @@ test("an offer step that hangs is given up after 10 s, and the next offer is app
     }
 })
 
-test("an answer given up on that fails after a newer offer was answered is not kept for a resend", async () => {
+test("an answer given up on that fails after a newer offer was answered goes out once and is refused, without a rebuild", async () => {
     fakeTimers()
     try {
         const api = fakeApi()
@@ -2357,13 +2331,17 @@ test("an answer given up on that fails after a newer offer was answered is not k
         expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(2)
         api.sfuCallAnswerServerOffer.mockClear()
 
-        // The first answer's call times out only now.
+        // The first answer's call times out only now, so the manager keeps it
+        // for the next socket; the server refuses it by its offer id.
+        api.sfuCallAnswerServerOffer.mockResolvedValueOnce({ accepted: false, reason: "stale" })
         timeOut(new RpcError(408, "RPC call 'sfu.callAnswerServerOffer' timed out after 30000ms"))
         await flush()
         api.emitReconnect()
         await flush()
-        expect(api.sfuCallAnswerServerOffer).not.toHaveBeenCalled()
+        expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledWith(URL, ROOM, MINE, offer("first").offerId, expect.any(String))
         expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
     } finally {
         jest.useRealTimers()
     }
@@ -2441,7 +2419,7 @@ function distinctAnswers(pc: FakePeerConnection) {
     }))
 }
 const answerTo = (sdp: string) => JSON.stringify({ type: "answer", sdp: `answer-to-${sdp}` })
-const answersSent = (api: ReturnType<typeof fakeApi>) => (api.sfuCallAnswerServerOffer.mock.calls as unknown as string[][]).map((c) => c[3])
+const answersSent = (api: ReturnType<typeof fakeApi>) => (api.sfuCallAnswerServerOffer.mock.calls as unknown as string[][]).map((c) => c[4])
 
 test("an answer the socket kept is dropped when a newer offer arrives; after the socket is back only the newer one goes out", async () => {
     fakeTimers()
@@ -2467,11 +2445,8 @@ test("an answer the socket kept is dropped when a newer offer arrives; after the
         // B's answer was lost too: the next socket gets B's, never A's.
         failB(new RpcError(503, "WebSocket connection closed"))
         await flush()
-        // The executor never got B's answer: the resume sends B again.
-        api.sfuCallResume.mockImplementationOnce(async () => {
-            api.emitOffer(offer("B"))
-            return true
-        })
+        // The executor never got B's answer: the resume's reply carries B again.
+        api.sfuCallResume.mockResolvedValueOnce({ listed: true, offer: offer("B") })
         api.emitReconnect()
         await jest.advanceTimersByTimeAsync(0)
         expect(answersSent(api)).toEqual([answerTo("A"), answerTo("B"), answerTo("B")])
@@ -2511,9 +2486,10 @@ test("a same-mid ICE restart offer is never answered with the answer of the offe
     }
 })
 
-test("a stalled SDP step for one offer holds the next: a newer offer is applied after it, and the stale one never answers", async () => {
-    // Before: the 10 s time box let B's step run while A's was still inside
-    // setRemoteDescription; A then created and set its answer over B's.
+test("a stalled SDP step for one offer holds the next: a newer offer is applied after it, and the overtaken answer is refused", async () => {
+    // The steps stay serial: A's step runs to its end before B's starts. A's
+    // answer then goes out under A's offer id and the server refuses it
+    // (`stale`): correlation is the id's, not the client's.
     fakeTimers()
     try {
         const api = fakeApi()
@@ -2521,6 +2497,7 @@ test("a stalled SDP step for one offer holds the next: a newer offer is applied 
         await manager.join(fakeStream())
         const pc = currentPc()
         distinctAnswers(pc)
+        api.sfuCallAnswerServerOffer.mockResolvedValueOnce({ accepted: false, reason: "stale" })
         const setLocal = jest.spyOn(pc, "setLocalDescription")
         let releaseA!: () => void
         const realSetRemote = pc.setRemoteDescription.bind(pc)
@@ -2535,12 +2512,14 @@ test("a stalled SDP step for one offer holds the next: a newer offer is applied 
         await jest.advanceTimersByTimeAsync(1_000)
         api.emitOffer(offer("B"))
         await jest.advanceTimersByTimeAsync(20_000)
+        // B's step has not touched the connection while A's is stalled.
+        expect(setLocal).not.toHaveBeenCalled()
         releaseA()
         await jest.advanceTimersByTimeAsync(0)
         await flush()
 
-        expect(answersSent(api)).toEqual([answerTo("B")])
-        expect(setLocal.mock.calls.map(([d]) => d.sdp)).toEqual(["answer-to-B"])
+        expect(answersSent(api)).toEqual([answerTo("A"), answerTo("B")])
+        expect(setLocal.mock.calls.map(([d]) => d.sdp)).toEqual(["answer-to-A", "answer-to-B"])
         expect(pc.localDescription?.sdp).toBe("answer-to-B")
         await manager.leave()
     } finally {
@@ -2612,33 +2591,30 @@ test("a call that gave up rebuilding ends: `call-ended` with reason gave-up, its
     expect(api.sfuCallJoin).toHaveBeenCalledTimes(4)
 })
 
-// ── Round 2: a refused resume falls back to a rejoin when the session is gone ─
+// ── Round 2: the resume's reply decides ─────────────────────────────────────
 
-test.each([
-    ["an executor without sfu.callResume (404)", new RpcError(404, "Unknown type: sfu.callResume")],
-    ["an executor that no longer has the session", new RpcError(500, "Session P1 is not in this call")],
-])("after a reconnect, %s whose room no longer lists this session: the call is rejoined", async (_name, refusal) => {
+test("a resume that says the session is not listed rejoins the call", async () => {
     const api = fakeApi()
-    api.sfuCallResume.mockRejectedValue(refusal)
-    api.sfuListRooms.mockResolvedValue([room([pid(ALICE), ALICE])])
+    api.sfuCallResume.mockResolvedValue({ listed: false })
     api.sfuCallJoin.mockResolvedValueOnce(session()).mockResolvedValueOnce(session({ participantId: "P2" }))
     const manager = new SfuManager(api, ROOM, ME, URL)
     await manager.join(fakeStream())
+    // The session is gone from the room: the last roster did not list it.
+    api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+    await flush()
 
     api.emitReconnect()
     await flush()
     await flush()
 
-    expect(api.sfuListRooms).toHaveBeenCalledTimes(1)
+    expect(api.sfuCallResume).toHaveBeenCalledWith(URL, ROOM, MINE)
     expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
     expect(manager.getState().participantId).toBe("P2")
     await manager.leave()
 })
 
-test("a resume refused with 404 while the room still lists this session keeps the call", async () => {
+test("a resume that lists the session keeps the call", async () => {
     const api = fakeApi()
-    api.sfuCallResume.mockRejectedValue(new RpcError(404, "Unknown type: sfu.callResume"))
-    api.sfuListRooms.mockResolvedValue([room([MINE, ME])])
     const manager = new SfuManager(api, ROOM, ME, URL)
     await manager.join(fakeStream())
 
@@ -2646,24 +2622,9 @@ test("a resume refused with 404 while the room still lists this session keeps th
     await flush()
     await flush()
 
-    expect(api.sfuListRooms).toHaveBeenCalledTimes(1)
+    expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
     expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
     expect(manager.getState().participantId).toBe(MINE)
-    await manager.leave()
-})
-
-test("a resume refused with 404 by an api that cannot read the room rejoins", async () => {
-    const api = fakeApi() as Partial<ReturnType<typeof fakeApi>> & ReturnType<typeof fakeApi>
-    api.sfuCallResume.mockRejectedValue(new RpcError(404, "Unknown type: sfu.callResume"))
-    delete (api as Partial<ReturnType<typeof fakeApi>>).sfuListRooms
-    const manager = new SfuManager(api as SfuNeighbourhoodApi, ROOM, ME, URL)
-    await manager.join(fakeStream())
-
-    api.emitReconnect()
-    await flush()
-    await flush()
-
-    expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
     await manager.leave()
 })
 
@@ -2676,50 +2637,42 @@ test("a resume the socket fails (503) changes nothing: the next reconnect asks a
     api.emitReconnect()
     await flush()
     await flush()
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
 
-    expect(api.sfuListRooms).not.toHaveBeenCalled()
+    api.emitReconnect()
+    await flush()
+    await flush()
+    expect(api.sfuCallResume).toHaveBeenCalledTimes(2)
     expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
     await manager.leave()
 })
 
-// ── Round 2: one room read at a time ────────────────────────────────────────
+test("a resume refused with 403 ends the call, not a rebuild: the session is another agent's", async () => {
+    const api = fakeApi()
+    api.sfuCallResume.mockRejectedValue(new RpcError(403, "Session P1 belongs to another agent"))
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    const ended: unknown[] = []
+    manager.on("call-ended", (event: unknown) => ended.push(event))
+    await manager.join(fakeStream())
 
-test("room reads before a rebuild do not overlap: triggers while one is out share it, and the call is rebuilt once", async () => {
-    fakeTimers()
-    try {
-        const api = fakeApi()
-        const read = deferred<SfuRoomInfo[]>()
-        api.sfuListRooms.mockImplementation(() => read.promise)
-        api.sfuCallResume.mockRejectedValue(new RpcError(404, "Unknown type: sfu.callResume"))
-        const manager = new SfuManager(api, ROOM, ME, URL)
-        await manager.join(fakeStream())
+    api.emitReconnect()
+    await flush()
+    await flush()
 
-        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
-        await flush()
-        await jest.advanceTimersByTimeAsync(3_000)
-        expect(api.sfuListRooms).toHaveBeenCalledTimes(1)
-        // While that read is out: another roster without this session, and a refused resume.
-        api.emitRoster(roster([ALICE, BOB], {}, { withoutMe: true }))
-        api.emitReconnect()
-        await jest.advanceTimersByTimeAsync(3_000)
-        expect(api.sfuListRooms).toHaveBeenCalledTimes(1)
-
-        read.resolve([room([pid(ALICE), ALICE])])
-        await jest.advanceTimersByTimeAsync(1_000)
-        expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
-        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
-        await manager.leave()
-    } finally {
-        jest.useRealTimers()
-    }
+    expect(ended).toHaveLength(1)
+    expect((ended[0] as { reason: string }).reason).toBe("refused")
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+    expect(manager.getState().participantId).toBeNull()
 })
 
-test("a room read that answers after a roster listed this session again rebuilds nothing, and the next unlisted roster reads again", async () => {
+// ── Round 2: resumes before a rebuild do not pile up ────────────────────────
+
+test("a resume that answers after a roster listed this session again rebuilds nothing, and the next unlisted roster asks again", async () => {
     fakeTimers()
     try {
         const api = fakeApi()
-        const first = deferred<SfuRoomInfo[]>()
-        api.sfuListRooms.mockImplementationOnce(() => first.promise).mockResolvedValue([room([MINE, ME])])
+        const first = deferred<SfuResumeResult>()
+        api.sfuCallResume.mockImplementationOnce(() => first.promise).mockResolvedValue({ listed: false })
         const manager = new SfuManager(api, ROOM, ME, URL)
         await manager.join(fakeStream())
 
@@ -2728,27 +2681,28 @@ test("a room read that answers after a roster listed this session again rebuilds
         await jest.advanceTimersByTimeAsync(3_000)
         api.emitRoster(roster([ALICE, ME]))
         await flush()
-        first.resolve([])
+        first.resolve({ listed: false })
         await jest.advanceTimersByTimeAsync(0)
+        // Listed meanwhile: the stale "not listed" does not rebuild.
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
 
         api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
         await flush()
         await jest.advanceTimersByTimeAsync(3_000)
-        expect(api.sfuListRooms).toHaveBeenCalledTimes(2)
-        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(2)
+        expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
         await manager.leave()
     } finally {
         jest.useRealTimers()
     }
 })
 
-test("a room read from before a rebuild is not used for the rebuilt session", async () => {
+test("a resume from before a rebuild is not used for the rebuilt session", async () => {
     fakeTimers()
     try {
         const api = fakeApi()
-        const old = deferred<SfuRoomInfo[]>()
-        api.sfuListRooms.mockImplementationOnce(() => old.promise).mockResolvedValue([room([MINE, ME])])
+        const old = deferred<SfuResumeResult>()
+        api.sfuCallResume.mockImplementationOnce(() => old.promise).mockResolvedValue(resumeListed())
         const manager = new SfuManager(api, ROOM, ME, URL)
         await manager.join(fakeStream())
         api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
@@ -2760,10 +2714,10 @@ test("a room read from before a rebuild is not used for the rebuilt session", as
         api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
         await flush()
         await jest.advanceTimersByTimeAsync(3_000)
-        old.resolve([])
+        old.resolve({ listed: false })
         await jest.advanceTimersByTimeAsync(0)
 
-        expect(api.sfuListRooms).toHaveBeenCalledTimes(2)
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(2)
         expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
         await manager.leave()
     } finally {

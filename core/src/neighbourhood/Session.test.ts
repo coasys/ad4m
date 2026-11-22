@@ -71,6 +71,8 @@ function fakeApi() {
         sfuCallAnswerServerOffer: jest.fn(),
         sfuCallRestartIce: jest.fn(),
         onNetworkChange: jest.fn().mockReturnValue(() => {}),
+        onReconnect: jest.fn().mockReturnValue(() => {}),
+        sfuCallResume: jest.fn(),
         checkConnection: jest.fn(),
         subscribeSfuCallRenegotiationOffer: jest.fn(),
         sfuAddIceCandidate: jest.fn(),
