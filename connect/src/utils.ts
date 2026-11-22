@@ -32,6 +32,26 @@ export function removeLocal(key: string): void {
 const SESSION_KEYS = ["ad4m-token", "ad4m-url", "ad4m-port", "ad4m-last-host"];
 
 /**
+ * A guest's email and password on one host (`ad4m-guest-email-<host>`, `ad4m-guest-pass-<host>`),
+ * stored by `connectAsGuest`. They move with the session: an app reads them under the token's
+ * prefix to tell a guest's session from a person's, and `connectAsGuest` reuses them to log the
+ * same guest in again.
+ */
+const GUEST_KEY = /^ad4m-guest-(email|pass)-/;
+
+/** The names of the guest credentials stored under `prefix`. */
+function guestKeys(prefix: string): string[] {
+  const names: string[] = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (!key?.startsWith(`${prefix}/`)) continue;
+    const name = key.slice(prefix.length + 1);
+    if (GUEST_KEY.test(name)) names.push(name);
+  }
+  return names;
+}
+
+/**
  * Carry a session stored by another version of this package over to this version's keys.
  *
  * Every key is stored under `${version}/`, so upgrading the package (an app redeploy) used to
@@ -41,7 +61,7 @@ const SESSION_KEYS = ["ad4m-token", "ad4m-url", "ad4m-port", "ad4m-last-host"];
  * `0.13.1-staging.5`, `0.13.1` → `0.13.2`). A minor or major upgrade may break the session, which
  * is why the keys carry the version, so it starts logged out; and a newer version's session is not
  * carried back to an app rolled back to an older version. The token is not checked here; a refused one is
- * dropped by `checkAuth` as before. The other versions' sessions are removed once one is carried
+ * dropped by `checkAuth` as before. A guest's credentials move with the session (see `GUEST_KEY`). The other versions' sessions are removed once one is carried
  * over: left in place, a logout (or a refused token, which is discarded) only cleared this
  * version's keys, and the next load carried the old session over again. Answers whether a session
  * was carried over.
@@ -73,8 +93,12 @@ export function adoptStoredSession(url?: string): boolean {
     if (value !== null) localStorage.setItem(`${version}/${name}`, value);
     else localStorage.removeItem(`${version}/${name}`);
   }
+  // The guest credentials come along, so a guest's session stays a guest's.
+  for (const name of guestKeys(newest)) {
+    localStorage.setItem(`${version}/${name}`, localStorage.getItem(`${newest}/${name}`)!);
+  }
   for (const prefix of prefixes) {
-    for (const name of SESSION_KEYS) localStorage.removeItem(`${prefix}/${name}`);
+    for (const name of [...SESSION_KEYS, ...guestKeys(prefix)]) localStorage.removeItem(`${prefix}/${name}`);
   }
   return true;
 }
@@ -147,5 +171,14 @@ export function getHue(str: string): number {
   let hash = 0;
   for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
   return ((hash % 360) + 360) % 360;
+}
+
+/** Format a HOT price with enough decimal places to be meaningful */
+export function formatPrice(price: number): string {
+  if (price === 0) return "0.00";
+  if (price >= 0.01) return price.toFixed(2);
+  if (price >= 0.0001) return price.toFixed(4);
+  if (price >= 0.000001) return price.toFixed(6);
+  return price.toExponential(2);
 }
 

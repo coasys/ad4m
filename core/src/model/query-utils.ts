@@ -8,6 +8,7 @@
  */
 
 import type { WhereCondition, Where, ModelMetadata } from "./types";
+import { encodeRFC3986URIComponent } from "../rfc3986";
 import { escapeQueryString } from "../utils";
 
 /**
@@ -19,15 +20,7 @@ import { escapeQueryString } from "../utils";
  */
 export function formatQueryValue(value: any): string {
     if (typeof value === 'string') {
-        // Escape backslashes first, then single quotes and other special characters
-        const escaped = value
-            .replace(/\\/g, '\\\\')  // Backslash -> \\
-            .replace(/'/g, "\\'")     // Single quote -> \'
-            .replace(/"/g, '\\"')     // Double quote -> \"
-            .replace(/\n/g, '\\n')    // Newline -> \n
-            .replace(/\r/g, '\\r')    // Carriage return -> \r
-            .replace(/\t/g, '\\t');   // Tab -> \t
-        return `'${escaped}'`;
+        return `'${escapeQueryString(value)}'`;
     } else if (typeof value === 'number' || typeof value === 'boolean') {
         return String(value);
     } else if (Array.isArray(value)) {
@@ -107,12 +100,7 @@ export function buildWhereCondition(
      */
     function formatLiteralFilter(varName: string, v: any): string {
         const raw = escapeQueryString(String(v));
-        const encoded = encodeURIComponent(String(v))
-            .replace(/!/g, '%21')
-            .replace(/'/g, '%27')
-            .replace(/\(/g, '%28')
-            .replace(/\)/g, '%29')
-            .replace(/\*/g, '%2A');
+        const encoded = encodeRFC3986URIComponent(String(v));
         if (typeof v === 'string') {
             return `FILTER(STR(${varName}) = "${raw}" || STR(${varName}) = "literal:string:${encoded}")`;
         } else if (typeof v === 'number') {
@@ -129,9 +117,7 @@ export function buildWhereCondition(
             const varName = `?_wc${varSuffix}`;
             const inValues = (condition as any[]).flatMap(v => {
                 const raw = escapeQueryString(String(v));
-                const encoded = encodeURIComponent(String(v))
-                    .replace(/!/g, '%21').replace(/'/g, '%27')
-                    .replace(/\(/g, '%28').replace(/\)/g, '%29').replace(/\*/g, '%2A');
+                const encoded = encodeRFC3986URIComponent(String(v));
                 return [`"${raw}"`, `"literal:string:${encoded}"`];
             }).join(', ');
             return `?target <${escapedPredicate}> ${varName} . FILTER(STR(${varName}) IN (${inValues}))`;
