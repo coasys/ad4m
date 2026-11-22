@@ -1788,6 +1788,111 @@ describe("SHACL Memoisation", () => {
   });
 });
 
+// Characterization for the shared registry-walk merge behind
+// getPropertiesMetadata / getRelationsMetadata: parent-first merge order
+// (child entries win on a duplicated key), per-class memoisation, no
+// mutation of the parent's or a sibling's own records, and two caches
+// that never share a result object.
+describe("metadata registry merge (inheritance)", () => {
+  @Model({ name: "MergeParent" })
+  class MergeParent extends Ad4mModel {
+    @Property({ through: "test://parent-only-prop" })
+    parentOnlyProp: string = "";
+
+    @Property({ through: "test://parent-shared-prop" })
+    sharedProp: string = "";
+
+    @HasMany({ through: "test://parent-only-rel" })
+    parentOnlyRel: string[] = [];
+
+    @HasMany({ through: "test://parent-shared-rel" })
+    sharedRel: string[] = [];
+  }
+
+  @Model({ name: "MergeChild" })
+  class MergeChild extends MergeParent {
+    @Property({ through: "test://child-shared-prop" })
+    sharedProp: string = "";
+
+    @Property({ through: "test://child-only-prop" })
+    childOnlyProp: string = "";
+
+    @HasMany({ through: "test://child-shared-rel" })
+    sharedRel: string[] = [];
+
+    @HasMany({ through: "test://child-only-rel" })
+    childOnlyRel: string[] = [];
+  }
+
+  @Model({ name: "MergeSibling" })
+  class MergeSibling extends MergeParent {
+    @Property({ through: "test://sibling-shared-prop" })
+    sharedProp: string = "";
+
+    @HasMany({ through: "test://sibling-shared-rel" })
+    sharedRel: string[] = [];
+  }
+
+  it("child entries win over parent's on a duplicated key", () => {
+    const props = getPropertiesMetadata(MergeChild);
+    expect(props.sharedProp.through).toBe("test://child-shared-prop");
+
+    const rels = getRelationsMetadata(MergeChild);
+    expect(rels.sharedRel.predicate).toBe("test://child-shared-rel");
+  });
+
+  it("inherited-only fields remain in the child's merged result", () => {
+    const props = getPropertiesMetadata(MergeChild);
+    expect(props.parentOnlyProp.through).toBe("test://parent-only-prop");
+    expect(props.childOnlyProp.through).toBe("test://child-only-prop");
+
+    const rels = getRelationsMetadata(MergeChild);
+    expect(rels.parentOnlyRel.predicate).toBe("test://parent-only-rel");
+    expect(rels.childOnlyRel.predicate).toBe("test://child-only-rel");
+  });
+
+  it("child records do not leak into the parent's or a sibling's result", () => {
+    const parentProps = getPropertiesMetadata(MergeParent);
+    expect(parentProps.sharedProp.through).toBe("test://parent-shared-prop");
+    expect(parentProps.childOnlyProp).toBeUndefined();
+
+    const siblingProps = getPropertiesMetadata(MergeSibling);
+    expect(siblingProps.sharedProp.through).toBe("test://sibling-shared-prop");
+    expect(siblingProps.childOnlyProp).toBeUndefined();
+
+    const parentRels = getRelationsMetadata(MergeParent);
+    expect(parentRels.sharedRel.predicate).toBe("test://parent-shared-rel");
+    expect(parentRels.childOnlyRel).toBeUndefined();
+
+    const siblingRels = getRelationsMetadata(MergeSibling);
+    expect(siblingRels.sharedRel.predicate).toBe("test://sibling-shared-rel");
+    expect(siblingRels.childOnlyRel).toBeUndefined();
+  });
+
+  it("property and relation caches do not share a result object", () => {
+    const props = getPropertiesMetadata(MergeChild);
+    const rels = getRelationsMetadata(MergeChild);
+    expect(props).not.toBe(rels);
+  });
+
+  it("returns one stable cached object for a class with no metadata", () => {
+    @Model({ name: "EmptyMeta" })
+    class EmptyMeta extends Ad4mModel {}
+
+    const propsFirst = getPropertiesMetadata(EmptyMeta);
+    const propsSecond = getPropertiesMetadata(EmptyMeta);
+    expect(propsFirst).toBe(propsSecond);
+    expect(propsFirst).toEqual({});
+
+    const relsFirst = getRelationsMetadata(EmptyMeta);
+    const relsSecond = getRelationsMetadata(EmptyMeta);
+    expect(relsFirst).toBe(relsSecond);
+    expect(relsFirst).toEqual({});
+
+    expect(propsFirst).not.toBe(relsFirst);
+  });
+});
+
 describe("SHACL recursion — self-referential relations", () => {
   // Reported as a Maximum-call-stack-size-exceeded overflow when Flux's
   // Channel model has `@HasMany(() => Channel) childChannels`. The
