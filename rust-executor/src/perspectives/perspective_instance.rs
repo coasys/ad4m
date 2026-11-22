@@ -5476,8 +5476,7 @@ impl PerspectiveInstance {
         // Each `collectionSetter`, run after the merged commands with the
         // members as its parameters (as in `update_subject`).
         let mut collection_runs = Vec::new();
-        let mut call_groups: BTreeMap<(String, String), call_actions::CallGroup> =
-            BTreeMap::new();
+        let mut call_groups: BTreeMap<(String, String), call_actions::CallGroup> = BTreeMap::new();
 
         // Handle initial values if provided
         if let Some(obj) = initial_values {

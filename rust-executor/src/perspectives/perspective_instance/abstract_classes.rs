@@ -424,13 +424,7 @@ impl PerspectiveInstance {
                         for command in &call_commands {
                             let mut one = serde_json::Map::new();
                             one.insert(own.to_string(), payload.clone());
-                            Self::group_call(
-                                &mut call_groups,
-                                command,
-                                Some(base),
-                                one,
-                                &where_,
-                            )?;
+                            Self::group_call(&mut call_groups, command, Some(base), one, &where_)?;
                         }
                     }
                 }
@@ -494,10 +488,7 @@ impl PerspectiveInstance {
         }
         Ok(AbstractWrite {
             runs,
-            calls: call_groups
-                .into_values()
-                .map(CallGroup::into_run)
-                .collect(),
+            calls: call_groups.into_values().map(CallGroup::into_run).collect(),
         })
     }
 
@@ -680,10 +671,7 @@ impl PerspectiveInstance {
                 }
             }
         }
-        let calls: Vec<CallRun> = call_groups
-            .into_values()
-            .map(CallGroup::into_run)
-            .collect();
+        let calls: Vec<CallRun> = call_groups.into_values().map(CallGroup::into_run).collect();
         self.run_call_actions(&calls, batch_id.as_deref(), context)
             .await?;
         if commands.is_empty() {

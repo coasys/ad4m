@@ -114,7 +114,11 @@ impl PerspectiveInstance {
                     )
                 })?
                 .to_string(),
-            "" => return Err(anyhow!("call action of {where_} has no source expression URL")),
+            "" => {
+                return Err(anyhow!(
+                    "call action of {where_} has no source expression URL"
+                ))
+            }
             source => source.to_string(),
         };
         let name = command.predicate.clone().ok_or_else(|| {
@@ -275,8 +279,8 @@ impl PerspectiveInstance {
         let Some(address) = deltas.first().and_then(|d| d.address.clone()) else {
             return Err(anyhow!("create returned no address"));
         };
-        let (scheme, _) = LanguageController::parse_expr_url(&calls[0].source)
-            .map_err(|e| anyhow!("{e}"))?;
+        let (scheme, _) =
+            LanguageController::parse_expr_url(&calls[0].source).map_err(|e| anyhow!("{e}"))?;
         Ok(Some(format!("{scheme}://{address}")))
     }
 

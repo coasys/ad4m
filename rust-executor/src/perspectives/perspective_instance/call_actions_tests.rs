@@ -4,9 +4,7 @@
 //! address records every call it served, which these tests read back.
 
 use super::*;
-use crate::languages::mount_tests::{
-    interact, load_mount_test_language, mount_thing_shape,
-};
+use crate::languages::mount_tests::{interact, load_mount_test_language, mount_thing_shape};
 use serde_json::{json, Value};
 
 fn class(name: &str) -> SubjectClassOption {
@@ -197,7 +195,10 @@ async fn a_call_inside_a_caller_batch_is_refused() {
         )
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("cannot run inside a batch"), "{err}");
+    assert!(
+        err.to_string().contains("cannot run inside a batch"),
+        "{err}"
+    );
     assert_eq!(calls(&lang).await.len(), 1, "the update never ran");
     p.discard_batch(&batch).await;
 }
@@ -221,7 +222,10 @@ async fn a_constructor_must_return_an_address() {
         .create_subject(class("MountBad"), "ignored".to_string(), None, None, &ctx)
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("create returned no address"), "{err}");
+    assert!(
+        err.to_string().contains("create returned no address"),
+        "{err}"
+    );
 }
 
 #[tokio::test]
@@ -244,7 +248,10 @@ async fn a_mixed_action_list_is_refused() {
         .update_subject(class("MountThing"), base, json!({"title": "b"}), None, &ctx)
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("mixes call and link actions"), "{err}");
+    assert!(
+        err.to_string().contains("mixes call and link actions"),
+        "{err}"
+    );
 }
 
 #[tokio::test]
@@ -257,15 +264,9 @@ async fn a_call_target_is_not_parameter_substituted() {
     let (mut p, ctx) = mounted("MountThing", shape.to_string()).await;
     let base = created_thing(&lang, &ctx, &mut p).await;
 
-    p.update_subject(
-        class("MountThing"),
-        base,
-        json!({"done": true}),
-        None,
-        &ctx,
-    )
-    .await
-    .unwrap();
+    p.update_subject(class("MountThing"), base, json!({"done": true}), None, &ctx)
+        .await
+        .unwrap();
 
     let calls = calls(&lang).await;
     let updates: Vec<&Value> = calls.iter().filter(|c| c["name"] == "update").collect();
