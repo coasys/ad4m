@@ -519,6 +519,60 @@ test("an offer queued for a connection that has since been replaced is dropped",
     expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(1)
 })
 
+test("an answer refused for a replaced connection does not rebuild the new call", async () => {
+    // The reply landed after its connection was gone: unknown-session is
+    // the executor talking about the old session, not the new one.
+    const api = fakeApi()
+    api.sfuCallJoin.mockResolvedValueOnce(session()).mockResolvedValueOnce(session({ participantId: "P2" }))
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    const old = currentPc()
+    const answered = deferred<SfuAnswerResult>()
+    api.sfuCallAnswerServerOffer.mockImplementationOnce(() => answered.promise)
+    api.emitOffer(offer("first"))
+    await flush()
+
+    await iceState("failed")
+    await flush()
+    expect(currentPc()).not.toBe(old)
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+
+    answered.resolve({ accepted: false, reason: "unknown-session" })
+    await flush()
+    await flush()
+
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+    expect(FakePeerConnection.instances).toHaveLength(2)
+    await manager.leave()
+})
+
+test("an answer accepted for a replaced connection does not mark its offer answered", async () => {
+    // answeredOfferId is the new session's to write; the old reply keeping
+    // it would drop that session's offer of the same id unanswered.
+    const api = fakeApi()
+    api.sfuCallJoin.mockResolvedValueOnce(session()).mockResolvedValueOnce(session({ participantId: "P2" }))
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    const answered = deferred<SfuAnswerResult>()
+    api.sfuCallAnswerServerOffer.mockImplementationOnce(() => answered.promise)
+    api.emitOffer(offer("first"))
+    await flush()
+
+    await iceState("failed")
+    await flush()
+    const replacement = currentPc()
+
+    answered.resolve({ accepted: true })
+    await flush()
+    // The executor's resend carries the offer's id again, to the new session.
+    api.emitOffer(offer("first", undefined, "P2"))
+    await flush()
+    await flush()
+
+    expect(replacement.remoteSdps()).toEqual(["server-answer", "first"])
+    await manager.leave()
+})
+
 test("a failed join drops its subscriptions", async () => {
     const api = fakeApi()
     api.sfuCallJoin.mockRejectedValue(new Error("Not a member of this neighbourhood"))

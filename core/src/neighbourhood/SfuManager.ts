@@ -1022,6 +1022,11 @@ export class SfuManager {
                 answer.offerId,
                 answer.sdpAnswer,
             )
+            // The reply names the connection and session it went out for;
+            // one that lands after either changed is about a call that is
+            // gone: its refusal must not rebuild the new one, its
+            // acceptance must not mark this one's offer answered.
+            if (this.state.peerConnection !== answer.pc || this.state.participantId !== answer.participantId) return
             // Accepted or refused, the answer reached the executor: nothing
             // to keep for the next socket.
             if (this.unsentAnswer === answer) this.unsentAnswer = null
