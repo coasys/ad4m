@@ -218,7 +218,9 @@ export class NeighbourhoodClient {
      *  answer to that offer and replies whether it took it: `{ accepted:
      *  true }` (also for a repeat of an answer already accepted), or
      *  `{ accepted: false, reason }` (`stale`, `no-pending`,
-     *  `unknown-session`). A refusal is this value, not an RPC error. */
+     *  `unknown-session`). A refusal is this value, not an RPC error.
+     *  Sent urgent: a socket that took it and went silent must be found
+     *  inside the offer's window, not after it. */
     async sfuCallAnswerServerOffer(
         neighbourhoodUrl: string,
         roomName: string,
@@ -232,15 +234,16 @@ export class NeighbourhoodClient {
             participantId,
             offerId,
             sdpAnswer,
-        })
+        }, { urgent: true })
     }
 
     /** Ask the SFU to restart ICE on the session `participantId` (this
      *  agent's, as its join returned it; any other is refused). The offer
      *  arrives as an `sfu-call-renegotiation-offer` event for that session;
-     *  answer it with {@link sfuCallAnswerServerOffer}. */
+     *  answer it with {@link sfuCallAnswerServerOffer}. Sent urgent: a
+     *  dead socket holding it must be found inside the restart window. */
     async sfuCallRestartIce(neighbourhoodUrl: string, roomName: string, participantId: string): Promise<boolean> {
-        return this.#apiClient.call("sfu.callRestartIce", { neighbourhoodUrl, roomName, participantId })
+        return this.#apiClient.call("sfu.callRestartIce", { neighbourhoodUrl, roomName, participantId }, { urgent: true })
     }
 
     /** Fires after a network change, once the client's socket is back on
@@ -253,9 +256,11 @@ export class NeighbourhoodClient {
      *  client's socket came back: `{ listed: false }` when the room or the
      *  session is gone, `{ listed: true, offer?, roster? }` with the pending
      *  offer and the room's sessions when it is listed. A session of another
-     *  agent is 403; an event loop that does not answer is 408. */
+     *  agent is 403; an event loop that does not answer is 408. Sent
+     *  urgent: the reply must land inside the restart window it shares
+     *  with the resends it follows. */
     async sfuCallResume(neighbourhoodUrl: string, roomName: string, participantId: string): Promise<SfuResumeResult> {
-        return this.#apiClient.call("sfu.callResume", { neighbourhoodUrl, roomName, participantId })
+        return this.#apiClient.call("sfu.callResume", { neighbourhoodUrl, roomName, participantId }, { urgent: true })
     }
 
     /** Fires after the client's socket opened again after a drop. See {@link ApiClient.onReconnect}. */
