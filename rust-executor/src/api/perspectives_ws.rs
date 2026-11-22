@@ -1082,7 +1082,23 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
     }
 }
 
-async fn mount_handler(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+/// Until ad4m#1775 passes the caller's context to a language, `mountSnapshot`
+/// reads the records as the main agent, in the language instance every agent
+/// shares. So only the main agent may mount or sync a language: a user would
+/// mirror the main agent's records into their own perspective.
+fn refuse_mount_for_users(ctx: &RequestContext) -> Result<(), WsRpcError> {
+    if ctx.acts_as().is_main_agent() {
+        Ok(())
+    } else {
+        Err(WsRpcError::forbidden(
+            "a mount reads the language as the main agent until ad4m#1775, so a user may not \
+             mount or sync one",
+        ))
+    }
+}
+
+async fn mount_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    refuse_mount_for_users(&ctx)?;
     let language_address = params.require_str("languageAddress")?;
     let mut perspective = guarded_perspective(&params).await?;
     perspective
@@ -1102,7 +1118,8 @@ async fn unmount_handler(params: Value, _ctx: Arc<RequestContext>) -> Result<Val
     Ok(Value::Bool(true))
 }
 
-async fn sync_mount_handler(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+async fn sync_mount_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    refuse_mount_for_users(&ctx)?;
     let language_address = params.require_str("languageAddress")?;
     let mut perspective = guarded_perspective(&params).await?;
     let report = perspective
