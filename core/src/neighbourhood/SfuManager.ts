@@ -424,6 +424,8 @@ export class SfuManager {
                     }
                     if (Date.now() + delay > deadline) {
                         console.error("SFU reconnect failed:", e)
+                        // No rejoin, so no roster will settle who is still here.
+                        this.resetParticipants()
                         this.emit("error", e)
                         return
                     }
