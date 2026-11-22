@@ -353,6 +353,11 @@ export class SfuManager {
     /** The `offerId` of the last server offer the executor took an answer
      *  for. Its resends are not answered again. */
     private answeredOfferId: string | null = null
+    /** The `offerId` of the server offer last applied to the connection,
+     *  whether or not its answer reached the executor. Only its answer is
+     *  kept on a socket fault: an older offer's call failing late must not
+     *  displace the answer the executor is still waiting on. */
+    private appliedOfferId: string | null = null
     /** An answer a socket fault kept from the executor (503, 408): the
      *  connection is fine, so it goes out again once the socket is back, or
      *  when the executor sends its offer again. */
@@ -965,6 +970,7 @@ export class SfuManager {
         // with it, so this session decides on its own ids afresh, and an
         // answer kept for the old session's connection is not its to send.
         this.answeredOfferId = null
+        this.appliedOfferId = null
         this.unsentAnswer = null
         this.unsentRestart = null
         this.renegotiationUnsubscribe = this.neighbourhood.subscribeSfuCallRenegotiationOffer(
@@ -1053,6 +1059,7 @@ export class SfuManager {
             return
         }
         const answer = { pc, offerId: event.offerId, roomName: event.roomName, participantId: event.participantId, sdpAnswer }
+        this.appliedOfferId = event.offerId
         await this.timeBoxed(() => this.sendAnswer(answer))
     }
 
@@ -1099,8 +1106,10 @@ export class SfuManager {
             if (this.state.peerConnection !== answer.pc) return
             if (isSocketFault(err)) {
                 // The executor may never have seen this answer; keep it unless
-                // a resend of the offer was already answered meanwhile.
-                if (this.answeredOfferId !== answer.offerId) {
+                // a resend of the offer was already answered meanwhile — and
+                // only while it is the newest applied offer's: an older
+                // offer's call failing late must not displace the kept one.
+                if (this.answeredOfferId !== answer.offerId && this.appliedOfferId === answer.offerId) {
                     console.warn("SFU: the answer did not reach the executor; sending it again once the socket is back:", err)
                     this.unsentAnswer = answer
                 }

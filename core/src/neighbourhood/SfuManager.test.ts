@@ -2761,7 +2761,7 @@ test("an older offer's answer failing late does not replace the current offer's 
     }
 })
 
-test("an answer given up on that fails after a newer offer was answered goes out once and is refused, without a rebuild", async () => {
+test("an answer given up on that fails after a newer offer was answered sends nothing more", async () => {
     fakeTimers()
     try {
         const api = fakeApi()
@@ -2777,15 +2777,14 @@ test("an answer given up on that fails after a newer offer was answered goes out
         expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(2)
         api.sfuCallAnswerServerOffer.mockClear()
 
-        // The first answer's call times out only now, so the manager keeps it
-        // for the next socket; the server refuses it by its offer id.
-        api.sfuCallAnswerServerOffer.mockResolvedValueOnce({ accepted: false, reason: "stale" })
+        // The first answer's call times out only now, but a newer offer was
+        // applied and answered meanwhile: the stale answer is not kept, and
+        // the reconnect sends none.
         timeOut(new RpcError(408, "RPC call 'sfu.callAnswerServerOffer' timed out after 30000ms"))
         await flush()
         api.emitReconnect()
         await flush()
-        expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(1)
-        expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledWith(URL, ROOM, MINE, offer("first").offerId, expect.any(String))
+        expect(api.sfuCallAnswerServerOffer).not.toHaveBeenCalled()
         expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
     } finally {
