@@ -10,4 +10,8 @@ export type LoginWithKeyParams = { proof: SignedKeyStatement,
  * The app the session is for: its name and the capabilities it asks for. The operator
  * role holds every capability whatever it asks.
  */
-app: AuthInfoInput, };
+app: AuthInfoInput, 
+/**
+ * The app's id in the platform's registry; a web statement needs it, a native one has none.
+ */
+appId?: string, };

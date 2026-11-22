@@ -12,12 +12,13 @@ file. Edit this file; do not put unique rules in `CLAUDE.md`.
 | `cli/` | `ad4m` CLI binary; wraps `rust-executor` (`ad4m-executor` subcommand) and `rust-client` | Rust |
 | `rust-client/` | Rust client for the executor's WS RPC | Rust |
 | `ad4m-hash-chain/` | Generic linear hash chain of signed JSON entries (entry hash, `eddsa-jcs-2022` proofs, fold/import, fork detection, `ChainStore` with memory/SQLite adapters; native + WASM). Under the key log. See `ad4m-hash-chain/AGENTS.md` | Rust |
-| `ad4m-identity-core/` | The `did:scid:coasys:1` identity core: the key log as a chain type on `ad4m-hash-chain` (`Event`, `KelPolicy`, `fold`, `KeyState`), the DID document (`did_document`), signing domains, proof of work, event builders (`build`), device linking (`link`), the device inbox (`inbox`, HPKE seals), the private details record (`record`), the request box (`requests`), the 12 words (`words`), WASM exports (`wasm`). Spec `docs-src/identity/did-scid-coasys-1.md`. See `ad4m-identity-core/AGENTS.md` | Rust |
+| `ad4m-identity-core/` | The `did:scid:coasys:1` identity core: the key log as a chain type on `ad4m-hash-chain` (`Event`, `KelPolicy`, `fold`, `KeyState`), the DID document (`did_document`), signing domains, proof of work, event builders (`build`), device linking (`link`), the device inbox (`inbox`, HPKE seals), the private details record (`record`), the request box (`requests`), the 12 words (`words`), the new device's link steps (`device`), WASM exports (`wasm`). Spec `docs-src/identity/did-scid-coasys-1.md`. See `ad4m-identity-core/AGENTS.md` | Rust |
 | `ad4m-identity-client/` | The master-key side of `did:scid:coasys:1` for apps: `Vault` (`MemoryVault` behind `test-vault`), `MasterSigner`, `ViaExecutor` (the executor's `identity.*` calls over any `ExecutorRpc`; feature `ws` for `ad4m-client`), flows `create`, `link`, `revoke`, `rotate`, `restore` (from the 12 words), master-key custody and the request box. Builds for wasm32. See `ad4m-identity-client/AGENTS.md` | Rust |
 | `ad4m-keyring/` | Symmetric keys for data at rest and room keys: `SecretKey` (zeroed before it is freed), `VersionedKey` (versions only grow, old ones readable until retired), `wrap`/`unwrap` under another key with a `WrapContext` as associated data (XChaCha20-Poly1305, random nonce), `hkdf_subkey`, and the room-key X25519 seal, byte for byte the server link language's `sealToDid` (shared vectors in `vectors/room-key-seal.json`). No executor dependency; builds for wasm32. See `ad4m-keyring/AGENTS.md` | Rust |
 | `identity-store/` | The shared store of key logs: `identity-store` binary (axum, SQLite on `ad4m-hash-chain`'s `SqliteChainStore`), signed heads, the key index, signed requests, agent records, offers and claims (an `add` spends a claim: the claim check), the device inbox, the private details record and the request box (ciphertext only). Its log and head reads are the public did:scid host profile (any origin, cached). Reached by executors only through the agent language. See `identity-store/AGENTS.md` | Rust |
 | `core/` | TypeScript SDK (`@coasys/ad4m`): `Ad4mClient`, types, model/SHACL decorators, generated RPC contracts (`src/generated/api/RpcMethods.ts`) | TS |
-| `connect/` | Browser/Node connection helper (`@coasys/ad4m-connect`) | TS |
+| `connect-lib/` | `@coasys/connect`: the app's side of Coasys Connect on the web. `getAd4mConnect` opens the Connect frame on the auth domain, checks its answer (origin, `state`), redeems the one-time code with a PKCE verifier (`user.redeemCode`), keeps the token in memory, renews through the frame. Replaces `@coasys/ad4m-connect`. See `connect-lib/AGENTS.md` | TS |
+| `identity-wasm/` | `@coasys/identity-wasm`: `ad4m-identity-core`'s `wasm` exports built for `web` (ES module, `init()`, types) for the Connect frame: key log replay, the new device's link steps, the private record, the bytes to sign. It never holds an Ed25519 key. Build: `pnpm --filter @coasys/identity-wasm build` (needs the locked wasm-bindgen CLI). See `identity-wasm/AGENTS.md` | Rust/TS |
 | `bootstrap-languages/` | The system Languages (agent, perspective-diff-sync, etc.) bundled into the executor | TS/Rust |
 | `ad4m-ldk/` | ALDK = AD4M Language Development Kit (Rust + JS crates for writing Languages) | Rust/TS |
 | `ad4m-hooks/`, `hooks/` | React/Vue hooks for the SDK | TS |
@@ -66,7 +67,7 @@ it in older docs.
   gets no event until it sends `events.watch` naming it, so a raw-WebSocket test
   client must send the watch and wait for its reply before it triggers the
   event (see `tests/js/helpers/sfu/events.ts`).
-- `connect/` tests (vitest + happy-dom) fail under Node 26 (`localStorage.clear`
+- `connect-lib/` tests (vitest + happy-dom) fail under Node 26 (`localStorage.clear`
   undefined); run them under Node 24.
 
 ## Holochain DHT and GetStrategy
@@ -149,7 +150,7 @@ includes time queued on the one slot. It uses this commit's executor and SDK:
 - The executor is the one the `build` job published for the commit
   (`$EXECUTOR_PUBLISH_DIR/<sha>/manifest.json`, sha256 checked). If there is none,
   the job builds it.
-- `core` and `connect` are built and packed. WE's ad4m pin (root `pnpm.overrides`)
+- `core` and `connect-lib` are built and packed. WE's ad4m pin (root `pnpm.overrides`)
   points at the two tarballs.
 - WE comes from the pipeline parameter `we-ref` (branch, tag or full commit;
   default `dev`). WE installs with its own pnpm (10).

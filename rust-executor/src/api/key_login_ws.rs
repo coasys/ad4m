@@ -11,8 +11,9 @@ use super::ws_handler::{HandlerMap, NoParams, WsRpcError};
 use crate::agent::capabilities::AGENT_AUTH_CAPABILITY;
 use crate::identity::key_login;
 use crate::identity::types::{
-    EndAllSessionsParams, EndedSessions, KeySessionResult, LoginWithKeyParams, RenewSessionParams,
-    RenewedSession, SessionChallenge, SessionInfo, SignSessionStatementParams, SignedKeyStatement,
+    EndAllSessionsParams, EndedSessions, KeySessionResult, LoginWithKeyParams, LoginWithKeyResult,
+    RedeemCodeParams, RenewSessionParams, RenewedSession, SessionChallenge, SessionInfo,
+    SignSessionStatementParams, SignedKeyStatement,
 };
 use crate::types::RequestContext;
 
@@ -46,6 +47,12 @@ async fn login_with_key(params: Value, _ctx: Arc<RequestContext>) -> Result<Valu
     let params: LoginWithKeyParams = parse(params)?;
     let service = crate::identity::service()?;
     answer(key_login::login(&service, params, now()).await?)
+}
+
+async fn redeem_code(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let params: RedeemCodeParams = parse(params)?;
+    let service = crate::identity::service()?;
+    answer(key_login::redeem_code(&service, params, now())?)
 }
 
 async fn renew_session(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -89,7 +96,12 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // A login signed by a device key: the handler checks the statement, the key and the role
     // (operator record, or the local agent that speaks for the identity) and refuses with one
     // stable reason. AGENT_AUTH, as `user.sessionChallenge`.
-    map.method::<LoginWithKeyParams, KeySessionResult>("user.loginWithKey", login_with_key)
+    map.method::<LoginWithKeyParams, LoginWithKeyResult>("user.loginWithKey", login_with_key)
+        .guard(Guard::Cap(AGENT_AUTH_CAPABILITY.clone()));
+    // A web login answered a one-time code; the page that holds the PKCE verifier of its
+    // `codeChallenge` turns it into the session. AGENT_AUTH, as the login: the caller is
+    // anonymous, and the code with its verifier is the proof.
+    map.method::<RedeemCodeParams, KeySessionResult>("user.redeemCode", redeem_code)
         .guard(Guard::Cap(AGENT_AUTH_CAPABILITY.clone()));
     // Open: a key session renews itself whatever its capabilities. The handler requires a
     // key-bound grant and a statement of its own key naming it; 400 for any other session.
@@ -137,6 +149,7 @@ mod tests {
             ("user.currentSession", open.clone()),
             ("user.endAllSessions", open.clone()),
             ("user.loginWithKey", auth.clone()),
+            ("user.redeemCode", auth.clone()),
             ("user.renewSession", open.clone()),
             ("user.sessionChallenge", open),
         ];

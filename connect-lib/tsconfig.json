@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "declaration": true,
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "target": "es2019",
+    "lib": ["es2019", "dom"],
+    "strict": true,
+    "moduleResolution": "Node",
+    "resolveJsonModule": true,
+    "allowSyntheticDefaultImports": true,
+    "types": ["node"],
+    "skipLibCheck": true
+  },
+  "include": ["./src"],
+  "exclude": ["node_modules/*", "**/*.test.ts", "dist"]
+}

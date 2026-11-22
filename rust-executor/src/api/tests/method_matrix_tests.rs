@@ -805,6 +805,10 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "proof": signed_key_statement("login"), "app": { "appName": "a", "appDesc": "", "appDomain": "" } }),
     ),
     (
+        "user.redeemCode",
+        || json!({ "code": "c", "codeVerifier": "v".repeat(43) }),
+    ),
+    (
         "user.renewSession",
         || json!({ "proof": signed_key_statement("renew") }),
     ),
@@ -1557,6 +1561,7 @@ fn anonymous_callers_reach_only_the_anonymous_capabilitys_methods() {
             "user.login",
             "user.loginWithKey",
             "user.multiUserEnabled",
+            "user.redeemCode",
             "user.requestVerification",
             "user.verifyEmail",
         ]

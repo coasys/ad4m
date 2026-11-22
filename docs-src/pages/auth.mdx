@@ -38,84 +38,50 @@ This flow ensures that:
 - The application only gets the permissions it needs
 - The connection between UI and executor is secure
 
-### Using ad4m-connect
+### Using @coasys/connect
 
-The easiest way to implement this flow is using our `ad4m-connect` library:
+A web app signs in with `@coasys/connect`. The person does not type a code: the library opens
+the Coasys Connect frame on the auth domain (`https://coasys.id`, or `https://staging.coasys.id`),
+where the person picks one of their own devices and the browser key signs the login.
 
 ```js
-import Ad4mConnect from "@coasys/ad4m-connect";
+import { getAd4mConnect } from "@coasys/connect";
 
-const ui = Ad4mConnect({
-  appInfo: {
-    name: "My First ADAM App",
-    description: "This is my first app here.",
-    url: "ad4m.dev",
-    iconPath: "https://i.ibb.co/GnqjPJP/icon.png",
-  },
-  capabilities: [
-    {
-      with: { domain: "*", pointers: ["*"] },
-      can: ["*"],
-    },
-  ],
+const { core, client } = getAd4mConnect({
+  appId: "my-app", // the id the platform registry lists your origins under
+  endpoints: { authDomain: "https://coasys.id" },
+  capabilities: [{ with: { domain: "*", pointers: ["*"] }, can: ["*"] }],
 });
 
-// .connect() will show the authentication pop up
-ui.connect().then((client) => {
-  // Client is now authenticated with requested capabilities
-});
+core.addEventListener("authstatechange", (e) => console.log(e.detail));
+const ad4m = await client; // an authenticated Ad4mClient
 ```
 
-If ad4m-connect could not find a running AD4M-executor, it will show a screen prompting the user to either download and run
-the AD4M Launcher to provide other connection settings:
+How it works:
 
-![ad4m-connect-1](/images/connect1.jpg)
+1. The library makes a random `state` and a PKCE `codeVerifier`, and sends the frame the
+   `state` and the SHA-256 `codeChallenge` (RFC 7636). The verifier stays in the page.
+2. The frame signs a `user.loginWithKey` statement with the person's browser key. The
+   executor checks that the page's origin is one of the app's origins in the platform
+   registry, and answers the frame with a one-time **code** (60 seconds, one use), not a token.
+3. The frame sends the code to the page. The page calls `user.redeemCode` with the code and
+   the verifier. The executor gives the token only when the verifier matches the challenge.
+4. The token (one hour) lives in memory only. The library renews it through the frame before
+   it ends, and `core.disconnect()` ends the session.
 
-When ad4m-connect was able to find a running AD4M-executor, it will begin the authentication flow:
-![ad4m-connect-1](/images/connect2.jpg)
+A web grant is a normal app grant limited to the capabilities the app asked for. Only an app
+the registry marks `firstParty`, on an identity that is the executor's operator, can hold the
+operator role.
 
-Clicking on "Authorize" will trigger the request against the AD4M-executor and Launcher will open a pop-up prompting the user
-with the nature of this request:
+Old versions of `@coasys/ad4m-connect` kept the token in `localStorage`. `@coasys/connect`
+removes those keys when it starts.
 
-- The application requesting access
-- The capabilities being requested
+### Hosted multi-user nodes
 
-![ad4m-connect-pop-up](/images/authorize1.jpg)
-
-If the user approves the request, the Launcher will show a six-digit random secret code that needs to be entered into the app UI.
-That way we have safely established that the network agent initiating the capability request (as seen from
-the AD4M-executor) really is the UI the users wants to use.
-(It could run on an external device, like the user's phone connecting through a proxy server).
-
-![ad4m-connect-pop-up](/images/authorize2.jpg)
-
-### Remote Multi-User Authentication
-
-When connecting to a **remote multi-user host** (with `hosting: true` set in
-`ad4m-connect`), the user selects the **Remote Node** option on the connection screen
-and then chooses or enters a host URL. After selecting a host, the authentication flow
-differs from the local capability handshake described above.
-
-Instead of the code-based authorization dialog, `ad4m-connect` presents an **email +
-password form**:
-
-- **New users** enter an email address and password to create an account. If the host has
-  SMTP configured, a verification code is sent to the email and must be entered to complete
-  registration.
-- **Returning users** enter their email and password to log in. With SMTP enabled, a
-  verification code is sent on each login for additional security.
-
-Behind the scenes, this calls `ad4m.agent.createUser()` or
-`ad4m.agent.requestLoginVerification()` / `ad4m.agent.verifyEmailCode()` as described in
-the [Multi-User Mode](/multi-user) documentation.
-
-Each user receives their own **DID** and a scoped **JWT token** upon successful
-authentication. The token is managed automatically by `ad4m-connect` for all subsequent
-API calls.
-
-> **Note**: The remote authentication flow is shown when the user connects to a remote
-> host. The local capability handshake is shown when connecting to a local executor.
-> `ad4m-connect` handles both flows — apps do not need to implement either one manually.
+On a hosted multi-user node an app can connect as a guest with `core.connectAsGuest(hostUrl)`.
+The library makes a random account on the first visit and logs in with it afterwards. See
+[Multi-User Mode](/multi-user) for accounts, DIDs and email verification. The token stays in
+memory.
 
 ### Capability Specification
 
@@ -199,5 +165,5 @@ For tests and local development, `--insecure-no-admin-credential` (or `AD4M_INSE
 
 For more details about implementing authentication in your application:
 
-- Check the [ad4m-connect documentation](https://github.com/coasys/ad4m/tree/main/connect)
+- Check the [@coasys/connect documentation](https://github.com/coasys/ad4m/tree/main/connect-lib)
 - See the [Ad4mClient API reference](/jsdoc/classes/Ad4mClient)

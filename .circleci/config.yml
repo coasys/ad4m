@@ -663,6 +663,9 @@ jobs:
               cargo test -p ad4m-hash-chain --target wasm32-unknown-unknown --features wasm
             CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=$RUNNER \
               cargo test --release -p ad4m-keyring --target wasm32-unknown-unknown
+            # The identity core's wasm exports and the new device's link steps (the shared vectors).
+            CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=$RUNNER \
+              cargo test -p ad4m-identity-core --target wasm32-unknown-unknown --features wasm,build
           no_output_timeout: 30m
       - run:
           # ad4m-ldk/rust is its own workspace, so the commands above skip it.
@@ -938,7 +941,8 @@ jobs:
           destination: test-logs
 
   # Identity end to end: a real identity-store and three executors (create, link,
-  # first-link refusal, revoke, a store restored behind the cache, cache after restart).
+  # first-link refusal, revoke, a store restored behind the cache, cache after restart),
+  # then the web login suite (a browser key held in JS, a fake app registry, the code and PKCE).
   # No Holochain. The suite builds identity-store and the holder example with cargo.
   integration-tests-identity:
     machine: true

@@ -22,6 +22,7 @@ import type { AuthInfoInput as AuthInfoWire } from "../generated/api/AuthInfoInp
 import type { EndedSessions } from "../generated/api/EndedSessions";
 import type { KeySessionResult } from "../generated/api/KeySessionResult";
 import type { RenewedSession } from "../generated/api/RenewedSession";
+import type { WebLoginCode } from "../generated/api/WebLoginCode";
 import type { SessionChallenge } from "../generated/api/SessionChallenge";
 import type { SessionInfo } from "../generated/api/SessionInfo";
 import type { SignedKeyStatement } from "../generated/api/SignedKeyStatement";
@@ -334,7 +335,36 @@ export class AgentClient {
    * token lives one hour.
    */
   async loginWithKey(proof: SignedKeyStatement, app: AuthInfoWire): Promise<KeySessionResult> {
-    return this.#apiClient.call('user.loginWithKey', { proof, app });
+    const answer = await this.#apiClient.call('user.loginWithKey', { proof, app });
+    if (!('token' in answer)) {
+      throw new Error('loginWithKey: the executor answered a code; a web statement goes through loginWithKeyForWeb');
+    }
+    return answer;
+  }
+
+  /**
+   * The web form of `loginWithKey`: the statement names `client: {kind: 'web', origin}` and the
+   * PKCE `codeChallenge` of a verifier the app's page holds, and `appId` is the app's id in the
+   * platform registry. The executor reads the registry itself and refuses (`origin`) an origin
+   * the app does not list. It answers a one-time code (60 s), never a token: the app's page
+   * turns it into the session with `redeemCode` and the verifier. Used by the auth domain's
+   * frame; an app goes through `@coasys/connect`.
+   */
+  async loginWithKeyForWeb(proof: SignedKeyStatement, app: AuthInfoWire, appId: string): Promise<WebLoginCode> {
+    const answer = await this.#apiClient.call('user.loginWithKey', { proof, app, appId });
+    if ('token' in answer) {
+      throw new Error('loginWithKeyForWeb: the executor answered a session; the statement was not a web one');
+    }
+    return answer;
+  }
+
+  /**
+   * Turns the code of a web login into its session, once, within 60 s, when `codeVerifier` is the
+   * PKCE verifier whose S256 the login's statement named. A refusal (`code`) spends the code and
+   * ends the grant. The token lives one hour; renew it with `renewSession`.
+   */
+  async redeemCode(code: string, codeVerifier: string): Promise<KeySessionResult> {
+    return this.#apiClient.call('user.redeemCode', { code, codeVerifier });
   }
 
   /**

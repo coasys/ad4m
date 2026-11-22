@@ -380,6 +380,7 @@ pub(crate) mod tests {
                 challenges: Default::default(),
                 inbox: Default::default(),
                 audiences: Default::default(),
+                connect: Default::default(),
                 store_keys_source: crate::identity::StoreSource::Config,
             });
             db(|db| db.set_agent_identity(&agent_did, &log.scid(), now())).unwrap();

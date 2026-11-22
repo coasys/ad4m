@@ -12,6 +12,7 @@ pub mod backend;
 pub mod bot_key;
 pub mod cache;
 pub mod claim;
+pub mod connect;
 pub mod custody;
 pub mod device;
 pub mod head;
@@ -131,6 +132,9 @@ pub struct IdentitySettings {
     /// (`Ad4mConfig::listens_on_network`): with it and no `public_origins`, `audiences`
     /// accepts no origin — key login is refused until `public_origins` names them.
     pub network_listener: bool,
+    /// `identity.registryUrl`: the platform a web login reads its app registry from. `None`:
+    /// `connect::DEFAULT_REGISTRY_URL`.
+    pub registry_url: Option<String>,
 }
 
 impl IdentitySettings {
@@ -175,6 +179,7 @@ impl IdentitySettings {
             public_origins: config.public_origins.clone().unwrap_or_default(),
             api_port: config.port,
             network_listener: config.listens_on_network(),
+            registry_url: config.identity_registry_url.clone(),
         }
     }
 
@@ -273,6 +278,7 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
         challenges: Default::default(),
         inbox: Default::default(),
         audiences,
+        connect: connect::Connect::new(settings.registry_url.as_deref()),
     };
     let service = Arc::new(service);
     if SERVICE.set(service.clone()).is_err() {

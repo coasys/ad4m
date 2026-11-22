@@ -520,7 +520,7 @@ jobs:
         uses: JS-DevTools/npm-publish@v1
         with:
           token: ${{ secrets.COASYS_NPM_TOKEN }}
-          package: connect/package.json
+          package: connect-lib/package.json
           tag: ${{ env.NPM_TAG }}
           access: public
 
