@@ -3242,17 +3242,17 @@ test("a resume from before a rebuild is not used for the rebuilt session", async
 
 // ── Round 4: the resume's RPC is time-boxed ─────────────────────────────────
 
-test("an offer behind a resume that outlives its box still makes its restart window", async () => {
-    // The resume RPC could wait out the executor's 30 s timeout while an ICE
-    // restart has 15 s to bring media back; the offer queued behind it never
-    // got its answer out. Boxed, the resume holds the queue only within the
-    // restart window's offer share.
+test("a restart's offer never waits for the resume's ask, and a reply outliving its box applies nothing", async () => {
+    // The resume's ask could wait out the executor's 30 s timeout while an
+    // ICE restart has 15 s to bring media back; the offer it triggers on the
+    // executor must be answered while the reply is still out, and a reply
+    // landing after its bound is the call that already went on.
     fakeTimers()
     try {
         const api = fakeApi()
         const resuming = deferred<SfuResumeResult>()
         api.sfuCallResume.mockImplementation(() => resuming.promise)
-        const manager = new SfuManager(api, ROOM, ME, URL)
+        const { manager, joined } = recordedManager(api)
         await manager.join(fakeStream())
         const pc = currentPc()
 
@@ -3265,17 +3265,24 @@ test("an offer behind a resume that outlives its box still makes its restart win
         await flush()
         expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
 
+        // The offer the ask triggers is answered at once — no wait for the reply.
         api.emitOffer(offer("restart-offer"))
-        await flush()
-        // Held just inside the bound...
-        await jest.advanceTimersByTimeAsync(9_999)
-        expect(pc.remoteSdps()).toEqual(["server-answer"])
-        // ...and free at it: the restart's offer goes on and is answered.
-        await jest.advanceTimersByTimeAsync(1)
         await flush()
         await flush()
         expect(pc.remoteSdps()).toEqual(["server-answer", "restart-offer"])
         expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledWith(URL, ROOM, MINE, offer("restart-offer").offerId, expect.any(String))
+
+        // The ask's bound spent at 10 s (a restart started with it): the
+        // reply landing after it applies no one.
+        await jest.advanceTimersByTimeAsync(10_000)
+        resuming.resolve(
+            resumeListed({
+                roster: { revision: nextRevision++, participants: [{ participantId: MINE, agentDid: ME }, { participantId: pid(ALICE), agentDid: ALICE }] },
+            }),
+        )
+        await flush()
+        await flush()
+        expect(joined).toEqual([])
 
         // Media back ends the restart: nothing rebuilds.
         await iceState("connected")

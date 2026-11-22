@@ -338,16 +338,19 @@ export class SfuManager {
     private qualityPreference: SfuQualityPreference | null = null
     /** Server-offer work, one step at a time. Every offer — an event's or a
      *  resume reply's — runs its SDP steps to their end before the next
-     *  offer's start; only an RPC is boxed: an answer's at most
-     *  OFFER_STEP_TIMEOUT_MS, a resume's RESUME_STEP_TIMEOUT_MS. */
+     *  offer's start; only an RPC is boxed, an answer's at most
+     *  OFFER_STEP_TIMEOUT_MS. A resume's reply applies its roster and offer
+     *  here, but the ask's own wait is off the queue: the restart offer it
+     *  triggers on the executor must not wait for it. */
     private offerQueue: Promise<void> = Promise.resolve()
     /** How long one answer RPC of `offerQueue` may hold the steps behind it. */
     private static readonly OFFER_STEP_TIMEOUT_MS = 10_000
-    /** How long the `sfu.callResume` RPC may hold `offerQueue`. The RPC's own
-     *  timeout is 30 s, but an ICE restart has only RESTART_TIMEOUT_MS to
-     *  bring media back, and the last RESTART_AFTER_RESEND_MS of that is the
-     *  resent offer's share once its answer is out. A resume that started
-     *  when a restart did must be out of the queue by then. */
+    /** How long a `sfu.callResume` ask waits for its reply before dropping
+     *  it. The RPC's own timeout is 30 s, but an ICE restart has only
+     *  RESTART_TIMEOUT_MS to bring media back, and the last
+     *  RESTART_AFTER_RESEND_MS of that is the resent offer's share once its
+     *  answer is out. An ask made while a restart is in flight is bounded
+     *  by the restart's remaining time, which is always within this. */
     private static readonly RESUME_STEP_TIMEOUT_MS =
         SfuManager.RESTART_TIMEOUT_MS - SfuManager.RESTART_AFTER_RESEND_MS
     /** The `offerId` of the last server offer the executor took an answer
@@ -381,6 +384,10 @@ export class SfuManager {
     /** An ICE restart is in flight until this fires: ICE going disconnected
      *  again joins it, a network change replaces it. */
     private restartTimer: ReturnType<typeof setTimeout> | null = null
+    /** The restart in flight's deadline — `restartTimer`'s fire time — so an
+     *  ask it made (`sfu.callResume` after the socket's return) is bounded
+     *  by what is left of the window, never a fresh one. */
+    private restartDeadline: number | null = null
     private networkUnsubscribe: (() => void) | null = null
     /** Running while the room's roster leaves this session out: see `noticeRoster`. */
     private unlistedTimer: ReturnType<typeof setTimeout> | null = null
@@ -544,11 +551,13 @@ export class SfuManager {
         console.info("SFU: restarting ICE")
         const restart = setTimeout(() => {
             this.restartTimer = null
+            this.restartDeadline = null
             if (generation !== this.generation || this.state.peerConnection !== pc) return
             if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") return
             void this.reconnect()
         }, SfuManager.RESTART_TIMEOUT_MS)
         this.restartTimer = restart
+        this.restartDeadline = Date.now() + SfuManager.RESTART_TIMEOUT_MS
         this.sendRestart(pc, participantId, restart)
     }
 
@@ -602,6 +611,7 @@ export class SfuManager {
             clearTimeout(this.restartTimer)
             this.restartTimer = null
         }
+        this.restartDeadline = null
         this.unsentRestart = null
     }
 
@@ -897,11 +907,7 @@ export class SfuManager {
         this.unlistedTimer = setTimeout(() => {
             this.unlistedTimer = null
             if (this.state.peerConnection !== pc || this.state.participantId !== participantId) return
-            // On the one offer queue: a resume's offer applies like an event's,
-            // never beside an SDP step still running.
-            this.offerQueue = this.offerQueue
-                .then(() => this.resume(pc))
-                .catch((err) => console.warn("SFU: resuming the session failed:", err))
+            this.resume(pc)
         }, SfuManager.UNLISTED_GRACE_MS)
     }
 
@@ -1010,8 +1016,9 @@ export class SfuManager {
         for (const unsubscribe of previous) unsubscribe?.()
     }
 
-    /** Run one RPC step of `offerQueue`; after `withinMs` the steps behind it go on
-     *  without it. Never an SDP step: one given up on would go on changing the connection. */
+    /** Run one bounded RPC wait of the offer work; after `withinMs` whoever
+     *  waits on it goes on without it. Never an SDP step: one given up on
+     *  would go on changing the connection. */
     private timeBoxed(step: () => Promise<void>, withinMs = SfuManager.OFFER_STEP_TIMEOUT_MS): Promise<void> {
         let timer: ReturnType<typeof setTimeout> | undefined
         const timeout = new Promise<void>((resolve) => {
@@ -1149,42 +1156,73 @@ export class SfuManager {
                     this.unsentRestart = null
                     this.sendRestart(pc, restart.participantId, restart.timer)
                 }
-                await this.resume(pc)
             })
             .catch((err) => console.warn("SFU: recovering after the socket's return failed:", err))
+        // Off the queue: the ask waits out a join still settling, and its
+        // reply applies on the queue — so the restart offer it triggers on
+        // the executor is answered while the reply is still out.
+        this.resume(pc)
     }
 
     /**
-     * Ask the executor for this session's state (`sfu.callResume`). The
-     * reply's roster and pending offer apply like the events that carry
-     * them. `listed: false` — the room or the session gone — rebuilds the
-     * call, unless a roster newer than the ask listed it again meanwhile.
-     * The RPC is boxed at RESUME_STEP_TIMEOUT_MS so a slow executor cannot
-     * hold the offers queued behind it past a restart's window; a reply
-     * that lands after the box is dropped — it must not list or unlist,
-     * roster, offer or rebuild a call that already went on. Only the RPC
-     * is bounded: the SDP steps a reply starts run to their end like any
-     * offer's.
-     * A socket fault (503,
-     * 408) keeps the call: the next reconnect asks again. A 403 ends it: the
-     * session the join returned is another agent's, so there is no call to
-     * keep.
+     * Ask the executor for this session's state (`sfu.callResume`). The ask
+     * is not a queue step — the restart offer it triggers on the executor
+     * is answered while the reply is still out, inside the restart's
+     * window — but it waits out a join still settling, and its reply's
+     * roster and pending offer apply on the queue like the events that
+     * carry them. `listed: false` — the room or the session gone —
+     * rebuilds the call, unless a roster newer than the ask listed it
+     * again meanwhile. The reply's wait is bounded so a reply landing
+     * after it is dropped — it must not list or unlist, roster, offer or
+     * rebuild a call that already went on; while a restart is in flight
+     * the bound is the restart's remaining time, never a fresh one from
+     * the socket's return. Only the RPC is bounded: the SDP steps a reply
+     * starts run to their end like any offer's.
+     * A socket fault (503, 408) keeps the call: the next reconnect asks
+     * again. A 403 ends it: the session the join returned is another
+     * agent's, so there is no call to keep.
      */
-    private async resume(pc: RTCPeerConnection): Promise<void> {
+    private resume(pc: RTCPeerConnection): void {
         const participantId = this.state.participantId
         if (!participantId || this.state.peerConnection !== pc) return
-        const askedAtRevision = this.rosterRevision
-        let reply: { result: SfuResumeResult } | { error: unknown } | null = null
-        await this.timeBoxed(async () => {
-            try {
-                reply = { result: await this.neighbourhood.sfuCallResume(this.neighbourhoodUrl, this.roomId, participantId) }
-            } catch (error) {
-                reply = { error }
-            }
-        }, SfuManager.RESUME_STEP_TIMEOUT_MS)
-        // The box won: whatever the RPC answers now belongs to a call that
-        // went on without it.
-        if (reply === null) return
+        const joined = this.joinSettled
+        void joined.then(async () => {
+            // The join the ask waited for may not be this call's any more.
+            if (this.state.peerConnection !== pc || this.state.participantId !== participantId) return
+            const askedAtRevision = this.rosterRevision
+            // A restart in flight owns its remaining window: a socket that
+            // came back late in it bounds the ask by what is left, or
+            // drops it.
+            const restartLeft = this.restartDeadline === null ? Infinity : this.restartDeadline - Date.now()
+            if (restartLeft <= 0) return
+            let reply: { result: SfuResumeResult } | { error: unknown } | null = null
+            await this.timeBoxed(async () => {
+                try {
+                    reply = { result: await this.neighbourhood.sfuCallResume(this.neighbourhoodUrl, this.roomId, participantId) }
+                } catch (error) {
+                    reply = { error }
+                }
+            }, Math.min(SfuManager.RESUME_STEP_TIMEOUT_MS, restartLeft))
+            // The box won: whatever the RPC answers now belongs to a call
+            // that went on without it.
+            if (reply === null) return
+            this.offerQueue = this.offerQueue
+                .then(() => this.applyResume(pc, participantId, askedAtRevision, reply!))
+                .catch((err) => console.warn("SFU: applying the resume's reply failed:", err))
+        })
+    }
+
+    /**
+     * Apply a `sfu.callResume` reply on the offer queue: `resume` asked it,
+     * `askedAtRevision` is the roster revision when it did. See `resume`
+     * for what each answer means for the call.
+     */
+    private async applyResume(
+        pc: RTCPeerConnection,
+        participantId: string,
+        askedAtRevision: number,
+        reply: { result: SfuResumeResult } | { error: unknown },
+    ): Promise<void> {
         if ("error" in reply) {
             const err = reply.error
             if (this.state.peerConnection !== pc || this.state.participantId !== participantId) return
