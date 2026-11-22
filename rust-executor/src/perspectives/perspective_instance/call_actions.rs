@@ -25,6 +25,39 @@ use crate::languages::mount_types::MountDelta;
 use crate::languages::LanguageController;
 use crate::types::InteractionCall;
 
+tokio::task_local! {
+    /// Whether the caller of the request in flight holds `expression:update`.
+    /// Set per RPC call and MCP tool call (`with_interact_grant`). Unset in
+    /// executor code that is not a request (tests, flows): the agent check
+    /// in `run_call_actions` still applies there.
+    static CALLER_MAY_INTERACT: bool;
+}
+
+/// Runs `request` with `granted` as whether its caller holds
+/// `expression:update`, the capability `expression.interact` needs. A call
+/// action runs a language interaction, so it needs the same.
+pub async fn with_interact_grant<F: std::future::Future>(granted: bool, request: F) -> F::Output {
+    CALLER_MAY_INTERACT.scope(granted, request).await
+}
+
+/// `Ok` if a write by `context` may run language calls. Until ad4m#1775
+/// passes the caller's context to the language, a call runs as the main
+/// agent, so only the main agent may make one. A request also needs
+/// `expression:update`, as `expression.interact` does.
+pub(crate) fn check_call_caller(context: &AgentContext) -> Result<(), AnyError> {
+    if !context.is_main_agent() {
+        return Err(anyhow!(
+            "language calls run as the main agent until ad4m#1775, so a user may not make one"
+        ));
+    }
+    if matches!(CALLER_MAY_INTERACT.try_with(|granted| *granted), Ok(false)) {
+        return Err(anyhow!(
+            "a write that calls a language needs the expression:update capability"
+        ));
+    }
+    Ok(())
+}
+
 /// One language call a write makes: the interaction `name` on the
 /// expression URL `source` with the merged JSON object `params`.
 pub(super) struct CallRun {
@@ -192,6 +225,7 @@ impl PerspectiveInstance {
         if calls.is_empty() {
             return Ok(Vec::new());
         }
+        check_call_caller(context)?;
         if batch_id.is_some() {
             return Err(anyhow!("call actions cannot run inside a batch"));
         }
@@ -213,9 +247,9 @@ impl PerspectiveInstance {
     async fn execute_call(&self, run: &CallRun) -> Result<MountDelta, AnyError> {
         // `expression_interact` takes no agent context, so the call runs
         // as the executor's main agent: whatever the language signs or
-        // writes during it (zome calls, its own links) is the main agent's,
-        // whoever made the write, until ad4m#1775 passes the caller's
-        // context through.
+        // writes during it (zome calls, its own links) is the main agent's.
+        // That is why `check_call_caller` lets only the main agent make
+        // one, until ad4m#1775 passes the caller's context through.
         let result = LanguageController::global_instance()
             .expression_interact(
                 &run.source,

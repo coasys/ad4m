@@ -525,9 +525,18 @@ impl HandlerMap {
         let entry = self.entry(msg_type)?;
         let answer = match Self::admit_entry(entry, msg_type, &params, &ctx).await {
             // The link writes the handler makes count for the caller's agent (`GET /metrics`).
+            // A call action in it runs an interaction, so it needs what
+            // `expression.interact` needs.
             Ok(()) => {
                 let did = ctx.session.acts_as_did();
-                crate::metrics::as_caller(did.as_deref(), (entry.handler)(params, ctx)).await
+                let may_interact = ctx
+                    .require(&crate::agent::capabilities::defs::EXPRESSION_UPDATE_CAPABILITY)
+                    .is_ok();
+                let request = crate::perspectives::perspective_instance::with_interact_grant(
+                    may_interact,
+                    (entry.handler)(params, ctx),
+                );
+                crate::metrics::as_caller(did.as_deref(), request).await
             }
             Err(e) => Err(e),
         };

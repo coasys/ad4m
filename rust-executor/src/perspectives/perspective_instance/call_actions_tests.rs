@@ -229,6 +229,85 @@ async fn a_constructor_must_return_an_address() {
 }
 
 #[tokio::test]
+async fn a_managed_user_may_not_make_a_call() {
+    let lang = load_mount_test_language().await;
+    let (mut p, ctx) = mounted("MountThing", thing_shape(&lang).await).await;
+    let base = created_thing(&lang, &ctx, &mut p).await;
+    let alice = AgentContext::managed("did:key:z6MkAliceCallActionUser".to_string());
+    let before = link_count(&p).await;
+
+    let err = p
+        .create_subject(
+            class("MountThing"),
+            "ignored".to_string(),
+            Some(json!({"title": "b"})),
+            None,
+            &alice,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("main agent"), "{err}");
+    let err = p
+        .update_subject(
+            class("MountThing"),
+            base.clone(),
+            json!({"done": true}),
+            None,
+            &alice,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("main agent"), "{err}");
+    let err = p
+        .remove_subject(class("MountThing"), base, None, &alice)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("main agent"), "{err}");
+
+    assert_eq!(
+        calls(&lang).await.len(),
+        1,
+        "only the main agent's create ran"
+    );
+    assert_eq!(link_count(&p).await, before);
+}
+
+#[tokio::test]
+async fn a_request_without_expression_update_may_not_make_a_call() {
+    let lang = load_mount_test_language().await;
+    let (mut p, ctx) = mounted("MountThing", thing_shape(&lang).await).await;
+
+    let err = with_interact_grant(
+        false,
+        p.create_subject(
+            class("MountThing"),
+            "ignored".to_string(),
+            Some(json!({"title": "a"})),
+            None,
+            &ctx,
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("expression:update"), "{err}");
+    assert!(calls(&lang).await.is_empty());
+
+    let url = with_interact_grant(
+        true,
+        p.create_subject(
+            class("MountThing"),
+            "ignored".to_string(),
+            Some(json!({"title": "a"})),
+            None,
+            &ctx,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(url, Some(format!("{lang}://t1")));
+}
+
+#[tokio::test]
 async fn a_mixed_action_list_is_refused() {
     let lang = load_mount_test_language().await;
     let mut shape: Value = serde_json::from_str(&thing_shape(&lang).await).unwrap();

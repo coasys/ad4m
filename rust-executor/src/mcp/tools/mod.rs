@@ -215,10 +215,19 @@ impl ServerHandler for Ad4mMcpHandler {
             // The link writes the tool makes count for its caller's agent
             // (`GET /metrics`), as they do for an RPC call
             // (`metrics::as_caller` in `HandlerMap::dispatch`).
+            // A call action the tool makes needs `expression:update`, as on RPC.
             Ok(this) => {
-                let did = this.session().await.ok().and_then(|s| s.acts_as_did());
-                crate::metrics::as_caller(did.as_deref(), this.dispatch_tool(request, context))
-                    .await
+                let session = this.session().await.ok();
+                let did = session.as_ref().and_then(|s| s.acts_as_did());
+                let may_interact = session.is_some_and(|s| {
+                    s.require(&crate::agent::capabilities::defs::EXPRESSION_UPDATE_CAPABILITY)
+                        .is_ok()
+                });
+                let call = crate::perspectives::perspective_instance::with_interact_grant(
+                    may_interact,
+                    this.dispatch_tool(request, context),
+                );
+                crate::metrics::as_caller(did.as_deref(), call).await
             }
             Err(refusal) => Ok(refusal),
         }

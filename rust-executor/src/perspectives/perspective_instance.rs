@@ -78,6 +78,7 @@ mod shapes;
 mod sdna_writes;
 #[cfg(test)]
 pub(crate) use abstract_classes::faults::fail_next_index;
+pub use call_actions::with_interact_grant;
 pub use sdna_writes::SdnaType;
 pub use shapes::{RegisterResult, ShapeSummary};
 mod subscriptions;
