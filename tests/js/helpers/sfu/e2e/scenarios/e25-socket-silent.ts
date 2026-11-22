@@ -19,7 +19,7 @@
 
 import { CAMERA } from "../media.js";
 import { e2eScenario } from "../scenario.js";
-import { RunChecks, TcpShaper, failsOnDev, reconnected } from "../../faults/index.js";
+import { RunChecks, TcpShaper, failsOnDev, reconnected, rowPassed } from "../../faults/index.js";
 
 const EVERYONE = ["alice", "bob", "carol"];
 /** The ping deadline (up to 30 s, seen at 29 s), the redial and an RPC over the new socket. */
@@ -68,6 +68,7 @@ export const e25SocketSilent = e2eScenario({
         if (violations.length) throw new Error(violations.join("\n"));
       });
       await step("no session reported an error", () => call.eventually(call.noErrors(), 1, "errors"));
+      rowPassed("e25");
     } finally {
       await checks?.abort();
       shaper.close();

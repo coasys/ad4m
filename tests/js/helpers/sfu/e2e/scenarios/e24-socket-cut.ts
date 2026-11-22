@@ -18,7 +18,7 @@
 
 import { CAMERA } from "../media.js";
 import { e2eScenario } from "../scenario.js";
-import { RunChecks, TcpShaper, failsOnDev, reconnected } from "../../faults/index.js";
+import { RunChecks, TcpShaper, failsOnDev, reconnected, rowPassed } from "../../faults/index.js";
 
 const EVERYONE = ["alice", "bob", "carol"];
 /** The redial (first retry after 500 ms) and an RPC over the new socket fit inside this. */
@@ -68,6 +68,7 @@ export const e24SocketCut = e2eScenario({
         if (violations.length) throw new Error(violations.join("\n"));
       });
       await step("no session reported an error", () => call.eventually(call.noErrors(), 1, "errors"));
+      rowPassed("e24");
     } finally {
       await checks?.abort();
       shaper.close();
