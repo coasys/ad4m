@@ -23,7 +23,7 @@ use tokio::sync::mpsc;
 use super::hosts::{socket_for, MediaSockets};
 use super::reachability::{assess, stun_reflexive, Advertised, SfuReachability};
 use super::relay::MediaRelay;
-use super::room::{ParticipantId, RoomId};
+use super::room::{random_upper_half_u64, ParticipantId, RoomId};
 use super::simulcast::{is_keyframe, LayerSelector};
 use super::types::{SfuAnswerRefusal, SfuAnswerResult, SfuCallRenegotiationOffer};
 
@@ -265,7 +265,8 @@ fn offer_retry_wait(resends_done: u32) -> Duration {
 /// and kept for every resend of that offer.
 fn next_offer_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(1);
+    use std::sync::LazyLock;
+    static NEXT: LazyLock<AtomicU64> = LazyLock::new(|| AtomicU64::new(random_upper_half_u64()));
     format!("o{}", NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
@@ -4080,6 +4081,27 @@ mod tests {
         let (_again, mapping) = apply_deferred_tracks(peers.get_mut(&pid).unwrap(), now)
             .expect("the requeued track is offered again on this pipe");
         assert_eq!(mapping.len(), 1);
+    }
+
+    /// A fresh process does not hand out a low offer id, and the wire form
+    /// stays `o{n}`. Consecutive mints still increase by one.
+    #[test]
+    fn a_fresh_offer_id_starts_in_the_upper_half_and_keeps_its_form() {
+        let first = next_offer_id();
+        let second = next_offer_id();
+        let n1: u64 = first[1..]
+            .parse()
+            .unwrap_or_else(|_| panic!("offer id {first} is not o{{n}}"));
+        let n2: u64 = second[1..]
+            .parse()
+            .unwrap_or_else(|_| panic!("offer id {second} is not o{{n}}"));
+        assert!(
+            first.starts_with('o') && first == format!("o{n1}"),
+            "offer id {first} lost its o{{n}} form"
+        );
+        assert!(n1 >= 1u64 << 63, "fresh offer id {first} is below 2^63");
+        assert_eq!(n2, n1 + 1, "consecutive offer ids {first} then {second}");
+        assert_eq!(second, format!("o{n2}"));
     }
 
     /// An answer that carries this offer's SDP but another offer's id is
