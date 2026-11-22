@@ -20,7 +20,9 @@
 //!   3. Ask the configured LLM (`AIService::prompt` on the task registered by
 //!      `ensure_interpretation_task`), retrying the parse a few times because local
 //!      models emit half-valid JSON (`retry_interpretation_parse` +
-//!      `parse_interpretation_response` -> `ProposedInstance`s).
+//!      `parse_interpretation_response` -> `ProposedInstance`s). A parsed answer
+//!      with nothing in it, on a pass that had transcript items, is asked once
+//!      more, and that extra call does not nest the thinking-off retry.
 //!   4. Drop anything already present (`filter_already_present`, order-preserving),
 //!      then plan the writes (`plan_interpretation_ops_with_context`): a proposal
 //!      carrying an `id` becomes an `Update`, otherwise a `Create`, and relation
