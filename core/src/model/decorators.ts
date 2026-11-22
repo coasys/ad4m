@@ -378,6 +378,10 @@ export interface PropertyOptions {
      * This is the form mounted classes use (a language owns the record,
      * so a write must reach the language, not the link graph). Example:
      * `@Property({ through: "mounttest://title", setter: { interaction: "update" } })`.
+     *
+     * Call writers run only through the executor's shape actions — the
+     * SDK's own save path refuses to write a call-setter property as a
+     * link (`save()` throws rather than bypass the language).
      */
     setter?: CallActionOptions | CallActionOptions[];
 
@@ -1066,12 +1070,20 @@ export interface RelationOptions {
      * `source` defaults to `"this"`; the executor hands the call
      * `{ <relation>: [members] }` merged over `params`.
      * Mutually exclusive with `readOnly` and with `getter`.
+     *
+     * Declaring either a call `adder` or a call `remover` drops BOTH
+     * generated link lists — the relation has no link-write path at all,
+     * not just the side that was declared. Call writers run only through
+     * the executor's shape actions: the SDK's own save path refuses to
+     * write such a relation as links (`save()`/`add*`/`remove*`/`set*`
+     * throw rather than bypass the language).
      */
     adder?: CallActionOptions | CallActionOptions[];
     /**
      * Language-call remover: removing a member invokes the given language
      * interaction(s) — emitted as `ad4m://remover` in place of `removeLink`.
-     * Mutually exclusive with `readOnly` and with `getter`.
+     * Mutually exclusive with `readOnly` and with `getter`. See
+     * `RelationOptions.adder`: declaring either drops both link lists.
      */
     remover?: CallActionOptions | CallActionOptions[];
     /** Whether the link is stored locally (not shared on the network) */

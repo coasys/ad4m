@@ -6,33 +6,31 @@ const plugins = [
   commonjs()
 ];
 
+// One build for both entries: `index` and `@coasys/ad4m/model` share the
+// modules they re-export (the decorator registries in model/decorators.ts
+// among them). Two separate builds would inline a copy per entry, and a
+// class decorated through `@coasys/ad4m/model` would be invisible to
+// getPropertiesMetadata()/Ad4mModel from `@coasys/ad4m`. With a shared
+// chunk per format, both entries import the same runtime module — one
+// registry, whichever entry each side imported.
 module.exports = [
   {
-    input: 'lib/src/index.js',
+    input: {
+      index: 'lib/src/index.js',
+      model: 'lib/src/model-entry.js'
+    },
     output: [
       {
-        format: 'cjs',
-        file: "lib/index.cjs",
+        format: 'esm',
+        dir: "lib",
+        entryFileNames: "[name].js",
+        chunkFileNames: "shared-[hash].js"
       },
       {
-        format: 'esm',
-        file: "lib/index.js",
-      }
-    ],
-    plugins
-  },
-  {
-    // `@coasys/ad4m/model`: decorators + SHACL generation without the
-    // client runtime, for language bundles (`mount.classes`).
-    input: 'lib/src/model.js',
-    output: [
-      {
         format: 'cjs',
-        file: "lib/model.cjs",
-      },
-      {
-        format: 'esm',
-        file: "lib/model.js",
+        dir: "lib",
+        entryFileNames: "[name].cjs",
+        chunkFileNames: "shared-[hash].cjs"
       }
     ],
     plugins

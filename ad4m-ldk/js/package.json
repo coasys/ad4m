@@ -25,6 +25,7 @@
     "email": "info@coasys.org"
   },
   "devDependencies": {
+    "@coasys/ad4m": "workspace:*",
     "tsx": "^4.16.0",
     "typescript": "^5.9.3"
   }

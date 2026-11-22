@@ -12,12 +12,19 @@
       "require": "./lib/index.cjs"
     },
     "./model": {
-      "types": "./lib/src/model.d.ts",
+      "types": "./lib/src/model-entry.d.ts",
       "import": "./lib/model.js",
       "require": "./lib/model.cjs"
     },
     "./package.json": "./package.json",
     "./*": "./*"
+  },
+  "typesVersions": {
+    "*": {
+      "model": [
+        "lib/src/model-entry.d.ts"
+      ]
+    }
   },
   "scripts": {
     "build": "patch-package && tsc && pnpm run bundle",
