@@ -7,11 +7,15 @@
  *  - `TcpShaper`: a TCP proxy between one client and the executor's API port.
  *    Everything the client's Ad4mClient sends and receives (its one WebSocket)
  *    crosses it, with a fixed delay, a byte rate per direction, stalls,
- *    `cut()` and `silence()`. A stall or silence holds every byte for a while
- *    and then lets them go in order: what packet loss does to a TCP stream
- *    (a retransmission timeout), since a proxy above TCP cannot lose bytes.
- *    `cut()` destroys the proxied sockets both ways: the client's WebSocket
- *    dies while its media — UDP, not proxied — keeps flowing.
+ *    `cut()`, `silence()` and `blackout()`. A stall holds every byte, on
+ *    every connection, for a while and then lets them go in order: what
+ *    packet loss does to a TCP stream (a retransmission timeout), since a
+ *    proxy above TCP cannot lose bytes. `silence()` holds only the
+ *    connections open now, so a new dial passes. `cut()` destroys the
+ *    proxied sockets both ways: the client's WebSocket dies while its media
+ *    — UDP, not proxied — keeps flowing. `blackout()` cuts and holds every
+ *    new dial until the link is back. `connections()` reports each
+ *    connection, so a row can see the client dial a new one.
  *  - `UdpRelay`: a UDP relay between one client and the remote ends it calls,
  *    with loss and delay per packet: the client's media path.
  *
@@ -46,6 +50,16 @@ export interface ShaperEvent {
   upBytes?: number;
   downBytes?: number;
   seconds?: number;
+}
+
+/** One proxied connection, as `connections()` reports it. */
+export interface ShaperConnection {
+  /** Numbered from 1 in the order the client dialled. */
+  conn: number;
+  open: boolean;
+  /** Bytes forwarded client→executor and executor→client so far. */
+  upBytes: number;
+  downBytes: number;
 }
 
 class Direction {
@@ -112,60 +126,89 @@ export class TcpShaper {
   private heldUntil = 0;
   private sockets = new Set<Socket>();
   private connSeq = 0;
-  private live = new Map<number, { client: Socket; executor: Socket; sever: () => void }>();
+  private live = new Map<number, { silence: (until: number) => void; sever: () => void }>();
+  private all = new Map<number, () => ShaperConnection>();
+  private blackoutUntil = 0;
+  private timers = new Set<ReturnType<typeof setTimeout>>();
+  private closed = false;
   port = 0;
   stalls = 0;
   silences = 0;
   cuts = 0;
+  blackouts = 0;
   constructor(
     private target: number,
     private onEvent: (e: ShaperEvent) => void = () => {},
   ) {
     this.server = createServer((client) => {
-      const conn = ++this.connSeq;
-      const started = Date.now();
-      const executor = connect(target, "127.0.0.1");
-      client.setNoDelay(true);
-      executor.setNoDelay(true);
-      this.sockets.add(client).add(executor);
-      this.onEvent({ t: new Date().toISOString(), conn, what: "open" });
-      const hold = () => ({ delayMs: this.shapeNow.delayMs ?? 0, stalledUntil: this.heldUntil });
-      const up = new Direction(client, executor, () => ({ ...hold(), rate: this.shapeNow.upBytesPerS ?? 0 }));
-      const down = new Direction(executor, client, () => ({ ...hold(), rate: this.shapeNow.downBytesPerS ?? 0 }));
-      let by: "client" | "executor" | "shaper" | null = null;
-      const closed = (who: "client" | "executor" | "shaper") => () => {
-        if (!by) {
-          by = who;
-          this.onEvent({ t: new Date().toISOString(), conn, what: "close", by, upBytes: up.bytes, downBytes: down.bytes, seconds: Math.round((Date.now() - started) / 1000) });
-        }
-      };
-      client.on("end", closed("client"));
-      executor.on("end", closed("executor"));
-      const drop = (who: "client" | "executor" | "shaper") => () => {
-        closed(who)();
+      if (this.closed) return void client.destroy();
+      // A dial during a blackout gets no answer until the link is back: the
+      // client's bytes wait in the kernel, as a SYN retransmits, and its
+      // handshake completes once the blackout ends.
+      const wait = this.blackoutUntil - Date.now();
+      if (wait > 0) {
+        client.pause();
+        this.sockets.add(client);
+        const timer = setTimeout(() => {
+          this.timers.delete(timer);
+          if (client.destroyed || this.closed) return;
+          this.proxy(client);
+          client.resume();
+        }, wait);
+        this.timers.add(timer);
+        return;
+      }
+      this.proxy(client);
+    });
+  }
+  private proxy(client: Socket): void {
+    const target = this.target;
+    const conn = ++this.connSeq;
+    const started = Date.now();
+    const executor = connect(target, "127.0.0.1");
+    client.setNoDelay(true);
+    executor.setNoDelay(true);
+    this.sockets.add(client).add(executor);
+    this.onEvent({ t: new Date().toISOString(), conn, what: "open" });
+    let silentUntil = 0;
+    const hold = () => ({ delayMs: this.shapeNow.delayMs ?? 0, stalledUntil: Math.max(this.heldUntil, silentUntil) });
+    const up = new Direction(client, executor, () => ({ ...hold(), rate: this.shapeNow.upBytesPerS ?? 0 }));
+    const down = new Direction(executor, client, () => ({ ...hold(), rate: this.shapeNow.downBytesPerS ?? 0 }));
+    let by: "client" | "executor" | "shaper" | null = null;
+    const closed = (who: "client" | "executor" | "shaper") => () => {
+      if (!by) {
+        by = who;
+        this.onEvent({ t: new Date().toISOString(), conn, what: "close", by, upBytes: up.bytes, downBytes: down.bytes, seconds: Math.round((Date.now() - started) / 1000) });
+      }
+    };
+    client.on("end", closed("client"));
+    executor.on("end", closed("executor"));
+    const drop = (who: "client" | "executor" | "shaper") => () => {
+      closed(who)();
+      up.stop();
+      down.stop();
+      client.destroy();
+      executor.destroy();
+      this.sockets.delete(client);
+      this.sockets.delete(executor);
+      this.live.delete(conn);
+    };
+    client.on("error", drop("client"));
+    executor.on("error", drop("executor"));
+    client.on("close", drop("client"));
+    executor.on("close", drop("executor"));
+    this.all.set(conn, () => ({ conn, open: this.live.has(conn), upBytes: up.bytes, downBytes: down.bytes }));
+    this.live.set(conn, {
+      silence: (until: number) => {
+        silentUntil = Math.max(silentUntil, until);
+      },
+      sever: () => {
+        closed("shaper")();
         up.stop();
         down.stop();
         client.destroy();
         executor.destroy();
-        this.sockets.delete(client);
-        this.sockets.delete(executor);
-        this.live.delete(conn);
-      };
-      client.on("error", drop("client"));
-      executor.on("error", drop("executor"));
-      client.on("close", drop("client"));
-      executor.on("close", drop("executor"));
-      this.live.set(conn, {
-        client,
-        executor,
-        sever: () => {
-          closed("shaper")();
-          up.stop();
-          down.stop();
-          client.destroy();
-          executor.destroy();
-        },
-      });
+      },
     });
   }
   async listen(): Promise<number> {
@@ -176,20 +219,23 @@ export class TcpShaper {
   set(shape: Shape): void {
     this.shapeNow = shape;
   }
-  /** Hold every byte, both ways, for `ms` from now. */
+  /** Hold every byte, both ways, on every connection — new ones too — for `ms` from now. */
   stall(ms: number): void {
     this.stalls++;
     this.heldUntil = Math.max(this.heldUntil, Date.now() + ms);
   }
   /**
-   * The link stays open but nothing crosses it for `ms`: the silent-socket
-   * case (the OS keeps the socket; no FIN, no RST). Bytes are held and then
-   * delivered — never dropped, which would corrupt the WebSocket stream — so
-   * the socket's close handshake still completes after the interval.
+   * The connections open now stay open but nothing crosses them for `ms`
+   * (default: for the rest of their life) — the silent-socket case: the OS
+   * keeps the socket, no FIN, no RST, while a new dial passes. Bytes are
+   * held, never dropped, which would corrupt the WebSocket stream. Returns
+   * the connections silenced.
    */
-  silence(ms: number): void {
+  silence(ms = Infinity): number[] {
     this.silences++;
-    this.heldUntil = Math.max(this.heldUntil, Date.now() + ms);
+    const until = Date.now() + ms;
+    for (const { silence } of this.live.values()) silence(until);
+    return [...this.live.keys()];
   }
   /**
    * Cut every live connection's TCP path both ways: the client's WebSocket
@@ -203,7 +249,26 @@ export class TcpShaper {
     for (const { sever } of entries) sever();
     return entries.length;
   }
+  /**
+   * The link goes away for `ms`: every live connection is cut, and a dial
+   * meanwhile gets no answer until the link is back, then connects. Returns
+   * the connections cut.
+   */
+  blackout(ms: number): number[] {
+    this.blackouts++;
+    this.blackoutUntil = Math.max(this.blackoutUntil, Date.now() + ms);
+    const cut = [...this.live.keys()];
+    this.cut();
+    return cut;
+  }
+  /** Every connection so far, open or closed, oldest first. */
+  connections(): ShaperConnection[] {
+    return [...this.all.values()].map((info) => info());
+  }
   close(): void {
+    this.closed = true;
+    for (const timer of this.timers) clearTimeout(timer);
+    this.timers.clear();
     this.server.close();
     for (const s of this.sockets) s.destroy();
   }
