@@ -1048,6 +1048,7 @@ mod app_token_tests {
     // every code and receive the app's token.
     #[tokio::test]
     async fn a_request_stops_accepting_codes_after_too_many_wrong_ones() {
+        setup();
         let (request_id, code) = permitted_request().await;
         let mut last_err = String::new();
         for _ in 0..MAX_CODE_ATTEMPTS {
@@ -1078,6 +1079,7 @@ mod app_token_tests {
     // The request goes once it runs out of code attempts.
     #[tokio::test]
     async fn a_locked_out_request_is_deleted() {
+        setup();
         let (request_id, code) = permitted_request().await;
         assert!(PendingRequests::global().contains(&request_id));
         for _ in 0..MAX_CODE_ATTEMPTS {

@@ -719,6 +719,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     ("identity.cosignIncept", || json!({ "event": {} })),
     ("identity.publish", || json!({ "events": [] })),
+    ("identity.unlinkSelf", || json!({})),
     (
         "identity.openOffer",
         || json!({ "signedOffer": signed_offer() }),
@@ -1406,9 +1407,9 @@ async fn a_users_app_without_agent_update_cannot_revoke_the_users_sessions() {
 }
 
 /// An app token on the main agent holds `agent:SIGN` and `agent:UPDATE` (the default set every
-/// app gets) and still may not co-sign an incept or publish for the main agent: that binds the
-/// main agent to an identity for good, so only the admin credential does. A user co-signs and
-/// publishes for their own agent.
+/// app gets) and still may not co-sign an incept, publish or unlink its key for the main
+/// agent: that binds the main agent to an identity for good or ends its key, so only the admin
+/// credential does. A user does each for their own agent.
 #[tokio::test]
 async fn only_the_operator_binds_the_main_agent_to_an_identity() {
     let map = build_handler_map();
@@ -1426,7 +1427,11 @@ async fn only_the_operator_binds_the_main_agent_to_an_identity() {
         ],
     );
     let operator = RequestContext::operator_for_test();
-    for method in ["identity.cosignIncept", "identity.publish"] {
+    for method in [
+        "identity.cosignIncept",
+        "identity.publish",
+        "identity.unlinkSelf",
+    ] {
         let params = params(method, None, false);
         for app in [&app, &all] {
             let refused = map.admit(method, &params, app).await.unwrap_err();
