@@ -214,10 +214,11 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .guard(Guard::UserOrOperator(AGENT_SIGN_CAPABILITY.clone()));
     map.method::<PublishParams, SignedHead>("identity.publish", publish)
         .guard(Guard::UserOrOperator(AGENT_UPDATE_CAPABILITY.clone()));
-    // The device leaves the identity with its own key, no master key: for the main agent the
-    // operator, as `identity.publish`; a user for their own agent.
+    // The device leaves the identity with its own key, no master key, and the key is dead for
+    // good: for the main agent the operator, as `identity.publish`; for a managed agent only
+    // the user's own login, never an app the user approved.
     map.method::<NoParams, SignedHead>("identity.unlinkSelf", unlink_self)
-        .guard(Guard::UserOrOperator(AGENT_UPDATE_CAPABILITY.clone()));
+        .guard(Guard::UserLoginOrOperator(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<OpenOfferParams, OfferOpened>("identity.openOffer", open_offer)
         .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<OffersParams, Vec<OfferListing>>("identity.offers", offers)
@@ -315,7 +316,8 @@ mod tests {
     }
 
     /// Each call carries its guard: reads the agent read capability; co-signing and publishing
-    /// the agent sign and update capabilities, and for the main agent the operator; other writes
+    /// the agent sign and update capabilities, and for the main agent the operator (unlinking, a
+/// user's login or the operator, no app); other writes
     /// the agent update capability; a claim for the main agent and a log reset the operator.
     #[test]
     fn every_identity_call_has_its_guard() {
@@ -349,7 +351,7 @@ mod tests {
                 "identity.unlinkSelf",
                 format!(
                     "{:?}",
-                    Guard::UserOrOperator(AGENT_UPDATE_CAPABILITY.clone())
+                    Guard::UserLoginOrOperator(AGENT_UPDATE_CAPABILITY.clone())
                 ),
             ),
         ];

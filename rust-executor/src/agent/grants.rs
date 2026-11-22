@@ -275,6 +275,13 @@ impl LiveGrant {
         &self.auth.app_name
     }
 
+    /// Whether the grant is a user's login (`user.login`), not an app's. A login answers no
+    /// capability request, so its `request_id` is its own id; an app's grant answers a
+    /// request, whose id is another.
+    pub fn is_login(&self) -> bool {
+        self.request_id == self.id.0
+    }
+
     /// Whether the grant was revoked or removed.
     pub fn is_ended(&self) -> bool {
         self.ended.is_cancelled()
