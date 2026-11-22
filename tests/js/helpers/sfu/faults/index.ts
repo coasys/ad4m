@@ -30,4 +30,9 @@ export type { FaultWindow, RunCheckOptions } from "./checks.js";
  * rework), so they stay in the tree and are skipped with the reason here.
  * Remove an entry when its row passes.
  */
-export const FAILS_ON_DEV: Record<string, string> = {};
+export const FAILS_ON_DEV: Record<string, string> = {
+  // A dropped sfu.callAnswerServerOffer makes the session rebuild the whole
+  // call (every observer sees participant-left for carol): on dev the answer
+  // is a fatal RPC, not a message that can be lost and retried.
+  e26: "a lost sfu.callAnswerServerOffer rebuilds carol's call on dev (participant-left fires); slice 3 makes the answer retryable",
+};
