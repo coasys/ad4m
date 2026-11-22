@@ -182,24 +182,28 @@ impl CascadeSignal {
 /// the next announce would rebuild the pipe while the other end still
 /// held its entry. Each further consecutive failure doubles this, up to
 /// [`PIPE_REDIAL_BACKOFF_CAP`]. A timeout (the pipe never connected) does
-/// not wait, and a pipe that stayed connected for [`PIPE_HEALTHY_RESET`]
-/// starts the count again.
+/// not wait, and a pipe whose connected stretch reached
+/// [`PIPE_HEALTHY_RESET`] starts the count again. The stretch is measured
+/// until ICE reports `Disconnected`. Time spent disconnected does not count.
 pub const PIPE_REDIAL_BACKOFF: Duration = Duration::from_secs(30);
 
 /// The longest redial wait. Further consecutive failures of the same pipe stay here.
 pub const PIPE_REDIAL_BACKOFF_CAP: Duration = Duration::from_secs(120);
 
 /// How long a pipe must stay connected before its failure count is cleared.
-/// The next end is then a first failure, and the redial is immediate.
+/// Measured until ICE reports `Disconnected`, or until the pipe is dropped
+/// while it is still connected. Time spent disconnected does not count, and
+/// two shorter stretches are not added. The next end is then a first
+/// failure, and the redial is immediate.
 pub const PIPE_HEALTHY_RESET: Duration = Duration::from_secs(120);
 
 /// One pipe's run of consecutive ended offers and dialler drops, and when
-/// it may be dialled. `connected_at` is when the current pipe became
-/// connected. It is cleared when the pipe ends.
+/// it may be dialled. `reset` means the next recorded end counts as a first
+/// failure, because a connected stretch reached [`PIPE_HEALTHY_RESET`].
 struct PipeRedial {
     failures: u32,
     not_before: Instant,
-    connected_at: Option<Instant>,
+    reset: bool,
 }
 
 /// The wait after `failures` consecutive ends. The first is immediate.
@@ -285,31 +289,26 @@ impl CascadeManager {
         self.test_now = Some(now);
     }
 
-    /// The pipe to `remote_did` is connected as of `now`. A later end uses
-    /// this to decide whether the failure count still stands. The first
-    /// connect of this life is kept: a second event must not move the clock.
-    pub fn note_pipe_connected(&mut self, room_id: &str, remote_did: &str, now: Instant) {
+    /// The connected stretch to `remote_did` reached [`PIPE_HEALTHY_RESET`].
+    /// The next end of that pipe counts as a first failure. No entry yet
+    /// means the next end is already a first failure.
+    fn note_healthy_stretch(&mut self, room_id: &str, remote_did: &str) {
         let key = (room_id.to_string(), remote_did.to_string());
         if let Some(redial) = self.redials.get_mut(&key) {
-            if redial.connected_at.is_none() {
-                redial.connected_at = Some(now);
-            }
+            redial.reset = true;
         }
     }
 
     /// An established pipe to `remote_did` ended: a locally rejected answer,
     /// an unanswered offer, or an ICE drop on the end that dials. The first
     /// consecutive end dials at once. From the second, [`Self::establish_pipe`]
-    /// waits. A pipe that stayed connected for [`PIPE_HEALTHY_RESET`] counts
-    /// this end as a first failure again.
+    /// waits. A stretch that reached [`PIPE_HEALTHY_RESET`] counts this end
+    /// as a first failure again. The peer decides that, at the disconnect;
+    /// this does not compare clocks.
     fn note_pipe_offer_ended(&mut self, room_id: &str, remote_did: &str, now: Instant) {
         let key = (room_id.to_string(), remote_did.to_string());
         let previous = self.redials.get(&key);
-        let reset = previous
-            .and_then(|redial| redial.connected_at)
-            .is_some_and(|connected| {
-                now.saturating_duration_since(connected) >= PIPE_HEALTHY_RESET
-            });
+        let reset = previous.is_some_and(|redial| redial.reset);
         let failures = if reset {
             1
         } else {
@@ -328,9 +327,28 @@ impl CascadeManager {
             PipeRedial {
                 failures,
                 not_before: now + wait,
-                connected_at: None,
+                reset: false,
             },
         );
+    }
+
+    /// A pipe peer died, and `healthy_stretch` says whether a connected
+    /// stretch reached [`PIPE_HEALTHY_RESET`] before this death. When it
+    /// did, the failure count resets and this end is a first failure.
+    /// Dead-pipe cleanup calls this. The comparison is the peer's: a
+    /// disconnected period is not measured here.
+    pub fn apply_pipe_death(
+        &mut self,
+        room_id: &str,
+        remote_did: &str,
+        reason: &str,
+        now: Instant,
+        healthy_stretch: bool,
+    ) -> Option<ParticipantId> {
+        if healthy_stretch {
+            self.note_healthy_stretch(room_id, remote_did);
+        }
+        self.on_pipe_died(room_id, remote_did, reason, now)
     }
 
     /// A pipe peer died. An ended offer (`reason` `"offer"`) arms the redial
@@ -1449,9 +1467,10 @@ mod tests {
             .expect("the fourth consecutive failure waits 120 s");
     }
 
-    /// A pipe that stayed connected for the healthy interval drops its
-    /// failure count. The end after that is free again. A shorter connect
-    /// keeps the count, so that end still waits.
+    /// Cleanup reporting a healthy stretch drops the failure count. The end
+    /// after that is free again. Without that report the count stands, so
+    /// the end still waits. The peer decides the bool from the connected
+    /// stretch; see the server drop tests.
     #[test]
     fn a_pipe_healthy_for_the_interval_resets_the_redial_count() {
         let room = RoomId::new("nh", "r");
@@ -1469,10 +1488,9 @@ mod tests {
             .expect("the second failure waits 30 s");
 
         let t_short = t0 + PIPE_REDIAL_BACKOFF;
-        mgr.note_pipe_connected(&key, remote, t_short);
         let t_early = t_short + PIPE_HEALTHY_RESET - Duration::from_millis(1);
         mgr.set_now(t_early);
-        mgr.on_pipe_died(&key, remote, "drop", t_early);
+        mgr.apply_pipe_death(&key, remote, "drop", t_early, false);
         assert!(
             mgr.establish_pipe(remote, &room).is_err(),
             "a pipe connected for less than the healthy interval keeps its backoff"
@@ -1482,10 +1500,9 @@ mod tests {
         mgr.set_now(t_up);
         mgr.establish_pipe(remote, &room)
             .expect("the third failure waits 60 s");
-        mgr.note_pipe_connected(&key, remote, t_up);
         let t_drop = t_up + PIPE_HEALTHY_RESET;
         mgr.set_now(t_drop);
-        mgr.on_pipe_died(&key, remote, "drop", t_drop);
+        mgr.apply_pipe_death(&key, remote, "drop", t_drop, true);
         mgr.establish_pipe(remote, &room)
             .expect("a pipe that stayed connected for the healthy interval redials at once");
 

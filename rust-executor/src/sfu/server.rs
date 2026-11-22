@@ -101,6 +101,11 @@ pub struct SfuPeer {
     /// `Disconnected`, so that stretch is not counted toward
     /// [`super::cascade::PIPE_HEALTHY_RESET`]. A client peer leaves it unset.
     usable_since: Option<Instant>,
+    /// A usable stretch that ended on `Disconnected` had already reached
+    /// [`super::cascade::PIPE_HEALTHY_RESET`]. A later shorter stretch does
+    /// not clear it. The drop after the disconnect grace still sees it.
+    /// A client peer leaves it false.
+    healthy_stretch: bool,
     /// An ICE restart the client asked for (`sfu.callRestartIce`), from the
     /// request until its answer lands or the offer's retry budget ends.
     /// The offer SDP lives in [`PendingNegotiation`].
@@ -311,6 +316,7 @@ impl SfuPeer {
             had_path: false,
             created_at: Instant::now(),
             usable_since: None,
+            healthy_stretch: false,
             ice_restart: None,
             drops_logged: HashSet::new(),
             write_errors_logged: HashSet::new(),
@@ -334,12 +340,13 @@ impl SfuPeer {
     /// Track an ICE state change: `Disconnected` starts the disconnect
     /// clock, any other state stops it. A pipe's usable stretch starts on
     /// `Connected` or `Completed` and ends on `Disconnected`, so a
-    /// disconnected stretch does not count as healthy.
+    /// disconnected stretch does not count as healthy. The stretch that
+    /// just ended is recorded before the clock is cleared.
     pub fn on_ice_state(&mut self, state: IceConnectionState, now: Instant) {
         self.disconnected_since = match state {
             IceConnectionState::Disconnected => {
                 if self.is_pipe {
-                    self.usable_since = None;
+                    self.end_usable_stretch(now);
                 }
                 self.disconnected_since.or(Some(now))
             }
@@ -351,11 +358,51 @@ impl SfuPeer {
         }
     }
 
+    /// The usable stretch ended. Remember whether it reached the healthy
+    /// interval, then clear it. A disconnected period is not added, and
+    /// the later drop still knows.
+    fn end_usable_stretch(&mut self, now: Instant) {
+        if let Some(since) = self.usable_since {
+            if now.saturating_duration_since(since) >= super::cascade::PIPE_HEALTHY_RESET {
+                self.healthy_stretch = true;
+            }
+        }
+        self.usable_since = None;
+    }
+
     /// Remember the start of this pipe's usable stretch. A second event in
     /// the same stretch does not move it. A client peer has no stretch.
     fn note_usable(&mut self, now: Instant) {
         if self.is_pipe && self.usable_since.is_none() {
             self.usable_since = Some(now);
+        }
+    }
+
+    /// Whether a connected stretch reached [`super::cascade::PIPE_HEALTHY_RESET`].
+    /// The stretch that ended on `Disconnected` was recorded then. A stretch
+    /// still open at `now` (the pipe dropped while ICE is up) is measured
+    /// here. A disconnected period is in neither.
+    fn reached_healthy(&self, now: Instant) -> bool {
+        if !self.is_pipe {
+            return false;
+        }
+        if self.healthy_stretch {
+            return true;
+        }
+        self.usable_since.is_some_and(|since| {
+            now.saturating_duration_since(since) >= super::cascade::PIPE_HEALTHY_RESET
+        })
+    }
+
+    /// The dead-peer notice the sweep sends. `now` is the sweep's clock.
+    fn dead_peer(&self, now: Instant) -> DeadPeer {
+        DeadPeer {
+            room_id: self.room_id.clone(),
+            agent_did: self.agent_did.clone(),
+            participant_id: self.id.clone(),
+            is_pipe: self.is_pipe,
+            reason: self.end_reason.unwrap_or("drop"),
+            healthy_stretch: self.reached_healthy(now),
         }
     }
 
@@ -1220,10 +1267,14 @@ pub struct DeadPeer {
     /// that pipe again. A `drop` does the same on the end that dials. The
     /// first consecutive failure still dials at once.
     pub reason: &'static str,
-    /// When this pipe's current usable stretch began, if it is still
-    /// usable. Cleared on `Disconnected`, so the healthy-interval reset
-    /// does not count a disconnected stretch.
-    pub usable_since: Option<Instant>,
+    /// Whether a connected stretch reached
+    /// [`super::cascade::PIPE_HEALTHY_RESET`] before this death. Recorded
+    /// when ICE went `Disconnected`, so the drop after the grace still
+    /// knows, and a disconnected period is not counted. An offer-ended
+    /// pipe that is still connected reports the open stretch. A client
+    /// peer leaves this false. Cleanup resets the redial count when it
+    /// is true.
+    pub healthy_stretch: bool,
 }
 
 /// The SFU server. Owns the UDP sockets and drives the str0m event loop.
@@ -1795,14 +1846,7 @@ impl SfuServer {
                         relay.remove_participant(pid);
                         quality_preferences.remove(pid);
                         layers.forget(pid);
-                        dead_peers.push(DeadPeer {
-                            room_id: peer.room_id.clone(),
-                            agent_did: peer.agent_did.clone(),
-                            participant_id: pid.clone(),
-                            is_pipe: peer.is_pipe,
-                            reason: peer.end_reason.unwrap_or("drop"),
-                            usable_since: peer.usable_since,
-                        });
+                        dead_peers.push(peer.dead_peer(now));
                         false
                     } else {
                         true
@@ -5485,6 +5529,198 @@ mod tests {
         assert_ne!(replacement.id, pipe.id);
     }
 
+    /// One prior drop, then a connected stretch of `up_for`, then the
+    /// `stayed_disconnected` death. Returns the redial the cleanup allows
+    /// at that death. The dialler is the higher DID, so the drop counts.
+    /// The clock is the same injectable `Instant` the backoff tests use.
+    fn redial_after_connected_drop(
+        up_for: Duration,
+    ) -> Result<(SfuPeer, super::super::cascade::CascadeSignal), String> {
+        let remote = "did:key:nodeA";
+        let local = "did:key:nodeB";
+        assert!(local > remote, "the local DID has to be the end that dials");
+        let room = RoomId::new("nh", "healthy-drop");
+        let key = room.to_string();
+        let t0 = Instant::now();
+        let mut mgr = CascadeManager::new(
+            local.into(),
+            "127.0.0.1:10180".parse::<std::net::SocketAddr>().unwrap(),
+            8,
+        );
+        mgr.set_now(t0);
+        mgr.establish_pipe(remote, &room).unwrap();
+        mgr.on_pipe_died(&key, remote, "drop", t0);
+        let (mut peer, _) = mgr
+            .establish_pipe(remote, &room)
+            .expect("the first drop redials at once");
+
+        let up = t0;
+        peer.on_ice_state(IceConnectionState::Connected, up);
+        let down = up + up_for;
+        peer.on_ice_state(IceConnectionState::Disconnected, down);
+        let drop_at = down + ICE_DISCONNECT_GRACE;
+        assert!(
+            !peer.never_established(drop_at),
+            "the pipe had a path, so this is not an establish timeout"
+        );
+        assert!(
+            peer.stayed_disconnected(drop_at),
+            "the drop death comes from stayed_disconnected"
+        );
+
+        // The sweep names the death. Cleanup resets on the bool the peer
+        // recorded when the stretch ended, not on a clock it no longer has.
+        peer.end_reason = Some("drop");
+        let dead = peer.dead_peer(drop_at);
+        assert_eq!(dead.reason, "drop");
+        assert_eq!(
+            dead.healthy_stretch,
+            up_for >= super::super::cascade::PIPE_HEALTHY_RESET,
+            "the drop carries whether the stretch that ended reached the healthy interval"
+        );
+        mgr.set_now(drop_at);
+        mgr.apply_pipe_death(
+            &dead.room_id.to_string(),
+            &dead.agent_did,
+            dead.reason,
+            drop_at,
+            dead.healthy_stretch,
+        );
+        mgr.establish_pipe(remote, &room)
+    }
+
+    /// Connected for the healthy interval, then a drop: the backoff count
+    /// resets and the next redial is free.
+    #[test]
+    fn a_drop_after_the_healthy_interval_redials_at_once() {
+        redial_after_connected_drop(super::super::cascade::PIPE_HEALTHY_RESET)
+            .expect("a pipe connected for the healthy interval redials at once");
+    }
+
+    /// Connected for 111 s, under the healthy interval. The 10 s disconnect
+    /// grace would put the death at 121 s, so counting that grace would
+    /// reset. The next redial still backs off.
+    #[test]
+    fn a_drop_after_111_seconds_keeps_the_backoff() {
+        let short = Duration::from_secs(111);
+        assert!(short < super::super::cascade::PIPE_HEALTHY_RESET);
+        assert!(
+            short + ICE_DISCONNECT_GRACE > super::super::cascade::PIPE_HEALTHY_RESET,
+            "111 s plus the disconnect grace passes the healthy interval"
+        );
+        let err = redial_after_connected_drop(short)
+            .expect_err("a pipe connected for 111 s keeps its backoff");
+        assert!(
+            err.starts_with("pipe redial waits"),
+            "the next redial backs off, got: {err}"
+        );
+    }
+
+    /// Two stretches of 60 s with a disconnect between them add up to the
+    /// healthy interval only if the gap counts. It does not, so the drop
+    /// keeps the backoff.
+    #[test]
+    fn a_disconnect_gap_does_not_add_up_to_a_healthy_stretch() {
+        let remote = "did:key:nodeA";
+        let local = "did:key:nodeB";
+        let room = RoomId::new("nh", "healthy-gap");
+        let key = room.to_string();
+        let t0 = Instant::now();
+        let mut mgr = CascadeManager::new(
+            local.into(),
+            "127.0.0.1:10181".parse::<std::net::SocketAddr>().unwrap(),
+            8,
+        );
+        mgr.set_now(t0);
+        mgr.establish_pipe(remote, &room).unwrap();
+        mgr.on_pipe_died(&key, remote, "drop", t0);
+        let (mut peer, _) = mgr
+            .establish_pipe(remote, &room)
+            .expect("the first drop redials at once");
+
+        let up = t0;
+        peer.on_ice_state(IceConnectionState::Connected, up);
+        let down = up + Duration::from_secs(60);
+        peer.on_ice_state(IceConnectionState::Disconnected, down);
+        assert!(!peer.healthy_stretch, "60 s is under the healthy interval");
+        let back = down + Duration::from_secs(1);
+        peer.on_ice_state(IceConnectionState::Connected, back);
+        let down_again = back + Duration::from_secs(60);
+        peer.on_ice_state(IceConnectionState::Disconnected, down_again);
+        assert!(
+            !peer.healthy_stretch,
+            "a disconnected gap does not join two short stretches"
+        );
+        let drop_at = down_again + ICE_DISCONNECT_GRACE;
+        assert!(drop_at.saturating_duration_since(up) > super::super::cascade::PIPE_HEALTHY_RESET);
+        assert!(peer.stayed_disconnected(drop_at));
+        peer.end_reason = Some("drop");
+        let dead = peer.dead_peer(drop_at);
+        assert!(!dead.healthy_stretch);
+        mgr.set_now(drop_at);
+        mgr.apply_pipe_death(
+            &dead.room_id.to_string(),
+            &dead.agent_did,
+            dead.reason,
+            drop_at,
+            dead.healthy_stretch,
+        );
+        let err = mgr
+            .establish_pipe(remote, &room)
+            .expect_err("two short stretches do not reset the backoff");
+        assert!(err.starts_with("pipe redial waits"), "got: {err}");
+    }
+
+    /// An offer-ended pipe is still connected, so the open stretch counts.
+    /// One that reached the healthy interval redials at once. One of 111 s
+    /// does not.
+    #[test]
+    fn an_offer_end_uses_the_open_stretch() {
+        for (up_for, free) in [
+            (super::super::cascade::PIPE_HEALTHY_RESET, true),
+            (Duration::from_secs(111), false),
+        ] {
+            let remote = "did:key:nodeA";
+            let local = "did:key:nodeB";
+            let room = RoomId::new("nh", "healthy-offer");
+            let key = room.to_string();
+            let t0 = Instant::now();
+            let mut mgr = CascadeManager::new(
+                local.into(),
+                "127.0.0.1:10182".parse::<std::net::SocketAddr>().unwrap(),
+                8,
+            );
+            mgr.set_now(t0);
+            mgr.establish_pipe(remote, &room).unwrap();
+            mgr.on_pipe_died(&key, remote, "drop", t0);
+            let (mut peer, _) = mgr
+                .establish_pipe(remote, &room)
+                .expect("the first drop redials at once");
+            peer.on_ice_state(IceConnectionState::Connected, t0);
+            let ended = t0 + up_for;
+            assert!(!peer.stayed_disconnected(ended));
+            peer.end_reason = Some("offer");
+            let dead = peer.dead_peer(ended);
+            assert_eq!(dead.reason, "offer");
+            assert_eq!(dead.healthy_stretch, free);
+            mgr.set_now(ended);
+            mgr.apply_pipe_death(
+                &dead.room_id.to_string(),
+                &dead.agent_did,
+                dead.reason,
+                ended,
+                dead.healthy_stretch,
+            );
+            let redial = mgr.establish_pipe(remote, &room);
+            if free {
+                redial.expect("an offer end after the healthy interval redials at once");
+            } else {
+                let err = redial.expect_err("an offer end after 111 s keeps the backoff");
+                assert!(err.starts_with("pipe redial waits"), "got: {err}");
+            }
+        }
+    }
+
     /// A disconnected stretch does not stay inside the pipe's usable
     /// interval. The next connect starts that interval again.
     #[test]
@@ -5499,6 +5735,10 @@ mod tests {
         assert!(
             peer.usable_since.is_none(),
             "a disconnected stretch is not part of the healthy interval"
+        );
+        assert!(
+            !peer.healthy_stretch,
+            "111 s does not mark the stretch healthy"
         );
         let back = down + Duration::from_secs(1);
         peer.on_ice_state(IceConnectionState::Connected, back);
