@@ -337,8 +337,10 @@ SFU stays the only offerer: the restart comes as a server renegotiation
 offer), and rebuilds the call if that has not reconnected within 15 s; after
 a socket reconnect with no network change it restarts ICE only if ICE is not
 connected 2 s later; a failed connection is rebuilt at once, a rebuild
-retries the join for 120 s, and after 3 rebuilds in 2 min the SDK ends the
-call: it closes the connection, leaves the session, emits `error` and then
+retries the join for 120 s, and either terminal give-up — the 120 s spent
+without a rejoin, or a 4th rebuild inside 2 min — ends the call: it closes
+the connection, leaves the session, tells the participants they left,
+emits `error` and then
 `call-ended` (`{ reason: "gave-up" }`, also on the `Session`, which goes
 idle) for the UI to show; a new `join` starts over. A rebuild keeps
 the participants and clears only their media. Only an SDP the connection
@@ -375,8 +377,9 @@ out urgent (`CallOptions.urgent`; `sfu.callRestartIce`, `sfu.callResume`
 and `sfu.callAnswerServerOffer`): its wait is 1 s
 (`URGENT_PENDING_PROBE_MS`) and the probe it starts judges a silent
 socket in 3 s (`URGENT_CHECK_CONNECTION_DEADLINE_MS`, drain allowance
-kept) instead of 8 s — it shortens only that request's timing. The probe
-sends no ping when the socket
+kept) instead of 8 s — it shortens only that request's timing, and a probe
+already running gets its verdict moved earlier to that wait, never later.
+The probe sends no ping when the socket
 delivered a message in the last 5 s and drops a socket that answered
 nothing for 8 s after one probe; any frame proves the socket, so a slow
 request on a socket that keeps delivering fails as an RPC timeout, not a
