@@ -1146,10 +1146,16 @@ export class PerspectiveProxy {
      * ```
      *
      * A class whose stored shape already is the given one is left alone
-     * (`unchanged`): registering on every start writes nothing. The others
-     * are rewritten in one diff (`written`), which keeps links other apps
-     * put on the class. Both lists name classes by target class IRI.
-     * Answers once the executor reads the new shapes.
+     * (`unchanged`): registering on every start writes nothing, and the
+     * executor answers an all-unchanged call from its cached registry
+     * without taking the write mutex. The others are rewritten in one diff
+     * (`written`), which keeps links other apps put on the class. Both
+     * lists name classes by target class IRI. Answers once the executor
+     * reads the new shapes.
+     *
+     * Concurrent identical calls share one RPC (see `querySparql`), so the
+     * same registration sent by several places at once reaches the
+     * executor once.
      *
      * Rejects, writing nothing, when two shapes name one class or share a
      * shape URI, or when another class holds a shape URI given here.

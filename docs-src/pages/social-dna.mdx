@@ -320,7 +320,10 @@ shape.addProperty({
 });
 
 // Store in perspective. Registering the same shape again writes nothing:
-// the result names it under `unchanged`.
+// the result names it under `unchanged`. That repeat is cheap — the
+// executor answers it from its cached registry — and identical
+// concurrent calls share one request, so re-registering on every app
+// start costs little.
 const { written, unchanged } = await perspective.registerShapes([shape]);
 
 // Retrieve, with a hash of each stored shape

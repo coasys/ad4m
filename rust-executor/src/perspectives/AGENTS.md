@@ -14,7 +14,7 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 | `write_log.rs` | The store's log of recent writes by generation: the links each one only added, or `Other` (`SparqlStore::additions_since`) |
 | `model_query/` | Typed queries over SHACL shapes: `shape.rs` loads `ModelShape` from SHACL triples → `sparql_builder.rs` → `SparqlStore` → `hydration.rs` → `filtering.rs` → `getters.rs`/`relations.rs`/`projection.rs`. Entry: `execute_model_query` (`query.rs`). `mod.rs` has the pipeline diagram |
 | `shacl_parser.rs` | Writer side: a class's links (`shape_links`; `parse_shacl_to_links` from JSON), which links on a class node are its own (`is_own_link`), links → shape (`shape_from_links`), `canonical_json`; flow JSON ↔ links (`parse_flow_to_links`, `parse_flow_from_links`). Types `SHACLShape`, `SHACLFlow`, `AD4MAction` |
-| `perspective_instance/shapes.rs` | Class registration: `register_shapes` (diff, under `sdna_change_mutex`) and `shapes` / `class_names` over the cached registry |
+| `perspective_instance/shapes.rs` | Class registration: `register_shapes` (all-unchanged fast path over the cached registry link sets, otherwise a diff under `sdna_change_mutex`) and `shapes` / `class_names` over the cached registry |
 | `instances/` | Validated instance writes (create, update, remove, collection items) against a class's SHACL shape: the shared core of the MCP `instance_*` tools and the `perspective.instance*` RPC methods. See `instances/AGENTS.md` |
 | `subject_classes_of.rs` | Which classes a URI conforms to (SPARQL) |
 | `sdna.rs`, `shacl_to_prolog.rs` | Prolog fact generation from links/SHACL. Only used when Prolog mode ≠ Disabled |
@@ -51,6 +51,14 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   missing and removes every copy of each stale own link. Copies of an expected triple stay
   (two peers that registered the same shape agree); links other apps put on the class, shape
   or property nodes stay. It answers once the registry and the shape cache hold the new shape.
+  The registry caches each class's own-link triple set beside its `ShapeSummary`
+  (`abstract_cache.own_links`, same generation, lifetime and clearing): an
+  all-unchanged call answers from those sets before `sdna_change_mutex`, with only the
+  shape-URI holder check left to run, so registering on every start is cheap. The
+  comparison is of the stored triples, never a shape hash — a stale `ad4m://shape` link
+  changes the set where `shape_from_links` still parses the least URI to the same shape.
+  The answer can come from the state just before a concurrent write commits, as a
+  slow-path call that took the mutex first could.
 - A class is addressed by its target class IRI; the SDK sends it on every call. Many classes
   may share a name (`class_name_of`, the IRI's local name): `we://Topic` and `flux://Topic`
   coexist. `model_query::shape::find_class` matches an IRI exactly; a bare name (MCP tools,

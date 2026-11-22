@@ -150,6 +150,7 @@ A class is addressed by its target class IRI (`flux://Note`). Its name, the last
 
 - Every SDK call that names a model's class (queries, creates, updates, deletes, includes, getters) sends its target class IRI, so `we://Topic` and `flux://Topic` live side by side in one Perspective, each read and written as its own class.
 - `registerShapes` takes a class whatever name other classes hold. It refuses one target class twice in one call, a shape URI another class holds, and a shape URI that does not end in `{Name}Shape`.
+- Re-registering is the intended pattern at app start: an unchanged call writes nothing and is answered from the executor's cached registry — the stored links are compared exactly, never just the shape's hash — and identical concurrent calls on one perspective share one executor request.
 - A bare name passed to the executor (`perspective.createSubject("Note", ...)`, an MCP tool) reads the class of that name with the least IRI: `a://Note` over `b://Note`. Pass the IRI to reach any other.
 - `perspective.shapes(["Note"])` lists every class of that name, least IRI first; `perspective.shapes(["b://Note"])` only that one.
 - A relation to another class resolves through the target class of the shape it names, so `sh:class b://NoteShape` reaches `b://Note` even when `a://Note` exists.
