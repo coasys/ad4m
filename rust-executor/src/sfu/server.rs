@@ -24,6 +24,7 @@ use super::reachability::{assess, stun_reflexive, Advertised, SfuReachability};
 use super::relay::MediaRelay;
 use super::room::{ParticipantId, RoomId};
 use super::simulcast::{is_keyframe, LayerSelector};
+use super::types::{SfuAnswerRefusal, SfuAnswerResult, SfuCallRenegotiationOffer};
 
 /// The call session whose media a track carries, by the id the clients of
 /// this node know it by: a local session's own id, a remote one's
@@ -59,6 +60,10 @@ pub struct SfuPeer {
     /// The offer has an id the answer echoes, so a retry republishes this
     /// record's SDP and id instead of building another.
     pending: Option<PendingNegotiation>,
+    /// The offer id last applied on this session. An answer that names it
+    /// again is accepted and changes nothing, including while a newer offer
+    /// waits.
+    last_accepted_offer_id: Option<String>,
     /// Reverse index: (origin_pid, origin_mid) -> outbound Mid on this peer.
     /// Provides O(1) lookup during media relay instead of scanning `tracks_out`.
     pub tracks_out_rev: HashMap<(ParticipantId, Mid), Mid>,
@@ -251,6 +256,7 @@ impl SfuPeer {
             tracks_out: HashMap::new(),
             tracks_out_rev: HashMap::new(),
             pending: None,
+            last_accepted_offer_id: None,
             deferred_tracks: Vec::new(),
             remote_origins: HashMap::new(),
             is_pipe,
@@ -432,6 +438,11 @@ impl SfuPeer {
         offer_id: &str,
         sdp_answer_json: &str,
     ) -> Result<(), ServerAnswerError> {
+        // A retry of the offer already applied: the reply was lost, or the
+        // answer arrived again after a newer offer. Nothing moves.
+        if self.last_accepted_offer_id.as_deref() == Some(offer_id) {
+            return Ok(());
+        }
         let Some(pending) = self.pending.as_ref() else {
             return Err(ServerAnswerError::NoPending);
         };
@@ -479,33 +490,64 @@ impl SfuPeer {
                 }
             }
         }
+        self.last_accepted_offer_id = Some(offer_id.to_string());
         Ok(())
     }
 
-    /// Apply an answer the way the event loop does. Only an answer that
-    /// belongs to the pending offer and that str0m refused disconnects the
-    /// peer. A late answer, an answer for an older offer, and an answer that
-    /// crossed another offer leave the peer and its media in place.
-    fn settle_answer(&mut self, offer_id: &str, sdp_answer_json: &str) {
+    /// Apply an answer the way the event loop does, and say what the RPC
+    /// answers. Only an answer that belongs to the pending offer and that
+    /// str0m refused disconnects the peer. A late answer, an answer for an
+    /// older offer, and an answer that crossed another offer leave the peer
+    /// and its media in place. A repeat of an offer already accepted is
+    /// accepted and changes nothing.
+    ///
+    /// The reply has three refusals. An answer that does not parse, or whose
+    /// m-lines are not the pending offer's, leaves that offer pending
+    /// (`stale`). One whose token str0m has already taken answers
+    /// `no-pending`.
+    fn settle_answer(&mut self, offer_id: &str, sdp_answer_json: &str) -> SfuAnswerResult {
+        let already = self.last_accepted_offer_id.as_deref() == Some(offer_id);
         match self.accept_server_answer(offer_id, sdp_answer_json) {
-            Ok(()) => info!(
-                "SFU: server-offer answer accepted for {} ({} outbound tracks live)",
-                self.id,
-                self.tracks_out.len()
-            ),
+            Ok(()) => {
+                if already {
+                    debug!(
+                        "SFU: server-offer answer for {} repeats accepted offer {offer_id}",
+                        self.id
+                    );
+                } else {
+                    info!(
+                        "SFU: server-offer answer accepted for {} ({} outbound tracks live)",
+                        self.id,
+                        self.tracks_out.len()
+                    );
+                }
+                SfuAnswerResult::accepted()
+            }
             Err(ServerAnswerError::Rejected(error)) => {
                 // str0m consumed the token. A resend would answer a change
                 // that no longer exists.
                 warn!("SFU: ApplyServerAnswer for {}: {error}", self.id);
                 self.rtc.disconnect();
+                SfuAnswerResult::refused(SfuAnswerRefusal::NoPending)
             }
             Err(ServerAnswerError::NoPending) => {
                 debug!(
                     "SFU: ApplyServerAnswer for {} with no pending offer",
                     self.id
                 );
+                SfuAnswerResult::refused(SfuAnswerRefusal::NoPending)
             }
-            Err(error) => warn!("SFU: ApplyServerAnswer for {}: {error}", self.id),
+            Err(ServerAnswerError::OutOfOrder) => {
+                warn!(
+                    "SFU: ApplyServerAnswer for {}: answer crossed another offer",
+                    self.id
+                );
+                SfuAnswerResult::refused(SfuAnswerRefusal::NoPending)
+            }
+            Err(error) => {
+                warn!("SFU: ApplyServerAnswer for {}: {error}", self.id);
+                SfuAnswerResult::refused(SfuAnswerRefusal::Stale)
+            }
         }
     }
 
@@ -558,7 +600,7 @@ impl SfuPeer {
     #[cfg(test)]
     fn settle_current_answer(&mut self, sdp_answer_json: &str) {
         let id = self.pending_offer_id().unwrap_or("").to_string();
-        self.settle_answer(&id, sdp_answer_json)
+        self.settle_answer(&id, sdp_answer_json);
     }
 
     /// The client asked for its call state again (`sfu.callResume`), e.g.
@@ -760,6 +802,8 @@ pub enum SfuCommand {
         /// has no offer id, so the pending offer's id is used.
         offer_id: Option<String>,
         sdp_answer_json: String,
+        /// The RPC waits on this. A pipe answer has none.
+        reply: Option<tokio::sync::oneshot::Sender<SfuAnswerResult>>,
     },
     /// A remote SFU sent a renegotiation offer over the cascade
     /// gossip transport, addressed to our local end of an existing
@@ -801,8 +845,12 @@ pub enum SfuCommand {
     /// server-offer path; the client answers with `ApplyServerAnswer`.
     RestartIce { participant_id: ParticipantId },
     /// The client's socket came back (`sfu.callResume`): publish the pending
-    /// server offer, if any, again at once.
-    Resume { participant_id: ParticipantId },
+    /// server offer, if any, again at once, and answer whether this session
+    /// is still in the loop.
+    Resume {
+        participant_id: ParticipantId,
+        reply: tokio::sync::oneshot::Sender<ResumeLoopReply>,
+    },
     /// Query the quality preferences map.  Returns a snapshot via
     /// oneshot so callers outside the event loop can read it.
     GetQualityPreferences {
@@ -810,6 +858,14 @@ pub enum SfuCommand {
     },
     /// Shut down the SFU server.
     Shutdown,
+}
+
+/// What the event loop answers to `SfuCommand::Resume`. The service adds
+/// the room roster; the offer, when there is one, is the pending server offer.
+#[derive(Debug)]
+pub struct ResumeLoopReply {
+    pub listed: bool,
+    pub offer: Option<SfuCallRenegotiationOffer>,
 }
 
 /// Configuration for the SFU server.
@@ -1164,31 +1220,36 @@ impl SfuServer {
                         participant_id,
                         offer_id,
                         sdp_answer_json,
+                        reply,
                     }) => {
-                        let Some(peer) = peers.get_mut(&participant_id) else {
+                        let verdict = if let Some(peer) = peers.get_mut(&participant_id) {
+                            // A pipe answer names no offer id: the cascade wire
+                            // has none, so the pending offer's id is used. A
+                            // client answer names the offer it belongs to.
+                            let id = offer_id.unwrap_or_else(|| {
+                                peer.pending
+                                    .as_ref()
+                                    .map(|pending| pending.offer_id.clone())
+                                    .unwrap_or_default()
+                            });
+                            // Settled before the deadline sweep below: an answer
+                            // in the tick of a resend cancels that resend.
+                            peer.settle_answer(&id, &sdp_answer_json)
+                            // Deferred tracks drain AFTER poll_output — see
+                            // the post-poll sweep below.  Draining here would
+                            // call sdp_api().apply() before str0m has
+                            // processed the accept_answer, producing offers
+                            // that never materialise into working media.
+                        } else {
                             debug!(
                                 "SFU: ApplyServerAnswer for unknown participant {}",
                                 participant_id
                             );
-                            continue;
+                            SfuAnswerResult::refused(SfuAnswerRefusal::UnknownSession)
                         };
-                        // A pipe answer names no offer id: the cascade wire
-                        // has none, so the pending offer's id is used. A
-                        // client answer names the offer it belongs to.
-                        let id = offer_id.unwrap_or_else(|| {
-                            peer.pending
-                                .as_ref()
-                                .map(|pending| pending.offer_id.clone())
-                                .unwrap_or_default()
-                        });
-                        // Settled before the deadline sweep below: an answer
-                        // in the tick of a resend cancels that resend.
-                        peer.settle_answer(&id, &sdp_answer_json);
-                        // Deferred tracks drain AFTER poll_output — see
-                        // the post-poll sweep below.  Draining here would
-                        // call sdp_api().apply() before str0m has
-                        // processed the accept_answer, producing offers
-                        // that never materialise into working media.
+                        if let Some(reply) = reply {
+                            let _ = reply.send(verdict);
+                        }
                     }
                     Ok(SfuCommand::ApplyPipeRenegotiationOffer {
                         participant_id,
@@ -1350,31 +1411,53 @@ impl SfuServer {
                         info!("SFU: peer {} asked for an ICE restart", participant_id);
                         peer.restart_ice(Instant::now());
                     }
-                    Ok(SfuCommand::Resume { participant_id }) => {
-                        let Some(peer) = peers.get_mut(&participant_id) else {
-                            debug!("SFU: Resume for unknown participant {}", participant_id);
-                            continue;
-                        };
-                        if peer.is_pipe {
-                            warn!("SFU: Resume for pipe {} ignored", participant_id);
-                            continue;
-                        }
-                        match peer.resume_offer(Instant::now()) {
-                            Some((offer_id, sdp, track_mapping)) => {
-                                info!(
-                                    "SFU: peer {} resumed; pending offer {offer_id} sent again",
-                                    participant_id
-                                );
-                                publish_renegotiation_offer(
-                                    peer,
-                                    &participant_id,
-                                    &offer_id,
-                                    sdp,
-                                    track_mapping,
-                                );
+                    Ok(SfuCommand::Resume {
+                        participant_id,
+                        reply,
+                    }) => {
+                        let report = if let Some(peer) = peers.get_mut(&participant_id) {
+                            if peer.is_pipe {
+                                warn!("SFU: Resume for pipe {} ignored", participant_id);
+                                ResumeLoopReply {
+                                    listed: false,
+                                    offer: None,
+                                }
+                            } else {
+                                let offer = match peer.resume_offer(Instant::now()) {
+                                    Some((offer_id, sdp, track_mapping)) => {
+                                        info!(
+                                            "SFU: peer {} resumed; pending offer {offer_id} sent again",
+                                            participant_id
+                                        );
+                                        publish_renegotiation_offer(
+                                            peer,
+                                            &participant_id,
+                                            &offer_id,
+                                            sdp,
+                                            track_mapping,
+                                        )
+                                    }
+                                    None => {
+                                        info!(
+                                            "SFU: peer {} resumed; no offer pending",
+                                            participant_id
+                                        );
+                                        None
+                                    }
+                                };
+                                ResumeLoopReply {
+                                    listed: true,
+                                    offer,
+                                }
                             }
-                            None => info!("SFU: peer {} resumed; no offer pending", participant_id),
-                        }
+                        } else {
+                            debug!("SFU: Resume for unknown participant {}", participant_id);
+                            ResumeLoopReply {
+                                listed: false,
+                                offer: None,
+                            }
+                        };
+                        let _ = reply.send(report);
                     }
                     Ok(SfuCommand::GetQualityPreferences { reply }) => {
                         let _ = reply.send(quality_preferences.clone());
@@ -2185,14 +2268,16 @@ fn data_recipients(
 /// Publish a renegotiation offer. A client peer gets an
 /// `sfu-call-renegotiation-offer` event; a pipe transport's offer goes to the
 /// cascade router through the pipe bus. Both carry the track mapping.
+/// Returns the client payload when the peer is a client, so a resume reply
+/// can carry the same value the event does.
 fn publish_renegotiation_offer(
     peer: &SfuPeer,
     pid: &ParticipantId,
     offer_id: &str,
     sdp_offer_json: String,
     track_mapping: Vec<crate::sfu::TrackMapEntry>,
-) {
-    if peer.is_pipe {
+) -> Option<SfuCallRenegotiationOffer> {
+    let client_offer = if peer.is_pipe {
         let payload = crate::sfu::SfuPipeRenegotiationOffer {
             remote_did: peer.agent_did.clone(),
             room_id: peer.room_id.to_string(),
@@ -2200,8 +2285,9 @@ fn publish_renegotiation_offer(
             track_mapping,
         };
         super::pipe_bus::publish_offer(payload);
+        None
     } else {
-        let payload = crate::sfu::SfuCallRenegotiationOffer {
+        let payload = SfuCallRenegotiationOffer {
             target_did: peer.agent_did.clone(),
             participant_id: pid.to_string(),
             offer_id: offer_id.to_string(),
@@ -2212,7 +2298,8 @@ fn publish_renegotiation_offer(
         };
         crate::pubsub::get_global_pubsub_sync()
             .publish_event(crate::events::Event::sfu_renegotiation_offer(&payload));
-    }
+        Some(payload)
+    };
     if let Some(pending) = &peer.pending {
         let kind = if pending.resends == 0 {
             "initial"
@@ -2228,6 +2315,7 @@ fn publish_renegotiation_offer(
             sdp_fingerprint(&pending.sdp),
         );
     }
+    client_offer
 }
 
 /// Ordered `a=mid` values in SDP text.
@@ -3636,6 +3724,47 @@ mod tests {
         assert_audio_writer(&mut peer, mid);
     }
 
+    /// A second answer that names an offer already accepted is accepted and
+    /// changes nothing: not when the session is idle, and not while a newer
+    /// offer waits. A wrong id, and an answer with nothing waiting that was
+    /// never accepted, are refusals.
+    #[test]
+    fn a_retried_accepted_answer_is_accepted_and_changes_nothing() {
+        let (mut caller, mut peer) = connected_pair();
+        let now = Instant::now();
+        let (sdp_a, _, mid_a) = offer_outbound_audio(&mut peer, now);
+        let id_a = peer.pending_offer_id().unwrap().to_string();
+        let answer_a = answer_json(&mut caller, &sdp_a);
+        assert!(peer.settle_answer("o-other", &answer_a).reason == Some(SfuAnswerRefusal::Stale));
+        assert_eq!(peer.pending_offer_id(), Some(id_a.as_str()));
+        assert!(peer.settle_answer(&id_a, &answer_a).accepted);
+        assert!(peer.pending.is_none());
+        assert_audio_writer(&mut peer, mid_a);
+
+        let again = peer.settle_answer(&id_a, "not-sdp");
+        assert!(again.accepted);
+        assert!(again.reason.is_none());
+        assert!(peer.pending.is_none());
+        assert_audio_writer(&mut peer, mid_a);
+        assert!(peer.rtc.is_alive());
+
+        let (sdp_b, _, mid_b) = offer_outbound_audio(&mut peer, now);
+        let id_b = peer.pending_offer_id().unwrap().to_string();
+        assert_ne!(id_a, id_b);
+        let repeated = peer.settle_answer(&id_a, &answer_a);
+        assert!(repeated.accepted);
+        assert_eq!(peer.pending_offer_id(), Some(id_b.as_str()));
+        assert_eq!(peer.pending.as_ref().unwrap().sdp, sdp_b);
+        assert!(peer.rtc.writer(mid_b).is_none());
+
+        let idle = {
+            let (_caller, mut quiet) = connected_pair();
+            quiet.settle_answer("o-never", "{}")
+        };
+        assert_eq!(idle.reason, Some(SfuAnswerRefusal::NoPending));
+        assert!(!idle.accepted);
+    }
+
     /// A copy of the answer to offer A arrives after offer B, which added an
     /// m-line. The copy names A's id, so it does not take B's token, and
     /// B's own answer still negotiates.
@@ -3654,8 +3783,9 @@ mod tests {
         let id_b = peer.pending_offer_id().unwrap().to_string();
         assert_ne!(id_a, id_b);
         assert_ne!(sdp_mids(&sdp_a), sdp_mids(&sdp_b));
-        let err = peer.accept_server_answer(&id_a, &answer_a).unwrap_err();
-        assert!(matches!(err, ServerAnswerError::NotThisOffer));
+        // A was already accepted. Repeating it while B waits is accepted
+        // and leaves B's token where it is.
+        peer.accept_server_answer(&id_a, &answer_a).unwrap();
         peer.settle_answer(&id_a, &answer_a);
         assert!(peer.rtc.is_alive());
         assert_eq!(peer.pending.as_ref().unwrap().sdp, sdp_b);

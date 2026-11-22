@@ -315,10 +315,16 @@ that grace and the 10 s disconnect clock starts again. An unanswered server
 offer is resent at 10 s and 30 s, then every 30 s, and never drops the peer
 (#1802 dropped it at 70 s, also while its media flowed). The offer carries
 an `offerId` that a resend and `sfu.callResume` repeat; the answer echoes
-it, and an answer that names another id is refused. `sfu.callResume` (the
-session's `participantId`) sends the pending offer and the roster again at
-once, for a client whose socket came back, returns false when the room or
-the session is not there, and an error when the session is another agent's;
+it. `sfu.callAnswerServerOffer` answers `{ accepted: true }`, or
+`{ accepted: false, reason }` (`stale`, `no-pending`, `unknown-session`),
+after the event loop applies the answer. A repeat of an id already accepted
+for that session is `{ accepted: true }` and changes nothing. A refused
+answer is that value, not an RPC error. `sfu.callResume` (the session's
+`participantId`) sends the pending offer and the roster again at once, for
+a client whose socket came back, and answers `{ listed: true, offer?,
+roster: { participants } }` with the same offer and the same sessions, or
+`{ listed: false }` when the room or the session is not there. A session of
+another agent is 403.
 on ICE `disconnected` or a network change the SDK restarts ICE in place (the
 SFU stays the only offerer: the restart comes as a server renegotiation
 offer), and rebuilds the call if that has not reconnected within 15 s; a
