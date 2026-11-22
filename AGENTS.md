@@ -369,7 +369,13 @@ told once an open socket is proven — the local path changed, so media must
 restart — while the socket itself is judged by socket evidence through
 `checkConnection`, which also runs when a request
 has had no reply for 4 s (`PENDING_PROBE_MS`) on a socket nothing
-arrived on since it was sent. The probe sends no ping when the socket
+arrived on since it was sent. A request that cannot wait that long goes
+out urgent (`CallOptions.urgent`; `sfu.callRestartIce`, `sfu.callResume`
+and `sfu.callAnswerServerOffer`): its wait is 1 s
+(`URGENT_PENDING_PROBE_MS`) and the probe it starts judges a silent
+socket in 3 s (`URGENT_CHECK_CONNECTION_DEADLINE_MS`, drain allowance
+kept) instead of 8 s — it shortens only that request's timing. The probe
+sends no ping when the socket
 delivered a message in the last 5 s and drops a socket that answered
 nothing for 8 s after one probe; any frame proves the socket, so a slow
 request on a socket that keeps delivering fails as an RPC timeout, not a
