@@ -4222,7 +4222,7 @@ mod tests {
         let establish = Duration::from_secs(30);
         let mut mgr = super::super::cascade::CascadeManager::new(
             "did:key:nodeB".into(),
-            "127.0.0.1:10040".parse().unwrap(),
+            "127.0.0.1:10040".parse::<std::net::SocketAddr>().unwrap(),
             8,
         );
         let room = RoomId::new("neighbourhood://pipe", "r");
