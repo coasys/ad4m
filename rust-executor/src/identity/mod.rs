@@ -21,6 +21,7 @@ pub mod resolver;
 pub mod service;
 pub mod src_fetch;
 pub mod types;
+pub mod unlink;
 pub mod verdict;
 
 use std::collections::BTreeSet;
@@ -321,6 +322,12 @@ async fn run_recheck(
         Ok(read) => log::debug!("identity: read {read} key logs for the re-check"),
         Err(e) => log::warn!("identity: could not list the cached key logs: {e}"),
     }
+    // A key a log ended while this executor was down (or whose change was lost) is removed from
+    // the wallet now.
+    tokio::spawn({
+        let cache = service.cache.clone();
+        async move { unlink::sweep_dead_keys(&cache).await }
+    });
     let mut tick = tokio::time::interval(RECHECK_EVERY);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut expired_until = 0;
@@ -338,10 +345,12 @@ async fn run_recheck(
                 let mut lagged = false;
                 match change {
                     Ok(change) => {
+                        unlink::end_sessions_of(&change);
                         signers.insert(format!("did:key:{}", change.key));
                         loop {
                             match changes.try_recv() {
                                 Ok(change) => {
+                                    unlink::end_sessions_of(&change);
                                     signers.insert(format!("did:key:{}", change.key));
                                 }
                                 Err(TryRecvError::Lagged(_)) => lagged = true,
@@ -351,6 +360,14 @@ async fn run_recheck(
                     }
                     Err(RecvError::Lagged(_)) => lagged = true,
                     Err(RecvError::Closed) => return,
+                }
+                // A change the receiver lost may have ended a local agent's key: check every
+                // local agent against its own trusted log.
+                if lagged {
+                    tokio::spawn({
+                        let cache = service.cache.clone();
+                        async move { unlink::sweep_dead_keys(&cache).await }
+                    });
                 }
                 let scopes = if lagged {
                     let (scopes, swept) =
@@ -713,6 +730,28 @@ pub async fn load_local_identities() {
         }
     };
     keep_local_all(&service.cache, &scids).await;
+    // The keys whose unlink is pending stay fenced from the first signature, then the unlink is
+    // finished (when the wallet is still locked, at its unlock).
+    match crate::db_backend::db_backend().unlink_intents() {
+        Ok(intents) => {
+            crate::agent::fence::load(intents.into_iter().map(|(did, _)| did));
+        }
+        Err(e) => log::warn!("identity: could not read the pending unlinks: {e}"),
+    }
+    resume_pending_unlinks();
+}
+
+/// Finishes the pending unlinks of this executor's agents on their own task (see
+/// [`IdentityService::resume_pending`]). Called at start and when the wallet unlocks; does
+/// nothing without a runtime or an identity module.
+pub fn resume_pending_unlinks() {
+    let (Some(service), Ok(handle)) = (
+        SERVICE.get().cloned(),
+        tokio::runtime::Handle::try_current(),
+    ) else {
+        return;
+    };
+    handle.spawn(async move { service.resume_pending().await });
 }
 
 async fn keep_local_all(cache: &KelCache, scids: &[String]) {

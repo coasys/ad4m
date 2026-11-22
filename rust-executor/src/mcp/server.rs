@@ -858,6 +858,8 @@ pub(crate) mod tests {
 
     /// A plain MCP server on 127.0.0.1 and an initialized MCP session on it.
     pub(crate) async fn local_server_session(admin_credential: Option<Secret>) -> (String, String) {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
         crate::test_utils::ensure_test_db();
         let (port, _) = free_adjacent_ports();
         let config = McpServerConfig {

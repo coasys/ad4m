@@ -34,6 +34,7 @@ pub struct IdentityStatus {
     pub device_enc: String,
     pub key_id: Option<String>,
     pub revoked: Option<u64>,
+    pub unlinked: Option<u64>,
     pub head: Option<SignedHead>,
     pub fork: Option<ForkRecord>,
     /// Set while the executor's configured store answers the log behind its cache.
