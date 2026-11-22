@@ -65,7 +65,7 @@ use super::types::{
 };
 use crate::perspectives::shacl_parser::class_name_of;
 use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
-use deno_core::anyhow::{anyhow, Error};
+use anyhow::{anyhow, Error};
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};

@@ -73,7 +73,7 @@ async fn fixture_query(
     shape: &ModelShape,
     query: &ModelQueryInput,
     resolver: &dyn super::types::ShapeResolver,
-) -> Result<super::types::ModelQueryResult, deno_core::anyhow::Error> {
+) -> Result<super::types::ModelQueryResult, anyhow::Error> {
     super::query::execute_model_query(store, shape, &with_unverified(query), resolver).await
 }
 
@@ -82,7 +82,7 @@ async fn fixture_query_from_json(
     class_name: &str,
     query: &ModelQueryInput,
     shape_json: &str,
-) -> Result<super::types::ModelQueryResult, deno_core::anyhow::Error> {
+) -> Result<super::types::ModelQueryResult, anyhow::Error> {
     execute_model_query_from_json(store, class_name, &with_unverified(query), shape_json).await
 }
 

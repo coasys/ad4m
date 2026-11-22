@@ -701,6 +701,9 @@ pub struct PerspectiveInstance {
     /// Each mounted language's lifecycle phase, generation and apply lock
     /// (`mount_lifecycle`).
     mount_lifecycles: Arc<mount_lifecycle::MountLifecycles>,
+    /// Resource counters of this perspective (`GET /metrics`). They go with the instance:
+    /// a removed perspective leaves the output.
+    pub metrics: Arc<crate::metrics::PerspectiveCounters>,
     /// Test-only fault injection for [`Self::add_link_expression`] (#981).
     /// Compiled out entirely in non-test builds — see [`Self::fail_next_add_link`].
     /// `0` means the *next* call returns an error instead of writing, then
@@ -824,6 +827,7 @@ impl PerspectiveInstance {
             flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
             flow_pass_lock: Arc::new(Mutex::new(())),
             mount_lifecycles: Arc::new(Default::default()),
+            metrics: Arc::new(Default::default()),
             #[cfg(test)]
             fail_add_link_after: Arc::new(AtomicI64::new(-1)),
             #[cfg(test)]
@@ -1056,7 +1060,7 @@ impl PerspectiveInstance {
                     return false;
                 }
                 if !online_set.contains(did) {
-                    log::info!(
+                    log::debug!(
                         "auto_processor supervisor `{uuid}`: agent `{did}` aged out of \
                          freshness window; aborting loop"
                     );
@@ -1078,7 +1082,7 @@ impl PerspectiveInstance {
                 let uuid_clone = uuid.clone();
                 let did_clone = did.clone();
                 let handle = tokio::spawn(async move {
-                    log::info!(
+                    log::debug!(
                         "auto_processor supervisor `{uuid_clone}`: starting loop for agent \
                          `{did_clone}`"
                     );
@@ -1952,6 +1956,14 @@ impl PerspectiveInstance {
         // applied is decorated and published, with what the diff's
         // tombstones did folded in.
         let (applied, effects) = self.persist_remote_diff(store_diff)?;
+        // Synced links count like a local write, for no caller: the
+        // perspective's added/removed counters, no user's
+        // (`metrics::record_link_writes`).
+        crate::metrics::record_link_writes(
+            &self.metrics,
+            applied.additions.len(),
+            applied.removals.len() + effects.retracted.len(),
+        );
         let mut decorated_diff = DecoratedPerspectiveDiff {
             additions: applied
                 .additions
@@ -4158,7 +4170,10 @@ impl PerspectiveInstance {
         // write. On failure nothing was written; fall back to one link at a
         // time.
         match self.sparql_store.apply_diff(&removals, &additions) {
-            Ok(()) => return Ok(effects),
+            Ok(()) => {
+                crate::metrics::record_link_writes(&self.metrics, additions.len(), removals.len());
+                return Ok(effects);
+            }
             Err(e) => log::warn!(
                 "Failed to apply link diff to SPARQL store in one transaction, \
                  writing links one by one: {:?}",
@@ -4167,17 +4182,22 @@ impl PerspectiveInstance {
         }
 
         // Removals first
+        let mut removed = 0;
         for removal in &removals {
-            if let Err(e) = self.sparql_store.remove_link(removal) {
-                log::warn!("Failed to remove link from SPARQL store: {:?}", e);
+            match self.sparql_store.remove_link(removal) {
+                Ok(_) => removed += 1,
+                Err(e) => log::warn!("Failed to remove link from SPARQL store: {:?}", e),
             }
         }
         // Additions after
+        let mut added = 0;
         for addition in &additions {
-            if let Err(e) = self.sparql_store.add_link(addition) {
-                log::warn!("Failed to add link to SPARQL store: {:?}", e);
+            match self.sparql_store.add_link(addition) {
+                Ok(_) => added += 1,
+                Err(e) => log::warn!("Failed to add link to SPARQL store: {:?}", e),
             }
         }
+        crate::metrics::record_link_writes(&self.metrics, added, removed);
 
         // EXPERIMENT: removed per-write flush. The fix-branch added a flush
         // call here to reclaim memtable memory, but flushing on EVERY single
@@ -6201,6 +6221,9 @@ impl PerspectiveInstance {
         // held meanwhile. Each subscription runs at most once per pass and
         // passes run one after another, so the results compared below are
         // the newest.
+        self.metrics
+            .subscription_rechecks
+            .fetch_add(query_futures.len() as u64, Ordering::Relaxed);
         let results =
             subscriptions::run_rechecks(query_futures, &subscriptions::RECHECK_SLOTS).await;
 

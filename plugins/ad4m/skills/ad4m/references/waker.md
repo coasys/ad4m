@@ -58,6 +58,8 @@ The `Mentioned items` section lists each item that triggered the wake:
 
 An item can have multiple parents when an app derives further containers from it (auto-generated summary threads, for example).
 
+When you reply, mention whoever you answer: their DID in the reply's `mentions` relation (and a mention mark over `@Name` when the class keeps marks). See "Tag everyone you address" in SKILL.md.
+
 ### Reading the context around a mention
 
 The wake event gives you two addresses and no types. Work out the rest from the space's own ontology, cheapest step first, and stop as soon as you know enough to act:

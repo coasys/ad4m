@@ -2,8 +2,8 @@ use super::write_log::{AddedLink, WriteDelta, WriteLog};
 use crate::languages::literal::RFC3986_COMPONENT_ENCODE;
 use crate::types::LinkStatus;
 use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link, LinkExpression};
+use anyhow::{anyhow, Error};
 use chrono::DateTime as ChronoDateTime;
-use deno_core::anyhow::{anyhow, Error};
 use oxigraph::model::*;
 use oxigraph::sparql::{QueryResults, SparqlEvaluator};
 use oxigraph::store::{Store, StoreOptions, Transaction};
@@ -61,6 +61,9 @@ pub struct EvalStop {
     /// live-query-opening slot too. Empty for internal evals (background
     /// loops, tests).
     permits: Vec<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    /// The client query this eval runs for (`GET /metrics`): it counts as in flight until
+    /// the gate and every eval under it have ended. `None` for internal evals.
+    timer: Option<Arc<crate::metrics::QueryTimer>>,
 }
 
 impl EvalStop {
@@ -74,6 +77,7 @@ impl EvalStop {
                 deadline: Duration::ZERO,
             }),
             permits: Vec::new(),
+            timer: None,
         }
     }
 
@@ -135,6 +139,7 @@ impl EvalGate {
                 deadline,
             }),
             permits: Vec::new(),
+            timer: None,
         };
         let watchdog = Watchdog::arm(stop.clone(), deadline, cancel);
         EvalGate {
@@ -153,6 +158,11 @@ impl EvalGate {
     /// covered by the slot until they end.
     pub fn hold_slot(&mut self, permit: tokio::sync::OwnedSemaphorePermit) {
         self.stop.permits.push(Arc::new(permit));
+    }
+
+    /// Count the evals under the gate as one client query, until they have all ended.
+    pub fn time_query(&mut self, timer: crate::metrics::QueryTimer) {
+        self.stop.timer = Some(Arc::new(timer));
     }
 }
 
@@ -237,7 +247,13 @@ pub(crate) fn query_deadline() -> Duration {
 /// call, so a `request.cancel` drops it here like anywhere else. The deadline
 /// starts once the slot is held: time spent queued behind other evals is not
 /// the query's own. Drop the gate to stop the eval.
-pub(crate) async fn query_gate(ctx: &crate::types::domain::RequestContext) -> EvalGate {
+///
+/// The call counts as one query of `perspective` and of the caller's agent
+/// (`GET /metrics`) from the slot on, until its evals have ended.
+pub(crate) async fn query_gate(
+    ctx: &crate::types::domain::RequestContext,
+    perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
+) -> EvalGate {
     let mut permit = None;
     if let Some(slots) = ctx.query_slots.clone() {
         let cancelled = ctx.cancel_token.clone();
@@ -260,6 +276,10 @@ pub(crate) async fn query_gate(ctx: &crate::types::domain::RequestContext) -> Ev
     if let Some(permit) = permit {
         gate.hold_slot(permit);
     }
+    gate.time_query(crate::metrics::QueryTimer::start(
+        perspective.metrics.clone(),
+        ctx.session.acts_as_did().as_deref(),
+    ));
     gate
 }
 
@@ -1201,6 +1221,8 @@ pub struct SparqlStore {
     store: Arc<Store>,
     /// Serializes link mutations and clear across every clone of this store.
     writer: Arc<Mutex<()>>,
+    /// Counts this store as open (`ad4m_sparql_stores_open`) until its last clone drops.
+    _open: Arc<crate::metrics::OpenStore>,
     /// The write generation: bumped after every committed write, shared
     /// across clones. A reader that keeps a query result can reuse it while
     /// the generation it read before the query is unchanged, and can wait for
@@ -1284,6 +1306,7 @@ impl SparqlStore {
         Ok(SparqlStore {
             store: Arc::new(store),
             writer: Arc::new(Mutex::new(())),
+            _open: Arc::new(crate::metrics::OpenStore::open()),
             writes: Arc::new(tokio::sync::watch::Sender::new(0)),
             write_log: Arc::new(Mutex::new(WriteLog::default())),
             #[cfg(test)]
@@ -2327,7 +2350,7 @@ impl SparqlStore {
         let query = query_string.to_string();
         tokio::task::spawn_blocking(move || store.query(&stop, &query))
             .await
-            .map_err(|e| deno_core::anyhow::anyhow!("spawn_blocking join error: {}", e))?
+            .map_err(|e| anyhow!("spawn_blocking join error: {}", e))?
     }
 
     /// `query_arbitrary` on the blocking pool under `stop` — the eval checks
@@ -2356,7 +2379,7 @@ impl SparqlStore {
         // expect (CodeRabbit review, PR #855).
         tokio::task::spawn_blocking(move || store.query_arbitrary(&stop, &query))
             .await
-            .map_err(|e| deno_core::anyhow::anyhow!("spawn_blocking join error: {}", e))?
+            .map_err(|e| anyhow!("spawn_blocking join error: {}", e))?
     }
 
     /// Remove all triples from the store.
