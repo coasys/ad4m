@@ -1,0 +1,39 @@
+# cargo-nextest runs each test in its own process, so the suite can run in parallel:
+# rust-tests runs it with `cargo test -- --test-threads=1` because the services are
+# global singletons. `ci` is the profile of the trial job rust-tests-nextest;
+# rust-tests stays the required check until the two have been compared on the runners.
+[profile.ci]
+retries = 0
+fail-fast = false
+failure-output = "immediate-final"
+slow-timeout = { period = "60s", terminate-after = 10 }
+# These tests pass only after another test in the same process has set up a global
+# (AgentService, Ad4mDb, the wallet backend, GLOBAL_AD4M_CONFIG). They fail alone under
+# `cargo test` too, and in a process of their own every time, so they are left out here
+# until each sets up what it reads. A test-group does not help: it still gives each test
+# its own process. rust-tests still runs them.
+default-filter = """
+not (
+  test(=agent::capabilities::app_token_tests::a_locked_out_request_is_deleted) |
+  test(=agent::capabilities::app_token_tests::a_request_stops_accepting_codes_after_too_many_wrong_ones) |
+  test(=mcp::server::tests::no_token_on_a_local_listener_is_the_operator_unless_proxied) |
+  test(=mcp::server::tests::the_admin_credential_header_is_the_operator_over_http) |
+  test(=mcp::tools::agent_context_tests::without_a_credential_no_token_is_the_operator_only_on_loopback) |
+  test(=mcp::tools::auth::auth_status_session_tests::no_token_on_a_local_executor_without_a_credential_reports_the_operator) |
+  test(=mcp::tools::auth::auth_status_session_tests::no_token_on_an_executor_with_a_credential_is_anonymous) |
+  test(=mcp::tools::auth::capability_mint_tests::a_user_session_holding_permit_gets_no_mint_code_for_the_main_agent) |
+  test(=mcp::tools::auth::capability_mint_tests::an_authenticated_caller_still_gets_a_permitted_code) |
+  test(=mcp::tools::auth::capability_mint_tests::an_unauthenticated_caller_gets_no_mint_code) |
+  test(=mcp::tools::auth::capability_mint_tests::without_admin_credential_a_local_caller_is_still_auto_permitted) |
+  test(=mcp::tools::instances::tests::over_mcp_an_unknown_perspective_is_not_found) |
+  test(=perspectives::interpretation::run::pass_session_tests::a_pass_on_user_as_perspective_cannot_read_user_bs) |
+  test(=perspectives::interpretation::run::pass_session_tests::a_tokenless_fallback_inside_a_pass_is_anonymous) |
+  test(=perspectives::interpretation::run::pass_session_tests::a_tokenless_pass_acts_as_the_user_who_owns_the_perspective) |
+  test(=perspectives::interpretation::run::pass_session_tests::a_tokenless_pass_lists_no_other_perspective_of_its_user) |
+  test(=perspectives::interpretation::run::pass_session_tests::the_tool_list_of_a_pass_names_the_classes_of_its_perspective_only) |
+  test(=prolog_service::engine_pool::tests::test_regular_queries_use_complete_pool)
+)
+"""
+
+[profile.ci.junit]
+path = "junit.xml"

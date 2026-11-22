@@ -81,7 +81,7 @@ pub(crate) use validate::{
 
 pub(crate) use crate::perspectives::instances::{
     class_properties, fetch_instance, find_property, generate_instance_uri, link_target,
-    run_model_query, subject_class, PropView,
+    subject_class, PropView,
 };
 // What the tests reach through `use super::*` from before the write core moved out.
 #[cfg(test)]
@@ -212,6 +212,14 @@ pub(super) fn common_error(error: &InstanceError) -> Option<String> {
             } else {
                 registered.join(", ")
             }
+        )),
+        InstanceError::AmbiguousClass {
+            class_name,
+            candidates,
+        } => error_json(format!(
+            "'{class_name}' names more than one registered class — pass its target class IRI \
+             instead: {}. Call describe_perspective to see their schemas.",
+            candidates.join(", ")
         )),
         InstanceError::AbstractClass { class_name } => error_json(format!(
             "'{class_name}' is an abstract class: collection membership is written through the \

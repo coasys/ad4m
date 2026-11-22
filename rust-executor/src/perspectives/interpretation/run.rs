@@ -87,6 +87,71 @@ where
     }))
 }
 
+/// One interpretation prompt: the request and response events, then the model
+/// call. `allow_size_retry` is true in the parse loop, where a size problem
+/// may add the thinking-off call, and false for the empty-answer retry, which
+/// must not nest that call.
+async fn prompt_interpretation_text(
+    service: &crate::ai_service::AIService,
+    task_id: String,
+    prompt: &str,
+    stick_no_thinking: &std::sync::atomic::AtomicBool,
+    allow_size_retry: bool,
+    emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+    debug_response: Option<&std::sync::Mutex<Option<String>>>,
+) -> anyhow::Result<String> {
+    use crate::perspectives::auto_processor::events::{
+        emit, AutoProcessorEvent, AutoProcessorStep,
+    };
+
+    if let Some(ctx) = emit_ctx {
+        emit(
+            AutoProcessorEvent::new(
+                &ctx.perspective_uuid,
+                &ctx.processor_id,
+                AutoProcessorStep::LlmRequestSent,
+            )
+            .with_agent_did(&ctx.agent_did)
+            .with_items(&ctx.item_ids)
+            .with_batch_key(&ctx.batch_key)
+            .with_llm_input(prompt.to_string()),
+        )
+        .await;
+    }
+
+    let result = service
+        .prompt_interpretation_call(
+            task_id,
+            prompt.to_string(),
+            Some(stick_no_thinking),
+            allow_size_retry,
+        )
+        .await
+        .context("AIService::prompt failed")?;
+
+    if let Some(ctx) = emit_ctx {
+        emit(
+            AutoProcessorEvent::new(
+                &ctx.perspective_uuid,
+                &ctx.processor_id,
+                AutoProcessorStep::LlmResponseReceived,
+            )
+            .with_agent_did(&ctx.agent_did)
+            .with_items(&ctx.item_ids)
+            .with_batch_key(&ctx.batch_key)
+            .with_llm_output(result.text.clone()),
+        )
+        .await;
+    }
+
+    if let Some(slot) = debug_response {
+        if let Ok(mut guard) = slot.lock() {
+            *guard = Some(result.text.clone());
+        }
+    }
+    Ok(result.text)
+}
+
 /// Drop [`InterpretationOp::Update`] ops whose new field values already match
 /// the perspective's current state (per-property value-set equality). Small LLMs
 /// occasionally re-emit an existing `existing` entry verbatim after being
@@ -806,27 +871,28 @@ pub(super) async fn run_interpretation_once(
             .map_err(|e| anyhow::anyhow!("run_interpretation: AIService not ready: {e:#}"))?;
 
         // Mid-pass observability (Nico 2026-08-20 + CodeRabbit #903 CR #6):
-        // `LlmRequestSent` fires right before EACH `service.prompt` call and
+        // `LlmRequestSent` fires right before EACH model call and
         // `LlmResponseReceived` fires right after EACH successful prompt
         // response — including responses that later fail parsing, so a UI
-        // can diagnose why a retry happened. Both live INSIDE the retry
-        // callback: emitting them once around the whole retry loop would
-        // hide any raw response that wasn't the final parse-successful one.
+        // can diagnose why a retry happened. Both live inside
+        // [`prompt_interpretation_text`], which the parse loop and the
+        // empty-answer retry share. Emitting them once around the whole
+        // loop would hide any raw response that was not the one we kept.
         //
-        // `debug_response_capture` retains the LAST successful raw response
-        // for `InterpretationRun` persistence — the same value that ends up
-        // on the run node's `debugResponse` scalar. Retries only happen when
-        // parsing fails, so the value in the cell after `retry_interpretation_parse`
-        // succeeds is by construction the final (parse-successful) attempt.
+        // `debug_response_capture` retains the raw response kept for
+        // `InterpretationRun` persistence — the same value that ends up
+        // on the run node's `debugResponse` scalar. The parse loop replaces
+        // it on every successful prompt. The empty-answer retry replaces it
+        // only when that retry's text parses; a retry that does not parse
+        // leaves the first answer.
         let debug_response_capture: std::sync::Arc<std::sync::Mutex<Option<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(None));
         // One no-reasoning retry per pass. Once a pass falls back, later parse
         // retries stay there instead of spending another reasoning attempt.
+        // The empty-answer retry does not run after that fallback: the size
+        // retry already spent the pass's one extra model call.
         let stick_no_thinking = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let InterpretationOutput {
-            instances,
-            flow_proposals: llm_proposals,
-        } = retry_interpretation_parse(|_attempt| {
+        let mut parsed = retry_interpretation_parse(|_attempt| {
             let service = service.clone();
             let task_id = task.task_id.clone();
             let prompt = prompt.clone();
@@ -834,57 +900,96 @@ pub(super) async fn run_interpretation_once(
             let emit_ctx_cloned = emit_ctx.cloned();
             let stick_no_thinking = stick_no_thinking.clone();
             async move {
-                use crate::perspectives::auto_processor::events::{
-                    emit, AutoProcessorEvent, AutoProcessorStep,
-                };
-
-                if let Some(ctx) = emit_ctx_cloned.as_ref() {
-                    emit(
-                        AutoProcessorEvent::new(
-                            &ctx.perspective_uuid,
-                            &ctx.processor_id,
-                            AutoProcessorStep::LlmRequestSent,
-                        )
-                        .with_agent_did(&ctx.agent_did)
-                        .with_items(&ctx.item_ids)
-                        .with_batch_key(&ctx.batch_key)
-                        .with_llm_input(prompt.clone()),
-                    )
-                    .await;
-                }
-
-                let result = service
-                    // Internal caller (interpretation runner) — no user auth context; billing skipped.
-                    // Reasoning first, capped so thinking cannot overflow the window.
-                    // A size failure retries once with thinking off.
-                    .prompt_interpretation_pass(task_id, prompt, Some(stick_no_thinking.as_ref()))
-                    .await
-                    .context("AIService::prompt failed")?;
-
-                if let Some(ctx) = emit_ctx_cloned.as_ref() {
-                    emit(
-                        AutoProcessorEvent::new(
-                            &ctx.perspective_uuid,
-                            &ctx.processor_id,
-                            AutoProcessorStep::LlmResponseReceived,
-                        )
-                        .with_agent_did(&ctx.agent_did)
-                        .with_items(&ctx.item_ids)
-                        .with_batch_key(&ctx.batch_key)
-                        .with_llm_output(result.text.clone()),
-                    )
-                    .await;
-                }
-
-                if emit_debug_events {
-                    if let Ok(mut slot) = capture.lock() {
-                        *slot = Some(result.text.clone());
-                    }
-                }
-                Ok(result.text)
+                prompt_interpretation_text(
+                    &service,
+                    task_id,
+                    &prompt,
+                    &stick_no_thinking,
+                    true,
+                    emit_ctx_cloned.as_ref(),
+                    emit_debug_events.then_some(capture.as_ref()),
+                )
+                .await
             }
         })
         .await?;
+        // A parsed answer with nothing in it, on a pass that had transcript
+        // items, is asked once more. This is not the parse loop (that one
+        // retries bad JSON up to five times) and it does not nest the
+        // thinking-off retry. One extra model call for emptiness, total.
+        if parsed.instances.is_empty()
+            && parsed.flow_proposals.is_empty()
+            && !transcript.is_empty()
+        {
+            let processor = emit_ctx
+                .map(|ctx| ctx.processor_id.as_str())
+                .or(cursor.map(|cursor| cursor.processor.as_str()))
+                .unwrap_or("-");
+            let perspective_uuid = emit_ctx
+                .map(|ctx| ctx.perspective_uuid.as_str())
+                .unwrap_or(perspective.uuid.as_str());
+            if stick_no_thinking.load(std::sync::atomic::Ordering::Relaxed) {
+                log::debug!(
+                    "interpretation: empty answer after the thinking-off retry; not prompting again processor={processor} perspective={perspective_uuid} transcript_items={}",
+                    transcript.len()
+                );
+            } else {
+                log::warn!(
+                    "interpretation: empty answer with transcript items; retrying once processor={processor} perspective={perspective_uuid} transcript_items={}",
+                    transcript.len()
+                );
+                let previous_debug = emit_debug_events
+                    .then(|| {
+                        debug_response_capture
+                            .lock()
+                            .ok()
+                            .and_then(|slot| slot.clone())
+                    })
+                    .flatten();
+                match prompt_interpretation_text(
+                    &service,
+                    task.task_id.clone(),
+                    &prompt,
+                    &stick_no_thinking,
+                    false,
+                    emit_ctx,
+                    emit_debug_events.then_some(debug_response_capture.as_ref()),
+                )
+                .await
+                {
+                    Ok(text) => match parse_interpretation_output(&text) {
+                        Ok(retry) => {
+                            log::warn!(
+                                "interpretation: empty-answer retry found instances={} flow_proposals={}",
+                                retry.instances.len(),
+                                retry.flow_proposals.len()
+                            );
+                            parsed = retry;
+                        }
+                        Err(error) => {
+                            if emit_debug_events {
+                                if let Ok(mut slot) = debug_response_capture.lock() {
+                                    *slot = previous_debug;
+                                }
+                            }
+                            log::warn!(
+                                "interpretation: empty-answer retry found instances=0 flow_proposals=0 error={error}"
+                            );
+                        }
+                    },
+                    Err(error) => {
+                        log::warn!(
+                            "interpretation: empty-answer retry found instances=0 flow_proposals=0 error={error}"
+                        );
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        let InterpretationOutput {
+            instances,
+            flow_proposals: llm_proposals,
+        } = parsed;
         // Handles (`P3`) back to full ids.
         let instances = shown.handles.resolve(instances, shapes);
 
@@ -1637,6 +1742,7 @@ mod pass_session_tests {
 
     /// A managed user: a row in the users table, which makes the owner DID a managed agent.
     fn managed_user(email: &str, did: &str) {
+        crate::perspectives::interpretation_test_support::ensure_db_init();
         let known = crate::db::Ad4mDb::with_global_instance(|db| db.get_username_by_did(did))
             .ok()
             .flatten();
@@ -2853,5 +2959,523 @@ mod tests {
         assert_eq!(flows[0].subject, task);
         assert_eq!(flows[0].instance_uri, inst_uri);
         assert_eq!(flows[0].current_state, "identified");
+    }
+}
+
+/// A parsed empty answer (`[]`, or instances and flow proposals both empty)
+/// on a pass that had transcript items is one sampling miss. These tests
+/// drive that pass through the real runner and a scripted llama-server,
+/// the same stub the thinking-off retry uses.
+#[cfg(test)]
+mod empty_answer_retry_tests {
+    use super::run_interpretation_with_strategy_and_model;
+    use crate::ai_service::AIService;
+    use crate::db::Ad4mDb;
+    use crate::perspectives::auto_processor::config::processor_node;
+    use crate::perspectives::auto_processor::cursor::load_processed_source_ids;
+    use crate::perspectives::interpretation::DedupStrategy;
+    use crate::perspectives::interpretation::InterpretationRunCursor;
+    use crate::perspectives::interpretation::TranscriptTurn;
+    use crate::perspectives::interpretation_test_support::{
+        graph_titles_lower, setup_perspective_no_llm, TASK_SDNA,
+    };
+    use crate::types::{Endpoint, EndpointKind, ModelInput, ModelType};
+
+    const RECORD: &str = r#"[{"class":"Task","title":"Write the spec"}]"#;
+    const FLOW_ONLY: &str = r#"{"instances":[],"flow_proposals":[{"instance":"ad4m://flow/instance/1","toState":"scoped"}]}"#;
+
+    fn reply(content: &str, finish: &str) -> String {
+        serde_json::json!({
+            "choices": [{
+                "message": { "content": content },
+                "finish_reason": finish
+            }]
+        })
+        .to_string()
+    }
+
+    fn body(request: &mockito::Request) -> serde_json::Value {
+        serde_json::from_slice(request.body().unwrap()).unwrap()
+    }
+
+    fn thinking_on(request: &mockito::Request) -> bool {
+        body(request).get("chat_template_kwargs").is_none()
+    }
+
+    fn thinking_off(request: &mockito::Request) -> bool {
+        body(request)["chat_template_kwargs"]["enable_thinking"] == false
+    }
+
+    async fn install_llama(base_url: &str) {
+        AIService::init_global_instance().await.expect("AIService");
+        let service = AIService::global_instance().await.expect("AIService");
+        service.wait_loaded().await;
+        let name = format!("empty-retry-{}", uuid::Uuid::new_v4());
+        let mut endpoint = Endpoint::for_test(&name, EndpointKind::LlamaServer, base_url, &name);
+        // Large enough that the interpretation prompt is not a size failure.
+        // The empty retry is about a parsed `[]`, not a window overflow.
+        endpoint.max_num_ctx = Some(131_072);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).expect("endpoint");
+        let model_id = service
+            .add_model(ModelInput {
+                name: format!("empty-retry-{}", uuid::Uuid::new_v4()),
+                model_type: ModelType::Llm,
+                endpoint_id: endpoint.id,
+                remote_model: "m".into(),
+                native_tools: None,
+            })
+            .await
+            .expect("model");
+        service
+            .set_default_model(ModelType::Llm, model_id)
+            .await
+            .expect("default model");
+    }
+
+    async fn interpret(
+        base_url: &str,
+        turns: &[TranscriptTurn],
+    ) -> (anyhow::Result<super::InterpretationOutcome>, Vec<String>) {
+        // `ensure_db_init` (inside the perspective setup) replaces the
+        // in-memory database the first time this process calls it. Register
+        // the model after that, or the prompt resolves `default` against an
+        // empty database.
+        let (mut perspective, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        install_llama(base_url).await;
+        let outcome = run_interpretation_with_strategy_and_model(
+            &mut perspective,
+            &shapes,
+            turns,
+            "ad4m://empty-retry/",
+            &ctx,
+            &DedupStrategy::default(),
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await;
+        let titles = graph_titles_lower(&perspective, &shapes).await;
+        (outcome, titles)
+    }
+
+    fn said(text: &str) -> Vec<TranscriptTurn> {
+        vec![TranscriptTurn::from_speaker_text("Ada", text)]
+    }
+
+    /// `[]`, then a Task. The record is stored and the model is called twice.
+    /// Both calls leave thinking on: this retry is not the thinking-off retry.
+    #[tokio::test]
+    async fn empty_answer_then_a_record_is_stored_and_the_model_is_called_twice() {
+        let mut upstream = mockito::Server::new_async().await;
+        // mockito 1.7.2 serves the oldest mock that still needs hits.
+        let first = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_on)
+            .with_body(reply("[]", "stop"))
+            .expect(1)
+            .create_async()
+            .await;
+        let second = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_on)
+            .with_body(reply(RECORD, "stop"))
+            .expect(1)
+            .create_async()
+            .await;
+        let thinking_off_call = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_off)
+            .expect(0)
+            .create_async()
+            .await;
+
+        let (outcome, titles) =
+            interpret(&upstream.url(), &said("Please write the spec by Friday")).await;
+        assert!(
+            outcome.is_ok(),
+            "the retry's record must be applied, got {outcome:?}"
+        );
+        assert!(
+            titles.iter().any(|title| title == "write the spec"),
+            "the record from the second answer must be stored, got {titles:?}"
+        );
+        first.assert_async().await;
+        second.assert_async().await;
+        thinking_off_call.assert_async().await;
+    }
+
+    /// Small talk: transcript items, and both answers are `[]`. One retry,
+    /// then nothing is stored. The model is called exactly twice.
+    #[tokio::test]
+    async fn empty_answer_on_small_talk_retries_once_and_stores_nothing() {
+        let mut upstream = mockito::Server::new_async().await;
+        let calls = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_on)
+            .with_body(reply("[]", "stop"))
+            .expect(2)
+            .create_async()
+            .await;
+        let thinking_off_call = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_off)
+            .expect(0)
+            .create_async()
+            .await;
+
+        let (outcome, titles) = interpret(&upstream.url(), &said("hey")).await;
+        assert!(
+            outcome.is_ok(),
+            "a second empty answer is a successful pass, got {outcome:?}"
+        );
+        assert!(
+            titles.is_empty(),
+            "small talk stores nothing, got {titles:?}"
+        );
+        assert!(
+            outcome.unwrap().bases.is_empty(),
+            "the pass writes no bases"
+        );
+        calls.assert_async().await;
+        thinking_off_call.assert_async().await;
+    }
+
+    /// No transcript items: a parsed `[]` is not a miss. One call.
+    #[tokio::test]
+    async fn empty_answer_with_no_transcript_items_is_not_retried() {
+        let mut upstream = mockito::Server::new_async().await;
+        let only = upstream
+            .mock("POST", "/v1/chat/completions")
+            .with_body(reply("[]", "stop"))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let (outcome, titles) = interpret(&upstream.url(), &[]).await;
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert!(titles.is_empty(), "{titles:?}");
+        only.assert_async().await;
+    }
+
+    /// The first answer already has an instance. One call, and it is stored.
+    #[tokio::test]
+    async fn empty_answer_is_not_retried_when_the_first_answer_has_instances() {
+        let mut upstream = mockito::Server::new_async().await;
+        let only = upstream
+            .mock("POST", "/v1/chat/completions")
+            .with_body(reply(RECORD, "stop"))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let (outcome, titles) =
+            interpret(&upstream.url(), &said("Please write the spec by Friday")).await;
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert!(
+            titles.iter().any(|title| title == "write the spec"),
+            "{titles:?}"
+        );
+        only.assert_async().await;
+    }
+
+    /// The first answer has a flow proposal and no instances. One call.
+    #[tokio::test]
+    async fn empty_answer_is_not_retried_when_the_first_answer_has_flow_proposals() {
+        let mut upstream = mockito::Server::new_async().await;
+        let only = upstream
+            .mock("POST", "/v1/chat/completions")
+            .with_body(reply(FLOW_ONLY, "stop"))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let (outcome, titles) = interpret(&upstream.url(), &said("Move the spec to scoped")).await;
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert!(
+            titles.is_empty(),
+            "a proposal alone writes no Task, got {titles:?}"
+        );
+        only.assert_async().await;
+    }
+
+    /// The empty-answer retry is one call with thinking still on. A cut or
+    /// empty reply on that call does not add the thinking-off retry: a pass
+    /// makes at most one extra model call for emptiness.
+    #[tokio::test]
+    async fn empty_answer_retry_does_not_add_a_thinking_off_call() {
+        let mut upstream = mockito::Server::new_async().await;
+        // Oldest mock that still needs hits is served first.
+        let first = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_on)
+            .with_body(reply("[]", "stop"))
+            .expect(1)
+            .create_async()
+            .await;
+        let second = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_on)
+            .with_body(reply("", "length"))
+            .expect(1)
+            .create_async()
+            .await;
+        let thinking_off_call = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_off)
+            .expect(0)
+            .create_async()
+            .await;
+
+        let (outcome, titles) =
+            interpret(&upstream.url(), &said("Please write the spec by Friday")).await;
+        assert!(
+            outcome.is_ok(),
+            "a retry that does not parse keeps the first empty answer, got {outcome:?}"
+        );
+        assert!(titles.is_empty(), "{titles:?}");
+        first.assert_async().await;
+        second.assert_async().await;
+        thinking_off_call.assert_async().await;
+    }
+
+    /// A size failure already spent the pass's one extra call (thinking off).
+    /// When that retry parses as `[]`, the empty-answer retry does not add
+    /// a third call, and the record that a third call would have returned
+    /// is not stored.
+    #[tokio::test]
+    async fn empty_answer_after_thinking_off_does_not_call_the_model_again() {
+        let mut upstream = mockito::Server::new_async().await;
+        // Oldest mock that still needs hits is served first. The record is
+        // a catch-all with expect(0), so it is only a fallback after the
+        // two scripted replies have been consumed.
+        let first = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_on)
+            .with_body(reply("", "length"))
+            .expect(1)
+            .create_async()
+            .await;
+        let second = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_off)
+            .with_body(reply("[]", "stop"))
+            .expect(1)
+            .create_async()
+            .await;
+        let third = upstream
+            .mock("POST", "/v1/chat/completions")
+            .with_body(reply(RECORD, "stop"))
+            .expect(0)
+            .create_async()
+            .await;
+
+        let (outcome, titles) =
+            interpret(&upstream.url(), &said("Please write the spec by Friday")).await;
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert!(
+            titles.is_empty(),
+            "the thinking-off answer was empty; a third call must not store the record, got {titles:?}"
+        );
+        first.assert_async().await;
+        second.assert_async().await;
+        third.assert_async().await;
+    }
+
+    /// The retry's request fails. The pass returns that error and does not
+    /// mint a run, so the cursor does not name the item. A later pass still
+    /// processes it.
+    #[tokio::test]
+    async fn empty_answer_retry_transport_failure_does_not_commit_the_cursor() {
+        let mut upstream = mockito::Server::new_async().await;
+        // Oldest mock that still needs hits is served first.
+        let first = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_on)
+            .with_body(reply("[]", "stop"))
+            .expect(1)
+            .create_async()
+            .await;
+        let failed = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_on)
+            .with_status(500)
+            .with_body("upstream unavailable")
+            .expect(1)
+            .create_async()
+            .await;
+        let later = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_on)
+            .with_body(reply(RECORD, "stop"))
+            .expect(1)
+            .create_async()
+            .await;
+        let thinking_off_call = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_off)
+            .expect(0)
+            .create_async()
+            .await;
+
+        let (mut perspective, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        install_llama(&upstream.url()).await;
+        let cursor = InterpretationRunCursor {
+            processor: processor_node("empty-retry-transport"),
+            sources: vec!["turn-missed".into()],
+        };
+        let turns = said("Please write the spec by Friday");
+        let outcome = run_interpretation_with_strategy_and_model(
+            &mut perspective,
+            &shapes,
+            &turns,
+            "ad4m://empty-retry/",
+            &ctx,
+            &DedupStrategy::default(),
+            None,
+            None,
+            Some(&cursor),
+            false,
+            None,
+            None,
+        )
+        .await;
+        let message = format!(
+            "{:#}",
+            outcome.expect_err("the retry's transport error fails the pass")
+        );
+        assert!(
+            message.contains("500"),
+            "the pass must surface the upstream status, got {message}"
+        );
+        let titles = graph_titles_lower(&perspective, &shapes).await;
+        assert!(
+            titles.is_empty(),
+            "a failed retry stores nothing, got {titles:?}"
+        );
+        // The failure wrote no run. Register the class so the cursor query
+        // is a read of an empty set, not a missing-class error.
+        crate::perspectives::interpretation::ensure_interpretation_overlay_classes(
+            &mut perspective,
+            &ctx,
+        )
+        .await
+        .expect("overlay classes");
+        let now = chrono::Utc::now().timestamp_millis();
+        let processed = load_processed_source_ids(&perspective, "empty-retry-transport", now, None)
+            .await
+            .expect("cursor");
+        assert!(
+            !processed.contains("turn-missed"),
+            "a failed retry must not commit the cursor, got {processed:?}"
+        );
+
+        let outcome = run_interpretation_with_strategy_and_model(
+            &mut perspective,
+            &shapes,
+            &turns,
+            "ad4m://empty-retry/",
+            &ctx,
+            &DedupStrategy::default(),
+            None,
+            None,
+            Some(&cursor),
+            false,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            outcome.is_ok(),
+            "a later pass processes the item, got {outcome:?}"
+        );
+        let processed = load_processed_source_ids(
+            &perspective,
+            "empty-retry-transport",
+            chrono::Utc::now().timestamp_millis(),
+            None,
+        )
+        .await
+        .expect("cursor");
+        assert!(
+            processed.contains("turn-missed"),
+            "the later pass commits the cursor, got {processed:?}"
+        );
+        let titles = graph_titles_lower(&perspective, &shapes).await;
+        assert!(
+            titles.iter().any(|title| title == "write the spec"),
+            "the later pass stores the record, got {titles:?}"
+        );
+        first.assert_async().await;
+        failed.assert_async().await;
+        later.assert_async().await;
+        thinking_off_call.assert_async().await;
+    }
+
+    /// The retry's text does not parse. The pass keeps the first empty
+    /// answer, and the debug capture is that first answer, not the text
+    /// that failed to parse.
+    #[tokio::test]
+    async fn empty_answer_retry_that_does_not_parse_restores_the_debug_capture() {
+        let mut upstream = mockito::Server::new_async().await;
+        let first = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_on)
+            .with_body(reply("[]", "stop"))
+            .expect(1)
+            .create_async()
+            .await;
+        let second = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_on)
+            .with_body(reply("NOT-JSON-RETRY", "stop"))
+            .expect(1)
+            .create_async()
+            .await;
+        let thinking_off_call = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_request(thinking_off)
+            .expect(0)
+            .create_async()
+            .await;
+
+        let (mut perspective, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        install_llama(&upstream.url()).await;
+        let outcome = run_interpretation_with_strategy_and_model(
+            &mut perspective,
+            &shapes,
+            &said("Please write the spec by Friday"),
+            "ad4m://empty-retry/",
+            &ctx,
+            &DedupStrategy::default(),
+            None,
+            None,
+            None,
+            true,
+            None,
+            None,
+        )
+        .await;
+        let outcome = outcome.expect("an unparseable retry keeps the first answer");
+        assert!(
+            outcome.bases.is_empty(),
+            "the first answer was empty, got {outcome:?}"
+        );
+        let debug = outcome.debug.expect("emit_debug_events keeps the capture");
+        assert_eq!(
+            debug.response, "[]",
+            "the capture must be the first answer, not the unparseable retry"
+        );
+        assert!(
+            debug.prompt.contains("Please write the spec by Friday"),
+            "the capture is this pass's prompt"
+        );
+        let titles = graph_titles_lower(&perspective, &shapes).await;
+        assert!(titles.is_empty(), "{titles:?}");
+        first.assert_async().await;
+        second.assert_async().await;
+        thinking_off_call.assert_async().await;
     }
 }
