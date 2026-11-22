@@ -353,23 +353,31 @@ call. An answer a socket fault kept (503, 408) goes out again once the
 socket is back, and `sfu.callResume` then returns what went by — the
 session's pending offer and the room's roster, applied like the events
 that carry them; a resume the socket fails keeps the call, and a 403 ends
-it (`call-ended`, `{ reason: "refused" }`: the session is another
-agent's). Of the server offers waiting, only the newest
-is applied, and each step of the offer queue gets 10 s. The restart names the session's `participantId` (only that session
+it (`call-ended`, `{ reason: "refused" }`: the executor refused the
+resume — the session is another agent's, or this agent is no longer a
+member). Of the server offers waiting, only the newest
+is applied; only the offer queue's RPC waits are bounded (10 s) — SDP
+steps run to their end — and a resume's ask waits off the queue, bounded
+by the restart's remaining window when one is in flight, so the restart
+offer it triggers is answered while the reply is still out. The restart names the session's `participantId` (only that session
 restarts, never another device of the agent), and a manager with no session
 (join not back, left, replaced) sends none. A room roster that leaves this
 session out for 3 s asks `sfu.callResume` and rebuilds the call when its
-reply says the session is not listed; a roster that lists it, as during a
-restart in place, changes nothing.
+reply says the session is not listed — an ask the socket fails is asked
+again within the grace while the roster still omits it; a roster that
+lists it, as during a restart in place, changes nothing.
 `ApiClient` drops an executor socket whose ping stays unanswered for a ping
 interval (10 s, `PING_INTERVAL_MS`; longer while a large write it sent may
 still be crossing a 16 kB/s link) and dials a new one, so a
 socket a network switch left OPEN is noticed in 10 to 20 s. `onNetworkChange`
 fires only for platform network events: `online` redials at once and tells
 it once the new socket is open, and `change` on `navigator.connection`
-(only when its `type` or `navigator.onLine` changed) marks a change that is
-told once an open socket is proven — the local path changed, so media must
-restart — while the socket itself is judged by socket evidence through
+marks a change — told once an open socket is proven — only when its
+`type` or `navigator.onLine` moved: the local path changed, so media must
+restart. On a platform that reports no `type` (desktop Chromium) a `change`
+with the reported state unmoved only has the socket judged — a real
+switch kills it and its drop redials; a moved estimate keeps it and marks
+nothing. The socket is judged by socket evidence through
 `checkConnection`, which also runs when a request
 has had no reply for 4 s (`PENDING_PROBE_MS`) on a socket nothing
 arrived on since it was sent. A request that cannot wait that long goes
