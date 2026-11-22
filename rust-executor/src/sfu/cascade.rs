@@ -174,30 +174,43 @@ impl CascadeSignal {
     }
 }
 
-/// How long the cascade waits before redialling a pipe that ended because
-/// its answer was rejected locally, its offer was still unanswered after
-/// the second resend, or its ICE dropped on the end that dials. Announce
-/// arrives every 10 s, so the next announce is not this wait: it would
-/// rebuild the pipe while the other end still held its entry, and a pipe
-/// that failed the same way would end and redial about every minute. The
-/// first failure waits this long. Each further one doubles the wait, up to
+/// How long the cascade waits before redialling a pipe that has ended
+/// twice in a row: a locally rejected answer, an offer still unanswered
+/// after the second resend, or an ICE drop on the end that dials. The
+/// first of those is immediate, as a single drop was before the flap
+/// guard. Announce arrives every 10 s, so without a wait on the repeats
+/// the next announce would rebuild the pipe while the other end still
+/// held its entry. Each further consecutive failure doubles this, up to
 /// [`PIPE_REDIAL_BACKOFF_CAP`]. A timeout (the pipe never connected) does
-/// not wait.
+/// not wait, and a pipe that stayed connected for [`PIPE_HEALTHY_RESET`]
+/// starts the count again.
 pub const PIPE_REDIAL_BACKOFF: Duration = Duration::from_secs(30);
 
-/// The longest redial wait. Further failures of the same pipe stay here.
+/// The longest redial wait. Further consecutive failures of the same pipe stay here.
 pub const PIPE_REDIAL_BACKOFF_CAP: Duration = Duration::from_secs(120);
 
-/// One pipe's run of ended offers and dialler drops, and when it may be dialled.
+/// How long a pipe must stay connected before its failure count is cleared.
+/// The next end is then a first failure, and the redial is immediate.
+pub const PIPE_HEALTHY_RESET: Duration = Duration::from_secs(120);
+
+/// One pipe's run of consecutive ended offers and dialler drops, and when
+/// it may be dialled. `connected_at` is when the current pipe became
+/// connected. It is cleared when the pipe ends.
 struct PipeRedial {
     failures: u32,
     not_before: Instant,
+    connected_at: Option<Instant>,
 }
 
-/// The wait after `failures` ends. `1` is [`PIPE_REDIAL_BACKOFF`].
+/// The wait after `failures` consecutive ends. The first is immediate.
+/// The second is [`PIPE_REDIAL_BACKOFF`], then double, capped at
+/// [`PIPE_REDIAL_BACKOFF_CAP`].
 fn pipe_redial_wait(failures: u32) -> Duration {
+    if failures <= 1 {
+        return Duration::ZERO;
+    }
     let mut wait = PIPE_REDIAL_BACKOFF;
-    for _ in 1..failures {
+    for _ in 2..failures {
         wait = wait.saturating_mul(2).min(PIPE_REDIAL_BACKOFF_CAP);
     }
     wait
@@ -226,9 +239,10 @@ pub struct CascadeManager {
     /// Per-room cooldown: last time a rebalance migration was issued.
     /// Prevents rapid-fire migrations (anti-pingpong).
     rebalance_cooldowns: HashMap<String, Instant>,
-    /// Pipes the dialling end must not rebuild yet, keyed by
-    /// `(room_id, remote_did)`. An ended offer records one, and so does an
-    /// ICE drop on the end that dials. Absent when that pair may dial now.
+    /// Consecutive failures of a pipe the dialling end must remember, keyed
+    /// by `(room_id, remote_did)`. An ended offer records one, and so does
+    /// an ICE drop on the end that dials. The first failure still dials
+    /// now. Absent when that pair has not failed since it was last healthy.
     /// See [`PIPE_REDIAL_BACKOFF`].
     redials: HashMap<(String, String), PipeRedial>,
     /// Tests set the clock [`Self::establish_pipe`] compares to the redial
@@ -271,17 +285,39 @@ impl CascadeManager {
         self.test_now = Some(now);
     }
 
+    /// The pipe to `remote_did` is connected as of `now`. A later end uses
+    /// this to decide whether the failure count still stands. The first
+    /// connect of this life is kept: a second event must not move the clock.
+    pub fn note_pipe_connected(&mut self, room_id: &str, remote_did: &str, now: Instant) {
+        let key = (room_id.to_string(), remote_did.to_string());
+        if let Some(redial) = self.redials.get_mut(&key) {
+            if redial.connected_at.is_none() {
+                redial.connected_at = Some(now);
+            }
+        }
+    }
+
     /// An established pipe to `remote_did` ended: a locally rejected answer,
-    /// an unanswered offer, or an ICE drop on the end that dials. The next
-    /// [`Self::establish_pipe`] waits.
+    /// an unanswered offer, or an ICE drop on the end that dials. The first
+    /// consecutive end dials at once. From the second, [`Self::establish_pipe`]
+    /// waits. A pipe that stayed connected for [`PIPE_HEALTHY_RESET`] counts
+    /// this end as a first failure again.
     fn note_pipe_offer_ended(&mut self, room_id: &str, remote_did: &str, now: Instant) {
         let key = (room_id.to_string(), remote_did.to_string());
-        let failures = self
-            .redials
-            .get(&key)
-            .map(|redial| redial.failures)
-            .unwrap_or(0)
-            .saturating_add(1);
+        let previous = self.redials.get(&key);
+        let reset = previous
+            .and_then(|redial| redial.connected_at)
+            .is_some_and(|connected| {
+                now.saturating_duration_since(connected) >= PIPE_HEALTHY_RESET
+            });
+        let failures = if reset {
+            1
+        } else {
+            previous
+                .map(|redial| redial.failures)
+                .unwrap_or(0)
+                .saturating_add(1)
+        };
         let wait = pipe_redial_wait(failures);
         debug!(
             "SFU cascade: pipe to {remote_did} for room {room_id} ended ({failures}); redial waits {} s",
@@ -292,6 +328,7 @@ impl CascadeManager {
             PipeRedial {
                 failures,
                 not_before: now + wait,
+                connected_at: None,
             },
         );
     }
@@ -1218,9 +1255,10 @@ mod tests {
     }
 
     /// A pipe ended for an unanswered offer, or an answer rejected locally,
-    /// is not dialled again on the spot. The wait doubles, and it stops at
-    /// the cap. A timeout still dials at once. An ICE drop on the dialler
-    /// waits; see [`the_dialler_waits_out_the_backoff_when_the_other_end_ends_the_pipe`].
+    /// dials again at once the first time. The next consecutive end waits,
+    /// the wait doubles, and it stops at the cap. A timeout still dials at
+    /// once. An ICE drop on the dialler uses the same count; see
+    /// [`the_dialler_waits_out_the_backoff_when_the_other_end_ends_the_pipe`].
     #[test]
     fn a_redialled_pipe_that_fails_again_waits_out_its_backoff() {
         let room = RoomId::new("nh", "r");
@@ -1245,48 +1283,53 @@ mod tests {
             !mgr.has_pipe(&key, remote),
             "the ended pipe's entry is gone"
         );
-        assert!(
-            mgr.establish_pipe(remote, &room).is_err(),
-            "the redial does not happen in the same moment"
-        );
-        mgr.set_now(t0 + PIPE_REDIAL_BACKOFF - Duration::from_millis(1));
-        assert!(mgr.establish_pipe(remote, &room).is_err());
-        mgr.set_now(t0 + PIPE_REDIAL_BACKOFF);
         let (second, _) = mgr
             .establish_pipe(remote, &room)
-            .expect("the first redial waits one backoff");
+            .expect("the first drop redials at once");
         assert_ne!(second.id, first_id);
 
-        let t1 = t0 + PIPE_REDIAL_BACKOFF;
+        let t1 = t0;
         mgr.on_pipe_died(&key, remote, "offer", t1);
-        mgr.set_now(t1 + PIPE_REDIAL_BACKOFF);
+        mgr.set_now(t1 + PIPE_REDIAL_BACKOFF - Duration::from_millis(1));
         assert!(
             mgr.establish_pipe(remote, &room).is_err(),
             "a redialled pipe that fails again is not redialled on the same wait"
         );
-        mgr.set_now(t1 + PIPE_REDIAL_BACKOFF * 2);
+        mgr.set_now(t1 + PIPE_REDIAL_BACKOFF);
         mgr.establish_pipe(remote, &room)
-            .expect("the second failure waits twice as long");
+            .expect("the second failure waits one backoff");
 
-        let t2 = t1 + PIPE_REDIAL_BACKOFF * 2;
+        let t2 = t1 + PIPE_REDIAL_BACKOFF;
         mgr.on_pipe_died(&key, remote, "offer", t2);
-        mgr.set_now(t2 + PIPE_REDIAL_BACKOFF_CAP - Duration::from_millis(1));
+        mgr.set_now(t2 + PIPE_REDIAL_BACKOFF);
+        assert!(
+            mgr.establish_pipe(remote, &room).is_err(),
+            "the third failure is not on the same wait"
+        );
+        mgr.set_now(t2 + PIPE_REDIAL_BACKOFF * 2);
+        mgr.establish_pipe(remote, &room)
+            .expect("the third failure waits twice as long");
+
+        let t3 = t2 + PIPE_REDIAL_BACKOFF * 2;
+        mgr.on_pipe_died(&key, remote, "offer", t3);
+        mgr.set_now(t3 + PIPE_REDIAL_BACKOFF_CAP - Duration::from_millis(1));
         assert!(mgr.establish_pipe(remote, &room).is_err());
-        mgr.set_now(t2 + PIPE_REDIAL_BACKOFF_CAP);
+        mgr.set_now(t3 + PIPE_REDIAL_BACKOFF_CAP);
         mgr.establish_pipe(remote, &room)
             .expect("the wait reaches the cap");
 
-        let t3 = t2 + PIPE_REDIAL_BACKOFF_CAP;
-        mgr.on_pipe_died(&key, remote, "offer", t3);
-        mgr.set_now(t3 + PIPE_REDIAL_BACKOFF_CAP);
+        let t4 = t3 + PIPE_REDIAL_BACKOFF_CAP;
+        mgr.on_pipe_died(&key, remote, "offer", t4);
+        mgr.set_now(t4 + PIPE_REDIAL_BACKOFF_CAP);
         mgr.establish_pipe(remote, &room)
             .expect("a further failure stays at the cap");
     }
 
     /// The higher DID is the only end that dials. When the lower DID ends
-    /// its offer, this end only sees the ICE drop. That drop waits out the
-    /// same backoff, so the pipe cannot be redialled on the next announce.
-    /// A timeout still dials at once.
+    /// its offer, this end only sees the ICE drop. The first such drop
+    /// dials at once. The next consecutive one waits, so a pipe that keeps
+    /// failing is not rebuilt on the next announce. A timeout still dials
+    /// at once.
     #[test]
     fn the_dialler_waits_out_the_backoff_when_the_other_end_ends_the_pipe() {
         let room = RoomId::new("nh", "r");
@@ -1311,37 +1354,148 @@ mod tests {
         dialler.establish_pipe(lower, &room).unwrap();
         // The lower DID ended its offer. It never dials.
         other.on_pipe_died(&key, higher, "offer", t0);
-        // The dialler sees an ordinary drop.
+        // The dialler sees an ordinary drop. The first one is free.
         dialler.on_pipe_died(&key, lower, "drop", t0);
         assert!(
             !dialler.has_pipe(&key, lower),
             "the dialler's pipe entry is gone"
         );
+        dialler
+            .establish_pipe(lower, &room)
+            .expect("the first dialler drop redials at once");
 
-        assert!(
-            dialler.establish_pipe(lower, &room).is_err(),
-            "the dialling end waits out the backoff after the other end ends the pipe"
-        );
+        dialler.on_pipe_died(&key, lower, "drop", t0);
         dialler.set_now(t0 + PIPE_REDIAL_BACKOFF - Duration::from_millis(1));
         assert!(
             dialler.establish_pipe(lower, &room).is_err(),
-            "the dialling end waits out the backoff after the other end ends the pipe"
+            "the dialling end waits out the backoff after the other end ends the pipe again"
         );
         dialler.set_now(t0 + PIPE_REDIAL_BACKOFF);
         dialler
             .establish_pipe(lower, &room)
-            .expect("the dialler redials after one backoff");
+            .expect("the second dialler drop waits 30 s");
+    }
 
-        let t1 = t0 + PIPE_REDIAL_BACKOFF;
-        dialler.on_pipe_died(&key, lower, "drop", t1);
-        dialler.set_now(t1 + PIPE_REDIAL_BACKOFF);
-        assert!(
-            dialler.establish_pipe(lower, &room).is_err(),
-            "a second drop on the dialler waits twice as long"
-        );
-        dialler.set_now(t1 + PIPE_REDIAL_BACKOFF * 2);
+    /// One ordinary end, offer or dialler drop, redials in the same moment.
+    #[test]
+    fn the_first_drop_redials_at_once() {
+        let room = RoomId::new("nh", "r");
+        let remote = "did:key:nodeA";
+        let key = room.to_string();
+        let t0 = Instant::now();
+
+        let mut offered = CascadeManager::new("did:key:nodeB".into(), test_addr(10040), 8);
+        offered.set_now(t0);
+        offered.establish_pipe(remote, &room).unwrap();
+        offered.on_pipe_died(&key, remote, "offer", t0);
+        offered
+            .establish_pipe(remote, &room)
+            .expect("the first drop redials at once");
+
+        let mut dialler = CascadeManager::new("did:key:nodeB".into(), test_addr(10041), 8);
+        dialler.set_now(t0);
+        dialler.establish_pipe(remote, &room).unwrap();
+        dialler.on_pipe_died(&key, remote, "drop", t0);
         dialler
-            .establish_pipe(lower, &room)
-            .expect("the second drop waits 60 s");
+            .establish_pipe(remote, &room)
+            .expect("the first dialler drop redials at once");
+    }
+
+    /// The second consecutive end waits 30 s, the third 60 s, and the
+    /// fourth reaches the 120 s cap.
+    #[test]
+    fn consecutive_pipe_failures_back_off() {
+        let room = RoomId::new("nh", "r");
+        let remote = "did:key:nodeA";
+        let key = room.to_string();
+        let t0 = Instant::now();
+        let mut mgr = CascadeManager::new("did:key:nodeB".into(), test_addr(10043), 8);
+        mgr.set_now(t0);
+        mgr.establish_pipe(remote, &room).unwrap();
+        mgr.on_pipe_died(&key, remote, "offer", t0);
+        mgr.establish_pipe(remote, &room)
+            .expect("the first drop redials at once");
+
+        mgr.on_pipe_died(&key, remote, "offer", t0);
+        mgr.set_now(t0 + PIPE_REDIAL_BACKOFF - Duration::from_millis(1));
+        assert!(
+            mgr.establish_pipe(remote, &room).is_err(),
+            "the second consecutive failure waits 30 s"
+        );
+        mgr.set_now(t0 + PIPE_REDIAL_BACKOFF);
+        mgr.establish_pipe(remote, &room)
+            .expect("the second consecutive failure waits 30 s");
+
+        let t2 = t0 + PIPE_REDIAL_BACKOFF;
+        mgr.on_pipe_died(&key, remote, "drop", t2);
+        mgr.set_now(t2 + PIPE_REDIAL_BACKOFF);
+        assert!(
+            mgr.establish_pipe(remote, &room).is_err(),
+            "the third consecutive failure waits 60 s"
+        );
+        mgr.set_now(t2 + PIPE_REDIAL_BACKOFF * 2);
+        mgr.establish_pipe(remote, &room)
+            .expect("the third consecutive failure waits 60 s");
+
+        let t3 = t2 + PIPE_REDIAL_BACKOFF * 2;
+        mgr.on_pipe_died(&key, remote, "offer", t3);
+        mgr.set_now(t3 + PIPE_REDIAL_BACKOFF_CAP - Duration::from_millis(1));
+        assert!(
+            mgr.establish_pipe(remote, &room).is_err(),
+            "the fourth consecutive failure waits 120 s"
+        );
+        mgr.set_now(t3 + PIPE_REDIAL_BACKOFF_CAP);
+        mgr.establish_pipe(remote, &room)
+            .expect("the fourth consecutive failure waits 120 s");
+    }
+
+    /// A pipe that stayed connected for the healthy interval drops its
+    /// failure count. The end after that is free again. A shorter connect
+    /// keeps the count, so that end still waits.
+    #[test]
+    fn a_pipe_healthy_for_the_interval_resets_the_redial_count() {
+        let room = RoomId::new("nh", "r");
+        let remote = "did:key:nodeA";
+        let key = room.to_string();
+        let t0 = Instant::now();
+        let mut mgr = CascadeManager::new("did:key:nodeB".into(), test_addr(10044), 8);
+        mgr.set_now(t0);
+        mgr.establish_pipe(remote, &room).unwrap();
+        mgr.on_pipe_died(&key, remote, "drop", t0);
+        mgr.establish_pipe(remote, &room).unwrap();
+        mgr.on_pipe_died(&key, remote, "drop", t0);
+        mgr.set_now(t0 + PIPE_REDIAL_BACKOFF);
+        mgr.establish_pipe(remote, &room)
+            .expect("the second failure waits 30 s");
+
+        let t_short = t0 + PIPE_REDIAL_BACKOFF;
+        mgr.note_pipe_connected(&key, remote, t_short);
+        let t_early = t_short + PIPE_HEALTHY_RESET - Duration::from_millis(1);
+        mgr.set_now(t_early);
+        mgr.on_pipe_died(&key, remote, "drop", t_early);
+        assert!(
+            mgr.establish_pipe(remote, &room).is_err(),
+            "a pipe connected for less than the healthy interval keeps its backoff"
+        );
+
+        let t_up = t_early + PIPE_REDIAL_BACKOFF * 2;
+        mgr.set_now(t_up);
+        mgr.establish_pipe(remote, &room)
+            .expect("the third failure waits 60 s");
+        mgr.note_pipe_connected(&key, remote, t_up);
+        let t_drop = t_up + PIPE_HEALTHY_RESET;
+        mgr.set_now(t_drop);
+        mgr.on_pipe_died(&key, remote, "drop", t_drop);
+        mgr.establish_pipe(remote, &room)
+            .expect("a pipe that stayed connected for the healthy interval redials at once");
+
+        mgr.on_pipe_died(&key, remote, "drop", t_drop);
+        assert!(
+            mgr.establish_pipe(remote, &room).is_err(),
+            "the count starts again, so the next consecutive failure waits"
+        );
+        mgr.set_now(t_drop + PIPE_REDIAL_BACKOFF);
+        mgr.establish_pipe(remote, &room)
+            .expect("backoff starts again at 30 s");
     }
 }

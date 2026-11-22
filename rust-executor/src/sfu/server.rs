@@ -4,6 +4,8 @@
 use std::collections::{HashMap, HashSet};
 use std::mem::Discriminant;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 
@@ -94,6 +96,11 @@ pub struct SfuPeer {
     pub had_path: bool,
     /// When the peer was made. See [`PEER_ESTABLISH_TIMEOUT`].
     pub created_at: Instant,
+    /// When this pipe first became usable (ICE connected or completed, or
+    /// its control channel opened). The cascade resets a redial count once
+    /// this has stood for [`super::cascade::PIPE_HEALTHY_RESET`]. A client
+    /// peer leaves it unset.
+    usable_since: Option<Instant>,
     /// An ICE restart the client asked for (`sfu.callRestartIce`), from the
     /// request until its answer lands or the offer's retry budget ends.
     /// The offer SDP lives in [`PendingNegotiation`].
@@ -228,8 +235,10 @@ const OFFER_BACKOFF_RESENDS: u32 = 2;
 
 /// An established pipe ends an unanswered offer after this many resends
 /// (the back-off: t=10 s and t=30 s). The next deadline disconnects the
-/// pipe. The cascade redials it after [`super::cascade::PIPE_REDIAL_BACKOFF`],
-/// which doubles when the new pipe fails the same way. An initial pipe
+/// pipe. The cascade redials the first end at once. The next consecutive
+/// failure waits [`super::cascade::PIPE_REDIAL_BACKOFF`], which doubles up
+/// to the cap, and a pipe that stayed connected for
+/// [`super::cascade::PIPE_HEALTHY_RESET`] starts that count again. An initial pipe
 /// offer, before any path, is not ended here: it carries the pipe-control
 /// channel, and [`PEER_ESTABLISH_TIMEOUT`] drops that pipe. A client offer
 /// is never ended here. A crossed offer ([`RtcError::ChangesOutOfOrder`])
@@ -263,11 +272,16 @@ fn offer_retry_wait(resends_done: u32) -> Duration {
 
 /// An id for one server offer. Minted once in [`SfuPeer::install_pending`]
 /// and kept for every resend of that offer.
+static OFFER_IDS: LazyLock<AtomicU64> = LazyLock::new(|| AtomicU64::new(random_upper_half_u64()));
+
 fn next_offer_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::LazyLock;
-    static NEXT: LazyLock<AtomicU64> = LazyLock::new(|| AtomicU64::new(random_upper_half_u64()));
-    format!("o{}", NEXT.fetch_add(1, Ordering::Relaxed))
+    format!("o{}", OFFER_IDS.fetch_add(1, Ordering::Relaxed))
+}
+
+/// The next offer id starts again, as it does when the process starts.
+#[cfg(test)]
+pub(crate) fn restart_offer_ids() {
+    OFFER_IDS.store(random_upper_half_u64(), Ordering::SeqCst);
 }
 
 impl SfuPeer {
@@ -296,6 +310,7 @@ impl SfuPeer {
             disconnected_since: None,
             had_path: false,
             created_at: Instant::now(),
+            usable_since: None,
             ice_restart: None,
             drops_logged: HashSet::new(),
             write_errors_logged: HashSet::new(),
@@ -1177,9 +1192,13 @@ pub struct DeadPeer {
     /// Why the peer was dropped: `timeout` when it never connected,
     /// `drop` when it stayed disconnected or died otherwise, `offer` when
     /// an established pipe's answer was rejected locally or its offer went
-    /// unanswered. `offer` makes the cascade wait before it dials that pipe
-    /// again. A `drop` does the same on the end that dials.
+    /// unanswered. `offer` makes the cascade count a failure before it dials
+    /// that pipe again. A `drop` does the same on the end that dials. The
+    /// first consecutive failure still dials at once.
     pub reason: &'static str,
+    /// When this pipe first became usable, if it did. The cascade clears
+    /// its failure count once this stood for the healthy interval.
+    pub usable_since: Option<Instant>,
 }
 
 /// The SFU server. Owns the UDP sockets and drives the str0m event loop.
@@ -1633,6 +1652,9 @@ impl SfuServer {
                                             | IceConnectionState::Completed
                                     )
                                 {
+                                    if peer.usable_since.is_none() {
+                                        peer.usable_since = Some(Instant::now());
+                                    }
                                     pipes_usable.push(pid.clone());
                                 }
                             }
@@ -1655,6 +1677,9 @@ impl SfuServer {
                                 );
                                 peer.channels.insert(cid, label);
                                 if peer.is_pipe {
+                                    if peer.usable_since.is_none() {
+                                        peer.usable_since = Some(Instant::now());
+                                    }
                                     pipes_usable.push(pid.clone());
                                 }
                             }
@@ -1762,6 +1787,7 @@ impl SfuServer {
                             participant_id: pid.clone(),
                             is_pipe: peer.is_pipe,
                             reason: peer.end_reason.unwrap_or("drop"),
+                            usable_since: peer.usable_since,
                         });
                         false
                     } else {
@@ -2680,7 +2706,7 @@ pub fn parse_trickle_candidate(sdp: &str) -> Result<Option<Candidate>, str0m::er
 
 #[cfg(test)]
 mod tests {
-    use super::super::cascade::{CascadeManager, CascadeSignal, PIPE_REDIAL_BACKOFF};
+    use super::super::cascade::{CascadeManager, CascadeSignal};
     use super::*;
 
     /// A browser's offer: one audio section, as a caller sends to join.
@@ -4104,6 +4130,34 @@ mod tests {
         assert_eq!(second, format!("o{n2}"));
     }
 
+    /// A second process start does not hand out the first process's first
+    /// offer id. The wire form stays `o{n}`.
+    #[test]
+    fn two_boots_do_not_hand_out_the_same_first_offer_id() {
+        restart_offer_ids();
+        let first = next_offer_id();
+        restart_offer_ids();
+        let second = next_offer_id();
+        assert_ne!(
+            first, second,
+            "two boots handed out the same first offer id {first}"
+        );
+        let n1: u64 = first[1..]
+            .parse()
+            .unwrap_or_else(|_| panic!("offer id {first} is not o{{n}}"));
+        let n2: u64 = second[1..]
+            .parse()
+            .unwrap_or_else(|_| panic!("offer id {second} is not o{{n}}"));
+        assert!(
+            first == format!("o{n1}") && second == format!("o{n2}"),
+            "a restarted offer id lost its o{{n}} form: {first} then {second}"
+        );
+        assert!(
+            n1 >= 1u64 << 63 && n2 >= 1u64 << 63,
+            "a restarted offer id is below 2^63: {first} then {second}"
+        );
+    }
+
     /// An answer that carries this offer's SDP but another offer's id is
     /// refused. The pending offer stays, and the answer that names it is
     /// accepted. Two offers can share a mid list (an ICE restart reuses
@@ -4791,13 +4845,69 @@ mod tests {
             .expect("the caller writes opus");
     }
 
+    /// What the server loop pushes onto `pipes_usable`: ICE Connected or
+    /// Completed, or a data channel opening. A hand-made list is not this.
+    fn pipe_poll_is_usable(seen: &Seen) -> bool {
+        seen.channel.is_some()
+            || seen.ice.iter().any(|(_, state)| {
+                matches!(
+                    state,
+                    IceConnectionState::Connected | IceConnectionState::Completed
+                )
+            })
+    }
+
+    /// Drive the control pipe until `dial` reports that event. Returns
+    /// whether it was seen. The seed offer is not built before this.
+    fn dial_saw_usable_pipe(
+        dial: &mut Rtc,
+        dial_addr: SocketAddr,
+        remote: &mut Rtc,
+        remote_addr: SocketAddr,
+        now: &mut Instant,
+        start: Instant,
+    ) -> bool {
+        let deadline = *now + Duration::from_secs(5);
+        loop {
+            assert!(
+                *now < deadline,
+                "the pipe did not reach Connected or open its control channel"
+            );
+            let mut sent = Vec::new();
+            let mut left_seen = Seen::default();
+            let mut right_seen = Seen::default();
+            let left_next = drive(dial, *now, start, &mut left_seen, &mut sent);
+            for (src, dst, data) in sent.drain(..) {
+                if dst == remote_addr {
+                    receive(remote, *now, src, dst, &data);
+                }
+            }
+            let right_next = drive(remote, *now, start, &mut right_seen, &mut sent);
+            for (src, dst, data) in sent.drain(..) {
+                if dst == dial_addr {
+                    receive(dial, *now, src, dst, &data);
+                }
+            }
+            let step = left_next.min(right_next);
+            *now = step.clamp(
+                *now + Duration::from_millis(1),
+                *now + Duration::from_millis(20),
+            );
+            if pipe_poll_is_usable(&left_seen) {
+                return true;
+            }
+        }
+    }
+
     /// Seed `dial` (a control-only pipe) with the room's existing origins and
     /// return how many tracks were offered, plus how many of Alice's and
     /// Bob's RTP payloads arrived on the remote end of that pipe.
     ///
     /// The exchange is the one `media_crossing_peers_arrives_on_the_receivers_payload_type`
     /// uses: write a frame, move the packets, count `MediaData`. Here the
-    /// receiver is the new pipe, not a second caller.
+    /// receiver is the new pipe, not a second caller. The usable list is the
+    /// Connected or channel-open event from that exchange, not a list passed
+    /// in ahead of it.
     fn rtp_counts_for_control_pipe(
         room: &RoomId,
         dial: SfuPeer,
@@ -4829,9 +4939,24 @@ mod tests {
             (bob_id.clone(), bob.peer),
             (pipe_id.clone(), dial),
         ]);
-        // The pipe opened no inbound track. Usable is what the event loop
-        // records on Connected or on the control channel.
-        let adds = outbound_adds(&mut peers, &[], &[pipe_id.clone()]);
+        // The pipe opened no inbound track. Drive it until the same event
+        // the loop records, and seed from that list only.
+        let start = Instant::now();
+        let mut now = start;
+        let saw_usable = dial_saw_usable_pipe(
+            &mut peers.get_mut(&pipe_id).unwrap().rtc,
+            dial_addr,
+            &mut remote.rtc,
+            remote_addr,
+            &mut now,
+            start,
+        );
+        let usable: Vec<ParticipantId> = if saw_usable {
+            vec![pipe_id.clone()]
+        } else {
+            Vec::new()
+        };
+        let adds = outbound_adds(&mut peers, &[], &usable);
         let seeded = adds.get(&pipe_id).map(|tracks| tracks.len()).unwrap_or(0);
         let offers = offer_new_tracks(&mut peers, adds);
         if offers.is_empty() {
@@ -4859,8 +4984,6 @@ mod tests {
             .accept_current_answer(&serde_json::to_string(&answer).unwrap())
             .unwrap();
 
-        let start = Instant::now();
-        let mut now = start;
         connect_pair(
             &mut alice.caller,
             alice.caller_addr,
@@ -4877,14 +5000,9 @@ mod tests {
             &mut now,
             start,
         );
-        connect_pair(
-            &mut peers.get_mut(&pipe_id).unwrap().rtc,
-            dial_addr,
-            &mut remote.rtc,
-            remote_addr,
-            &mut now,
-            start,
-        );
+        // The pipe is already up: `dial_saw_usable_pipe` drove it until the
+        // Connected or channel-open event the seed used. A second wait never
+        // sees that event again.
 
         // Write again across the exchange. A frame queued before SRTP has
         // keys is dropped on the next poll, the same way the payload-type
@@ -4993,7 +5111,7 @@ mod tests {
     }
 
     /// Both cascade entries are gone before the redial. The far end drops
-    /// when ICE stays down. The dialler waits out the backoff, then each
+    /// when ICE stays down. The first end redials at once, then each
     /// origin's RTP arrives on the new pipe.
     fn both_ends_drop_then_redial(
         dialer: &mut CascadeManager,
@@ -5031,16 +5149,9 @@ mod tests {
         );
 
         dialer.set_now(ended);
-        assert!(dialer.establish_pipe("did:key:nodeA", room).is_err());
-        dialer.set_now(ended + PIPE_REDIAL_BACKOFF - Duration::from_millis(1));
-        assert!(
-            dialer.establish_pipe("did:key:nodeA", room).is_err(),
-            "the redial waits out the backoff"
-        );
-        dialer.set_now(ended + PIPE_REDIAL_BACKOFF);
         let (mut redial, offer) = dialer
             .establish_pipe("did:key:nodeA", room)
-            .expect("the cascade redials after the backoff");
+            .expect("the first end redials at once");
         assert_ne!(&redial.id, old_id);
 
         let (mut remote, answer_signal) = answerer
@@ -5119,14 +5230,32 @@ mod tests {
         );
     }
 
+    /// Hand `sdp` to the remote pipe and drop the answer it produces. The
+    /// sender keeps its pending offer: that is the lost-answer state.
+    fn hand_the_remote_the_offer_and_drop_the_answer(remote: &mut SfuPeer, sdp: &str) {
+        let offer: SdpOffer = serde_json::from_str(sdp).expect("the offer is SDP");
+        let _answer = remote
+            .rtc
+            .sdp_api()
+            .accept_offer(offer)
+            .expect("the remote takes the offer; the answer is dropped");
+    }
+
     /// Lose the answers to an established pipe's offer, and both resends.
-    /// The pipe ends on both ends, the cascade redials, and each origin's
-    /// audio is on the new pipe.
+    /// Each one is delivered to the remote. The pipe ends on both ends, the
+    /// cascade redials, and each origin's audio is on the new pipe.
     #[test]
     fn an_unanswered_established_pipe_ends_and_the_cascade_redials() {
         let now = Instant::now();
         let (mut dialer, mut answerer, mut dial, mut answer, room) = connected_cascade_pipe();
         let (sdp, mapping) = offer_two_origins(&mut dial, now);
+        let offer_id = dial.pending_offer_id().unwrap().to_string();
+        hand_the_remote_the_offer_and_drop_the_answer(&mut answer, &sdp);
+        assert_eq!(
+            dial.pending_offer_id().map(str::to_string),
+            Some(offer_id.clone()),
+            "the answer to the offer was dropped"
+        );
         let old_id = dial.id.clone();
         let pid = dial.id.clone();
         let mut peers = HashMap::from([(pid.clone(), dial)]);
@@ -5135,9 +5264,21 @@ mod tests {
         assert_eq!(at_10.len(), 1);
         assert_eq!(at_10[0].sdp, sdp);
         assert_same_mapping(&at_10[0].track_mapping, &mapping);
+        hand_the_remote_the_offer_and_drop_the_answer(&mut answer, &at_10[0].sdp);
+        assert_eq!(
+            peers[&pid].pending_offer_id(),
+            Some(offer_id.as_str()),
+            "the answer to the first resend was dropped"
+        );
         let at_30 = sweep_offer_deadlines(&mut peers, now + Duration::from_secs(30));
         assert_eq!(at_30.len(), 1);
         assert_eq!(at_30[0].sdp, sdp);
+        hand_the_remote_the_offer_and_drop_the_answer(&mut answer, &at_30[0].sdp);
+        assert_eq!(
+            peers[&pid].pending_offer_id(),
+            Some(offer_id.as_str()),
+            "the answer to the second resend was dropped"
+        );
         assert!(apply_deferred_tracks(peers.get_mut(&pid).unwrap(), now).is_none());
 
         let ended = now + Duration::from_secs(60);

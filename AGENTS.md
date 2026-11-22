@@ -325,17 +325,21 @@ whose offer is still unanswered after those two resends, is disconnected.
 That rejection is local: a pipe answer carries no refusal, and a node that
 rejects an incoming offer only logs it, so the sender waits until the offer
 goes unanswered. The other end drops the pipe when its ICE fails. The end
-that dials (the lexically higher DID) then waits 30 s, then 60 s, then
-120 s, and stays at 120 s, whether it ended the offer or only saw the drop.
-A timeout, a pipe that never connected, does not wait. When the new pipe is
-usable it is offered the origins already in the room, so media resumes
+that dials (the lexically higher DID) redials at once the first time,
+whether it ended the offer or only saw the drop. The next consecutive
+failure waits 30 s, then 60 s, then 120 s, and stays at 120 s. A pipe that
+stayed connected for 120 s clears that count, so the next drop is free
+again. A timeout, a pipe that never connected, does not wait. When the new
+pipe is usable it is offered the origins already in the room, so media resumes
 without a new track. An Announce arrives every 10 s, so the announce alone
 would dial again on the next heartbeat. A crossed offer (`ChangesOutOfOrder`)
 keeps the pipe and queues the tracks again. An initial pipe that never connects stays
 through the second resend plus the 15 s ICE-restart grace, then is dropped.
 The offer carries
 an `offerId` that a resend and `sfu.callResume` repeat; the answer echoes
-it. `sfu.callAnswerServerOffer` answers `{ accepted: true }`, or
+it. `ParticipantId` (`P{n}`) and that offer id (`o{n}`) are minted from a
+counter that starts, once per process, at a random value at least `2^63`,
+so a restarted process does not hand a client's old id to a new session. `sfu.callAnswerServerOffer` answers `{ accepted: true }`, or
 `{ accepted: false, reason }` (`stale`, `no-pending`, `unknown-session`),
 after the event loop applies the answer. A repeat of an id already accepted
 for that session is `{ accepted: true }` and changes nothing. A refused

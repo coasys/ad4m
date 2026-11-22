@@ -847,10 +847,17 @@ impl SfuService {
                             dead.participant_id, dead.room_id, dead.agent_did, dead.reason
                         );
                         let room_key = dead.room_id.to_string();
-                        // An ended offer waits before the next dial, and so
-                        // does an ICE drop on the end that dials. A timeout
-                        // only removes the entry.
-                        self.cascade_manager.write().await.on_pipe_died(
+                        // An ended offer counts a failure before the next dial,
+                        // and so does an ICE drop on the end that dials. The
+                        // first consecutive one still dials at once. A
+                        // timeout only removes the entry. A pipe that stayed
+                        // usable for the healthy interval starts that count
+                        // again.
+                        let mut mgr = self.cascade_manager.write().await;
+                        if let Some(since) = dead.usable_since {
+                            mgr.note_pipe_connected(&room_key, &dead.agent_did, since);
+                        }
+                        mgr.on_pipe_died(
                             &room_key,
                             &dead.agent_did,
                             dead.reason,
@@ -2598,6 +2605,7 @@ mod tests {
             participant_id: ParticipantId::parse(&p1).unwrap(),
             is_pipe: false,
             reason: "drop",
+            usable_since: None,
         })
         .await;
         assert!(sessions(&svc, url).await.is_empty());
@@ -3130,6 +3138,52 @@ mod tests {
                 .await
                 .unwrap()
                 .listed
+        );
+    }
+
+    /// A restarted process must not give a new device the id an old client
+    /// still holds. That client's resume is not listed: the id names no
+    /// session of this process. `call_join` mints the id; the session key
+    /// stays fixed so the helper's extra `ParticipantId::next` cannot move it.
+    #[tokio::test]
+    async fn an_old_clients_resume_after_a_restart_is_not_listed() {
+        crate::sfu::room::restart_participant_ids();
+        let first = test_service().await;
+        let url = "neighbourhood://id-restart";
+        let old = first
+            .call_join(
+                url,
+                "r",
+                "did:a",
+                "laptop",
+                "session-kept",
+                &offer(),
+                false,
+                || true,
+            )
+            .await
+            .unwrap()
+            .participant_id;
+        crate::sfu::room::restart_participant_ids();
+        let second = test_service().await;
+        let fresh = second
+            .call_join(
+                url,
+                "r",
+                "did:a",
+                "phone",
+                "session-kept",
+                &offer(),
+                false,
+                || true,
+            )
+            .await
+            .unwrap()
+            .participant_id;
+        let resumed = second.call_resume(url, "r", "did:a", &old).await.unwrap();
+        assert!(
+            !resumed.listed,
+            "an old client's resume after a restart was listed (old {old}, new {fresh})"
         );
     }
 
@@ -3735,6 +3789,7 @@ mod tests {
                             participant_id: ParticipantId(1),
                             is_pipe: false,
                             reason: "drop",
+                            usable_since: None,
                         })
                         .await;
                 } else {
