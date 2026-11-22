@@ -8,10 +8,31 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use crate::agent::capabilities::{perspective_update_capability, EXPRESSION_UPDATE_CAPABILITY};
-use crate::api::tests::support::{admin_ctx, registered_perspective};
+use crate::api::tests::support::{admin_ctx, Registered};
 use crate::api::ws_handler::build_handler_map;
 use crate::languages::mount_tests::{interact, load_mount_test_language, mount_thing_shape};
+use crate::perspectives::perspective_instance::SdnaType;
 use crate::types::RequestContext;
+
+/// A registered perspective with `shape` as the SDNA of `MountThing`, by
+/// that name. `registerShapes` would name the class after its target class
+/// IRI instead, as a mount does not.
+async fn mount_thing_perspective(shape: &str) -> Registered {
+    let (mut p, _shapes, ctx) =
+        crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
+    p.add_sdna(
+        "MountThing".to_string(),
+        String::new(),
+        SdnaType::SubjectClass,
+        Some(shape.to_string()),
+        &ctx,
+    )
+    .await
+    .unwrap();
+    let uuid = p.persisted.lock().await.uuid.clone();
+    crate::perspectives::register_perspective(uuid.clone(), p);
+    Registered(uuid)
+}
 
 async fn call(method: &str, params: Value) -> Result<Value, (u16, String)> {
     call_as(admin_ctx(), method, params).await
@@ -51,7 +72,7 @@ async fn call_count(lang: &str) -> usize {
 async fn create_subject_rpc_returns_the_url_for_a_call_constructor() {
     let lang = load_mount_test_language().await;
     let shape = mount_thing_shape(&lang).await;
-    let p = registered_perspective(&[("MountThing", shape.as_str())]).await;
+    let p = mount_thing_perspective(&shape).await;
 
     let result = call(
         "perspective.createSubject",
@@ -72,7 +93,7 @@ async fn create_subject_rpc_returns_the_url_for_a_call_constructor() {
 async fn create_subject_rpc_needs_expression_update_for_a_call() {
     let lang = load_mount_test_language().await;
     let shape = mount_thing_shape(&lang).await;
-    let p = registered_perspective(&[("MountThing", shape.as_str())]).await;
+    let p = mount_thing_perspective(&shape).await;
     let update = perspective_update_capability(vec!["*".to_string()]);
 
     // A main-agent app with only the perspective capability: refused
@@ -102,7 +123,7 @@ async fn create_subject_rpc_needs_expression_update_for_a_call() {
 async fn create_subject_rpc_refuses_a_call_for_a_managed_user() {
     let lang = load_mount_test_language().await;
     let shape = mount_thing_shape(&lang).await;
-    let p = registered_perspective(&[("MountThing", shape.as_str())]).await;
+    let p = mount_thing_perspective(&shape).await;
     let alice = "did:key:z6MkAliceCallActionUser";
     crate::perspectives::get_perspective(&p.0)
         .unwrap()
