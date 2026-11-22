@@ -662,4 +662,31 @@ mod tests {
         )
         .is_err());
     }
+
+    #[test]
+    fn equally_ranked_candidates_the_first_wins() {
+        // Two candidates in the same top tier — both deserialize as
+        // non-empty payloads — the earlier one in the source wins.
+        let raw = r#"Draft: [{"class":"Task","title":"A"}] — final: [{"class":"Task","title":"B"}]"#;
+        let out = parse_interpretation_response(raw).unwrap();
+        assert_eq!(prop_values(&out, "title"), vec!["A"]);
+
+        // Same with two wrapper objects at the top tier.
+        let raw = r#"First {"instances":[{"class":"Task","title":"A"}]} then {"instances":[{"class":"Task","title":"B"}]}"#;
+        let out = parse_interpretation_output(raw).unwrap();
+        assert_eq!(prop_values(&out.instances, "title"), vec!["A"]);
+    }
+
+    #[test]
+    fn singleton_wrapper_array_loses_to_a_later_semantic_payload() {
+        // A wrapper object inside a one-element array is NOT unwrapped for
+        // ranking: the first tier deserializes the array itself as
+        // `Vec<ProposedInstance>` and a wrapper has no `class`, so it only
+        // reaches the structurally-non-empty tier. A later candidate that
+        // deserializes as a non-empty payload still wins.
+        let raw = r#"Nearly: [{"instances":[{"class":"Task","title":"A"}],"flow_proposals":[]}] — actually: {"instances":[{"class":"Task","title":"B"}],"flow_proposals":[]}"#;
+        let out = parse_interpretation_output(raw).unwrap();
+        assert_eq!(out.instances.len(), 1);
+        assert_eq!(prop_values(&out.instances, "title"), vec!["B"]);
+    }
 }
