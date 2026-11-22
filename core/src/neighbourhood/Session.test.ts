@@ -73,7 +73,6 @@ function fakeApi() {
         onNetworkChange: jest.fn().mockReturnValue(() => {}),
         onReconnect: jest.fn().mockReturnValue(() => {}),
         sfuCallResume: jest.fn(),
-        checkConnection: jest.fn(),
         subscribeSfuCallRenegotiationOffer: jest.fn(),
         sfuAddIceCandidate: jest.fn(),
         sfuSendData: jest.fn(),
@@ -265,7 +264,6 @@ describe("mesh path", () => {
             // A mesh peer is the agent on this device.
             selfId: "did:me#this-device",
             onNetworkChange: expect.any(Function),
-            checkConnection: expect.any(Function),
         })
     })
 

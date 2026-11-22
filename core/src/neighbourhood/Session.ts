@@ -644,7 +644,6 @@ export function createSession(config: SessionImplConfig): Session {
                     selfId: selfPeer,
                     ...(meshIce.length > 0 ? { iceServers: meshIce } : {}),
                     onNetworkChange: (cb: () => void) => api.onNetworkChange(cb),
-                    checkConnection: () => api.checkConnection(),
                 })
                 meshManager = mesh
                 wireMeshEvents(mesh)

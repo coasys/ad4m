@@ -94,11 +94,6 @@ export interface SfuNeighbourhoodApi {
         roomName: string,
         participantId: string,
     ): Promise<SfuResumeResult>
-    /** Check the executor socket now; one found dead is redialled and
-     *  `onNetworkChange` fires. Called when ICE goes disconnected, since a
-     *  network switch the platform announced nothing for leaves that socket
-     *  OPEN and dead, and the restart would go out on it. */
-    checkConnection(): void
     sfuAddIceCandidate(
         neighbourhoodUrl: string,
         roomName: string,
@@ -624,9 +619,8 @@ export class SfuManager {
                 this.endRestart()
                 void this.reconnect()
             } else if (pc.iceConnectionState === "disconnected") {
-                // The path may be gone with no `online` event; the restart
-                // needs a live socket, and a dead one is redialled in seconds.
-                this.neighbourhood.checkConnection()
+                // The restart is the whole answer: whether the socket it
+                // goes out on still answers is the socket layer's call.
                 this.restartIce(pc)
             } else if (
                 pc.iceConnectionState === "connected" ||

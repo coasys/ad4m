@@ -1468,9 +1468,9 @@ test("ICE disconnected asks the executor for an ICE restart at once and answers 
     }
 })
 
-test("ICE disconnected also checks the executor socket once, with the restart", async () => {
-    // A network switch the platform announces nothing for: the restart may
-    // go out on a dead socket, and only the check finds that out quickly.
+test("ICE disconnected restarts ICE in place and does not check the executor socket", async () => {
+    // Judging the socket is the socket layer's: ICE `disconnected` is media
+    // evidence, and media evidence answers with the restart alone.
     fakeTimers()
     try {
         const api = fakeApi()
@@ -1480,30 +1480,13 @@ test("ICE disconnected also checks the executor socket once, with the restart", 
         api.log.length = 0
 
         await iceState("disconnected")
-        expect(api.checkConnection).toHaveBeenCalledTimes(1)
         expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+        expect(api.checkConnection).not.toHaveBeenCalled()
 
-        // Connected again: no further check.
+        // Connected again: still no check.
         await iceState("connected")
         await jest.advanceTimersByTimeAsync(10_000)
-        expect(api.checkConnection).toHaveBeenCalledTimes(1)
-    } finally {
-        jest.useRealTimers()
-    }
-})
-
-test("ICE disconnected checks the socket with the shared deadline", async () => {
-    // One probe, no SFU override: the same wait the other callers get.
-    fakeTimers()
-    try {
-        const api = fakeApi()
-        const manager = new SfuManager(api, ROOM, ME, URL)
-        await manager.join(fakeStream())
-        await iceState("connected")
-
-        await iceState("disconnected")
-        expect(api.checkConnection.mock.calls).toEqual([[]])
-        await manager.leave()
+        expect(api.checkConnection).not.toHaveBeenCalled()
     } finally {
         jest.useRealTimers()
     }

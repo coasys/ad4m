@@ -108,12 +108,4 @@ describe("NeighbourhoodClient SFU calls", () => {
     expect(replaced).toEqual([expect.objectContaining(notice)]);
     expect(offers).toEqual([expect.objectContaining({ participantId: "P2", offerId: "offer-3" })]);
   });
-
-  it("checks the client's socket through its ApiClient", () => {
-    const check = jest.spyOn(api, "checkConnection");
-    const client = new NeighbourhoodClient("http://localhost:0", undefined, api);
-    client.checkConnection();
-    expect(check).toHaveBeenCalledTimes(1);
-    check.mockRestore();
-  });
 });
