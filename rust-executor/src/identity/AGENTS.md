@@ -236,8 +236,9 @@ and answers `JoinAdded`, so a repeated claim keeps the first row's identity and 
   record's envelope is signed by a key of the identity, which the device's request only
   carries. `unlinkSelf` ends the device key for good, so its guard is
   `Guard::UserLoginOrOperator`: the operator, or a user's login on a managed agent
-  (`LiveGrant::is_login`: the grant's `request_id` is its own id), never an app the user
-  approved, though it holds `agent:UPDATE`.
+  (`LiveGrant::is_login`: a password login, whose `request_id` is its own id, or a key
+  session, whose key binding is not delegated), never an app the user approved, though it
+  holds `agent:UPDATE`.
 - The store's URL and keys (`IdentitySettings`) reach the agent language only through
   `write_agent_language_settings` (atomic: temp file + rename), as its `storeUrl` and
   `storeKeys` settings, on every start: no store or no keys removes the setting, so an earlier
