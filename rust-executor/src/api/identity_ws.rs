@@ -152,6 +152,16 @@ async fn attach_note(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     )
 }
 
+/// `identity.unlinkSelf`: this agent's device key unlinks itself from its identity and is dead
+/// on this executor (`identity::unlink`).
+async fn unlink_self(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    answer(
+        crate::identity::service()?
+            .unlink_self(&ctx.acts_as())
+            .await?,
+    )
+}
+
 async fn open_offer(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let p: OpenOfferParams = parse(params)?;
     answer(
@@ -409,6 +419,11 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // good, and the token is spent): the guard of publish.
     map.method::<AttachNoteParams, VouchNote>("identity.attachNote", attach_note)
         .guard(Guard::UserOrOperator(AGENT_UPDATE_CAPABILITY.clone()));
+    // The device leaves the identity with its own key, no master key, and the key is dead for
+    // good: for the main agent the operator, as `identity.publish`; for a managed agent only
+    // the user's own login, never an app the user approved.
+    map.method::<NoParams, SignedHead>("identity.unlinkSelf", unlink_self)
+        .guard(Guard::UserLoginOrOperator(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<OpenOfferParams, OfferOpened>("identity.openOffer", open_offer)
         .guard(Guard::Cap(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<OffersParams, Vec<OfferListing>>("identity.offers", offers)
@@ -568,10 +583,12 @@ mod tests {
         .is_none());
     }
 
-    /// Each call carries its guard: reads the agent read capability; co-signing, publishing and
-    /// posting to or deleting from the request box the agent sign and update capabilities, and
-    /// for the main agent the operator; other writes the agent update capability; a claim for
-    /// the main agent and a log reset the operator.
+    /// Each call carries its guard: reads (including `identity.powParams`) the agent read
+    /// capability; co-signing, publishing, attaching a vouching note and posting to or deleting
+    /// from the request box the agent sign and update capabilities, and for the main agent the
+    /// operator (no app); unlinking oneself (`identity.unlinkSelf`) the operator or a user's own
+    /// login, no app; other writes the agent update capability; a claim for the main agent, a log reset, a rekey and
+    /// the main agent's record key (`identity.unwrapRecordKey`) the operator.
     #[test]
     fn every_identity_call_has_its_guard() {
         let mut map = HandlerMap::new();
@@ -626,6 +643,13 @@ mod tests {
             ("identity.resetLog", format!("{:?}", Guard::Operator)),
             ("identity.resolve", cap(&AGENT_READ_CAPABILITY)),
             ("identity.status", cap(&AGENT_READ_CAPABILITY)),
+            (
+                "identity.unlinkSelf",
+                format!(
+                    "{:?}",
+                    Guard::UserLoginOrOperator(AGENT_UPDATE_CAPABILITY.clone())
+                ),
+            ),
             ("identity.unwrapRecordKey", format!("{:?}", Guard::Operator)),
         ];
         let got: Vec<(String, String)> = map

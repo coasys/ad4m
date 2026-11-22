@@ -183,6 +183,18 @@ pub(super) fn resource_rows(guard: &Guard) -> Vec<(Caller, Expect)> {
             (UserAppWithout, Forbidden),
             (Anonymous, Forbidden),
         ],
+        // The same rows: the callers here that act on a managed agent hold a login grant
+        // (`Session::for_test`), and an approved app that holds the capability is refused in
+        // `guards.rs`.
+        Guard::UserLoginOrOperator(_) => vec![
+            (Operator, Granted),
+            (AppWithout, Forbidden),
+            (AppWith, Forbidden),
+            (User, Granted),
+            (OtherUser, Granted),
+            (UserAppWithout, Forbidden),
+            (Anonymous, Forbidden),
+        ],
         Guard::Owns { .. } => vec![],
     }
 }
@@ -720,6 +732,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ("identity.cosignIncept", || json!({ "event": {} })),
     ("identity.publish", || json!({ "events": [], "pow": null })),
     ("identity.attachNote", || json!({ "token": "t" })),
+    ("identity.unlinkSelf", || json!({})),
     (
         "identity.openOffer",
         || json!({ "signedOffer": signed_offer() }),
@@ -1221,6 +1234,8 @@ fn register_test_methods(map: &mut HandlerMap, calls: &Arc<AtomicUsize>) {
         .guard(Guard::Operator);
     map.method::<NoParams, bool>("test.user_or_operator", handler())
         .guard(Guard::UserOrOperator(AGENT_UPDATE_CAPABILITY.clone()));
+    map.method::<NoParams, bool>("test.user_login_or_operator", handler())
+        .guard(Guard::UserLoginOrOperator(AGENT_UPDATE_CAPABILITY.clone()));
     map.method::<NoParams, bool>("test.executor.local_only", handler())
         .local_only()
         .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
@@ -1431,9 +1446,9 @@ async fn every_method_admits_exactly_the_callers_its_guard_names() {
     world.remove().await;
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     // The test methods alone: Open, Operator and Executor × 6 rows, 2 Cap guards and the
-    // UserOrOperator guard × 7 rows, 2 perspective guards and 1 task guard: the walk reached
-    // them all.
-    let least = 3 * 6 + 3 * 7 + 2 * perspective_rows().len() + agent_resource_rows().len();
+    // two user-or-operator guards × 7 rows, 2 perspective guards and 1 task guard: the walk
+    // reached them all.
+    let least = 3 * 6 + 4 * 7 + 2 * perspective_rows().len() + agent_resource_rows().len();
     assert!(checked >= least, "only {checked} rows checked");
 }
 
@@ -1456,9 +1471,9 @@ async fn a_users_app_without_agent_update_cannot_revoke_the_users_sessions() {
 }
 
 /// An app token on the main agent holds `agent:SIGN` and `agent:UPDATE` (the default set every
-/// app gets) and still may not co-sign an incept or publish for the main agent: that binds the
-/// main agent to an identity for good, so only the admin credential does. A user co-signs and
-/// publishes for their own agent.
+/// app gets) and still may not co-sign an incept, publish or unlink its key for the main
+/// agent: that binds the main agent to an identity for good or ends its key, so only the admin
+/// credential does. A user does each for their own agent (a login, for `identity.unlinkSelf`).
 #[tokio::test]
 async fn only_the_operator_binds_the_main_agent_to_an_identity() {
     let map = build_handler_map();
@@ -1476,7 +1491,11 @@ async fn only_the_operator_binds_the_main_agent_to_an_identity() {
         ],
     );
     let operator = RequestContext::operator_for_test();
-    for method in ["identity.cosignIncept", "identity.publish"] {
+    for method in [
+        "identity.cosignIncept",
+        "identity.publish",
+        "identity.unlinkSelf",
+    ] {
         let params = params(method, None, false);
         for app in [&app, &all] {
             let refused = map.admit(method, &params, app).await.unwrap_err();

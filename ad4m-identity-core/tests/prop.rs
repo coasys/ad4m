@@ -59,7 +59,7 @@ fn model(events: &[Event]) -> Model {
             Op::Rotate {
                 master,
                 next,
-                revoke,
+                unlink,
                 ..
             } => {
                 let old = format!("m{}", m.masters - 1);
@@ -67,7 +67,7 @@ fn model(events: &[Event]) -> Model {
                 let new = format!("m{}", m.masters);
                 m.masters += 1;
                 m.keys.insert(new, (master.clone(), s, None, vec![]));
-                for id in revoke {
+                for id in unlink {
                     stop(m.keys.get_mut(id).unwrap(), s);
                 }
                 if next.is_none() {
@@ -115,7 +115,7 @@ fn build_log(steps: &[(u8, u8, u8)], end: bool) -> Log {
                 }
             }
             2 => {
-                let live = live_devices(&log, false, true);
+                let live = live_devices(&log, false, false);
                 if b % 2 == 1 && !live.is_empty() {
                     let id = live[usize::from(a) % live.len()].clone();
                     log.rotate(&[&id], false);

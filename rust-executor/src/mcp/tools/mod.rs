@@ -1177,6 +1177,8 @@ mod agent_context_tests {
 
     #[tokio::test]
     async fn without_a_credential_no_token_is_the_operator_only_on_loopback() {
+        setup_wallet();
+        setup_agent();
         ensure_test_db();
         let local = Ad4mMcpHandler::new(McpContext::new(None, ListenerReach::Loopback, false));
         assert!(local.session().await.unwrap().is_operator());

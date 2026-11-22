@@ -377,6 +377,22 @@ fn unlink_twice() {
 }
 
 #[test]
+fn rotate_unlinking_a_key_already_unlinked() {
+    assert_eq!(
+        policy_of(refuse("rotate unlinking a key already unlinked")),
+        FoldError::UnlinkedKey("d1".into())
+    );
+}
+
+#[test]
+fn rotate_unlinking_a_revoked_key() {
+    assert_eq!(
+        policy_of(refuse("rotate unlinking a revoked key")),
+        FoldError::RevokedKey("d1".into())
+    );
+}
+
+#[test]
 fn unlink_signed_by_another_device() {
     assert_eq!(
         policy_of(refuse("unlink signed by another device")),
@@ -540,12 +556,12 @@ fn serde_parsing_is_strict() {
     let text = serde_json::to_string(&log.events[0]).unwrap();
     let back: Event = serde_json::from_str(&text).unwrap();
     assert_eq!(back, log.events[0]);
-    // A rotate leaves out an empty revoke, and refuses an explicit one.
+    // A rotate leaves out an empty unlink, and refuses an explicit one.
     let mut log = Log::new();
     log.rotate(&[], false);
     let mut rotate = json(&log.events[1]);
-    assert!(rotate.get("revoke").is_none());
-    rotate["revoke"] = json!([]);
+    assert!(rotate.get("unlink").is_none());
+    rotate["unlink"] = json!([]);
     assert!(matches!(
         Event::from_json(&rotate),
         Err(FoldError::Format(FormatError::NotCanonical(_)))

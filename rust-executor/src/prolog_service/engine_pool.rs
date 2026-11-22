@@ -1245,6 +1245,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_regular_queries_use_complete_pool() {
+        AgentService::init_global_test_instance();
         let pool = PrologEnginePool::new();
         pool.initialize(2).await.unwrap();
 

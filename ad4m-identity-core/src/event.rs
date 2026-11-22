@@ -54,12 +54,14 @@ pub enum Op {
     /// One active device, node or bot key signs nothing new from this seq on. Signed by the
     /// master key or by the key itself.
     Unlink { unlink: KeyId },
-    /// `revoke` is left out of the JSON when empty; an explicit `"revoke": []` is refused.
+    /// `unlink` lists device keys the rotation drops: each is unlinked at this seq, as by an
+    /// `unlink` event (never revoked: links it made earlier stay valid). Left out of the JSON
+    /// when empty; an explicit `"unlink": []` is refused.
     Rotate {
         master: Multikey,
         salt: String,
         next: Option<Hash>,
-        revoke: Vec<KeyId>,
+        unlink: Vec<KeyId>,
     },
     /// A bot key only.
     Scope {
@@ -194,13 +196,13 @@ impl Serialize for Event {
                 master,
                 salt,
                 next,
-                revoke,
+                unlink,
             } => {
                 map.serialize_entry("master", master)?;
                 map.serialize_entry("salt", salt)?;
                 map.serialize_entry("next", next)?;
-                if !revoke.is_empty() {
-                    map.serialize_entry("revoke", revoke)?;
+                if !unlink.is_empty() {
+                    map.serialize_entry("unlink", unlink)?;
                 }
             }
             Op::Scope { key, can, expires } => {
@@ -367,7 +369,7 @@ impl Event {
             "add" => &["add", "offer", "coSig"],
             "revoke" => &["revoke", "since"],
             "unlink" => &["unlink"],
-            "rotate" => &["master", "salt", "next", "revoke"],
+            "rotate" => &["master", "salt", "next", "unlink"],
             "scope" => &["key", "can", "expires"],
             _ => return Err(format_err(FormatError::UnknownOp(op_name))),
         };
@@ -402,13 +404,13 @@ impl Event {
                 master: string(map, "master")?,
                 salt: string(map, "salt")?,
                 next: optional_string(map, "next")?,
-                revoke: match map.get("revoke") {
+                unlink: match map.get("unlink") {
                     None => Vec::new(),
                     Some(_) => {
-                        let list = strings(map, "revoke")?;
+                        let list = strings(map, "unlink")?;
                         if list.is_empty() {
                             return Err(format_err(FormatError::NotCanonical(
-                                "an empty `revoke` on rotate must be left out".into(),
+                                "an empty `unlink` on rotate must be left out".into(),
                             )));
                         }
                         list

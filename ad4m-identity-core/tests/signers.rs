@@ -151,7 +151,7 @@ fn master_n_fails_from_the_rotation_on() {
 }
 
 #[test]
-fn rotate_with_revoke_ends_those_keys() {
+fn rotate_with_unlink_ends_those_keys() {
     let mut log = Log::incept(vec![
         device(1, KeyLife::Standing),
         device(2, KeyLife::Standing),
@@ -161,7 +161,10 @@ fn rotate_with_revoke_ends_those_keys() {
     assert!(!state.key_valid_at("d1", 1));
     assert!(state.key_valid_at("d1", 0));
     assert!(state.key_valid_at("d2", 1));
-    // A master id is not a device key a rotate may revoke.
+    // The key is unlinked at the rotate, not revoked.
+    assert_eq!(state.keys["d1"].unlinked, Some(1));
+    assert_eq!(state.keys["d1"].revoked, None);
+    // A master id is not a device key a rotate may unlink.
     let mut bad = build::rotate_unsigned(
         &log.chain,
         &mk(&master(2)),
