@@ -1,9 +1,11 @@
 /**
  * E14: callers reach an SFU behind NAT through the address it advertises.
  *
- * The executor binds its SFU on 127.0.0.1, on a fixed port P, and advertises
- * 127.0.0.2 as its public address (`AD4M_SFU_UDP_PORT`,
- * `AD4M_SFU_PUBLIC_ADDR`): its answers offer the host candidate 127.0.0.1:P
+ * The executor binds its SFU on 127.0.0.1 only (`AD4M_SFU_BIND_ADDR`: the
+ * default would offer the LAN address too, which callers reach directly), on a
+ * fixed port P, and advertises 127.0.0.2 as its public address
+ * (`AD4M_SFU_UDP_PORT`, `AD4M_SFU_PUBLIC_ADDR`): its answers offer the host
+ * candidate 127.0.0.1:P
  * and the server-reflexive candidate 127.0.0.2:P. On this host, UDP to
  * 127.0.0.2:P is translated to 127.0.0.1:P, and UDP sent to 127.0.0.1:P
  * directly is dropped. A call therefore works only if the callers use the
@@ -32,7 +34,7 @@ export const e14AdvertisedAddress = e2eScenario({
   world: {
     users: EVERYONE.map((name) => ({ name })),
     neighbourhoods: [{ name: "space", owner: "ann", members: EVERYONE, call: { mode: "designated" } }],
-    executorEnv: { AD4M_SFU_UDP_PORT: String(PORT), AD4M_SFU_PUBLIC_ADDR: PUBLISHED },
+    executorEnv: { AD4M_SFU_BIND_ADDR: LOCAL, AD4M_SFU_UDP_PORT: String(PORT), AD4M_SFU_PUBLIC_ADDR: PUBLISHED },
   },
   unavailable: () => (natAvailable() ? null : "needs passwordless `sudo -n iptables` with the nat table"),
   async run({ call: inSpace, step }) {

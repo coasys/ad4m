@@ -26,6 +26,12 @@ references:
 #   Rust (fmt). More runners, with small working dirs.
 # Only `build` gates the integration tests. clippy and rust-tests start after it and run
 # next to the integration tests. fmt, js-unit-tests and plugin-ad4m-tests start at once.
+# The heavy jobs (rust-tests, rust-client-tests, the integration suites) start with
+# `heavy_gate`: on a draft PR, a PR whose base is not dev, or a branch with no PR they halt
+# green at once (.circleci/scripts/should-run-heavy.sh). The full-ci label or [full-ci] in
+# the commit message runs them anyway. The GitHub workflow heavy-suites.yml shows a halt as
+# the pending status ci/heavy-suites; it turns success only once a pipeline of the commit runs
+# the heavy jobs, and starts one when the PR gets ready or is retargeted to dev without a push.
 
 commands:
   fix_workdir:
@@ -46,6 +52,13 @@ commands:
             # removes a file as well. No runner workdir is a gitlink today.
             if [ -e .git ] && ! git rev-parse --git-dir >/dev/null 2>&1; then
               heal "corrupted .git (git rev-parse fails)"
+            fi
+            # A .git that opens but has no origin remote fails checkout with "No such remote
+            # 'origin'" (seen 2026-11-20, after the runner's disk filled during checkout). Checkout
+            # sets origin's URL but never adds the remote, so add it back here.
+            if [ -e .git ] && ! git remote get-url origin >/dev/null 2>&1; then
+              echo "fix_workdir: no origin remote -- adding it"
+              git remote add origin "$CIRCLE_REPOSITORY_URL"
             fi
             # A .git that opens but lacks objects its refs reach passes the check above and then
             # fails checkout with "pack has N unresolved deltas": checkout offers the local refs as
@@ -88,6 +101,14 @@ commands:
             if [ -e .git ]; then
               if head_sha="$(git rev-parse --verify -q HEAD)"; then
                 git update-ref --no-deref HEAD "$head_sha"
+                # Every build output and cache is gitignored, so an untracked file that no
+                # .gitignore covers is left from a checkout that stopped part way (seen 2026-11-20,
+                # after the disk filled: another branch's core/src/host/HostClient.ts broke tsc).
+                # git clean without -x keeps the ignored caches.
+                cleaned="$(git clean -fd)"
+                if [ -n "$cleaned" ]; then
+                  echo "fix_workdir: removed $(wc -l \<<<"$cleaned") untracked path(s) no .gitignore covers"
+                fi
               fi
               # Records after the first are the linked worktrees (the first is this one).
               held="$(git worktree list --porcelain | awk -v RS= 'NR > 1' | sed -n 's/^branch //p')"
@@ -125,6 +146,32 @@ commands:
               | grep -vxF -f <(printf '%s\n' $in_use /nonexistent) \
               | xargs -r -d '\n' rm -rf || true
             df -h /tmp | tail -1
+
+  heavy_gate:
+    description: "Halt a heavy job (green) on a draft PR, a PR whose base is not dev, or a branch with no PR"
+    steps:
+      - run:
+          # A stack of PRs pays the heavy suites once, at the PR that targets dev; the
+          # branches below it get fmt, build and clippy. dev, staging, main, tags and the
+          # nightly always run; so do a PR with the `full-ci` label and a head commit
+          # with [full-ci] in its message. The decision is in the script (tested in
+          # `build`); anything but its "skip" answer runs the suite, so a GitHub API
+          # failure costs a full run, never a skipped one. A halted job is green; the
+          # GitHub workflow heavy-suites.yml keeps the status ci/heavy-suites pending
+          # until a pipeline of the commit runs the heavy jobs, and starts one when the
+          # PR gets ready, is reopened, retargeted to dev or labeled full-ci without a
+          # push. Its script tells a halted job from one that ran by this step's name
+          # (it starts with "Stack gate") and whether a step follows it: keep both.
+          name: Stack gate (heavy suites only for non-draft PRs to dev)
+          environment:
+            HEAVY_GATE_FORCE: << pipeline.parameters.run-nightly-llm >>
+          command: |
+            rc=0
+            bash .circleci/scripts/should-run-heavy.sh || rc=$?
+            if [ "$rc" = 10 ]; then
+              circleci-agent step halt
+            fi
+            exit 0
 
   setup_env:
     description: "Set up build environment (Node, Rust, Deno, Go, pnpm)"
@@ -322,6 +369,7 @@ commands:
       - fix_workdir
       - checkout
       - test_artifacts_dir
+      - heavy_gate
       - when:
           condition: << parameters.local >>
           steps:
@@ -414,6 +462,15 @@ jobs:
           # coasys-spaces job's executor fetch, skip and model check.
           name: Test coasys-spaces.sh
           command: bash scripts/coasys-spaces.test.sh
+      - run:
+          # Fake curl with fixture PRs, no network; about a second. The heavy_gate decision.
+          name: Test should-run-heavy.sh
+          command: bash .circleci/scripts/should-run-heavy.test.sh
+      - run:
+          # Fake curl for the GitHub and CircleCI APIs, no network; about 15 seconds. The
+          # ci/heavy-suites status: CircleCI reads, the new pipeline, every pending (heavy-suites.yml).
+          name: Test heavy-suites-pr.sh
+          command: bash .github/scripts/heavy-suites-pr.test.sh
       - build_adam
       - build_integration_inputs
       - run:
@@ -637,6 +694,7 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - heavy_gate
       - setup_env
       - restore_rust_compile_inputs
       - run:
@@ -645,6 +703,44 @@ jobs:
           name: rust-executor tests
           command: cd rust-executor && cargo test --release -- --test-threads=1
           no_output_timeout: 30m
+
+  # Trial, not a required check: the same suite under cargo-nextest, one process per
+  # test, in parallel (.config/nextest.toml, profile `ci`). On one box it took about 30 s
+  # against about 6 min for rust-tests. It runs beside rust-tests for a few days so the
+  # two can be compared on these runners; rust-tests stays the gate. The profile leaves
+  # out 18 tests that need a global another test set up (they run in rust-tests) and
+  # nextest runs no doc-tests (rust-executor has 9, all ignored). The JUnit report gives
+  # per-test times in the job's Tests tab. nextest is a pinned release, checked against
+  # its SHA-256, kept in the runner's workdir (not the shared ~/.cargo/bin).
+  rust-tests-nextest:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - fix_workdir
+      - checkout
+      - heavy_gate
+      - setup_env
+      - restore_rust_compile_inputs
+      - run:
+          name: Install cargo-nextest 0.9.152
+          command: |
+            set -euo pipefail
+            bin="$PWD/target/nextest-bin"
+            if ! "$bin/cargo-nextest" nextest --version 2>/dev/null | grep -q '^cargo-nextest 0.9.152 '; then
+              dir=$(mktemp -d)
+              curl -fsSL -o "$dir/nextest.tar.gz" https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.152/cargo-nextest-0.9.152-x86_64-unknown-linux-gnu.tar.gz
+              echo "d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a  $dir/nextest.tar.gz" | sha256sum -c -
+              mkdir -p "$bin"
+              tar -xzf "$dir/nextest.tar.gz" -C "$bin"
+              rm -rf "$dir"
+            fi
+            echo "export PATH=\"$bin:\$PATH\"" >> "$BASH_ENV"
+      - run:
+          name: rust-executor tests (nextest, profile ci)
+          command: cd rust-executor && cargo nextest run --release --profile ci
+          no_output_timeout: 30m
+      - store_test_results:
+          path: target/nextest/ci/junit.xml
 
   # The Rust client: unit tests plus its real-executor integration test.
   # ad4m-executor comes from the build job's stash; AD4M_REQUIRE_EXECUTOR
@@ -664,6 +760,7 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - heavy_gate
       - setup_env
       - restore_binaries
       - run:
@@ -1336,6 +1433,10 @@ workflows:
           requires:
             - build
       - rust-tests:
+          requires:
+            - build
+      # Trial beside rust-tests; not a required check (see the job).
+      - rust-tests-nextest:
           requires:
             - build
       - rust-client-tests:
