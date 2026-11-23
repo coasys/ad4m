@@ -1,11 +1,10 @@
 import {
   Ad4mModel,
-  ModelQueryBuilder,
-  PaginationResult,
+  LiveQuery,
+  Page,
   PerspectiveProxy,
   Query,
-  TypedQuery,
-  ParentScope,
+  Scope,
 } from "@coasys/ad4m";
 import {
   ComputedRef,
@@ -47,7 +46,7 @@ type LiveOptions<T extends Ad4mModel> = {
    * declared `@HasMany` relation. Supports both model-form (auto-resolved predicate)
    * and raw-form (explicit predicate string).
    */
-  parent?: ParentScope;
+  parent?: Scope;
   query?: Query;
   /** When set, enables load-more / infinite-scroll mode. */
   pageSize?: number;
@@ -126,11 +125,8 @@ export function useLiveQuery<T extends Ad4mModel>(
   const error = ref<string>("");
   const pageNumber = ref(1);
   const totalCount = ref(0);
-  // Widened to ModelQueryBuilder<Ad4mModel> because the typed chain methods
-  // (`where`, `order`, `include`) are contravariant in T — invariance prevents
-  // the per-branch `ModelQueryBuilder<T>` / `ModelQueryBuilder<Ad4mModel>` from
-  // unifying directly. Subscribe callbacks cast back to T[] at the boundary.
-  let modelQuery: ModelQueryBuilder<Ad4mModel> | null = null;
+  // Ends the current live query.
+  let stop: (() => void) | null = null;
 
   // Normalise: accept either a raw PerspectiveProxy or a ref/computed wrapping one
   const perspectiveRef = shallowRef<PerspectiveProxy | null>(
@@ -149,7 +145,8 @@ export function useLiveQuery<T extends Ad4mModel>(
   function buildQuery(): Query {
     const q: Query = {
       ...userQuery,
-      ...(pageSize ? { limit: pageSize * pageNumber.value } : {}),
+      // A page always asks for its total.
+      ...(pageSize ? { limit: pageSize * pageNumber.value, count: true } : {}),
     };
 
     // Parent scope — pass through to Query; core resolves the predicate internally
@@ -165,18 +162,17 @@ export function useLiveQuery<T extends Ad4mModel>(
     return q;
   }
 
-  /** Build a ModelQueryBuilder for either a class constructor or a string class name.
-   *  The cast to `TypedQuery<T>` is necessary because the hook is generic over an
-   *  arbitrary `T extends Ad4mModel` — TypeScript can't statically resolve whether
-   *  T has typed fields, so the deferred `TypedQuery<T>` conditional doesn't accept
-   *  the raw `Query` shape we build at runtime. End-user callers of the static API
-   *  retain strict typing; this cast is the documented escape hatch for generic
-   *  meta-utilities that build queries dynamically. */
-  function makeQueryBuilder(q: Query, p: PerspectiveProxy): ModelQueryBuilder<Ad4mModel> {
+  /** Open the live query for either a class constructor or a string class name.
+   *  The casts are the documented escape hatch for generic meta-utilities that
+   *  build queries dynamically: TypeScript cannot resolve whether `T` has typed
+   *  fields, so the deferred `TypedQuery<T>` does not accept the raw `Query`
+   *  shape built at runtime. End-user callers of the static API keep strict
+   *  typing. */
+  function open(q: Query, p: PerspectiveProxy): LiveQuery<Page<Ad4mModel>> {
     if (typeof model === "string") {
-      return Ad4mModel.query(p, q as TypedQuery<Ad4mModel>).overrideModelClassName(model);
+      return Ad4mModel.live(p, q, { className: model });
     }
-    return (model as ModelCtor<T>).query(p, q as TypedQuery<T>) as unknown as ModelQueryBuilder<Ad4mModel>;
+    return (model as ModelCtor<T>).live(p, q) as unknown as LiveQuery<Page<Ad4mModel>>;
   }
 
   function mergeEntries(oldEntries: T[], newEntries: T[]): T[] {
@@ -193,14 +189,9 @@ export function useLiveQuery<T extends Ad4mModel>(
     }
   }
 
-  function paginateSubscribeCallback(result: PaginationResult<Ad4mModel>) {
-    handleNewEntries(result.results as T[]);
-    totalCount.value = result.totalCount as number;
-  }
-
   function subscribe(p: PerspectiveProxy) {
     // If a parent scope is declared but its id is not yet resolved, hold off
-    if (parent && !parent.id) {
+    if (parent && "id" in parent && !parent.id) {
       collectionData.value = [];
       instanceData.value = null;
       loading.value = false;
@@ -215,53 +206,26 @@ export function useLiveQuery<T extends Ad4mModel>(
     }
 
     // Dispose previous subscription
-    modelQuery?.dispose();
-    modelQuery = null;
+    stop?.();
+    stop = null;
     loading.value = true;
 
-    const q = buildQuery();
-
     try {
-      modelQuery = makeQueryBuilder(q, p);
-
-      if (pageSize) {
-        // Paginated subscription
-        modelQuery
-          .paginateSubscribe(
-            pageSize * pageNumber.value,
-            1,
-            paginateSubscribeCallback,
-          )
-          .then(({ results, totalCount: count }) => {
-            if (isInstance) {
-              instanceData.value = (results[0] as T) ?? null;
-            } else {
-              collectionData.value = results as T[];
-            }
-            totalCount.value = count as number;
-            loading.value = false;
-          })
-          .catch((err) => {
-            error.value = err instanceof Error ? err.message : String(err);
-            loading.value = false;
-          });
-      } else {
-        // Non-paginated subscription
-        modelQuery
-          .subscribe((results: Ad4mModel[]) => handleNewEntries(results as T[]))
-          .then((results) => {
-            if (isInstance) {
-              instanceData.value = (results[0] as T) ?? null;
-            } else {
-              collectionData.value = results as T[];
-            }
-            loading.value = false;
-          })
-          .catch((err) => {
-            error.value = err instanceof Error ? err.message : String(err);
-            loading.value = false;
-          });
-      }
+      const opened = open(buildQuery(), p);
+      const unsubscribe = opened.subscribe((snapshot) => {
+        if (snapshot.status === "error") {
+          error.value = snapshot.error!.message;
+          loading.value = false;
+        } else if (snapshot.status === "ready") {
+          handleNewEntries(snapshot.data!.results as T[]);
+          if (snapshot.data!.totalCount !== undefined) totalCount.value = snapshot.data!.totalCount;
+          loading.value = false;
+        }
+      });
+      stop = () => {
+        unsubscribe();
+        opened.dispose();
+      };
     } catch (err) {
       error.value = err instanceof Error ? err.message : String(err);
       loading.value = false;
@@ -273,8 +237,8 @@ export function useLiveQuery<T extends Ad4mModel>(
     perspectiveRef,
     (newP, oldP) => {
       if (!newP) {
-        modelQuery?.dispose();
-        modelQuery = null;
+        stop?.();
+        stop = null;
         loading.value = false;
         collectionData.value = [];
         instanceData.value = null;
@@ -296,8 +260,8 @@ export function useLiveQuery<T extends Ad4mModel>(
 
   // Clean up on unmount
   onUnmounted(() => {
-    modelQuery?.dispose();
-    modelQuery = null;
+    stop?.();
+    stop = null;
   });
 
   const loadMore = () => {

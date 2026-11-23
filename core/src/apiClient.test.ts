@@ -164,7 +164,7 @@ describe('ApiClient calls', () => {
 
 describe('ApiClient calls that open something on the executor (OPENS_METHODS)', () => {
     it('sends request.cancel when such a call times out', async () => {
-        const promise = call('perspective.modelSubscribe', { uuid: 'u' }, { timeoutMs: 50 })
+        const promise = call('perspective.subscribe', { uuid: 'u' }, { timeoutMs: 50 })
         await flush()
         const req = socket(0).sent[0]
         await expect(promise).rejects.toMatchObject({ name: 'RpcError', status: 408 })
@@ -179,20 +179,12 @@ describe('ApiClient calls that open something on the executor (OPENS_METHODS)', 
         expect(socket(0).sent.map((m) => m.type)).toEqual(['perspective.addLink'])
     })
 
-    it('sends request.cancel for a timed-out subscribeQuery too', async () => {
-        const promise = call('perspective.subscribeQuery', { uuid: 'u' }, { timeoutMs: 50 })
-        await flush()
-        const req = socket(0).sent[0]
-        await expect(promise).rejects.toMatchObject({ status: 408 })
-        expect(socket(0).sent[1]).toMatchObject({ type: 'request.cancel', params: { targetId: req.id } })
-    })
-
     it('drops a reply that crossed the cancel: the caller owns the id it sent', async () => {
         const events: unknown[] = []
         client.on('agent-updated', (e) => { events.push(e) })
-        const promise = call('perspective.modelSubscribe', { uuid: 'u', subscriptionId: 's1' }, { timeoutMs: 50 })
+        const promise = call('perspective.subscribe', { uuid: 'u', subscriptionId: 's1' }, { timeoutMs: 50 })
         await flush()
-        const req = socket(0).sent.find((m) => m.type === 'perspective.modelSubscribe')!
+        const req = socket(0).sent.find((m) => m.type === 'perspective.subscribe')!
         await expect(promise).rejects.toMatchObject({ status: 408 })
 
         const cancel = socket(0).sent.find((m) => m.type === 'request.cancel')!

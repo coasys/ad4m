@@ -156,7 +156,7 @@ pub(super) fn touches_shape<'a>(links: impl IntoIterator<Item = &'a Link>) -> bo
 /// The error a live query that is not SPARQL gets. Live queries are SPARQL or
 /// model queries; Prolog live queries were removed (a one-shot Prolog query
 /// still runs through `perspective.queryProlog`).
-pub(crate) const PROLOG_LIVE_QUERY_UNSUPPORTED: &str = "Prolog live queries are no longer supported; subscribe with a SPARQL query or a model query (perspective.modelSubscribe)";
+pub(crate) const PROLOG_LIVE_QUERY_UNSUPPORTED: &str = "Prolog live queries are no longer supported; subscribe with a SPARQL query or a model query (perspective.subscribe with `model`)";
 
 /// The error a model subscription that sends `after` gets. A subscription
 /// re-runs one query on every matching write, so a cursor would re-read the

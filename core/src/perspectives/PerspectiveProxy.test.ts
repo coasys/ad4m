@@ -1,4 +1,4 @@
-import { PerspectiveProxy, QuerySubscriptionProxy } from './PerspectiveProxy';
+import { PerspectiveProxy } from './PerspectiveProxy';
 import { Link, LinkExpression } from '../links/Links';
 import { LinkQuery } from './LinkQuery';
 import { Literal } from '../Literal';
@@ -12,54 +12,52 @@ function createProxy(client: any): PerspectiveProxy {
   );
 }
 
-describe('QuerySubscriptionProxy', () => {
-  function liveClient(subscribeQuery: jest.Mock) {
+describe('perspective.liveSparql', () => {
+  function liveClient(subscribe: jest.Mock) {
+    const reconnects = new Set<() => void>();
     const client = {
-      subscribeQuery,
+      subscribe,
       onQueryUpdate: () => () => {},
-      onReconnect: () => () => {},
+      onReconnect: (cb: () => void) => { reconnects.add(cb); return () => reconnects.delete(cb); },
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     } as any;
-    return { client };
+    return { client, reconnects };
   }
 
-  it('resolves initialized with the first result', async () => {
+  it('opens through perspective.subscribe and resolves `first` with the rows, marked initial', async () => {
     const { client } = liveClient(jest.fn().mockResolvedValue({ subscriptionId: 'sub-1', result: [{ s: 'a' }], revision: 0 }));
-    const subscription = new QuerySubscriptionProxy('perspective-1', 'SELECT * WHERE { ?s ?p ?o }', client);
-    await subscription.subscribe();
-    await expect(subscription.initialized).resolves.toBe(true);
-    expect(subscription.result).toEqual([{ s: 'a' }]);
-    expect(subscription.id).toBe('sub-1');
-    expect(client.subscribeQuery).toHaveBeenCalledWith('perspective-1', 'SELECT * WHERE { ?s ?p ?o }', { signal: expect.any(AbortSignal) });
+    const live = createProxy(client).liveSparql('SELECT * WHERE { ?s ?p ?o }');
+    await expect(live.first).resolves.toEqual([{ s: 'a' }]);
+    expect(live.getSnapshot()).toMatchObject({ status: 'ready', data: [{ s: 'a' }], initial: true });
+    expect(client.subscribe).toHaveBeenCalledWith(
+      'test-uuid', { sparql: 'SELECT * WHERE { ?s ?p ?o }' }, { signal: expect.any(AbortSignal), timeoutMs: undefined });
+    live.dispose();
+    expect(client.disposeQuerySubscription).toHaveBeenCalledWith('test-uuid', 'sub-1');
   });
 
-  it('opens a model query over a class when given one', async () => {
-    const modelSubscribe = jest.fn().mockResolvedValue({ subscriptionId: 'sub-2', result: { instances: [{ id: 'a' }], totalCount: 1 }, revision: 0 });
-    const { client } = liveClient(jest.fn());
-    client.modelSubscribe = modelSubscribe;
-    const subscription = new QuerySubscriptionProxy('perspective-1', '{"limit":1}', client, 'ad4m://TextContent');
-    await subscription.subscribe();
-    expect(modelSubscribe).toHaveBeenCalledWith('perspective-1', 'ad4m://TextContent', '{"limit":1}', { signal: expect.any(AbortSignal) });
-    expect(client.subscribeQuery).not.toHaveBeenCalled();
-    expect(subscription.result).toEqual({ instances: [{ id: 'a' }], totalCount: 1 });
+  it('passes the timeout to the open call', async () => {
+    const { client } = liveClient(jest.fn().mockResolvedValue({ subscriptionId: 'sub-1', result: [], revision: 0 }));
+    const live = createProxy(client).liveSparql('SELECT ?x WHERE { ?x ?p ?o }', { timeoutMs: 5000 });
+    await live.first;
+    expect(client.subscribe.mock.calls[0][2]).toMatchObject({ timeoutMs: 5000 });
+    live.dispose();
   });
 
-  it('rejects initialized when the subscribe call fails', async () => {
+  it('rejects `first` and sets the error snapshot when the subscribe call fails', async () => {
     const { client } = liveClient(jest.fn().mockRejectedValue(new Error('locked')));
-    const subscription = new QuerySubscriptionProxy('p', 'SELECT ?x WHERE { ?x ?p ?o }', client);
-    const initialized = subscription.initialized;
-    await expect(subscription.subscribe()).rejects.toThrow('locked');
-    await expect(initialized).rejects.toThrow('locked');
+    const live = createProxy(client).liveSparql('SELECT ?x WHERE { ?x ?p ?o }');
+    await expect(live.first).rejects.toThrow('locked');
+    expect(live.getSnapshot()).toMatchObject({ status: 'error' });
   });
 
-  it('leaves no unhandled rejection when the caller never reads initialized', async () => {
+  it('leaves no unhandled rejection when the caller never reads `first`', async () => {
     const unhandled: unknown[] = [];
     const record = (reason: unknown) => unhandled.push(reason);
     process.on('unhandledRejection', record);
     try {
       const { client } = liveClient(jest.fn().mockRejectedValue(new Error('refused')));
-      const subscription = new QuerySubscriptionProxy('p', 'not sparql', client);
-      await expect(subscription.subscribe()).rejects.toThrow('refused');
+      createProxy(client).liveSparql('not sparql');
+      await new Promise(resolve => setImmediate(resolve));
       await new Promise(resolve => setImmediate(resolve));
       expect(unhandled).toEqual([]);
     } finally {
@@ -67,22 +65,17 @@ describe('QuerySubscriptionProxy', () => {
     }
   });
 
-  it('perspective.subscribeQuery leaves nothing re-opening when the first subscribe fails', async () => {
-    const reconnects = new Set<() => void>();
-    const subscribeQuery = jest.fn().mockRejectedValue(new Error('Prolog live queries are not supported'));
-    const client = {
-      subscribeQuery,
-      onQueryUpdate: () => () => {},
-      onReconnect: (cb: () => void) => { reconnects.add(cb); return () => reconnects.delete(cb); },
-      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
-    } as any;
+  it('leaves nothing re-opening when the first subscribe fails', async () => {
+    const subscribe = jest.fn().mockRejectedValue(new Error('Prolog live queries are not supported'));
+    const { client, reconnects } = liveClient(subscribe);
     const errors = jest.spyOn(console, 'error').mockImplementation(() => {});
     try {
-      await expect(createProxy(client).subscribeQuery('a Prolog query')).rejects.toThrow('not supported');
-      // The caller never got a proxy to dispose: a reconnect must not open the query again.
+      const live = createProxy(client).liveSparql('a Prolog query');
+      await expect(live.first).rejects.toThrow('not supported');
+      // A reconnect must not open the failed query again.
       for (const reconnect of [...reconnects]) reconnect();
       await new Promise(resolve => setImmediate(resolve));
-      expect(subscribeQuery).toHaveBeenCalledTimes(1);
+      expect(subscribe).toHaveBeenCalledTimes(1);
       expect(reconnects.size).toBe(0);
     } finally {
       errors.mockRestore();

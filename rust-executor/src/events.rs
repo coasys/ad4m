@@ -146,7 +146,7 @@ impl Topic {
             // `hosting.info`; the main agent's copy needs RUNTIME_USER_MANAGEMENT_READ instead
             // (`Event::hosting_user_info`).
             Topic::HostingUserInfoChanged => caps::RUNTIME_HOSTING_READ_CAPABILITY.clone(),
-            // `perspective.get`, `perspective.queryLinks`, `perspective.subscribeQuery`.
+            // `perspective.get`, `perspective.queryLinks`, `perspective.subscribe`.
             Topic::PerspectiveAdded
             | Topic::PerspectiveRemoved
             | Topic::PerspectiveUpdated

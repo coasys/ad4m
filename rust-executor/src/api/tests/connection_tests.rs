@@ -132,8 +132,8 @@ impl Socket {
     /// Open a live query on `perspective`; returns its subscription id.
     async fn subscribe(&mut self, perspective: &str) -> String {
         let id = uuid::Uuid::new_v4().to_string();
-        self.send(json!({ "id": id, "type": "perspective.subscribeQuery",
-            "params": { "uuid": perspective, "query": QUERY, "subscriptionId": id } }));
+        self.send(json!({ "id": id, "type": "perspective.subscribe",
+            "params": { "uuid": perspective, "sparql": QUERY, "subscriptionId": id } }));
         let reply = self.reply(&id).await;
         reply["result"]["subscriptionId"]
             .as_str()
@@ -242,11 +242,9 @@ async fn closing_the_socket_ends_its_subscriptions_only() {
 async fn a_prolog_live_query_gets_400() {
     let p = registered_perspective(&[]).await;
     let mut socket = Socket::open().await;
-    socket.send(
-        json!({ "id": "prolog", "type": "perspective.subscribeQuery",
-        "params": { "uuid": p.0, "query": "triple(X, _, \"todo-ontology://is-todo\").",
-            "subscriptionId": "prolog" } }),
-    );
+    socket.send(json!({ "id": "prolog", "type": "perspective.subscribe",
+        "params": { "uuid": p.0, "sparql": "triple(X, _, \"todo-ontology://is-todo\").",
+            "subscriptionId": "prolog" } }));
     let reply = socket.reply("prolog").await;
     assert_eq!(reply["error"]["code"], 400, "{reply}");
     assert_eq!(
@@ -264,8 +262,8 @@ async fn a_subscribe_cancelled_then_disposed_leaves_nothing() {
     let mut socket = Socket::open().await;
     for round in 0..20 {
         let (call, sub) = (format!("s{round}"), format!("minted-{round}"));
-        socket.send(json!({ "id": call, "type": "perspective.subscribeQuery",
-            "params": { "uuid": p.0, "query": QUERY, "subscriptionId": sub } }));
+        socket.send(json!({ "id": call, "type": "perspective.subscribe",
+            "params": { "uuid": p.0, "sparql": QUERY, "subscriptionId": sub } }));
         socket.send(
             json!({ "id": format!("c{round}"), "type": "request.cancel", "params": { "targetId": call } }),
         );
@@ -633,7 +631,7 @@ async fn a_token_that_expired_gets_401_and_ends_the_connection() {
         .unwrap();
 }
 
-/// A handler map whose `perspective.subscribeQuery` never answers: it reports each call that
+/// A handler map whose `perspective.subscribe` never answers: it reports each call that
 /// starts on `started` and each one dropped (cancelled) on `dropped`.
 fn hanging_subscribe(
     started: mpsc::UnboundedSender<()>,
@@ -649,7 +647,7 @@ fn hanging_subscribe(
     }
     let mut map = HandlerMap::new();
     // Every method needs a guard, or the dispatcher refuses it before the handler runs.
-    map.method::<NoParams, bool>("perspective.subscribeQuery", move |_, _| {
+    map.method::<NoParams, bool>("perspective.subscribe", move |_, _| {
         let (started, dropped) = (started.clone(), dropped.clone());
         async move {
             let _dropped = OnDrop(dropped);
@@ -667,7 +665,7 @@ async fn closing_the_socket_cancels_a_live_query_still_opening() {
     let (started, mut starts) = mpsc::unbounded_channel();
     let (dropped, mut drops) = mpsc::unbounded_channel();
     let mut socket = Socket::open_with_handlers(hanging_subscribe(started, dropped)).await;
-    socket.send(json!({ "id": "s", "type": "perspective.subscribeQuery" }));
+    socket.send(json!({ "id": "s", "type": "perspective.subscribe" }));
     tokio::time::timeout(Duration::from_secs(5), starts.recv())
         .await
         .expect("the subscribe call starts");
@@ -688,7 +686,7 @@ async fn a_connection_runs_a_bounded_number_of_live_query_opens_at_once() {
     let socket = Socket::open_with_handlers(hanging_subscribe(started, dropped)).await;
     // A client that abandons each subscribe and asks again, as the waker did (#1595).
     for i in 0..MAX_OPENING_LIVE_QUERIES + 4 {
-        socket.send(json!({ "id": format!("s{i}"), "type": "perspective.subscribeQuery" }));
+        socket.send(json!({ "id": format!("s{i}"), "type": "perspective.subscribe" }));
     }
     for _ in 0..MAX_OPENING_LIVE_QUERIES {
         tokio::time::timeout(Duration::from_secs(5), starts.recv())
@@ -718,7 +716,7 @@ async fn a_live_query_open_cancelled_while_it_waits_never_starts() {
     let (dropped, _drops) = mpsc::unbounded_channel();
     let mut socket = Socket::open_with_handlers(hanging_subscribe(started, dropped)).await;
     for i in 0..=MAX_OPENING_LIVE_QUERIES {
-        socket.send(json!({ "id": format!("s{i}"), "type": "perspective.subscribeQuery" }));
+        socket.send(json!({ "id": format!("s{i}"), "type": "perspective.subscribe" }));
     }
     for _ in 0..MAX_OPENING_LIVE_QUERIES {
         tokio::time::timeout(Duration::from_secs(5), starts.recv())

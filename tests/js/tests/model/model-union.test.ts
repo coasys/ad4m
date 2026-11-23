@@ -197,8 +197,11 @@ describe("Ad4mModel — one query over several classes", function () {
   it("one live subscription fires on an edit to each class", async () => {
     const { t1, n2 } = await interleaved();
     const batches: Ad4mModel[][] = [];
-    const builder = Ad4mModel.queryOf(perspective, [UnionTask, UnionNote]);
-    const initial = await builder.subscribe((r) => batches.push(r));
+    const builder = Ad4mModel.liveOf(perspective, [UnionTask, UnionNote]);
+    const initial = (await builder.first).results;
+    builder.subscribe((s) => {
+      if (s.status === "ready" && !s.initial) batches.push(s.data!.results);
+    });
     expect(initial.length).to.equal(5);
 
     try {
@@ -217,7 +220,7 @@ describe("Ad4mModel — one query over several classes", function () {
         "note edit reaches the union subscription",
       );
     } finally {
-      await builder.dispose();
+      builder.dispose();
     }
   });
 });

@@ -859,7 +859,7 @@ if (first.nextCursor) {
 - a `parent` scope with `limitPerAnchor` or `levels`,
 - `after` inside an `include` sub-query (page a relation with `limit`/`offset`), on one class or over several.
 
-Subscriptions refuse `after` too: a subscription re-runs one query, so it would re-read the same page forever. `subscribe()`, `countSubscribe()` and `paginateSubscribe()` leave it out.
+Subscriptions refuse `after` too: a subscription re-runs one query, so it would re-read the same page forever. `Model.live()` leaves it out.
 
 Use `paginate()` when you need page numbers, a total count, or another order.
 
@@ -1091,10 +1091,11 @@ for (const item of items) {
   if (item instanceof Placement) { /* ... */ }
 }
 
-// Builder form; subscribe() registers one subscription for every class
-const builder = Ad4mModel.queryOf(perspective, [Placement, EdgeRoute])
-  .parent(canvas.id, "canvas://item");
-await builder.subscribe((items) => render(items));
+// Live form; one subscription for every class
+const live = Ad4mModel.liveOf(perspective, [Placement, EdgeRoute], {
+  parent: { id: canvas.id, predicate: "canvas://item" },
+});
+live.subscribe(({ data }) => data && render(data.results));
 ```
 
 Each result is an instance of the class it was read as, and carries `__subjectClass` (that class's target class IRI) and `__subjectClasses` (the IRI of every class the record conforms to), as members of a [polymorphic relation](#relations) do. The query itself is the same `Query` a single class takes. The rules where the classes differ:
@@ -1134,7 +1135,7 @@ const everything = await Readable.findAll(perspective);
 const mentions = await Readable.findAll(perspective, { where: { text: { contains: "@data" } } });
 ```
 
-A query over an abstract class is a [union query](#querying-several-classes-at-once) over the classes it matches, with the same rules and limits. `modelQuery("Readable", …)` and `modelSubscribe("Readable", …)` work the same way.
+A query over an abstract class is a [union query](#querying-several-classes-at-once) over the classes it matches, with the same rules and limits. `modelQuery("Readable", …)` and `Ad4mModel.live(perspective, …, { className: "Readable" })` work the same way.
 
 | Rule | Detail |
 |---|---|
@@ -1317,30 +1318,34 @@ These APIs are useful for building dynamic UIs, tooling, and AI agent integratio
 Subscribe to changes in your data:
 
 ```typescript
-const builder = Recipe.query(perspective)
-  .where({ status: "cooking" });
+// One live handle for every shape of live query
+const live = Recipe.live(perspective, { where: { status: "cooking" } });
 
-// Subscribe — callback fires immediately with initial results,
-// then again whenever matching data changes
-const initialRecipes = await builder.subscribe(recipes => {
-  console.log("Currently cooking:", recipes);
+// The opening page
+const { results: initialRecipes } = await live.first;
+
+// Called at once with the current value (when there is one), then on each change.
+// `initial` is true only for the opening value.
+const stop = live.subscribe(({ status, data, initial }) => {
+  if (status === "ready") console.log("Currently cooking:", data.results, initial);
 });
 
-// Count subscription
-const initialCount = await builder.countSubscribe(count => {
-  console.log("Number cooking:", count);
-});
+// A live count: no rows, only `totalCount`
+const count = Recipe.live(perspective, { where: { status: "cooking" }, limit: 0, count: true });
 
-// Paginated subscription
-const initialPage = await builder.paginateSubscribe(10, 1, page => {
-  console.log("Page 1:", page.results);
-});
+// A live page
+const page = Recipe.live(perspective, { limit: 10, offset: 0, count: true });
 
 // Important: Clean up when done
-builder.dispose();
+stop();
+live.dispose();
+count.dispose();
+page.dispose();
 ```
 
-Always call `dispose()` when you're done with a subscription to prevent memory leaks.
+`Model.live(perspective, query?, options?)` returns a `LiveQuery<Page<T>>` and `perspective.liveSparql(sparql)` a `LiveQuery<SparqlRows>`. `getSnapshot()` returns the same object until the result, the status or `reopening` changes, so it fits `useSyncExternalStore(live.subscribe, live.getSnapshot)`. A result equal to the last emits nothing. Over the wire, `Model.live()` calls the `perspective.subscribe` RPC with `model`, and `liveSparql()` with `sparql`.
+
+Always call `dispose()` when you're done with a live query to prevent memory leaks.
 
 #### What re-runs a subscription
 
@@ -1352,25 +1357,28 @@ Comment)` lists only targets that carry `Comment`'s flag and required
 properties, so `post.comments` updates when one does, with or without
 `include`). It does not cover a record of another class: creating a `Note` does
 not re-run a `Post` subscription, even when both classes use the same flag
-predicate. A query over several classes (`Ad4mModel.queryOf`) is one
+predicate. A query over several classes (`Ad4mModel.liveOf`) is one
 subscription that re-runs on a write any of its classes would re-run on. When
 the result changes, the executor sends only the change (the records added,
-updated and removed, with the new `totalCount` when the query set `count: true`), and the builder applies it to
+updated and removed, with the new `totalCount` when the query set `count: true`), and the `LiveQuery` applies it to
 the result it holds before calling your callback.
 
 #### Subscriptions and `dispose()`
 
-Each builder holds its own executor subscription, tied to its connection. Two
-builders on the same query (two components showing the same list, for example)
+Each `LiveQuery` holds its own executor subscription, tied to its connection. Two
+handles on the same query (two components showing the same list, for example)
 get two subscriptions, so disposing one never stops the other's updates.
 
-A builder holds one subscription at a time: `subscribe()`, `countSubscribe()`
-and `paginateSubscribe()` end the previous one first. `dispose()` ends it on the
-client at once and tells the executor. The executor also ends every subscription
-of a connection when the connection closes.
+`dispose()` ends the subscription on the client at once and tells the executor,
+and is valid before the first value. Calling it again does nothing. The executor
+also ends every subscription of a connection when the connection closes; the
+handle opens a new one when the client reconnects. A re-open that finds the
+result as it was emits nothing; one that finds a different result emits it with
+`initial: false`.
 
 A subscribe the client gives up on leaves nothing behind on the executor. When
-the call times out (30 s), or is cancelled (`dispose({ cancelOpening: true })`),
+the call times out (30 s, `options.timeoutMs`), or `dispose()` cancels it before
+the first value,
 the client cancels it on the executor and then disposes it. The client picks
 each subscription's id itself and sends it with the subscribe call, so it can
 dispose a subscription whose answer it never got. The
@@ -1711,15 +1719,14 @@ const BlogPost = Ad4mModel.fromJSONSchema(schema) as typeof Ad4mModel & {
 
 6. **Subscriptions**: Clean up subscriptions when they're no longer needed:
    ```typescript
-   const builder = Recipe.query(perspective)
-     .where({ status: "active" });
+   const live = Recipe.live(perspective, { where: { status: "active" } });
      
-   await builder.subscribe(recipes => {
+   live.subscribe(({ data }) => {
      // Handle updates
    });
    
    // Later...
-   builder.dispose();
+   live.dispose();
    ```
 
 7. **Use Literals Appropriately**: 

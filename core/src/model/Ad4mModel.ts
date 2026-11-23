@@ -15,6 +15,8 @@ import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from ".
 
 import { buildSPARQLQuery, valueToLiteralIri, effectiveLiteralStorage } from "./query-sparql";
 import { ModelQueryBuilder } from "./ModelQueryBuilder";
+import { LiveQuery } from "../perspectives/LiveQuery";
+import type { LiveOptions } from "../perspectives/LiveQuery";
 import {
   normalizeValue,
 } from "./hydration";
@@ -1440,14 +1442,13 @@ export class Ad4mModel {
 
   /**
    * A {@link ModelQueryBuilder} over several model classes: the builder form of
-   * {@link findAllOf}. `subscribe()` registers one subscription, which re-runs
-   * when any of the classes changes.
+   * {@link findAllOf}. For a live result use {@link liveOf}.
    *
    * @example
    * ```typescript
-   * const builder = Ad4mModel.queryOf(perspective, [Placement, EdgeRoute])
-   *   .parent(canvas.id, "canvas://item");
-   * await builder.subscribe((items) => render(items));
+   * const items = await Ad4mModel.queryOf(perspective, [Placement, EdgeRoute])
+   *   .parent(canvas.id, "canvas://item")
+   *   .get();
    * ```
    */
   static queryOf<C extends (typeof Ad4mModel)[]>(
@@ -1456,6 +1457,65 @@ export class Ad4mModel {
     query?: Query,
   ): ModelQueryBuilder<InstanceType<C[number]>> {
     return new ModelQueryBuilder<InstanceType<C[number]>>(perspective, Ad4mModel, query, classes);
+  }
+
+  /**
+   * A live page of the query: one {@link LiveQuery} that opens at once, holds
+   * the current {@link Page} and moves to the next one whenever the result
+   * changes. The snapshot's `initial` is true for the opening page only.
+   *
+   * `Page.totalCount` is set when the query asks for `count`. A cursor
+   * (`after`) is not sent: a live query re-runs one query, it does not walk
+   * pages. `options.className` queries by class name, as
+   * `overrideModelClassName` does on the builder. Call `dispose()` when done.
+   *
+   * @example
+   * ```typescript
+   * const live = Recipe.live(perspective, { where: { status: "cooking" }, limit: 10, count: true });
+   * const page = await live.first;
+   * const stop = live.subscribe((snap) => render(snap.data?.results));
+   * // later
+   * stop();
+   * live.dispose();
+   * ```
+   */
+  static live<T extends Ad4mModel>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    query?: Query,
+    options: LiveOptions & { className?: string } = {},
+  ): LiveQuery<Page<T>> {
+    const { after: _after, ...cursorless } = query ?? {};
+    const withAll = Ad4mModel.withIncludeAll([this], cursorless);
+    const { className, queryJson } = this.prepareModelQueryParams(withAll, options.className);
+    return new LiveQuery<Page<T>>(
+      perspective.client, perspective.uuid,
+      (signal) => perspective.client.subscribe(perspective.uuid, { className, queryJson }, { signal, timeoutMs: options.timeoutMs }),
+      (raw) => ({
+        results: this.parseModelResult(perspective, raw, withAll.include, withAll.properties),
+        ...(raw?.totalCount !== undefined ? { totalCount: raw.totalCount } : {}),
+      }),
+    );
+  }
+
+  /** {@link live} over several model classes: one live query that re-runs when any of them changes. */
+  static liveOf<C extends (typeof Ad4mModel)[]>(
+    perspective: PerspectiveProxy,
+    classes: [...C],
+    query?: Query,
+    options: LiveOptions = {},
+  ): LiveQuery<Page<InstanceType<C[number]>>> {
+    const { after: _after, ...cursorless } = query ?? {};
+    const withAll = Ad4mModel.withIncludeAll(classes, cursorless);
+    const { classNames, queryJson } = Ad4mModel.prepareUnionQueryParams(classes, withAll);
+    return new LiveQuery<Page<InstanceType<C[number]>>>(
+      perspective.client, perspective.uuid,
+      (signal) => perspective.client.subscribe(perspective.uuid, { className: classNames, queryJson }, { signal, timeoutMs: options.timeoutMs }),
+      (raw) => ({
+        results: Ad4mModel.parseUnionResult(classes, perspective, raw, withAll.include, withAll.properties) as InstanceType<C[number]>[],
+        ...(raw?.totalCount !== undefined ? { totalCount: raw.totalCount } : {}),
+      }),
+    );
   }
 
   // instancesFromQueryResult — removed (superseded by Rust executeModelQuery pipeline)

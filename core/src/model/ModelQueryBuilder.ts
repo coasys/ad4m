@@ -7,18 +7,12 @@
 
 import type { Ad4mModel } from "./Ad4mModel";
 import type { LinkStatus, PerspectiveProxy } from "../perspectives/PerspectiveProxy";
-import { LiveQuery } from "../perspectives/LiveQuery";
 import { requireTotalCount } from "./query-common";
 import type {
   Where, Order, IncludeMap, Query,
   Page, PaginationResult, CursorPage,
   TypedQueryWhere, TypedOrder, TypedIncludeMap, PropertyKeysOf,
 } from "./types";
-
-/** What a subscription compares to skip a callback whose results equal the
- *  last ones emitted (a resync or a reconnect re-open of an unchanged result). */
-const fingerprint = (value: unknown): string =>
-  JSON.stringify(value, (_, v) => (typeof v === 'function' ? undefined : v));
 
 /** Query builder for Ad4mModel queries.
  * Allows building queries with a fluent interface and either running them once
@@ -34,10 +28,6 @@ const fingerprint = (value: unknown): string =>
  * // Run once
  * const recipes = await builder.run();
  * 
- * // Or subscribe to updates
- * await builder.subscribe(recipes => {
- *   console.log("Updated recipes:", recipes);
- * });
  * ```
  */
 export class ModelQueryBuilder<T extends Ad4mModel> {
@@ -45,7 +35,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   private queryParams: Query = {};
   private modelClassName: string | null = null;
   private ctor: typeof Ad4mModel;
-  private currentSubscription?: { dispose(): void };
 
   /** Set for a query over several classes (`Ad4mModel.queryOf`, #1238). */
   private unionClasses?: (typeof Ad4mModel)[];
@@ -57,67 +46,12 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     if (unionClasses) this.unionClasses = unionClasses;
   }
 
-  /** The wire parameters for `params`: one class, or the union's class list. */
-  private prepare(params: Query): { className: string | string[]; queryJson: string } {
-    if (this.unionClasses) {
-      const { classNames, queryJson } = (this.ctor as any).prepareUnionQueryParams(this.unionClasses, params);
-      return { className: classNames, queryJson };
-    }
-    return (this.ctor as any).prepareModelQueryParams(params, this.modelClassName);
-  }
-
   /** Run `params` once and build model instances from the rows. */
   private execute(params: Query): Promise<Page<T>> {
     if (this.unionClasses) {
       return (this.ctor as any).executeUnionQuery(this.perspective, this.unionClasses, params);
     }
     return (this.ctor as any).executeModelQuery(this.perspective, params, this.modelClassName);
-  }
-
-  /** Build model instances from a raw result pushed by a subscription. */
-  private parse(raw: any): T[] {
-    const { include, properties } = (this.ctor as any).withIncludeAll(this.unionClasses ?? [this.ctor], this.queryParams);
-    if (this.unionClasses) {
-      return (this.ctor as any).parseUnionResult(this.unionClasses, this.perspective, raw, include, properties);
-    }
-    return (this.ctor as any).parseModelResult(this.perspective, raw, include, properties);
-  }
-
-  /** Ends the current subscription, if any, on the client and the executor. */
-  dispose() {
-    if (this.currentSubscription) {
-      this.currentSubscription.dispose();
-      this.currentSubscription = undefined;
-    }
-  }
-
-  /** Open a live model query for `params` as the current subscription.
-   *  Resolves with it and the raw initial result; `onResult` gets every later one.
-   *  A failed open ends only its own query: a later call may already own
-   *  `currentSubscription`. A cursor (`after`) is never sent: the executor
-   *  refuses it on a subscription, which re-runs one query, not a page walk. */
-  private async live(params: Query, onResult: (raw: any) => void): Promise<{ live: LiveQuery; initial: any }> {
-    const { after: _after, ...cursorless } = params;
-    const { className, queryJson } = this.prepare(cursorless);
-    const live = new LiveQuery(
-      this.perspective.client, this.perspective.uuid,
-      () => this.perspective.modelSubscribe(className, queryJson),
-      onResult,
-    );
-    this.currentSubscription = live;
-    try {
-      return { live, initial: await live.start() };
-    } catch (e) {
-      this.endFailed(live);
-      throw e;
-    }
-  }
-
-  /** End `live` after its call failed. A later call may already own
-   *  `currentSubscription`, so only clear it if it is still `live`. */
-  private endFailed(live: LiveQuery): void {
-    live.dispose();
-    if (this.currentSubscription === live) this.currentSubscription = undefined;
   }
 
   /**
@@ -464,66 +398,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   }
 
   /**
-   * Subscribes to the query and receives updates when results change.
-   *
-   * This method:
-   * 1. Creates and initializes a SPARQL live query subscription (default)
-   * 2. Sets up the callback to process future updates
-   * 3. Returns the initial results immediately
-   *
-   * Remember to call dispose() when you're done with the subscription
-   * to clean up resources.
-   *
-   * @param callback - Function to call with updated results
-   * @returns Initial results array
-   *
-   * @example
-   * ```typescript
-   * const builder = Recipe.query(perspective)
-   *   .where({ status: "cooking" });
-   *
-   * const initialRecipes = await builder.subscribe(recipes => {
-   *   console.log("Updated recipes:", recipes);
-   * });
-   *
-   * // When done with subscription:
-   * builder.dispose();
-   * ```
-   *
-   */
-  async subscribe(callback: (results: T[]) => void): Promise<T[]> {
-    this.dispose();
-
-    const parseResults = (raw: any): T[] => this.parse(raw);
-
-    // Suppress callbacks whose parsed results equal the last ones emitted.
-    let lastFingerprint: string | null = null;
-
-    const { initial } = await this.live(this.queryParams, (raw) => {
-      try {
-        const results = parseResults(raw);
-        const fp = fingerprint(results);
-        if (fp === lastFingerprint) return;
-        lastFingerprint = fp;
-        callback(results);
-      } catch (e) {
-        console.error('Model subscription update parse error:', e);
-      }
-    });
-    const initialResults = parseResults(initial);
-    lastFingerprint = fingerprint(initialResults);
-    return initialResults;
-  }
-
-  /**
-   * Subscribes to the query and receives updates using SPARQL.
-   * @deprecated Use subscribe() instead — now routes through Rust model subscription.
-   */
-  async subscribeSparql(callback: (results: T[]) => void): Promise<T[]> {
-    return this.subscribe(callback);
-  }
-
-  /**
    * Gets the total count of matching entities.
    * 
    * @returns Total count
@@ -547,61 +421,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async countSparql(): Promise<number> {
     return await this.count();
-  }
-
-  /**
-   * Subscribes to count updates for matching entities.
-   *
-   * This method:
-   * 1. Creates and initializes a SPARQL live query subscription for the count (default)
-   * 2. Sets up the callback to process future count updates
-   * 3. Returns the initial count immediately
-   *
-   * Remember to call dispose() when you're done with the subscription
-   * to clean up resources.
-   *
-   * @param callback - Function to call with updated count
-   * @returns Initial count
-   *
-   * @example
-   * ```typescript
-   * const builder = Recipe.query(perspective)
-   *   .where({ status: "active" });
-   *
-   * const initialCount = await builder.countSubscribe(count => {
-   *   console.log("Active items:", count);
-   * });
-   *
-   * // When done with subscription:
-   * builder.dispose();
-   * ```
-   *
-   */
-  async countSubscribe(callback: (count: number) => void): Promise<number> {
-    this.dispose();
-    // As paginateSubscribe: a push without the asked-for count is logged and
-    // skipped, since a throw here would reach the client's update dispatch.
-    const { live, initial } = await this.live({ ...this.queryParams, limit: 0, count: true }, (raw) => {
-      try {
-        callback(requireTotalCount(raw));
-      } catch (e) {
-        console.error('Count subscription error:', e);
-      }
-    });
-    try {
-      return requireTotalCount(initial);
-    } catch (e) {
-      this.endFailed(live);
-      throw e;
-    }
-  }
-
-  /**
-   * Subscribes to count updates using SPARQL.
-   * @deprecated Use countSubscribe() instead — now routes through Rust model subscription.
-   */
-  async countSubscribeSparql(callback: (count: number) => void): Promise<number> {
-    return this.countSubscribe(callback);
   }
 
   /**
@@ -657,102 +476,5 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async paginateSparql(pageSize: number, pageNumber: number): Promise<PaginationResult<T>> {
     return await this.paginate(pageSize, pageNumber);
-  }
-
-  /**
-   * Subscribes to paginated results updates.
-   *
-   * This method:
-   * 1. Creates and initializes a SPARQL live query subscription for the paginated results (default)
-   * 2. Sets up the callback to process future page updates
-   * 3. Returns the initial page immediately
-   *
-   * Remember to call dispose() when you're done with the subscription
-   * to clean up resources.
-   *
-   * @param pageSize - Number of items per page
-   * @param pageNumber - Which page to retrieve (1-based)
-   * @param callback - Function to call with updated pagination results
-   * @returns Initial pagination results
-   *
-   * @example
-   * ```typescript
-   * const builder = Recipe.query(perspective)
-   *   .where({ category: "Main" });
-   *
-   * const initialPage = await builder.paginateSubscribe(10, 1, page => {
-   *   console.log("Updated page:", page.results);
-   * });
-   *
-   * // When done with subscription:
-   * builder.dispose();
-   * ```
-   *
-   */
-  async paginateSubscribe(
-    pageSize: number,
-    pageNumber: number,
-    callback: (results: PaginationResult<T>) => void
-  ): Promise<PaginationResult<T>> {
-    this.dispose();
-
-    // Subscribe to the page itself. Since #1237 the executor re-runs a paged
-    // subscription when a record outside the page starts or stops matching
-    // (the `joins` and `scan` trigger rules), and a model result carries
-    // `totalCount`, so a write outside the page still changes the result and
-    // is pushed. Each page is built from the pushed rows: no second query, and
-    // the executor hydrates one page per change rather than every match.
-    // Pushes arrive in revision order, so the last callback is the latest
-    // state (#1051). After dispose() the live query delivers nothing.
-    // Page numbers are offsets, so a cursor (`after`) is not sent.
-    const { after: _after, ...cursorless } = this.queryParams || {};
-    const paginatedQuery: Query = {
-      ...cursorless,
-      limit: pageSize,
-      offset: pageSize * (pageNumber - 1),
-      count: true,
-    };
-    // As subscribe(): a callback fires only when the rows or totalCount
-    // differ from the last page emitted, not on a resync or a reconnect
-    // re-open of an unchanged page.
-    let lastFingerprint: string | null = null;
-    const toPage = (raw: any): { page: PaginationResult<T>; fp: string } => {
-      const results = this.parse(raw);
-      const fp = fingerprint([results, raw?.totalCount]);
-      // `count: true` is set above, so the executor sends a total.
-      return { page: { results, totalCount: requireTotalCount(raw), pageSize, pageNumber }, fp };
-    };
-
-    const { live, initial } = await this.live(paginatedQuery, (raw) => {
-      try {
-        const { page, fp } = toPage(raw);
-        if (fp === lastFingerprint) return;
-        lastFingerprint = fp;
-        callback(page);
-      } catch (e) {
-        console.error('Paginate subscription error:', e);
-      }
-    });
-    let first: { page: PaginationResult<T>; fp: string };
-    try {
-      first = toPage(initial);
-    } catch (e) {
-      this.endFailed(live);
-      throw e;
-    }
-    lastFingerprint = first.fp;
-    return first.page;
-  }
-
-  /**
-   * Subscribes to paginated results updates using SPARQL.
-   * Delegates to paginateSubscribe().
-   */
-  async paginateSubscribeSparql(
-    pageSize: number,
-    pageNumber: number,
-    callback: (results: PaginationResult<T>) => void
-  ): Promise<PaginationResult<T>> {
-    return await this.paginateSubscribe(pageSize, pageNumber, callback);
   }
 }

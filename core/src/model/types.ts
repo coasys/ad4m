@@ -798,7 +798,7 @@ export type ResultsWithTotalCount<T> = { results: T[]; totalCount: number };
  * it to the next `page()` call. Its absence means this was the last page.
  */
 export type CursorPage<T> = { results: T[]; nextCursor?: string; pageSize: number };
-/** The result of `paginate()` and `paginateSubscribe()`, which always ask for the count. */
+/** The result of `paginate()`, which always asks for the count. */
 export type PaginationResult<T> = { results: T[]; totalCount: number; pageSize: number; pageNumber: number };
 
 // ---------------------------------------------------------------------------

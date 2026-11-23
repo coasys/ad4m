@@ -145,7 +145,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'perspective.getSubjectData': '{"name":"test"}',
     'perspective.createBatch': 'batch-id-1',
     'perspective.commitBatch': { additions: [], removals: [] },
-    'perspective.subscribeQuery': { subscriptionId: 'sub-1', result: [{ s: 'a' }], revision: 0 },
+    'perspective.subscribe': { subscriptionId: 'sub-1', result: [{ s: 'a' }], revision: 0 },
     'perspective.resyncSubscription': { revision: 3, result: [{ s: 'c' }] },
     'events.watch': true,
     'perspective.disposeQuery': true,
@@ -966,11 +966,15 @@ describe('PerspectiveClient', () => {
     test('a live query applies updates and resyncs on a revision gap', async () => {
         const freshClient = newClient();
         const subscription = await freshClient.perspective.byUUID('uuid-1')
-            .then(p => p!.subscribeQuery('SELECT ?s WHERE { ?s ?p ?o }'));
+            .then(p => p!.liveSparql('SELECT ?s WHERE { ?s ?p ?o }'));
+        expect(await subscription.first).toEqual([{ s: 'a' }]);
         const results: unknown[] = [];
-        subscription.onResult(r => results.push(r));
+        subscription.subscribe(snapshot => results.push(snapshot.data));
         const ws = lastOf(MockWebSocket.instances);
-        expect(subscription.result).toEqual([{ s: 'a' }]);
+        // A listener added after the first result gets it at once.
+        expect(results).toEqual([[{ s: 'a' }]]);
+        results.length = 0;
+        const current = () => subscription.getSnapshot().data;
 
         ws.emit({ type: 'perspective-added', perspective: { uuid: 'uuid-ignored' } });
         ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-2', revision: 1, added: [{ s: 'x' }], removed: [] });
@@ -981,10 +985,10 @@ describe('PerspectiveClient', () => {
         ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-1', revision: 3, added: [{ s: 'z' }], removed: [] });
         await new Promise(r => setTimeout(r, 10));
         expect(lastRpcCall).toEqual({ type: 'perspective.resyncSubscription', params: { uuid: 'uuid-1', subscriptionId: 'sub-1' } });
-        expect(subscription.result).toEqual([{ s: 'c' }]);
+        expect(current()).toEqual([{ s: 'c' }]);
 
         ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-1', revision: 4, added: [{ s: 'd' }], removed: [] });
-        expect(subscription.result).toEqual([{ s: 'c' }, { s: 'd' }]);
+        expect(current()).toEqual([{ s: 'c' }, { s: 'd' }]);
 
         subscription.dispose();
         await new Promise(r => setTimeout(r, 10));
