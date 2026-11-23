@@ -1178,9 +1178,8 @@ fn wasm_language_bundle() -> Option<String> {
 /// working wasm-bindgen bundle, only without the marker.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_wasm_bundle_without_the_aldk_marker_is_refused_at_load() {
-    let bundle = wasm_language_bundle().expect(
-        "test-wasm-language bundle missing; run `bash tests/rust-languages/build.sh`",
-    );
+    let bundle = wasm_language_bundle()
+        .expect("test-wasm-language bundle missing; run `bash tests/rust-languages/build.sh`");
     assert!(bundle.contains(ad4m_ldk::MARKER_EXPORT));
     let unmarked = bundle.replace(ad4m_ldk::MARKER_EXPORT, "__ldkVersionMarker");
     assert!(!unmarked.contains(ad4m_ldk::MARKER_EXPORT));
@@ -1209,9 +1208,8 @@ async fn a_wasm_bundle_without_the_aldk_marker_is_refused_at_load() {
 /// agents.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_wasm_bundle_with_the_aldk_marker_loads_and_overlaps() {
-    let bundle = wasm_language_bundle().expect(
-        "test-wasm-language bundle missing; run `bash tests/rust-languages/build.sh`",
-    );
+    let bundle = wasm_language_bundle()
+        .expect("test-wasm-language bundle missing; run `bash tests/rust-languages/build.sh`");
     assert!(bundle.contains(ad4m_ldk::MARKER_EXPORT));
 
     crate::test_utils::setup_wallet();
@@ -1446,9 +1444,8 @@ async fn a_wasm_language_runs_concurrent_calls_in_order_as_their_agents() {
 /// Bob's matching answer is the control — his release ran under his own call.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_wasm_language_runs_concurrent_calls_each_as_its_own_agent() {
-    let bundle = wasm_language_bundle().expect(
-        "test-wasm-language bundle missing; run `bash tests/rust-languages/build.sh`",
-    );
+    let bundle = wasm_language_bundle()
+        .expect("test-wasm-language bundle missing; run `bash tests/rust-languages/build.sh`");
 
     crate::test_utils::setup_wallet();
     crate::test_utils::setup_agent();
@@ -1544,9 +1541,7 @@ async fn a_wasm_language_runs_concurrent_calls_each_as_its_own_agent() {
         "bob's release found no parked wait to wake: {bob_answer}"
     );
     assert_eq!(
-        bob_expression
-            .pointer("/author")
-            .and_then(|a| a.as_str()),
+        bob_expression.pointer("/author").and_then(|a| a.as_str()),
         Some(bob.as_str()),
         "bob's release reported a different agent: {bob_answer}"
     );
@@ -1569,9 +1564,7 @@ async fn a_wasm_language_runs_concurrent_calls_each_as_its_own_agent() {
         .expect("alice's wait answers");
     let alice_expression: serde_json::Value = serde_json::from_str(&alice_answer).unwrap();
     assert_eq!(
-        alice_expression
-            .pointer("/author")
-            .and_then(|a| a.as_str()),
+        alice_expression.pointer("/author").and_then(|a| a.as_str()),
         Some(alice.as_str()),
         "alice's resumed call answered as a different agent: {alice_answer}"
     );
