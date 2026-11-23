@@ -135,6 +135,37 @@ async fn the_templated_language_is_loaded_and_sees_its_seed() {
     assert_eq!(result, json!("x"));
 }
 
+/// Applying the same template data again gives the same address and must keep
+/// the runtime that is already loaded: `bump` counts in module state, which a
+/// reload would set back to zero.
+#[tokio::test]
+async fn applying_the_same_data_again_keeps_the_loaded_runtime() {
+    const COUNTING_SOURCE: &str = "//!@ad4m-template-variable\nconst seed = \"<to-be-filled>\";\nlet count = 0;\nexport const name = \"counting\";\nexport async function init() {}\nexport function interactions(a) { return a === \"project\" ? [{ name: \"bump\", label: \"bump\", parameters: [], execute: async () => ++count }] : []; }\n";
+    let controller = setup();
+    let (base, _) = controller
+        .save_language_bundle(COUNTING_SOURCE, None)
+        .unwrap();
+    let seed = Uuid::new_v4().to_string();
+
+    let address = controller
+        .apply_template_local(&base, template_data(&[("seed", seed.as_str())]))
+        .await
+        .unwrap();
+    let url = format!("{address}://project");
+    assert_eq!(interact(&url, "bump", json!({})).await.unwrap(), json!(1));
+
+    let again = controller
+        .apply_template_local(&base, template_data(&[("seed", seed.as_str())]))
+        .await
+        .unwrap();
+    assert_eq!(again, address);
+    assert_eq!(
+        interact(&url, "bump", json!({})).await.unwrap(),
+        json!(2),
+        "the second apply reloaded the runtime"
+    );
+}
+
 /// The source comes from this machine's languages directory; the template data
 /// may hold a secret. The language language must not see a single request —
 /// fetching the source from it (as `language_apply_template_on_source` does)
