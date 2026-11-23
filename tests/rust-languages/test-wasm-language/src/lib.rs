@@ -23,9 +23,15 @@ pub struct TestLang {
 }
 
 impl Language for TestLang {
-    fn name() -> &'static str { "test-wasm-language" }
-    fn version() -> &'static str { "0.1.0" }
-    fn is_public() -> bool { true }
+    fn name() -> &'static str {
+        "test-wasm-language"
+    }
+    fn version() -> &'static str {
+        "0.1.0"
+    }
+    fn is_public() -> bool {
+        true
+    }
 
     async fn init() -> LanguageResult<Self> {
         let storage_dir = rt::language_storage_directory();
@@ -37,7 +43,10 @@ impl Language for TestLang {
             storage_dir, address
         )));
 
-        Ok(Self { storage_dir, address })
+        Ok(Self {
+            storage_dir,
+            address,
+        })
     }
 
     fn teardown(&mut self) -> LanguageResult<()> {
@@ -93,8 +102,8 @@ impl ExpressionCapability for TestLang {
         let addr = format!("test:{}", &addr[..addr.len().min(32)]);
 
         // Persist via the storage KV import.
-        let stored: serde_json::Value = serde_wasm_bindgen::from_value(signed)
-            .unwrap_or(serde_json::Value::Null);
+        let stored: serde_json::Value =
+            serde_wasm_bindgen::from_value(signed).unwrap_or(serde_json::Value::Null);
         rt::storage_put(&addr, &serde_json::to_string(&stored)?)?;
 
         rt::emit_signal(::wasm_bindgen::JsValue::from_str(&format!(
@@ -105,10 +114,10 @@ impl ExpressionCapability for TestLang {
         Ok(addr)
     }
 
-    async fn expression_get(&mut self, address: Address) -> LanguageResult<Option<Expression>> {
+    async fn expression_get(&self, address: Address) -> LanguageResult<Option<Expression>> {
         // "slow:<ms>:<addr>" waits <ms> ms before reading <addr> — the
-        // runtime tests use it to hold the instance's async export lock
-        // across a real await while another call is queued behind it.
+        // runtime tests use it to hold the instance's lock side across a
+        // real await while another call runs beside it.
         let address = if let Some(rest) = address.strip_prefix("slow:") {
             let (ms, real) = rest.split_once(':').unwrap_or((rest, ""));
             let ms: u32 = ms.parse().unwrap_or(0);
@@ -144,7 +153,9 @@ impl ExpressionCapability for TestLang {
         }
         // The KV stub returns a JS string; parse it as an Expression envelope.
         let s: String = raw.as_string().unwrap_or_default();
-        if s.is_empty() { return Ok(None); }
+        if s.is_empty() {
+            return Ok(None);
+        }
         let exp: Expression = match serde_json::from_str(&s) {
             Ok(exp) => exp,
             Err(_) => Expression {
@@ -170,11 +181,14 @@ impl PerspectiveQueryCapability for TestLang {
                 request.kind
             )));
         }
-        Ok(QueryResponse { results: request.params })
+        Ok(QueryResponse {
+            results: request.params,
+        })
     }
 }
 
 ad4m_language! {
     language: TestLang,
     capabilities: [expression, perspective_query],
+    concurrent: [expression_get],
 }

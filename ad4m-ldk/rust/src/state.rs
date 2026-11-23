@@ -1,12 +1,13 @@
 //! Per-module state helper. Languages compiled to WASM are single-instance
 //! per isolate, so a thread_local RefCell is sufficient for per-Language state.
 
-use std::cell::RefCell;
+use std::cell::{Cell, Ref, RefCell, RefMut};
+use std::future::Future;
 use std::rc::Rc;
+use std::task::Waker;
 
 use futures::channel::oneshot;
 use futures::future::{select, Either, FutureExt, Shared};
-use futures::lock::{Mutex, MutexGuard};
 
 use crate::errors::{LanguageError, LanguageResult};
 
@@ -30,7 +31,9 @@ impl<T: 'static> State<T> {
     pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
         self.inner.with(|cell| {
             let borrow = cell.borrow();
-            let v = borrow.as_ref().expect("State not initialized (call init() first)");
+            let v = borrow
+                .as_ref()
+                .expect("State not initialized (call init() first)");
             f(v)
         })
     }
@@ -38,7 +41,9 @@ impl<T: 'static> State<T> {
     pub fn with_mut<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
         self.inner.with(|cell| {
             let mut borrow = cell.borrow_mut();
-            let v = borrow.as_mut().expect("State not initialized (call init() first)");
+            let v = borrow
+                .as_mut()
+                .expect("State not initialized (call init() first)");
             f(v)
         })
     }
@@ -61,8 +66,7 @@ macro_rules! language_state {
             static __LANG_STATE_CELL: std::cell::RefCell<Option<$ty>> =
                 std::cell::RefCell::new(None);
         }
-        static $name: $crate::state::State<$ty> =
-            $crate::state::State::new(&__LANG_STATE_CELL);
+        static $name: $crate::state::State<$ty> = $crate::state::State::new(&__LANG_STATE_CELL);
     };
 }
 
@@ -70,10 +74,15 @@ macro_rules! language_state {
 ///
 /// The runtime can call into a language while an earlier async call
 /// still waits on a host import, so the slot does not assume serial
-/// calls. An async lock guards the instance:
-///   * async calls (`lock`) wait their turn, one after the other;
-///   * sync calls (`try_with`) cannot wait, so they fail with a
-///     "busy" `LanguageError` while an async call holds the lock;
+/// calls. A read/write lock guards the instance, by the export's declared
+/// kind (the `concurrent:` list of `ad4m_language!`):
+///   * concurrent exports share the read side (`read`) — two of them
+///     overlap;
+///   * ordered exports take the write side (`write`) — they run alone,
+///     beside no read and no other write;
+///   * sync `&self` exports (`try_with`) share the read side without
+///     waiting — they answer while only concurrent work is in flight, and
+///     report "busy" only while an ordered call holds the instance;
 ///   * every call before `init()` (or after `teardown()`) fails with a
 ///     "not initialized" `LanguageError`;
 ///   * every call after a panic fails with a "panicked" `LanguageError`
@@ -84,21 +93,232 @@ macro_rules! language_state {
 /// lock never releases it. Without the panic record, every later async
 /// call (and `teardown`) would wait for that lock forever. A call that
 /// already waits for the lock when the panic happens is woken by the
-/// panic signal (see `Instance::lock`).
+/// panic signal (see `Instance::read`/`write`).
 pub struct LanguageSlot<T: 'static> {
-    inner: RefCell<Option<Rc<Mutex<T>>>>,
+    inner: RefCell<Option<Rc<CallLock<T>>>>,
     panicked: RefCell<Option<String>>,
     // Created on the first `get`, because `new` is `const`. `mark_panicked`
-    // sends the panic message on it, which wakes every waiting `lock`.
+    // sends the panic message on it, which wakes every waiting lock.
     panic_tx: RefCell<Option<oneshot::Sender<String>>>,
     panic_rx: RefCell<Option<PanicSignal>>,
 }
 
 type PanicSignal = Shared<oneshot::Receiver<String>>;
 
-/// The instance an async shim locks, with the slot's panic signal.
+/// How an export enters the instance: a `concurrent:`-declared export
+/// shares the read side with other concurrent exports; every other
+/// (ordered) export takes the write side alone.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Access {
+    Read,
+    Write,
+}
+
+/// The per-instance read/write lock. WASM runs on one thread, so counts,
+/// not atomics: `RefCell` borrows provide the `&`/`&mut` the guards hand
+/// out — the counters only decide who may take which borrow.
+///
+/// A waiting writer turns new readers away so an ordered call is not
+/// starved by reads that keep arriving. Waiting is waker-based: a future
+/// that stops waiting (the panic side of `select` won) leaves a dead
+/// waker the next release drains, so only a live waiter can hold the
+/// door against readers.
+struct CallLock<T> {
+    data: RefCell<T>,
+    readers: Cell<usize>,
+    writer: Cell<bool>,
+    read_waiters: RefCell<Vec<Waker>>,
+    write_waiters: RefCell<Vec<Waker>>,
+}
+
+impl<T> CallLock<T> {
+    fn new(data: T) -> Self {
+        Self {
+            data: RefCell::new(data),
+            readers: Cell::new(0),
+            writer: Cell::new(false),
+            read_waiters: RefCell::new(Vec::new()),
+            write_waiters: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn can_read(&self) -> bool {
+        !self.writer.get() && self.write_waiters.borrow().is_empty()
+    }
+
+    fn can_write(&self) -> bool {
+        !self.writer.get() && self.readers.get() == 0
+    }
+
+    fn take_read(&self) -> ReadGuard<'_, T> {
+        self.readers.set(self.readers.get() + 1);
+        ReadGuard {
+            lock: self,
+            inner: self.data.borrow(),
+        }
+    }
+
+    fn take_write(&self) -> WriteGuard<'_, T> {
+        self.writer.set(true);
+        WriteGuard {
+            lock: self,
+            inner: self.data.borrow_mut(),
+        }
+    }
+
+    fn register(waiters: &RefCell<Vec<Waker>>, waker: &Waker) {
+        let mut waiters = waiters.borrow_mut();
+        if !waiters.iter().any(|w| w.will_wake(waker)) {
+            waiters.push(waker.clone());
+        }
+    }
+
+    fn drain(waiters: &RefCell<Vec<Waker>>) -> Vec<Waker> {
+        waiters.borrow_mut().drain(..).collect()
+    }
+
+    fn read(&self) -> impl Future<Output = ReadGuard<'_, T>> + '_ {
+        std::future::poll_fn(move |cx| {
+            if self.can_read() {
+                std::task::Poll::Ready(self.take_read())
+            } else {
+                Self::register(&self.read_waiters, cx.waker());
+                std::task::Poll::Pending
+            }
+        })
+    }
+
+    fn write(&self) -> impl Future<Output = WriteGuard<'_, T>> + '_ {
+        std::future::poll_fn(move |cx| {
+            if self.can_write() {
+                std::task::Poll::Ready(self.take_write())
+            } else {
+                Self::register(&self.write_waiters, cx.waker());
+                std::task::Poll::Pending
+            }
+        })
+    }
+
+    fn try_read(&self) -> Option<ReadGuard<'_, T>> {
+        self.can_read().then(|| self.take_read())
+    }
+
+    /// Wake every waiting reader — all of them may proceed together.
+    fn wake_readers(&self) {
+        for w in Self::drain(&self.read_waiters) {
+            w.wake();
+        }
+    }
+
+    /// Wake every waiting writer: they re-poll and the first takes the
+    /// write side; the rest re-register. Dead wakers (dropped futures)
+    /// drop out.
+    fn wake_writers(&self) {
+        for w in Self::drain(&self.write_waiters) {
+            w.wake();
+        }
+    }
+}
+
+impl<T> Drop for CallLock<T> {
+    fn drop(&mut self) {
+        for w in self.read_waiters.get_mut().drain(..) {
+            w.wake();
+        }
+        for w in self.write_waiters.get_mut().drain(..) {
+            w.wake();
+        }
+    }
+}
+
+/// Shared access to the instance — every concurrent export holds one.
+pub struct ReadGuard<'a, T> {
+    lock: &'a CallLock<T>,
+    inner: Ref<'a, T>,
+}
+
+impl<T> std::ops::Deref for ReadGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<T> Drop for ReadGuard<'_, T> {
+    fn drop(&mut self) {
+        self.lock.readers.set(self.lock.readers.get() - 1);
+        if self.lock.readers.get() == 0 {
+            self.lock.wake_writers();
+        }
+    }
+}
+
+/// Alone access to the instance — every ordered export holds one.
+pub struct WriteGuard<'a, T> {
+    lock: &'a CallLock<T>,
+    inner: RefMut<'a, T>,
+}
+
+impl<T> std::ops::Deref for WriteGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<T> std::ops::DerefMut for WriteGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+}
+
+impl<T> Drop for WriteGuard<'_, T> {
+    fn drop(&mut self) {
+        self.lock.writer.set(false);
+        // Writers first: a queued ordered call should not wait behind
+        // reads that keep arriving.
+        if self.lock.write_waiters.borrow().is_empty() {
+            self.lock.wake_readers();
+        } else {
+            self.lock.wake_writers();
+        }
+    }
+}
+
+/// The guard an export holds across its call: `Read` shares, `Write` is
+/// alone. `Deref` gives `&T` to `&self` methods under either; `DerefMut`
+/// answers `&mut T` only for `Write` — a `&mut` method declared
+/// `concurrent:` reaches it through `Read` and panics with the cause.
+pub enum InstanceGuard<'a, T> {
+    Read(ReadGuard<'a, T>),
+    Write(WriteGuard<'a, T>),
+}
+
+impl<T> std::ops::Deref for InstanceGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        match self {
+            InstanceGuard::Read(g) => g,
+            InstanceGuard::Write(g) => g,
+        }
+    }
+}
+
+impl<T> std::ops::DerefMut for InstanceGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        match self {
+            InstanceGuard::Write(g) => g,
+            InstanceGuard::Read(_) => panic!(
+                "a &mut export cannot be declared `concurrent:` — \
+                 it needs the instance alone"
+            ),
+        }
+    }
+}
+
+/// The instance an export's future locks, with the slot's panic signal.
 pub struct Instance<T: 'static> {
-    mutex: Rc<Mutex<T>>,
+    lock: Rc<CallLock<T>>,
     panicked: PanicSignal,
 }
 
@@ -109,11 +329,21 @@ impl<T: 'static> std::fmt::Debug for Instance<T> {
 }
 
 impl<T: 'static> Instance<T> {
-    /// Wait for the instance lock. Fails with the "panicked" error when
-    /// the module panics while this call waits, because the call that
-    /// panicked never releases the lock.
-    pub async fn lock(&self, op: &str) -> LanguageResult<MutexGuard<'_, T>> {
-        match select(self.mutex.lock(), self.panicked.clone()).await {
+    /// Wait for the instance as `access` says: shared (`Read`) or alone
+    /// (`Write`). Fails with the "panicked" error when the module panics
+    /// while this call waits, because the call that panicked never
+    /// releases the lock.
+    pub async fn acquire(&self, access: Access, op: &str) -> LanguageResult<InstanceGuard<'_, T>> {
+        match access {
+            Access::Read => Ok(InstanceGuard::Read(self.read(op).await?)),
+            Access::Write => Ok(InstanceGuard::Write(self.write(op).await?)),
+        }
+    }
+
+    /// Wait for the shared read side. Concurrent exports hold the
+    /// instance together.
+    pub async fn read(&self, op: &str) -> LanguageResult<ReadGuard<'_, T>> {
+        match select(self.lock.read(), self.panicked.clone()).await {
             Either::Left((guard, _)) => Ok(guard),
             Either::Right((Ok(message), _)) => Err(panicked(op, &message)),
             // The sender only drops with the slot. Keep waiting for the lock.
@@ -121,9 +351,20 @@ impl<T: 'static> Instance<T> {
         }
     }
 
-    /// The lock if no call holds it.
-    pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
-        self.mutex.try_lock()
+    /// Wait for the write side. Ordered exports take the instance alone.
+    pub async fn write(&self, op: &str) -> LanguageResult<WriteGuard<'_, T>> {
+        match select(self.lock.write(), self.panicked.clone()).await {
+            Either::Left((guard, _)) => Ok(guard),
+            Either::Right((Ok(message), _)) => Err(panicked(op, &message)),
+            // The sender only drops with the slot. Keep waiting for the lock.
+            Either::Right((Err(oneshot::Canceled), lock)) => Ok(lock.await),
+        }
+    }
+
+    /// The read side without waiting, for a sync export — `None` while an
+    /// ordered call holds the instance.
+    pub fn try_read(&self) -> Option<ReadGuard<'_, T>> {
+        self.lock.try_read()
     }
 }
 
@@ -146,7 +387,7 @@ impl<T: 'static> LanguageSlot<T> {
     /// Store a new instance. A call that still holds the old instance
     /// finishes against the old instance.
     pub fn set(&self, value: T) {
-        *self.inner.borrow_mut() = Some(Rc::new(Mutex::new(value)));
+        *self.inner.borrow_mut() = Some(Rc::new(CallLock::new(value)));
     }
 
     /// The shared instance, or a "panicked" / "not initialized" error.
@@ -154,13 +395,13 @@ impl<T: 'static> LanguageSlot<T> {
         if let Some(message) = self.panic_message() {
             return Err(panicked(op, &message));
         }
-        let mutex = self
+        let lock = self
             .inner
             .borrow()
             .clone()
             .ok_or_else(|| not_initialized(op))?;
         Ok(Instance {
-            mutex,
+            lock,
             panicked: self.panic_signal(),
         })
     }
@@ -176,24 +417,25 @@ impl<T: 'static> LanguageSlot<T> {
             .clone()
     }
 
-    /// Run a sync call against the instance. Fails with a "busy" error
-    /// when an async call holds the instance.
-    pub fn try_with<R>(&self, op: &str, f: impl FnOnce(&mut T) -> R) -> LanguageResult<R> {
+    /// Run a sync `&self` call against the shared read side. Fails with a
+    /// "busy" error only while an ordered call holds the instance — it
+    /// answers beside concurrent async work.
+    pub fn try_with<R>(&self, op: &str, f: impl FnOnce(&T) -> R) -> LanguageResult<R> {
         let instance = self.get(op)?;
-        let mut guard = instance.try_lock().ok_or_else(|| {
+        let guard = instance.try_read().ok_or_else(|| {
             LanguageError::transient(format!(
-                "Language busy: {op} called while an async call is in progress"
+                "Language busy: {op} called while an ordered call is in progress"
             ))
         })?;
-        Ok(f(&mut guard))
+        Ok(f(&guard))
     }
 
     /// Remove the instance from the slot. Later calls fail with "not
     /// initialized". Returns `None` when the slot is empty.
     pub fn take(&self) -> Option<Instance<T>> {
-        let mutex = self.inner.borrow_mut().take()?;
+        let lock = self.inner.borrow_mut().take()?;
         Some(Instance {
-            mutex,
+            lock,
             panicked: self.panic_signal(),
         })
     }
@@ -266,7 +508,15 @@ mod tests {
 
     #[derive(Debug)]
     struct Counter {
-        log: Vec<&'static str>,
+        log: RefCell<Vec<&'static str>>,
+    }
+
+    impl Counter {
+        fn new() -> Self {
+            Self {
+                log: RefCell::new(vec![]),
+            }
+        }
     }
 
     #[test]
@@ -280,71 +530,129 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_async_calls_run_one_after_the_other() {
+    fn ordered_calls_run_one_after_the_other() {
         let slot = LanguageSlot::new();
-        slot.set(Counter { log: vec![] });
+        slot.set(Counter::new());
         let (tx, rx) = oneshot::channel::<()>();
 
-        // First call holds the lock across an await that only completes
-        // after the second call has started waiting.
+        // First call holds the write side across an await that only
+        // completes after the second call has started waiting.
         let first = async {
             let m = slot.get("first").unwrap();
-            let mut g = m.lock("first").await.unwrap();
-            g.log.push("first:start");
+            let g = m.write("first").await.unwrap();
+            g.log.borrow_mut().push("first:start");
             rx.await.unwrap();
-            g.log.push("first:end");
+            g.log.borrow_mut().push("first:end");
         };
         let second = async {
             let m = slot.get("second").unwrap();
             tx.send(()).unwrap();
-            let mut g = m.lock("second").await.unwrap();
-            g.log.push("second");
+            let g = m.write("second").await.unwrap();
+            g.log.borrow_mut().push("second");
         };
         block_on(join(first, second));
 
         let m = slot.get("check").unwrap();
-        let g = m.try_lock().unwrap();
-        assert_eq!(g.log, vec!["first:start", "first:end", "second"]);
+        let g = m.try_read().unwrap();
+        assert_eq!(*g.log.borrow(), vec!["first:start", "first:end", "second"]);
     }
 
     #[test]
-    fn sync_call_while_async_call_holds_lock_returns_busy() {
+    fn concurrent_calls_share_the_instance() {
         let slot = LanguageSlot::new();
-        slot.set(Counter { log: vec![] });
-        let m = slot.get("async").unwrap();
-        let guard = block_on(m.lock("async")).unwrap();
+        slot.set(Counter::new());
+        let (tx, rx) = oneshot::channel::<()>();
 
-        let e = slot.try_with("perspectiveCommit", |l| l.log.push("sync")).unwrap_err();
+        // The first reader awaits inside its read; the second reader
+        // completes while the first still holds the instance.
+        let first = async {
+            let m = slot.get("first").unwrap();
+            let g = m.read("first").await.unwrap();
+            g.log.borrow_mut().push("first:start");
+            rx.await.unwrap();
+            g.log.borrow_mut().push("first:end");
+        };
+        let second = async {
+            let m = slot.get("second").unwrap();
+            tx.send(()).unwrap();
+            let g = m.read("second").await.unwrap();
+            g.log.borrow_mut().push("second");
+        };
+        block_on(join(first, second));
+
+        let m = slot.get("check").unwrap();
+        let g = m.try_read().unwrap();
+        assert_eq!(*g.log.borrow(), vec!["first:start", "second", "first:end"]);
+    }
+
+    #[test]
+    fn a_read_does_not_overtake_a_waiting_write() {
+        let slot = LanguageSlot::new();
+        slot.set(Counter::new());
+        let first = slot.get("first").unwrap();
+        let second = slot.get("second").unwrap();
+        let mut cx = Context::from_waker(noop_waker_ref());
+
+        let held = block_on(first.read("first")).unwrap();
+        // A queued writer turns new readers away.
+        let mut write = Box::pin(second.write("ordered"));
+        assert!(write.as_mut().poll(&mut cx).is_pending());
+        assert!(second.try_read().is_none());
+
+        drop(held);
+        assert!(write.as_mut().poll(&mut cx).is_ready());
+    }
+
+    #[test]
+    fn sync_call_answers_beside_concurrent_work_and_is_busy_beside_a_write() {
+        let slot = LanguageSlot::new();
+        slot.set(Counter::new());
+        let m = slot.get("async").unwrap();
+        let read = block_on(m.read("concurrent")).unwrap();
+
+        // A sync &self export answers while only concurrent work is in flight.
+        slot.try_with("interactions", |l| l.log.borrow_mut().push("sync"))
+            .unwrap();
+        drop(read);
+
+        // While an ordered call holds the instance it still reports busy.
+        let write = block_on(m.write("ordered")).unwrap();
+        let e = slot
+            .try_with("interactions", |_| ())
+            .expect_err("sync export must not share the instance with a write");
         assert!(matches!(e.code, ErrorCode::Transient));
         assert!(e.message.contains("busy"));
+        drop(write);
 
-        drop(guard);
-        slot.try_with("perspectiveCommit", |l| l.log.push("sync")).unwrap();
-        assert_eq!(m.try_lock().unwrap().log, vec!["sync"]);
+        assert_eq!(*m.try_read().unwrap().log.borrow(), vec!["sync"]);
     }
 
     #[test]
     fn take_empties_slot_and_waits_for_in_flight_call() {
         let slot = LanguageSlot::new();
-        slot.set(Counter { log: vec![] });
+        slot.set(Counter::new());
         let held = slot.get("async").unwrap();
-        let guard = block_on(held.lock("async")).unwrap();
+        let guard = block_on(held.write("async")).unwrap();
 
         let taken = slot.take().expect("instance");
         assert!(!slot.is_set());
         assert!(slot.get("expressionGet").is_err());
-        assert!(taken.try_lock().is_none());
+        assert!(taken.try_read().is_none());
         drop(guard);
-        assert!(block_on(taken.lock("teardown")).unwrap().log.is_empty());
+        assert!(block_on(taken.write("teardown"))
+            .unwrap()
+            .log
+            .borrow()
+            .is_empty());
     }
 
     #[test]
     fn calls_after_a_panic_error_instead_of_waiting_for_the_lock() {
         let slot = LanguageSlot::new();
-        slot.set(Counter { log: vec![] });
+        slot.set(Counter::new());
         // A call that panicked in WASM never releases its guard.
         let held = slot.get("expressionGet").unwrap();
-        std::mem::forget(block_on(held.lock("expressionGet")).unwrap());
+        std::mem::forget(block_on(held.write("expressionGet")).unwrap());
         slot.mark_panicked("boom at lib.rs:1");
         slot.mark_panicked("a later panic");
 
@@ -369,16 +677,16 @@ mod tests {
     #[test]
     fn a_call_waiting_for_the_lock_fails_when_the_holder_panics() {
         let slot = LanguageSlot::new();
-        slot.set(Counter { log: vec![] });
+        slot.set(Counter::new());
         let held = slot.get("expressionCreate").unwrap();
-        let guard = block_on(held.lock("expressionCreate")).unwrap();
+        let guard = block_on(held.write("expressionCreate")).unwrap();
 
         // Both wait for the lock before the panic: a shim call, and a
         // teardown that has already taken the instance from the slot.
         let waiting = slot.get("expressionGet").unwrap();
-        let mut call = Box::pin(waiting.lock("expressionGet"));
+        let mut call = Box::pin(waiting.write("expressionGet"));
         let taken = slot.take().expect("instance");
-        let mut teardown = Box::pin(taken.lock("teardown"));
+        let mut teardown = Box::pin(taken.write("teardown"));
         let mut cx = Context::from_waker(noop_waker_ref());
         assert!(call.as_mut().poll(&mut cx).is_pending());
         assert!(teardown.as_mut().poll(&mut cx).is_pending());
@@ -389,6 +697,24 @@ mod tests {
 
         assert_refused_after_panic("expressionGet", call.as_mut().poll(&mut cx));
         assert_refused_after_panic("teardown", teardown.as_mut().poll(&mut cx));
+    }
+
+    #[test]
+    fn a_waiting_reader_fails_when_the_holder_panics() {
+        let slot = LanguageSlot::new();
+        slot.set(Counter::new());
+        let held = slot.get("expressionCreate").unwrap();
+        let guard = block_on(held.write("expressionCreate")).unwrap();
+
+        let waiting = slot.get("expressionGet").unwrap();
+        let mut call = Box::pin(waiting.read("expressionGet"));
+        let mut cx = Context::from_waker(noop_waker_ref());
+        assert!(call.as_mut().poll(&mut cx).is_pending());
+
+        std::mem::forget(guard);
+        slot.mark_panicked("boom at lib.rs:7");
+
+        assert_refused_after_panic("expressionGet", call.as_mut().poll(&mut cx));
     }
 
     fn assert_refused_after_panic<G>(op: &str, polled: Poll<LanguageResult<G>>) {
@@ -418,7 +744,7 @@ mod tests {
 
     #[test]
     fn panic_marker_records_the_panic_message() {
-        HOOKED.with(|slot| slot.set(Counter { log: vec![] }));
+        HOOKED.with(|slot| slot.set(Counter::new()));
         install_panic_marker(mark_hooked);
         let r = std::panic::catch_unwind(|| panic!("probe panic in a language method"));
         assert!(r.is_err());

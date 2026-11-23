@@ -106,17 +106,17 @@ impl ExpressionCapability for CentralizedAgentLanguage {
         agents::create(&self.store, &HostAgent, content).await
     }
 
-    async fn expression_get(&mut self, address: Address) -> LanguageResult<Option<Expression>> {
+    async fn expression_get(&self, address: Address) -> LanguageResult<Option<Expression>> {
         agents::get(&self.store, &address, HostAgent.now_ms() / 1000).await
     }
 }
 
 impl IdentityCapability for CentralizedAgentLanguage {
-    async fn identity_log(&mut self, did: String, from: u64) -> LanguageResult<Option<LogPage>> {
+    async fn identity_log(&self, did: String, from: u64) -> LanguageResult<Option<LogPage>> {
         self.store.log(&did, from).await
     }
 
-    async fn identity_head(&mut self, did: String) -> LanguageResult<Option<SignedHead>> {
+    async fn identity_head(&self, did: String) -> LanguageResult<Option<SignedHead>> {
         self.store.head(&did).await
     }
 
@@ -129,14 +129,14 @@ impl IdentityCapability for CentralizedAgentLanguage {
     }
 
     async fn identity_key_owner(
-        &mut self,
+        &self,
         multikey: String,
         wait_s: u8,
     ) -> LanguageResult<Option<KeyIndexEntry>> {
         self.store.key_owner(&multikey, wait_s).await
     }
 
-    async fn identity_pow_params(&mut self) -> LanguageResult<PowParams> {
+    async fn identity_pow_params(&self) -> LanguageResult<PowParams> {
         self.store.pow_params().await
     }
 
@@ -162,7 +162,7 @@ impl IdentityCapability for CentralizedAgentLanguage {
     }
 
     async fn identity_list_offers(
-        &mut self,
+        &self,
         did: String,
         req: SignedRequest,
         wait_s: u8,
@@ -189,7 +189,7 @@ impl IdentityCapability for CentralizedAgentLanguage {
     }
 
     async fn identity_offer_state(
-        &mut self,
+        &self,
         did: String,
         offer_id: String,
         key: String,
@@ -203,4 +203,8 @@ ad4m_language! {
     language: CentralizedAgentLanguage,
     capabilities: [expression, identity],
     holochain_signal: false,
+    concurrent: [
+        expression_get, identity_log, identity_head, identity_key_owner,
+        identity_pow_params, identity_list_offers, identity_offer_state,
+    ],
 }

@@ -25,7 +25,7 @@ impl ExpressionCapability for Full {
     async fn expression_create(&mut self, _content: serde_json::Value) -> LanguageResult<Address> {
         Ok("addr".into())
     }
-    async fn expression_get(&mut self, _address: Address) -> LanguageResult<Option<Expression>> {
+    async fn expression_get(&self, _address: Address) -> LanguageResult<Option<Expression>> {
         Ok(None)
     }
 }
@@ -61,7 +61,7 @@ impl PeersCapability for Full {
     fn peers_set_local(&mut self, _agents: Vec<Did>) -> LanguageResult<()> {
         Ok(())
     }
-    fn peers_remote(&mut self) -> LanguageResult<Vec<Did>> {
+    fn peers_remote(&self) -> LanguageResult<Vec<Did>> {
         Ok(Vec::new())
     }
 }
@@ -70,18 +70,18 @@ impl TelepresenceCapability for Full {
     fn telepresence_set_online_status(&mut self, _status: serde_json::Value) -> LanguageResult<()> {
         Ok(())
     }
-    fn telepresence_get_online_agents(&mut self) -> LanguageResult<serde_json::Value> {
+    fn telepresence_get_online_agents(&self) -> LanguageResult<serde_json::Value> {
         Ok(serde_json::Value::Null)
     }
     fn telepresence_send_signal(
-        &mut self,
+        &self,
         _remote_did: Did,
         _payload: serde_json::Value,
     ) -> LanguageResult<serde_json::Value> {
         Ok(serde_json::Value::Null)
     }
     fn telepresence_send_broadcast(
-        &mut self,
+        &self,
         _payload: serde_json::Value,
     ) -> LanguageResult<serde_json::Value> {
         Ok(serde_json::Value::Null)
@@ -89,7 +89,7 @@ impl TelepresenceCapability for Full {
 }
 
 impl LanguageSourceCapability for Full {
-    async fn language_get_source(&mut self, _address: Address) -> LanguageResult<String> {
+    async fn language_get_source(&self, _address: Address) -> LanguageResult<String> {
         Ok(String::new())
     }
 }

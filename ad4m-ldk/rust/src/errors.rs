@@ -21,19 +21,34 @@ pub struct LanguageError {
 
 impl LanguageError {
     pub fn not_found(msg: impl Into<String>) -> Self {
-        Self { code: ErrorCode::NotFound, message: msg.into() }
+        Self {
+            code: ErrorCode::NotFound,
+            message: msg.into(),
+        }
     }
     pub fn invalid_input(msg: impl Into<String>) -> Self {
-        Self { code: ErrorCode::InvalidInput, message: msg.into() }
+        Self {
+            code: ErrorCode::InvalidInput,
+            message: msg.into(),
+        }
     }
     pub fn permission_denied(msg: impl Into<String>) -> Self {
-        Self { code: ErrorCode::PermissionDenied, message: msg.into() }
+        Self {
+            code: ErrorCode::PermissionDenied,
+            message: msg.into(),
+        }
     }
     pub fn transient(msg: impl Into<String>) -> Self {
-        Self { code: ErrorCode::Transient, message: msg.into() }
+        Self {
+            code: ErrorCode::Transient,
+            message: msg.into(),
+        }
     }
     pub fn internal(msg: impl Into<String>) -> Self {
-        Self { code: ErrorCode::Internal, message: msg.into() }
+        Self {
+            code: ErrorCode::Internal,
+            message: msg.into(),
+        }
     }
 }
 
