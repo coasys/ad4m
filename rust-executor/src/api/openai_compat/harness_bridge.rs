@@ -142,9 +142,10 @@ const ELIDED_TOOL_RESULT_STUB: &str = "[elided: this tool result did not fit the
 /// do first, exactly when a long history pushed the list over budget.
 ///
 /// Two phases:
-///   1. Drop entries between the system prefix and the last user message,
-///      oldest-first; dropping an assistant `tool_calls` turn drains the
-///      result messages it orphaned.
+///   1. Between the system prefix and the last user message, oldest-first:
+///      plain turns drop; a tool group's results are cut first (a prefix,
+///      or the elision note) so a call the list still shows keeps its
+///      result. The group drops only when even that cut does not fit.
 ///   2. Still over with nothing droppable left (the tail after the
 ///      question is heavier than the budget): shrink `tool` results —
 ///      the only unbounded entries. Oldest-first, each gets the space the
@@ -189,6 +190,33 @@ fn trim_messages_to_budget(messages: &[Value], budget_bytes: usize, model_id: &s
         .rposition(|(m, _)| m["role"] == "user")
         .unwrap_or_else(|| out.len().saturating_sub(1));
     while total > budget_bytes && last_user > keep {
+        // A tool group at the drop point: cut its results before deleting
+        // the call. A call that stays keeps a result. The group goes only
+        // when the cut still does not fit.
+        if is_tool_call_turn(&out[keep].0) {
+            let mut j = keep + 1;
+            while j < out.len()
+                && j < last_user
+                && out[j].0["role"] == "tool"
+                && total > budget_bytes
+            {
+                let before = out[j].1;
+                let room = budget_bytes.saturating_sub(total - before);
+                let shrunk = shrink_tool_result(&mut out[j].0, room);
+                if shrunk != before {
+                    log::debug!(
+                        "harness_bridge: context_budget cut tool result {} from {before} to {shrunk} bytes to fit the {budget_bytes}B budget for {model_id}",
+                        out[j].0["tool_call_id"].as_str().unwrap_or("")
+                    );
+                }
+                total = total - before + shrunk;
+                out[j].1 = shrunk;
+                j += 1;
+            }
+            if total <= budget_bytes {
+                break;
+            }
+        }
         total -= out.remove(keep).1;
         last_user -= 1;
         // A dropped assistant `tool_calls` turn leaves its results with no
@@ -254,6 +282,13 @@ fn escaped_prefix_len(s: &str, escaped_budget: usize) -> usize {
         end = i + ch.len_utf8();
     }
     end
+}
+
+fn is_tool_call_turn(m: &Value) -> bool {
+    m["role"] == "assistant"
+        && m.get("tool_calls")
+            .and_then(|calls| calls.as_array())
+            .is_some_and(|calls| !calls.is_empty())
 }
 
 /// Shrink one `tool` message's content until the serialized message is at
@@ -1717,6 +1752,21 @@ mod injected_path_dispatch_tests {
             .rposition(|m| m["role"] == "user")
             .unwrap_or_else(|| out.len().saturating_sub(1));
         while size(&out) > budget_bytes && last_user > keep {
+            if is_tool_call_turn(&out[keep]) {
+                let mut j = keep + 1;
+                while j < out.len()
+                    && j < last_user
+                    && out[j]["role"] == "tool"
+                    && size(&out) > budget_bytes
+                {
+                    let room = budget_bytes.saturating_sub(size(&out) - out[j].to_string().len());
+                    shrink_tool_result(&mut out[j], room);
+                    j += 1;
+                }
+                if size(&out) <= budget_bytes {
+                    break;
+                }
+            }
             out.remove(keep);
             last_user -= 1;
             while last_user > keep && out.get(keep).is_some_and(|m| m["role"] == "tool") {

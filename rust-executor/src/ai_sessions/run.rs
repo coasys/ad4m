@@ -30,9 +30,15 @@ use crate::ai_service::harness::{run_with_tools, CompletionSource, CreditGate, H
 use crate::types::ModelType;
 
 /// How many transcript entries a turn hands the model, and the most they may take.
-/// TODO(history-compaction): summarise what falls off instead of dropping it.
+/// A tool result that does not fit is cut, oldest first (a prefix, then a note
+/// naming this limit). Plain turns older than that still fall off.
 const HISTORY_MAX_MESSAGES: u32 = 200;
 pub(crate) const HISTORY_MAX_BYTES: usize = 128 * 1024;
+
+/// What the model reads when [`HISTORY_MAX_BYTES`] cannot keep any of a tool
+/// result's body. The transcript row still holds the result.
+const HISTORY_OMITTED_RESULT: &str = "[omitted: this tool result did not fit HISTORY_MAX_BYTES — \
+     the transcript row kept it; call the tool again with a narrower query]";
 
 /// The tools an AI session never sees, of the static surface: each would mint a token
 /// or replace the session the turn acts within (`store_token_and_respond` rewrites the
@@ -97,11 +103,13 @@ pub(crate) fn system_prompt(session: &AiSession) -> String {
 
 /// The transcript a new turn of `session` continues: the last [`HISTORY_MAX_MESSAGES`]
 /// entries, tool calls and their results included, the running assistant row the turn is
-/// writing left out. Capped by [`HISTORY_MAX_BYTES`] too — oldest groups fall off first,
-/// but never the last user message: that is the question the turn answers, and a chat
-/// template that cannot find it fails the whole request. Each stored tool result is
-/// capped to `tool_result_max_bytes` as well — the row keeps it whole, the model reads
-/// the same capped prefix it was fed when the call ran.
+/// writing left out. Capped by [`HISTORY_MAX_BYTES`] too — oldest plain turns fall off
+/// first, then the oldest tool results are cut (a prefix, or a note naming the limit
+/// when no prefix fits). A call the transcript still shows keeps its result. Never the
+/// last user message: that is the question the turn answers, and a chat template that
+/// cannot find it fails the whole request. Each stored tool result is capped to
+/// `tool_result_max_bytes` as well — the row keeps it whole, the model reads the same
+/// capped prefix it was fed when the call ran. A debug line names whichever limit cut.
 ///
 /// A turn's rows are in the order `service::send` and the observer write them: the
 /// person's message, the assistant row (the answer lands on it when the turn ends), then
@@ -116,42 +124,50 @@ pub(crate) fn history(messages: Vec<AiSessionMessage>, tool_result_max_bytes: us
     // The answer of the turn being read, held back until the steps that follow its row
     // are out.
     let mut answer: Option<Value> = None;
-    let flush =
-        |out: &mut Vec<Value>, group: &mut Vec<&AiSessionMessage>, answer: &mut Option<Value>| {
-            if group.is_empty() {
-                out.extend(answer.take());
-                return;
-            }
-            let calls: Vec<Value> = group
-                .iter()
-                .map(|step| {
-                    json!({
-                        "id": format!("call_{}", step.id),
-                        "type": "function",
-                        "function": {
-                            "name": step.content["name"],
-                            "arguments": step.content["arguments"].to_string(),
-                        },
-                    })
-                })
-                .collect();
-            out.push(json!({
-                "role": "assistant",
-                "content": null,
-                "tool_calls": calls,
-            }));
-            for step in group.drain(..) {
-                out.push(json!({
-                    "role": "tool",
-                    "tool_call_id": format!("call_{}", step.id),
-                    "content": crate::ai_service::harness::cap_tool_result(
-                        &step.tool_result_text(),
-                        tool_result_max_bytes,
-                    ),
-                }));
-            }
+    let flush = |out: &mut Vec<Value>,
+                 group: &mut Vec<&AiSessionMessage>,
+                 answer: &mut Option<Value>| {
+        if group.is_empty() {
             out.extend(answer.take());
-        };
+            return;
+        }
+        let calls: Vec<Value> = group
+            .iter()
+            .map(|step| {
+                json!({
+                    "id": format!("call_{}", step.id),
+                    "type": "function",
+                    "function": {
+                        "name": step.content["name"],
+                        "arguments": step.content["arguments"].to_string(),
+                    },
+                })
+            })
+            .collect();
+        out.push(json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": calls,
+        }));
+        for step in group.drain(..) {
+            let raw = step.tool_result_text();
+            let capped = crate::ai_service::harness::cap_tool_result(&raw, tool_result_max_bytes);
+            if capped.len() < raw.len() {
+                log::debug!(
+                    "ai session history: tool_result_max_bytes cut call_{} to {} of {} bytes",
+                    step.id,
+                    capped.len(),
+                    raw.len()
+                );
+            }
+            out.push(json!({
+                "role": "tool",
+                "tool_call_id": format!("call_{}", step.id),
+                "content": capped,
+            }));
+        }
+        out.extend(answer.take());
+    };
     for message in &messages {
         match message.role {
             AiSessionMessageRole::User => {
@@ -184,33 +200,164 @@ pub(crate) fn history(messages: Vec<AiSessionMessage>, tool_result_max_bytes: us
     }
     flush(&mut out, &mut tool_group, &mut answer);
 
-    // Cap by size: drop the oldest entries until the transcript fits — but
-    // never the last user message. That is the question the new turn is
-    // answering; a request that loses it comes back from the model server
-    // as `no user query found in messages` (it would drop the oldest
-    // messages itself to fit `num_ctx` — this does it first, on purpose).
-    let mut last_user = out
-        .iter()
-        .rposition(|m| m["role"] == "user")
-        .unwrap_or(out.len().saturating_sub(1));
-    while serde_json::to_string(&out).map(|s| s.len()).unwrap_or(0) > HISTORY_MAX_BYTES
-        && last_user > 0
-    {
-        out.remove(0);
-        last_user -= 1;
-        // A dropped assistant tool_calls turn orphans its result messages:
-        // they now lead `out` with no call to answer.
-        while last_user > 0 && out.first().is_some_and(|m| m["role"] == "tool") {
-            out.remove(0);
-            last_user -= 1;
+    fit_history_budget(&mut out);
+    out
+}
+
+/// The longest byte prefix of `s` inside `max_bytes`, on a char boundary.
+fn on_char_boundary(s: &str, max_bytes: usize) -> usize {
+    let mut n = max_bytes.min(s.len());
+    while n > 0 && !s.is_char_boundary(n) {
+        n -= 1;
+    }
+    n
+}
+
+fn history_cut_note(kept: usize, total: usize) -> String {
+    format!(
+        "\n[truncated: {kept} of {total} bytes shown — cut by HISTORY_MAX_BYTES; \
+         call the tool again with a narrower query for the rest]"
+    )
+}
+
+/// Cut `raw` so the result is at most `max_bytes`, note included. A budget
+/// that cannot hold the note becomes [`HISTORY_OMITTED_RESULT`].
+fn cut_for_history_budget(raw: &str, max_bytes: usize) -> String {
+    if raw.len() <= max_bytes {
+        return raw.to_string();
+    }
+    let room = max_bytes.saturating_sub(history_cut_note(max_bytes, raw.len()).len());
+    if room == 0 {
+        return HISTORY_OMITTED_RESULT.to_string();
+    }
+    let kept = on_char_boundary(raw, room);
+    if kept == 0 {
+        return HISTORY_OMITTED_RESULT.to_string();
+    }
+    format!("{}{}", &raw[..kept], history_cut_note(kept, raw.len()))
+}
+
+fn transcript_bytes(out: &[Value]) -> usize {
+    serde_json::to_string(out).map(|s| s.len()).unwrap_or(0)
+}
+
+fn is_tool_calls_message(m: &Value) -> bool {
+    m["role"] == "assistant"
+        && m.get("tool_calls")
+            .and_then(|calls| calls.as_array())
+            .is_some_and(|calls| !calls.is_empty())
+}
+
+/// Shorten the tool result at `idx` until the transcript is within
+/// [`HISTORY_MAX_BYTES`], or to [`HISTORY_OMITTED_RESULT`] when no prefix
+/// fits. `false` when this result cannot get any shorter.
+fn shrink_history_result(out: &mut [Value], idx: usize) -> bool {
+    let raw = out[idx]["content"].as_str().unwrap_or("").to_string();
+    if raw == HISTORY_OMITTED_RESULT {
+        return false;
+    }
+    let over = transcript_bytes(out).saturating_sub(HISTORY_MAX_BYTES);
+    if over == 0 {
+        return false;
+    }
+    let room = raw.len().saturating_sub(over);
+    let mut next = if room == 0 {
+        HISTORY_OMITTED_RESULT.to_string()
+    } else {
+        cut_for_history_budget(&raw, room)
+    };
+    if next.len() >= raw.len() {
+        if HISTORY_OMITTED_RESULT.len() < raw.len() {
+            next = HISTORY_OMITTED_RESULT.to_string();
+        } else {
+            return false;
         }
     }
-    // The cut can still fall inside a tool group and leave results whose
-    // call went with it. A `tool` message that answers no call is one a
-    // provider refuses the whole request for: those go too.
+    let call_id = out[idx]["tool_call_id"].as_str().unwrap_or("").to_string();
+    log::debug!(
+        "ai session history: HISTORY_MAX_BYTES cut tool result {call_id} to {} of {} bytes",
+        next.len(),
+        raw.len()
+    );
+    out[idx]["content"] = Value::String(next);
+    true
+}
+
+/// The oldest not-yet-omitted result of the tool group at the front.
+fn shrink_front_group_result(out: &mut [Value]) -> bool {
+    let mut i = 1;
+    while i < out.len() && out[i]["role"] == "tool" {
+        if out[i]["content"].as_str() != Some(HISTORY_OMITTED_RESULT) {
+            return shrink_history_result(out, i);
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Fit `out` in [`HISTORY_MAX_BYTES`]. Oldest plain turns fall off first.
+/// A tool result is cut before its call is dropped, so a call the transcript
+/// still shows keeps a result — a prefix, or a note naming this limit.
+/// The last user message stays: it is the question this turn answers.
+fn fit_history_budget(out: &mut Vec<Value>) {
+    if transcript_bytes(out) <= HISTORY_MAX_BYTES {
+        return;
+    }
+    log::debug!(
+        "ai session history: transcript is {} bytes, over HISTORY_MAX_BYTES ({HISTORY_MAX_BYTES}); cutting oldest-first",
+        transcript_bytes(out)
+    );
+
+    let mut cuts = 0;
+    while transcript_bytes(out) > HISTORY_MAX_BYTES {
+        let last_user = out.iter().rposition(|m| m["role"] == "user").unwrap_or(0);
+        if last_user == 0 {
+            break;
+        }
+        if is_tool_calls_message(&out[0]) {
+            if cuts < 64 && shrink_front_group_result(out) {
+                cuts += 1;
+                continue;
+            }
+            log::debug!(
+                "ai session history: HISTORY_MAX_BYTES dropped the oldest tool group; a cut of its result still did not fit"
+            );
+            out.remove(0);
+            while out.first().is_some_and(|m| m["role"] == "tool") {
+                out.remove(0);
+            }
+            continue;
+        }
+        if out[0]["role"] == "tool" {
+            // A result whose call is already gone. A provider refuses it.
+            out.remove(0);
+            continue;
+        }
+        out.remove(0);
+    }
+
+    // A result written after the question (this turn's own step) can still
+    // push the transcript over. Cut it; do not drop the question to reach it.
+    let mut tail_cuts = 0;
+    while transcript_bytes(out) > HISTORY_MAX_BYTES && tail_cuts < 64 {
+        let Some(idx) = out.iter().position(|m| {
+            m["role"] == "tool" && m["content"].as_str() != Some(HISTORY_OMITTED_RESULT)
+        }) else {
+            break;
+        };
+        if !shrink_history_result(out, idx) {
+            break;
+        }
+        tail_cuts += 1;
+    }
+
     let orphans = out.iter().take_while(|m| m["role"] == "tool").count();
+    if orphans > 0 {
+        log::debug!(
+            "ai session history: HISTORY_MAX_BYTES dropped {orphans} tool result(s) whose call was no longer in the transcript"
+        );
+    }
     out.drain(..orphans);
-    out
 }
 
 /// A credit gate that also checks the caller's session still holds — a turn whose person
@@ -569,9 +716,10 @@ mod tests {
         assert_eq!(history[3]["content"], "error: the turn ran out of time");
     }
 
-    // The size cap drops the oldest entries; when the cut falls inside a tool group, the
-    // results left without their call go too — a provider refuses a request that carries a
-    // `tool` message answering no call.
+    // The size cap cuts the oldest tool result instead of deleting the group.
+    // A result whose call the transcript still shows stays (a prefix, or a
+    // note). A provider refuses a `tool` message that answers no call, so
+    // the two sides of the pair stay together.
     #[test]
     fn a_cut_inside_a_tool_group_leaves_no_result_without_its_call() {
         let step = |id: &str, seq: i64, bytes: usize| {
@@ -610,23 +758,48 @@ mod tests {
             ),
         ];
         let history = history(messages, usize::MAX);
+        assert!(
+            transcript_bytes(&history) <= HISTORY_MAX_BYTES,
+            "{} bytes",
+            transcript_bytes(&history)
+        );
         let called: Vec<&str> = history
             .iter()
             .filter_map(|m| m.get("tool_calls"))
             .flat_map(|calls| calls.as_array().unwrap())
             .map(|call| call["id"].as_str().unwrap())
             .collect();
-        for result in history.iter().filter(|m| m["role"] == "tool") {
-            let id = result["tool_call_id"].as_str().unwrap();
-            assert!(called.contains(&id), "{id} answers no call in the history");
+        let answered: Vec<&str> = history
+            .iter()
+            .filter(|m| m["role"] == "tool")
+            .map(|m| m["tool_call_id"].as_str().unwrap())
+            .collect();
+        for id in &answered {
+            assert!(called.contains(id), "{id} answers no call in the history");
         }
-        assert_eq!(
-            history,
-            vec![
-                json!({"role": "assistant", "content": "read"}),
-                json!({"role": "user", "content": "and now?"}),
-            ]
+        for id in &called {
+            assert!(
+                answered.contains(id),
+                "{id} is still on the transcript with no result"
+            );
+        }
+        assert_eq!(called, ["call_t1", "call_t2"]);
+        // Oldest result is the one cut; the newer one still fits whole.
+        let older = history
+            .iter()
+            .find(|m| m["tool_call_id"] == "call_t1")
+            .unwrap();
+        let older_text = older["content"].as_str().unwrap();
+        assert!(
+            older_text.contains("HISTORY_MAX_BYTES"),
+            "the oldest result was dropped instead of cut: {older_text:.160}"
         );
+        let newer = history
+            .iter()
+            .find(|m| m["tool_call_id"] == "call_t2")
+            .unwrap();
+        assert_eq!(newer["content"], "x".repeat(8 * 1024));
+        assert!(history.iter().any(|m| m["content"] == "and now?"));
     }
 
     // A stored result bigger than the model's share of the window replays
@@ -717,6 +890,10 @@ mod tests {
                 .iter()
                 .any(|m| m["role"] == "user" && m["content"] == "the question being answered"),
             "the question the new turn answers fell off: {history:?}"
+        );
+        assert!(
+            history.iter().any(|m| m["role"] == "tool"),
+            "the result after the question was dropped instead of cut: {history:?}"
         );
     }
 }
