@@ -707,9 +707,8 @@ jobs:
   # Trial, not a required check: the same suite under cargo-nextest, one process per
   # test, in parallel (.config/nextest.toml, profile `ci`). On one box it took about 30 s
   # against about 6 min for rust-tests. It runs beside rust-tests for a few days so the
-  # two can be compared on these runners; rust-tests stays the gate. The profile leaves
-  # out 18 tests that need a global another test set up (they run in rust-tests) and
-  # nextest runs no doc-tests (rust-executor has 9, all ignored). The JUnit report gives
+  # two can be compared on these runners; rust-tests stays the gate. nextest runs no
+  # doc-tests (rust-executor has 9, all ignored). The JUnit report gives
   # per-test times in the job's Tests tab. nextest is a pinned release, checked against
   # its SHA-256, kept in the runner's workdir (not the shared ~/.cargo/bin).
   rust-tests-nextest:
