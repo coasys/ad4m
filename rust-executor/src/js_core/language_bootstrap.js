@@ -310,9 +310,10 @@ async function initLanguage(contextJson) {
     const ad4mSignal = createAd4mSignal(languageAddress);
 
     // Build an agent proxy that delegates to the global AGENT ops.
-    // `did` and `signingKeyId` are getters so they reflect the current
-    // thread-local AgentContext (which may be a managed user's context
-    // when expression_create runs with a user agent context).
+    // `did` and `signingKeyId` are getters so they reflect the agent of the
+    // call the code runs for (a managed user when expression_create runs
+    // for that user), not the agent at init: see `__ad4mRunCall` in
+    // agent_extension.js.
     const agentProxy = {
         get did() { return AGENT.did(); },
         get signingKeyId() { return AGENT.signingKeyId(); },
@@ -363,6 +364,8 @@ async function initLanguage(contextJson) {
         "expressionGet", "expressionCreate", "expressionAddressOf",
         "isImmutableExpression", "expressionIcon", "expressionConstructorIcon",
         "expressionInteract",
+        // Mount (language-provided shapes and records)
+        "mountShapes", "mountSnapshot",
         // Perspective-commit
         "perspectiveCommit",
         // Perspective-sync

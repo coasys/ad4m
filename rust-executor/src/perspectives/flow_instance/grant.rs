@@ -133,6 +133,7 @@
 use super::produced::{first_produced_at, output_matches_class};
 use crate::perspectives::flow_evaluator::RequiresQueryable;
 use crate::perspectives::shacl_parser::ProducedByFlow;
+use crate::perspectives::sparql_store::EvalStop;
 use std::collections::BTreeMap;
 
 /// When flow `spec` first produced each instance of `role_class`, by
@@ -184,6 +185,7 @@ pub(crate) async fn produced_at_by_instance<Q: RequiresQueryable + ?Sized>(
     let role_iri = perspective.class_iri(role_class);
     let role_iri = role_iri.as_deref().unwrap_or(role_class);
     let first = first_produced_at(
+        &EvalStop::none(),
         &catalogue,
         &spec.flow,
         Some(&spec.state),
@@ -729,6 +731,7 @@ mod tests {
             assert_eq!(
                 windows == 1,
                 produced_by_flow(
+                    &EvalStop::none(),
                     &cat,
                     &this,
                     &granting.flow_uri(),

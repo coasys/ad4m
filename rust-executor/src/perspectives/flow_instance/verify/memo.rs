@@ -140,6 +140,18 @@ impl SettledRun {
 /// a non-verified verdict's reason is still in hand, so it is logged here
 /// at debug level before the projection drops it.
 pub fn settle(catalogue: &HashMap<String, SHACLFlow>, receipt: &FlowReceipt) -> Option<SettledRun> {
+    settle_final(catalogue, receipt).0
+}
+
+/// [`settle`], and whether the answer is final under the memo key: a
+/// `Verified` run, or a refusal the checks reach before the fold
+/// ([`ReceiptVerdict::is_structural`]). A refusal the fold produced is not
+/// final: it can rest on a carried link this replica judged `cantCheck`, which
+/// changes under the same key once the signer's log lands.
+fn settle_final(
+    catalogue: &HashMap<String, SHACLFlow>,
+    receipt: &FlowReceipt,
+) -> (Option<SettledRun>, bool) {
     let verdict = verify_receipt(catalogue, receipt);
     let settled = SettledRun::of(&verdict);
     if settled.is_none() {
@@ -148,7 +160,8 @@ pub fn settle(catalogue: &HashMap<String, SHACLFlow>, receipt: &FlowReceipt) -> 
             receipt.flow_uri
         );
     }
-    settled
+    let is_final = settled.is_some() || verdict.is_structural();
+    (settled, is_final)
 }
 
 /// Memo key → (how many [`HeldAnswers`] hold it, the answer they hold).
@@ -168,6 +181,10 @@ pub struct VerdictMemo {
     /// read of an unchanged set re-verifies nothing.
     #[cfg(test)]
     verifications: std::sync::atomic::AtomicUsize,
+    /// Test-only: a stop to fire right after the next verification, so a
+    /// test can cancel a run in the middle of its receipt loop.
+    #[cfg(test)]
+    cancel_after_verification: Mutex<Option<crate::perspectives::sparql_store::EvalStop>>,
 }
 
 /// The memo answers one read relies on, held for as long as the read keeps
@@ -244,6 +261,8 @@ impl VerdictMemo {
             held: Mutex::new(HashMap::new()),
             #[cfg(test)]
             verifications: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            cancel_after_verification: Mutex::new(None),
         }
     }
 
@@ -274,20 +293,18 @@ impl VerdictMemo {
         #[cfg(test)]
         self.verifications
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let verdict = verify_receipt(catalogue, receipt);
-        let settled = SettledRun::of(&verdict);
-        if settled.is_none() {
-            log::debug!(
-                "a receipt for `{}` does not verify and speaks for nothing here — {verdict}",
-                receipt.flow_uri
-            );
+        let (settled, is_final) = settle_final(catalogue, receipt);
+        #[cfg(test)]
+        if let Some(stop) = self
+            .cancel_after_verification
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            stop.cancel();
         }
-        // The key pins down a `Verified` run and a refusal the checks reach
-        // before the fold (`is_structural`): both are final under this key.
-        // A refusal the fold produced is not kept — it can rest on a carried
-        // link this replica judged `cantCheck`, which changes under the same
-        // key once the signer's log lands.
-        if settled.is_some() || verdict.is_structural() {
+        // Only a final answer is kept (see `settle_final`).
+        if is_final {
             let weight = settled.as_ref().map_or(0, SettledRun::bytes);
             if let Some(key) = key.filter(|_| weight <= MEMO_ENTRY_MAX_BYTES) {
                 self.lock().put(key, settled.clone());
@@ -302,6 +319,18 @@ impl VerdictMemo {
             memo: self,
             keys: Vec::new(),
         }
+    }
+
+    /// Test-only: fire `stop` right after the next verification this memo runs.
+    #[cfg(test)]
+    pub fn cancel_after_next_verification(
+        &self,
+        stop: crate::perspectives::sparql_store::EvalStop,
+    ) {
+        *self
+            .cancel_after_verification
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(stop);
     }
 
     /// How many verifications this memo has actually run.

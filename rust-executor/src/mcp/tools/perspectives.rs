@@ -384,7 +384,7 @@ mod guard_tests {
     use super::*;
     use crate::agent::capabilities::{perspective_query_capability, perspective_update_capability};
     use crate::mcp::tools::test_support::{
-        app, handler_as, operator, perspective, setup, status, user,
+        app, handler_as, links_of, operator, perspective, setup, status, user,
     };
 
     // Writes checked PERSPECTIVE_CREATE on every perspective; the method checks the update
@@ -455,6 +455,79 @@ mod guard_tests {
         for uuid in [uuid, other] {
             crate::perspectives::remove_perspective(&uuid).await;
         }
+    }
+
+    /// Re-registering through `add_model` keeps the links a class does not own:
+    /// an annotation on the shape node and one on a property node survive a
+    /// second `add_model` that changes the shape.
+    #[tokio::test]
+    async fn add_model_again_keeps_foreign_annotations() {
+        setup();
+        let uuid = perspective(None).await;
+        let handler = handler_as(operator());
+        let note = |properties: &str| {
+            format!(r#"{{"target_class":"ns://Note","properties":[{properties}]}}"#)
+        };
+        let title = r#"{"path":"ns://title","name":"title","datatype":"xsd:string","max_count":1}"#;
+        let body = r#"{"path":"ns://body","name":"body","datatype":"xsd:string"}"#;
+        let add = |shacl_json: String| AddModelParams {
+            perspective_id: uuid.clone(),
+            class_name: "Note".into(),
+            shacl_json,
+        };
+
+        let first = handler.add_model(Parameters(add(note(title)))).await;
+        let first: serde_json::Value = serde_json::from_str(&first).expect(&first);
+        assert_eq!(first["success"], true, "{first}");
+
+        // Another app's annotations, on the shape node and on the property
+        // node: `we://display` is no predicate of the class's.
+        for source in ["ns://NoteShape", "ns://Note.title"] {
+            let added = handler
+                .add_link(Parameters(AddLinkParams {
+                    perspective_id: uuid.clone(),
+                    source: source.into(),
+                    predicate: "we://display".into(),
+                    target: "we://card".into(),
+                }))
+                .await;
+            let added: serde_json::Value = serde_json::from_str(&added).expect(&added);
+            assert_eq!(added["success"], true, "{added}");
+        }
+
+        let second = handler
+            .add_model(Parameters(add(note(&format!("{title},{body}")))))
+            .await;
+        let second: serde_json::Value = serde_json::from_str(&second).expect(&second);
+        assert_eq!(second["success"], true, "{second}");
+        assert_eq!(second["changed"], true, "{second}");
+
+        let links = links_of(&uuid).await;
+        for source in ["ns://NoteShape", "ns://Note.title"] {
+            assert!(
+                links.contains(&(
+                    source.to_string(),
+                    "we://display".to_string(),
+                    "we://card".to_string()
+                )),
+                "the annotation on {source} stays: {links:?}"
+            );
+        }
+        for (source, predicate, target) in [
+            ("ns://NoteShape", "sh://property", "ns://Note.body"),
+            ("ns://Note.body", "sh://path", "ns://body"),
+        ] {
+            assert!(
+                links.contains(&(
+                    source.to_string(),
+                    predicate.to_string(),
+                    target.to_string()
+                )),
+                "the added property landed ({source} {predicate} {target}): {links:?}"
+            );
+        }
+
+        crate::perspectives::remove_perspective(&uuid).await;
     }
 
     // The operator saw only the unowned and the main agent's perspectives, as an app does.
