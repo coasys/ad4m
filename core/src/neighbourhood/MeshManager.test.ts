@@ -1448,6 +1448,93 @@ describe("call mesh", () => {
         }
     })
 
+    it("stops a clone whose replaceTrack has not settled when the peer leaves", async () => {
+        // Closing the connection aborts a pending replaceTrack without
+        // resolving or rejecting it. The fresh clone is not owned yet, so
+        // teardown has to stop it without waiting for that promise.
+        const camera = new FakeTrack("video")
+        const clones: FakeTrack[] = []
+        const original = camera.clone.bind(camera)
+        camera.clone = () => {
+            const copy = original()
+            clones.push(copy)
+            return copy
+        }
+        let releaseGate = () => {}
+        let attaching: Promise<void> = Promise.resolve()
+        try {
+            const alice = await makeMesh(bus, "did:alice", CALL_ID)
+            alice.mesh.setRoster(["did:alice", "did:bob"])
+            await settle()
+
+            FakePeerConnection.replaceCalls = 0
+            FakePeerConnection.replaceGate = new Promise<void>((resolve) => { releaseGate = resolve })
+            attaching = alice.mesh.replaceTrack("video", camera as unknown as MediaStreamTrack)
+            for (let i = 0; i < 20 && FakePeerConnection.replaceCalls === 0; i += 1) await settle()
+            expect(clones).toHaveLength(1)
+            expect(clones[0].readyState).toBe("live")
+
+            alice.mesh.setRoster(["did:alice"])
+
+            expect(clones[0].readyState).toBe("ended")
+            expect(camera.readyState).toBe("live")
+            expect(alice.errors).toEqual([])
+        } finally {
+            releaseGate()
+            await attaching.catch(() => undefined)
+            FakePeerConnection.replaceGate = null
+        }
+    })
+
+    it("stops a clone whose replaceTrack has not settled when an early offer reseats", async () => {
+        FakePeerConnection.separateSections = true
+        FakePeerConnection.deferNegotiation = true
+        const camera = new FakeTrack("video")
+        const clones: FakeTrack[] = []
+        const original = camera.clone.bind(camera)
+        camera.clone = () => {
+            const copy = original()
+            clones.push(copy)
+            return copy
+        }
+        let releaseGate = () => {}
+        let attaching: Promise<void> = Promise.resolve()
+        try {
+            const alice = await makeMesh(bus, "did:alice", CALL_ID, { localStream: stream(track("audio"), track("video")) })
+            const bob = await makeMesh(bus, "did:bob", CALL_ID, { localStream: stream(track("audio")) })
+            // Alice first: her deferred negotiation runs before Bob's, so the
+            // offer arrives while Bob's own offer is still waiting.
+            alice.mesh.setRoster(["did:alice", "did:bob"])
+            bob.mesh.setRoster(["did:alice", "did:bob"])
+
+            FakePeerConnection.replaceCalls = 0
+            FakePeerConnection.replaceGate = new Promise<void>((resolve) => { releaseGate = resolve })
+            attaching = bob.mesh.replaceTrack("video", camera as unknown as MediaStreamTrack)
+            for (let i = 0; i < 5 && FakePeerConnection.replaceCalls === 0; i += 1) await Promise.resolve()
+            expect(FakePeerConnection.replaceCalls).toBeGreaterThan(0)
+            expect(clones).toHaveLength(1)
+            const retired = clones[0]
+            expect(retired.readyState).toBe("live")
+
+            await settle()
+
+            // The replacement connection may mint its own clone. The one on
+            // the connection reseat closed is the one that has to end now.
+            expect(bob.connections[0].closed).toBe(true)
+            expect(retired.readyState).toBe("ended")
+            expect(camera.readyState).toBe("live")
+            expect(bob.errors).toEqual([])
+        } finally {
+            releaseGate()
+            await attaching.catch(() => undefined)
+            await settleAll()
+            FakePeerConnection.separateSections = false
+            FakePeerConnection.deferNegotiation = false
+            FakePeerConnection.replaceGate = null
+            FakePeerConnection.offerSections.clear()
+        }
+    })
+
     it("attaches the tracks handed to join, one per kind", async () => {
         const mic = track("audio")
         const camera = track("video")

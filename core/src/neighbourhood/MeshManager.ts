@@ -549,6 +549,12 @@ export class MeshManager {
      * Recorded only after `replaceTrack` accepts the clone. See {@link putTrack}.
      */
     private owned = new Map<RTCRtpSender, { source: MediaStreamTrack; clone: MediaStreamTrack }>()
+    /**
+     * A clone minted for a `replaceTrack` that has not accepted it yet.
+     * Closing the connection aborts that call without settling its promise, so
+     * {@link releaseClones} stops these itself. See {@link putTrack}.
+     */
+    private inflight = new Map<RTCRtpSender, MediaStreamTrack>()
     private closed = false
     private channelUnsubscribe: (() => void) | null = null
     private unwatchPublish: (() => void) | null = null
@@ -1166,16 +1172,37 @@ export class MeshManager {
      * on purpose. The previous clone is stopped only after the sender accepts
      * the new track. A refusal stops the clone that was just minted and leaves
      * the one the sender still holds. The source is never stopped.
+     *
+     * A fresh clone is remembered in {@link inflight} for the await. Disconnect
+     * and reseat stop it there: the browser aborts a pending `replaceTrack`
+     * when the connection closes, and does not settle the promise, so the
+     * rejection handler and {@link commitTrack} need not run.
      */
     private async putTrack(sender: RTCRtpSender, source: MediaStreamTrack | null): Promise<void> {
         const prepared = this.prepareTrack(sender, source)
+        if (prepared.fresh && prepared.track) this.inflight.set(sender, prepared.track)
         try {
             if (sender.track !== prepared.track) await sender.replaceTrack(prepared.track)
         } catch (error) {
-            if (prepared.fresh && prepared.track) this.stopClone(prepared.track)
+            this.abandonInflight(sender, prepared)
             throw error
         }
+        // Teardown took the clone while `replaceTrack` was pending. Recording
+        // it now would undo that, and the promise may equally never settle.
+        if (prepared.fresh && prepared.track && this.inflight.get(sender) !== prepared.track) return
+        if (prepared.fresh && prepared.track) this.inflight.delete(sender)
         this.commitTrack(sender, source, prepared.track, prepared.fresh)
+    }
+
+    /** Stop a fresh clone `replaceTrack` refused, unless teardown already did. */
+    private abandonInflight(
+        sender: RTCRtpSender,
+        prepared: { track: MediaStreamTrack | null; fresh: boolean },
+    ): void {
+        if (!prepared.fresh || !prepared.track) return
+        if (this.inflight.get(sender) !== prepared.track) return
+        this.inflight.delete(sender)
+        this.stopClone(prepared.track)
     }
 
     /** The track to give `sender`. A fresh clone is not owned until {@link commitTrack}. */
@@ -1242,9 +1269,19 @@ export class MeshManager {
         return mine
     }
 
-    /** Stop the clones one connection was encoding. The sources stay live for the others. */
+    /**
+     * Stop the clones one connection was encoding, including one `replaceTrack`
+     * has not accepted. The sources stay live for the others.
+     */
     private releaseClones(slot: PeerSlot): void {
-        for (const sender of this.sendersOf(slot)) this.releaseSender(sender)
+        for (const sender of this.sendersOf(slot)) {
+            const pending = this.inflight.get(sender)
+            if (pending) {
+                this.inflight.delete(sender)
+                this.stopClone(pending)
+            }
+            this.releaseSender(sender)
+        }
     }
 
     /** This slot still owns `pc`. False after a disconnect or a reseat during an await. */
