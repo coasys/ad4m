@@ -372,10 +372,14 @@ describe('LiveQuery', () => {
         update('s1', 1, [2]);
         expect(later).not.toHaveBeenCalled();
 
+        // The snapshot is already not initial, so a flag keeps the disposer quiet
+        // for its immediate call; it disposes on the next update.
         const last = jest.fn();
-        live.subscribe(snapshot => { if (!snapshot.initial) live.dispose() });
+        let armed = false;
+        live.subscribe(() => { if (armed) live.dispose() });
         live.subscribe(last);
         last.mockClear();
+        armed = true;
         update('s1', 2, [3]);
         expect(last).not.toHaveBeenCalled();
     });

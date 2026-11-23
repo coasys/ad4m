@@ -1473,7 +1473,8 @@ export class Ad4mModel {
       perspective.client, perspective.uuid,
       (signal) => perspective.client.subscribe(perspective.uuid, { className, queryJson }, { signal, timeoutMs: options.timeoutMs }),
       (raw) => ({
-        results: this.parseModelResult(perspective, raw, withAll.include, withAll.properties) as (T & IncludeExtras<T, IncludeOf<Q>>)[],
+        // A copy: LiveQuery keeps the raw result to apply later diffs to.
+        results: this.parseModelResult(perspective, structuredClone(raw), withAll.include, withAll.properties) as (T & IncludeExtras<T, IncludeOf<Q>>)[],
         ...(raw?.totalCount !== undefined ? { totalCount: raw.totalCount } : {}),
       }),
     );
@@ -1495,7 +1496,7 @@ export class Ad4mModel {
       perspective.client, perspective.uuid,
       (signal) => perspective.client.subscribe(perspective.uuid, { className: classNames, queryJson }, { signal, timeoutMs: options.timeoutMs }),
       (raw) => ({
-        results: Ad4mModel.parseUnionResult(classList, perspective, raw, withAll.include, withAll.properties) as InstanceType<C[number]>[],
+        results: Ad4mModel.parseUnionResult(classList, perspective, structuredClone(raw), withAll.include, withAll.properties) as InstanceType<C[number]>[],
         ...(raw?.totalCount !== undefined ? { totalCount: raw.totalCount } : {}),
       }),
     );
