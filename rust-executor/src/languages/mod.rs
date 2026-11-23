@@ -19,6 +19,7 @@ mod metas;
 mod metrics;
 #[cfg(test)]
 pub(crate) mod mount_tests;
+pub mod mount_types;
 #[cfg(test)]
 mod signing_reach_tests;
 #[cfg(test)]
@@ -51,6 +52,7 @@ use language_context::LanguageContext;
 use language_runtime::CallKind;
 use language_runtime_handle::LanguageRuntimeHandle;
 use log::{error, info, warn};
+use mount_types::{MountShapes, MountSnapshot};
 use regex::Regex;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
@@ -3135,6 +3137,58 @@ impl LanguageController {
                 Ok(Some(trimmed.to_string()))
             }
         }
+    }
+
+    // ─── Mount ──────────────────────────────────────────────────────────
+
+    /// Run one of the mount exports on a language after checking it can be
+    /// mounted at all: a mountable language exports `mountShapes` and
+    /// `mountSnapshot` together, so the guard tests for both whichever one is
+    /// being called. Returns the export's JSON-serialised result.
+    async fn call_mount_export(
+        &self,
+        lang_address: &str,
+        export: &str,
+    ) -> Result<String, LanguageError> {
+        // Resolve alias forward (e.g. "did" → actual hash), like
+        // expression_interactions does.
+        let lang_address = {
+            let aliases = self.language_aliases.lock().await;
+            aliases
+                .get(lang_address)
+                .cloned()
+                .unwrap_or_else(|| lang_address.to_string())
+        };
+
+        let script = format!(
+            r#"JSON.stringify(await (async () => {{
+                if (typeof language.mountShapes !== "function" || typeof language.mountSnapshot !== "function")
+                    throw new Error("language cannot be mounted: it must export mountShapes and mountSnapshot");
+                return await Promise.resolve(language.{export}());
+            }})())"#
+        );
+
+        self.execute_on_language(&lang_address, &script).await
+    }
+
+    /// The SHACL shapes a mountable language wants installed into the
+    /// perspective (`mountShapes()`), with the language's format version.
+    pub async fn mount_shapes(&self, lang_address: &str) -> Result<MountShapes, LanguageError> {
+        let result = self.call_mount_export(lang_address, "mountShapes").await?;
+        serde_json::from_str(&result).map_err(|e| LanguageError::SerializationError {
+            message: format!("mountShapes returned an invalid value: {e}"),
+        })
+    }
+
+    /// Every record a mountable language wants shown in the perspective
+    /// (`mountSnapshot()`): class name, address and data per record.
+    pub async fn mount_snapshot(&self, lang_address: &str) -> Result<MountSnapshot, LanguageError> {
+        let result = self
+            .call_mount_export(lang_address, "mountSnapshot")
+            .await?;
+        serde_json::from_str(&result).map_err(|e| LanguageError::SerializationError {
+            message: format!("mountSnapshot returned an invalid value: {e}"),
+        })
     }
 
     // ─── Reload language ────────────────────────────────────────────────
