@@ -47,7 +47,8 @@ read verified links another agent wrote.
   ```
 
   It wraps `target/release/{ad4m-executor,ad4m}` (or `AD4M_BIN_DIR`) with
-  `docker-entrypoint.sh` and the `bootstrap-languages/local` seed. Every
+  `docker-entrypoint.sh` (and the `docker/ai-env.sh` it sources) and the
+  `bootstrap-languages/local` seed. Every
   script fails if the image is missing.
 - `pnpm install --ignore-workspace` in this directory (it is not a workspace
   package; `@coasys/ad4m` links to `../../core`).

@@ -23,7 +23,7 @@ done
 CTX="$(mktemp -d)"
 trap 'rm -rf "$CTX"' EXIT
 cp "$BIN_DIR/ad4m-executor" "$BIN_DIR/ad4m" "$CTX/"
-cp "$REPO/docker-entrypoint.sh" "$HERE/Dockerfile" "$CTX/"
+cp "$REPO/docker-entrypoint.sh" "$REPO/docker/ai-env.sh" "$HERE/Dockerfile" "$CTX/"
 node "$REPO/docker/generate-seed.mjs" "$REPO/bootstrap-languages/local" "$CTX/seed" >/dev/null
 SOURCE="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
 git -C "$REPO" diff --quiet HEAD -- rust-executor cli rust-client 2>/dev/null || SOURCE="$SOURCE+dirty"
