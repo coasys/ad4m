@@ -276,11 +276,8 @@ your usage.
 
 A Language can mount its own records into a perspective as instances of a
 class. You describe the class with the model decorators and pass it to
-`defineLanguage({ mount: { classes } })`. A setter names only an
-interaction, and the executor finds the Language and expression from the
-instance URL. See
-[Mounted classes](https://github.com/coasys/ad4m/tree/dev/ad4m-ldk/js#mounted-classes)
-in the LDK README.
+`defineLanguage({ mount: { classes } })`. See
+[Mounted Languages](#mounted-languages) below for the whole feature.
 
 ### Rust with `ad4m_language!`
 
@@ -347,6 +344,192 @@ For a production reference, see
 — the HTTP-backed agent Language — or
 [`bootstrap-languages/agent-language/rust-impl/`](https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/agent-language)
 for a Holochain-backed one.
+
+## Mounted Languages
+
+A Language usually holds its data in its own form: a Holochain DNA, a
+remote API, a file. Mounting shows that data in a perspective as typed
+instances of subject classes. The Language stays the owner of the
+records. The perspective holds a live copy, so model queries, SPARQL,
+subscriptions, the MCP `instance_*` tools and apps read the records like
+any other instances. Writes to a mounted instance go back to the
+Language as interaction calls.
+
+<Callout type="warning" emoji="⚠️">
+Status: the two mount exports and `defineLanguage({ mount })` are on
+`dev`. The model decorators for mounted classes come with
+[#1907](https://github.com/coasys/ad4m/pull/1907). The executor side
+(`perspective.mount`, the sync, and call actions) is on the Acorn mount
+branches (`acorn/a2-call-action` to `acorn/a9-mount-lifecycle`) and is
+not merged yet. Until it merges, the executor refuses a shape that has
+call actions.
+</Callout>
+
+### The two exports
+
+A mountable Language exports both of these, or neither:
+
+| Export | Returns | Purpose |
+|---|---|---|
+| `mountShapes()` | `{ version, shapes: [{ name, shape }] }` | The SHACL shape of each class the Language mounts. When `version` changes, the executor installs the shapes again. |
+| `mountSnapshot()` | `{ entries: [{ class, address, data }] }` | Every record to show now. `class` is a name from `mountShapes()`, `address` is the expression address without the `<language>://` prefix, and `data` is a JSON object of property values. |
+
+The WIT form is `interface mount` in
+[`ad4m-lang.wit`](https://github.com/coasys/ad4m/blob/dev/docs-src/ad4m-lang.wit).
+In TypeScript, `defineLanguage({ mount })` emits both exports. You can
+write the shapes by hand (`mount: { shapes, snapshot }`) or describe the
+classes with the model decorators (`mount: { classes, version, snapshot }`):
+
+```typescript
+import { defineLanguage } from "@coasys/ad4m-ldk";
+import { Model, Flag, Optional } from "@coasys/ad4m/model";
+
+@Model({
+    name: "Thing",
+    namespace: "things://",
+    targetClass: "things://Thing",
+    mount: true,
+    constructorActions: { interaction: "create", source: "{language}://class/Thing" },
+    destructorActions: { interaction: "delete" },
+})
+class Thing {
+    @Flag({ through: "rdf://type", value: "things://Thing" })
+    type!: string;
+
+    @Optional({ through: "things://title", setter: { interaction: "update" } })
+    title!: string;
+}
+
+export default defineLanguage({
+    name: "thing-store",
+    version: "1.0.0",
+    mount: {
+        classes: [Thing],
+        version: "1",
+        snapshot: () => ({
+            entries: [{ class: "Thing", address: "t1", data: { title: "First" } }],
+        }),
+    },
+    // ... expression, interactions, etc.
+});
+```
+
+`@coasys/ad4m/model` holds the decorators and the SHACL generation
+without the client, so a Language bundle stays small. `@Model({ mount:
+true })` turns off the link actions that the decorators generate for app
+classes: a mounted record is written through calls, not links.
+
+### Mounting
+
+An app or agent mounts a Language into a perspective it owns:
+
+```typescript
+await perspective.mount(languageAddress);   // install shapes, mirror records
+await perspective.mounts();                 // addresses of mounted Languages
+await perspective.syncMount(languageAddress); // re-read now: { added, removed }
+await perspective.unmount(languageAddress);
+```
+
+The RPC methods are `perspective.mount`, `perspective.unmount`,
+`perspective.syncMount` and `perspective.mounts`. When you mount, the
+executor:
+
+1. Refuses a Language that does not export both mount functions.
+2. Refuses a class whose name, class IRI or SHACL node already belongs to
+   another mount or to a subject class that no mount installed. One class
+   has one owner. The claims stay with the Language in that perspective,
+   also after an unmount, so only the same Language address can mount
+   them again.
+3. Installs the shapes from `mountShapes()`.
+4. Reads `mountSnapshot()` and writes each record as links.
+5. Writes the mount link `ad4m://self -[ad4m://mount]-> <language>://project`
+   last. A mount that fails before this step leaves no mount link and no
+   records.
+
+### How a record becomes links
+
+The base expression of a mounted record is the Language's own expression
+URL, `<language address>://<address>`. For each property of the record's
+shape:
+
+- A flag property writes its fixed value. The `rdf://type` flag is what
+  makes the record an instance of the class.
+- Any other property reads `data[<property name>]`. A missing or `null`
+  value writes nothing. An array writes one link per element. A string
+  that is an absolute IRI writes that IRI. Every other value is stored as
+  a `literal:` IRI.
+
+These links are `Local`: they are never committed to the perspective's
+link Language. The executor marks each one as written by the mount. A
+sync or an unmount changes only links that carry this mark, so a link
+that a user or app adds under `<language>://` is never removed.
+
+### Keeping the copy current
+
+- **Pushed changes:** the Language sends
+  `emitSignal({ mountDelta: { changed: [entries], removed: [addresses] } })`.
+  The executor applies it to every perspective that mounts the Language.
+- **Resync:** pushed changes are best effort. Every 15 seconds the
+  executor reads `mountSnapshot()` again and applies the difference. A
+  record that the snapshot no longer lists is removed. A new
+  `mountShapes()` version installs the shapes first.
+- **On demand:** `syncMount` runs the same resync now.
+- **Order:** each change and snapshot gets a sequence number when the
+  executor receives it. An older change never overwrites a newer one, and
+  a snapshot read before a change does not remove that change's record.
+- **Restart:** at startup the executor reads the mount links, waits for
+  each Language to load, and syncs it.
+
+The mount link is `Shared`, so it syncs to the other members of a
+neighbourhood. A member who has the Language installed mounts it too. A
+member who cannot install it gets one warning and no records. The
+records themselves never sync through the neighbourhood: each member
+reads them from the Language.
+
+### Writing through calls
+
+A mounted class writes with call actions instead of link actions:
+`{ action: "call", source, predicate, target }`. `predicate` is the
+interaction name, and `target` is a JSON object as text. The decorators
+generate this form from `setter`, `adder`, `remover`,
+`constructorActions` and `destructorActions`.
+
+**How a call finds its Language.** For a setter, adder, remover or
+destructor, `source` defaults to `"this"`, which is the instance URL. The
+executor splits that URL into the Language address and the expression
+address. Then it runs the interaction on that Language, for that
+expression. This is why a setter only names `interaction: "update"`. Your
+`interactions(address)` export must list the interaction for the
+record's address.
+
+**Constructors.** A constructor has no instance yet, so it names its
+`source`, normally `"{language}://class/<ClassName>"`. When
+`mount.classes` builds `mountShapes()`, it replaces `{language}` with the
+Language's own address. Your `interactions()` must answer for the
+address `class/<ClassName>`.
+
+**The call's result.** The interaction returns a delta,
+`{ address, changed, removed }`, in the same form as a pushed change. The
+executor applies it at once, so the new values show without waiting for
+a resync. A `create` must return the `address` of the new record, and
+`createSubject` returns its URL, `<language address>://<address>`.
+
+**Rules:**
+
+- The caller's values are merged over the action's JSON `target`, and the
+  merged object is the single argument of the interaction. When several
+  properties of one write share a source and an interaction, they share
+  one call. For a constructor, all initial values are the parameters.
+- An action list must not mix call and link actions. The executor refuses
+  it.
+- Calls run before link actions and are not rolled back. A call cannot run
+  inside a batch.
+- `Ad4mModel.save()` and the relation helpers refuse a property or
+  relation with a call writer. Write through `createSubject`,
+  `updateSubject` and `removeSubject`, or the MCP `instance_*` tools.
+
+The [Mounted classes](https://github.com/coasys/ad4m/tree/dev/ad4m-ldk/js#mounted-classes)
+section of the LDK README has the same rules from the author's side.
 
 ## Publishing, installing, using
 
