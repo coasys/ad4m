@@ -220,11 +220,26 @@ impl OrderingStrategy for LinkedListStrategy {
             .collect();
         let projected = self.reconstruct(&projected_members, current_ordering);
 
-        // Nothing to say. Covers a save that changed nothing, an append that the
-        // by-timestamp tail already places correctly, and — the one worth
-        // naming — a *removal*, where dropping the data link is the entire
-        // operation and the stale entry is inert.
-        if projected == desired_items {
+        // A member that already has an entry, whose predecessor in this
+        // projection is the one the desired order asks for, needs nothing
+        // new. That covers a save that changed nothing and a removal — the
+        // data link going away is the whole deletion, and the stale entry is
+        // inert because `reconstruct` walks it without emitting it.
+        //
+        // A member with *no* entry is not that case, even when the projection
+        // already equals the desired array. The projection is a timestamp
+        // sort. The include path that names a target class does not sort by
+        // link timestamp: it keeps the getter's own row order, and two links
+        // signed in one millisecond tie. Skipping the entry there is how the
+        // first ordered writes in a perspective come back swapped (#1304).
+        // Record a position for every desired member that does not have one.
+        let winners = latest_per_item(current_ordering);
+        let recorded: HashSet<&str> = winners.iter().map(|e| e.item.as_str()).collect();
+        if projected == desired_items
+            && desired_items
+                .iter()
+                .all(|item| recorded.contains(item.as_str()))
+        {
             return OrderingDiff::default();
         }
 
@@ -249,10 +264,15 @@ impl OrderingStrategy for LinkedListStrategy {
         let mut previous = LIST_HEAD.to_string();
         let mut seq = 0u64;
         for item in desired_items {
-            let already_there = projected_predecessors
-                .get(item.as_str())
-                .map(|p| p == &previous)
-                .unwrap_or(false);
+            // Only a recorded entry can be "already there". An unrecorded
+            // member that the timestamp projection happens to place correctly
+            // still needs an entry: the getter-backed read will not repeat
+            // that projection.
+            let already_there = recorded.contains(item.as_str())
+                && projected_predecessors
+                    .get(item.as_str())
+                    .map(|p| p == &previous)
+                    .unwrap_or(false);
             if !already_there {
                 add.push(OrderingEntry {
                     predicate: predicate.to_string(),

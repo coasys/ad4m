@@ -3818,6 +3818,108 @@ impl PerspectiveInstance {
         Ok(())
     }
 
+    /// An ordering link that places `item` at the end of the ordered collection
+    /// `source --predicate-->`, or `None` when that predicate is not ordered.
+    ///
+    /// For `addLink`, which appends one member and has no array to diff. The
+    /// tail is the chain reconstructed *without* `item`: an item that is
+    /// already last would otherwise become its own predecessor.
+    async fn collection_append_link(
+        &mut self,
+        source: &str,
+        predicate: &str,
+        item: &str,
+        batch_id: Option<&str>,
+    ) -> Result<Option<Link>, AnyError> {
+        let strategy_name = match self
+            .ordering_strategy_for(source, predicate, batch_id)
+            .await
+        {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let strategy = match crate::perspectives::ordering::create_strategy(&strategy_name) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("ordering: {e}");
+                return Ok(None);
+            }
+        };
+
+        let persisted_members = self
+            .get_links(&LinkQuery {
+                source: Some(source.to_string()),
+                predicate: Some(predicate.to_string()),
+                target: None,
+                from_date: None,
+                until_date: None,
+                limit: None,
+            })
+            .await?;
+        let members = self
+            .links_including_batch(persisted_members, source, Some(predicate), batch_id)
+            .await;
+        let mut current_members: Vec<(String, String)> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for link in &members {
+            if link.data.target == item {
+                continue;
+            }
+            if seen.insert(link.data.target.clone()) {
+                current_members.push((link.data.target.clone(), link.timestamp.clone()));
+            }
+        }
+
+        let persisted_order_links = self
+            .get_links(&LinkQuery {
+                source: Some(source.to_string()),
+                predicate: Some(
+                    crate::perspectives::ordering::COLLECTION_ORDER_PREDICATE.to_string(),
+                ),
+                target: None,
+                from_date: None,
+                until_date: None,
+                limit: None,
+            })
+            .await?;
+        let existing_order_links = self
+            .links_including_batch(
+                persisted_order_links,
+                source,
+                Some(crate::perspectives::ordering::COLLECTION_ORDER_PREDICATE),
+                batch_id,
+            )
+            .await;
+        let targets: Vec<String> = existing_order_links
+            .iter()
+            .map(|l| l.data.target.clone())
+            .collect();
+        let current_entries =
+            crate::perspectives::ordering::parse_ordering_entries(&targets, predicate);
+
+        let entry = strategy.generate_append(
+            item,
+            &current_entries,
+            &current_members,
+            predicate,
+            &crate::agent::did(),
+            chrono::Utc::now().timestamp_millis().max(0) as u64,
+        );
+        match crate::perspectives::ordering::encode_ordering_entry(&entry) {
+            Ok(target) => Ok(Some(Link {
+                source: source.to_string(),
+                predicate: Some(
+                    crate::perspectives::ordering::COLLECTION_ORDER_PREDICATE.to_string(),
+                ),
+                target,
+            })),
+            Err(e) => {
+                log::warn!("ordering: could not encode entry: {e}");
+                Ok(None)
+            }
+        }
+    }
+
     /// Execute a model query — the executor-side replacement for
     /// SPARQL-build → hydrate → JS-filter → JS-sort → JS-paginate.
     ///
@@ -4994,17 +5096,47 @@ impl PerspectiveInstance {
 
             match command.action {
                 Action::AddLink => {
-                    self.add_link(
-                        Link {
-                            source,
-                            predicate,
-                            target,
-                        },
-                        status,
-                        batch_id.clone(),
-                        context,
-                    )
-                    .await?;
+                    // `addLink` is how `addChild` writes one member. It has no
+                    // array to diff, so without an entry here the member is
+                    // unpositioned and a getter-backed read keeps SPARQL order
+                    // (#1304). The entry is computed before either link is
+                    // stored, from members already committed or staged in this
+                    // batch, and the two links go in together.
+                    let order_link = match predicate.as_deref() {
+                        Some(pred) => {
+                            self.collection_append_link(&source, pred, &target, batch_id.as_deref())
+                                .await?
+                        }
+                        None => None,
+                    };
+                    if let Some(order_link) = order_link {
+                        self.add_links(
+                            vec![
+                                Link {
+                                    source,
+                                    predicate,
+                                    target,
+                                },
+                                order_link,
+                            ],
+                            status,
+                            batch_id.clone(),
+                            context,
+                        )
+                        .await?;
+                    } else {
+                        self.add_link(
+                            Link {
+                                source,
+                                predicate,
+                                target,
+                            },
+                            status,
+                            batch_id.clone(),
+                            context,
+                        )
+                        .await?;
+                    }
                 }
                 Action::RemoveLink => {
                     let remove_source = source.clone();
@@ -10407,6 +10539,262 @@ mod tests {
             "expected cancellation marker in error, got: {}",
             err
         );
+    }
+
+    /// #1304: the first ordered-relation write in a new perspective sometimes
+    /// reads back with its first two members swapped.
+    ///
+    /// The reported steps, repeated over fresh perspectives: install a class
+    /// whose `HasMany` is `linkedList`-ordered, create a parent and three
+    /// children, add the children one call at a time in the reverse of the
+    /// order they were created, and read the parent with `include`. Children
+    /// are `we://c/0` < `we://c/1` < `we://c/2`, added as `[2, 1, 0]`. A
+    /// timestamp tie broken by target URI reads back `[1, 2, 0]`.
+    #[tokio::test]
+    async fn first_ordered_write_in_a_new_perspective_keeps_order() {
+        setup_wallet();
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        AgentService::init_global_test_instance();
+        init_prolog_service().await;
+
+        const ITERATIONS: usize = 200;
+        let ctx = AgentContext::main_agent();
+        let child_shacl = r#"{
+            "target_class": "we://Child",
+            "properties": [
+                { "path": "we://flag", "name": "flag", "has_value": "we://child",
+                  "min_count": 1, "max_count": 1 }
+            ],
+            "constructor_actions": [
+                {"action": "addLink", "source": "this", "predicate": "we://flag", "target": "we://child"}
+            ]
+        }"#;
+        // Same declaration the TypeScript model emits: ordering on the
+        // relation, a conformance getter so `include` is getter-backed, the
+        // collection setter, and the predicate the ordering entries live under
+        // (the instance query builds its predicate filter from declared paths).
+        let parent_shacl = r#"{
+            "target_class": "we://Parent",
+            "properties": [
+                { "path": "we://flag", "name": "flag", "has_value": "we://parent",
+                  "min_count": 1, "max_count": 1 },
+                { "path": "we://children", "name": "children", "collection": true,
+                  "relation_kind": "hasMany", "ordering": "linkedList",
+                  "target_class_name": "Child",
+                  "getter": "SELECT ?target WHERE { <Base> <we://children> ?target . ?target <we://flag> <we://child> . }",
+                  "setter": [{"action": "collectionSetter", "source": "this", "predicate": "we://children", "target": "value"}] },
+                { "path": "ad4m://collection_order", "name": "_collectionOrder" }
+            ],
+            "constructor_actions": [
+                {"action": "addLink", "source": "this", "predicate": "we://flag", "target": "we://parent"}
+            ]
+        }"#;
+
+        let class = |name: &str| SubjectClassOption {
+            class_name: Some(name.to_string()),
+            query: None,
+        };
+        let children = ["we://c/2", "we://c/1", "we://c/0"];
+        let expected = ["we://c/2", "we://c/1", "we://c/0"];
+        let same_order = |got: &[String]| {
+            got.len() == expected.len() && got.iter().zip(expected).all(|(g, e)| g.as_str() == e)
+        };
+
+        let mut setter_swaps = 0usize;
+        let mut setter_other = 0usize;
+        let mut adder_swaps = 0usize;
+        let mut adder_other = 0usize;
+        let mut setter_without_entries = 0usize;
+        let mut tied_first_two = 0usize;
+        let mut sample = String::new();
+
+        for i in 0..ITERATIONS {
+            let mut perspective = PerspectiveInstance::new(
+                PerspectiveHandle {
+                    uuid: Uuid::new_v4().to_string(),
+                    name: Some(format!("ordered-{i}")),
+                    shared_url: None,
+                    neighbourhood: None,
+                    state: PerspectiveState::Private,
+                    owners: None,
+                },
+                None,
+            );
+            perspective
+                .register_shape_json(child_shacl, &ctx)
+                .await
+                .expect("register Child");
+            perspective
+                .register_shape_json(parent_shacl, &ctx)
+                .await
+                .expect("register Parent");
+            for id in ["we://c/0", "we://c/1", "we://c/2"] {
+                perspective
+                    .create_subject(class("Child"), id.to_string(), None, None, &ctx)
+                    .await
+                    .expect("create child");
+            }
+
+            // Path the setter takes: each call replaces the collection with the
+            // array so far, in add order [2], [2, 1], [2, 1, 0].
+            let setter_parent = "we://parent/set";
+            perspective
+                .create_subject(class("Parent"), setter_parent.to_string(), None, None, &ctx)
+                .await
+                .expect("create setter parent");
+            let mut so_far: Vec<&str> = Vec::new();
+            for child in children {
+                so_far.push(child);
+                perspective
+                    .update_subject(
+                        class("Parent"),
+                        setter_parent.to_string(),
+                        serde_json::json!({ "children": so_far }),
+                        None,
+                        &ctx,
+                    )
+                    .await
+                    .expect("collectionSetter");
+            }
+
+            // Path `addChild` takes: one `addLink` per member, no array.
+            let adder_parent = "we://parent/add";
+            perspective
+                .create_subject(class("Parent"), adder_parent.to_string(), None, None, &ctx)
+                .await
+                .expect("create adder parent");
+            for child in children {
+                perspective
+                    .execute_commands(
+                        vec![Command {
+                            source: Some("this".to_string()),
+                            predicate: Some("we://children".to_string()),
+                            target: Some("value".to_string()),
+                            local: None,
+                            action: Action::AddLink,
+                        }],
+                        adder_parent.to_string(),
+                        vec![Parameter {
+                            name: "value".to_string(),
+                            value: serde_json::Value::String(child.to_string()),
+                        }],
+                        None,
+                        &ctx,
+                    )
+                    .await
+                    .expect("addLink");
+            }
+
+            let setter_got = {
+                let query = format!(
+                    r#"{{"where":{{"id":"{setter_parent}"}},"include":{{"children":true}},"deepQuery":true}}"#
+                );
+                let raw = perspective
+                    .model_query("Parent", &query)
+                    .await
+                    .expect("read setter parent");
+                child_ids_from_model_query(&raw)
+            };
+            let adder_got = {
+                let query = format!(
+                    r#"{{"where":{{"id":"{adder_parent}"}},"include":{{"children":true}},"deepQuery":true}}"#
+                );
+                let raw = perspective
+                    .model_query("Parent", &query)
+                    .await
+                    .expect("read adder parent");
+                child_ids_from_model_query(&raw)
+            };
+
+            let order_n = perspective
+                .get_links(&LinkQuery {
+                    source: Some(setter_parent.to_string()),
+                    predicate: Some(
+                        crate::perspectives::ordering::COLLECTION_ORDER_PREDICATE.to_string(),
+                    ),
+                    ..Default::default()
+                })
+                .await
+                .expect("order links")
+                .len();
+            if order_n == 0 {
+                setter_without_entries += 1;
+            }
+            let member_ts = perspective
+                .get_links(&LinkQuery {
+                    source: Some(setter_parent.to_string()),
+                    predicate: Some("we://children".to_string()),
+                    ..Default::default()
+                })
+                .await
+                .expect("member links");
+            let ts_of = |id: &str| {
+                member_ts
+                    .iter()
+                    .find(|l| l.data.target == id)
+                    .map(|l| l.timestamp.clone())
+                    .unwrap_or_default()
+            };
+            if ts_of("we://c/2") == ts_of("we://c/1") {
+                tied_first_two += 1;
+            }
+
+            let tally = |got: &[String], swaps: &mut usize, other: &mut usize| {
+                if same_order(got) {
+                    return;
+                }
+                let first_two_swapped = got.len() >= 2
+                    && got[0] == "we://c/1"
+                    && got[1] == "we://c/2"
+                    && (got.len() == 2 || got[2] == "we://c/0");
+                if first_two_swapped {
+                    *swaps += 1;
+                } else {
+                    *other += 1;
+                }
+            };
+            tally(&setter_got, &mut setter_swaps, &mut setter_other);
+            tally(&adder_got, &mut adder_swaps, &mut adder_other);
+
+            if sample.is_empty() && (!same_order(&setter_got) || !same_order(&adder_got)) {
+                sample = format!(
+                    "iter {i}: setter={setter_got:?} adder={adder_got:?} order_links={order_n} ts=[{}, {}, {}]",
+                    ts_of("we://c/2"),
+                    ts_of("we://c/1"),
+                    ts_of("we://c/0")
+                );
+            }
+        }
+
+        let summary = format!(
+            "iterations={ITERATIONS} setter_swaps={setter_swaps} setter_other={setter_other} \
+             adder_swaps={adder_swaps} adder_other={adder_other} \
+             setter_without_entries={setter_without_entries} tied_first_two={tied_first_two} \
+             sample={sample}"
+        );
+        eprintln!("{summary}");
+        assert!(
+            setter_swaps == 0 && setter_other == 0 && adder_swaps == 0 && adder_other == 0,
+            "first ordered write read back in the wrong order: {summary}"
+        );
+    }
+
+    fn child_ids_from_model_query(raw: &str) -> Vec<String> {
+        let parsed: serde_json::Value = serde_json::from_str(raw).expect("model_query json");
+        parsed["instances"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|row| row.get("children"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|v| {
+                v.as_str()
+                    .map(|s| s.to_string())
+                    .or_else(|| v.get("id").and_then(|i| i.as_str()).map(|s| s.to_string()))
+            })
+            .collect()
     }
 }
 

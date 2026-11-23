@@ -1056,18 +1056,17 @@ export interface RelationOptions {
      * thread — where timestamp order *is* the order. It cannot express a sequence
      * somebody chose: a kanban column, a playlist, the blocks of a post.
      *
-     * **Declaration only, for now.** Setting this emits `ad4m://ordering` on the
-     * property shape, where the executor reads it back — but no read or write
-     * path acts on it yet, so a relation declaring it still hydrates by link
-     * timestamp exactly as one that does not. Wiring save and hydration to the
-     * declaration is the next change; nothing about how you write the relation
-     * will change when it lands — assign the array in the order you want and
-     * save.
+     * Setting this emits `ad4m://ordering` on the property shape. The executor
+     * records a position on `set*` and on `add*`, and reads that chain back.
+     * Assign the array in the order you want, or append one member at a time;
+     * both come back in that order. A member written with no entry — raw
+     * `perspective.add`, or a peer that does not record the strategy — is still
+     * returned, after the positioned members.
      *
-     * Ordering is declared in the type system, rather than passed per query, so
-     * that *every* writer gets it once it is wired: the ORM, MCP agents, raw
-     * WS-RPC callers, another app sharing the neighbourhood. Implemented
-     * client-side it would order only what this client wrote.
+     * Ordering is declared on the relation, rather than passed per query, so
+     * `set*` and `add*` record it for every caller of those actions. A raw link
+     * write does not: there is no array and no class in that call to order
+     * against.
      *
      * @example
      * ```typescript

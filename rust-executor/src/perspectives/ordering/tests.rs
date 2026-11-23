@@ -407,20 +407,27 @@ fn diff_projects_a_new_item_the_way_its_link_will_read_back() {
     let now_ms = 1_788_220_800_000;
     let now_rfc3339 = "2026-09-01T00:00:00.000Z";
 
+    // `a` and `b` already have entries. `n` does not. Its timestamp would put
+    // it last, which is where hydration would read it — and where a getter
+    // backed read would not. The entry is what makes those two agree (#1304).
+    // A projection that sorted `n` *before* `a` (the old zero-padded stand-in)
+    // would also rewrite `a`, so `a` staying out of the diff pins the format.
+    let ordering = s().generate_full(&["a".into(), "b".into()], PRED, "did:x", 1_000);
     let appended = s().diff(
-        &[],
+        &ordering,
         &existing,
         &["a".into(), "b".into(), "n".into()],
         PRED,
         "did:x",
         now_ms,
     );
-    assert!(
-        appended.add.is_empty(),
-        "appending to an unordered collection is already what hydration gives, \
-         so it costs nothing: {:?}",
-        appended.add,
+    let added: Vec<&str> = appended.add.iter().map(|e| e.item.as_str()).collect();
+    assert_eq!(
+        added,
+        vec!["n"],
+        "the append is recorded and the members that already have entries are left alone: {added:?}",
     );
+    assert_eq!(appended.add[0].after.as_deref(), Some("b"));
 
     let prepended = s().diff(
         &[],

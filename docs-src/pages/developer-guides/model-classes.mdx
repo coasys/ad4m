@@ -502,16 +502,17 @@ type-checking query, below), never in an order someone chose. Add `ordering` to 
 tasks: string[] = [];
 ```
 
-Assigning the array (`board.tasks = [c, a, b]` then `save()`, or `setTasks([c, a, b])`) writes
-ordering entries alongside the member links. Concurrent reorders by different agents merge rather
-than overwrite each other.
+Assigning the array (`board.tasks = [c, a, b]` then `save()`, or `setTasks([c, a, b])`) writes an
+ordering entry for every member, including one that was just appended. `addTasks(c)` does the same
+for that one member: it records the new member at the end, rather than leaving it to link
+timestamps. Concurrent reorders by different agents merge rather than overwrite each other.
 
 The member links decide what is in the relation; the entries decide only where things go. A member
 with no entry is still returned, after every positioned member. A member has no entry when it was
 written:
 
-- by `add*`, which writes the member link only
-- by raw `addLink`, an MCP tool, or a peer that does not know the strategy
+- by raw `perspective.add` / `addLink` on the link API, which stores the member link and nothing else
+- by an MCP tool or a peer whose executor does not record the strategy
 - before the relation had `ordering`
 
 Where those members go depends on how the relation is read:
