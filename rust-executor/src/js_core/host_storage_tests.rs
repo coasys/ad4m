@@ -20,6 +20,8 @@ async fn language_isolate() -> (JsCore, tempfile::TempDir) {
         r#"import { storagePut, storageDelete } from "ad4m:host";
            globalThis.__kv = { storagePut, storageDelete };"#
             .to_string(),
+        0,
+        crate::agent::AgentContext::main_agent(),
     )
     .await
     .expect("load test bundle");

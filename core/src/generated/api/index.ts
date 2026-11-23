@@ -79,14 +79,16 @@ export type { UpdateLinkRequest } from "./UpdateLinkRequest";
 export type { UpdatePerspectiveRequest } from "./UpdatePerspectiveRequest";
 export type { VerifySignatureRequest } from "./VerifySignatureRequest";
 export type { WriteSettingsRequest } from "./WriteSettingsRequest";
-// The run contract: the executor's log and its config file (runtime.logTail, runtime.config,
-// runtime.setConfig, config-changed).
+// The run contract: the executor's log and its config file (runtime.logTail, runtime.setLogFilter,
+// runtime.logFilter, runtime.config, runtime.setConfig, config-changed).
 export type { ConfigChanged } from "./ConfigChanged";
 export type { ConfigKeyInfo } from "./ConfigKeyInfo";
 export type { ConfigRefusal } from "./ConfigRefusal";
 export type { KeyClass } from "./KeyClass";
+export type { LogFilter } from "./LogFilter";
 export type { LogTail } from "./LogTail";
 export type { LogTailParams } from "./LogTailParams";
+export type { SetLogFilterParams } from "./SetLogFilterParams";
 export type { Pinned } from "./Pinned";
 export type { RefusalReason } from "./RefusalReason";
 export type { RuntimeConfig } from "./RuntimeConfig";

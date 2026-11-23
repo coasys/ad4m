@@ -43,7 +43,7 @@ impl FileLanguage {
         let counter = gets.clone();
         tokio::spawn(async move {
             while let Some(request) = requests.recv().await {
-                let LanguageOperation::Execute(script, _) = &request.operation else {
+                let LanguageOperation::Execute(script, ..) = &request.operation else {
                     let _ = request.response_tx.send(Ok("null".to_string()));
                     continue;
                 };
