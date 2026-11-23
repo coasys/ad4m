@@ -40,16 +40,11 @@ pub async fn with_interact_grant<F: std::future::Future>(granted: bool, request:
     CALLER_MAY_INTERACT.scope(granted, request).await
 }
 
-/// `Ok` if a write by `context` may run language calls. Until ad4m#1775
-/// passes the caller's context to the language, a call runs as the main
-/// agent, so only the main agent may make one. A request also needs
-/// `expression:update`, as `expression.interact` does.
-pub(crate) fn check_call_caller(context: &AgentContext) -> Result<(), AnyError> {
-    if !context.is_main_agent() {
-        return Err(anyhow!(
-            "language calls run as the main agent until ad4m#1775, so a user may not make one"
-        ));
-    }
+/// `Ok` if a write by `context` may run language calls. The call runs as
+/// the writer (#1775): whatever the language signs or writes during it is
+/// the writer's, a managed user's own Holochain cell included. A request
+/// also needs `expression:update`, as `expression.interact` does.
+pub(crate) fn check_call_caller(_context: &AgentContext) -> Result<(), AnyError> {
     if matches!(CALLER_MAY_INTERACT.try_with(|granted| *granted), Ok(false)) {
         return Err(anyhow!(
             "a write that calls a language needs the expression:update capability"
@@ -291,7 +286,7 @@ impl PerspectiveInstance {
             // The mount the call's delta may land in: the one active
             // before the call went out. An unmount meanwhile wins.
             let generation = self.active_mount_generation(&lang).await;
-            let answer = self.execute_call(run).await?;
+            let answer = self.execute_call(run, context).await?;
             if let Some(why) = &answer.malformed {
                 log::warn!(
                     "call {} on {}: the call succeeded but its result is not a delta ({why}); \
@@ -313,12 +308,13 @@ impl PerspectiveInstance {
     /// One call: `run.name` on `run.source` with `run.params` as the
     /// single JSON object argument. Returns what the language answered
     /// (`parse_call_result`).
-    async fn execute_call(&self, run: &CallRun) -> Result<CallAnswer, AnyError> {
-        // `expression_interact` takes no agent context, so the call runs
-        // as the executor's main agent: whatever the language signs or
-        // writes during it (zome calls, its own links) is the main agent's.
-        // That is why `check_call_caller` lets only the main agent make
-        // one, until ad4m#1775 passes the caller's context through.
+    async fn execute_call(
+        &self,
+        run: &CallRun,
+        context: &AgentContext,
+    ) -> Result<CallAnswer, AnyError> {
+        // The call runs as the writer (#1775): what the language signs or
+        // writes during it (zome calls, its own links) is the writer's.
         let result = LanguageController::global_instance()
             .expression_interact(
                 &run.source,
@@ -326,6 +322,7 @@ impl PerspectiveInstance {
                     name: run.name.clone(),
                     parameters_stringified: Value::Object(run.params.clone()).to_string(),
                 },
+                context,
             )
             .await
             .map_err(|e| anyhow!("{e}"))?;

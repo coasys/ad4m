@@ -1,4 +1,4 @@
-import { languageAddress, emitSignal } from "ad4m:host";
+import { languageAddress, emitSignal, agentDid } from "ad4m:host";
 
 export const name = "mount-test";
 const CLASS = "MountThing";
@@ -7,6 +7,10 @@ const CLASS = "MountThing";
 const records = new Map();
 // every executed interaction, in order: { address, name, params }
 const calls = [];
+// the agent (agentDid()) each interaction, mountShapes and mountSnapshot ran
+// as, in order: { what, agent } (#1775: a call runs as the caller)
+const agents = [];
+function ranAs(what) { agents.push({ what, agent: agentDid() }); }
 let counter = 0;
 // version reported by mountShapes(); setVersion changes it so a remount
 // can be told apart from the first install
@@ -54,6 +58,7 @@ export function interactions(address) {
       parameters: [{ name: "title", type: "string" }, { name: "done", type: "boolean" }, { name: "tags", type: "array" }, { name: "children", type: "array" }],
       execute: async (params) => {
         const p = plain(params);
+        ranAs("create");
         calls.push({ address, name: "create", params: p });
         if (p.fail) throw new Error("create: " + p.fail);
         counter += 1;
@@ -71,8 +76,13 @@ export function interactions(address) {
     return [
       { label: "Calls", name: "calls", parameters: [],
         execute: async () => calls.slice() },
+      { label: "Agents", name: "agents", parameters: [],
+        execute: async () => agents.slice() },
+      // The agent this interaction runs as.
+      { label: "Who", name: "who", parameters: [],
+        execute: async () => agentDid() },
       { label: "Reset", name: "reset", parameters: [],
-        execute: async () => { records.clear(); expressions.clear(); calls.length = 0; counter = 0; return true; } },
+        execute: async () => { records.clear(); expressions.clear(); calls.length = 0; agents.length = 0; counter = 0; return true; } },
       { label: "Address", name: "address", parameters: [],
         execute: async () => languageAddress() },
       // Change the version mountShapes() reports (tests re-install on version change).
@@ -121,6 +131,7 @@ export function interactions(address) {
       { label: "Update", name: "update", parameters: [],
         execute: async (params) => {
           const p = plain(params);
+          ranAs("update");
           calls.push({ address, name: "update", params: p });
           if (p.fail) throw new Error("update: " + p.fail);
           records.set(address, { ...records.get(address), ...p });
@@ -163,6 +174,7 @@ function withOverride(property, override) {
 }
 
 export function mountShapes() {
+  ranAs("mountShapes");
   const lang = languageAddress();
   const update = [{ action: "call", source: "this", predicate: "update", target: "{}" }];
   return {
@@ -188,6 +200,7 @@ export function mountShapes() {
 }
 
 export function mountSnapshot() {
+  ranAs("mountSnapshot");
   if (snapshotFailure) throw new Error("mountSnapshot: " + snapshotFailure);
   const entries = [...records.entries()].map(([address, data]) => ({ class: CLASS, address, data }));
   return { entries: entries.concat(extraEntries) };

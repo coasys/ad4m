@@ -1,7 +1,6 @@
 //! `perspective.createSubject` on a class whose constructor is a `call`
-//! answers the URL the language minted, not `true` (design §3.3). Until
-//! ad4m#1775, only the main agent may make such a call, and only with
-//! `expression:update`.
+//! answers the URL the language minted, not `true` (design §3.3). The call
+//! runs as the writer (#1775) and needs `expression:update`.
 
 use std::sync::Arc;
 
@@ -120,7 +119,7 @@ async fn create_subject_rpc_needs_expression_update_for_a_call() {
 }
 
 #[tokio::test]
-async fn create_subject_rpc_refuses_a_call_for_a_managed_user() {
+async fn create_subject_rpc_runs_a_managed_users_call_as_that_user() {
     let lang = load_mount_test_language().await;
     let shape = mount_thing_shape(&lang).await;
     let p = mount_thing_perspective(&shape).await;
@@ -132,9 +131,8 @@ async fn create_subject_rpc_refuses_a_call_for_a_managed_user() {
         .await
         .add_owner(alice);
 
-    // Alice owns the perspective and holds every capability a call needs,
-    // but the call would run as the main agent.
-    let before = call_count(&lang).await;
+    // Alice owns the perspective and holds every capability a call needs:
+    // the call runs, as Alice.
     let user = Arc::new(RequestContext::user_for_test(
         alice,
         vec![
@@ -142,9 +140,24 @@ async fn create_subject_rpc_refuses_a_call_for_a_managed_user() {
             EXPRESSION_UPDATE_CAPABILITY.clone(),
         ],
     ));
-    let err = call_as(user, "perspective.createSubject", create_params(&p.0))
+    let result = call_as(user, "perspective.createSubject", create_params(&p.0))
         .await
-        .unwrap_err();
-    assert!(err.1.contains("main agent"), "{err:?}");
-    assert_eq!(call_count(&lang).await, before, "the language was called");
+        .unwrap();
+    assert!(result
+        .as_str()
+        .is_some_and(|url| url.starts_with(&format!("{lang}://"))));
+    let agents = interact(&format!("{lang}://project"), "agents", json!({}))
+        .await
+        .unwrap();
+    let last_create = agents
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|a| a["what"] == "create")
+        .cloned();
+    assert_eq!(
+        last_create,
+        Some(json!({ "what": "create", "agent": alice }))
+    );
 }
