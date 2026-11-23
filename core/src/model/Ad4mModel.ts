@@ -2830,6 +2830,7 @@ export class Ad4mModel {
       } else {
         setPropertyRegistryEntry(DynamicModelClass, prop.name, {
           through: prop.path,
+          ...(prop.minCount !== undefined && prop.minCount >= 1 && { required: true }),
           writable: prop.writable ?? true,
           ...(prop.resolveLanguage !== undefined && { resolveLanguage: prop.resolveLanguage }),
           ...(prop.local !== undefined && { local: prop.local }),
