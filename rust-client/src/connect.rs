@@ -631,6 +631,23 @@ pub fn normalize_base_url(url: &str) -> String {
         .unwrap_or_else(|| u.to_string())
 }
 
+/// Refuse to send credentials to a plaintext executor that is not on
+/// loopback, unless `allow_insecure_remote` is set.
+///
+/// Callers pass a URL from [`normalize_base_url`], so `wss://` counts as
+/// TLS. The admin credential would otherwise ride the socket URL.
+/// `Ad4mConnect` and `ad4m-executor claim` both call this. There is no
+/// second copy of the policy.
+pub fn refuse_insecure_remote(base_url: &str, allow_insecure_remote: bool) -> Result<()> {
+    if allow_insecure_remote || !plaintext_remote(base_url) {
+        return Ok(());
+    }
+    Err(ConnectError::InsecureTransport {
+        url: base_url.to_string(),
+    }
+    .into())
+}
+
 /// Whether credentials sent to `base_url` travel unencrypted off this
 /// machine: plain `http` (after `normalize_base_url`) to a host that is not
 /// loopback (`localhost`, 127.0.0.0/8, `::1`). `localhost` passes by name,
@@ -768,10 +785,8 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
         prompts.status(ConnectStatus::Connecting);
         let (url, pinned) = self.resolve_url().await?;
         // Before any token goes out (it rides the socket URL) or any prompt
-        // is asked (F5).
-        if !self.opts.insecure_remote && plaintext_remote(&url) {
-            return Err(ConnectError::InsecureTransport { url }.into());
-        }
+        // is asked (F5). Same helper `claim` calls.
+        refuse_insecure_remote(&url, self.opts.insecure_remote)?;
         self.url = Some(url.clone());
         self.pinned = pinned;
 

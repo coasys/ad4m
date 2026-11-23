@@ -84,6 +84,13 @@ export AD4M_ADMIN_CREDENTIAL="$(cat /path/to/admin-credential)"   # required
 ad4m-executor run
 ```
 
+3. Claim an offer on an executor. The admin credential goes in the socket URL. A plaintext `http://` or `ws://` executor that is not on loopback (`127.0.0.0/8`, `::1`, `localhost`) is refused unless `--allow-insecure-remote` is set. `https://` and loopback stay allowed.
+
+```bash
+ad4m-executor --executor-url https://executor.example:12000 claim '<offer>'
+ad4m-executor --allow-insecure-remote --executor-url http://192.168.1.20:12000 claim '<offer>'
+```
+
 ## Core Commands
 
 ### Agent Management

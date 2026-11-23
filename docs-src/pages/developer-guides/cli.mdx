@@ -39,6 +39,28 @@ ad4m-executor run --insecure-no-admin-credential   # or AD4M_INSECURE_NO_ADMIN_C
 
 In that mode an empty token is the operator on a loopback-bound API: any client that can reach the executor's loopback port, including a proxy or tunnel on the same host that sets no forwarding header, has full admin access. On a network-bound API (`--localhost false`, or TLS) a caller with no token is anonymous. Never use it on an executor other users or other machines can reach.
 
+### Claiming an offer
+
+`ad4m-executor claim <offer>` joins an identity: it claims an offer link (or offer string) that identity's app opened, prints the match code, and waits until the app confirms. It needs the operator's admin credential (`--admin-credential` or `AD4M_ADMIN_CREDENTIAL`). The credential travels in the socket URL of the executor named by `--executor-url` (or the local executor).
+
+`claim` refuses a plaintext URL (`http://` or `ws://`) whose host is not loopback. The error is:
+
+```
+refusing to send credentials to http://… over plaintext: use https:// (or allow_insecure_remote to accept it)
+```
+
+Loopback (`127.0.0.0/8`, `::1`, `localhost`) and TLS (`https://`, `wss://`) are allowed with the flag off. `--allow-insecure-remote` accepts a plaintext executor off loopback. Set it only for a path you trust end to end. The flag is global: it may come before `claim` or after it.
+
+```bash
+ad4m-executor --executor-url https://executor.example:12000 claim '<offer>'
+
+ad4m-executor --allow-insecure-remote \
+  --executor-url http://192.168.1.20:12000 \
+  claim '<offer>'
+```
+
+`--hint <name>` is the name the app shows on its confirm card. `--no-wait` prints the match code and returns without waiting for confirmation.
+
 ### Configuration Parameters
 
 The executor supports various configuration parameters to customize its behavior. Here are the key parameters:

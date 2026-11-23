@@ -106,6 +106,12 @@ struct ClapApp {
     /// Provide admin credential to gain all capabilities
     #[arg(short, long)]
     admin_credential: Option<String>,
+
+    /// Send `claim`'s admin credential to a plaintext (`http://` or `ws://`)
+    /// executor that is not on loopback. Refused unless this is set.
+    /// Loopback (127.0.0.0/8, ::1, localhost) and https:// stay allowed.
+    #[arg(long, global = true)]
+    allow_insecure_remote: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -132,7 +138,8 @@ enum Domain {
     /// Join an identity: claim an offer link (or offer string) its app opened, show the match
     /// code, and wait until the app confirms. Needs the operator's admin credential
     /// (`--admin-credential` or AD4M_ADMIN_CREDENTIAL) and an operator recorded with
-    /// `init --operator`.
+    /// `init --operator`. A plaintext executor off loopback is refused unless
+    /// `--allow-insecure-remote` is set.
     Claim {
         /// The offer link (`https://id.coasys.org/o#coasys:offer:1:…`) or the offer string.
         offer: String,
@@ -292,7 +299,16 @@ async fn main() -> Result<()> {
             .admin_credential
             .or_else(|| std::env::var("AD4M_ADMIN_CREDENTIAL").ok())
             .unwrap_or_default();
-        if let Err(e) = identity::claim(&executor_url, &token, &offer, hint, no_wait).await {
+        if let Err(e) = identity::claim(
+            &executor_url,
+            &token,
+            &offer,
+            hint,
+            no_wait,
+            args.allow_insecure_remote,
+        )
+        .await
+        {
             eprintln!("{e}");
             std::process::exit(1);
         }
@@ -594,5 +610,36 @@ mod tests {
         assert_eq!(smtp.username, "ad4m@example");
         assert_eq!(smtp.from_address, "ad4m@example");
         assert_eq!(smtp.password, "smtp-secret");
+    }
+
+    /// `--allow-insecure-remote` is in `ad4m-executor --help` and `claim --help`,
+    /// and it is accepted before or after the subcommand.
+    #[test]
+    fn claim_help_names_allow_insecure_remote() {
+        for argv in [
+            vec!["ad4m-executor", "--help"],
+            vec!["ad4m-executor", "claim", "--help"],
+        ] {
+            let err = ClapApp::try_parse_from(&argv).unwrap_err();
+            assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+            let text = err.to_string();
+            assert!(
+                text.contains("--allow-insecure-remote"),
+                "help for {argv:?} omits the flag:\n{text}"
+            );
+        }
+
+        for argv in [
+            vec!["ad4m-executor", "--allow-insecure-remote", "claim", "offer"],
+            vec!["ad4m-executor", "claim", "--allow-insecure-remote", "offer"],
+            vec!["ad4m-executor", "claim", "offer", "--allow-insecure-remote"],
+        ] {
+            let app = ClapApp::try_parse_from(&argv).unwrap_or_else(|err| {
+                panic!("failed to parse {argv:?}: {err}");
+            });
+            assert!(app.allow_insecure_remote, "flag was not set for {argv:?}");
+        }
+        let app = ClapApp::try_parse_from(["ad4m-executor", "claim", "offer"]).unwrap();
+        assert!(!app.allow_insecure_remote);
     }
 }
