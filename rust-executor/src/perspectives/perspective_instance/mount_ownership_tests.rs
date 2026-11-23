@@ -377,3 +377,117 @@ async fn a_mount_refuses_a_mirror_from_an_older_build() {
     crate::perspectives::unregister_mount(&lang, &p.uuid);
     assert!(error.to_string().contains("fresh perspective"), "{error}");
 }
+
+// --- The ownership check and the install are one SDNA change ----------------
+
+/// A `register_shapes` that arrives after a mount's class ownership check
+/// waits for the mount's install: it cannot land in between and have its
+/// class replaced by a check that no longer holds.
+#[tokio::test]
+async fn register_shapes_waits_for_a_mount_between_check_and_install() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "a"})).await;
+    let (p, _shapes, ctx) =
+        crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
+
+    let gate = gates::arm(&lang, MountPoint::OwnershipChecked);
+    let mut mounting = p.clone();
+    let l = lang.clone();
+    let mount = tokio::spawn(async move { mounting.mount(&l).await });
+    gate.arrived().await;
+
+    let thing: crate::perspectives::shacl_parser::SHACLShape = serde_json::from_value(json!({
+        "target_class": "app://Gadget",
+        "properties": [{"path": "app://title", "name": "title", "datatype": "xsd:string", "max_count": 1}]
+    }))
+    .unwrap();
+    let mut registering = p.clone();
+    let register =
+        tokio::spawn(async move { registering.register_shapes(vec![thing], &ctx).await });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let landed_between = register.is_finished();
+    gate.release();
+
+    let mounted = tokio::time::timeout(Duration::from_secs(10), mount)
+        .await
+        .expect("the mount deadlocked")
+        .unwrap();
+    let registered = tokio::time::timeout(Duration::from_secs(10), register)
+        .await
+        .expect("register_shapes deadlocked")
+        .unwrap();
+    crate::perspectives::unregister_mount(&lang, &p.uuid);
+    assert!(
+        !landed_between,
+        "register_shapes ran between the mount's ownership check and its install"
+    );
+    mounted.unwrap();
+    registered.unwrap();
+}
+
+// --- A record names only this mount's classes -------------------------------
+
+/// A record whose `class` is a class the app registered, not one the mount
+/// installed, writes nothing: no flag or property links of the app's
+/// class under the language's address.
+#[tokio::test]
+async fn a_record_of_a_class_the_mount_did_not_install_writes_nothing() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "a"})).await;
+    let (mut p, ctx) = mounted(&lang).await;
+    crate::perspectives::unregister_mount(&lang, &p.uuid);
+    p.add_sdna(
+        "AppNote".to_string(),
+        String::new(),
+        SdnaType::SubjectClass,
+        Some(
+            json!({
+                "target_class": "app://AppNote",
+                "properties": [
+                    {"path": "rdf://type", "name": "type", "has_value": "app://AppNote", "min_count": 1, "max_count": 1},
+                    {"path": "app://title", "name": "title", "max_count": 1}
+                ]
+            })
+            .to_string(),
+        ),
+        &ctx,
+    )
+    .await
+    .unwrap();
+
+    let generation = p.active_mount_generation(&lang).await.unwrap();
+    for class in ["AppNote", "app://AppNote"] {
+        let delta = crate::languages::mount_types::MountDelta {
+            address: Some("t9".to_string()),
+            changed: vec![crate::languages::mount_types::MountEntry {
+                r#class: class.to_string(),
+                address: "t9".to_string(),
+                data: json!({"title": "forged"}),
+            }],
+            removed: vec![],
+        };
+        let result = p
+            .apply_mount_delta(
+                &lang,
+                &delta,
+                generation,
+                super::mount_lifecycle::next_mount_seq(),
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "a record of {class} was applied: {result:?}"
+        );
+    }
+    let forged = p
+        .get_links(&LinkQuery {
+            source: Some(format!("{lang}://t9")),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        forged.is_empty(),
+        "links of another class were written: {forged:?}"
+    );
+}

@@ -71,7 +71,8 @@ fn class_basename(node: &str) -> &str {
     after_scheme.rsplit('/').next().unwrap_or(after_scheme)
 }
 
-/// The node `alias_mount_class_names` types as the class `name`.
+/// The node `add_sdna` types as the class `name` when the name is not its
+/// target class's basename.
 fn alias_node(name: &str) -> String {
     format!("literal:string:shacl://{name}")
 }
@@ -265,6 +266,21 @@ impl PerspectiveInstance {
             self.add_mount_links(lang_address, links).await?;
         }
         Ok(())
+    }
+
+    /// The names and target class IRIs of every class `lang_address`
+    /// claimed: the classes its records may name.
+    pub(super) async fn mount_own_classes(
+        &self,
+        lang_address: &str,
+    ) -> Result<HashSet<String>, AnyError> {
+        Ok(self
+            .class_claims()
+            .await?
+            .into_iter()
+            .filter(|c| c.owner == lang_address)
+            .flat_map(|c| std::iter::once(c.name).chain(c.targets))
+            .collect())
     }
 
     /// Every class claim in the store.

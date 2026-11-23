@@ -13,6 +13,9 @@ pub(crate) enum MountPoint {
     /// The per-record diff, after it read the record's current links and
     /// before it writes.
     EntryRead,
+    /// The shape install, after the class ownership check and before the
+    /// claim and the install.
+    OwnershipChecked,
 }
 
 /// Stop here if a test armed a gate for `(lang, point)`.
