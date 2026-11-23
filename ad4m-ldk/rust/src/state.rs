@@ -424,23 +424,26 @@ impl<T: 'static> Instance<T> {
     }
 
     /// Wait for the shared read side. Concurrent exports hold the
-    /// instance together.
+    /// instance together. The panic signal polls first, so a recorded
+    /// panic refuses a queued call even when the lock freed meanwhile —
+    /// a call that acquires here would run on the dead instance.
     pub async fn read(&self, op: &str) -> LanguageResult<ReadGuard<'_, T>> {
-        match select(self.lock.read(), self.panicked.clone()).await {
-            Either::Left((guard, _)) => Ok(guard),
-            Either::Right((Ok(message), _)) => Err(panicked(op, &message)),
+        match select(self.panicked.clone(), self.lock.read()).await {
+            Either::Left((Ok(message), _)) => Err(panicked(op, &message)),
             // The sender only drops with the slot. Keep waiting for the lock.
-            Either::Right((Err(oneshot::Canceled), lock)) => Ok(lock.await),
+            Either::Left((Err(oneshot::Canceled), lock)) => Ok(lock.await),
+            Either::Right((guard, _)) => Ok(guard),
         }
     }
 
     /// Wait for the write side. Ordered exports take the instance alone.
+    /// Same order as `read`: a recorded panic beats a ready lock.
     pub async fn write(&self, op: &str) -> LanguageResult<WriteGuard<'_, T>> {
-        match select(self.lock.write(), self.panicked.clone()).await {
-            Either::Left((guard, _)) => Ok(guard),
-            Either::Right((Ok(message), _)) => Err(panicked(op, &message)),
+        match select(self.panicked.clone(), self.lock.write()).await {
+            Either::Left((Ok(message), _)) => Err(panicked(op, &message)),
             // The sender only drops with the slot. Keep waiting for the lock.
-            Either::Right((Err(oneshot::Canceled), lock)) => Ok(lock.await),
+            Either::Left((Err(oneshot::Canceled), lock)) => Ok(lock.await),
+            Either::Right((guard, _)) => Ok(guard),
         }
     }
 
@@ -871,6 +874,57 @@ mod tests {
 
         assert_refused_after_panic("expressionGet", call.as_mut().poll(&mut cx));
         assert_refused_after_panic("teardown", teardown.as_mut().poll(&mut cx));
+    }
+
+    #[test]
+    fn a_recorded_panic_beats_a_lock_that_frees_for_a_queued_call() {
+        let slot = LanguageSlot::new();
+        slot.set(Counter::new());
+        let mut cx = Context::from_waker(noop_waker_ref());
+
+        // A read holds the instance; an ordered call queues behind it
+        // and a concurrent call behind the writer.
+        let held_call = slot.get("held").unwrap();
+        let held = block_on(held_call.read("held")).unwrap();
+        let writer = slot.get("ordered").unwrap();
+        let mut write = Box::pin(writer.write("ordered"));
+        assert!(write.as_mut().poll(&mut cx).is_pending());
+        let reader = slot.get("expressionGet").unwrap();
+        let mut read = Box::pin(reader.read("expressionGet"));
+        assert!(read.as_mut().poll(&mut cx).is_pending());
+
+        // The module panics while both wait. The lock then frees — the
+        // held read drops — but a recorded panic must still refuse both
+        // queued calls rather than run them on the dead instance.
+        slot.mark_panicked("boom at lib.rs:9");
+        drop(held);
+
+        match write.as_mut().poll(&mut cx) {
+            Poll::Ready(Err(e)) => {
+                assert!(e.message.contains("ordered"), "{}", e.message);
+                assert!(
+                    e.message.contains("earlier call panicked: boom at lib.rs:9"),
+                    "{}",
+                    e.message
+                );
+            }
+            Poll::Ready(Ok(_)) => panic!("a queued write took the lock of a panicked instance"),
+            Poll::Pending => panic!("the queued write still waits after the panic"),
+        }
+        // The writer's refusal freed the readers queued behind it, but
+        // the panic still comes first for them too.
+        match read.as_mut().poll(&mut cx) {
+            Poll::Ready(Err(e)) => {
+                assert!(e.message.contains("expressionGet"), "{}", e.message);
+                assert!(
+                    e.message.contains("earlier call panicked: boom at lib.rs:9"),
+                    "{}",
+                    e.message
+                );
+            }
+            Poll::Ready(Ok(_)) => panic!("a queued read took the lock of a panicked instance"),
+            Poll::Pending => panic!("the queued read still waits after the panic"),
+        };
     }
 
     #[test]
