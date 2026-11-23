@@ -101,6 +101,7 @@ import { RpcError } from "../apiClient"
 import { defaultDeviceId, SfuManager, type SfuNeighbourhoodApi, type SfuParticipantState } from "./SfuManager"
 import type {
     CallSessionInfo,
+    SfuAnswerResult,
     SfuCallRenegotiationOffer,
     SfuConfig,
     SfuDataMessage,
@@ -142,6 +143,7 @@ function offer(sdp: string, trackMapping?: TrackMapEntry[], participantId = MINE
     return {
         targetDid: ME,
         participantId,
+        offerId: `offer-${sdp}`,
         neighbourhoodUrl: URL,
         roomName: ROOM,
         sdpOffer: JSON.stringify({ type: "offer", sdp }),
@@ -170,7 +172,7 @@ function roster(
         withoutMe || sessions.some((s) => s.participantId === MINE)
             ? sessions
             : [...sessions, { participantId: MINE, agentDid: ME }]
-    return { neighbourhoodUrl: URL, roomName: ROOM, participants: listed, ...overrides }
+    return { neighbourhoodUrl: URL, roomName: ROOM, revision: 1, participants: listed, ...overrides }
 }
 
 function replaced(participantId: string, overrides: Partial<SfuSessionReplaced> = {}): SfuSessionReplaced {
@@ -217,9 +219,9 @@ function fakeApi() {
             return true
         }),
         sfuCallSetQualityPreference: jest.fn(async () => true),
-        sfuCallAnswerServerOffer: jest.fn(async () => {
+        sfuCallAnswerServerOffer: jest.fn(async (): Promise<SfuAnswerResult> => {
             log.push("sfuCallAnswerServerOffer")
-            return true
+            return { accepted: true }
         }),
         subscribeSfuCallRenegotiationOffer: jest.fn(
             (_did: string, handler: (e: SfuCallRenegotiationOffer) => void) => {
@@ -335,6 +337,7 @@ test("offers that arrive before the join completes apply after its answer, in ar
         URL,
         ROOM,
         MINE,
+        expect.any(String),
         JSON.stringify({ type: "answer", sdp: "local-answer" }),
     )
 })
@@ -343,7 +346,7 @@ test("a second offer waits until the first one is answered", async () => {
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL)
     await manager.join(fakeStream())
-    const answered = deferred<boolean>()
+    const answered = deferred<SfuAnswerResult>()
     api.sfuCallAnswerServerOffer.mockImplementationOnce(() => answered.promise)
 
     api.emitOffer(offer("first"))
@@ -352,7 +355,7 @@ test("a second offer waits until the first one is answered", async () => {
     const pc = currentPc()
     expect(pc.remoteSdps()).toEqual(["server-answer", "first"])
 
-    answered.resolve(true)
+    answered.resolve({ accepted: true })
     await flush()
     expect(pc.remoteSdps()).toEqual(["server-answer", "first", "second"])
     expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledTimes(2)
@@ -380,7 +383,7 @@ test("an offer queued for a connection that has since been replaced is dropped",
     const manager = new SfuManager(api, ROOM, ME, URL)
     await manager.join(fakeStream())
     const old = currentPc()
-    const answered = deferred<boolean>()
+    const answered = deferred<SfuAnswerResult>()
     api.sfuCallAnswerServerOffer.mockImplementationOnce(() => answered.promise)
     api.emitOffer(offer("first"))
     api.emitOffer(offer("stale"))
@@ -389,7 +392,7 @@ test("an offer queued for a connection that has since been replaced is dropped",
     await iceState("failed")
     const replacement = currentPc()
     expect(replacement).not.toBe(old)
-    answered.resolve(true)
+    answered.resolve({ accepted: true })
     await flush()
 
     expect(old.remoteSdps()).toEqual(["server-answer", "first"])
@@ -1162,7 +1165,7 @@ test("the join sends the device id; every later call names the participant id th
         [URL, ROOM, MINE, "early"],
         [URL, ROOM, MINE, "late"],
     ])
-    expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledWith(URL, ROOM, MINE, expect.any(String))
+    expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledWith(URL, ROOM, MINE, expect.any(String), expect.any(String))
     expect(api.sfuCallSetQualityPreference).toHaveBeenCalledWith(URL, ROOM, MINE, "low")
     expect(api.sfuSendData).toHaveBeenCalledWith(URL, ROOM, MINE, "chat", "hi", false)
     expect(api.sfuCallLeave.mock.calls).toEqual([[URL, ROOM, MINE]])
@@ -1499,6 +1502,7 @@ test("a lost restart offer stays open until the executor can resend it", async (
             URL,
             ROOM,
             MINE,
+            expect.any(String),
             JSON.stringify({ type: "answer", sdp: "local-answer" }),
         )
 

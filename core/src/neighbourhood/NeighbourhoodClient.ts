@@ -7,6 +7,7 @@ import { PerspectiveHandle } from "../perspectives/PerspectiveHandle"
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy"
 import type {
     CallSessionInfo,
+    SfuAnswerResult,
     SfuCallRenegotiationOffer,
     SfuCascadeStatus,
     SfuConfig,
@@ -215,12 +216,14 @@ export class NeighbourhoodClient {
         neighbourhoodUrl: string,
         roomName: string,
         participantId: string,
+        offerId: string,
         sdpAnswer: string,
-    ): Promise<boolean> {
+    ): Promise<SfuAnswerResult> {
         return this.#apiClient.call("sfu.callAnswerServerOffer", {
             neighbourhoodUrl,
             roomName,
             participantId,
+            offerId,
             sdpAnswer,
         })
     }
@@ -366,6 +369,7 @@ export class NeighbourhoodClient {
             callback({
                 targetDid: event.targetDid,
                 participantId: event.participantId,
+                offerId: event.offerId,
                 neighbourhoodUrl: event.neighbourhoodUrl,
                 roomName: event.roomName,
                 sdpOffer: event.sdpOffer,

@@ -11,6 +11,8 @@ import type { SfuQualityPreferenceParams } from "../generated/api/SfuQualityPref
 
 export type { CallSessionInfo } from "../generated/api/CallSessionInfo"
 export type { IceServer } from "../generated/api/IceServer"
+export type { SfuAnswerRefusal } from "../generated/api/SfuAnswerRefusal"
+export type { SfuAnswerResult } from "../generated/api/SfuAnswerResult"
 export type { SfuCallRenegotiationOffer } from "../generated/api/SfuCallRenegotiationOffer"
 export type { SfuCascadePipe } from "../generated/api/SfuCascadePipe"
 export type { SfuCascadeStatus } from "../generated/api/SfuCascadeStatus"

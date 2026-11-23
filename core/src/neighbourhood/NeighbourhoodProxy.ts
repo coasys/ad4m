@@ -4,6 +4,7 @@ import { Perspective, PerspectiveExpression, PerspectiveUnsignedInput } from "..
 import { NeighbourhoodClient } from "./NeighbourhoodClient";
 import type {
     CallSessionInfo,
+    SfuAnswerResult,
     SfuCallRenegotiationOffer,
     SfuCascadeStatus,
     SfuConfig,
@@ -238,9 +239,10 @@ export class NeighbourhoodProxy {
         neighbourhoodUrl: string,
         roomName: string,
         participantId: string,
+        offerId: string,
         sdpAnswer: string,
-    ): Promise<boolean> {
-        return await this.#client.sfuCallAnswerServerOffer(neighbourhoodUrl, roomName, participantId, sdpAnswer)
+    ): Promise<SfuAnswerResult> {
+        return await this.#client.sfuCallAnswerServerOffer(neighbourhoodUrl, roomName, participantId, offerId, sdpAnswer)
     }
 
     /**

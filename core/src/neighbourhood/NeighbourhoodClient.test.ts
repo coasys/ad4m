@@ -72,7 +72,7 @@ describe("NeighbourhoodClient SFU calls", () => {
     FakeWebSocket.sent = [];
     await client.sfuCallJoin(url, "r", "{}", "laptop", "K1");
     await client.sfuCallLeave(url, "r", "P1");
-    await client.sfuCallAnswerServerOffer(url, "r", "P1", "{}");
+    await client.sfuCallAnswerServerOffer(url, "r", "P1", "offer-9", "{}");
     await client.sfuAddIceCandidate(url, "r", "P1", "candidate:1");
     await client.sfuCallSetQualityPreference(url, "r", "P1", "low");
     await client.sfuSendData(url, "r", "P1", "chat", "hi");
@@ -82,7 +82,7 @@ describe("NeighbourhoodClient SFU calls", () => {
     expect(sfu).toEqual([
       { type: "sfu.callJoin", params: { neighbourhoodUrl: url, roomName: "r", sdpOffer: "{}", deviceId: "laptop", sessionKey: "K1" } },
       { type: "sfu.callLeave", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1" } },
-      { type: "sfu.callAnswerServerOffer", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1", sdpAnswer: "{}" } },
+      { type: "sfu.callAnswerServerOffer", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1", offerId: "offer-9", sdpAnswer: "{}" } },
       { type: "sfu.addIceCandidate", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1", candidate: "candidate:1" } },
       { type: "sfu.callSetQualityPreference", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1", preference: "low" } },
       { type: "sfu.sendData", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1", channelLabel: "chat", data: "hi", binary: false } },
@@ -101,7 +101,7 @@ describe("NeighbourhoodClient SFU calls", () => {
 
     const notice = { targetDid: "did:me", neighbourhoodUrl: url, roomName: "r", participantId: "P1" };
     FakeWebSocket.last.push({ type: "sfu-session-replaced", ...notice });
-    FakeWebSocket.last.push({ type: "sfu-call-renegotiation-offer", targetDid: "did:me", participantId: "P2", neighbourhoodUrl: url, roomName: "r", sdpOffer: "{}" });
+    FakeWebSocket.last.push({ type: "sfu-call-renegotiation-offer", targetDid: "did:me", participantId: "P2", offerId: "offer-3", neighbourhoodUrl: url, roomName: "r", sdpOffer: "{}" });
 
     expect(replaced).toEqual([expect.objectContaining(notice)]);
     expect(offers).toEqual([expect.objectContaining({ participantId: "P2" })]);

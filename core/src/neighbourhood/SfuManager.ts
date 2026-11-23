@@ -29,6 +29,7 @@ import { RpcError } from "../apiClient"
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy"
 import type {
     CallSessionInfo,
+    SfuAnswerResult,
     SfuCallRenegotiationOffer,
     SfuConfig,
     SfuDataMessage,
@@ -66,8 +67,9 @@ export interface SfuNeighbourhoodApi {
         neighbourhoodUrl: string,
         roomName: string,
         participantId: string,
+        offerId: string,
         sdpAnswer: string,
-    ): Promise<boolean>
+    ): Promise<SfuAnswerResult>
     subscribeSfuCallRenegotiationOffer(
         targetDid: string,
         callback: (event: SfuCallRenegotiationOffer) => void,
@@ -864,6 +866,7 @@ export class SfuManager {
                 this.neighbourhoodUrl,
                 event.roomName,
                 event.participantId,
+                event.offerId,
                 JSON.stringify(pc.localDescription),
             )
             this.answeredOffer = event.sdpOffer
