@@ -61,9 +61,16 @@ pub async fn ws_rpc(
     axum::extract::Extension(handler_map): axum::extract::Extension<Arc<HandlerMap>>,
     reach: ListenerReach,
     headers: axum::http::HeaderMap,
+    connect: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
 ) -> impl IntoResponse {
     let token = query.token.unwrap_or_default();
-    let remote = forwarded_for(&headers);
+    let remote = match connect {
+        Some(axum::extract::ConnectInfo(peer)) => {
+            client_ip(peer, &headers, &trusted_proxies_from_env())
+        }
+        // No socket peer: a forwarding header has nothing to be checked against.
+        None => "-".to_string(),
+    };
     match connection_context(&token, &state.admin_credential, reach) {
         Ok(ctx) => ws.on_upgrade(move |socket| handle_ws(socket, handler_map, ctx, remote)),
         Err(e) => {
@@ -73,22 +80,70 @@ pub async fn ws_rpc(
     }
 }
 
-/// The client's address as the proxy in front reports it: the first `X-Forwarded-For`
-/// entry, else `X-Real-IP`, else `-` (a direct connection; the executor does not read the
-/// peer address of its listeners).
-fn forwarded_for(headers: &axum::http::HeaderMap) -> String {
-    let header = |name: &str| {
-        headers
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.split(',').next())
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(str::to_string)
-    };
-    header("x-forwarded-for")
-        .or_else(|| header("x-real-ip"))
-        .unwrap_or_else(|| "-".to_string())
+/// Address for the `ip` field of a socket's open and close lines.
+///
+/// The socket peer is that address. A loopback peer, or a peer listed in `trusted`
+/// (`AD4M_TRUSTED_PROXIES`, comma-separated IP addresses), may name the client with
+/// `X-Forwarded-For` or `X-Real-IP`. The value used is the last `X-Forwarded-For` entry,
+/// else `X-Real-IP`, and only when that value is a single IP address. A missing or
+/// malformed header leaves the socket peer.
+fn client_ip(
+    peer: std::net::SocketAddr,
+    headers: &axum::http::HeaderMap,
+    trusted: &[std::net::IpAddr],
+) -> String {
+    if is_proxy_peer(peer.ip(), trusted) {
+        if let Some(ip) = forwarding_ip(headers) {
+            return ip.to_string();
+        }
+    }
+    peer.ip().to_canonical().to_string()
+}
+
+fn is_proxy_peer(peer: std::net::IpAddr, trusted: &[std::net::IpAddr]) -> bool {
+    let peer = peer.to_canonical();
+    peer.is_loopback() || trusted.iter().any(|ip| ip.to_canonical() == peer)
+}
+
+/// The last `X-Forwarded-For` entry when that header is present, else `X-Real-IP`.
+/// `None` when the chosen header is absent or not one IP address.
+fn forwarding_ip(headers: &axum::http::HeaderMap) -> Option<std::net::IpAddr> {
+    if let Some(value) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        return last_ip(value);
+    }
+    headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .and_then(first_ip)
+}
+
+fn last_ip(value: &str) -> Option<std::net::IpAddr> {
+    value.split(',').next_back().and_then(parse_ip)
+}
+
+fn first_ip(value: &str) -> Option<std::net::IpAddr> {
+    value.split(',').next().and_then(parse_ip)
+}
+
+fn parse_ip(value: &str) -> Option<std::net::IpAddr> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        value.parse().ok()
+    }
+}
+
+/// `AD4M_TRUSTED_PROXIES`: comma-separated IP addresses. Anything that is not an IP is skipped.
+fn trusted_proxies_from_env() -> Vec<std::net::IpAddr> {
+    match std::env::var("AD4M_TRUSTED_PROXIES") {
+        Ok(spec) => parse_trusted_proxies(&spec),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn parse_trusted_proxies(spec: &str) -> Vec<std::net::IpAddr> {
+    spec.split(',').filter_map(parse_ip).collect()
 }
 
 /// Who a connection's caller is, for its log lines: the user's DID, `main` (a grant on the
@@ -1145,7 +1200,14 @@ mod socket_tests {
         let app = crate::api::api_router(AppState {
             admin_credential: Some(ADMIN.into()),
         });
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap()
+        });
         addr
     }
 
@@ -1583,8 +1645,9 @@ mod socket_tests {
     // With an admin credential set, a socket with no token used to get the main agent's
     // event stream.
     /// A socket's open and close are each one `[call-diag]` line: the caller, the connection,
-    /// the client's address from `X-Forwarded-For`, and on close its lifetime, the bytes the
-    /// executor sent and the close code and reason the client gave.
+    /// the client address, and on close its lifetime, the bytes the executor sent and the
+    /// close code and reason the client gave. This client connects to the loopback listener,
+    /// so the last `X-Forwarded-For` entry is that address.
     #[tokio::test]
     async fn a_socket_logs_its_open_and_its_close_with_the_close_code() {
         use crate::call_diag::capture;
@@ -1599,7 +1662,7 @@ mod socket_tests {
             .unwrap();
         request.headers_mut().insert(
             "x-forwarded-for",
-            format!("{ip}, 10.0.0.1").parse().unwrap(),
+            format!("192.0.2.1, {ip}").parse().unwrap(),
         );
         let mut ws = tokio_tungstenite::connect_async(request).await.unwrap().0;
         let reply = call(&mut ws, "s", "agent.status").await;
@@ -1965,5 +2028,73 @@ mod liveness_tests {
         assert_eq!(capture::lines("ws.pong-late", &[]).len(), before);
         // A pong without a ping (a client that sent none) is not counted either.
         stats.pong_left(None, 0);
+    }
+}
+
+#[cfg(test)]
+mod client_ip_tests {
+    use super::{client_ip, parse_trusted_proxies};
+    use axum::http::HeaderMap;
+    use std::net::{IpAddr, SocketAddr};
+
+    fn peer(addr: &str) -> SocketAddr {
+        addr.parse().unwrap()
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (name, value) in pairs {
+            headers.insert(*name, value.parse().unwrap());
+        }
+        headers
+    }
+
+    /// A peer that is not loopback and not configured keeps its own address.
+    #[test]
+    fn a_forwarding_header_from_a_non_proxy_peer_stays_the_socket_peer() {
+        let peer = peer("203.0.113.50:40000");
+        let headers = headers(&[
+            ("x-forwarded-for", "198.51.100.9, 192.0.2.8"),
+            ("x-real-ip", "198.51.100.8"),
+        ]);
+        assert_eq!(client_ip(peer, &headers, &[]), "203.0.113.50");
+    }
+
+    #[test]
+    fn a_loopback_proxy_uses_the_last_forwarded_address() {
+        let peer = peer("127.0.0.1:1234");
+        let headers = headers(&[("x-forwarded-for", "198.51.100.9, 192.0.2.8")]);
+        assert_eq!(client_ip(peer, &headers, &[]), "192.0.2.8");
+    }
+
+    #[test]
+    fn a_loopback_proxy_without_forwarded_for_uses_x_real_ip() {
+        let peer = peer("[::1]:1234");
+        let headers = headers(&[("x-real-ip", "192.0.2.8")]);
+        assert_eq!(client_ip(peer, &headers, &[]), "192.0.2.8");
+    }
+
+    #[test]
+    fn a_malformed_forwarding_header_from_a_proxy_stays_the_socket_peer() {
+        let peer = peer("127.0.0.1:1234");
+        let headers = headers(&[("x-forwarded-for", "not-an-ip"), ("x-real-ip", "192.0.2.8")]);
+        assert_eq!(client_ip(peer, &headers, &[]), "127.0.0.1");
+        assert_eq!(client_ip(peer, &HeaderMap::new(), &[]), "127.0.0.1");
+    }
+
+    #[test]
+    fn a_configured_proxy_may_set_the_forwarded_address() {
+        let peer = peer("192.0.2.10:443");
+        let trusted = parse_trusted_proxies("192.0.2.10, not-an-ip, ::1");
+        assert_eq!(
+            trusted,
+            vec![
+                "192.0.2.10".parse::<IpAddr>().unwrap(),
+                "::1".parse().unwrap()
+            ]
+        );
+        let headers = headers(&[("x-forwarded-for", "198.51.100.7")]);
+        assert_eq!(client_ip(peer, &headers, &trusted), "198.51.100.7");
+        assert_eq!(client_ip(peer, &headers, &[]), "192.0.2.10");
     }
 }
