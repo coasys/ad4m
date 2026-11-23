@@ -21,7 +21,7 @@ import {
 import type {
   Scope, TraverseScope, IncludeMap, Query,
   GetOptions, AllInstancesResult, Page, ResultsWithTotalCount,
-  PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata,
+  PaginationResult, CursorPage, PropertyMetadata, RelationMetadata, ModelMetadata,
   IncludeProjection,
   TypedQuery, IncludeExtras, IncludeOf, LinksMap,
 } from "./types";
@@ -1235,6 +1235,7 @@ export class Ad4mModel {
     }
     if (query.offset !== undefined) queryInput.offset = query.offset;
     if (query.limit !== undefined) queryInput.limit = query.limit;
+    if (query.after !== undefined) queryInput.after = query.after;
     if (query.count !== undefined) queryInput.count = query.count;
     if (query.links) queryInput.links = query.links;
     queryInput.deepQuery = query.deepQuery ?? true;
@@ -1494,6 +1495,7 @@ export class Ad4mModel {
     return {
       results: instances,
       totalCount: result.totalCount,
+      ...(result.nextCursor !== undefined ? { nextCursor: result.nextCursor } : {}),
     };
   }
 
@@ -1618,9 +1620,54 @@ export class Ad4mModel {
     query?: Q,
     options?: CallOptions,
   ): Promise<PaginationResult<T & IncludeExtras<T, IncludeOf<Q>>>> {
-    const paginationQuery = { ...((query ?? {}) as Query), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
+    // Page numbers page by offset; a cursor from the starting query has no meaning here.
+    const { after: _after, ...base } = (query ?? {}) as Query;
+    const paginationQuery = { ...base, limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
     const answer = await this.executeModelQuery(perspective, paginationQuery, undefined, options);
     return { results: answer.results as (T & IncludeExtras<T, IncludeOf<Q>>)[], totalCount: requireTotalCount(answer), pageSize, pageNumber };
+  }
+
+  /**
+   * One page in timestamp order, continued by cursor rather than by offset.
+   *
+   * Pass no `after` (or `""`) for the first page, then each page's
+   * `nextCursor`. A row created while you page cannot shift a later page the
+   * way it shifts an `offset` page. The query may order by `timestamp`,
+   * `createdAt` or `updatedAt` (either direction) or not at all; the executor
+   * refuses any other order, and `offset` is dropped. Use `paginate()` for
+   * page numbers or other orders.
+   *
+   * `nextCursor` is `undefined` on the last page — and `undefined` (or `""`)
+   * as `after` asks for the first page, so loop on the cursor:
+   * `while (page.nextCursor)`. A `do … while (page.results.length)` loop
+   * passes `page?.nextCursor` — `undefined` again on the last page — and
+   * re-reads page one forever.
+   *
+   * @example
+   * ```typescript
+   * let page = await Message.page(perspective, 50, undefined, { order: { createdAt: "DESC" } });
+   * while (page.nextCursor) {
+   *   page = await Message.page(perspective, 50, page.nextCursor, { order: { createdAt: "DESC" } });
+   * }
+   * ```
+   */
+  static async page<T extends Ad4mModel, Q extends TypedQuery<T> = {}>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    pageSize: number,
+    after?: string,
+    query?: Q,
+    options?: CallOptions,
+  ): Promise<CursorPage<T & IncludeExtras<T, IncludeOf<Q>>>> {
+    // A cursor page returns no total, so `count` is dropped with `offset`: no COUNT runs for it.
+    const { offset: _offset, count: _count, ...rest } = (query ?? {}) as Query;
+    const pageQuery: Query = { ...rest, limit: pageSize, after: after ?? '' };
+    const { results, nextCursor } = await this.executeModelQuery(perspective, pageQuery, undefined, options);
+    return {
+      results: results as (T & IncludeExtras<T, IncludeOf<Q>>)[],
+      ...(nextCursor !== undefined ? { nextCursor } : {}),
+      pageSize,
+    };
   }
 
   /**
@@ -1655,7 +1702,9 @@ export class Ad4mModel {
     query?: TypedQuery<T>,
     options?: CallOptions,
   ): Promise<number> {
-    return requireTotalCount(await this.executeModelQuery(perspective, { ...((query ?? {}) as Query), limit: 0, count: true }, undefined, options));
+    // A total is one figure over the whole scope; a cursor pages it, so `after` is dropped like `paginate` does.
+    const { after: _after, ...countQuery } = (query ?? {}) as Query;
+    return requireTotalCount(await this.executeModelQuery(perspective, { ...countQuery, limit: 0, count: true }, undefined, options));
   }
 
   /** The `executeAction` write that sets property `key` to `value`; none for an empty value. */
