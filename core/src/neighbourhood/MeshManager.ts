@@ -555,6 +555,11 @@ export class MeshManager {
      * {@link releaseClones} stops these itself. See {@link putTrack}.
      */
     private inflight = new Map<RTCRtpSender, MediaStreamTrack>()
+    /**
+     * Replacements of one sender, one at a time. The `sender.track` check and
+     * live-clone reuse both read what the previous replacement committed.
+     */
+    private senderTail = new Map<RTCRtpSender, Promise<void>>()
     private closed = false
     private channelUnsubscribe: (() => void) | null = null
     private unwatchPublish: (() => void) | null = null
@@ -1177,8 +1182,29 @@ export class MeshManager {
      * and reseat stop it there: the browser aborts a pending `replaceTrack`
      * when the connection closes, and does not settle the promise, so the
      * rejection handler and {@link commitTrack} need not run.
+     *
+     * Calls on one sender run in order. `sender.track` changes only when
+     * `replaceTrack` settles, so a mute that looks while a camera is still
+     * attaching would otherwise see a null track and skip `replaceTrack(null)`.
      */
     private async putTrack(sender: RTCRtpSender, source: MediaStreamTrack | null): Promise<void> {
+        const previous = this.senderTail.get(sender) ?? Promise.resolve()
+        let release = () => {}
+        const gate = new Promise<void>((resolve) => { release = resolve })
+        // A refusal must not strand the next replacement behind a rejected tail.
+        const finished = previous.then(() => gate, () => gate)
+        this.senderTail.set(sender, finished)
+        try {
+            await previous
+            await this.applyTrack(sender, source)
+        } finally {
+            release()
+            if (this.senderTail.get(sender) === finished) this.senderTail.delete(sender)
+        }
+    }
+
+    /** Prepare, replace and commit one track. Caller serialises this per sender. */
+    private async applyTrack(sender: RTCRtpSender, source: MediaStreamTrack | null): Promise<void> {
         const prepared = this.prepareTrack(sender, source)
         if (prepared.fresh && prepared.track) this.inflight.set(sender, prepared.track)
         try {

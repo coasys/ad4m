@@ -1535,6 +1535,92 @@ describe("call mesh", () => {
         }
     })
 
+    it("does not leave a camera sending when a mute starts while it is attaching", async () => {
+        // The camera's replaceTrack is still pending, so sender.track is null.
+        // A mute that checks that and skips replaceTrack(null) lets the camera
+        // land afterwards.
+        const camera = new FakeTrack("video")
+        const clones: FakeTrack[] = []
+        const original = camera.clone.bind(camera)
+        camera.clone = () => {
+            const copy = original()
+            clones.push(copy)
+            return copy
+        }
+        let releaseGate = () => {}
+        try {
+            const alice = await makeMesh(bus, "did:alice", CALL_ID)
+            alice.mesh.setRoster(["did:alice", "did:bob"])
+            await settle()
+
+            FakePeerConnection.replaceCalls = 0
+            FakePeerConnection.replaceGate = new Promise<void>((resolve) => { releaseGate = resolve })
+            const attaching = alice.mesh.replaceTrack("video", camera as unknown as MediaStreamTrack)
+            for (let i = 0; i < 20 && FakePeerConnection.replaceCalls === 0; i += 1) await settle()
+            expect(clones).toHaveLength(1)
+
+            const muting = alice.mesh.replaceTrack("video", null)
+            releaseGate()
+            await attaching
+            await muting
+
+            const live = alice.connections[0].getSenders().filter((sender) =>
+                sender.track?.kind === "video" && asFake(sender.track).readyState === "live")
+            expect(live).toHaveLength(0)
+            expect(clones[0].readyState).toBe("ended")
+            expect(camera.readyState).toBe("live")
+            expect(alice.errors).toEqual([])
+        } finally {
+            releaseGate()
+            FakePeerConnection.replaceGate = null
+        }
+    })
+
+    it("applies the later of two replacements that overlap on one sender", async () => {
+        // The second call runs while the first is still in replaceTrack, so
+        // the sender still holds the previous clone of the same camera. Reusing
+        // that clone and skipping replaceTrack loses to the first call, which
+        // then commits the screen and stops the clone.
+        const camera = new FakeTrack("video")
+        const screen = new FakeTrack("video")
+        let releaseGate = () => {}
+        try {
+            const alice = await makeMesh(bus, "did:alice", CALL_ID)
+            alice.mesh.setRoster(["did:alice", "did:bob"])
+            await settle()
+            await alice.mesh.replaceTrack("video", camera as unknown as MediaStreamTrack)
+
+            const video = () => alice.connections[0].getSenders().find((sender) => sender.track?.kind === "video")
+            expect(asFake(video()?.track).clonedFrom).toBe(camera)
+
+            FakePeerConnection.replaceCalls = 0
+            FakePeerConnection.replaceGate = new Promise<void>((resolve) => { releaseGate = resolve })
+            const toScreen = alice.mesh.replaceTrack("video", screen as unknown as MediaStreamTrack)
+            for (let i = 0; i < 20 && FakePeerConnection.replaceCalls === 0; i += 1) await settle()
+            const back = alice.mesh.replaceTrack("video", camera as unknown as MediaStreamTrack)
+            releaseGate()
+            await toScreen
+            await back
+
+            const sent = asFake(video()?.track)
+            expect(sent.clonedFrom).toBe(camera)
+            expect(sent.readyState).toBe("live")
+            expect(camera.readyState).toBe("live")
+            expect(screen.readyState).toBe("live")
+
+            // The same source again reuses the live clone: no new replaceTrack.
+            FakePeerConnection.replaceGate = null
+            FakePeerConnection.replaceCalls = 0
+            await alice.mesh.replaceTrack("video", camera as unknown as MediaStreamTrack)
+            expect(FakePeerConnection.replaceCalls).toBe(0)
+            expect(video()?.track).toBe(sent)
+            expect(alice.errors).toEqual([])
+        } finally {
+            releaseGate()
+            FakePeerConnection.replaceGate = null
+        }
+    })
+
     it("attaches the tracks handed to join, one per kind", async () => {
         const mic = track("audio")
         const camera = track("video")
