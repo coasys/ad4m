@@ -159,6 +159,40 @@ fn inbound_touches_shacl(diff: &DecoratedPerspectiveDiff) -> bool {
 /// still runs through `perspective.queryProlog`).
 pub(crate) const PROLOG_LIVE_QUERY_UNSUPPORTED: &str = "Prolog live queries are no longer supported; subscribe with a SPARQL query or a model query (perspective.modelSubscribe)";
 
+/// The error a model subscription that sends `after` gets. A subscription
+/// re-runs one query on every matching write, so a cursor would re-read the
+/// same page forever; cursor paging is a one-shot `perspective.modelQuery`.
+pub(crate) const MODEL_SUBSCRIPTION_CURSOR_UNSUPPORTED: &str = "Model subscriptions do not take an `after` cursor: a subscription re-runs one query, so it would re-read the same page forever. Subscribe without `after` (use `limit`/`offset`), and page by cursor with perspective.modelQuery";
+
+/// Whether a model query JSON sends a cursor (`after`, even `""`). `null`
+/// reads as no cursor, as it does in the query itself. JSON that does not
+/// parse is left to the query, which reports it.
+pub(crate) fn model_query_sends_cursor(query_json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(query_json)
+        .ok()
+        .and_then(|q| q.get("after").map(|a| !a.is_null()))
+        .unwrap_or(false)
+}
+
+/// The refusals [`PerspectiveInstance::model_query_classes_within`]'s early
+/// answers would skip — the `after` rules that need no shape. A union (or
+/// an abstract class, which resolves to one) refuses `after` reads itself
+/// ([`super::model_query::refuse_union_reads`]); one class refuses the
+/// unsupported cursors of [`super::model_query::refuse_unsupported_cursor`].
+fn refuse_before_empty_model_answer(
+    classes: &super::model_query::QueryClasses,
+    query_input: &super::model_query::ModelQueryInput,
+) -> Result<(), deno_core::anyhow::Error> {
+    match classes {
+        super::model_query::QueryClasses::Union(_) => {
+            super::model_query::refuse_union_reads(query_input)
+        }
+        super::model_query::QueryClasses::One(_) => {
+            super::model_query::refuse_unsupported_cursor(query_input).map(|_| ())
+        }
+    }
+}
+
 pub(crate) fn is_sparql_query(query: &str) -> bool {
     let trimmed = query.trim();
     // Match SPARQL keywords followed by whitespace or '{' / '<' to avoid
@@ -3851,6 +3885,16 @@ impl PerspectiveInstance {
         let mut query_input: super::model_query::ModelQueryInput = serde_json::from_str(query_json)
             .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
 
+        // A malformed `after` fails the same way however the query would have
+        // been answered: the empty results below (a hard-wired class nothing
+        // wrote yet, a producedByFlow filter nothing passes) must not take an
+        // unparseable cursor for a last page.
+        if let Some(after) = query_input.after.as_deref() {
+            if !after.is_empty() {
+                super::model_query::KeysetCursor::decode(after)?;
+            }
+        }
+
         // `where.producedByFlow` is resolved here, not in the pipeline: it
         // needs the perspective (receipts, flow catalogue) and signature
         // verification, neither of which SPARQL or the post-hydration filter
@@ -3890,9 +3934,14 @@ impl PerspectiveInstance {
             one => one.clone(),
         };
         if unstored_hardwired.iter().all(|u| *u) {
+            // The empty answer still fails what the query would be refused
+            // for without a shape: a union's `after` rules, or one class's
+            // unsupported cursor.
+            refuse_before_empty_model_answer(classes, &query_input)?;
             return serde_json::to_string(&super::model_query::ModelQueryResult {
                 instances: vec![],
                 total_count: query_input.count.unwrap_or(false).then_some(0),
+                next_cursor: None,
             })
             .map_err(|e| {
                 deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
@@ -3916,10 +3965,15 @@ impl PerspectiveInstance {
             .await?;
         let named = classes;
         let classes = &targets.classes;
+        // The early answers below — no class resolved, a `producedByFlow`
+        // filter nothing passes — skip the pipeline, so they make its
+        // shape-free refusals themselves, the same way.
+        refuse_before_empty_model_answer(classes, &query_input)?;
         if classes.names().is_empty() {
             return serde_json::to_string(&super::model_query::ModelQueryResult {
                 instances: vec![],
                 total_count: query_input.count.unwrap_or(false).then_some(0),
+                next_cursor: None,
             })
             .map_err(|e| {
                 deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
@@ -3971,6 +4025,7 @@ impl PerspectiveInstance {
                 return serde_json::to_string(&super::model_query::ModelQueryResult {
                     instances: vec![],
                     total_count: query_input.count.unwrap_or(false).then_some(0),
+                    next_cursor: None,
                 })
                 .map_err(|e| {
                     deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
@@ -5903,6 +5958,8 @@ impl PerspectiveInstance {
     ///
     /// `classes` is one class or a union (#1238). A union is one subscription:
     /// it re-runs when a diff touches the trigger set of any class it names.
+    /// A query that sends `after` fails with
+    /// [`MODEL_SUBSCRIPTION_CURSOR_UNSUPPORTED`].
     pub async fn model_subscribe_and_query(
         &self,
         stop: &EvalStop,
@@ -5912,6 +5969,9 @@ impl PerspectiveInstance {
         connection_id: String,
         subscriber: Option<String>,
     ) -> Result<(String, u64, String), AnyError> {
+        if model_query_sends_cursor(&query_json) {
+            return Err(anyhow!(MODEL_SUBSCRIPTION_CURSOR_UNSUPPORTED));
+        }
         // An abstract class (#1435) is watched through the classes it reads
         // now; `refresh_abstract_subscriptions` resolves it again when the
         // installed shapes change. The generation is read first, so a change
@@ -9012,6 +9072,92 @@ mod tests {
         assert!(
             msg.contains("No SHACL shape stored for class 'Unknown'"),
             "error should name the class, got: {msg}"
+        );
+    }
+
+    /// A malformed `after` fails even when the query would answer empty:
+    /// `ad4m://FlowInstance` is a hard-wired class nothing wrote here, so the
+    /// query returns before the pipeline's decode could run. A valid first
+    /// page still answers empty — and writes nothing.
+    #[tokio::test]
+    async fn test_model_query_decodes_after_before_an_empty_answer() {
+        use base64::Engine;
+        let perspective = setup().await;
+        let err = perspective
+            .model_query_within(
+                "ad4m://FlowInstance",
+                r#"{"after":"!","limit":1}"#,
+                Duration::from_secs(1),
+            )
+            .await
+            .expect_err("a malformed cursor is an error, not an empty page");
+        assert!(err.to_string().contains("Invalid `after` cursor"), "{err}");
+
+        // And every `after` rule the pipeline refuses without a shape fails
+        // the same way here: the empty result must not stand in for the
+        // refusal a stored class would give.
+        for (name, query) in [
+            (
+                "a property order",
+                r#"{"after":"","limit":1,"order":{"title":"ASC"}}"#,
+            ),
+            ("`limit: 0`", r#"{"after":"","limit":0}"#),
+            ("no `limit`", r#"{"after":""}"#),
+            (
+                "a non-zero `offset`",
+                r#"{"after":"","limit":1,"offset":2}"#,
+            ),
+            ("an `include` cursor", r#"{"include":{"rel":{"after":""}}}"#),
+        ] {
+            let err = perspective
+                .model_query_within("ad4m://FlowInstance", query, Duration::from_secs(1))
+                .await
+                .expect_err(&format!("{name}: refused, not an empty page"));
+            assert!(err.to_string().contains("`after`"), "{name}: {err}");
+        }
+
+        // A cursor taken from a page read the other way is refused too —
+        // the order's direction needs no shape to compare.
+        let desc_cursor = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"ts":"2026-01-01T00:00:00.000Z","id":"ns://a","desc":true}"#);
+        let err = perspective
+            .model_query_within(
+                "ad4m://FlowInstance",
+                &format!(r#"{{"after":"{desc_cursor}","limit":1,"order":{{"timestamp":"ASC"}}}}"#),
+                Duration::from_secs(1),
+            )
+            .await
+            .expect_err("a cursor from the other direction: refused");
+        assert!(
+            err.to_string().contains("opposite order direction"),
+            "{err}"
+        );
+
+        let first = perspective
+            .model_query_within(
+                "ad4m://FlowInstance",
+                r#"{"after":"","limit":1}"#,
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("a first page of an unstored class reads empty");
+        let first: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(first["instances"].as_array().unwrap().len(), 0);
+        // And a well-formed cursor decodes and reads empty too.
+        let cursor = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"ts":"2026-01-01T00:00:00.000Z","id":"ns://a","desc":false}"#);
+        let query = format!(r#"{{"after":"{cursor}","limit":1}}"#);
+        perspective
+            .model_query_within("ad4m://FlowInstance", &query, Duration::from_secs(1))
+            .await
+            .expect("a well-formed cursor decodes");
+        assert!(
+            perspective
+                .get_links(&LinkQuery::default())
+                .await
+                .unwrap()
+                .is_empty(),
+            "the empty answers wrote nothing"
         );
     }
 
