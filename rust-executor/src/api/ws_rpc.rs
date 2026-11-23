@@ -2065,7 +2065,7 @@ mod client_ip_tests {
         addr.parse().unwrap()
     }
 
-    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
         let mut headers = HeaderMap::new();
         for (name, value) in pairs {
             headers.insert(*name, value.parse().unwrap());
