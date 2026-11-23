@@ -43,8 +43,8 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   Links from older versions (`ad4m://has_subject_class`, `ad4m://sdna`, `ad4m://has_shacl`,
   `ad4m://shacl_shape_uri`) are not read and not written. `shape_cache` is keyed by the key
   the caller passed (a target class IRI or a name); it and the registry are cleared whole
-  (`clear_shape_cache`) by `register_shapes` and by every local or inbound diff that touches
-  shape links, so an IRI key and a name key never hold a stale or crossed shape.
+  (`clear_shape_cache`) by `register_shapes`, by every local or inbound diff that touches
+  shape links, and by `import_perspective`, so an IRI key and a name key never hold a stale or crossed shape.
   `get_shape(class)` → `Arc<ModelShape>`, `class` a target class IRI or a name.
 - `register_shapes` compares the own links a shape gives with the own links stored, as
   triples. Equal sets write nothing (`unchanged`); otherwise one Shared diff adds what is

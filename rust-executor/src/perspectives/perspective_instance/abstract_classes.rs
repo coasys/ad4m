@@ -69,7 +69,7 @@ pub(super) const UNRESOLVED: u64 = u64::MAX;
 
 impl PerspectiveInstance {
     /// Drop every cached shape, and what was derived from them.
-    pub(super) fn clear_shape_cache(&self) {
+    pub(crate) fn clear_shape_cache(&self) {
         self.shape_cache.write().unwrap().clear();
         self.forget_derived_shapes();
     }

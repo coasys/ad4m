@@ -769,6 +769,9 @@ pub async fn import_perspective(
         .await
         .map_err(|e| format!("Failed to persist link diff to SPARQL store: {}", e))?;
 
+    // The import wrote shape links behind the caches' back: drop them.
+    perspective.clear_shape_cache();
+
     Ok(instance.handle)
 }
 
