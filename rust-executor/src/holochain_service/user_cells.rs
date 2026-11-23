@@ -309,8 +309,9 @@ impl UserCells {
                 let started = std::time::Instant::now();
                 let app = backend.install(payload).await?;
                 log::info!(
-                    "Installed Holochain app {} for {did} in language {} in {} ms",
+                    "Installed Holochain app {} for {did} (agent {}) in language {} in {} ms",
                     app.app_id,
+                    app.agent,
                     main.language,
                     started.elapsed().as_millis()
                 );
