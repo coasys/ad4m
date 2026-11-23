@@ -116,7 +116,7 @@ async fn run_as(handle: &LanguageRuntimeHandle, context: &AgentContext, script: 
     let raw = handle
         .execute_with_context(script.to_string(), context.clone())
         .await
-        .expect("the script runs");
+        .unwrap_or_else(|e| panic!("the script runs: {e}"));
     serde_json::from_str(&raw).expect("the script returns JSON")
 }
 
@@ -187,7 +187,7 @@ async fn every_agent_calls_through_its_own_cell() {
             r#"(async () => {{
   const info = await HOLOCHAIN_SERVICE.installApp({{
     installed_app_id: {app_id:?},
-    agent_key: {key},
+    agent_key: new Uint8Array({key}),
     source: {{ type: "path", value: "/nonexistent/acorn.happ" }},
     network_seed: "project-1",
     roles_settings: null,
@@ -196,7 +196,7 @@ async fn every_agent_calls_through_its_own_cell() {
   }});
   return JSON.stringify(info.installed_app_id);
 }})()"#,
-            key = serde_json::to_string(&main_key).unwrap(),
+            key = serde_json::to_string(&main_key.get_raw_39().to_vec()).unwrap(),
         ),
     )
     .await;
@@ -244,19 +244,20 @@ async fn every_agent_calls_through_its_own_cell() {
                 &format!(
                     r#"(async () => {{
   const info = await HOLOCHAIN_SERVICE.getAppInfo({app_id:?});
-  return JSON.stringify(info ? info.agent_pub_key : null);
+  return JSON.stringify(info ? Array.from(info.agent_pub_key) : null);
 }})()"#
                 ),
             )
             .await
         }
     };
-    let alice_info = info_key(as_alice.clone()).await;
-    let alice_key: AgentPubKey = serde_json::from_value(alice_info).expect("Alice's app info");
+    let key_of = |info: Value| {
+        let bytes: Vec<u8> = serde_json::from_value(info).expect("an app info with a key");
+        AgentPubKey::from_raw_39(bytes)
+    };
+    let alice_key = key_of(info_key(as_alice.clone()).await);
     assert_eq!(alice_key.to_string(), a1);
-    let main_info: AgentPubKey =
-        serde_json::from_value(info_key(main.clone()).await).expect("the main app info");
-    assert_eq!(main_info, main_key);
+    assert_eq!(key_of(info_key(main.clone()).await), main_key);
 
     // Alice cannot reach Bob's cell by naming his app, nor an app no language registered.
     let bobs_app = format!("{app_id}@{bob}");
