@@ -54,6 +54,7 @@ use lazy_static::lazy_static;
 use perspective_instance::PerspectiveInstance;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::RwLock;
 
 use crate::events::{Audience, Event, Topic};
@@ -443,7 +444,10 @@ pub async fn update_perspective_with(
                 .update_perspective(persisted)
                 .map_err(|e| e.to_string())?;
             // Keep the DB and routing cache writes serialized with handle writes.
-            if let Some(nh) = &persisted.neighbourhood {
+            // A removed perspective's change must not put its entry back after
+            // `remove_perspective` cleared it.
+            let torn_down = instance.is_teardown.load(Ordering::Acquire);
+            if let (Some(nh), false) = (&persisted.neighbourhood, torn_down) {
                 register_link_language_perspective(
                     nh.data.link_language.clone(),
                     persisted.clone(),
@@ -501,13 +505,17 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
         // cached handle DIRECTLY without verifying get_perspective
         // still returns Some, so signals would keep flowing for a
         // removed perspective until the cache entry was overwritten.
-        {
-            let handle_snapshot = instance.persisted.snapshot();
-            if let Some(nh) = &handle_snapshot.neighbourhood {
-                let mut cache = LINK_LANG_TO_PERSPECTIVE_HANDLE.write().unwrap();
-                cache.remove(&nh.data.link_language);
-            }
-        }
+        // Taken as a handle write, so a change already writing finishes (and
+        // registers its entry) first; later ones see the teardown flag.
+        instance
+            .persisted
+            .update(|handle| {
+                if let Some(nh) = &handle.neighbourhood {
+                    let mut cache = LINK_LANG_TO_PERSPECTIVE_HANDLE.write().unwrap();
+                    cache.remove(&nh.data.link_language);
+                }
+            })
+            .await;
 
         // Clean up the per-perspective SPARQL (Oxigraph/RocksDB) directory
         if let Some(data_path) = get_app_data_path() {
@@ -588,6 +596,9 @@ async fn perspective_by_link_language(language_address: String) -> Option<Perspe
         let matches = perspective
             .persisted
             .update(|handle| {
+                if perspective.is_teardown.load(Ordering::Acquire) {
+                    return false;
+                }
                 if let Some(nh) = &handle.neighbourhood {
                     if nh.data.link_language == language_address {
                         // Serialize cache fills with handle updates, so an old copy cannot win.
@@ -1179,6 +1190,43 @@ mod tests {
         assert!(
             owners.contains(&"did:test:b".to_string()),
             "the routing cache lost B: {owners:?}"
+        );
+    }
+
+    /// A change still writing when the perspective is removed must not leave
+    /// the removed handle in the routing cache: the signal fast path uses the
+    /// cached handle without checking the perspective still exists.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn removing_a_perspective_during_a_change_leaves_no_routing_cache_entry() {
+        setup();
+        let link_language = "routing-cache-remove-during-change";
+        let instance = neighbourhood_perspective(link_language, None);
+        let uuid = instance.uuid.clone();
+
+        let writer = instance.persisted.hold_writer().await;
+        let change = tokio::spawn({
+            let uuid = uuid.clone();
+            async move { update_perspective_with(&uuid, |h| h.add_owner("did:test:b")).await }
+        });
+        // Let the change find the instance and queue for the handle lock.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let removal = tokio::spawn({
+            let uuid = uuid.clone();
+            async move { remove_perspective(&uuid).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        drop(writer);
+        change.await.unwrap().unwrap();
+        assert!(removal.await.unwrap().is_some());
+
+        let cached = cached_perspective_handle(link_language);
+        LINK_LANG_TO_PERSPECTIVE_HANDLE
+            .write()
+            .unwrap()
+            .remove(link_language);
+        assert!(
+            cached.is_none(),
+            "the routing cache kept the removed perspective"
         );
     }
 
