@@ -626,12 +626,13 @@ impl PerspectiveInstance {
         log::debug!("Mount resync loop ended for perspective {}", uuid);
     }
 
-    /// Install `shapes` through `add_sdna_batch` (one SubjectClass per
-    /// shape, Shared as `add_sdna` writes them) once `check_class_ownership`
-    /// lets this language install them and it claimed them, then rewrite
-    /// the mount's version link. The check and the install hold the
-    /// perspective's install lock, so two mounts cannot both pass the check
-    /// for the same class.
+    /// Install `shapes` (one SubjectClass per shape, Shared as `add_sdna`
+    /// writes them) once `check_class_ownership` lets this language install
+    /// them and it claimed them, then rewrite the mount's version link. The
+    /// check, the claim and the install hold the perspective's install lock,
+    /// so two mounts cannot both pass the check for the same class, and its
+    /// `sdna_change_mutex`, so no `register_shapes` or `add_sdna` lands
+    /// between the check and the install.
     async fn install_mount_shapes(
         &mut self,
         lang_address: &str,
@@ -639,7 +640,10 @@ impl PerspectiveInstance {
     ) -> Result<(), AnyError> {
         let lifecycles = self.mount_lifecycles.clone();
         let _installing = lifecycles.install_lock().await;
+        let sdna = self.sdna_change_mutex.clone();
+        let sdna_changing = sdna.lock().await;
         self.check_class_ownership(lang_address, shapes).await?;
+        pause(lang_address, MountPoint::OwnershipChecked).await;
         // Claimed before they are installed: an install that fails halfway
         // leaves classes this language may still install over on a retry.
         self.claim_mount_classes(lang_address, shapes).await?;
@@ -656,7 +660,8 @@ impl PerspectiveInstance {
                 )
             })
             .collect();
-        self.add_sdna_batch(entries, &context).await?;
+        self.add_sdna_batch_locked(entries, &context).await?;
+        drop(sdna_changing);
         self.alias_mount_class_names(shapes).await?;
 
         self.remove_bookkeeping(lang_address).await?;

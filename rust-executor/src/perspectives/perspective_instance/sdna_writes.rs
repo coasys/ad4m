@@ -61,6 +61,26 @@ fn parse_sdna_json_to_links(
     }
 }
 
+/// An SDNA entry with its SHACL parsed: name, code, type, links.
+type ParsedSdna = (String, String, SdnaType, Option<Vec<Link>>);
+
+/// Parse every entry before writing any of them, so one invalid shape
+/// refuses the whole batch instead of leaving it half-applied.
+fn parse_sdna_entries(
+    entries: Vec<(String, String, SdnaType, Option<String>)>,
+) -> Result<Vec<ParsedSdna>, AnyError> {
+    entries
+        .into_iter()
+        .map(|(name, sdna_code, sdna_type, shacl_json)| {
+            let shacl_links = shacl_json
+                .as_deref()
+                .map(|shacl| parse_sdna_json_to_links(&sdna_type, shacl, &name))
+                .transpose()?;
+            Ok((name, sdna_code, sdna_type, shacl_links))
+        })
+        .collect()
+}
+
 impl PerspectiveInstance {
     /// Adds the given Social DNA code to the perspective's SDNA code
     /// If shacl_json is provided, also stores SHACL as queryable RDF links
@@ -194,31 +214,11 @@ impl PerspectiveInstance {
             .iter()
             .any(|(_, _, sdna_type, _)| matches!(sdna_type, SdnaType::Flow));
 
-        // Parse every entry before writing any of them, so one invalid shape
-        // refuses the whole batch instead of leaving it half-applied.
-        let entries = entries
-            .into_iter()
-            .map(|(name, sdna_code, sdna_type, shacl_json)| {
-                let shacl_links = shacl_json
-                    .as_deref()
-                    .map(|shacl| parse_sdna_json_to_links(&sdna_type, shacl, &name))
-                    .transpose()?;
-                Ok((name, sdna_code, sdna_type, shacl_links))
-            })
-            .collect::<Result<Vec<_>, AnyError>>()?;
-
+        let entries = parse_sdna_entries(entries)?;
         let results = {
             let mutex = self.sdna_change_mutex.clone();
             let _guard = mutex.lock().await;
-
-            let mut results = Vec::with_capacity(entries.len());
-            for (name, sdna_code, sdna_type, shacl_links) in entries {
-                let result = self
-                    .add_sdna_inner(name, sdna_code, sdna_type, shacl_links, context)
-                    .await?;
-                results.push(result);
-            }
-            results
+            self.add_parsed_sdna(entries, context).await?
         };
 
         // Same rule as `add_sdna`: register the flow-runtime classes only after
@@ -232,6 +232,44 @@ impl PerspectiveInstance {
                 .map_err(|e| anyhow!("ensure_flow_model_classes: {e:#}"))?;
         }
 
+        Ok(results)
+    }
+
+    /// `add_sdna_batch` for a caller that already holds `sdna_change_mutex`
+    /// (a mount checks class ownership, claims and installs under one
+    /// hold). A flow entry is refused: registering the flow-runtime classes
+    /// re-enters the mutex.
+    pub(super) async fn add_sdna_batch_locked(
+        &mut self,
+        entries: Vec<(String, String, SdnaType, Option<String>)>,
+        context: &AgentContext,
+    ) -> Result<Vec<bool>, AnyError> {
+        if entries
+            .iter()
+            .any(|(_, _, sdna_type, _)| matches!(sdna_type, SdnaType::Flow))
+        {
+            return Err(anyhow!(
+                "a flow cannot be registered under a held SDNA lock: use add_sdna_batch"
+            ));
+        }
+        let entries = parse_sdna_entries(entries)?;
+        self.add_parsed_sdna(entries, context).await
+    }
+
+    /// Write parsed SDNA entries, one `add_sdna_inner` each. The caller
+    /// holds `sdna_change_mutex`.
+    async fn add_parsed_sdna(
+        &mut self,
+        entries: Vec<ParsedSdna>,
+        context: &AgentContext,
+    ) -> Result<Vec<bool>, AnyError> {
+        let mut results = Vec::with_capacity(entries.len());
+        for (name, sdna_code, sdna_type, shacl_links) in entries {
+            let result = self
+                .add_sdna_inner(name, sdna_code, sdna_type, shacl_links, context)
+                .await?;
+            results.push(result);
+        }
         Ok(results)
     }
 

@@ -377,3 +377,50 @@ async fn a_mount_refuses_a_mirror_from_an_older_build() {
     crate::perspectives::unregister_mount(&lang, &p.uuid);
     assert!(error.to_string().contains("fresh perspective"), "{error}");
 }
+
+// --- The ownership check and the install are one SDNA change ----------------
+
+/// A `register_shapes` that arrives after a mount's class ownership check
+/// waits for the mount's install: it cannot land in between and have its
+/// class replaced by a check that no longer holds.
+#[tokio::test]
+async fn register_shapes_waits_for_a_mount_between_check_and_install() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "a"})).await;
+    let (p, _shapes, ctx) =
+        crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
+
+    let gate = gates::arm(&lang, MountPoint::OwnershipChecked);
+    let mut mounting = p.clone();
+    let l = lang.clone();
+    let mount = tokio::spawn(async move { mounting.mount(&l).await });
+    gate.arrived().await;
+
+    let thing: crate::perspectives::shacl_parser::SHACLShape = serde_json::from_value(json!({
+        "target_class": "app://Gadget",
+        "properties": [{"path": "app://title", "name": "title", "datatype": "xsd:string", "max_count": 1}]
+    }))
+    .unwrap();
+    let mut registering = p.clone();
+    let register =
+        tokio::spawn(async move { registering.register_shapes(vec![thing], &ctx).await });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let landed_between = register.is_finished();
+    gate.release();
+
+    let mounted = tokio::time::timeout(Duration::from_secs(10), mount)
+        .await
+        .expect("the mount deadlocked")
+        .unwrap();
+    let registered = tokio::time::timeout(Duration::from_secs(10), register)
+        .await
+        .expect("register_shapes deadlocked")
+        .unwrap();
+    crate::perspectives::unregister_mount(&lang, &p.uuid);
+    assert!(
+        !landed_between,
+        "register_shapes ran between the mount's ownership check and its install"
+    );
+    mounted.unwrap();
+    registered.unwrap();
+}
