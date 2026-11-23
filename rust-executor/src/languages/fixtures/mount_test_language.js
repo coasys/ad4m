@@ -1,0 +1,88 @@
+import { languageAddress, emitSignal } from "ad4m:host";
+
+export const name = "mount-test";
+const CLASS = "MountThing";
+
+// address -> data object { title, done, tags }
+const records = new Map();
+// every executed interaction, in order: { address, name, params }
+const calls = [];
+let counter = 0;
+
+export async function init() {}
+export function isPublic() { return false; }
+
+function delta(address) {
+  return { address, changed: [{ class: CLASS, address, data: records.get(address) }], removed: [] };
+}
+
+function plain(params) {
+  return params && typeof params === "object" ? params : {};
+}
+
+export function interactions(address) {
+  if (address === "class/" + CLASS) {
+    return [{
+      label: "Create", name: "create",
+      parameters: [{ name: "title", type: "string" }, { name: "done", type: "boolean" }, { name: "tags", type: "array" }],
+      execute: async (params) => {
+        const p = plain(params);
+        calls.push({ address, name: "create", params: p });
+        if (p.fail) throw new Error("create: " + p.fail);
+        counter += 1;
+        const id = "t" + counter;
+        records.set(id, { title: p.title ?? null, done: p.done ?? false, tags: p.tags ?? [] });
+        return delta(id);
+      },
+    }];
+  }
+  if (address === "project") {
+    return [
+      { label: "Calls", name: "calls", parameters: [],
+        execute: async () => calls.slice() },
+      { label: "Reset", name: "reset", parameters: [],
+        execute: async () => { records.clear(); calls.length = 0; counter = 0; return true; } },
+      { label: "Address", name: "address", parameters: [],
+        execute: async () => languageAddress() },
+      // Change a record "from outside" (like a stock Acorn user would). Emits a delta only if emit is true.
+      { label: "Outside change", name: "outsideChange", parameters: [],
+        execute: async (params) => {
+          const p = plain(params);
+          records.set(p.address, { ...(records.get(p.address) ?? {}), ...(p.data ?? {}) });
+          if (p.emit) emitSignal({ mountDelta: { changed: [{ class: CLASS, address: p.address, data: records.get(p.address) }], removed: [] } });
+          return true;
+        } },
+      { label: "Outside remove", name: "outsideRemove", parameters: [],
+        execute: async (params) => {
+          const p = plain(params);
+          records.delete(p.address);
+          if (p.emit) emitSignal({ mountDelta: { changed: [], removed: [p.address] } });
+          return true;
+        } },
+    ];
+  }
+  if (records.has(address)) {
+    return [
+      { label: "Update", name: "update", parameters: [],
+        execute: async (params) => {
+          const p = plain(params);
+          calls.push({ address, name: "update", params: p });
+          if (p.fail) throw new Error("update: " + p.fail);
+          records.set(address, { ...records.get(address), ...p });
+          return delta(address);
+        } },
+      { label: "Delete", name: "delete", parameters: [],
+        execute: async (params) => {
+          calls.push({ address, name: "delete", params: plain(params) });
+          records.delete(address);
+          return { address, changed: [], removed: [address] };
+        } },
+    ];
+  }
+  return [];
+}
+
+export async function expressionGet(address) {
+  if (!records.has(address)) return null;
+  return { author: "did:key:mount-test", timestamp: new Date(0).toISOString(), data: records.get(address), proof: { signature: "", key: "" } };
+}

@@ -118,7 +118,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'perspective.removeLink': true,
     'perspective.queryProlog': JSON.stringify([{ X: 'test' }]),
     'perspective.querySparql': JSON.stringify([{ id: '1' }]),
-    'perspective.addSdna': true,
+    'perspective.registerShapes': { unchanged: [], written: ['test://TestClass'], generation: 1 },
     'perspective.executeCommands': true,
     'perspective.createSubject': true,
     // A `colour` property is refused as the executor refuses an unknown property: 422 with the
@@ -748,9 +748,9 @@ describe('PerspectiveClient', () => {
         expect(result.additions).toHaveLength(1);
     });
 
-    test('addSdna() adds SDNA', async () => {
-        const result = await ad4m.perspective.addSdna('uuid-1', 'TestClass', 'code', 'subject_class');
-        expect(result).toBe(true);
+    test('registerShapes() registers shapes', async () => {
+        const result = await ad4m.perspective.registerShapes('uuid-1', [{ target_class: 'test://TestClass', properties: [] }]);
+        expect(result).toEqual({ unchanged: [], written: ['test://TestClass'], generation: 1 });
     });
 
     test('queryProlog() runs prolog query', async () => {
@@ -1135,19 +1135,19 @@ describe('NeighbourhoodClient', () => {
         expect(ws.rpc[0].params).toEqual({ 'sfu-call-renegotiation-offer': null, 'sfu-data': null, 'sfu-migrate': null });
 
         const room = { neighbourhoodUrl: 'neighbourhood://n', roomName: 'r' };
-        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:other', participantId: 'P2', ...room, sdpOffer: '{}' }));
-        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', participantId: 'P1', ...room, sdpOffer: '{"x":1}' }));
+        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:other', participantId: 'P2', offerId: 'o2', ...room, sdpOffer: '{}' }));
+        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', participantId: 'P1', offerId: 'o1', ...room, sdpOffer: '{"x":1}' }));
         ws.emit(event('sfu-migrate', { targetDid: 'did:me', ...room, migrateToDid: 'did:node' }));
         const message = { senderDid: 'did:other', senderParticipantId: 'P2', ...room, channelLabel: 'chat', binary: false, data: 'hi' };
         ws.emit(event('sfu-data', message));
 
         expect(offers).toHaveBeenCalledTimes(1);
-        expect(offers).toHaveBeenCalledWith({ targetDid: 'did:me', participantId: 'P1', ...room, sdpOffer: '{"x":1}', trackMapping: undefined });
+        expect(offers).toHaveBeenCalledWith({ targetDid: 'did:me', participantId: 'P1', offerId: 'o1', ...room, sdpOffer: '{"x":1}', trackMapping: undefined });
         expect(migrations).toHaveBeenCalledWith({ targetDid: 'did:me', ...room, migrateToDid: 'did:node' });
         expect(data).toHaveBeenCalledWith(expect.objectContaining(message));
 
         releaseOffers();
-        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', participantId: 'P1', ...room, sdpOffer: '{}' }));
+        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', participantId: 'P1', offerId: 'o3', ...room, sdpOffer: '{}' }));
         expect(offers).toHaveBeenCalledTimes(1);
     });
 });

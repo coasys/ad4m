@@ -83,6 +83,7 @@ use crate::perspectives::flow_evaluator::{
     find_live_proposals, recompute_evidence_seal, write_proposal, EvidenceSeal, SatisfiedTransition,
 };
 use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::perspectives::sparql_store::EvalStop;
 use crate::types::LinkQuery;
 
 /// What one `propose_flow_transition` call did, and where the flow stands
@@ -149,7 +150,7 @@ pub async fn propose_flow_transition(
     // `accept_flow_proposal`.
     let lock = perspective.flow_pass_lock.clone();
     let _passes = lock.lock().await;
-    let flows = load_shacl_flows(perspective).await?;
+    let flows = load_shacl_flows(&EvalStop::none(), perspective).await?;
     let instances = load_all_flow_instances(perspective).await?;
     let record = instances
         .iter()
@@ -186,7 +187,19 @@ pub async fn propose_flow_transition(
     // co-signer runs.
     let terminal = is_terminal_state(flow, to_state);
     let outputs = if terminal {
-        let named = normalised_outputs(outputs);
+        // Each output is named by its class's target class IRI: a bare name
+        // reads the least IRI of that name, which a class registered later
+        // can change. A name no class reads stays, and is refused below.
+        let by_iri: Vec<OutputRef> = outputs
+            .iter()
+            .map(|o| OutputRef {
+                class_name: perspective
+                    .get_shape(&o.class_name)
+                    .map_or_else(|_| o.class_name.clone(), |s| s.target_class.clone()),
+                id: o.id.clone(),
+            })
+            .collect();
+        let named = normalised_outputs(&by_iri);
         let loaded = load_outputs(&*perspective, &named).await?;
         if let Some(missing) = named.iter().find(|r| !loaded.contains_key(*r)) {
             return Err(anyhow::anyhow!(

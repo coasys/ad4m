@@ -259,6 +259,64 @@ async fn apply_template(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     })?)
 }
 
+/// `language.applyTemplate` minus the publish: the template data may hold a
+/// secret (an Acorn project passphrase), so nothing is written to the language
+/// language — the templated language is saved and loaded on this machine only.
+async fn apply_template_local(
+    params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let _total = span("applyTemplateLocal");
+    let body: ApplyTemplateRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    let controller = LanguageController::global_instance();
+
+    let template_map: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&body.template_data)
+            .map_err(|e| WsRpcError::bad_request(format!("Invalid template_data JSON: {}", e)))?;
+
+    let declared_name = template_map
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    let address = controller
+        .apply_template_local(&body.source_language_hash, template_map)
+        .await
+        .map_err(|e| match e {
+            crate::languages::error::LanguageError::NotFound { .. } => {
+                WsRpcError::bad_request(e.to_string())
+            }
+            other => WsRpcError::internal(other.to_string()),
+        })?;
+
+    let name = match declared_name {
+        Some(name) => {
+            controller.set_language_name(&address, &name).await;
+            name
+        }
+        None => {
+            let source_name = controller
+                .get_language_name(&body.source_language_hash)
+                .await;
+            if !source_name.is_empty() {
+                source_name
+            } else {
+                // The load cached the templated bundle's own `name` export.
+                let own_name = controller.get_language_name(&address).await;
+                if own_name.is_empty() {
+                    "templated".to_string()
+                } else {
+                    own_name
+                }
+            }
+        }
+    };
+
+    Ok(serde_json::to_value(LanguageRef { address, name })?)
+}
+
 async fn remove_language(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let address = params.require_str("address")?;
     let mut controller = LanguageController::global_instance();
@@ -320,6 +378,14 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<ApplyTemplateRequest, LanguageRef>("language.applyTemplate", apply_template)
         .long()
         .guard(Guard::Cap(LANGUAGE_CREATE_CAPABILITY.clone()));
+    // The local twin of applyTemplate: same templating, nothing published, so a
+    // secret in the template data stays on this machine.
+    map.method::<ApplyTemplateRequest, LanguageRef>(
+        "language.applyTemplateLocal",
+        apply_template_local,
+    )
+    .long()
+    .guard(Guard::Cap(LANGUAGE_CREATE_CAPABILITY.clone()));
     // Installed languages and their settings are shared by every user of the executor.
     map.method::<LanguageAddressParams, bool>("language.remove", remove_language)
         .guard(Guard::Executor(LANGUAGE_DELETE_CAPABILITY.clone()));
