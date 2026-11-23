@@ -187,9 +187,13 @@ url2 = "0.0.6"
 # Features updated for 0.7.0 stable naming: sqlite-encrypted → encryption,
 # wasmer_sys → wasmer-sys-cranelift, transport-iroh dropped (not a feature
 # on 0.7.0 stable).
-holochain = { version = "0.7.0", default-features = false, features = ["test_utils", "encryption", "schema", "wasmer-sys-cranelift"], git = "https://github.com/coasys/holochain.git", branch = "0.7.0-space-override-coasys" }
-holochain_cli_bundle = { version = "0.7.0", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-space-override-coasys" }
-holochain_types = { version = "0.7.0", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-space-override-coasys" }
+# Bumped to HC 0.7.1 (coasys fork branch 0.7.1-space-override-coasys =
+# upstream holochain-0.7.1 + our space-override / network-readiness
+# commits) so AD4M can share cells with stock 0.7.1 conductors such as the
+# Acorn desktop app (0.7.1 changed the CapGrant shape).
+holochain = { version = "0.7.1", default-features = false, features = ["test_utils", "encryption", "schema", "wasmer-sys-cranelift"], git = "https://github.com/coasys/holochain.git", branch = "0.7.1-space-override-coasys" }
+holochain_cli_bundle = { version = "0.7.1", git = "https://github.com/coasys/holochain.git", branch = "0.7.1-space-override-coasys" }
+holochain_types = { version = "0.7.1", git = "https://github.com/coasys/holochain.git", branch = "0.7.1-space-override-coasys" }
 # Bumped from 0.6.3 to 0.7.1 to match HC 0.7.0 stable (which pins lair 0.7.1).
 # Using upstream lair 0.7.1 directly — no fork needed anymore. The old
 # coasys/lair 0.7.1-coasys fork existed only to downgrade rusqlite to 0.34
@@ -266,7 +270,7 @@ rcgen = "0.14"
 # reachable through `holochain::prelude`, needed directly for the canned
 # `AppInfo.installed_at` in the per-language agent key mock-dispatch tests
 # (issue #1099, dispatch/tests.rs).
-holochain_timestamp = { version = "0.7.0", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-space-override-coasys" }
+holochain_timestamp = { version = "0.7.1", git = "https://github.com/coasys/holochain.git", branch = "0.7.1-space-override-coasys" }
 maplit = "1.0.2"
 lazy_static = "1.4.0"
 itertools = "0.10.1"
