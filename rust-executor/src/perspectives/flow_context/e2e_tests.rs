@@ -35,6 +35,7 @@ use crate::perspectives::interpretation::{
 };
 use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
 use crate::perspectives::shacl_parser::parse_flow_to_links;
+use crate::perspectives::sparql_store::EvalStop;
 use crate::types::LinkStatus;
 
 /// Delivery flow JSON matching what `SHACLFlow.toJSON()` emits on the TS
@@ -371,7 +372,9 @@ async fn load_shacl_flows_ignores_links_that_do_not_count() {
     store_flow(&perspective, "Delivery", "delivery://", &[], &signer).await;
     store_flow(&perspective, "Other", "other://", &["rdf://type"], &signer).await;
 
-    let flows = load_shacl_flows(&perspective).await.unwrap();
+    let flows = load_shacl_flows(&EvalStop::none(), &perspective)
+        .await
+        .unwrap();
     assert!(
         flows.contains_key("delivery://DeliveryFlow"),
         "control flow loads: {flows:?}"

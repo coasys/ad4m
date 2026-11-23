@@ -22,6 +22,7 @@ use crate::perspectives::flow_instance::replica_state::FlowReplicaState;
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::{parse_flow_from_links, SHACLFlow};
+use crate::perspectives::sparql_store::EvalStop;
 use crate::types::{Link, LinkQuery};
 use std::collections::{HashMap, HashSet};
 
@@ -240,7 +241,7 @@ pub async fn gather_active_flow_contexts(
     subjects: &[String],
     flow_filter: Option<&[String]>,
 ) -> Vec<FlowContext> {
-    let mut flows_by_uri = match load_shacl_flows(perspective).await {
+    let mut flows_by_uri = match load_shacl_flows(&EvalStop::none(), perspective).await {
         Ok(m) => m,
         Err(e) => {
             log::warn!("gather_active_flow_contexts: load_shacl_flows failed, using empty: {e:#}");
@@ -429,7 +430,14 @@ pub fn parse_flows_from_bag(links: &[Link]) -> HashMap<String, SHACLFlow> {
 /// Errors from the outer type-index query propagate; per-flow child
 /// query failures are logged and skipped so one broken flow can't blind
 /// the extraction pass to every other flow on the perspective.
+///
+/// The reads run under `stop` (`get_links_stopped`): a caller whose eval
+/// is already over — a cancelled or timed-out model query reading through
+/// `flow_valid_outputs_reading` — ends here with the stop's error instead
+/// of a partial catalogue built from failed reads. Callers with no eval
+/// bound pass [`EvalStop::none`].
 pub async fn load_shacl_flows(
+    stop: &EvalStop,
     perspective: &PerspectiveInstance,
 ) -> anyhow::Result<HashMap<String, SHACLFlow>> {
     let type_query = LinkQuery {
@@ -442,7 +450,7 @@ pub async fn load_shacl_flows(
         include_unverified: None,
     };
     let mut type_links = perspective
-        .get_links(&type_query)
+        .get_links_stopped(stop, &type_query)
         .await
         .map_err(|e| anyhow::anyhow!("load_shacl_flows: get_links(type) failed: {e:#}"))?;
     // Only a link that counts defines a flow — the same `proof.valid` cut
@@ -456,6 +464,12 @@ pub async fn load_shacl_flows(
     }
 
     for tl in type_links {
+        // A fired stop makes every remaining read fail fast anyway; end
+        // with the stop's error rather than skipping to a partial
+        // catalogue one warn at a time.
+        if let Some(err) = stop.stopped_err("flow catalogue scan") {
+            return Err(err);
+        }
         let flow_uri = tl.data.source;
         if flow_uri.is_empty() {
             continue;
@@ -469,7 +483,7 @@ pub async fn load_shacl_flows(
             limit: None,
             include_unverified: None,
         };
-        let mut flow_links = match perspective.get_links(&flow_query).await {
+        let mut flow_links = match perspective.get_links_stopped(stop, &flow_query).await {
             Ok(l) => l,
             Err(e) => {
                 log::warn!(
@@ -501,7 +515,7 @@ pub async fn load_shacl_flows(
                 limit: None,
                 include_unverified: None,
             };
-            match perspective.get_links(&child_query).await {
+            match perspective.get_links_stopped(stop, &child_query).await {
                 Ok(child_links) => bag.extend(
                     child_links
                         .into_iter()

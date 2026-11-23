@@ -2479,13 +2479,13 @@ mod tests {
     }
 
     // The start-up pass asks each grant's agent's DID (`agent_speaks`), which the agent
-    // service answers only once `init_global_instance` ran: before it the read panics —
-    // inside the singleton's lock, so it poisons too. `run` calls the pass after the
-    // agent is initialised and loaded, never before the service exists; the panic stays
-    // the contract, so an earlier call cannot slip in quietly.
+    // service answers only once `init_global_instance` ran. Before it the read is an error
+    // (`did_for_context`, which no longer panics: RPC sessions ask it too), and a grant whose
+    // agent has no DID cannot be vouched for, so the pass ends it. That is why `run` calls
+    // the pass after the agent is initialised and loaded, never before the service exists;
+    // the read must neither panic nor poison the singleton's lock.
     #[tokio::test]
-    async fn the_start_up_pass_panics_before_the_agent_service() {
-        use futures::FutureExt;
+    async fn the_start_up_pass_errors_before_the_agent_service() {
         let world = world(131).await;
         // A grant on the main agent bound to a key the log admits.
         Grants::global()
@@ -2501,25 +2501,14 @@ mod tests {
             )
             .unwrap();
         let _aside = AgentServiceAside::take();
-        let panicked = std::panic::AssertUnwindSafe(end_key_grants_revoked_in_cache(
-            &world.service,
-            Grants::global(),
-        ))
-        .catch_unwind()
-        .await
-        .expect_err("agent_speaks reads the main DID while the service is None");
-        let message = panicked
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| panicked.downcast_ref::<&str>().copied())
-            .unwrap_or_default();
-        assert!(
-            message.contains("AgentService not initialized"),
-            "{message}"
+        let ended = end_key_grants_revoked_in_cache(&world.service, Grants::global()).await;
+        assert_eq!(
+            ended, 1,
+            "a grant whose agent has no DID yet is not vouched for"
         );
         assert!(
-            crate::agent::AgentService::global_instance().is_poisoned(),
-            "the panic held the singleton's lock"
+            !crate::agent::AgentService::global_instance().is_poisoned(),
+            "the read took the singleton's lock without panicking"
         );
         no_operator();
     }

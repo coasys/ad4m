@@ -66,7 +66,7 @@ async fn join_returns_before_the_link_language(context: AgentContext, joiner: St
         .await
         .expect("the new owner was never registered with the link language")
         .unwrap();
-    let LanguageOperation::Execute(script, _) = request.operation else {
+    let LanguageOperation::Execute(script, ..) = request.operation else {
         panic!("not a script: {:?}", request.operation);
     };
     assert_eq!(
@@ -129,7 +129,7 @@ async fn serve_system_language(
     tokio::spawn(async move {
         let mut unanswered = Vec::new();
         while let Some(request) = requests.recv().await {
-            let LanguageOperation::Execute(script, _) = &request.operation else {
+            let LanguageOperation::Execute(script, ..) = &request.operation else {
                 continue;
             };
             match answer(script) {

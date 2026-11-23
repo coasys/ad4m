@@ -279,6 +279,9 @@ mod tests {
         estimated.saturating_mul(11).saturating_add(9) / 10
     }
 
+    /// A parsed empty answer. A pass that has transcript items and receives
+    /// this is asked once more, so a test that counts one request per half
+    /// and is not about that retry answers with [`task_reply`] instead.
     const EMPTY_REPLY: &str =
         r#"{"choices":[{"message":{"content":"[]"},"finish_reason":"stop"}]}"#;
 
@@ -433,13 +436,21 @@ mod tests {
         );
 
         let mut upstream = mockito::Server::new_async().await;
+        // A flow proposal, not `[]` and not a new Task. This test counts the
+        // split, and its window is the floor for one turn: a Task from the
+        // first half is shown to the second and that prompt no longer fits.
+        // A proposal writes no instance, so the second prompt stays the size
+        // measured above. An empty answer would be asked once more.
+        let proposal = completion(
+            r#"{"instances":[],"flow_proposals":[{"instance":"ad4m://flow/instance/1","toState":"scoped"}]}"#,
+        );
         let alpha = upstream
             .mock("POST", "/v1/chat/completions")
             .match_request(|request| {
                 let body = body_text(request);
                 body.contains("TURN_ALPHA") && !body.contains("TURN_BETA")
             })
-            .with_body(EMPTY_REPLY)
+            .with_body(proposal.clone())
             .expect(1)
             .create_async()
             .await;
@@ -449,7 +460,7 @@ mod tests {
                 let body = body_text(request);
                 body.contains("TURN_BETA") && !body.contains("TURN_ALPHA")
             })
-            .with_body(EMPTY_REPLY)
+            .with_body(proposal)
             .expect(1)
             .create_async()
             .await;
@@ -519,13 +530,15 @@ mod tests {
         // the server is what refuses it.
         let window = 200_000u32;
         let mut upstream = mockito::Server::new_async().await;
+        // A record, not `[]`: this test counts the split. A half that has
+        // transcript items and answers with nothing is asked once more.
         let alpha = upstream
             .mock("POST", "/v1/chat/completions")
             .match_request(|request| {
                 let body = body_text(request);
                 body.contains("TURN_ALPHA") && !body.contains("TURN_BETA")
             })
-            .with_body(EMPTY_REPLY)
+            .with_body(task_reply("Split alpha"))
             .expect(1)
             .create_async()
             .await;
@@ -535,7 +548,7 @@ mod tests {
                 let body = body_text(request);
                 body.contains("TURN_BETA") && !body.contains("TURN_ALPHA")
             })
-            .with_body(EMPTY_REPLY)
+            .with_body(task_reply("Split beta"))
             .expect(1)
             .create_async()
             .await;
@@ -1054,13 +1067,15 @@ mod tests {
         let mut batch =
             prepare_split("overflow-events", 12_000, 12_000, 2_000, false, true, false).await;
         let mut upstream = mockito::Server::new_async().await;
+        // A record, not `[]`: this test counts one request per half. A half
+        // that has transcript items and answers with nothing is asked once more.
         let alpha = upstream
             .mock("POST", "/v1/chat/completions")
             .match_request(|request| {
                 let body = body_text(request);
                 body.contains("TURN_ALPHA") && !body.contains("TURN_BETA")
             })
-            .with_body(EMPTY_REPLY)
+            .with_body(task_reply("Split alpha"))
             .expect(1)
             .create_async()
             .await;
@@ -1070,7 +1085,7 @@ mod tests {
                 let body = body_text(request);
                 body.contains("TURN_BETA") && !body.contains("TURN_ALPHA")
             })
-            .with_body(EMPTY_REPLY)
+            .with_body(task_reply("Split beta"))
             .expect(1)
             .create_async()
             .await;
