@@ -165,6 +165,29 @@ export default function shaclRpcTests(testContext: TestContext) {
                 });
             });
 
+            it("a second PerspectiveProxy registering the same class keeps the links other apps put on it", async () => {
+                await withPerspective("shacl-rpc-second-proxy", async (p) => {
+                    const note = () => {
+                        const shape = new SHACLShape("note://Note");
+                        shape.addProperty({ name: "text", path: "note://text", datatype: "xsd://string", maxCount: 1 });
+                        return shape;
+                    };
+                    expect((await p.registerShapes([note()])).written).to.deep.equal(["note://Note"]);
+                    // An annotation another app keeps on the shape node.
+                    await p.add(new Link({ source: "note://NoteShape", predicate: "we://display", target: "we://card" }));
+
+                    // A second proxy of the same perspective has its own "already
+                    // sent" state, so the same shape goes over the wire again.
+                    const p2 = (await testContext.ad4mClient.perspective.byUUID(p.uuid))!;
+                    const second = await p2.registerShapes([note()]);
+                    expect(second.written).to.deep.equal([]);
+                    expect(second.unchanged).to.deep.equal(["note://Note"]);
+
+                    expect(await p.get(new LinkQuery({ source: "note://NoteShape", predicate: "we://display" })))
+                        .to.have.length(1);
+                });
+            });
+
             it("a shape given a new URI moves: the class points to the new one only", async () => {
                 await withPerspective("shacl-rpc-move", async (p) => {
                     const memo = (shapeUri: string) => {

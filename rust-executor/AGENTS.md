@@ -27,6 +27,11 @@ cd .. && pnpm run test-main                        # JS integration suites again
 `timing: <step> [address] <ms>ms` (`logging::span`), logged when the step ends. `applyTemplate`,
 `publish` and `join` are the totals of the three calls; `applyTemplate.*`, `publish.*`,
 `installLanguage.*`, `loadLanguage.*` and `holochain.*` are their steps.
+
+**Where a call spends its time:** `grep '\[call-diag\]'` (`call_diag.rs`): socket open and close,
+late pongs, RPCs over 2 s, broadcasts over 1 s, language queues every 30 s. `runtime.setLogFilter`
+raises a module's level for a while without a restart (`log_filter.rs`, `LOGGING.md`).
+
 Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call real LLMs.
 
 ## Module map (what lives where)
@@ -99,7 +104,13 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 - **JS ↔ Rust bridge**: `#[op2]` extensions in `js_core/*_extension.rs`, `holochain_service/`,
   `runtime_service/`; JS side in the sibling `.js` file and `js_core/host.js`. Every Language
   runtime gets every one of these extensions, so third-party language code reaches every op: an op
-  that signs must sign as `get_runtime_agent_context()`, never as the main agent directly. The one
+  that signs must take the call's agent token (`#[cppgc] call: Option<&CallAgent>`, passed by
+  `caller()` in `agent_extension.js`) and sign as `agent_of(call)?`, never as the main agent
+  directly: calls into one language overlap, so the agent travels with the call, not the thread
+  (`js_core/agent_extension.rs`, "The agent a call acts as"). No token means no agent: the op
+  refuses. Host code that enters language JS goes through the token machinery
+  (`__ad4mRunCall` via `LanguageRuntime::execute_as_host` for scripts, `__ad4mEnterCallAgent`
+  via `JsCore::load_module_from_source` for the bundle's `mod_evaluate`), never a bare `execute`. The one
   other kind of JS runtime is a tool bundle's (`tool_bundles/sandbox.rs`), and it gets none of
   them: only its own `tool_bundle_host` extension. Never register a `js_core` extension there.
   Languages are called by building JS source strings and evaluating them (`languages/mod.rs`).
