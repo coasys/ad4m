@@ -37,6 +37,8 @@ pub mod conductor_startup;
 pub(crate) mod dispatch;
 pub mod holochain_service_extension;
 pub(crate) mod interface;
+#[cfg(test)]
+mod same_dna_tests;
 pub(crate) mod user_cells;
 
 pub(crate) use interface::{
