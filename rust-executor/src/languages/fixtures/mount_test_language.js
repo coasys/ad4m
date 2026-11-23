@@ -158,6 +158,7 @@ export function interactions(address) {
         } },
       { label: "Delete", name: "delete", parameters: [],
         execute: async (params) => {
+          ranAs("delete");
           calls.push({ address, name: "delete", params: plain(params) });
           records.delete(address);
           return { address, changed: [], removed: [address] };
