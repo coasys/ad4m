@@ -92,6 +92,27 @@ const track = (kind: "audio" | "video") => new FakeTrack(kind) as unknown as Med
 const asFake = (item: MediaStreamTrack | null | undefined) => item as unknown as FakeTrack
 const stream = (...tracks: MediaStreamTrack[]) => new FakeMediaStream(tracks) as unknown as MediaStream
 
+/** m-lines an offer described, when it bothered to. The mesh's own offers do not. */
+const sectionsDescribed = (sdp: string): { kind: string; mid: string }[] => {
+    const sections: { kind: string; mid: string }[] = []
+    let kind: string | null = null
+    let seenMid = false
+    for (const line of sdp.split(/\r?\n/)) {
+        const media = /^m=(audio|video)\b/.exec(line)
+        if (media) {
+            kind = media[1]
+            seenMid = false
+            continue
+        }
+        const mid = /^a=mid:(.*)$/.exec(line)
+        if (mid && kind && !seenMid) {
+            sections.push({ kind, mid: mid[1].trim() })
+            seenMid = true
+        }
+    }
+    return sections
+}
+
 /**
  * `"settled"` when `pending` has already produced a value. Reading the flag
  * on the microtask after the reaction is queued, so a promise that is still
@@ -367,19 +388,28 @@ class FakePeerConnection {
         if (origin) this.remoteOrigin = origin
         // The offer's sections arrive beside any this side already created.
         if (description.type === "offer" && FakePeerConnection.separateSections) {
-            const kinds = FakePeerConnection.offerSections.get(description.sdp ?? "") ?? []
+            const described = sectionsDescribed(description.sdp ?? "")
+            const kinds = described.length > 0
+                ? []
+                : FakePeerConnection.offerSections.get(description.sdp ?? "") ?? []
             kinds.forEach((kind) => {
+                const existing = this.transceivers.filter((item) => item.mid != null).length
+                described.push({ kind, mid: String(existing + described.length) })
+            })
+            for (const section of described) {
+                // A renegotiation names the sections already on this connection.
+                if (this.transceivers.some((item) => item.mid === section.mid)) continue
                 const sender = this.makeSender(null)
                 const transceiver: FakePeerConnection["transceivers"][number] = {
-                    kind,
+                    kind: section.kind,
                     direction: "recvonly",
-                    mid: String(this.transceivers.filter((item) => item.mid != null).length),
+                    mid: section.mid,
                     sender,
-                    receiver: { track: { kind } },
+                    receiver: { track: { kind: section.kind } },
                 }
                 transceiver.stop = () => { transceiver.direction = "stopped" }
                 this.transceivers.push(transceiver)
-            })
+            }
         }
         this.remoteDescription = description
         this.signalingState = description.type === "offer" ? "have-remote-offer" : "stable"
@@ -1384,6 +1414,87 @@ describe("call mesh", () => {
         }
     })
 
+    it("keeps the current video sender when a re-offer appends a sendonly section", async () => {
+        // The working section stays sendrecv. The one appended beside it is
+        // sendonly, so the answer on it is recvonly and it cannot carry the
+        // camera. Last-of-kind would move the clone onto that section.
+        FakePeerConnection.separateSections = true
+        FakePeerConnection.deferNegotiation = true
+        const camera = new FakeTrack("video")
+        try {
+            const alice = await makeMesh(bus, "did:alice", CALL_ID, { localStream: stream(track("audio"), track("video")) })
+            const bob = await makeMesh(bus, "did:bob", CALL_ID, {
+                localStream: stream(track("audio"), camera as unknown as MediaStreamTrack),
+            })
+            alice.mesh.setRoster(["did:alice", "did:bob"])
+            bob.mesh.setRoster(["did:alice", "did:bob"])
+            await settleAll()
+
+            const answered = bob.live()
+            const video = answered.transceivers.filter((item) => item.kind === "video")
+            expect(video).toHaveLength(1)
+            const held = asFake(video[0].sender?.track)
+            expect(held.clonedFrom).toBe(camera)
+            expect(held.readyState).toBe("live")
+
+            const offers = alice.sent.filter((payload) => {
+                const message = payload as { kind?: string; description?: { type?: string } }
+                return message.kind === "description" && message.description?.type === "offer"
+            })
+            const last = offers[offers.length - 1] as {
+                gen?: string
+                peerGen?: string
+                offer?: number
+                description: { sdp?: string }
+            }
+            const origin = last.description.sdp?.split("@")[1]?.split(/[#>]/)[0]
+            const audioMid = answered.transceivers.find((item) => item.kind === "audio")?.mid
+            const sdp = [
+                `offer-sdp@${origin}#99`,
+                "m=audio 9 UDP/TLS/RTP/SAVPF 111",
+                `a=mid:${audioMid}`,
+                "a=sendrecv",
+                "m=video 9 UDP/TLS/RTP/SAVPF 96",
+                `a=mid:${video[0].mid}`,
+                "a=sendrecv",
+                "m=video 9 UDP/TLS/RTP/SAVPF 96",
+                "a=mid:9",
+                "a=sendonly",
+            ].join("\n")
+            bus.deliver("did:alice", {
+                v: CALL_PROTOCOL_VERSION,
+                call: CALL_ID,
+                to: "did:bob",
+                kind: "description",
+                description: { type: "offer", sdp },
+                offer: (last.offer ?? 0) + 1,
+                ...(last.gen ? { gen: last.gen } : {}),
+                ...(last.peerGen ? { peerGen: last.peerGen } : {}),
+            })
+            await settleAll()
+
+            expect(held.readyState).toBe("live")
+            expect(video[0].sender?.track).toBe(held)
+            const added = answered.transceivers.filter((item) => item.mid === "9")
+            expect(added).toHaveLength(1)
+            expect(added[0].sender?.track ?? null).toBeNull()
+            expect(added[0].direction).toBe("sendrecv")
+
+            await bob.mesh.replaceTrack("video", null)
+            expect(held.readyState).toBe("ended")
+            expect(camera.readyState).toBe("live")
+            const live = answered.getSenders().filter((sender) =>
+                sender.track?.kind === "video" && asFake(sender.track).readyState === "live")
+            expect(live).toHaveLength(0)
+            expect(bob.errors).toEqual([])
+            expect(alice.errors).toEqual([])
+        } finally {
+            FakePeerConnection.separateSections = false
+            FakePeerConnection.deferNegotiation = false
+            FakePeerConnection.offerSections.clear()
+        }
+    })
+
     it("stops a clone that landed on a sender an offer stopped using", async () => {
         // `replaceTrack` is in flight on the sender this side picked. The
         // peer's next offer adopts a different section of that kind and
@@ -1421,8 +1532,24 @@ describe("call mesh", () => {
                 description: { sdp?: string }
             }
             const origin = last.description.sdp?.split("@")[1]?.split(/[#>]/)[0]
-            const sdp = `offer-sdp@${origin}#99`
-            FakePeerConnection.offerSections.set(sdp, ["audio", "video", "video"])
+            // The section this side is sending on is offered sendonly, so it
+            // can no longer carry local video. The section appended beside it
+            // is sendrecv and is the one adoption has to move to.
+            const answered = bob.live()
+            const audioMid = answered.transceivers.find((item) => item.kind === "audio")?.mid
+            const videoMid = answered.transceivers.find((item) => item.kind === "video")?.mid
+            const sdp = [
+                `offer-sdp@${origin}#99`,
+                "m=audio 9 UDP/TLS/RTP/SAVPF 111",
+                `a=mid:${audioMid}`,
+                "a=sendrecv",
+                "m=video 9 UDP/TLS/RTP/SAVPF 96",
+                `a=mid:${videoMid}`,
+                "a=sendonly",
+                "m=video 9 UDP/TLS/RTP/SAVPF 96",
+                "a=mid:9",
+                "a=sendrecv",
+            ].join("\n")
             const started = FakePeerConnection.replaceCalls
             bus.deliver("did:alice", {
                 v: CALL_PROTOCOL_VERSION,

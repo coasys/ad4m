@@ -525,6 +525,48 @@ interface PeerSlot {
  *  saying so leaves its tracks `live` but `muted`. */
 const isLive = (track: MediaStreamTrack) => track.readyState !== "ended" && !track.muted
 
+/** Direction an offer gave one media section. Omitted means sendrecv, per RFC 3264. */
+type OfferDirection = "sendrecv" | "sendonly" | "recvonly" | "inactive"
+
+/** The offerer receives on this section, so the answer may send. RFC 3264 §6.1. */
+const offerAcceptsSend = (direction: OfferDirection) => direction === "sendrecv" || direction === "recvonly"
+
+/**
+ * Direction of each `a=mid` in an offer. A media section with no direction
+ * line is sendrecv. An offer with no m-lines yields an empty map, and a mid
+ * that is absent is treated the same way by the caller.
+ */
+const offeredDirections = (sdp: string | undefined): Map<string, OfferDirection> => {
+    const found = new Map<string, OfferDirection>()
+    if (!sdp) return found
+    let inMedia = false
+    let mid: string | null = null
+    let direction: OfferDirection | null = null
+    const finish = () => {
+        if (!inMedia || !mid) return
+        found.set(mid, direction ?? "sendrecv")
+    }
+    for (const line of sdp.split(/\r?\n/)) {
+        if (line.startsWith("m=")) {
+            finish()
+            inMedia = true
+            mid = null
+            direction = null
+            continue
+        }
+        if (!inMedia) continue
+        if (line.startsWith("a=mid:")) {
+            mid = line.slice("a=mid:".length).trim()
+            continue
+        }
+        if (line === "a=sendrecv" || line === "a=sendonly" || line === "a=recvonly" || line === "a=inactive") {
+            direction = line.slice("a=".length) as OfferDirection
+        }
+    }
+    finish()
+    return found
+}
+
 export class MeshManager {
     private channel: SignallingChannel
     private callId: string
@@ -1439,19 +1481,31 @@ export class MeshManager {
      *
      * The connection {@link reseat} installed has only the sections the offer
      * created, and they arrive recvonly. One section of each kind carries our
-     * track — the last of that kind, which is the one the offer added beside
-     * any this side already had. Every adopted audio and video section is
-     * sendrecv, with or without a track, so a camera or mic turned on later
-     * is a `replaceTrack` and does not need a new offer. The answer still
-     * intersects with the offer's direction. A second section of the same kind
-     * is not given a clone.
+     * track, and only a section whose offered direction still lets us send
+     * (`sendrecv` or `recvonly`, RFC 3264 §6.1). The sender already in use is
+     * kept when it is still one of those. Another section is used only when
+     * it is not, and then the last such section in the offer — the one added
+     * beside a section that can no longer carry local media. A `sendonly` or
+     * `inactive` section cannot: the answer intersects to recvonly or
+     * inactive. Every adopted audio and video section is sendrecv, with or
+     * without a track, so a camera or mic turned on later is a `replaceTrack`
+     * and does not need a new offer. The answer still intersects with the
+     * offer's direction. A section we are not sending on is not given a clone.
      */
-    private async adoptOfferSections(peerId: string, slot: PeerSlot): Promise<void> {
+    private async adoptOfferSections(peerId: string, slot: PeerSlot, sdp?: string): Promise<void> {
         const pc = slot.pc
         if (!this.slotCurrent(peerId, slot, pc)) return
         if (typeof pc.getTransceivers !== "function") return
         const kept = pc.getTransceivers().filter((transceiver) => transceiver.mid != null)
         const sections = kept.length > 0 ? kept : pc.getTransceivers()
+        const offered = offeredDirections(sdp)
+        const directionOf = (transceiver: RTCRtpTransceiver): OfferDirection => {
+            const mid = transceiver.mid
+            if (mid && offered.has(mid)) return offered.get(mid)!
+            return "sendrecv"
+        }
+        const canSend = (transceiver: RTCRtpTransceiver) =>
+            transceiver.direction !== "stopped" && offerAcceptsSend(directionOf(transceiver))
 
         const chosen = new Map<"audio" | "video", RTCRtpTransceiver>()
         const adopted: RTCRtpTransceiver[] = []
@@ -1460,13 +1514,27 @@ export class MeshManager {
             const kind = this.sectionKind(transceiver)
             if (!kind) continue
             adopted.push(transceiver)
-            chosen.set(kind, transceiver)
+            // Last eligible section. Replaced below when the current sender is still eligible.
+            if (canSend(transceiver)) chosen.set(kind, transceiver)
+        }
+        for (const kind of ["audio", "video"] as const) {
+            const current = slot.senders.get(kind)
+            const currentSection = sections.find((transceiver) => transceiver.sender === current)
+            if (currentSection && canSend(currentSection)) chosen.set(kind, currentSection)
         }
 
         // Drop a clone on any section of this kind we are not going to send on.
-        for (const [kind, transceiver] of chosen) {
-            const sender = transceiver.sender
+        for (const kind of ["audio", "video"] as const) {
+            const transceiver = chosen.get(kind)
+            const sender = transceiver?.sender
             const displaced = slot.senders.get(kind)
+            if (!sender) {
+                if (displaced) {
+                    this.releaseSender(displaced)
+                    slot.senders.delete(kind)
+                }
+                continue
+            }
             if (displaced && displaced !== sender) this.releaseSender(displaced)
             for (const other of this.sendersOf(slot)) {
                 if (other === sender) continue
@@ -1696,7 +1764,7 @@ export class MeshManager {
 
                 if (description.type === "offer") {
                     const pc = slot.pc
-                    await this.adoptOfferSections(peerId, slot)
+                    await this.adoptOfferSections(peerId, slot, description.sdp)
                     // The peer can leave while the offer's sections are adopted.
                     // Answering then would describe a connection that is gone.
                     if (!this.slotCurrent(peerId, slot, pc)) return
