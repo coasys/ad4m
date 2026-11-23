@@ -213,9 +213,18 @@ impl<T> CallLock<T> {
     }
 
     /// Wake every waiting writer: they re-poll and the first takes the
-    /// write side; the rest re-register under their id.
+    /// write side; the rest re-register under their id. Entries stay in
+    /// the queue — `WriteWait` removes its own when it acquires the lock
+    /// and when it is dropped — so a read polled between the wake and a
+    /// writer's re-poll still sees a waiting writer and stays queued.
     fn wake_writers(&self) {
-        for (_, w) in Self::drain(&self.write_waiters) {
+        let wakers: Vec<Waker> = self
+            .write_waiters
+            .borrow()
+            .iter()
+            .map(|(_, w)| w.clone())
+            .collect();
+        for w in wakers {
             w.wake();
         }
     }
@@ -232,8 +241,8 @@ struct WriteWait<'a, T> {
 
 impl<T> WriteWait<'_, T> {
     /// Register the caller's waker under this wait's id: first wait takes
-    /// a fresh id; a wait re-polled after a release re-registers under
-    /// its own — the release drained the queue.
+    /// a fresh id; a wait re-polled after a release finds its entry still
+    /// in the queue and only swaps in the caller's latest waker.
     fn queue(&mut self, waker: &Waker) {
         let mut waiters = self.lock.write_waiters.borrow_mut();
         let id = match self.id {
@@ -671,6 +680,39 @@ mod tests {
 
         drop(held);
         assert!(write.as_mut().poll(&mut cx).is_ready());
+    }
+
+    #[test]
+    fn a_read_does_not_slip_in_ahead_of_a_woken_write() {
+        let slot = LanguageSlot::new();
+        slot.set(Counter::new());
+        let mut cx = Context::from_waker(noop_waker_ref());
+
+        let held_call = slot.get("held").unwrap();
+        let held = block_on(held_call.read("held")).unwrap();
+
+        let writer = slot.get("ordered").unwrap();
+        let mut write = Box::pin(writer.write("ordered"));
+        assert!(write.as_mut().poll(&mut cx).is_pending());
+
+        // The last read leaving wakes the writer — but its registration
+        // must hold the door until it takes the write side: a read polled
+        // in that window still waits behind it, or reads arriving one
+        // wake at a time keep the ordered call waiting for ever.
+        drop(held);
+        let reader = slot.get("reader").unwrap();
+        let mut read = Box::pin(reader.read("reader"));
+        assert!(
+            read.as_mut().poll(&mut cx).is_pending(),
+            "a read polled after the writer's wake took the read side first"
+        );
+
+        let write_guard = match write.as_mut().poll(&mut cx) {
+            Poll::Ready(g) => g,
+            Poll::Pending => panic!("the woken writer never took the write side"),
+        };
+        drop(write_guard);
+        assert!(read.as_mut().poll(&mut cx).is_ready());
     }
 
     #[test]
