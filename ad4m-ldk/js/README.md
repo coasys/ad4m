@@ -86,6 +86,9 @@ decide which capabilities it supports, and starts calling them.
   structuring your Language's internals.
 - **Error types** that map cleanly onto the executor-side
   `LanguageError` variants.
+- **`mount.classes`** — describe the records your Language shows in a
+  perspective with the SDK's model decorators. See
+  [Mounted classes](#mounted-classes).
 
 See [`src/index.ts`](./src/index.ts) for the full API surface.
 
@@ -122,6 +125,89 @@ provide them (the wrappers throw a clear error at call time).
   path-based read/write. Prefer the core KV (`storageGet` /
   `storagePut`) unless you specifically need filesystem-like
   semantics (custom layouts, large blobs).
+
+## Mounted classes
+
+A Language can mount records into a perspective: the Language owns the
+records, and the perspective shows them as instances of a class. You
+describe such a class with the model decorators from
+`@coasys/ad4m/model` (the decorators and SHACL generation, without the
+client) and pass the classes to `defineLanguage`. `mountShapes()` is then
+built from them.
+
+```typescript
+import { defineLanguage } from "@coasys/ad4m-ldk";
+import { Model, Flag, Optional } from "@coasys/ad4m/model";
+
+@Model({
+    name: "Thing",
+    namespace: "things://",
+    targetClass: "things://Thing",
+    mount: true,
+    constructorActions: { interaction: "create", source: "{language}://class/Thing" },
+    destructorActions: { interaction: "delete" },
+})
+class Thing {
+    @Flag({ through: "rdf://type", value: "things://Thing" })
+    type!: string;
+
+    @Optional({ through: "things://title", setter: { interaction: "update" } })
+    title!: string;
+}
+
+export default defineLanguage({
+    name: "thing-store",
+    version: "1.0.0",
+    mount: {
+        classes: [Thing],
+        version: "1",
+        snapshot: () => ({ entries: [] }), // the records to show
+    },
+    // ... expression, interactions, etc.
+});
+```
+
+The setter names only the interaction, `"update"`. It names no Language
+and no expression. The executor finds both from the instance.
+
+### How a call finds its language
+
+1. The URL of a mounted record (its base expression) is your Language's
+   own expression URL: `<language address>://<expression address>`.
+2. A call action is `{ action: "call", source, predicate, target }`.
+   `predicate` is the interaction name and `target` is a JSON object as
+   text. For setters, adders, removers and destructors, `source` defaults
+   to `"this"`, which is the instance URL. The executor splits that URL
+   into the language address and the expression address
+   (`LanguageController::parse_expr_url`) and runs `expression_interact`
+   on that Language, for that expression. So your `interactions(address)`
+   export must list the interaction for the record's address.
+3. A constructor has no instance yet, so it must name its `source`.
+   Normally that is `"{language}://class/<ClassName>"`. When
+   `mount.classes` builds `mountShapes()`, it replaces `{language}` with
+   your own Language's address (the `languageAddress()` host import).
+   Outside a mount, `{language}` stays literal. Your `interactions()` must
+   answer for the address `class/<ClassName>`. The call returns a delta
+   whose `address` is the new record. `createSubject` returns the URL
+   `<language address>://<that address>`.
+
+More rules:
+
+- The caller's values are merged over the action's JSON `target` object,
+  and the merged object is the single argument of your interaction. Calls
+  do not go through link-parameter substitution. When several properties
+  of one write share a source and an interaction, they share one call.
+  For a constructor, all initial values are the parameters.
+- An action list must not mix call and link actions. The executor
+  refuses it.
+- Calls run before link actions and are not rolled back. A call cannot run
+  inside a batch.
+- `Ad4mModel.save()` and the relation helpers refuse a property or
+  relation with a call writer. Write through the executor's shape actions:
+  `createSubject`, `updateSubject` and `removeSubject`, or the MCP
+  `instance_*` tools.
+- Runtime dependency: the executor runs `action: "call"` only with the
+  call-action branch `acorn/a2-call-action`, which is not merged yet.
 
 ## Reference Languages
 
