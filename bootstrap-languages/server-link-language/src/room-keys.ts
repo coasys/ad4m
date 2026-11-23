@@ -72,6 +72,23 @@ export function afterFailedKeyRead(
 }
 
 /**
+ * Whether a successful key-ring refresh changed what this agent can open.
+ * Catch-up refreshes on every cycle while a link is held. The info line is
+ * for a change; an unchanged refresh is debug. `versions` is the set of
+ * open versions; order does not matter.
+ */
+export function keyRingRefreshChanged(
+    before: { status: KeyRingStatus; versions: readonly number[] },
+    after: { status: KeyRingStatus; versions: readonly number[] },
+): boolean {
+    if (before.status !== after.status) return true;
+    const left = [...before.versions].sort((a, b) => a - b);
+    const right = [...after.versions].sort((a, b) => a - b);
+    if (left.length !== right.length) return true;
+    return left.some((version, i) => version !== right[i]);
+}
+
+/**
  * Room admin only (the server refuses anyone else): a new room key version,
  * sealed to the DID of every ACL member. Returns null, and rotates nothing,
  * when no member's DID can be sealed to.

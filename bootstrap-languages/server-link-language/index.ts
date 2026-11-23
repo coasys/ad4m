@@ -26,6 +26,7 @@ import {
     adminRotationStep,
     afterFailedKeyRead,
     grantMissingRoomKeys,
+    keyRingRefreshChanged,
     rotateRoomKey,
     type KeyRingStatus,
     type RoomRole,
@@ -95,6 +96,27 @@ function isPlaceholder(value: string): boolean {
     return !value || value === "<to-be-filled>";
 }
 
+/** Open room-key versions, low to high. Empty when this agent holds none. */
+function openKeyVersions(): number[] {
+    return keyRing ? [...keyRing.keys()].sort((a, b) => a - b) : [];
+}
+
+/**
+ * A successful refresh. Info when the status or the open versions changed
+ * since the call started; debug when this cycle saw the same ring. Errors
+ * stay on `console.error`.
+ */
+function logKeyRingRefresh(
+    before: { status: KeyRingStatus; versions: number[] },
+    message: string,
+): void {
+    const changed = keyRingRefreshChanged(before, {
+        status: keyRingStatus,
+        versions: openKeyVersions(),
+    });
+    (changed ? console.info : console.debug)(message);
+}
+
 function setupKeyRingCoalesced(): Promise<void> {
     if (!keyRingInflight) {
         const p = setupKeyRing().finally(() => {
@@ -111,6 +133,7 @@ function setupKeyRingCoalesced(): Promise<void> {
 
 async function setupKeyRing(): Promise<void> {
     const gen = lifecycleGen;
+    const before = { status: keyRingStatus, versions: openKeyVersions() };
     const config = getConfig();
     try {
         const token = await auth.getValidToken();
@@ -119,7 +142,8 @@ async function setupKeyRing(): Promise<void> {
         if (keysRes.keys.length === 0) {
             keyRingStatus = "pending";
             keyRing = null;
-            console.info(
+            logKeyRingRefresh(
+                before,
                 "[server-link-language] this agent holds no room key yet — commits wait until the admin " +
                 "rotates one in or a member holding one grants it",
             );
@@ -145,12 +169,18 @@ async function setupKeyRing(): Promise<void> {
             // the same as holding none.
             keyRingStatus = "pending";
             keyRing = null;
-            console.info("[server-link-language] no room key version opens for this agent — waiting for a new one");
+            logKeyRingRefresh(
+                before,
+                "[server-link-language] no room key version opens for this agent — waiting for a new one",
+            );
             return;
         }
         keyRingStatus = "ready";
-        const versions = [...keyRing.keys()].sort((a, b) => a - b);
-        console.info(`[server-link-language] E2E key ring acquired (${versions.length} version(s): ${versions.join(", ")})`);
+        const versions = openKeyVersions();
+        logKeyRingRefresh(
+            before,
+            `[server-link-language] E2E key ring acquired (${versions.length} version(s): ${versions.join(", ")})`,
+        );
     } catch (err) {
         if (gen !== lifecycleGen) return;
         ({ status: keyRingStatus, ring: keyRing } = afterFailedKeyRead(keyRingStatus, keyRing));

@@ -5,7 +5,12 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { initAdapters, getConfig, resetAdapters } from "../src/adapters.js";
-import { adminRotates, adminRotationStep, afterFailedKeyRead } from "../src/room-keys.js";
+import {
+    adminRotates,
+    adminRotationStep,
+    afterFailedKeyRead,
+    keyRingRefreshChanged,
+} from "../src/room-keys.js";
 import { generateRoomKey } from "../src/encryption.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -140,5 +145,45 @@ describe("afterFailedKeyRead", () => {
             assert.deepStrictEqual(afterFailedKeyRead(status, null), { status: "error", ring: null });
         }
         assert.deepStrictEqual(afterFailedKeyRead("ready", new Map()), { status: "error", ring: null });
+    });
+});
+
+describe("keyRingRefreshChanged", () => {
+    it("is true only when the status or the open versions changed", () => {
+        assert.strictEqual(
+            keyRingRefreshChanged(
+                { status: "pending", versions: [] },
+                { status: "pending", versions: [] },
+            ),
+            false,
+        );
+        assert.strictEqual(
+            keyRingRefreshChanged(
+                { status: "pending", versions: [] },
+                { status: "ready", versions: [1] },
+            ),
+            true,
+        );
+        assert.strictEqual(
+            keyRingRefreshChanged(
+                { status: "ready", versions: [2, 1] },
+                { status: "ready", versions: [1, 2] },
+            ),
+            false,
+        );
+        assert.strictEqual(
+            keyRingRefreshChanged(
+                { status: "ready", versions: [1] },
+                { status: "ready", versions: [1, 2] },
+            ),
+            true,
+        );
+        assert.strictEqual(
+            keyRingRefreshChanged(
+                { status: "error", versions: [] },
+                { status: "pending", versions: [] },
+            ),
+            true,
+        );
     });
 });
