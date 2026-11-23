@@ -1290,7 +1290,7 @@ pub(crate) async fn serve_test_language(lang: &str, expression_json: String) {
         .await;
     tokio::spawn(async move {
         while let Some(req) = rx.recv().await {
-            if let LanguageOperation::Execute(script, _) = req.operation {
+            if let LanguageOperation::Execute(script, ..) = req.operation {
                 let result = if script.contains("isImmutableExpression") {
                     "false".to_string()
                 } else {
