@@ -831,9 +831,11 @@ export class MeshManager {
                     const sender = slot.senders.get(kind)
                     if (sender) {
                         await this.putTrack(sender, track)
-                        // Left while the sender was accepting the track: the clone
-                        // was recorded after `releaseClones` had already run.
-                        if (!this.slotCurrent(peerId, slot, pc)) this.releaseSender(sender)
+                        // Left, or an offer adopted a different sender, while this
+                        // one was accepting the track. The clone was recorded after
+                        // `releaseClones` had already run, and that release only
+                        // stops a clone the sender already owned.
+                        if (!this.slotCurrent(peerId, slot, pc) || slot.senders.get(kind) !== sender) this.releaseSender(sender)
                     } else if (track) {
                         if (!this.slotCurrent(peerId, slot, pc)) return
                         // Only reachable if `addTransceiver` failed. This fires

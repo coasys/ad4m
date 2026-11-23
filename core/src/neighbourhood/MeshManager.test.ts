@@ -1373,6 +1373,81 @@ describe("call mesh", () => {
         }
     })
 
+    it("stops a clone that landed on a sender an offer stopped using", async () => {
+        // `replaceTrack` is in flight on the sender this side picked. The
+        // peer's next offer adopts a different section of that kind and
+        // releases only the clone that sender already owned. The in-flight
+        // call then commits a fresh clone onto the sender it no longer
+        // uses. A later mute clears the selected sender and leaves the
+        // displaced one transmitting.
+        FakePeerConnection.separateSections = true
+        FakePeerConnection.deferNegotiation = true
+        const camera = new FakeTrack("video")
+        let releaseGate = () => {}
+        try {
+            const alice = await makeMesh(bus, "did:alice", CALL_ID, { localStream: stream(track("audio"), track("video")) })
+            const bob = await makeMesh(bus, "did:bob", CALL_ID, { localStream: stream(track("audio")) })
+            alice.mesh.setRoster(["did:alice", "did:bob"])
+            bob.mesh.setRoster(["did:alice", "did:bob"])
+            await settleAll()
+
+            // The opening handshake has finished. Hold the next replacement so
+            // an offer can adopt another section while it is in flight.
+            FakePeerConnection.replaceCalls = 0
+            FakePeerConnection.replaceGate = new Promise<void>((resolve) => { releaseGate = resolve })
+            const attaching = bob.mesh.replaceTrack("video", camera as unknown as MediaStreamTrack)
+            for (let i = 0; i < 20 && FakePeerConnection.replaceCalls === 0; i += 1) await settle()
+            expect(FakePeerConnection.replaceCalls).toBeGreaterThan(0)
+
+            const offers = alice.sent.filter((payload) => {
+                const message = payload as { kind?: string; description?: { type?: string } }
+                return message.kind === "description" && message.description?.type === "offer"
+            })
+            const last = offers[offers.length - 1] as {
+                gen?: string
+                peerGen?: string
+                offer?: number
+                description: { sdp?: string }
+            }
+            const origin = last.description.sdp?.split("@")[1]?.split(/[#>]/)[0]
+            const sdp = `offer-sdp@${origin}#99`
+            FakePeerConnection.offerSections.set(sdp, ["audio", "video", "video"])
+            const started = FakePeerConnection.replaceCalls
+            bus.deliver("did:alice", {
+                v: CALL_PROTOCOL_VERSION,
+                call: CALL_ID,
+                to: "did:bob",
+                kind: "description",
+                description: { type: "offer", sdp },
+                offer: (last.offer ?? 0) + 1,
+                ...(last.gen ? { gen: last.gen } : {}),
+                ...(last.peerGen ? { peerGen: last.peerGen } : {}),
+            })
+            for (let i = 0; i < 20 && FakePeerConnection.replaceCalls === started; i += 1) await settle()
+            expect(FakePeerConnection.replaceCalls).toBeGreaterThan(started)
+
+            releaseGate()
+            await attaching
+            await settleAll()
+
+            const liveVideo = () => bob.live().getSenders().filter((sender) =>
+                sender.track?.kind === "video" && asFake(sender.track).readyState === "live")
+            expect(liveVideo()).toHaveLength(1)
+
+            await bob.mesh.replaceTrack("video", null)
+            expect(liveVideo()).toHaveLength(0)
+            expect(camera.readyState).toBe("live")
+            expect(bob.errors).toEqual([])
+            expect(alice.errors).toEqual([])
+        } finally {
+            releaseGate()
+            FakePeerConnection.separateSections = false
+            FakePeerConnection.deferNegotiation = false
+            FakePeerConnection.replaceGate = null
+            FakePeerConnection.offerSections.clear()
+        }
+    })
+
     it("attaches the tracks handed to join, one per kind", async () => {
         const mic = track("audio")
         const camera = track("video")
