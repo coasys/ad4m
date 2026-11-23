@@ -201,8 +201,12 @@ impl<T> CallLock<T> {
         }
     }
 
+    /// The sync-read check ignores queued writers: a sync `&self` export
+    /// reports busy only while an ordered call holds the instance — a
+    /// writer that merely waits holds nothing yet, and the brief borrow
+    /// this takes is out of its way by its next poll.
     fn try_read(&self) -> Option<ReadGuard<'_, T>> {
-        self.can_read().then(|| self.take_read())
+        (!self.writer.get()).then(|| self.take_read())
     }
 
     /// Wake every waiting reader — all of them may proceed together.
@@ -673,13 +677,25 @@ mod tests {
         let mut cx = Context::from_waker(noop_waker_ref());
 
         let held = block_on(first.read("first")).unwrap();
-        // A queued writer turns new readers away.
+        // A queued writer turns new waiting readers away…
         let mut write = Box::pin(second.write("ordered"));
         assert!(write.as_mut().poll(&mut cx).is_pending());
-        assert!(second.try_read().is_none());
+        let third = slot.get("third").unwrap();
+        let mut queued_read = Box::pin(third.read("third"));
+        assert!(queued_read.as_mut().poll(&mut cx).is_pending());
+        // …but a sync read still answers: a sync export reports busy only
+        // while an ordered call holds the instance, not while one waits.
+        assert!(second.try_read().is_some());
 
         drop(held);
-        assert!(write.as_mut().poll(&mut cx).is_ready());
+        let write_guard = match write.as_mut().poll(&mut cx) {
+            Poll::Ready(g) => g,
+            Poll::Pending => panic!("the queued writer never took the write side"),
+        };
+        // While the ordered call holds the instance the sync read is busy.
+        assert!(second.try_read().is_none());
+        drop(write_guard);
+        assert!(queued_read.as_mut().poll(&mut cx).is_ready());
     }
 
     #[test]
