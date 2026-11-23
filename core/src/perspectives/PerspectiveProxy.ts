@@ -956,7 +956,6 @@ export class PerspectiveProxy {
     async discardBatch(batchId: string): Promise<boolean> {
         return await this.#client.discardBatch(this.#handle.uuid, batchId)
     }
-
     /**
      * Retrieves and renders an Expression referenced in this perspective.
      * 

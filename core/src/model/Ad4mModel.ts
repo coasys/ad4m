@@ -1091,15 +1091,6 @@ export class Ad4mModel {
   }
 
   /**
-   * Re-read this instance after a write. A model whose instances leave no
-   * links of their own (all-optional, nothing set) reads back as missing;
-   * it still gets a snapshot, so the next save() updates instead of creating.
-   */
-  private async refresh() {
-    if (!(await this.getData())) this.takeSnapshot();
-  }
-
-  /**
    * Generates a SPARQL query from a Query object.
    * 
    * @description
@@ -1848,14 +1839,11 @@ export class Ad4mModel {
       } else {
         await this.innerUpdate(true, batchId);
       }
-      if (batchId) {
-        // Batch hasn't been committed yet — getData() would fetch stale data
-        // and overwrite in-memory values. Just refresh the snapshot so further
-        // saves within the same batch diff correctly.
-        this.takeSnapshot();
-      } else {
-        await this.refresh();
-      }
+      // Snapshot what was written, so further saves diff correctly.
+      this.takeSnapshot();
+      // With a caller's batch nothing is committed yet: reading would fetch
+      // stale data and overwrite in-memory values.
+      if (!batchId) await this.getData();
       return;
     }
 
@@ -1879,18 +1867,11 @@ export class Ad4mModel {
     }
 
     // Otherwise the create gets its own batch, discarded if any step fails.
-    const ownBatch = await this.perspective.createBatch();
-    try {
-      await this.createIn(ownBatch);
-      await this.perspective.commitBatch(ownBatch);
-    } catch (e) {
-      await this.perspective.discardBatch(ownBatch).catch(() => {});
-      throw e;
-    }
+    await Ad4mModel.transaction(this.perspective, ({ batchId }) => this.createIn(batchId));
     // The record now exists: snapshot first, so if the re-read below fails a
     // retried save() updates instead of creating a second copy.
     this.takeSnapshot();
-    await this.refresh();
+    await this.getData();
   }
 
   /** Stage the writes that create this instance in `batchId`. */
@@ -2369,22 +2350,16 @@ export class Ad4mModel {
     // are committed together. If any step throws, the batch is discarded
     // (nothing is written, and it does not stay open on the executor) and the
     // original error is rethrown.
-    const batchId = await perspective.createBatch();
-    try {
+    await Ad4mModel.transaction(perspective, async ({ batchId }) => {
       await instance.save(batchId);
       await linkParent?.(perspective, instance.id, batchId);
-      await perspective.commitBatch(batchId);
-    } catch (e) {
-      // A failed discard must not hide the original error.
-      await perspective.discardBatch(batchId).catch(() => {});
-      throw e;
-    }
+    });
 
     // The record now exists. Rejecting would leave the caller no instance, and
     // a retry would create a second record: if the re-read fails, return the
     // instance with the values it wrote (its snapshot is already taken).
     try {
-      await instance.refresh();
+      await instance.getData();
     } catch (e) {
       console.warn(`${this.name}.create(): ${instance.id} was created, but reading it back failed`, e);
     }

@@ -119,16 +119,12 @@ impl PerspectiveInstance {
         // stays a plain addition or removal.
         let updates: Vec<(LinkExpression, LinkExpression)> = updates
             .into_iter()
-            .filter(|(old, new)| {
-                let (Some(r), Some(a)) = (
-                    diff.removals.iter().position(|l| l == old),
-                    diff.additions.iter().position(|l| l == new),
-                ) else {
-                    return false;
-                };
-                diff.removals.remove(r);
-                diff.additions.remove(a);
-                true
+            .filter_map(|(old, new)| {
+                let removed = diff.removals.iter().position(|l| *l == old)?;
+                let added = diff.additions.iter().position(|l| *l == new)?;
+                diff.removals.remove(removed);
+                diff.additions.remove(added);
+                Some((old, new))
             })
             .collect();
 
