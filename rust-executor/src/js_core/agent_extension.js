@@ -3,32 +3,88 @@ import {
     agent_sign_string_hex, agent, agent_is_initialized, agent_is_unlocked,
     agent_create_signed_expression_stringified, agent_create_signed_expression_for_user,
     agent_did_for_user, agent_list_user_emails, agent_get_all_local_user_dids, agent_agent_for_user,
-    agent_open_sealed
+    agent_open_sealed, agent_call_token
 } from 'ext:core/ops';
 
 ((globalThis) => {
     const core = Deno.core;
+
+    // The agent of the call this code runs for, kept in a V8 async-context
+    // variable: agent_extension.rs, "The agent a call acts as".
+    const callAgent = new core.AsyncVariable();
+    const caller = () => callAgent.get() ?? null;
+
+    // The runtime runs every script call as `__ad4mRunCall(id, async () => (script))`.
+    Object.defineProperty(globalThis, "__ad4mRunCall", {
+        value: (id, fn) => {
+            const token = agent_call_token(id);
+            const previous = callAgent.enter(token);
+            try {
+                return fn();
+            } finally {
+                core.setAsyncContext(previous);
+            }
+        },
+        writable: false,
+        enumerable: false,
+        configurable: false,
+    });
+
+    // The token of the call this code runs for (or null), for the other
+    // extensions' ops that act as the caller: the HOLOCHAIN_SERVICE ops route
+    // a call to the caller's cell (#1775). The token stays opaque: JS cannot
+    // make one, and handing it on gives an op no more than this code has.
+    Object.defineProperty(globalThis, "__ad4mCallAgent", {
+        value: () => caller(),
+        writable: false,
+        enumerable: false,
+        configurable: false,
+    });
+
+    // The host's module evaluation is driven from Rust (`JsCore::load_module_from_source`),
+    // not a script call: `__ad4mEnterCallAgent` takes the call's token into the
+    // async context the way `__ad4mRunCall` does, and `__ad4mLeaveCallAgent`
+    // restores the context it replaced. Evaluations do not nest: one module
+    // evaluates at a time, under the runtime's worker lock.
+    let replaced;
+    Object.defineProperty(globalThis, "__ad4mEnterCallAgent", {
+        value: (id) => {
+            replaced = callAgent.enter(agent_call_token(id));
+        },
+        writable: false,
+        enumerable: false,
+        configurable: false,
+    });
+    Object.defineProperty(globalThis, "__ad4mLeaveCallAgent", {
+        value: () => {
+            core.setAsyncContext(replaced);
+            replaced = undefined;
+        },
+        writable: false,
+        enumerable: false,
+        configurable: false,
+    });
 
     globalThis.AGENT = {
         didDocument: () => {
             return agent_did_document();
         },
         signingKeyId: () => {
-            return agent_signing_key_id();
+            return agent_signing_key_id(caller());
         },
         did: () => {
-            return agent_did();
+            return agent_did(caller());
         },
         createSignedExpression: (data) => {
             try {
-                return agent_create_signed_expression(data);
+                return agent_create_signed_expression(data, caller());
             } catch (error) {
                 console.error("Error calling agent_create_signed_expression:", error);
                 console.error("Data was:", data)
                 console.log("Falling back to stringified version")
                 try {
                     let stringified = JSON.stringify(data);
-                    let resultString = agent_create_signed_expression_stringified(stringified)
+                    let resultString = agent_create_signed_expression_stringified(stringified, caller())
                     let result = JSON.parse(resultString);
                     return result;
                 } catch (fallbackError) {
@@ -45,13 +101,13 @@ import {
             }
         },
         sign: (payload) => {
-            return agent_sign(payload);
+            return agent_sign(payload, caller());
         },
         signStringHex: (payload) => {
-            return agent_sign_string_hex(payload);
+            return agent_sign_string_hex(payload, caller());
         },
         openSealed: (sealed) => {
-            return agent_open_sealed(sealed);
+            return agent_open_sealed(sealed, caller());
         },
         agent: () => {
             return agent();
@@ -67,7 +123,7 @@ import {
                 throw new TypeError('userEmail must be a non-empty string');
             }
             try {
-                return agent_create_signed_expression_for_user(userEmail, data);
+                return agent_create_signed_expression_for_user(userEmail, data, caller());
             } catch (error) {
                 console.error("Error calling agent_create_signed_expression_for_user:", error);
                 console.error("userEmail was:", userEmail);

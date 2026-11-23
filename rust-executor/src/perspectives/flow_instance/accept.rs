@@ -47,6 +47,7 @@ use crate::perspectives::flow_evaluator::{
     recompute_evidence_hash, run_query, EvidenceItem, RequiresQueryable,
 };
 use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::perspectives::sparql_store::EvalStop;
 use crate::types::{DecoratedLinkExpression, Link, LinkQuery, LinkStatus};
 use std::collections::HashMap;
 
@@ -96,7 +97,7 @@ pub(crate) async fn accept_flow_proposal_locked(
         )
     })?;
 
-    let flows = load_shacl_flows(perspective).await?;
+    let flows = load_shacl_flows(&EvalStop::none(), perspective).await?;
     let instances = load_all_flow_instances(perspective).await?;
     let record = instances
         .iter()

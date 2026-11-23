@@ -476,6 +476,11 @@ async fn an_abstract_class_is_read_on_its_own() {
         r#"{"parent":{"ids":["ad4m://p"],"predicate":"ad4m://has_child","limitPerAnchor":2}}"#;
     let err = p.model_query_classes(&one("TextContent"), scoped).await;
     assert!(err.unwrap_err().to_string().contains("limitPerAnchor"));
+
+    // An abstract class is read as a union, so a keyset cursor is refused.
+    let paged = r#"{"after":"","limit":2}"#;
+    let err = p.model_query_classes(&one("TextContent"), paged).await;
+    assert!(err.unwrap_err().to_string().contains("`after`"));
 }
 
 /// The resolution is cached (the same `Arc`) until the installed shapes
@@ -1055,4 +1060,116 @@ async fn an_abstract_class_over_two_classes_of_one_name_uses_the_records_class()
     );
     assert_eq!(read(&p, "b://Task", "ad4m://bt", "text").await, "new");
     assert_eq!(targets_on(&p, "ad4m://bt", "b://child"), ["ad4m://c1"]);
+}
+
+/// `null` and `""` clear a property: the executor's own `removeLink` on
+/// `source` + `predicate`, for a concrete class and through an abstract one.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_empty_value_clears_the_property_on_update_subject() {
+    let (mut p, ctx) = dispatch_setup().await;
+    for (n, empty) in [json!(""), Value::Null].into_iter().enumerate() {
+        update(&mut p, &ctx, "Task", "ad4m://t1", json!({"owner": "o2"}))
+            .await
+            .unwrap();
+        assert_eq!(links_on(&p, "ad4m://t1", "ns://owner"), 1, "case {n}");
+        update(&mut p, &ctx, "Task", "ad4m://t1", json!({"owner": empty}))
+            .await
+            .unwrap();
+        assert_eq!(links_on(&p, "ad4m://t1", "ns://owner"), 0, "case {n}");
+        assert_eq!(links_on(&p, "ad4m://t1", "ns://type"), 1, "type kept");
+    }
+}
+
+/// A value staged earlier in the batch is cleared too: the commit keeps
+/// nothing for the property.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_empty_value_clears_a_value_staged_in_the_same_batch() {
+    let (mut p, ctx) = dispatch_setup().await;
+    let batch = p.create_batch().await;
+    p.update_subject(
+        class("Task"),
+        "ad4m://t1".into(),
+        json!({"owner": "staged"}),
+        Some(batch.clone()),
+        &ctx,
+    )
+    .await
+    .unwrap();
+    p.update_subject(
+        class("Task"),
+        "ad4m://t1".into(),
+        json!({"owner": ""}),
+        Some(batch.clone()),
+        &ctx,
+    )
+    .await
+    .unwrap();
+    p.commit_batch(batch, &ctx).await.unwrap();
+    assert_eq!(links_on(&p, "ad4m://t1", "ns://owner"), 0);
+}
+
+/// Through an abstract class the clear reaches each record class's own
+/// property: `text` is Message.body on `m2`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_empty_value_through_an_abstract_class_clears_the_concrete_property() {
+    let (mut p, ctx) = dispatch_setup().await;
+    assert_eq!(links_on(&p, "ad4m://m2", "ns://body"), 1);
+    update(
+        &mut p,
+        &ctx,
+        "TextContent",
+        "ad4m://m2",
+        json!({"text": ""}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(links_on(&p, "ad4m://m2", "ns://body"), 0);
+    update(
+        &mut p,
+        &ctx,
+        "TextContent",
+        "ad4m://m2",
+        json!({"text": "back"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(links_on(&p, "ad4m://m2", "ns://body"), 1);
+    update(
+        &mut p,
+        &ctx,
+        "TextContent",
+        "ad4m://m2",
+        json!({"text": null}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(links_on(&p, "ad4m://m2", "ns://body"), 0);
+}
+
+/// A required property (`min_count` 1) refuses to clear and writes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_required_property_refuses_to_clear() {
+    let (mut p, ctx) = dispatch_setup().await;
+    for empty in [json!(""), Value::Null] {
+        let err = update(
+            &mut p,
+            &ctx,
+            "Task",
+            "ad4m://t1",
+            json!({"owner": empty, "title": empty}),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            err,
+            "Property `title` of class `Task` is required and cannot be cleared"
+        );
+        assert_eq!(links_on(&p, "ad4m://t1", "ns://title"), 1);
+        assert_eq!(
+            links_on(&p, "ad4m://t1", "ns://owner"),
+            1,
+            "nothing written"
+        );
+    }
 }

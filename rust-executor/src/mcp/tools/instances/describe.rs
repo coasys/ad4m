@@ -7,6 +7,7 @@ use super::{class_properties, pretty, prop_json, Ad4mMcpHandler};
 use crate::perspectives::flow_context::load_shacl_flows;
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::perspectives::sparql_store::EvalStop;
 use crate::types::PerspectiveHandle;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
@@ -92,7 +93,7 @@ pub(crate) fn describe_class(
 /// enough for an agent to read: states with their hints, transitions with
 /// the action name that triggers them, and which classes a flow runs on.
 pub(crate) async fn describe_flows(perspective: &PerspectiveInstance) -> Vec<Value> {
-    let flows = match load_shacl_flows(perspective).await {
+    let flows = match load_shacl_flows(&EvalStop::none(), perspective).await {
         Ok(f) => f,
         Err(e) => {
             log::warn!("describe_perspective: could not load flows: {e:#}");

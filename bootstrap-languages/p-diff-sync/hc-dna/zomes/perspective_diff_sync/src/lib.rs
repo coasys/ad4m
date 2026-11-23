@@ -32,12 +32,14 @@ fn init(_: ()) -> ExternResult<InitCallbackResult> {
 
     let functions: GrantedFunctions = GrantedFunctions::Listed(functions);
 
-    create_cap_grant(CapGrantEntry {
-        tag: "".into(),
-        // empty access converts to unrestricted
-        access: ().into(),
+    // HC 0.7.1 restructured grants into { tag, constraint, capability }.
+    // Same grant as before: unrestricted zome-call access to these functions.
+    create_cap_grant(CapGrantEntry::new_zome_call_grant(
+        "".into(),
+        // empty constraint converts to unrestricted
+        ().into(),
         functions,
-    })?;
+    ))?;
     link_adapter::commit::add_active_agent_link::<retriever::HolochainRetreiver>()
         .map_err(|error| utils::err(&format!("{}", error)))?;
     Ok(InitCallbackResult::Pass)
