@@ -292,6 +292,37 @@ async fn member_call(
         == Some(SetterKind::Call))
 }
 
+/// A scalar with no `ad4m://setter` is written as a one-member replace
+/// through a `collectionSetter` synthesized from its `path`: right for a
+/// link `adder`/`remover` pair, but a `call` pair's language would never
+/// see the write (and a caller's batch would pass). Such a scalar is
+/// refused as read-only, before anything is written.
+async fn refuse_call_pair_scalar(
+    perspective: &PerspectiveInstance,
+    class_name: &str,
+    info: &super::PropView<'_>,
+) -> Result<(), InstanceError> {
+    for predicate in ["ad4m://adder", "ad4m://remover"] {
+        if member_call(perspective, class_name, info.name(), predicate).await? {
+            return Err(invalid(
+                class_name,
+                vec![super::ValidationError {
+                    property: info.name().to_string(),
+                    problem: super::ValidationProblem::ReadOnly {
+                        reason: super::ReadOnlyReason::NoSetter,
+                    },
+                    expected_type: Some(info.type_name()),
+                    cardinality: Some(info.cardinality()),
+                    allowed_values: None,
+                    received: None,
+                    item: None,
+                }],
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// `BatchNotFound` unless `batch_id` is absent or names an open batch.
 async fn check_batch(
     perspective: &PerspectiveInstance,
@@ -470,6 +501,7 @@ pub async fn create(
                         anyhow!("property `{name}` is not a property of {class_name}"),
                     ));
                 };
+                refuse_call_pair_scalar(perspective, &class_name, info).await?;
                 scalar_replaces.push((
                     name.clone(),
                     info.predicate().to_string(),
@@ -752,6 +784,7 @@ pub async fn update(
                             anyhow!("property `{name}` is not a property of {class_name}"),
                         ));
                     };
+                    refuse_call_pair_scalar(perspective, &class_name, info).await?;
                     plain_collections.push((
                         name.clone(),
                         info.predicate().to_string(),

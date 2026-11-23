@@ -612,3 +612,86 @@ async fn update_replaces_a_scalar_relation_member() {
         "the scalar relation replaces its one member"
     );
 }
+
+/// [`PINNED_SDNA`] with a `call` adder and remover on `pinned`: a language
+/// writes the pin.
+const CALL_PINNED_SDNA: &str = r#"{
+  "target_class": "ns://CallPinPost",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://CallPinPost"}
+  ],
+  "properties": [
+    {"path":"ns://pin_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://pin_title","target":"value"}]},
+    {"path":"ns://pinned","name":"pinned","relation_kind":"hasOne","target_class_name":"Comment",
+     "class":"ns://CommentShape","node_kind":"IRI","max_count":1,"writable":true,
+     "adder":[{"action":"call","source":"this","predicate":"pin","target":"{}"}],
+     "remover":[{"action":"call","source":"this","predicate":"unpin","target":"{}"}]}
+  ]
+}"#;
+
+/// A scalar whose adder and remover are `call`s is not written as raw
+/// links: the one-member replace through a synthesized `collectionSetter`
+/// would never reach the language. Create and update refuse it before
+/// they write anything.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scalar_with_a_call_adder_and_remover_is_not_written_as_links() {
+    let (mut p, _shapes, ctx) =
+        setup_perspective_no_llm(&[("CallPinPost", CALL_PINNED_SDNA)]).await;
+    let refused_create = create(
+        &mut p,
+        &ctx,
+        InstanceCreate {
+            class_name: "CallPinPost".into(),
+            properties: Some(Map::from_iter([
+                ("title".to_string(), json!("t")),
+                ("pinned".to_string(), json!("ns://c1")),
+            ])),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(
+        matches!(refused_create, Err(InstanceError::Validation { .. })),
+        "{refused_create:?}"
+    );
+
+    let base = create(
+        &mut p,
+        &ctx,
+        InstanceCreate {
+            class_name: "CallPinPost".into(),
+            properties: Some(Map::from_iter([("title".to_string(), json!("t"))])),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("create")
+    .base_uri;
+    let refused = update(
+        &mut p,
+        &ctx,
+        InstanceUpdate {
+            class_name: "CallPinPost".into(),
+            base_uri: base.clone(),
+            properties: Map::from_iter([("pinned".to_string(), json!("ns://c1"))]),
+            batch_id: None,
+        },
+    )
+    .await;
+    match refused {
+        Err(InstanceError::Validation { errors, .. }) => {
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(errors[0].property, "pinned");
+        }
+        other => panic!("a call-pair scalar must be refused: {other:?}"),
+    }
+    let pinned = p
+        .get_links(&LinkQuery {
+            predicate: Some("ns://pinned".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(pinned.is_empty(), "a raw pin link was written: {pinned:?}");
+}
