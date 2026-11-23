@@ -136,7 +136,7 @@ async fn rekey_and_move() -> Result<DeviceKeys, WsRpcError> {
 async fn move_from_retired(retired: &[String], new: &str) -> Vec<String> {
     let mut failed: Vec<String> = Vec::new();
     for instance in crate::perspectives::all_perspectives() {
-        let handle = instance.persisted.lock().await.clone();
+        let handle = instance.persisted.snapshot();
         if !retired.iter().any(|did| handle.is_owned_by(did)) {
             continue;
         }
@@ -323,10 +323,10 @@ mod tests {
         assert!(user.check().is_err(), "a managed user's grant ends too");
         // Perspective owners: the main agent's perspective moved, the user's did not.
         let mine = crate::perspectives::get_perspective(&owned.uuid).unwrap();
-        let mine = mine.persisted.lock().await.clone();
+        let mine = mine.persisted.snapshot();
         assert_eq!(mine.owners, Some(vec![new.clone()]));
         let theirs = crate::perspectives::get_perspective(&users.uuid).unwrap();
-        let theirs = theirs.persisted.lock().await.clone();
+        let theirs = theirs.persisted.snapshot();
         assert_eq!(theirs.owners, Some(vec!["did:key:rekey-user".to_string()]));
         // Notifications and claims.
         let (owners, join, flow) = Ad4mDb::with_global_instance(|db| {
@@ -406,7 +406,7 @@ mod tests {
 
     async fn owners_of(uuid: &str) -> Option<Vec<String>> {
         let instance = crate::perspectives::get_perspective(uuid).unwrap();
-        let owners = instance.persisted.lock().await.owners.clone();
+        let owners = instance.persisted.load().owners.clone();
         owners
     }
 
@@ -422,7 +422,7 @@ mod tests {
             .unwrap();
         let instance = crate::perspectives::get_perspective(&owned.uuid).unwrap();
 
-        let held = instance.persisted.lock().await;
+        let held = instance.persisted.hold_writer().await;
         let first = tokio::spawn(rekey_main());
         let first_key = key_after(&old).await;
         let second = tokio::spawn(rekey_main());
@@ -452,7 +452,7 @@ mod tests {
             .unwrap();
         let instance = crate::perspectives::get_perspective(&owned.uuid).unwrap();
 
-        let held = instance.persisted.lock().await;
+        let held = instance.persisted.hold_writer().await;
         let call = tokio::spawn(rekey_main());
         let new = key_after(&old).await;
         call.abort();
