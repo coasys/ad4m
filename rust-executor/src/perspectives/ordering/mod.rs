@@ -100,6 +100,12 @@ pub trait OrderingStrategy: Send + Sync {
     /// member, this reads as a move to the end, since the entry it returns
     /// carries a fresh `pid` and supersedes the item's current position. A
     /// caller wanting add-if-missing has to check membership itself.
+    ///
+    /// That single entry is not a complete move. The neighbour that followed
+    /// the item still points at it, and the two entries cycle, so a walk
+    /// from the head reaches nothing. A caller moving an item that already
+    /// has an entry has to diff the whole order and write every entry that
+    /// changes.
     fn generate_append(
         &self,
         item_uri: &str,

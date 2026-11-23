@@ -697,9 +697,10 @@ pub struct PerspectiveInstance {
     /// stale answer — see `flow_instance::verify::memo` (#1177).
     pub(crate) receipt_verdict_memo:
         Arc<crate::perspectives::flow_instance::verify::memo::VerdictMemo>,
-    /// The abstract classes and aliases installed here, and the classes each
-    /// abstract class reads (#1435). Derived from every class's shape, so
-    /// dropped whenever any shape is (see `forget_derived_shapes`).
+    /// The abstract classes and aliases installed here, the classes each
+    /// abstract class reads (#1435), and the predicates some class orders.
+    /// Derived from every class's shape, so dropped whenever any shape is
+    /// (see `forget_derived_shapes`).
     abstract_cache: Arc<std::sync::RwLock<abstract_classes::AbstractCache>>,
     /// The one debounced flow consensus pass this perspective may have
     /// queued for inbound neighbourhood links — see
@@ -3605,6 +3606,23 @@ impl PerspectiveInstance {
         predicate: &str,
         batch_id: Option<&str>,
     ) -> Option<String> {
+        // Most links are not ordered. Classifying the source and loading its
+        // shapes to discover that is the expensive part, and it used to run
+        // on every `addLink`. A predicate no installed class orders can be
+        // answered from the cached set. A predicate some class orders still
+        // classifies: the declaration may belong to a class this source is
+        // not. A set that could not be built is not treated as "nothing is
+        // ordered" — that would skip a write.
+        match self.ordered_predicate_set() {
+            Ok(Some(set)) if !set.contains(predicate) => return None,
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                log::warn!("ordering: ordered-predicate set was not kept; classifying anyway");
+            }
+            Err(e) => {
+                log::warn!("ordering: could not list ordered predicates, classifying anyway: {e}");
+            }
+        }
         let pending = self.staged_triples_for(source, batch_id).await;
         let resolver = self.shape_resolver();
         let classes = super::subject_classes_of::subject_classes_of_with_pending(
@@ -3836,31 +3854,40 @@ impl PerspectiveInstance {
         Ok(())
     }
 
-    /// An ordering link that places `item` at the end of the ordered collection
-    /// `source --predicate-->`, or `None` when that predicate is not ordered.
+    /// Ordering links that place `item` at the end of the ordered collection
+    /// `source --predicate-->`. Empty when that predicate is not ordered, or
+    /// when `item` is already last and every neighbour already says so.
     ///
     /// For `addLink`, which appends one member and has no array to diff. The
     /// tail is the chain reconstructed *without* `item`: an item that is
     /// already last would otherwise become its own predecessor.
+    ///
+    /// An item that has never had an entry gets one append entry. An item
+    /// that already has one — removed and added again, or added again while
+    /// it is still a member — is moved by diffing the order with the item at
+    /// the end and returning *every* entry that diff writes. One new
+    /// "item after the tail" entry leaves the neighbour that used to follow
+    /// the item pointing at it. Those two pointers cycle, and a walk from
+    /// the head reaches nothing.
     async fn collection_append_link(
         &mut self,
         source: &str,
         predicate: &str,
         item: &str,
         batch_id: Option<&str>,
-    ) -> Result<Option<Link>, AnyError> {
+    ) -> Result<Vec<Link>, AnyError> {
         let strategy_name = match self
             .ordering_strategy_for(source, predicate, batch_id)
             .await
         {
             Some(s) => s,
-            None => return Ok(None),
+            None => return Ok(Vec::new()),
         };
         let strategy = match crate::perspectives::ordering::create_strategy(&strategy_name) {
             Ok(s) => s,
             Err(e) => {
                 log::warn!("ordering: {e}");
-                return Ok(None);
+                return Ok(Vec::new());
             }
         };
 
@@ -3915,27 +3942,67 @@ impl PerspectiveInstance {
         let current_entries =
             crate::perspectives::ordering::parse_ordering_entries(&targets, predicate);
 
-        let entry = strategy.generate_append(
-            item,
-            &current_entries,
-            &current_members,
-            predicate,
-            &crate::agent::did(),
-            chrono::Utc::now().timestamp_millis().max(0) as u64,
-        );
-        match crate::perspectives::ordering::encode_ordering_entry(&entry) {
-            Ok(target) => Ok(Some(Link {
-                source: source.to_string(),
-                predicate: Some(
-                    crate::perspectives::ordering::COLLECTION_ORDER_PREDICATE.to_string(),
-                ),
-                target,
-            })),
-            Err(e) => {
-                log::warn!("ordering: could not encode entry: {e}");
-                Ok(None)
+        // `seq` restarts at 0 on every call, and an equal pid is tie-broken
+        // on `after`. That tie can keep the old pointer, so the neighbour
+        // rewrite never lands and the cycle stays. A save that lands on an
+        // existing entry's millisecond is stamped one millisecond later,
+        // which sorts strictly after every entry already stored.
+        let mut now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        if let Some(latest) = current_entries
+            .iter()
+            .filter_map(|entry| entry.pid.split('_').next())
+            .filter_map(|millis| millis.parse::<u64>().ok())
+            .max()
+        {
+            if now_ms <= latest {
+                now_ms = latest.saturating_add(1);
             }
         }
+        let agent_did = crate::agent::did();
+        let already_placed = current_entries.iter().any(|entry| entry.item == item);
+        let entries = if already_placed {
+            let mut desired = strategy.reconstruct(&current_members, &current_entries);
+            desired.push(item.to_string());
+            strategy
+                .diff(
+                    &current_entries,
+                    &current_members,
+                    &desired,
+                    predicate,
+                    &agent_did,
+                    now_ms,
+                )
+                .add
+        } else {
+            vec![strategy.generate_append(
+                item,
+                &current_entries,
+                &current_members,
+                predicate,
+                &agent_did,
+                now_ms,
+            )]
+        };
+
+        let links = entries
+            .iter()
+            .filter_map(
+                |entry| match crate::perspectives::ordering::encode_ordering_entry(entry) {
+                    Ok(target) => Some(Link {
+                        source: source.to_string(),
+                        predicate: Some(
+                            crate::perspectives::ordering::COLLECTION_ORDER_PREDICATE.to_string(),
+                        ),
+                        target,
+                    }),
+                    Err(e) => {
+                        log::warn!("ordering: could not encode entry: {e}");
+                        None
+                    }
+                },
+            )
+            .collect();
+        Ok(links)
     }
 
     /// Execute a model query — the executor-side replacement for
@@ -5157,32 +5224,18 @@ impl PerspectiveInstance {
                     // `addLink` is how `addChild` writes one member. It has no
                     // array to diff, so without an entry here the member is
                     // unpositioned and a getter-backed read keeps SPARQL order
-                    // (#1304). The entry is computed before either link is
-                    // stored, from members already committed or staged in this
-                    // batch, and the two links go in together.
-                    let order_link = match predicate.as_deref() {
+                    // (#1304). The entries are computed before any of these
+                    // links are stored, from members already committed or
+                    // staged in this batch, and the member link goes in with
+                    // every ordering entry, under one status.
+                    let order_links = match predicate.as_deref() {
                         Some(pred) => {
                             self.collection_append_link(&source, pred, &target, batch_id.as_deref())
                                 .await?
                         }
-                        None => None,
+                        None => Vec::new(),
                     };
-                    if let Some(order_link) = order_link {
-                        self.add_links(
-                            vec![
-                                Link {
-                                    source,
-                                    predicate,
-                                    target,
-                                },
-                                order_link,
-                            ],
-                            status,
-                            batch_id.clone(),
-                            context,
-                        )
-                        .await?;
-                    } else {
+                    if order_links.is_empty() {
                         self.add_link(
                             Link {
                                 source,
@@ -5194,6 +5247,15 @@ impl PerspectiveInstance {
                             context,
                         )
                         .await?;
+                    } else {
+                        let mut links = vec![Link {
+                            source,
+                            predicate,
+                            target,
+                        }];
+                        links.extend(order_links);
+                        self.add_links(links, status, batch_id.clone(), context)
+                            .await?;
                     }
                 }
                 Action::RemoveLink => {
@@ -10994,6 +11056,119 @@ mod tests {
             !order_links.is_empty(),
             "an ordered predicate still writes an entry after the unordered one was skipped"
         );
+    }
+
+    /// The ordered-predicate set is dropped when a shape changes. A set built
+    /// while `we://items` was unordered must not keep the next `addLink` from
+    /// writing an entry once the shape starts ordering it.
+    #[tokio::test]
+    async fn ordered_predicate_cache_notices_a_shape_that_starts_ordering() {
+        let mut perspective = setup().await;
+        let ctx = AgentContext::main_agent();
+        let plain = r#"{
+            "target_class": "we://Note",
+            "properties": [
+                { "path": "we://flag", "name": "flag", "has_value": "we://note",
+                  "min_count": 1, "max_count": 1 },
+                { "path": "we://items", "name": "items" }
+            ],
+            "constructor_actions": [
+                {"action": "addLink", "source": "this", "predicate": "we://flag", "target": "we://note"}
+            ]
+        }"#;
+        let ordered = r#"{
+            "target_class": "we://Note",
+            "properties": [
+                { "path": "we://flag", "name": "flag", "has_value": "we://note",
+                  "min_count": 1, "max_count": 1 },
+                { "path": "we://items", "name": "items", "ordering": "linkedList" }
+            ],
+            "constructor_actions": [
+                {"action": "addLink", "source": "this", "predicate": "we://flag", "target": "we://note"}
+            ]
+        }"#;
+        perspective
+            .register_shape_json(plain, &ctx)
+            .await
+            .expect("register unordered Note");
+        perspective
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some("Note".to_string()),
+                    query: None,
+                },
+                "we://note/2".to_string(),
+                None,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("create note");
+        add_link_on(&mut perspective, "we://note/2", "we://items", "we://item/1").await;
+        assert!(
+            collection_order_targets(&perspective, "we://note/2")
+                .await
+                .is_empty(),
+            "we://items is not ordered yet, so the first addLink writes no entry"
+        );
+
+        perspective
+            .register_shape_json(ordered, &ctx)
+            .await
+            .expect("register ordering on we://items");
+        add_link_on(&mut perspective, "we://note/2", "we://items", "we://item/2").await;
+        assert!(
+            !collection_order_targets(&perspective, "we://note/2")
+                .await
+                .is_empty(),
+            "a shape that starts ordering a predicate still gets an entry"
+        );
+    }
+
+    async fn add_link_on(
+        perspective: &mut PerspectiveInstance,
+        source: &str,
+        predicate: &str,
+        target: &str,
+    ) {
+        perspective
+            .execute_commands(
+                vec![Command {
+                    source: Some("this".to_string()),
+                    predicate: Some(predicate.to_string()),
+                    target: Some("value".to_string()),
+                    local: None,
+                    action: Action::AddLink,
+                }],
+                source.to_string(),
+                vec![Parameter {
+                    name: "value".to_string(),
+                    value: serde_json::Value::String(target.to_string()),
+                }],
+                None,
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("addLink {predicate} {target} on {source}: {e}"));
+    }
+
+    async fn collection_order_targets(
+        perspective: &PerspectiveInstance,
+        source: &str,
+    ) -> Vec<String> {
+        perspective
+            .get_links(&LinkQuery {
+                source: Some(source.to_string()),
+                predicate: Some(
+                    crate::perspectives::ordering::COLLECTION_ORDER_PREDICATE.to_string(),
+                ),
+                ..Default::default()
+            })
+            .await
+            .expect("order links")
+            .into_iter()
+            .map(|link| link.data.target)
+            .collect()
     }
 
     fn is_class_or_shape_query(query: &str) -> bool {
