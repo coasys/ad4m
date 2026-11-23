@@ -3,8 +3,9 @@
 
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
-use std::task::Waker;
+use std::task::{Context, Poll, Waker};
 
 use futures::channel::oneshot;
 use futures::future::{select, Either, FutureExt, Shared};
@@ -119,16 +120,20 @@ pub enum Access {
 /// out — the counters only decide who may take which borrow.
 ///
 /// A waiting writer turns new readers away so an ordered call is not
-/// starved by reads that keep arriving. Waiting is waker-based: a future
-/// that stops waiting (the panic side of `select` won) leaves a dead
-/// waker the next release drains, so only a live waiter can hold the
-/// door against readers.
+/// starved by reads that keep arriving. Waiting is waker-based: a
+/// reader's dead waker (a future that stopped waiting, e.g. the panic
+/// side of `select` won) just gets drained by the next release — a
+/// reader's registration decides nothing. A writer's does: it holds the
+/// door against readers, so `write_waiters` is keyed by the wait's own
+/// id and the wait takes its entry out on drop, which makes `is_empty`
+/// true exactly when no live writer waits.
 struct CallLock<T> {
     data: RefCell<T>,
     readers: Cell<usize>,
     writer: Cell<bool>,
     read_waiters: RefCell<Vec<Waker>>,
-    write_waiters: RefCell<Vec<Waker>>,
+    write_waiters: RefCell<Vec<(u64, Waker)>>,
+    next_waiter_id: Cell<u64>,
 }
 
 impl<T> CallLock<T> {
@@ -139,6 +144,7 @@ impl<T> CallLock<T> {
             writer: Cell::new(false),
             read_waiters: RefCell::new(Vec::new()),
             write_waiters: RefCell::new(Vec::new()),
+            next_waiter_id: Cell::new(0),
         }
     }
 
@@ -173,7 +179,7 @@ impl<T> CallLock<T> {
         }
     }
 
-    fn drain(waiters: &RefCell<Vec<Waker>>) -> Vec<Waker> {
+    fn drain<W>(waiters: &RefCell<Vec<W>>) -> Vec<W> {
         waiters.borrow_mut().drain(..).collect()
     }
 
@@ -188,15 +194,11 @@ impl<T> CallLock<T> {
         })
     }
 
-    fn write(&self) -> impl Future<Output = WriteGuard<'_, T>> + '_ {
-        std::future::poll_fn(move |cx| {
-            if self.can_write() {
-                std::task::Poll::Ready(self.take_write())
-            } else {
-                Self::register(&self.write_waiters, cx.waker());
-                std::task::Poll::Pending
-            }
-        })
+    fn write(&self) -> WriteWait<'_, T> {
+        WriteWait {
+            lock: self,
+            id: None,
+        }
     }
 
     fn try_read(&self) -> Option<ReadGuard<'_, T>> {
@@ -211,11 +213,79 @@ impl<T> CallLock<T> {
     }
 
     /// Wake every waiting writer: they re-poll and the first takes the
-    /// write side; the rest re-register. Dead wakers (dropped futures)
-    /// drop out.
+    /// write side; the rest re-register under their id.
     fn wake_writers(&self) {
-        for w in Self::drain(&self.write_waiters) {
+        for (_, w) in Self::drain(&self.write_waiters) {
             w.wake();
+        }
+    }
+}
+
+/// An ordered call's wait for the write side. Its `id` is its own entry
+/// in `write_waiters`: the entry leaves when the wait takes the lock and
+/// when the wait is dropped, so a cancelled ordered call never strands
+/// the readers that queued behind it.
+struct WriteWait<'a, T> {
+    lock: &'a CallLock<T>,
+    id: Option<u64>,
+}
+
+impl<T> WriteWait<'_, T> {
+    /// Register the caller's waker under this wait's id: first wait takes
+    /// a fresh id; a wait re-polled after a release re-registers under
+    /// its own — the release drained the queue.
+    fn queue(&mut self, waker: &Waker) {
+        let mut waiters = self.lock.write_waiters.borrow_mut();
+        let id = match self.id {
+            Some(id) => id,
+            None => {
+                let id = self.lock.next_waiter_id.get();
+                self.lock.next_waiter_id.set(id.wrapping_add(1));
+                self.id = Some(id);
+                id
+            }
+        };
+        match waiters.iter_mut().find(|(i, _)| *i == id) {
+            Some((_, w)) if !w.will_wake(waker) => w.clone_from(waker),
+            Some(_) => {}
+            None => waiters.push((id, waker.clone())),
+        }
+    }
+
+    /// Take this wait's entry out of the queue, if it has one. Returns
+    /// whether the queue is empty of waiting writers now.
+    fn dequeue(&mut self) -> bool {
+        if let Some(id) = self.id.take() {
+            let mut waiters = self.lock.write_waiters.borrow_mut();
+            waiters.retain(|(i, _)| *i != id);
+            waiters.is_empty()
+        } else {
+            self.lock.write_waiters.borrow().is_empty()
+        }
+    }
+}
+
+impl<'a, T> Future for WriteWait<'a, T> {
+    type Output = WriteGuard<'a, T>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.lock.can_write() {
+            self.dequeue();
+            return Poll::Ready(self.lock.take_write());
+        }
+        self.queue(cx.waker());
+        Poll::Pending
+    }
+}
+
+impl<T> Drop for WriteWait<'_, T> {
+    fn drop(&mut self) {
+        // The last waiting writer leaving frees the readers queued
+        // behind it — nobody else would wake them — unless a write
+        // still holds the lock, in which case the readers wake when
+        // its guard drops.
+        if self.id.is_some() && self.dequeue() && !self.lock.writer.get() {
+            self.lock.wake_readers();
         }
     }
 }
@@ -225,7 +295,7 @@ impl<T> Drop for CallLock<T> {
         for w in self.read_waiters.get_mut().drain(..) {
             w.wake();
         }
-        for w in self.write_waiters.get_mut().drain(..) {
+        for (_, w) in self.write_waiters.get_mut().drain(..) {
             w.wake();
         }
     }
@@ -601,6 +671,52 @@ mod tests {
 
         drop(held);
         assert!(write.as_mut().poll(&mut cx).is_ready());
+    }
+
+    #[test]
+    fn a_dropped_writer_frees_the_readers_queued_behind_it() {
+        use futures::task::ArcWake;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        struct WakeCount(AtomicUsize);
+        impl ArcWake for WakeCount {
+            fn wake_by_ref(arc_self: &Arc<Self>) {
+                arc_self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let slot = LanguageSlot::new();
+        slot.set(Counter::new());
+        let mut cx = Context::from_waker(noop_waker_ref());
+
+        let first = slot.get("first").unwrap();
+        let held = block_on(first.read("first")).unwrap();
+
+        // A writer queues behind the held read; a reader queues behind
+        // the writer — a waiting writer turns new readers away.
+        let writer = slot.get("ordered").unwrap();
+        let mut write = Box::pin(writer.write("ordered"));
+        assert!(write.as_mut().poll(&mut cx).is_pending());
+        let second = slot.get("second").unwrap();
+        let mut read = Box::pin(second.read("second"));
+        let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let read_waker = futures::task::waker(wakes.clone());
+        let mut read_cx = Context::from_waker(&read_waker);
+        assert!(read.as_mut().poll(&mut read_cx).is_pending());
+
+        // The writer's caller gives up: the last waiting writer leaving
+        // frees the readers queued behind it — nobody else would wake
+        // them. The reader wakes and shares the read side with the held
+        // read rather than stranding behind a registration nobody keeps.
+        drop(write);
+        assert_eq!(
+            wakes.0.load(Ordering::SeqCst),
+            1,
+            "the queued reader was not woken when the writer ahead of it left"
+        );
+        assert!(read.as_mut().poll(&mut read_cx).is_ready());
+        drop(held);
     }
 
     #[test]
