@@ -41,7 +41,13 @@ In that mode an empty token is the operator on a loopback-bound API: any client 
 
 ### Claiming an offer
 
-`ad4m-executor claim <offer>` joins an identity: it claims an offer link (or offer string) that identity's app opened, prints the match code, and waits until the app confirms. It needs the operator's admin credential (`--admin-credential` or `AD4M_ADMIN_CREDENTIAL`). The credential travels in the socket URL of the executor named by `--executor-url` (or the local executor).
+`ad4m-executor claim <offer>` joins an identity: it claims an offer link (or offer string) that identity's app opened, prints the match code, and waits until the app confirms. Record that identity on the executor first, with the same `--data-path` that `run` uses:
+
+```bash
+ad4m-executor init --operator '<did:scid:coasys:1:…>'
+```
+
+The value is the `did:scid:coasys:1` of the identity that issued the offer. With no operator record the claim is refused `no-operator`, before it prints the match code. A record of another identity is refused `first-link`. The claim also needs the operator's admin credential (`--admin-credential` or `AD4M_ADMIN_CREDENTIAL`). The credential travels in the socket URL of the executor named by `--executor-url` (or the local executor).
 
 `claim` refuses a plaintext URL (`http://` or `ws://`) whose host is not loopback. The error is:
 
