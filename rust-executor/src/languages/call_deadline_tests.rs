@@ -1436,22 +1436,19 @@ async fn a_wasm_language_runs_concurrent_calls_in_order_as_their_agents() {
     );
 }
 
-/// Two concurrent calls on a WASM language must overlap and each act as its own
-/// agent. `expressionGet("whoami")` answers with an expression authored by the
-/// agent the calling call runs as, so the `author` field reports which agent
-/// the export's host calls signed for. The slow read awaits inside the export,
-/// so the fast read can only answer first by running beside it — under the
-/// handle's forced `Ordered` it queues behind and answers after it; under a
-/// lifted forcing without the ALDK's per-call agent token it answers behind
-/// the lock or signs as the other call's agent.
+/// Two concurrent calls on a WASM language each act as their own agent — and
+/// the wake must carry that too. Alice's `wait` parks her call's future on a
+/// oneshot inside the language; Bob's `release` sends on it, and her future
+/// resumes on the shared wasm-bindgen scheduler inside Bob's poll — where she
+/// answers as Alice only if the export re-installs her pinned agent token
+/// around that poll. Her expression's `author` is the DID `agent_did()`
+/// answered and `proof.signature` signs a challenge unique to this test;
+/// Bob's matching answer is the control — his release ran under his own call.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_wasm_language_runs_concurrent_calls_each_as_its_own_agent() {
-    let Some(bundle) = wasm_language_bundle() else {
-        eprintln!(
-            "test-wasm-language bundle missing; run `bash tests/rust-languages/build.sh` — skipping"
-        );
-        return;
-    };
+    let bundle = wasm_language_bundle().expect(
+        "test-wasm-language bundle missing; run `bash tests/rust-languages/build.sh`",
+    );
 
     crate::test_utils::setup_wallet();
     crate::test_utils::setup_agent();
@@ -1478,57 +1475,118 @@ async fn a_wasm_language_runs_concurrent_calls_each_as_its_own_agent() {
         .await
         .expect("the language's init() runs");
 
-    let get = |handle: LanguageRuntimeHandle, agent: AgentContext, address: &'static str| {
-        tokio::spawn(async move {
-            let script = format!(
-                "JSON.stringify(await globalThis.__ad4m_language_instance__.expressionGet({}))",
-                serde_json::to_string(address).unwrap()
-            );
+    let wait_key = format!("wait-{}", uuid::Uuid::new_v4());
+    let alice_challenge = format!("alice-{}", uuid::Uuid::new_v4());
+    let bob_challenge = format!("bob-{}", uuid::Uuid::new_v4());
+
+    // Alice's wait registers a sender inside the language, then parks her
+    // call's future on the receiver until a release sends on it.
+    let alice_call = tokio::spawn({
+        let handle = handle.clone();
+        let alice = alice.clone();
+        let script = format!(
+            "JSON.stringify(await globalThis.__ad4m_language_instance__.expressionGet({}))",
+            serde_json::to_string(&format!("wait:{wait_key}:{alice_challenge}")).unwrap()
+        );
+        async move {
             handle
-                .call(script, agent, CallKind::Concurrent)
+                .call(script, AgentContext::managed(alice), CallKind::Concurrent)
                 .await
-                .map(|r| {
-                    serde_json::from_str::<serde_json::Value>(&r)
-                        .unwrap()
-                        .pointer("/author")
-                        .and_then(|a| a.as_str())
-                        .map(str::to_string)
-                })
-        })
-    };
+        }
+    });
 
-    // Alice's slow read starts first and awaits inside the export.
-    let slow = get(
-        handle.clone(),
-        AgentContext::managed(alice.clone()),
-        "slow:600:whoami",
-    );
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Gate on the event — her sender is registered inside the language —
+    // not on a sleep that would only guess she got that far.
+    within(Duration::from_secs(10), "alice's wait to park", async {
+        loop {
+            let probe = concurrent(
+                &handle,
+                format!(
+                    "JSON.stringify(await globalThis.__ad4m_language_instance__.expressionGet(\"waiting:{wait_key}\"))"
+                ),
+            )
+            .await
+            .expect("the waiting probe answers");
+            let waiting = serde_json::from_str::<serde_json::Value>(&probe)
+                .ok()
+                .and_then(|v| v.pointer("/data").and_then(|d| d.as_bool()))
+                .unwrap_or(false);
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
 
-    // Bob's read, sent while Alice's is still in flight.
-    let fast = get(handle.clone(), AgentContext::managed(bob.clone()), "whoami");
-
-    let fast = within(Duration::from_secs(10), "the fast read", fast)
-        .await
-        .unwrap();
-    let slow_finished_early = slow.is_finished();
-    let slow = within(Duration::from_secs(10), "the slow read", slow)
-        .await
-        .unwrap();
-
-    let fast_author = fast.expect("the fast read answers").unwrap_or_default();
-    assert_eq!(
-        fast_author, bob,
-        "the fast read signed as {fast_author}, not its own agent"
-    );
+    // Bob's release sends on Alice's sender: her parked future resumes
+    // inside his poll on the shared scheduler. His answer signs as Bob.
+    let bob_answer = within(Duration::from_secs(10), "bob's release", async {
+        handle
+            .call(
+                format!(
+                    "JSON.stringify(await globalThis.__ad4m_language_instance__.expressionGet({}))",
+                    serde_json::to_string(&format!("release:{wait_key}:{bob_challenge}")).unwrap()
+                ),
+                AgentContext::managed(bob.clone()),
+                CallKind::Concurrent,
+            )
+            .await
+    })
+    .await
+    .expect("bob's release answers");
+    let bob_expression: serde_json::Value = serde_json::from_str(&bob_answer).unwrap();
     assert!(
-        !slow_finished_early,
-        "the fast read waited for the slow read instead of running beside it"
+        bob_expression
+            .pointer("/data/released")
+            .and_then(|r| r.as_bool())
+            .unwrap_or(false),
+        "bob's release found no parked wait to wake: {bob_answer}"
     );
-    let slow_author = slow.expect("the slow read answers").unwrap_or_default();
     assert_eq!(
-        slow_author, alice,
-        "the slow read signed as {slow_author}, not its own agent"
+        bob_expression
+            .pointer("/author")
+            .and_then(|a| a.as_str()),
+        Some(bob.as_str()),
+        "bob's release reported a different agent: {bob_answer}"
+    );
+    let bob_signature = bob_expression
+        .pointer("/proof/signature")
+        .and_then(|s| s.as_str())
+        .expect("bob's release carries a signature");
+    assert!(
+        crate::agent::signatures::verify_string_signed_by_did(&bob, &bob_challenge, bob_signature)
+            .unwrap_or(false),
+        "bob's release did not sign his challenge as bob"
+    );
+
+    // Alice's parked future resumed inside bob's release poll; her answer
+    // must still name and sign as Alice — the token pinned at her export
+    // entry, not the ambient context of the poll that woke her.
+    let alice_answer = within(Duration::from_secs(10), "alice's wait", alice_call)
+        .await
+        .unwrap()
+        .expect("alice's wait answers");
+    let alice_expression: serde_json::Value = serde_json::from_str(&alice_answer).unwrap();
+    assert_eq!(
+        alice_expression
+            .pointer("/author")
+            .and_then(|a| a.as_str()),
+        Some(alice.as_str()),
+        "alice's resumed call answered as a different agent: {alice_answer}"
+    );
+    let alice_signature = alice_expression
+        .pointer("/proof/signature")
+        .and_then(|s| s.as_str())
+        .expect("alice's wait carries a signature");
+    assert!(
+        crate::agent::signatures::verify_string_signed_by_did(
+            &alice,
+            &alice_challenge,
+            alice_signature
+        )
+        .unwrap_or(false),
+        "alice's resumed call signed her challenge as a different agent"
     );
 }
 

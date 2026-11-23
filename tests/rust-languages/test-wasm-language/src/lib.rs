@@ -15,11 +15,19 @@
 
 use ad4m_ldk::imports as rt;
 use ad4m_ldk::prelude::*;
+use futures_channel::oneshot;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use wasm_bindgen::JsCast;
 
 pub struct TestLang {
     storage_dir: String,
     address: String,
+    /// The sender of each parked `wait:<id>` call: a `release:<id>` sends
+    /// on one and the parked call's future resumes inside the releasing
+    /// call's poll, on the shared wasm-bindgen scheduler. Never borrowed
+    /// across an await.
+    waiters: RefCell<HashMap<String, oneshot::Sender<()>>>,
 }
 
 impl Language for TestLang {
@@ -46,6 +54,7 @@ impl Language for TestLang {
         Ok(Self {
             storage_dir,
             address,
+            waiters: RefCell::new(HashMap::new()),
         })
     }
 
@@ -135,6 +144,68 @@ impl ExpressionCapability for TestLang {
         } else {
             address
         };
+        // "wait:<id>:<challenge>" parks this call's future on a oneshot
+        // receiver registered under <id>; a "release:<id>" sends on its
+        // sender, so the future resumes inside that call's poll on the
+        // shared scheduler. After the wake it answers as its own agent:
+        // the DID in `author` and a signature over <challenge> that a
+        // verifier checks under that DID. The RefCell borrow ends before
+        // the await — a borrow held across it would panic a second
+        // borrow from a call running beside this one.
+        if let Some(rest) = address.strip_prefix("wait:") {
+            let (id, challenge) = rest.split_once(':').unwrap_or((rest, ""));
+            let rx = {
+                let (tx, rx) = oneshot::channel::<()>();
+                self.waiters.borrow_mut().insert(id.to_string(), tx);
+                rx
+            };
+            let _ = rx.await;
+            return Ok(Some(Expression {
+                author: rt::agent_did()?,
+                timestamp: String::new(),
+                data: serde_json::Value::String(challenge.to_string()),
+                proof: ExpressionProof {
+                    signature: rt::agent_sign_string_hex(challenge)?,
+                    key: rt::agent_signing_key_id()?,
+                    ..Default::default()
+                },
+            }));
+        }
+        // "waiting:<id>" answers whether a "wait:<id>" has parked a sender
+        // yet — the gate a test polls so a release lands only once a
+        // waiter is there.
+        if let Some(id) = address.strip_prefix("waiting:") {
+            let waiting = self.waiters.borrow().contains_key(id);
+            return Ok(Some(Expression {
+                author: rt::agent_did()?,
+                timestamp: String::new(),
+                data: serde_json::Value::Bool(waiting),
+                proof: ExpressionProof::default(),
+            }));
+        }
+        // "release:<id>:<challenge>" sends on the sender a "wait:<id>"
+        // parked — waking that call's Rust future inside this call's
+        // poll — and answers as its own agent the same way. `released`
+        // reports a waiter was actually there.
+        if let Some(rest) = address.strip_prefix("release:") {
+            let (id, challenge) = rest.split_once(':').unwrap_or((rest, ""));
+            let released = self
+                .waiters
+                .borrow_mut()
+                .remove(id)
+                .map(|tx| tx.send(()).is_ok())
+                .unwrap_or(false);
+            return Ok(Some(Expression {
+                author: rt::agent_did()?,
+                timestamp: String::new(),
+                data: serde_json::json!({ "released": released }),
+                proof: ExpressionProof {
+                    signature: rt::agent_sign_string_hex(challenge)?,
+                    key: rt::agent_signing_key_id()?,
+                    ..Default::default()
+                },
+            }));
+        }
         // "whoami" never reaches storage: it answers with an expression
         // authored by the agent the call runs as — the concurrency tests
         // read the calling call's own agent token through it.

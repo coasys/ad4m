@@ -227,6 +227,7 @@ name = "test-wasm-language"
 version = "0.1.0"
 dependencies = [
  "ad4m-ldk",
+ "futures-channel",
  "js-sys",
  "serde",
  "serde-wasm-bindgen",
