@@ -459,6 +459,7 @@ impl IdentityBackend for AgentLanguageBackend {
         self.call(
             Capability::IdentityInboxPut,
             &[json(address)?, json(write)?, json(req)?],
+            CallKind::Ordered,
         )
         .await
     }
@@ -472,6 +473,7 @@ impl IdentityBackend for AgentLanguageBackend {
         self.call(
             Capability::IdentityInboxList,
             &[json(address)?, json(auth)?, wait_s.into()],
+            CallKind::Concurrent,
         )
         .await
     }
@@ -485,6 +487,7 @@ impl IdentityBackend for AgentLanguageBackend {
         self.call(
             Capability::IdentityInboxAck,
             &[json(address)?, id.into(), json(auth)?],
+            CallKind::Ordered,
         )
         .await
     }
@@ -494,8 +497,12 @@ impl IdentityBackend for AgentLanguageBackend {
         did: &str,
         req: &SignedRequest,
     ) -> Result<Option<StoredRecord>, IdentityError> {
-        self.call(Capability::IdentityGetRecord, &[did.into(), json(req)?])
-            .await
+        self.call(
+            Capability::IdentityGetRecord,
+            &[did.into(), json(req)?],
+            CallKind::Concurrent,
+        )
+        .await
     }
 
     async fn put_record(
@@ -507,6 +514,7 @@ impl IdentityBackend for AgentLanguageBackend {
         self.call(
             Capability::IdentityPutRecord,
             &[did.into(), json(record)?, json(req)?],
+            CallKind::Ordered,
         )
         .await
     }
@@ -520,6 +528,7 @@ impl IdentityBackend for AgentLanguageBackend {
         self.call(
             Capability::IdentityPostRequest,
             &[did.into(), json(post)?, json(req)?],
+            CallKind::Ordered,
         )
         .await
     }
@@ -533,6 +542,7 @@ impl IdentityBackend for AgentLanguageBackend {
         self.call(
             Capability::IdentityListRequests,
             &[did.into(), since.into(), json(req)?],
+            CallKind::Concurrent,
         )
         .await
     }
@@ -546,6 +556,7 @@ impl IdentityBackend for AgentLanguageBackend {
         self.call(
             Capability::IdentityDeleteRequest,
             &[did.into(), id.into(), json(req)?],
+            CallKind::Ordered,
         )
         .await
     }
