@@ -30,6 +30,10 @@ export class LanguageClient {
         return this.#apiClient.call('language.applyTemplate', { sourceLanguageHash, templateData }, options)
     }
 
+    async applyTemplateLocal(sourceLanguageHash: string, templateData: object, options?: CallOptions): Promise<LanguageRef> {
+        return this.#apiClient.call('language.applyTemplateLocal', { sourceLanguageHash, templateData: JSON.stringify(templateData) }, options)
+    }
+
     async publish(languagePath: string, languageMeta: LanguageMetaInput, options?: CallOptions): Promise<LanguageMeta> {
         return this.#apiClient.call('language.publish', { languagePath, languageMeta }, options)
     }

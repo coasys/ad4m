@@ -173,7 +173,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-234 methods: Cap 82, CapAnyPointer 1, Executor 43, Open 5, Operator 28, Owns 73, UserOrOperator 2. Local only (the operator on this machine): 5.
+237 methods: Cap 83, CapAnyPointer 1, Executor 43, Open 5, Operator 30, Owns 73, UserOrOperator 2. Local only (the operator on this machine): 5.
 
 | Method | Guard |
 |---|---|
@@ -265,6 +265,7 @@ the guard checked:
 | `identity.status` | `Cap(agent:READ)` |
 | `language.all` | `Cap(language:READ)` |
 | `language.applyTemplate` | `Cap(language:CREATE)` |
+| `language.applyTemplateLocal` | `Cap(language:CREATE)` |
 | `language.get` | `Cap(language:READ)` |
 | `language.meta` | `Cap(language:READ)` |
 | `language.publish` | `Executor(language:CREATE)` |
@@ -352,6 +353,7 @@ the guard checked:
 | `runtime.inbox` | `Cap(runtime.messages:READ)` |
 | `runtime.info` | `Open` |
 | `runtime.linkLanguageTemplates` | `Cap(runtime.known_link_languages:READ)` |
+| `runtime.logFilter` | `Operator` |
 | `runtime.logTail` | `Operator` |
 | `runtime.networkMetrics` | `Cap(runtime.hc_agent_info:READ)` |
 | `runtime.notifications` | `Cap(agent:UPDATE)` |
@@ -366,6 +368,7 @@ the guard checked:
 | `runtime.setConfig` | `Operator` |
 | `runtime.setFreeHostingEnabled` | `Executor(*:*)` |
 | `runtime.setHostRates` | `Operator` |
+| `runtime.setLogFilter` | `Operator` |
 | `runtime.setStatus` | `Cap(runtime.my_status:UPDATE)` |
 | `runtime.setUnytMembraneProof` | `Operator` |
 | `runtime.tlsDomain` | `Open` |
