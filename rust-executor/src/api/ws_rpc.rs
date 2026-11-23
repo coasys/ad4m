@@ -557,9 +557,17 @@ async fn write_to<S>(
                         _ = &mut grace => None,
                     };
                     let Some(msg) = msg else { break };
+                    // Count a reply that leaves during shutdown the same way as
+                    // one that left before it. A failed send is not counted.
+                    let len = msg.len();
+                    let pong = msg == PONG;
                     if sink.send(Message::Text(msg.into())).await.is_err() {
                         return;
                     }
+                    if pong {
+                        diag.stats.pong_left(diag.ctx.as_deref(), rx.len());
+                    }
+                    diag.stats.sent(len);
                 }
                 let _ = sink.send(Message::Close(Some(token_ended_frame()))).await;
                 return;
@@ -2049,6 +2057,57 @@ mod liveness_tests {
         // A pong without a ping (a client that sent none) is not counted either.
         stats.pong_left(Some(&ctx), 0);
         assert_eq!(capture::lines("ws.pong-late", &[conn]).len(), before);
+    }
+
+    /// A reply already queued when the session ends still leaves, and that send
+    /// is counted. The close frame is not a reply. A send that fails adds nothing.
+    #[tokio::test]
+    async fn a_reply_sent_after_the_session_ends_is_counted() {
+        let reply = r#"{"id":"1","error":{"code":401,"message":"ended"}}"#;
+
+        let stats = Arc::new(ConnStats::default());
+        let (tx, rx) = mpsc::unbounded_channel::<String>();
+        tx.send(reply.to_string()).unwrap();
+        drop(tx);
+        let session_over = CancellationToken::new();
+        session_over.cancel();
+        let sink = futures::sink::unfold((), |(), _msg: Message| async {
+            Ok::<(), std::convert::Infallible>(())
+        });
+        write_to(
+            Box::pin(sink),
+            rx,
+            session_over,
+            fresh(),
+            WriterDiag {
+                stats: stats.clone(),
+                ctx: None,
+            },
+        )
+        .await;
+        assert_eq!(stats.frames_sent(), 1);
+        assert_eq!(stats.bytes_sent(), reply.len() as u64);
+
+        let stats = Arc::new(ConnStats::default());
+        let (tx, rx) = mpsc::unbounded_channel::<String>();
+        tx.send(reply.to_string()).unwrap();
+        drop(tx);
+        let session_over = CancellationToken::new();
+        session_over.cancel();
+        let sink = futures::sink::unfold((), |(), _msg: Message| async { Err::<(), ()>(()) });
+        write_to(
+            Box::pin(sink),
+            rx,
+            session_over,
+            fresh(),
+            WriterDiag {
+                stats: stats.clone(),
+                ctx: None,
+            },
+        )
+        .await;
+        assert_eq!(stats.frames_sent(), 0);
+        assert_eq!(stats.bytes_sent(), 0);
     }
 }
 
