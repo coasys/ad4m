@@ -15,7 +15,9 @@
 //! the snapshot sweep. Which classes a mount owns is recorded outside its
 //! address space (`mount_classes`). The mount link itself is `Local` too:
 //! a mount is this agent's, and a mount link a peer shared mounts nothing
-//! here. Shared mounts (design §5.2) need class claims that peers see, and
+//! here, and neither does one written with a plain `addLink`: the mount
+//! link is marked in the mount ledger like every link a mount writes, and
+//! only a marked one mounts. Shared mounts (design §5.2) need class claims that peers see, and
 //! deactivation on a peer's unmount, first. `perspective.publishSnapshot`
 //! is unimplemented (api/perspectives_ws.rs), so no RPC ever exports the
 //! `Local` mirror.
@@ -142,15 +144,15 @@ impl PerspectiveInstance {
             self.write_snapshot(lang_address, &mut slot, records, seq)
                 .await?;
             if !self.has_mount_link(lang_address).await? {
-                self.add_links(
+                // Marked in the mount ledger: only a link this engine wrote
+                // is a mount (`mount_links`).
+                self.add_mount_links(
+                    lang_address,
                     vec![Link {
                         source: MOUNT_SOURCE.to_string(),
                         predicate: Some(MOUNT_PREDICATE.to_string()),
                         target: mount_target(lang_address),
                     }],
-                    LinkStatus::Local,
-                    None,
-                    &AgentContext::main_agent(),
                 )
                 .await?;
             }
@@ -423,23 +425,35 @@ impl PerspectiveInstance {
         Ok(())
     }
 
-    /// The `Local` mount links, of `lang` or of every language. A mount
-    /// link with another status (one a peer shared) is not a mount here.
+    /// The mount links `mount` wrote, of `lang` or of every language:
+    /// `Local` and marked in the mount ledger by the language they name
+    /// (`add_mount_links`). Any other mount link mounts nothing here: one a
+    /// peer shared, or one written with a plain `addLink` (a managed user
+    /// can write a `Local` link into a perspective they own, and the mark
+    /// is in the store's own vocabulary, which no link write may set).
     async fn mount_links(
         &self,
         lang_address: Option<&str>,
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
-        Ok(self
+        let links = self
             .get_links(&LinkQuery {
                 source: Some(MOUNT_SOURCE.to_string()),
                 predicate: Some(MOUNT_PREDICATE.to_string()),
                 target: lang_address.map(mount_target),
                 ..Default::default()
             })
-            .await?
-            .into_iter()
-            .filter(|l| l.status == Some(LinkStatus::Local))
-            .collect())
+            .await?;
+        let mut written = self.mount_written_by_language();
+        let mut marked = Vec::new();
+        for link in links {
+            let Ok((lang, _)) = LanguageController::parse_expr_url(&link.data.target) else {
+                continue;
+            };
+            if written.wrote(&lang, &link)? {
+                marked.push(link);
+            }
+        }
+        Ok(marked)
     }
 
     /// Whether the mount link for `lang` is in the store.

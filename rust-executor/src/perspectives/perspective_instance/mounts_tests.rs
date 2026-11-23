@@ -818,3 +818,78 @@ async fn creating_through_text_content_is_still_refused() {
     assert!(err.to_string().contains("abstract class"), "{err}");
     assert_eq!(calls(&lang).await, before, "a refused create made a call");
 }
+
+/// A managed user can write a `Local` link into a perspective they own. A
+/// mount link written that way is not marked in the mount ledger, so no
+/// restore, resync tick or sync acts on it.
+#[tokio::test]
+async fn a_managed_users_raw_mount_link_mounts_nothing() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "a"})).await;
+    let (mut p, _shapes, _ctx) =
+        crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
+    let email = format!("alice-{}@example.org", uuid::Uuid::new_v4().simple());
+    let alice = AgentContext::managed(crate::test_utils::create_test_user(&email));
+    p.add_link(
+        Link {
+            source: "ad4m://self".to_string(),
+            predicate: Some("ad4m://mount".to_string()),
+            target: format!("{lang}://project"),
+        },
+        LinkStatus::Local,
+        None,
+        &alice,
+    )
+    .await
+    .unwrap();
+
+    p.restore_mounts().await;
+    let registered = crate::perspectives::perspectives_for_mount(&lang);
+    crate::perspectives::unregister_mount(&lang, &p.uuid);
+    assert!(registered.is_empty(), "the raw mount link was activated");
+    assert!(p.mounts().await.unwrap().is_empty());
+    assert!(p.sync_mount(&lang).await.is_err(), "a sync ran on it");
+
+    // The resync loop activates nothing either.
+    super::mounts::set_mount_resync_interval_for_test(Duration::from_millis(200));
+    let instance = p.clone();
+    let loop_handle = tokio::spawn(async move { instance.mount_resync_loop().await });
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    let registered = crate::perspectives::perspectives_for_mount(&lang);
+    crate::perspectives::unregister_mount(&lang, &p.uuid);
+    p.teardown_background_tasks().await;
+    loop_handle.await.unwrap();
+    super::mounts::set_mount_resync_interval_for_test(Duration::from_secs(15));
+    assert!(registered.is_empty(), "the resync loop activated it");
+    assert!(
+        lang_links(&p, &lang).await.is_empty(),
+        "records were mirrored"
+    );
+}
+
+/// `mount` next to a raw mount link still mounts, through its own marked
+/// link.
+#[tokio::test]
+async fn mount_works_next_to_a_raw_mount_link() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "a"})).await;
+    let (mut p, _shapes, ctx) =
+        crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
+    p.add_link(
+        Link {
+            source: "ad4m://self".to_string(),
+            predicate: Some("ad4m://mount".to_string()),
+            target: format!("{lang}://project"),
+        },
+        LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .unwrap();
+
+    p.mount(&lang).await.unwrap();
+    crate::perspectives::unregister_mount(&lang, &p.uuid);
+    assert_eq!(p.mounts().await.unwrap(), vec![lang.clone()]);
+    assert_eq!(things(&p).await.len(), 1);
+}
