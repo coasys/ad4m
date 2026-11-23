@@ -339,7 +339,7 @@ describe("Ad4mModel — links option (per-link rows)", function () {
 
   // ── 5. subscriptions re-fire on a requested link ──────────────────────────
 
-  it("subscribe() re-fires when a link on an undeclared links IRI is added", async () => {
+  it("a live query re-fires when a link on an undeclared links IRI is added", async () => {
     const post = await TestPost.create(perspective, { title: "watched" });
     // Let the executor's 250 ms subscription batch drain first. Otherwise the
     // setup links above land in the same batch as the tombstone and re-run the
@@ -347,10 +347,11 @@ describe("Ad4mModel — links option (per-link rows)", function () {
     await sleep(1000);
 
     const all: TestPost[][] = [];
-    const builder = TestPost.query(perspective)
-      .where({ id: post.id } as any)
-      .links([TOMBSTONE]);
-    const initial = await builder.subscribe((r) => all.push(r));
+    const live = TestPost.live(perspective, { where: { id: post.id }, links: [TOMBSTONE] } as any);
+    const initial = (await live.first).results;
+    live.subscribe((s) => {
+      if (s.status === "ready" && !s.initial) all.push(s.data!.results);
+    });
     try {
       expect(initial).to.have.length(1);
       expect(initial[0].__links![TOMBSTONE]).to.deep.equal([]);
@@ -371,11 +372,11 @@ describe("Ad4mModel — links option (per-link rows)", function () {
         target: "literal://string:revoked",
       });
     } finally {
-      builder.dispose();
+      live.dispose();
     }
   });
 
-  it("subscribe() re-fires when a link on a links IRI inside an include lands", async () => {
+  it("a live query re-fires when a link on a links IRI inside an include lands", async () => {
     const post = await TestPost.create(perspective, { title: "outer" });
     const c = await TestComment.create(perspective, { body: "inner" });
     await post.addComments(c.id);
@@ -385,10 +386,14 @@ describe("Ad4mModel — links option (per-link rows)", function () {
     await sleep(1000);
 
     const all: TestPost[][] = [];
-    const builder = TestPost.query(perspective)
-      .where({ id: post.id } as any)
-      .include({ comments: { links: [TOMBSTONE] } } as any);
-    const initial = await builder.subscribe((r) => all.push(r));
+    const live = TestPost.live(perspective, {
+      where: { id: post.id },
+      include: { comments: { links: [TOMBSTONE] } },
+    } as any);
+    const initial = (await live.first).results;
+    live.subscribe((s) => {
+      if (s.status === "ready" && !s.initial) all.push(s.data!.results);
+    });
     try {
       expect(initial[0].comments[0].__links![TOMBSTONE]).to.deep.equal([]);
 
@@ -405,7 +410,7 @@ describe("Ad4mModel — links option (per-link rows)", function () {
         "subscription re-fires with the included tombstone row",
       );
     } finally {
-      builder.dispose();
+      live.dispose();
     }
   });
 
