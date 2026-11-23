@@ -476,8 +476,8 @@ executor:
 3. Installs the shapes from `mountShapes()`.
 4. Reads `mountSnapshot()` and writes each record as links.
 5. Writes the mount link `ad4m://self -[ad4m://mount]-> <language>://project`.
-   This is the last step. A mount that fails before it leaves no mount
-   link and no records.
+   This is the last step. If the mount returns an error before this step,
+   it is rolled back: there is no mount link and there are no records.
 
 `unmount` removes every link the mount wrote and the mount link. The
 installed classes stay.
