@@ -1170,6 +1170,150 @@ fn wasm_language_bundle() -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
+/// A wasm-bindgen bundle whose glue lacks the ALDK concurrency marker is
+/// refused at load, with an error naming the ALDK version needed: its
+/// exports do not pin the call's agent token across polls, so a call
+/// resumed beside another could sign as that call's agent. The "unmarked"
+/// bundle here is the fixture bundle with the marker renamed — still a
+/// working wasm-bindgen bundle, only without the marker.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wasm_bundle_without_the_aldk_marker_is_refused_at_load() {
+    let bundle = wasm_language_bundle().expect(
+        "test-wasm-language bundle missing; run `bash tests/rust-languages/build.sh`",
+    );
+    assert!(bundle.contains(ad4m_ldk::MARKER_EXPORT));
+    let unmarked = bundle.replace(ad4m_ldk::MARKER_EXPORT, "__ldkVersionMarker");
+    assert!(!unmarked.contains(ad4m_ldk::MARKER_EXPORT));
+
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+    let address = "QmTestWasmUnmarked".to_string();
+    let (handle, dir) = spawn_runtime(&address);
+    let context = LanguageContext::new(
+        crate::agent::did(),
+        crate::agent::signing_key_id(),
+        None,
+        dir.path().to_path_buf(),
+        address,
+    );
+    let err = handle
+        .load_module(unmarked, context)
+        .await
+        .expect_err("a WASM bundle without the marker must be refused at load");
+    assert!(err.contains(ad4m_ldk::MARKER_EXPORT), "{err}");
+    assert!(err.contains(ad4m_ldk::VERSION), "{err}");
+}
+
+/// The fixture bundle carries the marker — built with this ALDK — so it
+/// loads and its concurrent calls still overlap and answer as their own
+/// agents.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wasm_bundle_with_the_aldk_marker_loads_and_overlaps() {
+    let bundle = wasm_language_bundle().expect(
+        "test-wasm-language bundle missing; run `bash tests/rust-languages/build.sh`",
+    );
+    assert!(bundle.contains(ad4m_ldk::MARKER_EXPORT));
+
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+    let alice =
+        crate::test_utils::create_test_user(&format!("alice.{}@example.org", uuid::Uuid::new_v4()));
+    let bob =
+        crate::test_utils::create_test_user(&format!("bob.{}@example.org", uuid::Uuid::new_v4()));
+
+    let address = "QmTestWasmMarked".to_string();
+    let (handle, dir) = spawn_runtime(&address);
+    let context = LanguageContext::new(
+        crate::agent::did(),
+        crate::agent::signing_key_id(),
+        None,
+        dir.path().to_path_buf(),
+        address.clone(),
+    );
+    handle
+        .load_module(bundle, context.clone())
+        .await
+        .expect("the marked WASM bundle loads");
+    handle
+        .load_language(context.to_json())
+        .await
+        .expect("the language's init() runs");
+
+    // Alice's slow read parks inside the export for 600 ms; Bob's whoami,
+    // sent beside it, can only answer first by overlapping — and answers
+    // as Bob.
+    let mut slow = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            handle
+                .call(
+                    "globalThis.__ad4m_language_instance__.expressionGet(\"slow:600:x\")".into(),
+                    AgentContext::managed(alice.clone()),
+                    CallKind::Concurrent,
+                )
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let fast = within(Duration::from_secs(10), "bob's read", async {
+        handle
+            .call(
+                "JSON.stringify(await globalThis.__ad4m_language_instance__.expressionGet(\"whoami\"))"
+                    .into(),
+                AgentContext::managed(bob.clone()),
+                CallKind::Concurrent,
+            )
+            .await
+    })
+    .await
+    .expect("bob's read answers");
+    let author = serde_json::from_str::<serde_json::Value>(&fast)
+        .unwrap()
+        .pointer("/author")
+        .and_then(|a| a.as_str())
+        .map(str::to_string);
+    assert_eq!(author.as_deref(), Some(bob.as_str()), "{fast}");
+    assert!(
+        !slow.is_finished(),
+        "bob's read waited for alice's slow read instead of overlapping"
+    );
+    within(Duration::from_secs(10), "the slow read", &mut slow)
+        .await
+        .unwrap()
+        .expect("the slow read answers");
+}
+
+/// A plain JS bundle is not checked for the marker: the refusal is for
+/// wasm-bindgen bundles only.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_js_bundle_loads_without_the_marker() {
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+    let address = "QmTestJsBundle".to_string();
+    let (handle, dir) = spawn_runtime(&address);
+    let context = LanguageContext::new(
+        crate::agent::did(),
+        crate::agent::signing_key_id(),
+        None,
+        dir.path().to_path_buf(),
+        address,
+    );
+    let js = r#"
+        export function init() {}
+        export function name() { return "plain-js-test"; }
+        export function version() { return "0.0.1"; }
+        export function isPublic() { return true; }
+    "#;
+    handle
+        .load_module(js.to_string(), context.clone())
+        .await
+        .expect("a JS bundle still loads without the marker");
+    handle
+        .load_language(context.to_json())
+        .await
+        .expect("the JS language's init() runs");
+}
+
 /// On a Rust/ALDK (wasm-bindgen) language each export takes the lock side it
 /// declares: `expressionGet` is `concurrent:` (the shared read side) while
 /// `expressionCreate` needs `&mut self` (the write side, alone). Below, a slow

@@ -140,6 +140,13 @@ impl LanguageRuntimeHandle {
         self.running.clone()
     }
 
+    /// Whether the bundle is wasm-bindgen output (a Rust/ALDK language).
+    /// wasm-bindgen's `__wbindgen`/`__wbg_` names are the wasm module's own
+    /// import/export names, so bundling cannot rename them.
+    fn is_wasm_bundle(source: &str) -> bool {
+        source.contains("__wbindgen") || source.contains("__wbg_")
+    }
+
     /// The error for a call that will not run because the language's running call has run for
     /// the deadline.
     fn busy_error(&self, running_since: Instant) -> String {
@@ -214,8 +221,9 @@ impl LanguageRuntimeHandle {
 
         // Only script calls give up: loading a language and its teardown wait for it.
         // The runtime schedules the kind the caller declared — WASM bundles
-        // included: an ALDK export takes the instance's shared read side or
-        // the write side alone, by the export's own declaration, so a
+        // included: a marker-carrying ALDK export takes the instance's shared
+        // read side or the write side alone, by the export's own declaration,
+        // and `load_module` refuses a WASM bundle without the marker, so a
         // concurrent call no longer needs a rewrite to ordered here.
         let kind = match &operation {
             LanguageOperation::Execute(_, _, kind) => Some(*kind),
@@ -289,7 +297,8 @@ impl LanguageRuntimeHandle {
     /// `CallKind::Concurrent` starts it at once beside the other calls — only for a call
     /// that changes no state a later call depends on and needs no position in the send
     /// order. A WASM language's exports declare their own kind: a `concurrent:` export
-    /// shares the instance's read side, every other export takes the write side alone.
+    /// shares the instance's read side, every other export takes the write side alone
+    /// (`load_module` refuses a WASM bundle built without that support).
     pub(crate) async fn call(
         &self,
         script: String,
@@ -301,11 +310,28 @@ impl LanguageRuntimeHandle {
     }
 
     /// Load a language bundle into the runtime. `source` is the bundle's JS text.
+    ///
+    /// A wasm-bindgen bundle whose glue lacks the ALDK marker predates the
+    /// ALDK that pins each call's agent and splits the instance lock by
+    /// export. Its calls would take the caller's declared kind — concurrent
+    /// ones included — and one resumed beside another would sign as that
+    /// call's agent. Bundles are content-addressed, so old ones keep
+    /// circulating; refuse them here rather than force their calls back to
+    /// ordered. Plain-JS bundles are unaffected.
     pub async fn load_module(
         &self,
         source: String,
         context: LanguageContext,
     ) -> Result<(), String> {
+        if Self::is_wasm_bundle(&source) && !source.contains(ad4m_ldk::MARKER_EXPORT) {
+            return Err(format!(
+                "Refusing to load WASM language bundle: its glue has no {} export — it was \
+                 built before the ALDK made WASM calls safe to overlap. Rebuild the \
+                 language with ad4m-ldk {} or later.",
+                ad4m_ldk::MARKER_EXPORT,
+                ad4m_ldk::VERSION
+            ));
+        }
         self.send(LanguageOperation::LoadModule(source, context))
             .await
             .map(|_| ())

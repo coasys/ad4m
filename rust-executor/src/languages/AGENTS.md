@@ -49,7 +49,14 @@ the V8 event loop keeps one waker.
 
 A bundle that is wasm-bindgen output (a Rust/ALDK language) honors its calls'
 declared kind: the runtime no longer rewrites `CallKind::Concurrent` to
-ordered. Two ALDK-side properties make that safe. First, the agent: a
+ordered — but only a bundle carrying the ALDK's concurrency marker may run
+that way. `load_module` refuses a wasm-bindgen bundle whose glue does not
+name `__ad4mAldkVersion` (`ad4m_ldk::MARKER_EXPORT`, an export
+`ad4m_language!` emits since ad4m-ldk 0.13.0-test-1): an older bundle has
+none of the two properties below, so run beside other calls its exports
+could read and sign as another call's agent. Bundles are content-addressed
+and old ones keep circulating, hence refusal at load rather than a forced
+ordered fallback. Two ALDK-side properties make overlap safe. First, the agent: a
 wasm-bindgen-futures queue polls all of a module's futures without restoring
 each task's V8 async context, so ALDK pins the call's `CallAgent` token itself
 — `agent::export_future` takes it once at export entry

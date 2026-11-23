@@ -34,6 +34,11 @@
 //!     A panic hook records a panic in the language's own code; every
 //!     later call then returns a "panicked" `LanguageError` instead of
 //!     waiting for the lock that the aborted call still holds.
+//!   * a `__ad4mAldkVersion` marker export (`MARKER_EXPORT`), which
+//!     answers the ALDK version (`VERSION`): the executor refuses a
+//!     wasm-bindgen bundle that does not carry it, because only a bundle
+//!     built with this ALDK pins each call's agent and splits the
+//!     instance lock by export kind.
 //!   * lifecycle exports: `name`, `version`, `isPublic`, `init`, `teardown`, `interactions`
 //!   * capability exports — **only** for the listed capabilities. The WASM
 //!     export table therefore carries exactly the functions the runtime
@@ -93,6 +98,36 @@ macro_rules! ad4m_language {
 
         fn __ad4m_mark_panicked(message: &str) {
             let _ = __AD4M_LANG_STATE.try_with(|slot| slot.mark_panicked(message));
+        }
+
+        // The marker export naming this a concurrency-aware ALDK bundle.
+        // Its js_name must equal `MARKER_EXPORT` — checked at compile
+        // time (a `const` cannot feed an attribute, so the literal is
+        // here once and the const is compared against it).
+        const _: () = {
+            let marker = $crate::MARKER_EXPORT.as_bytes();
+            let emitted = "__ad4mAldkVersion".as_bytes();
+            assert!(
+                marker.len() == emitted.len(),
+                "MARKER_EXPORT does not match the marker export's js_name"
+            );
+            let mut i = 0;
+            while i < marker.len() {
+                assert!(
+                    marker[i] == emitted[i],
+                    "MARKER_EXPORT does not match the marker export's js_name"
+                );
+                i += 1;
+            }
+        };
+
+        /// Marks the bundle as built with a concurrency-aware ALDK — the
+        /// executor refuses a wasm-bindgen bundle whose glue does not
+        /// carry this marker. Returns the ALDK version the bundle was
+        /// built against.
+        #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "__ad4mAldkVersion")]
+        pub fn __ad4m_aldk_version() -> String {
+            $crate::VERSION.to_string()
         }
 
         // -------- Lifecycle --------

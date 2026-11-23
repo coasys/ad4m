@@ -115,7 +115,18 @@ So a concurrent read that awaits inside its export does not stall the
 language: other reads and the sync exports answer beside it, while a
 `&mut` export (e.g. `expressionCreate`) still waits for it to finish —
 the read side is shared, the write side exclusive. Internal mutation
-inside a `&self` export needs a `RefCell`/`Mutex` of your own.
+inside a `&self` export needs a `RefCell`/`Mutex` of your own — but never
+hold a `RefCell` borrow across an `.await`: every call's future polls on
+the module's one thread, so a borrow held while your future parks is a
+borrow another call's poll can hit, and `RefCell` panics on a second
+borrow (aborting the whole WASM module). Take the borrow, read or write,
+drop it — then await.
+
+`ad4m_language!` also emits a `__ad4mAldkVersion` marker export carrying
+the ALDK version. The executor refuses to load a wasm-bindgen bundle
+without it: a bundle built by an older ALDK pins no agent token and has
+no per-export lock side, so its calls could not safely run beside others
+— rebuild with this ALDK or later.
 
 Each call's host-agent operations (`rt::agent_did()`, `rt::agent_sign()`,
 …) act as the agent that placed the call, even across awaits: the macro
