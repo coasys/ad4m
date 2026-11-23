@@ -37,4 +37,40 @@ describe("usePerspectives", () => {
     expect(removed).toHaveBeenCalledWith(perspective, { data: { source: "s" } });
     expect(added).not.toHaveBeenCalled();
   });
+
+  it("reports an updated link as the old one removed and the new one added", async () => {
+    const listeners: Record<string, ((event: any) => void)[]> = {};
+    const perspective = {
+      uuid: "uuid-1",
+      on: (type: string, cb: (event: any) => void) => {
+        (listeners[type] ??= []).push(cb);
+        return () => {};
+      },
+    };
+    const client = {
+      on: () => () => {},
+      perspective: { all: async () => [perspective] },
+    };
+
+    // The hook keeps its state at module level and fetches once: load it afresh.
+    vi.resetModules();
+    const fresh = await import("./usePerspectives");
+    const { onLinkAdded, onLinkRemoved } = fresh.usePerspectives(client as any);
+    await vi.waitFor(() => expect(listeners["link-updated"]).toHaveLength(1));
+    const order: string[] = [];
+    const added = vi.fn(() => order.push("added"));
+    const removed = vi.fn(() => order.push("removed"));
+    onLinkAdded(added);
+    onLinkRemoved(removed);
+
+    const oldLink = { data: { target: "old" } };
+    const newLink = { data: { target: "new" } };
+    listeners["link-updated"][0]({ oldLink, newLink });
+
+    expect(removed).toHaveBeenCalledTimes(1);
+    expect(removed).toHaveBeenCalledWith(perspective, oldLink);
+    expect(added).toHaveBeenCalledTimes(1);
+    expect(added).toHaveBeenCalledWith(perspective, newLink);
+    expect(order).toEqual(["removed", "added"]);
+  });
 });

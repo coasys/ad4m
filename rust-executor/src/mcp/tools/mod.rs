@@ -213,7 +213,9 @@ impl ServerHandler for Ad4mMcpHandler {
             .await
         {
             // A bot's write gives its reason as the tool's `reason` argument: the RPC calls the
-            // tool makes carry it (`request_context`).
+            // tool makes carry it (`request_context`). The link writes the tool makes count for
+            // its caller's agent (`GET /metrics`), as they do for an RPC call
+            // (`metrics::as_caller` in `HandlerMap::dispatch`).
             Ok(this) => {
                 let reason = request
                     .arguments
@@ -221,8 +223,12 @@ impl ServerHandler for Ad4mMcpHandler {
                     .and_then(|arguments| arguments.get("reason"))
                     .and_then(Value::as_str)
                     .map(crate::bots::cut_reason);
+                let did = this.session().await.ok().and_then(|s| s.acts_as_did());
                 crate::bots::MCP_REASON
-                    .scope(reason, this.dispatch_tool(request, context))
+                    .scope(
+                        reason,
+                        crate::metrics::as_caller(did.as_deref(), this.dispatch_tool(request, context)),
+                    )
                     .await
             }
             Err(refusal) => Ok(refusal),
@@ -720,6 +726,29 @@ impl Ad4mMcpHandler {
             .admitted_perspective(perspective_id, perspective_query_capability)
             .await?;
         Ok(perspective)
+    }
+
+    /// [`Self::get_readable_perspective`], and the gate its query runs under: the one every
+    /// RPC query call gets (`sparql_store::query_gate`) — the configured deadline, and one
+    /// `GET /metrics` query counted for the call however many evaluations run under it.
+    /// An MCP session has no RPC connection, so no `request.cancel` and no query slots.
+    pub(crate) async fn gated_readable_perspective(
+        &self,
+        perspective_id: &str,
+    ) -> Result<
+        (
+            PerspectiveInstance,
+            crate::perspectives::sparql_store::EvalGate,
+        ),
+        String,
+    > {
+        let (perspective, session) = self
+            .admitted_perspective(perspective_id, perspective_query_capability)
+            .await?;
+        let gate =
+            crate::perspectives::sparql_store::query_gate(&request_context(session), &perspective)
+                .await;
+        Ok((perspective, gate))
     }
 
     /// Perspective `perspective_id` and the agent the caller writes as, if the caller may

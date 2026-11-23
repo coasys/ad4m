@@ -2471,6 +2471,7 @@ mod event_spec_tests {
                 serde_json::to_value(crate::sfu::SfuCallRenegotiationOffer {
                     target_did: "did:a".into(),
                     participant_id: "P1".into(),
+                    offer_id: "o1".into(),
                     neighbourhood_url: "n".into(),
                     room_name: "r".into(),
                     sdp_offer: "{}".into(),
@@ -2503,6 +2504,7 @@ mod event_spec_tests {
                 serde_json::to_value(crate::sfu::SfuRoomRoster {
                     neighbourhood_url: "n".into(),
                     room_name: "r".into(),
+                    revision: 1,
                     participants: vec![crate::sfu::SfuRosterParticipant {
                         agent_did: "did:a".into(),
                         participant_id: "P1".into(),

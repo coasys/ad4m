@@ -526,8 +526,11 @@ impl HandlerMap {
     ) -> Result<Value, WsRpcError> {
         let entry = self.entry(msg_type)?;
         let answer = match Self::admit_entry(entry, msg_type, &params, &ctx, true).await {
+            // The link writes the handler makes count for the caller's agent (`GET /metrics`).
             Ok(pending) => {
-                let answer = (entry.handler)(params, ctx).await;
+                let did = ctx.session.acts_as_did();
+                let answer =
+                    crate::metrics::as_caller(did.as_deref(), (entry.handler)(params, ctx)).await;
                 // A bot's write or join goes to its activity log with what it answered.
                 if let Some(pending) = pending {
                     pending.finish(answer.as_ref().map(|_| ()));

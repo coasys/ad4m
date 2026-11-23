@@ -21,7 +21,9 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::agent::AgentContext;
 use crate::languages::capability::Capability;
+use crate::languages::language_runtime::CallKind;
 use crate::languages::LanguageController;
 
 /// How long one call may take before it counts as `Unavailable` (a read should answer within
@@ -276,22 +278,26 @@ impl AgentLanguageBackend {
         &self,
         cap: Capability,
         args: &[Value],
+        kind: CallKind,
     ) -> Result<T, IdentityError> {
         let undefined = match cap {
             Capability::IdentityPutAgent => Undefined::Null,
             _ => Undefined::Refused,
         };
-        self.call_export(cap, cap.export_name(), args, undefined)
+        self.call_export(cap, cap.export_name(), args, undefined, kind)
             .await
     }
 
-    /// `export` on the agent language that serves `cap`.
+    /// `export` on the agent language that serves `cap`, scheduled as `kind`
+    /// (`Ordered` for a call that writes or whose order is observable,
+    /// `Concurrent` for a read — a wait's answer may lag a write sent first).
     async fn call_export<T: DeserializeOwned>(
         &self,
         cap: Capability,
         export: &str,
         args: &[Value],
         undefined: Undefined,
+        kind: CallKind,
     ) -> Result<T, IdentityError> {
         let controller = LanguageController::global_instance();
         let settled = controller.system_addresses.lock().await.settled;
@@ -313,7 +319,12 @@ impl AgentLanguageBackend {
             );
         }
         let script = call_script(export, args);
-        let run = controller.execute_on_language(language.address(), &script);
+        let run = controller.call_language(
+            language.address(),
+            &script,
+            AgentContext::main_agent(),
+            kind,
+        );
         let text = tokio::time::timeout(CALL_TIMEOUT, run)
             .await
             .map_err(|_| IdentityError::Unavailable(format!("{export} timed out")))?
@@ -329,8 +340,12 @@ fn json<T: serde::Serialize>(value: &T) -> Result<Value, IdentityError> {
 #[async_trait]
 impl IdentityBackend for AgentLanguageBackend {
     async fn log(&self, did: &str, from: u64) -> Result<Option<LogPage>, IdentityError> {
-        self.call(Capability::IdentityLog, &[did.into(), from.into()])
-            .await
+        self.call(
+            Capability::IdentityLog,
+            &[did.into(), from.into()],
+            CallKind::Concurrent,
+        )
+        .await
     }
 
     async fn key_owner(
@@ -341,13 +356,18 @@ impl IdentityBackend for AgentLanguageBackend {
         self.call(
             Capability::IdentityKeyOwner,
             &[multikey.into(), wait_s.into()],
+            CallKind::Concurrent,
         )
         .await
     }
 
     async fn append(&self, did: &str, req: &AppendRequest) -> Result<SignedHead, IdentityError> {
-        self.call(Capability::IdentityAppend, &[did.into(), json(req)?])
-            .await
+        self.call(
+            Capability::IdentityAppend,
+            &[did.into(), json(req)?],
+            CallKind::Ordered,
+        )
+        .await
     }
 
     async fn put_agent(
@@ -356,8 +376,12 @@ impl IdentityBackend for AgentLanguageBackend {
         req: Option<&SignedRequest>,
     ) -> Result<(), IdentityError> {
         let req = req.map(json).transpose()?.unwrap_or(Value::Null);
-        self.call(Capability::IdentityPutAgent, &[json(record)?, req])
-            .await
+        self.call(
+            Capability::IdentityPutAgent,
+            &[json(record)?, req],
+            CallKind::Ordered,
+        )
+        .await
     }
 
     async fn agent_version(&self, did: &str) -> Result<Option<u64>, IdentityError> {
@@ -368,14 +392,19 @@ impl IdentityBackend for AgentLanguageBackend {
                 "expressionGet",
                 &[did.into()],
                 Undefined::Null,
+                CallKind::Concurrent,
             )
             .await?;
         Ok(profile.as_ref().and_then(record_version))
     }
 
     async fn open_offer(&self, offer: &SignedOffer) -> Result<OfferOpened, IdentityError> {
-        self.call(Capability::IdentityOpenOffer, &[json(offer)?])
-            .await
+        self.call(
+            Capability::IdentityOpenOffer,
+            &[json(offer)?],
+            CallKind::Ordered,
+        )
+        .await
     }
 
     async fn list_offers(
@@ -387,6 +416,7 @@ impl IdentityBackend for AgentLanguageBackend {
         self.call(
             Capability::IdentityListOffers,
             &[did.into(), json(req)?, wait_s.into()],
+            CallKind::Concurrent,
         )
         .await
     }
@@ -400,6 +430,7 @@ impl IdentityBackend for AgentLanguageBackend {
         self.call(
             Capability::IdentityClaimOffer,
             &[did.into(), offer_id.into(), json(claim)?],
+            CallKind::Ordered,
         )
         .await
     }
@@ -414,6 +445,7 @@ impl IdentityBackend for AgentLanguageBackend {
         self.call(
             Capability::IdentityOfferState,
             &[did.into(), offer_id.into(), key.into(), wait_s.into()],
+            CallKind::Concurrent,
         )
         .await
     }
@@ -427,6 +459,7 @@ impl IdentityBackend for AgentLanguageBackend {
         self.call(
             Capability::IdentityInboxPut,
             &[json(address)?, json(write)?, json(req)?],
+            CallKind::Ordered,
         )
         .await
     }
@@ -440,6 +473,7 @@ impl IdentityBackend for AgentLanguageBackend {
         self.call(
             Capability::IdentityInboxList,
             &[json(address)?, json(auth)?, wait_s.into()],
+            CallKind::Concurrent,
         )
         .await
     }
@@ -453,6 +487,7 @@ impl IdentityBackend for AgentLanguageBackend {
         self.call(
             Capability::IdentityInboxAck,
             &[json(address)?, id.into(), json(auth)?],
+            CallKind::Ordered,
         )
         .await
     }
@@ -462,8 +497,12 @@ impl IdentityBackend for AgentLanguageBackend {
         did: &str,
         req: &SignedRequest,
     ) -> Result<Option<StoredRecord>, IdentityError> {
-        self.call(Capability::IdentityGetRecord, &[did.into(), json(req)?])
-            .await
+        self.call(
+            Capability::IdentityGetRecord,
+            &[did.into(), json(req)?],
+            CallKind::Concurrent,
+        )
+        .await
     }
 
     async fn put_record(
@@ -475,6 +514,7 @@ impl IdentityBackend for AgentLanguageBackend {
         self.call(
             Capability::IdentityPutRecord,
             &[did.into(), json(record)?, json(req)?],
+            CallKind::Ordered,
         )
         .await
     }
@@ -488,6 +528,7 @@ impl IdentityBackend for AgentLanguageBackend {
         self.call(
             Capability::IdentityPostRequest,
             &[did.into(), json(post)?, json(req)?],
+            CallKind::Ordered,
         )
         .await
     }
@@ -501,6 +542,7 @@ impl IdentityBackend for AgentLanguageBackend {
         self.call(
             Capability::IdentityListRequests,
             &[did.into(), since.into(), json(req)?],
+            CallKind::Concurrent,
         )
         .await
     }
@@ -514,6 +556,7 @@ impl IdentityBackend for AgentLanguageBackend {
         self.call(
             Capability::IdentityDeleteRequest,
             &[did.into(), id.into(), json(req)?],
+            CallKind::Ordered,
         )
         .await
     }

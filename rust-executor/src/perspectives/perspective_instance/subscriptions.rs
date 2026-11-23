@@ -158,6 +158,17 @@ impl PerspectiveInstance {
         get_global_pubsub().await.publish_event(event);
     }
 
+    /// The subscriber of each live subscription (a managed agent's DID; `None` for the main
+    /// agent), for the gauges of `GET /metrics`.
+    pub(crate) async fn subscription_subscribers(&self) -> Vec<Option<String>> {
+        self.subscribed_queries
+            .lock()
+            .await
+            .values()
+            .map(|q| q.subscriber.clone())
+            .collect()
+    }
+
     /// End one subscription that `connection_id` opened. `false` when there
     /// is no such subscription.
     pub async fn dispose_query_subscription(
@@ -462,11 +473,7 @@ pub(super) async fn run_rechecks<T: Send + 'static>(
             .acquire_owned()
             .await
             .expect("the re-check semaphore is never closed");
-        let runtime = runtime.clone();
-        running.spawn_blocking(move || {
-            let _permit = permit;
-            runtime.block_on(check)
-        });
+        running.spawn_blocking(blocking_check(runtime.clone(), permit, check));
     }
     while let Some(joined) = running.join_next().await {
         match joined {
@@ -475,6 +482,19 @@ pub(super) async fn run_rechecks<T: Send + 'static>(
         }
     }
     outputs
+}
+
+/// One check as the closure a blocking-pool thread runs: it drives `check` on
+/// `runtime` and holds `permit` until the check ends.
+pub(super) fn blocking_check<T: Send + 'static>(
+    runtime: tokio::runtime::Handle,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    check: BoxFuture<'static, T>,
+) -> impl FnOnce() -> T + Send + 'static {
+    move || {
+        let _permit = permit;
+        runtime.block_on(check)
+    }
 }
 
 #[cfg(test)]

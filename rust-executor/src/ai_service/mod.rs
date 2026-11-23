@@ -1247,11 +1247,32 @@ impl AIService {
     /// [`Self::prompt_interpretation`] with a flag the parse loop shares.
     /// Once a pass falls back to no reasoning, later calls that see the flag
     /// stay there instead of spending another reasoning attempt.
+    ///
+    /// The empty-content retry (a parsed answer with nothing in it, on a pass
+    /// that had transcript items) is the caller's. It uses
+    /// [`Self::prompt_interpretation_call`] with the size retry off, so this
+    /// pass does not become a second loop.
     pub(crate) async fn prompt_interpretation_pass(
         &self,
         task_id: String,
         prompt: String,
         stick_no_thinking: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<PromptResult> {
+        self.prompt_interpretation_call(task_id, prompt, stick_no_thinking, true)
+            .await
+    }
+
+    /// [`Self::prompt_interpretation_pass`] with the size retry optional.
+    ///
+    /// `allow_size_retry` is false for the one empty-answer retry. That call
+    /// must not nest another thinking-off attempt: a pass makes at most one
+    /// extra model call for emptiness.
+    pub(crate) async fn prompt_interpretation_call(
+        &self,
+        task_id: String,
+        prompt: String,
+        stick_no_thinking: Option<&std::sync::atomic::AtomicBool>,
+        allow_size_retry: bool,
     ) -> Result<PromptResult> {
         let task = crate::db_backend::db_backend()
             .get_task(task_id.clone())
@@ -1277,11 +1298,17 @@ impl AIService {
                 .await;
         }
 
+        if !allow_size_retry {
+            return self
+                .prompt_with(task_id, prompt, None, Some((false, cap)))
+                .await;
+        }
+
         let first = self
             .prompt_with(task_id.clone(), prompt.clone(), None, Some((false, cap)))
             .await;
         let size_problem = match &first {
-            Ok(result) => interpretation_reply_needs_no_thinking(&result),
+            Ok(result) => interpretation_reply_needs_no_thinking(result),
             Err(error) => context_was_exceeded(error),
         };
         if !size_problem {
