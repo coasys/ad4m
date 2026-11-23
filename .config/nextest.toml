@@ -1,7 +1,7 @@
 # cargo-nextest runs each test in its own process, so the suite can run in parallel:
-# rust-tests runs it with `cargo test -- --test-threads=1` because the services are
-# global singletons. `ci` is the profile of the trial job rust-tests-nextest;
-# rust-tests stays the required check until the two have been compared on the runners.
+# `cargo test` needs `--test-threads=1` because the services are global singletons.
+# `ci` is the profile of the required check rust-tests. rust-tests-serial runs the
+# suite in one process on dev, staging and main.
 [profile.ci]
 retries = 0
 fail-fast = false
@@ -11,7 +11,7 @@ slow-timeout = { period = "60s", terminate-after = 10 }
 # (AgentService, Ad4mDb, the wallet backend, GLOBAL_AD4M_CONFIG). They fail alone under
 # `cargo test` too, and in a process of their own every time, so they are left out here
 # until each sets up what it reads. A test-group does not help: it still gives each test
-# its own process. rust-tests still runs them.
+# its own process. rust-tests-serial still runs them.
 default-filter = """
 not (
   test(=agent::capabilities::app_token_tests::a_locked_out_request_is_deleted) |
