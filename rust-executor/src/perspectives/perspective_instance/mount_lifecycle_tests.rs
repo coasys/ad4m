@@ -752,3 +752,45 @@ async fn a_mount_reads_the_language_as_the_perspectives_owner() {
         assert_eq!(read["agent"], json!(alice), "{agents}");
     }
 }
+
+/// A `mountDelta` emitted with the async context cleared (no call token) is dropped: it
+/// counts as no agent, not as the main agent, so neither the main agent's nor Alice's mirror
+/// changes.
+#[tokio::test]
+async fn a_delta_with_no_call_token_reaches_no_mirror() {
+    let lang = load_mount_test_language().await;
+    let alice = "did:key:z6MkAliceNoToken";
+    let (alices, _) = mounted_and_registered(&lang).await;
+    alices.persisted.lock().await.add_owner(alice);
+    let (mains, _) = mounted_and_registered(&lang).await;
+
+    crate::languages::LanguageController::global_instance()
+        .expression_interact(
+            &format!("{lang}://project"),
+            &crate::types::InteractionCall {
+                name: "emitCleared".to_string(),
+                parameters_stringified: json!({"mountDelta": {
+                    "changed": [{"class": "MountThing", "address": "t7", "data": {"title": "tokenless"}}],
+                    "removed": []
+                }})
+                .to_string(),
+            },
+            &crate::agent::AgentContext::managed(alice.to_string()),
+        )
+        .await
+        .unwrap();
+    // A routed delta applies asynchronously: give it a moment to land.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (in_alices, in_mains) = (things(&alices).await, things(&mains).await);
+    crate::perspectives::remove_perspective(&alices.uuid).await;
+    crate::perspectives::remove_perspective(&mains.uuid).await;
+
+    assert!(
+        in_mains.is_empty(),
+        "the main agent's mirror changed: {in_mains:?}"
+    );
+    assert!(
+        in_alices.is_empty(),
+        "Alice's mirror changed: {in_alices:?}"
+    );
+}

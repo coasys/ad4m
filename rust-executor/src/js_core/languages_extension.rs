@@ -141,11 +141,10 @@ fn ad4m_signal_emitted(
     #[string] language_address: String,
     #[cppgc] call: Option<&crate::js_core::agent_extension::CallAgent>,
 ) -> Result<(), AnyhowWrapperError> {
-    // The agent the language emitted for: the current call's (#1775). No token:
-    // the main agent, as before.
-    let agent = call
-        .map(|call| call.agent().clone())
-        .unwrap_or_else(crate::agent::AgentContext::main_agent);
+    // The agent the language emitted for: the current call's (#1775). No token
+    // (code that cleared its async context): no agent, so a mountDelta is dropped
+    // below; it must not count as the main agent's.
+    let agent = call.map(|call| call.agent().clone());
     let language_address = own_language(&language_address)?;
     // A mounted language pushes changes as `{ mountDelta }`: route it to
     // every perspective mounting this language that the emitting agent owns
@@ -153,6 +152,13 @@ fn ad4m_signal_emitted(
     // that does not parse is dropped with a warning, not an error back
     // into the language.
     if let Some(delta) = signal.get("mountDelta") {
+        let Some(agent) = agent else {
+            log::warn!(
+                "emitSignal from `{}`: mountDelta with no call token dropped: it acts as no agent",
+                language_address
+            );
+            return Ok(());
+        };
         match serde_json::from_value::<crate::languages::mount_types::MountDelta>(delta.clone()) {
             Ok(delta) => crate::perspectives::handle_mount_delta_from_language(
                 delta,

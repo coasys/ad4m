@@ -124,6 +124,15 @@ export function interactions(address) {
       // malformed mountDelta shapes through this).
       { label: "Emit raw", name: "emitRaw", parameters: [],
         execute: async (params) => { emitSignal(params); return true; } },
+      // emitSignal with the async context cleared: no call token (#1775).
+      { label: "Emit with no call token", name: "emitCleared", parameters: [],
+        execute: async (params) => {
+          const core = Deno[Deno.internal].core;
+          const saved = core.getAsyncContext();
+          core.setAsyncContext(undefined);
+          try { emitSignal(params); } finally { core.setAsyncContext(saved); }
+          return true;
+        } },
     ];
   }
   if (records.has(address)) {
