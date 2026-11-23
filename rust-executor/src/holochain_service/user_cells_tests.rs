@@ -55,6 +55,20 @@ impl CellBackend for Backend {
         Ok(key)
     }
 
+    fn stored_agent_key(
+        &self,
+        language: &str,
+        agent: &AgentContext,
+    ) -> Result<Option<AgentPubKey>, AnyError> {
+        let setting = format!("key:{language}:{:?}", agent.managed_did());
+        Ok(self
+            .settings
+            .lock()
+            .unwrap()
+            .get(&setting)
+            .map(|key| AgentPubKey::try_from(key.as_str()).unwrap()))
+    }
+
     fn setting(&self, key: &str) -> Result<Option<String>, AnyError> {
         Ok(self.settings.lock().unwrap().get(key).cloned())
     }
@@ -258,4 +272,63 @@ async fn a_user_cells_signals_route_to_that_user_also_after_a_restart() {
     // Removing the language drops its routes.
     restarted.forget_language(LANG);
     assert_eq!(restarted.route_for_cell(&cell_key(&alice_cell)), None);
+}
+
+/// Alice's app as something other than Rust's installer left it: under the main key.
+fn plant_alices_app(backend: &Backend) {
+    let main_key = payload(APP).agent_key.unwrap();
+    let id = user_app_id(APP, ALICE);
+    backend.apps.lock().unwrap().insert(
+        id.clone(),
+        InstalledApp {
+            app_id: id,
+            agent: main_key.clone(),
+            cells: vec![CellId::new(dna(), main_key)],
+        },
+    );
+}
+
+#[tokio::test]
+async fn a_user_app_under_another_key_than_the_users_is_refused() {
+    // No key stored for Alice: the app was not installed by her installer.
+    let cells = UserCells::default();
+    let backend = Backend::default();
+    cells.remember_main_app(APP, LANG, payload(APP));
+    plant_alices_app(&backend);
+    let used = cells
+        .app_for_call(&backend, APP, Some(LANG), &alice())
+        .await;
+    assert!(
+        used.is_err(),
+        "Alice's call used {used:?}, under the main key"
+    );
+
+    // Alice has a stored key, and her app carries another.
+    let cells = UserCells::default();
+    let backend = Backend::default();
+    cells.remember_main_app(APP, LANG, payload(APP));
+    backend
+        .agent_key(LANG, &alice(), &user_app_id(APP, ALICE))
+        .await
+        .unwrap();
+    plant_alices_app(&backend);
+    let used = cells
+        .app_for_call(&backend, APP, Some(LANG), &alice())
+        .await;
+    assert!(
+        used.is_err(),
+        "Alice's call used {used:?}, under the main key"
+    );
+
+    // Nor does a restart route that app's signals to Alice or cache it for her calls.
+    cells.add_user(&backend, LANG, ALICE).unwrap();
+    let restarted = UserCells::default();
+    restarted.remember_main_app(APP, LANG, payload(APP));
+    restarted.restore_user_routes(&backend, APP).await;
+    let main_cell = CellId::new(dna(), payload(APP).agent_key.unwrap());
+    assert_eq!(restarted.route_for_cell(&cell_key(&main_cell)), None);
+    let used = restarted
+        .app_for_call(&backend, APP, Some(LANG), &alice())
+        .await;
+    assert!(used.is_err(), "after a restart Alice's call used {used:?}");
 }

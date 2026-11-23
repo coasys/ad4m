@@ -78,6 +78,12 @@ pub(crate) trait CellBackend: Send + Sync {
         agent: &AgentContext,
         adopt_app_id: &str,
     ) -> Result<AgentPubKey, AnyError>;
+    /// The agent key stored for `agent` in `language`, if one is; never resolves a new one.
+    fn stored_agent_key(
+        &self,
+        language: &str,
+        agent: &AgentContext,
+    ) -> Result<Option<AgentPubKey>, AnyError>;
     fn setting(&self, key: &str) -> Result<Option<String>, AnyError>;
     fn set_setting(&self, key: &str, value: &str) -> Result<(), AnyError>;
 }
@@ -218,6 +224,11 @@ impl UserCells {
         for did in self.users_of(backend, &language) {
             let id = user_app_id(app_id, &did);
             if let Ok(Some(app)) = backend.app(&id).await {
+                let agent = AgentContext::managed(did.clone());
+                if let Err(e) = Self::check_user_app(backend, &app, &language, &agent) {
+                    log::warn!("Not restoring {id}: {e}");
+                    continue;
+                }
                 self.add_routes(&app, &language, &did);
                 self.user_apps
                     .lock()
@@ -299,7 +310,10 @@ impl UserCells {
         }
         let wanted = user_app_id(app_id, did);
         let app = match backend.app(&wanted).await? {
-            Some(app) => app,
+            Some(app) => {
+                Self::check_user_app(backend, &app, &main.language, agent)?;
+                app
+            }
             None => {
                 let key = backend.agent_key(&main.language, agent, &wanted).await?;
                 self.add_user(backend, &main.language, did)?;
@@ -332,6 +346,30 @@ impl UserCells {
             .unwrap_or_else(|p| p.into_inner())
             .insert((app_id.to_string(), did.to_string()), app.app_id.clone());
         Ok(app.app_id)
+    }
+
+    /// A user app is used only if it carries the key stored for its (language, user): the one
+    /// the per-user installer resolved and installed it under. Anything else (an app installed
+    /// by other means, under another key) would make the user's calls sign as another agent.
+    fn check_user_app(
+        backend: &dyn CellBackend,
+        app: &InstalledApp,
+        language: &str,
+        agent: &AgentContext,
+    ) -> Result<(), AnyError> {
+        match backend.stored_agent_key(language, agent)? {
+            Some(key) if key == app.agent => Ok(()),
+            Some(key) => Err(anyhow!(
+                "Holochain app {} has agent {}, not the key {key} of its user",
+                app.app_id,
+                app.agent
+            )),
+            None => Err(anyhow!(
+                "Holochain app {} was not installed by its user's installer: no key is stored \
+                 for its user",
+                app.app_id
+            )),
+        }
     }
 
     fn add_routes(&self, app: &InstalledApp, language: &str, did: &str) {
@@ -409,6 +447,14 @@ impl CellBackend for ConductorBackend {
         adopt_app_id: &str,
     ) -> Result<AgentPubKey, AnyError> {
         self.0.agent_key_for(language, agent, adopt_app_id).await
+    }
+
+    fn stored_agent_key(
+        &self,
+        language: &str,
+        agent: &AgentContext,
+    ) -> Result<Option<AgentPubKey>, AnyError> {
+        super::HolochainServiceInterface::stored_agent_key_for(language, agent)
     }
 
     fn setting(&self, key: &str) -> Result<Option<String>, AnyError> {
