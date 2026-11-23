@@ -96,7 +96,12 @@ async fn a_delta_blocked_across_an_unmount_brings_nothing_back() {
     let gate = gates::arm(&lang, MountPoint::DeltaReceived);
     let l = lang.clone();
     let delta = tokio::spawn(async move {
-        handle_mount_delta_from_language_impl(delta_for("t1", json!({"title": "late"})), l).await
+        handle_mount_delta_from_language_impl(
+            delta_for("t1", json!({"title": "late"})),
+            l,
+            crate::agent::AgentContext::main_agent(),
+        )
+        .await
     });
     gate.arrived().await;
     p.unmount(&lang).await.unwrap();
@@ -167,12 +172,22 @@ async fn two_concurrent_scalar_updates_leave_one_value() {
     let gate = gates::arm(&lang, MountPoint::EntryRead);
     let l = lang.clone();
     let b = tokio::spawn(async move {
-        handle_mount_delta_from_language_impl(delta_for("t1", json!({"title": "b"})), l).await
+        handle_mount_delta_from_language_impl(
+            delta_for("t1", json!({"title": "b"})),
+            l,
+            crate::agent::AgentContext::main_agent(),
+        )
+        .await
     });
     gate.arrived().await;
     let l = lang.clone();
     let mut c = tokio::spawn(async move {
-        handle_mount_delta_from_language_impl(delta_for("t1", json!({"title": "c"})), l).await
+        handle_mount_delta_from_language_impl(
+            delta_for("t1", json!({"title": "c"})),
+            l,
+            crate::agent::AgentContext::main_agent(),
+        )
+        .await
     });
     // Unserialized, `c` finishes while `b` is stopped; serialized, it waits
     // for `b` (the timeout only bounds that wait, the outcome does not
@@ -212,8 +227,12 @@ async fn a_snapshot_taken_before_a_delta_keeps_the_delta_record() {
         json!({"address": "t1", "data": {"title": "new"}, "emit": false}),
     )
     .await;
-    handle_mount_delta_from_language_impl(delta_for("t1", json!({"title": "new"})), lang.clone())
-        .await;
+    handle_mount_delta_from_language_impl(
+        delta_for("t1", json!({"title": "new"})),
+        lang.clone(),
+        crate::agent::AgentContext::main_agent(),
+    )
+    .await;
     assert_eq!(things(&p).await.len(), 1);
 
     gate.release();
@@ -237,11 +256,20 @@ async fn an_older_delta_after_a_newer_one_does_not_regress() {
     let gate = gates::arm(&lang, MountPoint::DeltaReceived);
     let l = lang.clone();
     let older = tokio::spawn(async move {
-        handle_mount_delta_from_language_impl(delta_for("t1", json!({"title": "old"})), l).await
+        handle_mount_delta_from_language_impl(
+            delta_for("t1", json!({"title": "old"})),
+            l,
+            crate::agent::AgentContext::main_agent(),
+        )
+        .await
     });
     gate.arrived().await;
-    handle_mount_delta_from_language_impl(delta_for("t1", json!({"title": "new"})), lang.clone())
-        .await;
+    handle_mount_delta_from_language_impl(
+        delta_for("t1", json!({"title": "new"})),
+        lang.clone(),
+        crate::agent::AgentContext::main_agent(),
+    )
+    .await;
     gate.release();
     older.await.unwrap();
 
@@ -648,4 +676,79 @@ async fn a_dropped_mount_can_be_retried() {
     p.mount(&lang).await.unwrap();
     crate::perspectives::unregister_mount(&lang, &p.uuid);
     assert_eq!(things(&p).await.len(), 1);
+}
+
+// --- A mount runs as its perspective's owner (#1775) -----------------------
+
+/// A delta the language pushes while it runs for one agent lands only in the
+/// perspectives that agent owns: another owner's mount reads the language
+/// through its own Holochain cell, and the main agent's mount is the main
+/// agent's.
+#[tokio::test]
+async fn a_pushed_delta_reaches_only_the_emitting_agents_perspectives() {
+    let lang = load_mount_test_language().await;
+    let alice = "did:key:z6MkAliceDeltaOwner";
+    let (alices, _) = mounted_and_registered(&lang).await;
+    alices.persisted.lock().await.add_owner(alice);
+    let (mains, _) = mounted_and_registered(&lang).await;
+
+    let as_alice = crate::agent::AgentContext::managed(alice.to_string());
+    handle_mount_delta_from_language_impl(
+        delta_for("t9", json!({"title": "alice's"})),
+        lang.clone(),
+        as_alice,
+    )
+    .await;
+    let (in_alices, in_mains) = (things(&alices).await, things(&mains).await);
+
+    handle_mount_delta_from_language_impl(
+        delta_for("t9", json!({"title": "main's"})),
+        lang.clone(),
+        crate::agent::AgentContext::main_agent(),
+    )
+    .await;
+    let (alices_after, mains_after) = (things(&alices).await, things(&mains).await);
+    crate::perspectives::remove_perspective(&alices.uuid).await;
+    crate::perspectives::remove_perspective(&mains.uuid).await;
+
+    assert_eq!(in_alices.len(), 1, "Alice's delta missed her perspective");
+    assert!(
+        in_mains.is_empty(),
+        "Alice's delta reached the main agent's: {in_mains:?}"
+    );
+    assert_eq!(
+        mains_after.len(),
+        1,
+        "the main agent's delta missed its perspective"
+    );
+    assert_eq!(
+        alices_after, in_alices,
+        "the main agent's delta reached Alice's"
+    );
+}
+
+/// mount and syncMount read the language as the perspective's owner.
+#[tokio::test]
+async fn a_mount_reads_the_language_as_the_perspectives_owner() {
+    let lang = load_mount_test_language().await;
+    let alice = "did:key:z6MkAliceMountOwner";
+    let (mut p, _shapes, _ctx) =
+        crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
+    p.persisted.lock().await.add_owner(alice);
+    p.mount(&lang).await.unwrap();
+    p.sync_mount(&lang).await.unwrap();
+
+    let agents = interact(&format!("{lang}://project"), "agents", json!({}))
+        .await
+        .unwrap();
+    let reads: Vec<&Value> = agents
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["what"] == "mountSnapshot" || a["what"] == "mountShapes")
+        .collect();
+    assert_eq!(reads.len(), 4, "{agents}");
+    for read in reads {
+        assert_eq!(read["agent"], json!(alice), "{agents}");
+    }
 }

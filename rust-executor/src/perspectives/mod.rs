@@ -563,25 +563,50 @@ pub fn handle_perspective_diff_from_link_language(diff: PerspectiveDiff, languag
 /// §1.5). Called from the sync `ad4m_signal_emitted` op — spawns the apply.
 /// The delta's sequence number is taken here, on the language's thread in
 /// emit order, not in the spawned task.
-pub fn handle_mount_delta_from_language(delta: MountDelta, language_address: String) {
+pub fn handle_mount_delta_from_language(
+    delta: MountDelta,
+    language_address: String,
+    agent: crate::agent::AgentContext,
+) {
     let seq = perspective_instance::next_mount_seq();
-    tokio::spawn(apply_pushed_mount_delta(delta, language_address, seq));
+    tokio::spawn(apply_pushed_mount_delta(
+        delta,
+        language_address,
+        seq,
+        agent,
+    ));
 }
 
 /// [`handle_mount_delta_from_language`] for a caller that awaits the
 /// apply: the delta is ordered as of this call.
-pub async fn handle_mount_delta_from_language_impl(delta: MountDelta, language_address: String) {
+pub async fn handle_mount_delta_from_language_impl(
+    delta: MountDelta,
+    language_address: String,
+    agent: crate::agent::AgentContext,
+) {
     let seq = perspective_instance::next_mount_seq();
-    apply_pushed_mount_delta(delta, language_address, seq).await
+    apply_pushed_mount_delta(delta, language_address, seq, agent).await
 }
 
 /// Applies `delta` (sequence number `seq`) in every perspective that mounts
 /// `language_address` (`MOUNT_LANG_TO_PERSPECTIVES`), to the mount active
 /// as it arrives. A perspective that fails logs one warning; the others
 /// still get the delta.
-async fn apply_pushed_mount_delta(delta: MountDelta, language_address: String, seq: u64) {
+///
+/// Only the perspectives `agent` owns (#1775): the language pushed the delta
+/// while running for `agent` (its own cell's signal, its own write), and
+/// another owner's mount reads the language through its own cell.
+async fn apply_pushed_mount_delta(
+    delta: MountDelta,
+    language_address: String,
+    seq: u64,
+    agent: crate::agent::AgentContext,
+) {
     for uuid in perspectives_for_mount(&language_address) {
         if let Some(mut p) = get_perspective(&uuid) {
+            if !p.is_owned_as(&agent).await {
+                continue;
+            }
             let Some(generation) = p.active_mount_generation(&language_address).await else {
                 continue;
             };

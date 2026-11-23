@@ -16,7 +16,11 @@ import {
             return telepresence_signal_received(signal, language_address, recipientDid);
         },
         ad4mSignalEmitted: (signal, language_address) => {
-            return ad4m_signal_emitted(signal, language_address);
+            // The emitting call's agent (#1775): a mountDelta reaches only the
+            // perspectives that agent owns.
+            const call = typeof globalThis.__ad4mCallAgent === "function"
+                ? globalThis.__ad4mCallAgent() : null;
+            return ad4m_signal_emitted(signal, language_address, call);
         },
         registerHolochainSignalHandler: (cellIdKey, language_address) => {
             return register_holochain_signal_handler(cellIdKey, language_address);

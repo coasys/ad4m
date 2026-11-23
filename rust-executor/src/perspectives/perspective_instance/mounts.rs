@@ -257,8 +257,9 @@ impl PerspectiveInstance {
     async fn mount_as(&mut self, lang_address: &str, generation: u64) -> Result<(), AnyError> {
         let seq = next_mount_seq();
         let controller = LanguageController::global_instance();
-        let shapes = controller.mount_shapes(lang_address).await?;
-        let snapshot = controller.mount_snapshot(lang_address).await?;
+        let owner = self.owner_context().await;
+        let shapes = controller.mount_shapes(lang_address, &owner).await?;
+        let snapshot = controller.mount_snapshot(lang_address, &owner).await?;
 
         let mut slot = self.mount_lifecycles.lock(lang_address).await;
         if slot.generation != generation {
@@ -360,8 +361,9 @@ impl PerspectiveInstance {
         // and the records this sync read are ordered together.
         let seq = next_mount_seq();
         let controller = LanguageController::global_instance();
-        let shapes = controller.mount_shapes(lang_address).await?;
-        let snapshot = controller.mount_snapshot(lang_address).await?;
+        let owner = self.owner_context().await;
+        let shapes = controller.mount_shapes(lang_address, &owner).await?;
+        let snapshot = controller.mount_snapshot(lang_address, &owner).await?;
         pause(lang_address, MountPoint::SnapshotFetched).await;
 
         let Some(mut slot) = self
@@ -475,6 +477,19 @@ impl PerspectiveInstance {
         report.removed += self.remove_links(doomed, None).await?.len();
         slot.snapshot_applied(seq);
         Ok(report)
+    }
+
+    /// The agent a mount of this perspective reads its language as (#1775): the perspective's
+    /// owner. A mount belongs to one perspective, which has one owner: its primary owner when
+    /// that is a managed user, else the main agent (no owner, or the main agent's DID).
+    pub(crate) async fn owner_context(&self) -> AgentContext {
+        let owner = self.persisted.lock().await.get_primary_owner();
+        owner_context_of(owner)
+    }
+
+    /// Whether `agent` owns this perspective as [`Self::owner_context`] sees it.
+    pub(crate) async fn is_owned_as(&self, agent: &AgentContext) -> bool {
+        &self.owner_context().await == agent
     }
 
     /// The generation of `lang`'s mount while it is active: a delta or call
@@ -1053,5 +1068,14 @@ impl PerspectiveInstance {
             }
         }
         Ok(links)
+    }
+}
+
+/// [`PerspectiveInstance::owner_context`] for a primary owner DID.
+pub(crate) fn owner_context_of(owner: Option<String>) -> AgentContext {
+    let main_did = crate::agent::did_for_context(&AgentContext::main_agent()).ok();
+    match owner {
+        Some(did) if Some(&did) != main_did.as_ref() => AgentContext::managed(did),
+        _ => AgentContext::main_agent(),
     }
 }

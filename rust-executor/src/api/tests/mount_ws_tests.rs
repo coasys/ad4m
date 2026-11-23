@@ -1,6 +1,6 @@
-//! `perspective.mount` and `perspective.syncMount` over RPC. Until ad4m#1775
-//! a mount reads the language as the main agent, so only the main agent may
-//! mount or sync one.
+//! `perspective.mount` and `perspective.syncMount` over RPC. A mount reads
+//! the language as the perspective's owner (#1775), so a managed user mounts
+//! and syncs its own perspectives as itself.
 
 use std::sync::Arc;
 
@@ -24,7 +24,7 @@ fn update_everywhere() -> Vec<crate::agent::capabilities::Capability> {
 }
 
 #[tokio::test]
-async fn a_managed_user_may_not_mount_or_sync() {
+async fn a_managed_users_mount_and_sync_read_the_language_as_that_user() {
     let lang = load_mount_test_language().await;
     let p = registered_perspective(&[]).await;
     let alice = "did:key:z6MkAliceMountUser";
@@ -37,18 +37,32 @@ async fn a_managed_user_may_not_mount_or_sync() {
     let params = json!({ "uuid": p.0, "languageAddress": lang });
 
     for method in ["perspective.mount", "perspective.syncMount"] {
-        let err = call_as(
+        call_as(
             RequestContext::user_for_test(alice, update_everywhere()),
             method,
             params.clone(),
         )
         .await
-        .unwrap_err();
-        assert_eq!(err.0, 403, "{method}: {err:?}");
-        assert!(err.1.contains("main agent"), "{method}: {err:?}");
+        .unwrap_or_else(|e| panic!("{method}: {e:?}"));
     }
     let perspective = crate::perspectives::get_perspective(&p.0).unwrap();
-    assert!(perspective.mounts().await.unwrap().is_empty());
+    assert_eq!(perspective.mounts().await.unwrap(), vec![lang.clone()]);
+    crate::perspectives::unregister_mount(&lang, &p.0);
+
+    let agents =
+        crate::languages::mount_tests::interact(&format!("{lang}://project"), "agents", json!({}))
+            .await
+            .unwrap();
+    let snapshots: Vec<&Value> = agents
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["what"] == "mountSnapshot")
+        .collect();
+    assert_eq!(snapshots.len(), 2, "{agents}");
+    for read in snapshots {
+        assert_eq!(read["agent"], json!(alice), "{agents}");
+    }
 }
 
 #[tokio::test]
