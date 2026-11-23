@@ -3151,6 +3151,28 @@ test("a call left from a stream-removed handler during a rebuild is not joined a
     expect(manager.getState().peerConnection).toBeNull()
 })
 
+test("a rebuild tells listeners a track left once, with the participant's flags already refreshed", async () => {
+    const api = fakeApi()
+    const { manager, removed } = recordedManager(api)
+    await manager.join(fakeStream())
+    api.emitRoster(roster([ALICE]))
+    await flush()
+    api.emitOffer(offer("tracks", [mapped("1", ALICE, "audio")]))
+    await flush()
+    const track = new FakeTrack("audio")
+    currentPc().receive(track, "1")
+    const flagsSeen: boolean[] = []
+    manager.on("stream-removed", () => flagsSeen.push(manager.getParticipants()[0].hasAudio))
+
+    await iceState("failed")
+    await flush()
+    // The old connection's track ends after the rebuild took it out.
+    track.end()
+
+    expect(removed).toHaveLength(1)
+    expect(flagsSeen).toEqual([false])
+})
+
 // ── Round 2: an answer is sent only for the offer it answers ────────────────
 
 /** Answers that name the offer they answer, so a test can tell them apart. */

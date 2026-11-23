@@ -359,12 +359,14 @@ offer), and rebuilds the call if that has not reconnected within 15 s; after
 a socket reconnect with no network change it restarts ICE only if ICE is not
 connected 2 s later; a failed connection is rebuilt at once, a rebuild
 retries the join for 120 s, and either terminal give-up — the 120 s spent
-without a rejoin, or a 4th rebuild inside 2 min — ends the call: it closes
-the connection, leaves the session, tells the participants they left,
-emits `error` and then
-`call-ended` (`{ reason: "gave-up" }`, also on the `Session`, which goes
-idle) for the UI to show; a new `join` starts over. A rebuild keeps
-the participants and clears only their media. Only an SDP the connection
+without a rejoin, or a 4th rebuild inside 2 min — ends the call, in this
+order: `participant-left` for each participant, then `error`, then the
+connection closes, the `sfu.callLeave` request starts (the end does not wait
+for its reply) and `call-ended` (`{ reason: "gave-up" }`, also on the
+`Session`, which goes idle) is emitted for the UI to show; a new `join`
+starts over. A rebuild keeps the participants and clears only their media:
+it refreshes `hasAudio` and `hasVideo`, then emits one `stream-removed` per
+track, and a track that ends later does not emit a second one. Only an SDP the connection
 cannot apply rebuilds from a renegotiation: the answer names its offer's
 `offerId`, and the server refuses one naming another — `stale` or
 `no-pending` (a settled or superseded offer, or the server's own SDP step
@@ -413,7 +415,9 @@ kept) instead of 8 s — it shortens only that request's timing, and a probe
 already running gets its verdict moved earlier to that wait, never later.
 The probe sends no ping when the socket
 delivered a message in the last 5 s and drops a socket that answered
-nothing for 8 s after one probe; any frame proves the socket, so a slow
+nothing for 8 s after one probe (at least 8 s: while a large write it sent
+may still be crossing the link, the wait grows by that write's drain time);
+any frame proves the socket, so a slow
 request on a socket that keeps delivering fails as an RPC timeout, not a
 dead socket. A probe that gives up only redials, at once and without
 backoff — socket evidence is not a network change, so no `onNetworkChange`

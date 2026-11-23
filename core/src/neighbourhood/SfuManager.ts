@@ -412,10 +412,11 @@ export class SfuManager {
      *  listed the session meanwhile — a boolean could not order the two. */
     private listedAtRevision = 0
     /** The highest roster `revision` this join applied; older rosters and
-     *  resume replies are dropped. Reset per join: a new room's revisions
-     *  start at 1 again. */
+     *  resume replies are dropped. Reset per join: the executor counts
+     *  revisions across all its rooms, and a restarted executor counts
+     *  from 1 again. */
     private rosterRevision = 0
-    /** How long the roster may leave this session out before the call is rebuilt. */
+    /** How long the roster may leave this session out before the manager asks `sfu.callResume`. */
     private static readonly UNLISTED_GRACE_MS = 3_000
     /** How long after a socket reconnect — with no network change — ICE has to be connected before it is restarted. */
     private static readonly ICE_CHECK_AFTER_SOCKET_MS = 2_000
@@ -764,6 +765,8 @@ export class SfuManager {
             this.refreshKinds(participant)
             this.emit("stream-added", participant.stream, event.track)
             event.track.addEventListener("ended", () => {
+                // A rebuild may have taken the track out already, and told listeners.
+                if (!participant.stream.getTracks().includes(event.track)) return
                 participant.stream.removeTrack(event.track)
                 this.refreshKinds(participant)
                 this.emit("stream-removed", participant.stream, event.track)
@@ -992,9 +995,9 @@ export class SfuManager {
         this.listedAtRevision = 0
         this.rosterRevision = 0
         this.unlisted = false
-        // Per-session offer state: the executor's offer counter restarts
-        // with it, so this session decides on its own ids afresh, and the
-        // old session's last answer is not this one's to send.
+        // Per-session offer state: offer ids name one session's offers,
+        // so this session decides on its own ids afresh, and the old
+        // session's last answer is not this one's to send.
         this.lastAnswer = null
         this.appliedOfferId = null
         // The old connection's resume ask and whatever it marked belong to
@@ -1510,11 +1513,10 @@ export class SfuManager {
      *  keeping the participants and their streams for the new connection. */
     private clearMedia(): void {
         for (const participant of this.state.participants.values()) {
-            for (const track of participant.stream.getTracks()) {
-                participant.stream.removeTrack(track)
-                this.emit("stream-removed", participant.stream, track)
-            }
+            const tracks = participant.stream.getTracks()
+            for (const track of tracks) participant.stream.removeTrack(track)
             this.refreshKinds(participant)
+            for (const track of tracks) this.emit("stream-removed", participant.stream, track)
         }
         this.midToParticipant.clear()
     }
