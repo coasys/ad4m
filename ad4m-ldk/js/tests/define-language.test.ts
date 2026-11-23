@@ -128,6 +128,23 @@ test("defineLanguage: top-level hooks bind to spec (class-style authors)", async
     assert.deepEqual(state.signalReceived, { cell_id: "x" });
 });
 
+test("defineLanguage copies mount.shapes and mount.snapshot", async () => {
+    const lang = defineLanguage({
+        name: "m",
+        async init() {},
+        mount: {
+            shapes: () => ({ version: "v", shapes: [] }),
+            snapshot: () => ({ entries: [] }),
+        },
+    });
+    assert.equal((await lang.mountShapes!()).version, "v");
+    assert.equal((await lang.mountSnapshot!()).entries.length, 0);
+
+    const plain = defineLanguage({ name: "p", async init() {} });
+    assert.equal(plain.mountShapes, undefined);
+    assert.equal(plain.mountSnapshot, undefined);
+});
+
 test("defineLanguage: telepresence + holochain signal handler", () => {
     const lang = defineLanguage({
         name: "t",

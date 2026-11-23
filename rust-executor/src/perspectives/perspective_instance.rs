@@ -2,10 +2,14 @@ use super::fallback_sync::{fallback_push_refused, ShareScope};
 use super::hosted_status;
 use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
+use super::model_query::shape::find_class;
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::monotonic::{committable, drop_monotonic_removals, refuse_monotonic_removal};
 use super::sdna::{generic_link_fact, is_sdna_link};
-use super::shacl_parser::{check_consensus_rule_links, parse_flow_to_links, parse_shacl_to_links};
+use super::shacl_parser::check_consensus_rule_links;
+use super::shacl_parser::is_own_link;
+use super::shacl_parser::property_node_name;
+use super::shacl_parser::ShapeNode;
 use super::sparql_store::EvalStop;
 use super::update_perspective_with;
 use super::utils::prolog_get_all_string_bindings;
@@ -67,8 +71,14 @@ use uuid::Uuid;
 // Abstract classes: resolution cache, queries, subscriptions (#1435).
 mod abstract_classes;
 mod containment;
+// Class registration and the registry of shapes.
+mod shapes;
 #[cfg(test)]
 pub(crate) use abstract_classes::faults::fail_next_index;
+pub use shapes::{RegisterResult, ShapeSummary};
+mod runner;
+#[cfg(test)]
+pub(crate) use runner::hold_all_but;
 mod subscriptions;
 pub(crate) use subscriptions::{result_json, SubscriptionIdTaken};
 // Which writes re-run a model subscription (#1237).
@@ -80,6 +90,8 @@ mod expected_links;
 pub use expected_links::{ExpectedLinks, LinksChanged};
 // A batch's effective view of the graph for the validated write core.
 mod batch_view;
+// Remote telepresence broadcasts, off the link-language queue's critical path.
+mod language_broadcasts;
 
 #[cfg(test)]
 #[path = "perspective_instance_subscription_tests.rs"]
@@ -98,8 +110,16 @@ mod abstract_tests;
 mod join_tests;
 
 #[cfg(test)]
+#[path = "perspective_instance_broadcast_diag_tests.rs"]
+mod broadcast_diag_tests;
+
+#[cfg(test)]
 #[path = "perspective_instance_pending_diffs_tests.rs"]
 mod pending_diffs_tests;
+
+#[cfg(test)]
+#[path = "perspective_instance_telepresence_tests.rs"]
+mod telepresence_tests;
 
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
@@ -119,52 +139,68 @@ fn notification_pool_name(uuid: &str) -> String {
     format!("notification_{}", uuid)
 }
 
-/// True iff any addition or removal in the diff carries a triple
-/// that would alter a class's stored SHACL definition:
-///   * the `ad4m://` housekeeping triples emitted by `add_sdna`
-///     (`ad4m://has_subject_class`, `ad4m://sdna`, `ad4m://shape`),
-///   * a class-level `rdf://type ad4m://SubjectClass` marker (only
-///     that specific target — normal `rdf://type ns://SomeClass`
-///     application links must not flush the cache), or
-///   * any SHACL-vocabulary predicate (`sh://...`) which only
-///     appears on property-shape triples written by the SHACL
-///     writer, not on regular application data, or
-///   * an abstract-class marker or alias (#1435).
+/// True iff any of the links could be a class's own link on any of its
+/// nodes — [`is_own_link`] tried with each [`ShapeNode`], since a diff does
+/// not say which of a class's nodes its link sits on. Used by every store
+/// write (`write_link_diff`, `persist_remote_diff`) to decide whether it
+/// changed a stored SHACL definition, so the cached shapes (registry,
+/// own-link sets, `shape_cache`) must be dropped before the write returns.
 ///
-/// Used by `diff_from_link_language` to decide whether to
-/// invalidate the shape cache. The scan is one loop over
-/// (additions + removals) per inbound diff — cheap next to the
-/// SPARQL write. Kept intentionally narrow so that a chatty
-/// application (Flux message writes, etc.) doesn't churn the
-/// cache. `ad4m://resolveLanguage`, `getter`, `transform`,
-/// `interpretation_hint`, `identity` etc. also appear on live
-/// application data (a `@Property` decorator emits them onto every
-/// instance's property URI) and MUST NOT trigger invalidation.
-fn inbound_touches_shacl(diff: &DecoratedPerspectiveDiff) -> bool {
-    let iter = diff.additions.iter().chain(diff.removals.iter());
-    for decorated in iter {
-        let predicate = decorated.data.predicate.as_deref().unwrap_or("");
-        if predicate.starts_with("sh://") {
-            return true;
-        }
-        match predicate {
-            "ad4m://has_subject_class" | "ad4m://sdna" | "ad4m://shape" => return true,
-            // The abstract-class marker and aliases (#1435) can sync apart
-            // from the rest of a shape.
-            super::shacl_parser::ABSTRACT_PREDICATE | super::shacl_parser::ALIAS_PREDICATE => {
-                return true
-            }
-            "rdf://type" if decorated.data.target == "ad4m://SubjectClass" => return true,
-            _ => {}
-        }
-    }
-    false
+/// The match is the whole own-link vocabulary, the same one the
+/// registry's cached triple sets hold. Only the SHACL writers
+/// (`SHACLShape.toLinks`, the MCP model tools) put `ad4m://constructor`,
+/// `setter`, `resolveLanguage` etc. on shape and property nodes, so
+/// application writes do not clear the cache. A link outside a shape that
+/// still uses one of those predicates only costs a refill. An own-link
+/// change the scan misses would leave `register_shapes` answering a
+/// stale `unchanged`, so matching too much is safe and too little is not.
+pub(super) fn touches_shape<'a>(links: impl IntoIterator<Item = &'a Link>) -> bool {
+    links.into_iter().any(|link| {
+        let predicate = link.predicate.as_deref().unwrap_or("");
+        [ShapeNode::Class, ShapeNode::Shape, ShapeNode::Property]
+            .into_iter()
+            .any(|node| is_own_link(node, predicate, &link.target))
+    })
 }
 
 /// The error a live query that is not SPARQL gets. Live queries are SPARQL or
 /// model queries; Prolog live queries were removed (a one-shot Prolog query
 /// still runs through `perspective.queryProlog`).
 pub(crate) const PROLOG_LIVE_QUERY_UNSUPPORTED: &str = "Prolog live queries are no longer supported; subscribe with a SPARQL query or a model query (perspective.modelSubscribe)";
+
+/// The error a model subscription that sends `after` gets. A subscription
+/// re-runs one query on every matching write, so a cursor would re-read the
+/// same page forever; cursor paging is a one-shot `perspective.modelQuery`.
+pub(crate) const MODEL_SUBSCRIPTION_CURSOR_UNSUPPORTED: &str = "Model subscriptions do not take an `after` cursor: a subscription re-runs one query, so it would re-read the same page forever. Subscribe without `after` (use `limit`/`offset`), and page by cursor with perspective.modelQuery";
+
+/// Whether a model query JSON sends a cursor (`after`, even `""`). `null`
+/// reads as no cursor, as it does in the query itself. JSON that does not
+/// parse is left to the query, which reports it.
+pub(crate) fn model_query_sends_cursor(query_json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(query_json)
+        .ok()
+        .and_then(|q| q.get("after").map(|a| !a.is_null()))
+        .unwrap_or(false)
+}
+
+/// The refusals [`PerspectiveInstance::model_query_classes_within`]'s early
+/// answers would skip — the `after` rules that need no shape. A union (or
+/// an abstract class, which resolves to one) refuses `after` reads itself
+/// ([`super::model_query::refuse_union_reads`]); one class refuses the
+/// unsupported cursors of [`super::model_query::refuse_unsupported_cursor`].
+fn refuse_before_empty_model_answer(
+    classes: &super::model_query::QueryClasses,
+    query_input: &super::model_query::ModelQueryInput,
+) -> Result<(), deno_core::anyhow::Error> {
+    match classes {
+        super::model_query::QueryClasses::Union(_) => {
+            super::model_query::refuse_union_reads(query_input)
+        }
+        super::model_query::QueryClasses::One(_) => {
+            super::model_query::refuse_unsupported_cursor(query_input).map(|_| ())
+        }
+    }
+}
 
 pub(crate) fn is_sparql_query(query: &str) -> bool {
     let trimmed = query.trim();
@@ -185,7 +221,7 @@ pub(crate) fn is_sparql_query(query: &str) -> bool {
 }
 
 #[cfg(test)]
-mod inbound_touches_shacl_tests {
+mod touches_shape_tests {
     //! Regression guard for the shape-cache invalidation predicate. If
     //! either the positive OR the negative set drifts, `diff_from_link_language`
     //! either misses SHACL updates (stale cache) or thrashes the cache
@@ -212,6 +248,15 @@ mod inbound_touches_shacl_tests {
         }
     }
 
+    fn diff_touches_shape(diff: &DecoratedPerspectiveDiff) -> bool {
+        touches_shape(
+            diff.additions
+                .iter()
+                .chain(diff.removals.iter())
+                .map(|l| &l.data),
+        )
+    }
+
     fn diff(additions: Vec<DecoratedLinkExpression>) -> DecoratedPerspectiveDiff {
         DecoratedPerspectiveDiff {
             additions,
@@ -223,12 +268,12 @@ mod inbound_touches_shacl_tests {
     /// own; the cached abstract index must still be dropped (#1435).
     #[test]
     fn abstract_marker_and_alias_count_as_shacl() {
-        assert!(inbound_touches_shacl(&diff(vec![link(
+        assert!(diff_touches_shape(&diff(vec![link(
             "ns://TextContentShape",
             crate::perspectives::shacl_parser::ABSTRACT_PREDICATE,
             "literal:true",
         )])));
-        assert!(inbound_touches_shacl(&diff(vec![link(
+        assert!(diff_touches_shape(&diff(vec![link(
             "ns://Message.body",
             crate::perspectives::shacl_parser::ALIAS_PREDICATE,
             "literal:string:%7B%7D",
@@ -237,30 +282,35 @@ mod inbound_touches_shacl_tests {
 
     #[test]
     fn class_shape_assignment_triggers_invalidation() {
-        assert!(inbound_touches_shacl(&diff(vec![link(
+        assert!(diff_touches_shape(&diff(vec![link(
             "ad4m://InterpretationRun",
             "ad4m://shape",
             "ad4m://InterpretationRunShape",
         )])));
     }
 
+    /// The old name index is no longer read, so it changes no shape.
     #[test]
-    fn sdna_housekeeping_triggers_invalidation() {
-        for predicate in ["ad4m://has_subject_class", "ad4m://sdna"] {
+    fn old_name_index_does_not_invalidate() {
+        for predicate in [
+            "ad4m://has_subject_class",
+            "ad4m://sdna",
+            "ad4m://has_shacl",
+        ] {
             assert!(
-                inbound_touches_shacl(&diff(vec![link(
-                    "ad4m://perspective",
+                !diff_touches_shape(&diff(vec![link(
+                    "ad4m://self",
                     predicate,
-                    "some-target"
+                    "literal:string:Recipe"
                 )])),
-                "predicate `{predicate}` should invalidate"
+                "predicate `{predicate}` must not invalidate"
             );
         }
     }
 
     #[test]
     fn class_marker_rdf_type_triggers_invalidation() {
-        assert!(inbound_touches_shacl(&diff(vec![link(
+        assert!(diff_touches_shape(&diff(vec![link(
             "ad4m://InterpretationRun",
             "rdf://type",
             "ad4m://SubjectClass",
@@ -272,7 +322,7 @@ mod inbound_touches_shacl_tests {
         // A normal application instance's rdf://type link (e.g. a Flux
         // message declaring its class) MUST NOT flush the cache — every
         // message send would churn it.
-        assert!(!inbound_touches_shacl(&diff(vec![link(
+        assert!(!diff_touches_shape(&diff(vec![link(
             "flux://message/abc",
             "rdf://type",
             "ns://Message",
@@ -288,7 +338,7 @@ mod inbound_touches_shacl_tests {
             "sh://minCount",
         ] {
             assert!(
-                inbound_touches_shacl(&diff(vec![link(
+                diff_touches_shape(&diff(vec![link(
                     "ad4m://SomeShape.prop",
                     predicate,
                     "xsd:string"
@@ -301,7 +351,7 @@ mod inbound_touches_shacl_tests {
     #[test]
     fn plain_data_link_does_not_invalidate() {
         // Application data — the common case, must not touch the cache.
-        assert!(!inbound_touches_shacl(&diff(vec![link(
+        assert!(!diff_touches_shape(&diff(vec![link(
             "msg://hello",
             "ns://body",
             "literal:string:hi",
@@ -309,12 +359,13 @@ mod inbound_touches_shacl_tests {
     }
 
     #[test]
-    fn ad4m_predicates_that_also_ride_application_data_do_not_invalidate() {
+    fn own_link_predicates_invalidate_on_any_node() {
         // `resolveLanguage`, `getter`, `interpretation_hint`, `identity`
-        // appear on live property URIs on real instances (a @Property
-        // decorator writes them per-instance). They must NOT invalidate
-        // the class-shape cache — the check keys off the SHACL writer's
-        // structural triples only.
+        // are own-link predicates of a property shape. The check cannot
+        // tell which node a diff's link sits on, so it clears the cache on
+        // any node: an over-clear only costs a refill, and a missed
+        // own-link change would leave the registry answering a stale
+        // `unchanged`.
         for predicate in [
             "ad4m://resolveLanguage",
             "ad4m://getter",
@@ -323,12 +374,12 @@ mod inbound_touches_shacl_tests {
             "ad4m://transform",
         ] {
             assert!(
-                !inbound_touches_shacl(&diff(vec![link(
+                diff_touches_shape(&diff(vec![link(
                     "flux://message/abc.body",
                     predicate,
                     "some-value"
                 )])),
-                "predicate `{predicate}` should NOT invalidate on plain instance data"
+                "predicate `{predicate}` is in the own-link vocabulary, so it invalidates"
             );
         }
     }
@@ -341,53 +392,12 @@ mod inbound_touches_shacl_tests {
             "ad4m://shape",
             "ad4m://oldShape",
         ));
-        assert!(inbound_touches_shacl(&diff));
+        assert!(diff_touches_shape(&diff));
     }
 
     #[test]
     fn empty_diff_does_not_invalidate() {
-        assert!(!inbound_touches_shacl(&DecoratedPerspectiveDiff::default()));
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-pub enum SdnaType {
-    SubjectClass,
-    Flow,
-    Custom,
-}
-
-impl SdnaType {
-    pub fn from_string(s: &str) -> Result<Self, AnyError> {
-        match s {
-            "subject_class" => Ok(SdnaType::SubjectClass),
-            "flow" => Ok(SdnaType::Flow),
-            "custom" => Ok(SdnaType::Custom),
-            _ => Err(anyhow!(
-                "Invalid SDNA type: {}. Must one of 'subject_class', 'flow' or 'custom'.",
-                s
-            )),
-        }
-    }
-}
-
-/// Parse the `shacl_json` handed to `add_sdna` / `add_sdna_batch` into links.
-/// A flow definition (`SHACLFlow`: states, transitions, no `target_class`)
-/// goes through the flow parser; everything else is a class shape (#1650).
-/// A flow whose `consensusRule` could not be read back is refused here, before
-/// `add_sdna` / `add_sdna_batch` write anything (#1144).
-fn parse_sdna_json_to_links(
-    sdna_type: &SdnaType,
-    json: &str,
-    name: &str,
-) -> Result<Vec<Link>, AnyError> {
-    match sdna_type {
-        SdnaType::Flow => {
-            let links = parse_flow_to_links(json, name)?;
-            check_consensus_rule_links(&links)?;
-            Ok(links)
-        }
-        SdnaType::SubjectClass | SdnaType::Custom => parse_shacl_to_links(json, name),
+        assert!(!diff_touches_shape(&DecoratedPerspectiveDiff::default()));
     }
 }
 
@@ -510,6 +520,10 @@ impl SubscribedQuery {
 /// A batch with its creation timestamp, for timeout-based cleanup.
 struct TimestampedBatch {
     diff: PerspectiveDiff,
+    /// `(old, new)` pairs staged by `update_link`. Each half also sits in
+    /// `diff`, so batch-aware reads see it; `commit_batch` publishes a pair
+    /// whose halves are both still there as one update.
+    updates: Vec<(LinkExpression, LinkExpression)>,
     created_at: Instant,
 }
 
@@ -610,6 +624,10 @@ impl LoopWakes {
 /// yet fetchable). A new link language on the handle retries at once.
 const LINK_LANGUAGE_RETRY_MIN: Duration = Duration::from_millis(500);
 const LINK_LANGUAGE_RETRY_MAX: Duration = Duration::from_secs(30);
+/// How long `online_agents` waits on the link language's roster call before
+/// answering the locally known users instead: the language runtime serves
+/// one call at a time, and a stalled call must not stall the roster.
+const ONLINE_AGENTS_LANGUAGE_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long a notification check waits after the first changed link, so a
 /// burst of links is checked once.
 const NOTIFICATION_DEBOUNCE: Duration = Duration::from_millis(100);
@@ -641,6 +659,10 @@ pub struct PerspectiveInstance {
     local_agents_mutex: Arc<Mutex<()>>,
     prolog_update_mutex: Arc<RwLock<()>>,
     link_language: Arc<RwLock<Option<Language>>>,
+    /// Remote telepresence broadcasts waiting on the link language, drained
+    /// one at a time by a background task so `send_broadcast` never waits on
+    /// the language's serial queue (see `language_broadcasts`).
+    language_broadcasts: Arc<std::sync::Mutex<language_broadcasts::BroadcastQueue>>,
     /// Wakes the background loops that wait on state changes instead of a
     /// timer: `ensure_link_language` when the handle's link language changes
     /// (a publish sets `neighbourhood`), `nh_sync_loop` once it attaches,
@@ -659,6 +681,8 @@ pub struct PerspectiveInstance {
     /// of every diff committed after it.
     commit_order: Arc<Mutex<()>>,
     subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
+    /// Model query runs in flight, shared by identical calls (see `runner.rs`).
+    runs: runner::Runs,
     batch_store: Arc<RwLock<HashMap<String, TimestampedBatch>>>,
     // Fallback sync tracking for ensure_public_links_are_shared
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
@@ -670,7 +694,7 @@ pub struct PerspectiveInstance {
     pub(super) persist_lock: Arc<std::sync::Mutex<()>>,
     /// In-memory cache of parsed `ModelShape` instances keyed by class name.
     /// Populated lazily from SHACL triples in `sparql_store`; invalidated by
-    /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.
+    /// `register_shapes` and inbound SHACL links for a class.  No persistence.
     shape_cache: Arc<std::sync::RwLock<HashMap<String, Arc<ModelShape>>>>,
     /// Receipt verdicts this perspective has already taken, keyed by
     /// `(receipt URI, flow DNA hash)` so a DNA change can never be served a
@@ -694,6 +718,9 @@ pub struct PerspectiveInstance {
     /// `propose`, the engine's mint-and-sweep, the sync-triggered sweep),
     /// never inside `run_flow_consensus_pass`, which those nest.
     pub(crate) flow_pass_lock: Arc<Mutex<()>>,
+    /// Resource counters of this perspective (`GET /metrics`). They go with the instance:
+    /// a removed perspective leaves the output.
+    pub metrics: Arc<crate::metrics::PerspectiveCounters>,
     /// Test-only fault injection for [`Self::add_link_expression`] (#981).
     /// Compiled out entirely in non-test builds — see [`Self::fail_next_add_link`].
     /// `0` means the *next* call returns an error instead of writing, then
@@ -795,6 +822,7 @@ impl PerspectiveInstance {
             local_agents_mutex: Arc::new(Mutex::new(())),
             prolog_update_mutex: Arc::new(RwLock::new(())),
             link_language: Arc::new(RwLock::new(None)),
+            language_broadcasts: Arc::new(std::sync::Mutex::new(Default::default())),
             wakes: Arc::new(LoopWakes::default()),
             trigger_notification_check: Arc::new(AtomicBool::new(false)),
             trigger_subscription_check: Arc::new(AtomicBool::new(false)),
@@ -803,6 +831,7 @@ impl PerspectiveInstance {
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
             commit_order: Arc::new(Mutex::new(())),
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
+            runs: runner::Runs::default(),
             batch_store: Arc::new(RwLock::new(HashMap::new())),
             last_successful_fallback_sync: Arc::new(Mutex::new(None)),
             fallback_sync_interval: Arc::new(Mutex::new(Duration::from_secs(30))),
@@ -816,6 +845,7 @@ impl PerspectiveInstance {
             abstract_cache: Arc::new(std::sync::RwLock::new(Default::default())),
             flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
             flow_pass_lock: Arc::new(Mutex::new(())),
+            metrics: Arc::new(Default::default()),
             #[cfg(test)]
             fail_add_link_after: Arc::new(AtomicI64::new(-1)),
             #[cfg(test)]
@@ -850,18 +880,15 @@ impl PerspectiveInstance {
         self.fail_next_commit.store(true, Ordering::SeqCst);
     }
 
-    /// Look up a cached `ModelShape` for the given class name, loading it
-    /// from the perspective's SHACL triples on cache miss.  Returns an
-    /// `Arc<ModelShape>` shared across query and subscription re-evaluation.
+    /// Look up a cached `ModelShape` for a class, by its target class IRI or
+    /// its bare name (`find_class`: the least IRI of that name), loading it
+    /// from the perspective's SHACL triples on cache miss. The cache keeps
+    /// each key as asked; every write of SHACL (`register_shapes`, a synced
+    /// diff, a reload) clears all of it, so an IRI key and a name key never
+    /// hold a stale or another class's shape. Returns an `Arc<ModelShape>`
+    /// shared across query and subscription re-evaluation.
     pub fn get_shape(&self, class_name: &str) -> Result<Arc<ModelShape>, AnyError> {
         self.shape_resolver().get_shape(class_name)
-    }
-
-    /// Drop any cached `ModelShape` for `class_name`.  Called when SHACL is
-    /// (re-)written for the class so the next query re-parses fresh state.
-    pub fn invalidate_shape(&self, class_name: &str) {
-        self.shape_cache.write().unwrap().remove(class_name);
-        self.forget_derived_shapes();
     }
 
     /// Like [`get_shape`], but for perspectives joined to a
@@ -875,8 +902,11 @@ impl PerspectiveInstance {
     /// Local-only perspectives (no link language) behave identically
     /// to `get_shape` — a missing class there is a genuine
     /// caller bug, not a sync race, so we surface the error immediately.
+    ///
+    /// The wait ends with `stop`, returning its error.
     pub async fn get_shape_or_wait(
         &self,
+        stop: &EvalStop,
         class_name: &str,
         budget: Duration,
     ) -> Result<Arc<ModelShape>, AnyError> {
@@ -894,7 +924,7 @@ impl PerspectiveInstance {
             let now = Instant::now();
             if now >= deadline {
                 // Keeps the original message as a prefix (callers match on
-                // it) and says a wait happened, so "addSdna first" is not
+                // it) and says a wait happened, so "registerShapes first" is not
                 // read as the whole story by a peer whose shape is syncing.
                 return self.get_shape(class_name).map_err(|e| {
                     if budget.is_zero() {
@@ -905,7 +935,10 @@ impl PerspectiveInstance {
                 });
             }
             // Never sleep past the deadline: the caller's budget is shared.
-            sleep(poll.min(deadline - now)).await;
+            tokio::select! {
+                _ = sleep(poll.min(deadline - now)) => {}
+                err = runner::stopped(stop) => return Err(err),
+            }
             if let Ok(shape) = self.get_shape(class_name) {
                 return Ok(shape);
             }
@@ -1093,6 +1126,7 @@ impl PerspectiveInstance {
     pub async fn teardown_background_tasks(&self) {
         self.is_teardown.store(true, Ordering::Release);
         self.wakes.all();
+        self.language_broadcasts.lock().unwrap().abort();
     }
 
     /// Return diagnostic stats for this perspective's memory-relevant data structures.
@@ -1428,7 +1462,9 @@ impl PerspectiveInstance {
             .unwrap_or(false)
     }
 
-    async fn has_link_language(&self) -> bool {
+    /// Whether the link language is attached to this perspective. A
+    /// neighbourhood without one has no remote members to check.
+    pub(crate) async fn has_link_language(&self) -> bool {
         let link_language_guard = self.link_language.read().await;
         link_language_guard.is_some()
     }
@@ -1941,6 +1977,14 @@ impl PerspectiveInstance {
         // applied is decorated and published, with what the diff's
         // tombstones did folded in.
         let (applied, effects) = self.persist_remote_diff(store_diff)?;
+        // Synced links count like a local write, for no caller: the
+        // perspective's added/removed counters, no user's
+        // (`metrics::record_link_writes`).
+        crate::metrics::record_link_writes(
+            &self.metrics,
+            applied.additions.len(),
+            applied.removals.len() + effects.retracted.len(),
+        );
         let mut decorated_diff = DecoratedPerspectiveDiff {
             additions: applied
                 .additions
@@ -1955,16 +1999,8 @@ impl PerspectiveInstance {
         };
         effects.fold_into(&mut decorated_diff);
 
-        // If any of the inbound links change a class's SHACL definition,
-        // drop that entry from the in-memory shape cache so the next
-        // `model_query` re-parses fresh state from the SPARQL store.
-        // Without this, a locally cached shape can shadow updates the
-        // remote registered (rename, added property, etc.); with it, a
-        // peer that has never registered a class locally still picks up
-        // the class the moment its SHACL arrives.
-        if inbound_touches_shacl(&decorated_diff) {
-            self.clear_shape_cache();
-        }
+        // A class's SHACL arriving here has already dropped the cached
+        // shapes: `persist_remote_diff` does it with the store write.
 
         // Queue the Prolog fact update and the notification + live-query checks
         self.update_prolog_engines(decorated_diff.clone()).await;
@@ -2104,14 +2140,6 @@ impl PerspectiveInstance {
         // change to a flow definition queues the re-derivation that a synced
         // one gets from `diff_from_link_language`. A no-op for anything else.
         self.schedule_flow_pass_on_definition_change(decorated_diff);
-        // A class's SHACL written or removed by any path — `add_sdna`, a raw
-        // link write, a wipe — can change which classes are abstract, their
-        // aliases and which classes an abstract class reads (#1435). Shapes
-        // are cached per class and refreshed where they are written; what is
-        // derived from them spans every class, so any such write drops it.
-        if inbound_touches_shacl(decorated_diff) {
-            self.forget_derived_shapes();
-        }
         // A `FlowInstance` minted by an agent this executor acts for gets its
         // bookkeeping row now, before any pass can treat it as a catch-up
         // (#1424). Awaited, not spawned: a client's `start` is followed at
@@ -2134,6 +2162,37 @@ impl PerspectiveInstance {
                 };
                 super::publish_to_owners(topic, owners.clone(), payload);
             }
+        }
+    }
+
+    /// Publish one `link-updated` event, to all of the perspective's
+    /// `event_recipients`, for each `(old, new)` pair, and queue the
+    /// flow-definition sweep that `pubsub_publish_diff` queues for other
+    /// writes (once for the whole set).
+    async fn publish_link_updates(
+        &self,
+        updates: &[(DecoratedLinkExpression, DecoratedLinkExpression)],
+    ) {
+        if updates.is_empty() {
+            return;
+        }
+        let (olds, news): (Vec<_>, Vec<_>) = updates.iter().cloned().unzip();
+        self.schedule_flow_pass_on_definition_change(&DecoratedPerspectiveDiff::from(news, olds));
+
+        // Only the recipients come from the handle; the lock is released before publishing.
+        let owners = super::event_recipients(&*self.persisted.lock().await);
+
+        // One event per update, to all of the owners.
+        for (old_link, new_link) in updates {
+            super::publish_to_owners(
+                Topic::LinkUpdated,
+                owners.clone(),
+                PerspectiveLinkUpdatedEvent {
+                    perspective_uuid: self.uuid.clone(),
+                    old_link: old_link.clone(),
+                    new_link: new_link.clone(),
+                },
+            );
         }
     }
 
@@ -2474,28 +2533,25 @@ impl PerspectiveInstance {
         let new_link_expression =
             LinkExpression::from(create_signed_expression(new_link.normalize(), context)?);
 
+        // Both links keep the stored status. The old one is the stored link:
+        // the caller's `old_link` may carry no status, which reads as Shared.
+        let mut stored_new = new_link_expression.clone();
+        stored_new.status = Some(link_status.clone());
+        let mut stored_old = link.clone();
+        stored_old.status = Some(link_status.clone());
+
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
             let batch = batches
                 .get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
-            let diff = &mut batch.diff;
 
-            // Queue the stored link with its stored status: the caller's
-            // `old_link` may carry none, which the commit reads as Shared.
-            let mut stored_old = link.clone();
-            stored_old.status = Some(link_status.clone());
-            diff.removals.push(stored_old);
-            let mut new_link_expr = new_link_expression.clone();
-            new_link_expr.status = Some(link_status.clone());
-            diff.additions.push(new_link_expr.clone());
+            batch.diff.removals.push(stored_old.clone());
+            batch.diff.additions.push(stored_new.clone());
+            batch.updates.push((stored_old, stored_new.clone()));
 
-            Ok(DecoratedLinkExpression::from((new_link_expr, link_status)))
+            Ok(DecoratedLinkExpression::from((stored_new, link_status)))
         } else {
-            let mut stored_new = new_link_expression.clone();
-            stored_new.status = Some(link_status.clone());
-            let mut stored_old = link.clone();
-            stored_old.status = Some(link_status.clone());
             let diff = PerspectiveDiff::from(vec![stored_new], vec![stored_old]);
             let decorated_new_link_expression =
                 DecoratedLinkExpression::from((new_link_expression.clone(), link_status.clone()));
@@ -2512,22 +2568,13 @@ impl PerspectiveInstance {
                 .fold_into(&mut decorated_diff);
 
             // Queue the Prolog fact update and the notification + live-query checks
-            self.update_prolog_engines(decorated_diff.clone()).await;
+            self.update_prolog_engines(decorated_diff).await;
 
-            // An update publishes its own topic rather than going through
-            // `pubsub_publish_diff`, so it queues the definition sweep here.
-            self.schedule_flow_pass_on_definition_change(&decorated_diff);
-
-            // One event, to all of the owners.
-            super::publish_to_owners(
-                Topic::LinkUpdated,
-                super::event_recipients(&handle),
-                PerspectiveLinkUpdatedEvent {
-                    perspective_uuid: handle.uuid.clone(),
-                    old_link: decorated_old_link.clone(),
-                    new_link: decorated_new_link_expression.clone(),
-                },
-            );
+            self.publish_link_updates(&[(
+                decorated_old_link,
+                decorated_new_link_expression.clone(),
+            )])
+            .await;
 
             if link_status == LinkStatus::Shared {
                 self.spawn_commit_and_handle_error(&diff);
@@ -2677,67 +2724,6 @@ impl PerspectiveInstance {
         Ok(all_sdna_links)
     }
 
-    /// Get all subject class names from SHACL links (Prolog-free implementation)
-    ///
-    /// This queries links with:
-    /// - predicate = "rdf://type"
-    /// - target = "ad4m://SubjectClass"
-    ///
-    /// The source of these links is the class URI (e.g., "recipe://Recipe")
-    /// We extract the class name from the URI.
-    pub async fn get_subject_classes_from_shacl(&self) -> Result<Vec<String>, AnyError> {
-        let uuid = self.uuid.clone();
-        log::debug!(
-            "🔶 get_subject_classes_from_shacl: uuid={}, Querying for SHACL class links",
-            uuid
-        );
-        // Query for SHACL class definition links
-        let shacl_class_links = self.get_links_local(&LinkQuery {
-            predicate: Some("rdf://type".to_string()),
-            target: Some("ad4m://SubjectClass".to_string()),
-            ..Default::default()
-        })?;
-        log::debug!(
-            "🔶 get_subject_classes_from_shacl: Found {} links",
-            shacl_class_links.len()
-        );
-        for (link, _status) in &shacl_class_links {
-            log::debug!(
-                "🔶 get_subject_classes_from_shacl: Link: {} -> {:?} -> {}",
-                link.data.source,
-                link.data.predicate,
-                link.data.target
-            );
-        }
-
-        // Extract class names from source URIs
-        let mut class_names: Vec<String> = shacl_class_links
-            .iter()
-            .filter_map(|(link, _status)| {
-                let source = &link.data.source;
-                // Class URI format: "namespace://ClassName" (e.g., "recipe://Recipe")
-                // We want to extract "ClassName"
-                if let Some(idx) = source.rfind("://") {
-                    let after_scheme = &source[idx + 3..];
-                    // Handle paths like "namespace://path/ClassName"
-                    if let Some(last_slash) = after_scheme.rfind('/') {
-                        Some(after_scheme[last_slash + 1..].to_string())
-                    } else {
-                        Some(after_scheme.to_string())
-                    }
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Remove duplicates
-        class_names.sort();
-        class_names.dedup();
-
-        Ok(class_names)
-    }
-
     /// Query the SPARQL store for matching links, returning the decorated form
     /// already cached in the store. Does NOT re-verify signatures — the
     /// `proof.valid` flag was set on insert and persisted into RocksDB.
@@ -2885,326 +2871,6 @@ impl PerspectiveInstance {
         });
 
         Ok(links)
-    }
-
-    /// Adds the given Social DNA code to the perspective's SDNA code
-    /// If shacl_json is provided, also stores SHACL as queryable RDF links
-    pub async fn add_sdna(
-        &mut self,
-        name: String,
-        sdna_code: String,
-        sdna_type: SdnaType,
-        shacl_json: Option<String>,
-        context: &AgentContext,
-    ) -> Result<bool, AnyError> {
-        let is_flow = matches!(sdna_type, SdnaType::Flow);
-        // Validate before touching the store: see `add_sdna_inner`.
-        let shacl_links = shacl_json
-            .as_deref()
-            .map(|shacl| parse_sdna_json_to_links(&sdna_type, shacl, &name))
-            .transpose()?;
-        let result = {
-            let mutex = self.sdna_change_mutex.clone();
-            let _guard = mutex.lock().await;
-            self.add_sdna_inner(name, sdna_code, sdna_type, shacl_links, context)
-                .await?
-        };
-
-        // A flow definition entering the perspective means callers will
-        // immediately try to read FlowInstance / FlowTransitionProposal rows.
-        // Register those two hard-wired runtime classes now, so `findAll`
-        // answers `[]` on a fresh perspective instead of "no SHACL shape
-        // stored" (#1007).
-        //
-        // This MUST be outside the `sdna_change_mutex` guard above, and the
-        // explicit block is what releases it. `ensure_flow_model_classes`
-        // reaches `ensure_subject_class`, which calls back into *this*
-        // function (`hardwired_class.rs:105`) — and `sdna_change_mutex` is a
-        // plain non-reentrant `tokio::sync::Mutex`, so re-entering it while
-        // held deadlocks. Calling from `add_sdna_inner` (the obvious seam,
-        // since it is the one path every caller funnels through) does exactly
-        // that: it hangs with no error, no panic and no CPU, and CI reports it
-        // only as "Root tests timed out". Boxing the future silences the
-        // compiler's E0733 but does nothing about the lock.
-        //
-        // `Box::pin` is still required here: the call is still recursive in
-        // *type* terms even though it no longer re-enters the lock.
-        if is_flow {
-            Box::pin(crate::perspectives::flow_classes::ensure_flow_model_classes(self, context))
-                .await
-                .map_err(|e| anyhow::anyhow!("ensure_flow_model_classes: {e:#}"))?;
-        }
-
-        Ok(result)
-    }
-
-    /// Remove every SHACL link associated with the given target-class URIs.
-    /// Called when refreshing an existing `SubjectClass` so old property
-    /// triples are not left behind to compete with the fresh shape.
-    ///
-    /// Walks the link graph produced by [`parse_shacl_to_links`]:
-    ///   target_class_uri
-    ///     ── rdf://type      ──▶ ad4m://SubjectClass
-    ///     ── ad4m://shape    ──▶ shape_uri
-    ///   shape_uri
-    ///     ── sh://property   ──▶ prop_shape_uri  (one per declared property)
-    ///     ── *other shape-level predicates*
-    ///   prop_shape_uri
-    ///     ── *property-level predicates*
-    async fn remove_subject_class_shacl_links(
-        &mut self,
-        target_class_uris: &[String],
-    ) -> Result<(), AnyError> {
-        let mut to_remove: Vec<LinkExpression> = Vec::new();
-
-        for target_class_uri in target_class_uris {
-            // 1. target_class_uri → rdf://type → ad4m://SubjectClass
-            //    and target_class_uri → ad4m://shape → shape_uri
-            let target_class_links = self.get_links_local(&LinkQuery {
-                source: Some(target_class_uri.clone()),
-                ..Default::default()
-            })?;
-
-            let shape_uris: Vec<String> = target_class_links
-                .iter()
-                .filter(|(link, _)| link.data.predicate.as_deref() == Some("ad4m://shape"))
-                .map(|(link, _)| link.data.target.clone())
-                .collect();
-
-            to_remove.extend(
-                target_class_links
-                    .into_iter()
-                    .filter(|(link, _)| {
-                        matches!(
-                            link.data.predicate.as_deref(),
-                            Some("rdf://type") | Some("ad4m://shape")
-                        )
-                    })
-                    .map(|(link, _)| link),
-            );
-
-            for shape_uri in &shape_uris {
-                let shape_links = self.get_links_local(&LinkQuery {
-                    source: Some(shape_uri.clone()),
-                    ..Default::default()
-                })?;
-
-                let prop_shape_uris: Vec<String> = shape_links
-                    .iter()
-                    .filter(|(link, _)| link.data.predicate.as_deref() == Some("sh://property"))
-                    .map(|(link, _)| link.data.target.clone())
-                    .collect();
-
-                to_remove.extend(shape_links.into_iter().map(|(link, _)| link));
-
-                for prop_shape_uri in prop_shape_uris {
-                    let prop_links = self.get_links_local(&LinkQuery {
-                        source: Some(prop_shape_uri),
-                        ..Default::default()
-                    })?;
-                    to_remove.extend(prop_links.into_iter().map(|(link, _)| link));
-                }
-            }
-        }
-
-        if !to_remove.is_empty() {
-            self.remove_links(to_remove, None).await?;
-        }
-
-        Ok(())
-    }
-
-    /// Batch variant: registers multiple SDNA entries under a single mutex acquisition.
-    pub async fn add_sdna_batch(
-        &mut self,
-        entries: Vec<(String, String, SdnaType, Option<String>)>,
-        context: &AgentContext,
-    ) -> Result<Vec<bool>, AnyError> {
-        let any_flow = entries
-            .iter()
-            .any(|(_, _, sdna_type, _)| matches!(sdna_type, SdnaType::Flow));
-
-        // Parse every entry before writing any of them, so one invalid shape
-        // refuses the whole batch instead of leaving it half-applied.
-        let entries = entries
-            .into_iter()
-            .map(|(name, sdna_code, sdna_type, shacl_json)| {
-                let shacl_links = shacl_json
-                    .as_deref()
-                    .map(|shacl| parse_sdna_json_to_links(&sdna_type, shacl, &name))
-                    .transpose()?;
-                Ok((name, sdna_code, sdna_type, shacl_links))
-            })
-            .collect::<Result<Vec<_>, AnyError>>()?;
-
-        let results = {
-            let mutex = self.sdna_change_mutex.clone();
-            let _guard = mutex.lock().await;
-
-            let mut results = Vec::with_capacity(entries.len());
-            for (name, sdna_code, sdna_type, shacl_links) in entries {
-                let result = self
-                    .add_sdna_inner(name, sdna_code, sdna_type, shacl_links, context)
-                    .await?;
-                results.push(result);
-            }
-            results
-        };
-
-        // Same rule as `add_sdna`: register the flow-runtime classes only after
-        // the guard is released, because doing so re-enters `add_sdna` and
-        // `sdna_change_mutex` is not reentrant. Once per batch rather than per
-        // entry — `ensure_subject_class` is idempotent, so the extra calls
-        // would be harmless, just wasted writes.
-        if any_flow {
-            Box::pin(crate::perspectives::flow_classes::ensure_flow_model_classes(self, context))
-                .await
-                .map_err(|e| anyhow::anyhow!("ensure_flow_model_classes: {e:#}"))?;
-        }
-
-        Ok(results)
-    }
-
-    /// Inner implementation of add_sdna without mutex acquisition.
-    ///
-    /// Takes the SHACL already parsed: the purge of an existing class's
-    /// SHACL and the `has_subject_class` / `sdna` writes below are shared
-    /// links, so a shape that `parse_shacl_to_links` refuses must be refused
-    /// before any of them run. Otherwise a rejected re-registration deletes
-    /// the class for every peer (#1348).
-    async fn add_sdna_inner(
-        &mut self,
-        name: String,
-        mut sdna_code: String,
-        sdna_type: SdnaType,
-        shacl_links: Option<Vec<Link>>,
-        context: &AgentContext,
-    ) -> Result<bool, AnyError> {
-        let predicate = match sdna_type {
-            SdnaType::SubjectClass => "ad4m://has_subject_class",
-            SdnaType::Flow => "ad4m://has_flow",
-            SdnaType::Custom => "ad4m://has_custom_sdna",
-        };
-
-        let literal_name = Literal::from_string(name.clone())
-            .to_url()
-            .expect("just initialized Literal couldn't be turned into URL");
-
-        let mut sdna_links: Vec<Link> = Vec::new();
-
-        // For SubjectClass refresh: if this class already exists we must
-        // purge the prior SHACL graph before writing new triples.
-        // Without this, divergent old/new SHACL property triples coexist in
-        // the store and the loader produces non-deterministic shapes.
-        //
-        // When `shacl_links` is `None` and the class already exists, we
-        // preserve the historical no-op behaviour: nothing to refresh.
-        if matches!(sdna_type, SdnaType::SubjectClass) {
-            let all_class_links = self.get_links_local(&LinkQuery {
-                predicate: Some("rdf://type".to_string()),
-                target: Some("ad4m://SubjectClass".to_string()),
-                ..Default::default()
-            })?;
-
-            // A new shape refreshes only the class with its own target-class
-            // URI: `flux://Message` and `we://Message` are different classes,
-            // and a match on the name alone lets one app delete the other's.
-            // Without a shape nothing is deleted, so a class of this name in
-            // any namespace counts as already registered.
-            let incoming_target_class_uris: Option<Vec<&str>> = shacl_links.as_ref().map(|links| {
-                links
-                    .iter()
-                    .filter(|link| {
-                        link.predicate.as_deref() == Some("rdf://type")
-                            && link.target == "ad4m://SubjectClass"
-                    })
-                    .map(|link| link.source.as_str())
-                    .collect()
-            });
-
-            let existing_target_class_uris: Vec<String> = all_class_links
-                .iter()
-                .filter_map(|(link, _)| {
-                    let source = &link.data.source;
-                    let matches = match &incoming_target_class_uris {
-                        Some(uris) => uris.contains(&source.as_str()),
-                        None => source
-                            .split("://")
-                            .last()
-                            .and_then(|s| s.split('/').last())
-                            .map(|class_name| class_name == name)
-                            .unwrap_or(false),
-                    };
-                    if matches {
-                        Some(source.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            if !existing_target_class_uris.is_empty() {
-                if shacl_links.is_none() {
-                    log::info!(
-                        "Class '{}' SHACL definition already exists, skipping duplicate",
-                        name
-                    );
-                    return Ok(true);
-                }
-
-                log::info!(
-                    "Class '{}' already exists — refreshing SHACL definition",
-                    name
-                );
-                self.remove_subject_class_shacl_links(&existing_target_class_uris)
-                    .await?;
-            }
-        }
-
-        if (Literal::from_url(sdna_code.clone())).is_err() {
-            sdna_code = Literal::from_string(sdna_code)
-                .to_url()
-                .expect("just initialized Literal couldn't be turned into URL");
-        }
-
-        sdna_links.push(Link {
-            source: "ad4m://self".to_string(),
-            predicate: Some(predicate.to_string()),
-            target: literal_name.clone(),
-        });
-
-        // Store the Prolog code for backward compatibility with getSdna()
-        // SHACL links are the source of truth for schema operations,
-        // but Prolog code is still stored for retrieval
-        sdna_links.push(Link {
-            source: literal_name.clone(),
-            predicate: Some("ad4m://sdna".to_string()),
-            target: sdna_code.clone(),
-        });
-
-        self.add_links(sdna_links, LinkStatus::Shared, None, context)
-            .await?;
-
-        // Handle SHACL links if SHACL JSON provided explicitly
-        if let Some(shacl_links) = shacl_links {
-            self.add_links(shacl_links, LinkStatus::Shared, None, context)
-                .await?;
-            // SHACL just changed for this class — drop any cached shape so the
-            // next query re-parses against the fresh store state.
-            self.invalidate_shape(&name);
-        }
-
-        // A flow definition entering the perspective means callers will
-        // immediately try to read FlowTransitionProposal / FlowInstance rows.
-        // Register those two hard-wired runtime classes now so that findAll
-        // returns [] rather than an RPC 500 on a fresh perspective.
-        //
-        // NOTE: flow-runtime class registration deliberately does NOT happen
-        // here. This function runs while `sdna_change_mutex` is held, and
-        // registering those classes re-enters `add_sdna` — see the comment on
-        // `add_sdna`, which does it after releasing the guard.
-
-        Ok(true)
     }
 
     async fn ensure_prolog_engine_pool(&self) -> Result<(), AnyError> {
@@ -4188,21 +3854,8 @@ impl PerspectiveInstance {
         class_name: &str,
         query_json: &str,
     ) -> Result<String, deno_core::anyhow::Error> {
-        self.model_query_stopped(&EvalStop::none(), class_name, query_json)
-            .await
-    }
-
-    /// [`Self::model_query`] under `stop`: every evaluation the query makes
-    /// ends when the call's gate fires, reporting why.
-    pub async fn model_query_stopped(
-        &self,
-        stop: &EvalStop,
-        class_name: &str,
-        query_json: &str,
-    ) -> Result<String, deno_core::anyhow::Error> {
         let classes = super::model_query::QueryClasses::One(class_name.to_string());
-        self.model_query_classes_within(stop, &classes, query_json, MODEL_QUERY_SHAPE_WAIT)
-            .await
+        self.model_query_classes(&classes, query_json).await
     }
 
     /// [`Self::model_query`] over one class or a union of classes (#1238).
@@ -4211,24 +3864,19 @@ impl PerspectiveInstance {
         classes: &super::model_query::QueryClasses,
         query_json: &str,
     ) -> Result<String, deno_core::anyhow::Error> {
-        self.model_query_classes_within(
-            &EvalStop::none(),
-            classes,
-            query_json,
-            MODEL_QUERY_SHAPE_WAIT,
-        )
-        .await
+        self.model_query_classes_stopped(&EvalStop::none(), classes, query_json)
+            .await
     }
 
-    /// [`Self::model_query_classes`] under `stop` — every evaluation the
-    /// query makes ends when the call's gate fires.
+    /// [`Self::model_query_classes`] under `stop`: `stop` ends this call's
+    /// wait; the run itself is the runner's (see `runner.rs`).
     pub async fn model_query_classes_stopped(
         &self,
         stop: &EvalStop,
         classes: &super::model_query::QueryClasses,
         query_json: &str,
     ) -> Result<String, deno_core::anyhow::Error> {
-        self.model_query_classes_within(stop, classes, query_json, MODEL_QUERY_SHAPE_WAIT)
+        self.run_model_query(stop, classes, query_json, MODEL_QUERY_SHAPE_WAIT)
             .await
     }
 
@@ -4242,7 +3890,7 @@ impl PerspectiveInstance {
         shape_wait: Duration,
     ) -> Result<String, deno_core::anyhow::Error> {
         let classes = super::model_query::QueryClasses::One(class_name.to_string());
-        self.model_query_classes_within(&EvalStop::none(), &classes, query_json, shape_wait)
+        self.run_model_query(&EvalStop::none(), &classes, query_json, shape_wait)
             .await
     }
 
@@ -4258,6 +3906,16 @@ impl PerspectiveInstance {
     ) -> Result<String, deno_core::anyhow::Error> {
         let mut query_input: super::model_query::ModelQueryInput = serde_json::from_str(query_json)
             .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
+
+        // A malformed `after` fails the same way however the query would have
+        // been answered: the empty results below (a hard-wired class nothing
+        // wrote yet, a producedByFlow filter nothing passes) must not take an
+        // unparseable cursor for a last page.
+        if let Some(after) = query_input.after.as_deref() {
+            if !after.is_empty() {
+                super::model_query::KeysetCursor::decode(after)?;
+            }
+        }
 
         // `where.producedByFlow` is resolved here, not in the pipeline: it
         // needs the perspective (receipts, flow catalogue) and signature
@@ -4275,13 +3933,49 @@ impl PerspectiveInstance {
         // its includes reach get whatever this wait leaves (see the retry
         // around `execute_model_query` below).
         let deadline = Instant::now() + shape_wait;
+        // A hard-wired class not stored here has no instances here: the
+        // executor registers it before writing the first (`ensure_before_write`
+        // and its own write paths). It reads as nothing, at once, and the read
+        // writes nothing.
+        let unstored_hardwired = classes
+            .names()
+            .iter()
+            .map(|name| super::hardwired_class::unstored(self, name).map(|c| c.is_some()))
+            .collect::<Result<Vec<bool>, _>>()?;
+        let classes = &match classes {
+            super::model_query::QueryClasses::Union(names) => {
+                super::model_query::QueryClasses::Union(
+                    names
+                        .iter()
+                        .zip(&unstored_hardwired)
+                        .filter(|(_, unstored)| !**unstored)
+                        .map(|(name, _)| name.clone())
+                        .collect(),
+                )
+            }
+            one => one.clone(),
+        };
+        if unstored_hardwired.iter().all(|u| *u) {
+            // The empty answer still fails what the query would be refused
+            // for without a shape: a union's `after` rules, or one class's
+            // unsupported cursor.
+            refuse_before_empty_model_answer(classes, &query_input)?;
+            return serde_json::to_string(&super::model_query::ModelQueryResult {
+                instances: vec![],
+                total_count: query_input.count.unwrap_or(false).then_some(0),
+                next_cursor: None,
+            })
+            .map_err(|e| {
+                deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
+            });
+        }
         for class_name in classes.names() {
             // A built-in abstract class is not stored (#1446).
             if super::model_query::builtin_classes::builtin(class_name).is_some() {
                 continue;
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
-            self.get_shape_or_wait(class_name, remaining).await?;
+            self.get_shape_or_wait(stop, class_name, remaining).await?;
         }
         // An abstract class (#1435) reads the concrete classes that have its
         // names, each through its view; none of them is an empty result.
@@ -4293,10 +3987,15 @@ impl PerspectiveInstance {
             .await?;
         let named = classes;
         let classes = &targets.classes;
+        // The early answers below — no class resolved, a `producedByFlow`
+        // filter nothing passes — skip the pipeline, so they make its
+        // shape-free refusals themselves, the same way.
+        refuse_before_empty_model_answer(classes, &query_input)?;
         if classes.names().is_empty() {
             return serde_json::to_string(&super::model_query::ModelQueryResult {
                 instances: vec![],
                 total_count: query_input.count.unwrap_or(false).then_some(0),
+                next_cursor: None,
             })
             .map_err(|e| {
                 deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
@@ -4314,8 +4013,16 @@ impl PerspectiveInstance {
         let resolver = self.shape_resolver();
 
         if let Some(filter) = produced_by_flow {
-            let valid = super::flow_instance::produced::flow_valid_outputs(
+            // Inside this run's slot and under its stop: see `runner::InRun`.
+            let outputs = runner::InRun {
+                perspective: self,
+                stop,
+                shape_wait,
+            };
+            let valid = super::flow_instance::produced::flow_valid_outputs_reading(
+                stop,
                 self,
+                &outputs,
                 &filter.flow,
                 filter.state.as_deref(),
             )
@@ -4325,9 +4032,14 @@ impl PerspectiveInstance {
             let allowed: std::collections::BTreeSet<String> = valid
                 .into_iter()
                 .filter(|v| {
+                    let resolved = self
+                        .get_shape(&v.output.class_name)
+                        .ok()
+                        .map(|s| s.target_class.clone());
                     shapes.iter().any(|(class_name, shape)| {
                         super::flow_instance::produced::output_matches_class(
                             &v.output,
+                            resolved.as_deref(),
                             class_name,
                             &shape.target_class,
                         )
@@ -4343,6 +4055,7 @@ impl PerspectiveInstance {
                 return serde_json::to_string(&super::model_query::ModelQueryResult {
                     instances: vec![],
                     total_count: query_input.count.unwrap_or(false).then_some(0),
+                    next_cursor: None,
                 })
                 .map_err(|e| {
                     deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
@@ -4400,7 +4113,7 @@ impl PerspectiveInstance {
                 return Err(err);
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
-            self.get_shape_or_wait(&missing.class_name, remaining)
+            self.get_shape_or_wait(stop, &missing.class_name, remaining)
                 .await?;
         };
         let mut result = result;
@@ -4491,8 +4204,29 @@ impl PerspectiveInstance {
         // One store transaction for the whole diff, so a batch lands as one
         // write. On failure nothing was written; fall back to one link at a
         // time.
+        //
+        // A class's SHACL written or removed by any path (`register_shapes`, a raw
+        // link write, a sync, an import) can change which classes are abstract,
+        // their aliases, which classes an abstract class reads (#1435) and which
+        // class a bare name reads (the least IRI of that name). So a write that
+        // touches a shape own link drops every cached shape and what is derived
+        // from them, here, right after the store write and before any await: a
+        // caller cancelled later cannot leave the write committed and the cache
+        // stale.
+        let touches = touches_shape(
+            removals
+                .iter()
+                .chain(additions.iter())
+                .map(|link| &link.data),
+        );
         match self.sparql_store.apply_diff(&removals, &additions) {
-            Ok(()) => return Ok(effects),
+            Ok(()) => {
+                if touches {
+                    self.clear_shape_cache();
+                }
+                crate::metrics::record_link_writes(&self.metrics, additions.len(), removals.len());
+                return Ok(effects);
+            }
             Err(e) => log::warn!(
                 "Failed to apply link diff to SPARQL store in one transaction, \
                  writing links one by one: {:?}",
@@ -4501,17 +4235,25 @@ impl PerspectiveInstance {
         }
 
         // Removals first
+        let mut removed = 0;
         for removal in &removals {
-            if let Err(e) = self.sparql_store.remove_link(removal) {
-                log::warn!("Failed to remove link from SPARQL store: {:?}", e);
+            match self.sparql_store.remove_link(removal) {
+                Ok(_) => removed += 1,
+                Err(e) => log::warn!("Failed to remove link from SPARQL store: {:?}", e),
             }
         }
         // Additions after
+        let mut added = 0;
         for addition in &additions {
-            if let Err(e) = self.sparql_store.add_link(addition) {
-                log::warn!("Failed to add link to SPARQL store: {:?}", e);
+            match self.sparql_store.add_link(addition) {
+                Ok(_) => added += 1,
+                Err(e) => log::warn!("Failed to add link to SPARQL store: {:?}", e),
             }
         }
+        if touches {
+            self.clear_shape_cache();
+        }
+        crate::metrics::record_link_writes(&self.metrics, added, removed);
 
         // EXPERIMENT: removed per-write flush. The fix-branch added a flush
         // call here to reclaim memtable memory, but flushing on EVERY single
@@ -4984,15 +4726,49 @@ impl PerspectiveInstance {
 
     pub async fn online_agents(&self) -> Result<Vec<OnlineAgent>, AnyError> {
         // Remote peers via the link language's telepresence adapter (when one is
-        // present — i.e. a real multi-executor neighbourhood).
+        // present — i.e. a real multi-executor neighbourhood). The language
+        // runtime serves one call at a time, so the call is time-boxed: a
+        // slow or stuck language call must not stall the roster. On timeout
+        // or error the answer is that error: the remote agents are unknown,
+        // and the co-located users alone would read as a roster without
+        // them (`MeshManager.setRoster` drops every peer it does not list).
         let link_language_clone = self.link_language.read().await.clone();
         let has_link_language = link_language_clone.is_some();
+        let remote = match link_language_clone {
+            Some(mut link_language) => {
+                match time::timeout(
+                    ONLINE_AGENTS_LANGUAGE_TIMEOUT,
+                    link_language.get_online_agents(),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(anyhow!(
+                        "get_online_agents did not answer within {:?}",
+                        ONLINE_AGENTS_LANGUAGE_TIMEOUT
+                    )),
+                }
+            }
+            None => Ok(Vec::new()),
+        };
         // A remote multi-user node publishes its agents' statuses as one bundle;
         // `unpack` turns it back into one verified entry per agent.
-        let mut agents: Vec<OnlineAgent> = if let Some(mut link_language) = link_language_clone {
-            hosted_status::unpack(link_language.get_online_agents().await?)
-        } else {
-            Vec::new()
+        let mut agents: Vec<OnlineAgent> = match remote {
+            Ok(remote_agents) => {
+                let agents = hosted_status::unpack(remote_agents);
+                if let Some(url) = self.persisted.lock().await.shared_url.clone() {
+                    for agent in &agents {
+                        crate::sfu::config_store::saw_member(&url, &agent.did);
+                    }
+                }
+                agents
+            }
+            Err(e) => {
+                log::warn!(
+                    "online_agents: the link-language call failed or timed out ({e}); the roster is unknown"
+                );
+                return Err(e);
+            }
         };
 
         // Co-located multi-tenancy users: a neighbourhood's locally-managed
@@ -5020,11 +4796,9 @@ impl PerspectiveInstance {
         // source" error whenever there's no link language AND we found no
         // locally-online managed users. Callers (notably the auto-processor
         // watcher) rely on that error to fall through to their claim-based path
-        // rather than reading an empty set as "everyone is offline". We only
-        // diverge from the old link-language passthrough when we actually have
-        // co-located managed users to report. (A link language that returns an
-        // empty set is a genuine "nobody online" and stays `Ok(vec![])`, as
-        // before.)
+        // rather than reading an empty set as "everyone is offline". A link
+        // language that answered an empty set is a genuine "nobody online" and
+        // stays `Ok(vec![])`.
         if agents.is_empty() && !has_link_language {
             return Err(self.no_link_language_error().await);
         }
@@ -5131,7 +4905,15 @@ impl PerspectiveInstance {
         payload: PerspectiveExpression,
         loopback: bool,
     ) -> Result<(), AnyError> {
+        // Phases for `[call-diag] event=broadcast.slow` (`call_diag::phase`).
+        let mut mark = std::time::Instant::now();
+        let mut phase = |name: &'static str| {
+            let now = std::time::Instant::now();
+            crate::call_diag::phase(name, now - mark);
+            mark = now;
+        };
         let current_perspective_handle = self.persisted.lock().await.clone();
+        phase("handle_lock");
 
         if loopback {
             // send back to all clients through neighbourhood signal subscription
@@ -5159,11 +4941,23 @@ impl PerspectiveInstance {
                 );
             }
         }
+        phase("local_delivery");
 
-        // Also send through link language for remote users
+        // Remote members get the broadcast through the link language, off
+        // this RPC's critical path: the language runtime serves one call at
+        // a time, and a slow call there must not hold — or fail — a
+        // broadcast. The send is queued and drained in the background, or
+        // skipped when every member is local; only a full queue fails here.
         let link_language_clone = self.link_language.read().await.clone();
-        if let Some(mut link_language) = link_language_clone {
-            link_language.send_broadcast(payload).await
+        phase("link_language_lock");
+        if let Some(link_language) = link_language_clone {
+            let queued = self.broadcast_remotely(
+                link_language,
+                payload,
+                current_perspective_handle.shared_url.as_deref(),
+            );
+            phase("language");
+            queued
         } else {
             Err(self.no_link_language_error().await)
         }
@@ -5547,22 +5341,54 @@ impl PerspectiveInstance {
         class_name: &str,
         predicate: &str,
     ) -> Result<Option<Vec<Command>>, AnyError> {
-        // Query SPARQL store for links with the given predicate whose source ends with {ClassName}Shape
-        let shape_suffix = format!("{}Shape", class_name);
-        let _uuid = self.uuid.clone();
+        let Some(class) = find_class(&self.sparql_store, class_name)? else {
+            return Ok(None);
+        };
+        self.first_target(&class.shape_uri, predicate)?
+            .map(|target| Self::parse_actions_from_literal(&target))
+            .transpose()
+    }
 
-        let links = self.sparql_store.get_links_by_predicate_and_source_suffix(
-            &EvalStop::none(),
-            predicate,
-            &shape_suffix,
-        )?;
+    /// The least target of `source`'s links with `predicate`: one answer
+    /// whatever order the store yields them in.
+    fn first_target(&self, source: &str, predicate: &str) -> Result<Option<String>, AnyError> {
+        Ok(self
+            .sparql_store
+            .query_links(
+                &EvalStop::none(),
+                Some(source),
+                Some(predicate),
+                None,
+                None,
+                None,
+                None,
+            )?
+            .into_iter()
+            .map(|l| l.data.target)
+            .min())
+    }
 
-        // Return the first match
-        if let Some(link) = links.first() {
-            return Self::parse_actions_from_literal(&link.data.target).map(Some);
-        }
-
-        Ok(None)
+    /// The shape node of `class_name`'s property `property`: the one its
+    /// shape lists under `sh://property` with that name.
+    fn property_node(&self, class_name: &str, property: &str) -> Result<Option<String>, AnyError> {
+        let Some(class) = find_class(&self.sparql_store, class_name)? else {
+            return Ok(None);
+        };
+        Ok(self
+            .sparql_store
+            .query_links(
+                &EvalStop::none(),
+                Some(&class.shape_uri),
+                Some("sh://property"),
+                None,
+                None,
+                None,
+                None,
+            )?
+            .into_iter()
+            .map(|l| l.data.target)
+            .filter(|node| property_node_name(&class.target_class, node) == property)
+            .min())
     }
 
     /// Get actions from SHACL links for a property-level predicate (setter/adder/remover)
@@ -5572,22 +5398,12 @@ impl PerspectiveInstance {
         property: &str,
         predicate: &str,
     ) -> Result<Option<Vec<Command>>, AnyError> {
-        // Property shape URI format: {namespace}{ClassName}.{propertyName}
-        let prop_suffix = format!("{}.{}", class_name, property);
-        let _uuid = self.uuid.clone();
-
-        let links = self.sparql_store.get_links_by_predicate_and_source_suffix(
-            &EvalStop::none(),
-            predicate,
-            &prop_suffix,
-        )?;
-
-        // Return the first match
-        if let Some(link) = links.first() {
-            return Self::parse_actions_from_literal(&link.data.target).map(Some);
-        }
-
-        Ok(None)
+        let Some(node) = self.property_node(class_name, property)? else {
+            return Ok(None);
+        };
+        self.first_target(&node, predicate)?
+            .map(|target| Self::parse_actions_from_literal(&target))
+            .transpose()
     }
 
     /// Get the resolve language address (`ad4m://resolveLanguage`) for a property.
@@ -5606,24 +5422,18 @@ impl PerspectiveInstance {
         class_name: &str,
         property: &str,
     ) -> Result<Option<String>, AnyError> {
-        let prop_suffix = format!("{}.{}", class_name, property);
-
-        let links = self.sparql_store.get_links_by_predicate_and_source_suffix(
-            &EvalStop::none(),
-            "ad4m://resolveLanguage",
-            &prop_suffix,
-        )?;
-
-        if let Some(link) = links.first() {
+        let Some(node) = self.property_node(class_name, property)? else {
+            return Ok(None);
+        };
+        if let Some(target) = self.first_target(&node, "ad4m://resolveLanguage")? {
             // Extract value from literal:string:{value} or legacy literal://string:{value}
-            let encoded_value =
-                if let Some(rest) = link.data.target.strip_prefix("literal://string:") {
-                    rest
-                } else if let Some(rest) = link.data.target.strip_prefix("literal:string:") {
-                    rest
-                } else {
-                    return Ok(Some(link.data.target.clone()));
-                };
+            let encoded_value = if let Some(rest) = target.strip_prefix("literal://string:") {
+                rest
+            } else if let Some(rest) = target.strip_prefix("literal:string:") {
+                rest
+            } else {
+                return Ok(Some(target.clone()));
+            };
             let decoded = urlencoding::decode(encoded_value)
                 .map_err(|e| anyhow!("Failed to decode resolve language value: {}", e))?;
             return Ok(Some(decoded.to_string()));
@@ -5784,6 +5594,9 @@ impl PerspectiveInstance {
             .await?;
         //log::info!("🎯 CREATE SUBJECT: Got class name '{}' in {:?}", class_name, class_name_start.elapsed());
         self.refuse_abstract_create(&class_name)?;
+        // A hard-wired class (a flow run, an auto-processor) is the
+        // executor's to register: the first instance written registers it.
+        super::hardwired_class::ensure_before_write(self, &class_name, context).await?;
 
         //let constructor_start = std::time::Instant::now();
         let mut commands = self.get_constructor_actions(&class_name).await?;
@@ -6019,6 +5832,11 @@ impl PerspectiveInstance {
     /// Same collection expansion as `create_subject`: an array on an
     /// all-`addLink` setter appends one link per element; any other array
     /// stays a single `literal:json:` value.
+    ///
+    /// `null` and `""` clear the property instead: a `removeLink` with target
+    /// `*` per predicate the setter writes, which removes every stored link
+    /// there and prunes what the batch staged for it. A required property
+    /// (`sh://minCount` >= 1) refuses.
     async fn setter_commands(
         &self,
         class_name: &str,
@@ -6027,6 +5845,30 @@ impl PerspectiveInstance {
         value: &serde_json::Value,
         context: &AgentContext,
     ) -> Result<Vec<Command>, AnyError> {
+        if value.is_null() || value.as_str() == Some("") {
+            let required = self
+                .get_shape(class_name)?
+                .properties
+                .iter()
+                .any(|p| p.name == prop && p.is_required);
+            if required {
+                return Err(anyhow!(
+                    "Property `{prop}` of class `{class_name}` is required and cannot be cleared"
+                ));
+            }
+            let mut cleared: Vec<Command> = Vec::new();
+            for setter_cmd in setter {
+                if !cleared.iter().any(|c| c.predicate == setter_cmd.predicate) {
+                    cleared.push(Command {
+                        target: Some("*".to_string()),
+                        local: None,
+                        action: Action::RemoveLink,
+                        ..setter_cmd.clone()
+                    });
+                }
+            }
+            return Ok(cleared);
+        }
         let expand_collection = matches!(value, serde_json::Value::Array(_))
             && setter.iter().all(|c| c.action == Action::AddLink);
         let elements: Vec<serde_json::Value> = match (expand_collection, value) {
@@ -6248,6 +6090,8 @@ impl PerspectiveInstance {
     ///
     /// `classes` is one class or a union (#1238). A union is one subscription:
     /// it re-runs when a diff touches the trigger set of any class it names.
+    /// A query that sends `after` fails with
+    /// [`MODEL_SUBSCRIPTION_CURSOR_UNSUPPORTED`].
     pub async fn model_subscribe_and_query(
         &self,
         stop: &EvalStop,
@@ -6257,6 +6101,9 @@ impl PerspectiveInstance {
         connection_id: String,
         subscriber: Option<String>,
     ) -> Result<(String, u64, String), AnyError> {
+        if model_query_sends_cursor(&query_json) {
+            return Err(anyhow!(MODEL_SUBSCRIPTION_CURSOR_UNSUPPORTED));
+        }
         // An abstract class (#1435) is watched through the classes it reads
         // now; `refresh_abstract_subscriptions` resolves it again when the
         // installed shapes change. The generation is read first, so a change
@@ -6284,7 +6131,7 @@ impl PerspectiveInstance {
             subscriber,
         };
         let first_result =
-            self.model_query_classes_within(stop, &classes, &query_json, MODEL_QUERY_SHAPE_WAIT);
+            self.run_model_query(stop, &classes, &query_json, MODEL_QUERY_SHAPE_WAIT);
         self.open_subscription(subscription_id, subscribed_query, first_result)
             .await
     }
@@ -6332,7 +6179,11 @@ impl PerspectiveInstance {
         // First, so the queries collected below carry the new class lists.
         let reresolved = self.refresh_abstract_subscriptions().await;
 
+        // SPARQL subscriptions' re-checks, run on the re-check slots here, and
+        // the model subscriptions', whose runs take a slot themselves.
         let mut query_futures: Vec<future::BoxFuture<'static, Option<(Vec<String>, String)>>> =
+            Vec::new();
+        let mut model_futures: Vec<future::BoxFuture<'static, Option<(Vec<String>, String)>>> =
             Vec::new();
 
         // Collect only the minimal data needed: ID, query string, predicates,
@@ -6420,61 +6271,81 @@ impl PerspectiveInstance {
             // Each future returns Option<(ids, new_result)> instead of locking individually.
             // This avoids a lock convoy where N futures all contend on subscribed_queries.
             let self_clone = self.clone();
-            let query_future = Box::pin(async move {
-                #[cfg(test)]
-                subscriptions::evaluations::note(&self_clone.uuid);
-                // Model subscriptions: re-run execute_model_query instead of raw SPARQL.
-                // With no shape wait: every subscription on the perspective is
-                // re-checked in the one pass below, so a wait here for one
-                // subscription's unsynced class would hold back every other
-                // subscription's update. A class still missing fails this pass
-                // at once and is retried on the next one.
-                // A re-check runs under its own deadline gate: one slow
-                // subscription's eval stops there and is skipped for this
-                // pass — it does not kill the subscription or hold back the
-                // others. The gate drops with the future, so an eval still
-                // stopping is still ended.
-                let gate = crate::perspectives::sparql_store::EvalGate::request(
-                    crate::perspectives::sparql_store::query_deadline(),
-                    None,
-                );
-                let stop = gate.stop();
-                let result_string = if let Some(ref params) = model_params {
+            if let Some(params) = model_params {
+                // Model subscriptions run through the runner, which puts the
+                // run on a blocking slot itself and shares it with identical
+                // runs in flight. With no shape wait: every subscription on
+                // the perspective is re-checked in the one pass below, so a
+                // wait here for one subscription's unsynced class would hold
+                // back every other subscription's update. A class still
+                // missing fails this pass at once and is retried on the next
+                // one. The run has its own deadline: one slow subscription is
+                // skipped for this pass, it does not kill the subscription or
+                // hold back the others.
+                model_futures.push(Box::pin(async move {
                     match self_clone
-                        .model_query_classes_within(
-                            &stop,
+                        .run_model_query(
+                            &EvalStop::none(),
                             &params.classes,
                             &params.query_json,
                             Duration::ZERO,
                         )
                         .await
                     {
-                        Ok(r) => r,
+                        Ok(result) => Some((ids, result)),
                         Err(e) => {
-                            log::error!(
-                                "❌ 🔗 🧠 model-based subscription query failed (subscriptions {:?}): {}",
+                            // A deadline or cancel is expected under load and
+                            // retried next pass; anything else is a warning.
+                            if crate::perspectives::sparql_store::is_stop_error(&e) {
+                                log::debug!(
+                                    "🔗 🧠 model-based subscription query stopped (subscriptions {:?}): {}",
+                                    ids,
+                                    e
+                                );
+                            } else {
+                                log::warn!(
+                                    "⚠️ 🔗 🧠 model-based subscription query failed (subscriptions {:?}): {}",
+                                    ids,
+                                    e
+                                );
+                            }
+                            None
+                        }
+                    }
+                }));
+                continue;
+            }
+            // A re-check runs under its own deadline gate: one slow
+            // subscription's eval stops there and is skipped for this
+            // pass. The gate drops with the future, so an eval still
+            // stopping is still ended.
+            query_futures.push(Box::pin(async move {
+                #[cfg(test)]
+                subscriptions::evaluations::note(&self_clone.uuid);
+                let gate = crate::perspectives::sparql_store::EvalGate::request(
+                    crate::perspectives::sparql_store::query_deadline(),
+                    None,
+                );
+                match self_clone.sparql_query_stopped(&gate.stop(), &query_string) {
+                    Ok(result) => Some((ids, result)),
+                    Err(e) => {
+                        if crate::perspectives::sparql_store::is_stop_error(&e) {
+                            log::debug!(
+                                "🔗 🔎 SPARQL subscription query stopped (subscriptions {:?}): {}",
                                 ids,
                                 e
                             );
-                            return None;
-                        }
-                    }
-                } else {
-                    match self_clone.sparql_query_stopped(&stop, &query_string) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            log::error!(
-                                "❌ 🔗 🔎 SPARQL subscription query failed (subscriptions {:?}): {}",
+                        } else {
+                            log::warn!(
+                                "⚠️ 🔗 🔎 SPARQL subscription query failed (subscriptions {:?}): {}",
                                 ids,
                                 e
                             );
-                            return None;
                         }
+                        None
                     }
-                };
-                Some((ids, result_string))
-            });
-            query_futures.push(query_future);
+                }
+            }));
         }
 
         // Run the re-checks off the async workers, a bounded number at once
@@ -6482,8 +6353,17 @@ impl PerspectiveInstance {
         // held meanwhile. Each subscription runs at most once per pass and
         // passes run one after another, so the results compared below are
         // the newest.
-        let results =
-            subscriptions::run_rechecks(query_futures, &subscriptions::RECHECK_SLOTS).await;
+        // Every re-check of the pass, the model ones run by the runner too.
+        self.metrics.subscription_rechecks.fetch_add(
+            (query_futures.len() + model_futures.len()) as u64,
+            Ordering::Relaxed,
+        );
+        let (results, model_results) = future::join(
+            subscriptions::run_rechecks(query_futures, &subscriptions::RECHECK_SLOTS),
+            future::join_all(model_futures),
+        )
+        .await;
+        let results = results.into_iter().chain(model_results);
 
         // Single lock acquisition to compare and update all results
         let mut delta_updates = Vec::new();
@@ -7167,6 +7047,7 @@ impl PerspectiveInstance {
                     additions: Vec::new(),
                     removals: Vec::new(),
                 },
+                updates: Vec::new(),
                 created_at: now,
             },
         );
@@ -7698,15 +7579,9 @@ mod tests {
             ]
         }"#;
         perspective
-            .add_sdna(
-                "Collection".to_string(),
-                String::new(),
-                SdnaType::SubjectClass,
-                Some(shacl.to_string()),
-                &context,
-            )
+            .register_shape_json(shacl, &context)
             .await
-            .expect("add_sdna");
+            .expect("register the shape");
 
         // One batch: write the flag link that makes this URI an instance, then
         // set the ordered collection — exactly what `save()` does on create.
@@ -7775,9 +7650,9 @@ mod tests {
     /// stored shape.
     ///
     /// This is the boundary the ordering feature actually crosses in
-    /// production: `@Model` classes register through `ensureSubjectClass`,
-    /// which ships `SHACLShape.toJSON()` to `add_sdna`, which turns it into
-    /// links via `parse_shacl_to_links` — and `load_shape` reads the strategy
+    /// production: `@Model` classes register through `Ad4mModel.register`,
+    /// which ships `SHACLShape.toJSON()` to `register_shapes`, which turns it
+    /// into links via `shape_links` — and `load_shape` reads the strategy
     /// back only from the `ad4m://ordering` link that produces. Both halves of
     /// the feature hang off `ShapeProperty::ordering`: the setter writes no
     /// entries without it, and hydration never reorders. Every other test for
@@ -7797,15 +7672,9 @@ mod tests {
         }"#;
 
         perspective
-            .add_sdna(
-                "Collection".to_string(),
-                String::new(),
-                SdnaType::SubjectClass,
-                Some(shacl.to_string()),
-                &AgentContext::main_agent(),
-            )
+            .register_shape_json(shacl, &AgentContext::main_agent())
             .await
-            .expect("add_sdna");
+            .expect("register the shape");
 
         let shape = perspective.get_shape("Collection").expect("shape");
         let children = shape
@@ -8696,15 +8565,9 @@ mod tests {
         }"#;
         let ctx = AgentContext::main_agent();
         perspective
-            .add_sdna(
-                "Memo".to_string(),
-                String::new(),
-                SdnaType::SubjectClass,
-                Some(shacl.to_string()),
-                &ctx,
-            )
+            .register_shape_json(shacl, &ctx)
             .await
-            .expect("add_sdna");
+            .expect("register the shape");
 
         perspective
             .create_subject(
@@ -8765,15 +8628,9 @@ mod tests {
             "destructor_actions": []
         }"#;
         perspective
-            .add_sdna(
-                "Item".to_string(),
-                String::new(),
-                SdnaType::SubjectClass,
-                Some(shacl.to_string()),
-                &AgentContext::main_agent(),
-            )
+            .register_shape_json(shacl, &AgentContext::main_agent())
             .await
-            .expect("add_sdna");
+            .expect("register the shape");
         let ctx = AgentContext::main_agent();
 
         perspective
@@ -8892,15 +8749,9 @@ mod tests {
         }"#;
         let ctx = AgentContext::main_agent();
         perspective
-            .add_sdna(
-                "Cache".to_string(),
-                String::new(),
-                SdnaType::SubjectClass,
-                Some(shacl.to_string()),
-                &ctx,
-            )
+            .register_shape_json(shacl, &ctx)
             .await
-            .expect("add_sdna");
+            .expect("register the shape");
 
         async fn status_of(
             perspective: &PerspectiveInstance,
@@ -9037,15 +8888,9 @@ mod tests {
         }"#;
         let ctx = AgentContext::main_agent();
         perspective
-            .add_sdna(
-                "Flow".to_string(),
-                String::new(),
-                SdnaType::SubjectClass,
-                Some(shacl.to_string()),
-                &ctx,
-            )
+            .register_shape_json(shacl, &ctx)
             .await
-            .expect("add_sdna");
+            .expect("register the shape");
 
         perspective
             .create_subject(
@@ -9315,15 +9160,12 @@ mod tests {
     async fn test_model_trigger_predicates_cover_links_iris() {
         let mut perspective = setup().await;
         perspective
-            .add_sdna(
-                "Recipe".to_string(),
-                String::new(),
-                SdnaType::SubjectClass,
-                Some(cache_test_shacl("Recipe", "ns://")),
+            .register_shape_json(
+                &cache_test_shacl("Recipe", "ns://"),
                 &AgentContext::main_agent(),
             )
             .await
-            .expect("add_sdna");
+            .expect("register the shape");
         let query = r#"{
             "links": ["name", "ad4m://flow/role_grant_revoked"],
             "include": { "steps": { "links": ["ns://nested_note"] } }
@@ -9351,15 +9193,12 @@ mod tests {
         use crate::perspectives::flow_instance::{produced, receipt};
         let mut perspective = setup().await;
         perspective
-            .add_sdna(
-                "Recipe".to_string(),
-                String::new(),
-                SdnaType::SubjectClass,
-                Some(cache_test_shacl("Recipe", "ns://")),
+            .register_shape_json(
+                &cache_test_shacl("Recipe", "ns://"),
                 &AgentContext::main_agent(),
             )
             .await
-            .expect("add_sdna");
+            .expect("register the shape");
         let reads = [
             produced::FLOW_RECEIPT_INDEX_PREDICATE,
             receipt::FLOW_RECEIPT_CONTENT_PREDICATE,
@@ -9396,6 +9235,92 @@ mod tests {
         assert!(
             msg.contains("No SHACL shape stored for class 'Unknown'"),
             "error should name the class, got: {msg}"
+        );
+    }
+
+    /// A malformed `after` fails even when the query would answer empty:
+    /// `ad4m://FlowInstance` is a hard-wired class nothing wrote here, so the
+    /// query returns before the pipeline's decode could run. A valid first
+    /// page still answers empty — and writes nothing.
+    #[tokio::test]
+    async fn test_model_query_decodes_after_before_an_empty_answer() {
+        use base64::Engine;
+        let perspective = setup().await;
+        let err = perspective
+            .model_query_within(
+                "ad4m://FlowInstance",
+                r#"{"after":"!","limit":1}"#,
+                Duration::from_secs(1),
+            )
+            .await
+            .expect_err("a malformed cursor is an error, not an empty page");
+        assert!(err.to_string().contains("Invalid `after` cursor"), "{err}");
+
+        // And every `after` rule the pipeline refuses without a shape fails
+        // the same way here: the empty result must not stand in for the
+        // refusal a stored class would give.
+        for (name, query) in [
+            (
+                "a property order",
+                r#"{"after":"","limit":1,"order":{"title":"ASC"}}"#,
+            ),
+            ("`limit: 0`", r#"{"after":"","limit":0}"#),
+            ("no `limit`", r#"{"after":""}"#),
+            (
+                "a non-zero `offset`",
+                r#"{"after":"","limit":1,"offset":2}"#,
+            ),
+            ("an `include` cursor", r#"{"include":{"rel":{"after":""}}}"#),
+        ] {
+            let err = perspective
+                .model_query_within("ad4m://FlowInstance", query, Duration::from_secs(1))
+                .await
+                .expect_err(&format!("{name}: refused, not an empty page"));
+            assert!(err.to_string().contains("`after`"), "{name}: {err}");
+        }
+
+        // A cursor taken from a page read the other way is refused too —
+        // the order's direction needs no shape to compare.
+        let desc_cursor = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"ts":"2026-01-01T00:00:00.000Z","id":"ns://a","desc":true}"#);
+        let err = perspective
+            .model_query_within(
+                "ad4m://FlowInstance",
+                &format!(r#"{{"after":"{desc_cursor}","limit":1,"order":{{"timestamp":"ASC"}}}}"#),
+                Duration::from_secs(1),
+            )
+            .await
+            .expect_err("a cursor from the other direction: refused");
+        assert!(
+            err.to_string().contains("opposite order direction"),
+            "{err}"
+        );
+
+        let first = perspective
+            .model_query_within(
+                "ad4m://FlowInstance",
+                r#"{"after":"","limit":1}"#,
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("a first page of an unstored class reads empty");
+        let first: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(first["instances"].as_array().unwrap().len(), 0);
+        // And a well-formed cursor decodes and reads empty too.
+        let cursor = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"ts":"2026-01-01T00:00:00.000Z","id":"ns://a","desc":false}"#);
+        let query = format!(r#"{{"after":"{cursor}","limit":1}}"#);
+        perspective
+            .model_query_within("ad4m://FlowInstance", &query, Duration::from_secs(1))
+            .await
+            .expect("a well-formed cursor decodes");
+        assert!(
+            perspective
+                .get_links(&LinkQuery::default())
+                .await
+                .unwrap()
+                .is_empty(),
+            "the empty answers wrote nothing"
         );
     }
 
@@ -9438,13 +9363,7 @@ mod tests {
 
     async fn add_class(perspective: &mut PerspectiveInstance, name: &str, shacl: &str) {
         perspective
-            .add_sdna(
-                name.into(),
-                "".into(),
-                SdnaType::SubjectClass,
-                Some(shacl.into()),
-                &AgentContext::main_agent(),
-            )
+            .register_shape_json(shacl, &AgentContext::main_agent())
             .await
             .unwrap_or_else(|e| panic!("add {name}: {e}"));
     }
@@ -9482,13 +9401,7 @@ mod tests {
         let late_sync = async move {
             sleep(Duration::from_millis(500)).await;
             syncing
-                .add_sdna(
-                    "Task".into(),
-                    "".into(),
-                    SdnaType::SubjectClass,
-                    Some(NESTED_TASK_SHACL.into()),
-                    &AgentContext::main_agent(),
-                )
+                .register_shape_json(NESTED_TASK_SHACL, &AgentContext::main_agent())
                 .await
                 .expect("add Task");
         };
@@ -9750,15 +9663,9 @@ mod tests {
         let mut perspective = setup().await;
         let shacl = cache_test_shacl("Recipe", "ns://");
         perspective
-            .add_sdna(
-                "Recipe".to_string(),
-                String::new(),
-                SdnaType::SubjectClass,
-                Some(shacl),
-                &AgentContext::main_agent(),
-            )
+            .register_shape_json(&shacl, &AgentContext::main_agent())
             .await
-            .expect("add_sdna");
+            .expect("register the shape");
         let first = perspective.get_shape("Recipe").expect("first lookup");
         let second = perspective.get_shape("Recipe").expect("second lookup");
         assert!(
@@ -9768,149 +9675,45 @@ mod tests {
         assert_eq!(first.target_class, "ns://Recipe");
     }
 
+    /// Registering a changed shape replaces the cached shape at once.
     #[tokio::test]
-    async fn test_invalidate_shape_forces_reparse() {
+    async fn test_register_changed_shape_replaces_cached_shape() {
         let mut perspective = setup().await;
-        let shacl = cache_test_shacl("Recipe", "ns://");
         perspective
-            .add_sdna(
-                "Recipe".to_string(),
-                String::new(),
-                SdnaType::SubjectClass,
-                Some(shacl),
+            .register_shape_json(
+                &cache_test_shacl("Recipe", "ns://"),
                 &AgentContext::main_agent(),
             )
             .await
-            .expect("add_sdna");
+            .expect("register");
         let first = perspective.get_shape("Recipe").expect("first lookup");
-        perspective.invalidate_shape("Recipe");
-        let second = perspective.get_shape("Recipe").expect("re-parse");
-        assert!(
-            !Arc::ptr_eq(&first, &second),
-            "invalidation should cause a fresh Arc"
-        );
-        assert_eq!(second.target_class, first.target_class);
-    }
+        assert_eq!(first.properties.len(), 1);
 
-    #[tokio::test]
-    async fn test_add_sdna_invalidates_cache_for_class() {
-        let mut perspective = setup().await;
-        let shacl_initial = cache_test_shacl("Recipe", "ns://");
-        perspective
-            .add_sdna(
-                "Recipe".to_string(),
-                String::new(),
-                SdnaType::SubjectClass,
-                Some(shacl_initial),
-                &AgentContext::main_agent(),
-            )
+        let changed = r#"{
+            "target_class": "ns://Recipe",
+            "properties": [
+                { "path": "ns://name", "name": "name", "datatype": "xsd://string", "min_count": 1, "max_count": 1, "resolve_language": "literal" },
+                { "path": "ns://serves", "name": "serves", "datatype": "xsd://integer", "max_count": 1 }
+            ]
+        }"#;
+        let result = perspective
+            .register_shape_json(changed, &AgentContext::main_agent())
             .await
-            .expect("add_sdna initial");
-        let first = perspective.get_shape("Recipe").expect("first lookup");
+            .expect("re-register");
+        assert_eq!(result.written, vec!["ns://Recipe".to_string()]);
 
-        // add_sdna refuses to register a class twice with the same name;
-        // simulate a SHACL re-write by invalidating directly (matches the
-        // path register_shape would take if re-registration were exposed).
-        perspective.invalidate_shape("Recipe");
-
-        let second = perspective
-            .get_shape("Recipe")
-            .expect("re-parse after invalidation");
+        let second = perspective.get_shape("Recipe").expect("second lookup");
         assert!(!Arc::ptr_eq(&first, &second));
+        let mut names: Vec<_> = second.properties.iter().map(|p| p.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["name", "serves"]);
     }
 
-    /// Two apps that each define `Message` in their own namespace must not
-    /// delete each other's shape: a refresh replaces only the class with the
-    /// same target-class URI, not every class whose last segment is `Message`.
+    /// A shape the encoder refuses must leave the store untouched (#908,
+    /// #1348). Shape links are shared, so refusing only after a partial
+    /// write would change the class for every peer.
     #[tokio::test]
-    async fn test_add_sdna_refresh_keeps_same_named_class_of_another_namespace() {
-        fn class_links(perspective: &PerspectiveInstance, target_class: &str) -> Vec<String> {
-            let shape_uri = format!("{target_class}Shape");
-            let mut links: Vec<String> = perspective
-                .get_links_local(&LinkQuery::default())
-                .expect("get_links_local")
-                .into_iter()
-                .map(|(l, _)| l.data)
-                .filter(|l| {
-                    l.source == target_class
-                        || l.source == shape_uri
-                        || l.source.starts_with(&format!("{target_class}."))
-                })
-                .map(|l| format!("{} {:?} {}", l.source, l.predicate, l.target))
-                .collect();
-            links.sort();
-            links
-        }
-        let ctx = AgentContext::main_agent();
-        let mut perspective = setup().await;
-        let register = |namespace: &str, path: &str| {
-            cache_test_shacl("Message", namespace).replace(
-                &format!("\"{namespace}name\""),
-                &format!("\"{namespace}{path}\""),
-            )
-        };
-
-        perspective
-            .add_sdna(
-                "Message".to_string(),
-                String::new(),
-                SdnaType::SubjectClass,
-                Some(register("flux://", "name")),
-                &ctx,
-            )
-            .await
-            .expect("register flux://Message");
-        let flux_links = class_links(&perspective, "flux://Message");
-        assert!(
-            flux_links.iter().any(|l| l.contains("rdf://type")),
-            "{flux_links:?}"
-        );
-
-        perspective
-            .add_sdna(
-                "Message".to_string(),
-                String::new(),
-                SdnaType::SubjectClass,
-                Some(register("we://", "name")),
-                &ctx,
-            )
-            .await
-            .expect("register we://Message");
-        assert_eq!(
-            class_links(&perspective, "flux://Message"),
-            flux_links,
-            "registering we://Message must not touch flux://Message"
-        );
-
-        // Re-registering the same URI still replaces its shape.
-        perspective
-            .add_sdna(
-                "Message".to_string(),
-                String::new(),
-                SdnaType::SubjectClass,
-                Some(register("we://", "body")),
-                &ctx,
-            )
-            .await
-            .expect("refresh we://Message");
-        let we_links = class_links(&perspective, "we://Message");
-        assert!(
-            we_links.iter().any(|l| l.contains("we://body")),
-            "{we_links:?}"
-        );
-        assert!(
-            !we_links.iter().any(|l| l.contains("we://name")),
-            "the refresh purges the old property: {we_links:?}"
-        );
-        assert_eq!(class_links(&perspective, "flux://Message"), flux_links);
-    }
-
-    /// A shape `parse_shacl_to_links` refuses must leave the store untouched
-    /// (#908, #1348). The purge of an existing class and the
-    /// `has_subject_class` / `sdna` writes are shared links, so refusing
-    /// only after them deletes the class for every peer.
-    #[tokio::test]
-    async fn test_add_sdna_refused_shape_leaves_the_store_untouched() {
+    async fn test_refused_shape_leaves_the_store_untouched() {
         fn post_shacl(writer_datatype: Option<&str>) -> String {
             let datatype = writer_datatype
                 .map(|d| format!(r#""datatype": "{d}","#))
@@ -9947,13 +9750,7 @@ mod tests {
         let ctx = AgentContext::main_agent();
         let mut perspective = setup().await;
         perspective
-            .add_sdna(
-                "Post".to_string(),
-                String::new(),
-                SdnaType::SubjectClass,
-                Some(post_shacl(None)),
-                &ctx,
-            )
+            .register_shape_json(&post_shacl(None), &ctx)
             .await
             .expect("valid registration");
         let links_before = all_links(&perspective);
@@ -9965,19 +9762,13 @@ mod tests {
 
         // Re-registering the existing class with both options.
         let err = perspective
-            .add_sdna(
-                "Post".to_string(),
-                String::new(),
-                SdnaType::SubjectClass,
-                Some(post_shacl(Some("xsd://string"))),
-                &ctx,
-            )
+            .register_shape_json(&post_shacl(Some("xsd://string")), &ctx)
             .await
             .expect_err("both datatype and class must be refused");
         assert!(err.to_string().contains("datatype"), "{err}");
         assert_eq!(all_links(&perspective), links_before, "re-registration");
         // Re-read from the store, not the cache.
-        perspective.invalidate_shape("Post");
+        perspective.clear_shape_cache();
         assert_eq!(
             shape_summary(&perspective.get_shape("Post").expect("original shape")),
             shape_before
@@ -9986,32 +9777,22 @@ mod tests {
         // First registration of a new class, alone and inside a batch where
         // a valid entry comes first: nothing of either may be written.
         perspective
-            .add_sdna(
-                "Draft".to_string(),
-                String::new(),
-                SdnaType::SubjectClass,
-                Some(post_shacl(Some("xsd://string")).replace("ns://Post", "ns://Draft")),
+            .register_shape_json(
+                &post_shacl(Some("xsd://string")).replace("ns://Post", "ns://Draft"),
                 &ctx,
             )
             .await
             .expect_err("first registration");
         assert_eq!(all_links(&perspective), links_before, "first registration");
         perspective
-            .add_sdna_batch(
-                vec![
-                    (
-                        "Note".to_string(),
-                        String::new(),
-                        SdnaType::SubjectClass,
-                        Some(post_shacl(None).replace("ns://Post", "ns://Note")),
-                    ),
-                    (
-                        "Post".to_string(),
-                        String::new(),
-                        SdnaType::SubjectClass,
-                        Some(post_shacl(Some("xsd://string"))),
-                    ),
-                ],
+            .register_shapes(
+                [
+                    post_shacl(None).replace("ns://Post", "ns://Note"),
+                    post_shacl(Some("xsd://string")),
+                ]
+                .iter()
+                .map(|json| serde_json::from_str(json).expect("shape JSON"))
+                .collect(),
                 &ctx,
             )
             .await
@@ -10057,23 +9838,11 @@ mod tests {
             ]
         }"#;
         perspective
-            .add_sdna(
-                "Task".into(),
-                "".into(),
-                SdnaType::SubjectClass,
-                Some(task_shacl.into()),
-                &AgentContext::main_agent(),
-            )
+            .register_shape_json(task_shacl, &AgentContext::main_agent())
             .await
             .expect("add Task");
         perspective
-            .add_sdna(
-                "TaskBoard".into(),
-                "".into(),
-                SdnaType::SubjectClass,
-                Some(board_shacl.into()),
-                &AgentContext::main_agent(),
-            )
+            .register_shape_json(board_shacl, &AgentContext::main_agent())
             .await
             .expect("add TaskBoard");
 
@@ -10180,15 +9949,9 @@ mod tests {
             "destructor_actions": []
         }"#;
         perspective
-            .add_sdna(
-                "BlogPost".to_string(),
-                String::new(),
-                SdnaType::SubjectClass,
-                Some(shacl.to_string()),
-                &AgentContext::main_agent(),
-            )
+            .register_shape_json(shacl, &AgentContext::main_agent())
             .await
-            .expect("add_sdna");
+            .expect("register the shape");
 
         let post_root = "literal:string:test_post_root";
         let parent_root = "literal:string:test_parent_root";
@@ -10235,7 +9998,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_property_getter_survives_add_sdna_pipeline() {
+    async fn test_property_getter_survives_registration() {
         let mut perspective = setup().await;
         let shacl = r#"{
             "target_class": "blog://BlogPost",
@@ -10256,15 +10019,9 @@ mod tests {
             ]
         }"#;
         perspective
-            .add_sdna(
-                "BlogPost".to_string(),
-                String::new(),
-                SdnaType::SubjectClass,
-                Some(shacl.to_string()),
-                &AgentContext::main_agent(),
-            )
+            .register_shape_json(shacl, &AgentContext::main_agent())
             .await
-            .expect("add_sdna");
+            .expect("register the shape");
 
         let shape = perspective.get_shape("BlogPost").expect("shape");
         let parent = shape
@@ -10275,7 +10032,7 @@ mod tests {
         assert_eq!(
             parent.getter.as_deref(),
             Some("SELECT ?target WHERE { <Base> <blog://reply_to> ?target . } LIMIT 1"),
-            "getter must survive addSdna → SHACL store → load_shape round trip"
+            "getter must survive registerShapes → SHACL store → load_shape round trip"
         );
     }
 
@@ -10284,15 +10041,9 @@ mod tests {
         let mut perspective = setup().await;
         let shacl = cache_test_shacl("Recipe", "ns://");
         perspective
-            .add_sdna(
-                "Recipe".to_string(),
-                String::new(),
-                SdnaType::SubjectClass,
-                Some(shacl),
-                &AgentContext::main_agent(),
-            )
+            .register_shape_json(&shacl, &AgentContext::main_agent())
             .await
-            .expect("add_sdna");
+            .expect("register the shape");
 
         // First query warms the cache (load_shape fires once).
         let result_json = perspective
@@ -10384,6 +10135,246 @@ mod tests {
             link.target,
             msg
         );
+    }
+
+    /// M9: a link updated inside a batch reaches subscribers as one
+    /// `link-updated` event to all of the owners on commit, not as a removal
+    /// plus an addition, and both links keep the stored status.
+    #[tokio::test]
+    async fn test_commit_batch_publishes_batched_update_as_link_updated() {
+        let mut perspective = setup().await;
+        let owners = vec![
+            "did:test:owner-a".to_string(),
+            "did:test:owner-b".to_string(),
+        ];
+        perspective.persisted.lock().await.owners = Some(owners.clone());
+        let old: LinkExpression = perspective
+            .add_link(
+                create_link(),
+                LinkStatus::Local,
+                None,
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap()
+            .into();
+        let new_link = create_link();
+
+        let batch_id = perspective.create_batch().await;
+        perspective
+            .update_link(
+                old.clone(),
+                new_link.clone(),
+                Some(batch_id.clone()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap();
+
+        let pubsub = crate::pubsub::get_global_pubsub().await;
+        let mut rx = pubsub.subscribe_events();
+
+        perspective
+            .commit_batch(batch_id, &AgentContext::main_agent())
+            .await
+            .unwrap();
+
+        // The event channel is global: keep only this perspective's events.
+        let uuid = perspective.uuid.clone();
+        let mut mine = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if event.perspective.as_deref() == Some(uuid.as_str()) {
+                mine.push(event);
+            }
+        }
+        let of = |topic: Topic| {
+            mine.iter()
+                .filter(|e| e.topic == topic)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert!(of(Topic::LinkAdded).is_empty(), "no ADDED for an update");
+        assert!(
+            of(Topic::LinkRemoved).is_empty(),
+            "no REMOVED for an update"
+        );
+        let updated = of(Topic::LinkUpdated);
+        assert_eq!(updated.len(), 1, "one UPDATED for the update");
+        match &updated[0].audience {
+            crate::events::Audience::Dids(dids) => {
+                let mut dids = dids.clone();
+                dids.sort();
+                assert_eq!(dids, owners, "the UPDATED goes to all of the owners");
+            }
+            _ => panic!("the UPDATED goes to the owners' DIDs"),
+        }
+        for event in &updated {
+            let v = &event.payload;
+            assert_eq!(v["oldLink"]["data"]["target"], old.data.target.as_str());
+            assert_eq!(v["newLink"]["data"]["target"], new_link.target.as_str());
+            assert_eq!(v["oldLink"]["status"], "LOCAL");
+            assert_eq!(v["newLink"]["status"], "LOCAL");
+        }
+
+        let stored = perspective
+            .get_links(&LinkQuery {
+                source: Some(new_link.source.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].status, Some(LinkStatus::Local));
+        let old_left = perspective
+            .get_links(&LinkQuery {
+                source: Some(old.data.source.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(old_left.is_empty(), "the old link is removed");
+    }
+
+    /// M9: a batched update reaches the link language only when its link is
+    /// Shared. A Local update stays on this replica, as a non-batch one does.
+    #[tokio::test]
+    async fn test_commit_batch_sends_only_shared_updates_to_the_link_language() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let local: LinkExpression = perspective
+            .add_link(create_link(), LinkStatus::Local, None, &context)
+            .await
+            .unwrap()
+            .into();
+        let shared: LinkExpression = perspective
+            .add_link(create_link(), LinkStatus::Shared, None, &context)
+            .await
+            .unwrap()
+            .into();
+
+        // A neighbourhood whose link language records what it is sent.
+        let sent = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let record = sent.clone();
+        perspective.persisted.lock().await.neighbourhood =
+            Some(DecoratedNeighbourhoodExpression::default());
+        *perspective.link_language.write().await = Some(Language::with_test_commit(
+            "test-link-language".to_string(),
+            Arc::new(move |diff: PerspectiveDiff| {
+                let mut sent = record.lock().unwrap();
+                sent.extend(diff.additions.iter().map(|l| format!("+{}", l.data.target)));
+                sent.extend(diff.removals.iter().map(|l| format!("-{}", l.data.target)));
+                Ok(None)
+            }),
+        ));
+
+        let new_local = create_link();
+        let new_shared = create_link();
+        let batch_id = perspective.create_batch().await;
+        for (old, new) in [(&local, &new_local), (&shared, &new_shared)] {
+            perspective
+                .update_link(old.clone(), new.clone(), Some(batch_id.clone()), &context)
+                .await
+                .unwrap();
+        }
+        perspective.commit_batch(batch_id, &context).await.unwrap();
+
+        // The commit is spawned: wait until the Shared update has arrived.
+        // (The spawned commit of the Shared add above may land here too.)
+        let shared_update = [
+            format!("+{}", new_shared.target),
+            format!("-{}", shared.data.target),
+        ];
+        let mut got = Vec::new();
+        for _ in 0..100 {
+            got = sent.lock().unwrap().clone();
+            if shared_update.iter().all(|e| got.contains(e)) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            shared_update.iter().all(|e| got.contains(e)),
+            "the Shared update is sent: {got:?}"
+        );
+        let local_targets = [&local.data.target, &new_local.target];
+        assert!(
+            !got.iter()
+                .any(|e| local_targets.iter().any(|t| &e[1..] == t.as_str())),
+            "nothing of the Local update is sent: {got:?}"
+        );
+    }
+
+    /// M9: an update whose new link later work in the batch dropped commits
+    /// as a plain removal. Here `setSingleTarget` on the same source and
+    /// predicate prunes the staged new link and sets a third target.
+    #[tokio::test]
+    async fn test_commit_batch_publishes_an_update_broken_by_set_single_target_as_a_removal() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let old: LinkExpression = perspective
+            .add_link(create_link(), LinkStatus::Shared, None, &context)
+            .await
+            .unwrap()
+            .into();
+        let source = old.data.source.clone();
+        let predicate = old.data.predicate.clone();
+        let updated = Link {
+            target: "test://updated".to_string(),
+            ..old.data.clone()
+        };
+
+        let batch_id = perspective.create_batch().await;
+        perspective
+            .update_link(old.clone(), updated, Some(batch_id.clone()), &context)
+            .await
+            .unwrap();
+        perspective
+            .execute_commands(
+                vec![Command {
+                    source: Some(source.clone()),
+                    predicate: predicate.clone(),
+                    target: Some("test://final".to_string()),
+                    local: None,
+                    action: Action::SetSingleTarget,
+                }],
+                source.clone(),
+                vec![],
+                Some(batch_id.clone()),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let pubsub = crate::pubsub::get_global_pubsub().await;
+        let mut rx = pubsub.subscribe_events();
+        perspective.commit_batch(batch_id, &context).await.unwrap();
+
+        let uuid = perspective.uuid.clone();
+        let mut updates = 0;
+        while let Ok(event) = rx.try_recv() {
+            if event.perspective.as_deref() == Some(uuid.as_str())
+                && event.topic == Topic::LinkUpdated
+            {
+                updates += 1;
+            }
+        }
+        assert_eq!(
+            updates, 0,
+            "no UPDATED for an update whose new link was dropped"
+        );
+
+        let stored: Vec<String> = perspective
+            .get_links(&LinkQuery {
+                source: Some(source),
+                predicate,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|l| l.data.target)
+            .collect();
+        assert_eq!(stored, vec!["test://final".to_string()]);
     }
 
     /// Regression: paginated `get_links(limit=N)` must use the bounded-heap

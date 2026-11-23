@@ -101,6 +101,7 @@ import type { LocalAiPlan } from "./LocalAiPlan";
 import type { LocalAiRemoveParams } from "./LocalAiRemoveParams";
 import type { LocalAiStatus } from "./LocalAiStatus";
 import type { LockAgentRequest } from "./LockAgentRequest";
+import type { LogFilter } from "./LogFilter";
 import type { LogParams } from "./LogParams";
 import type { LogTail } from "./LogTail";
 import type { LogTailParams } from "./LogTailParams";
@@ -124,8 +125,6 @@ import type { PerspectiveAddAutoProcessorParams } from "./PerspectiveAddAutoProc
 import type { PerspectiveAddLinkExpressionParams } from "./PerspectiveAddLinkExpressionParams";
 import type { PerspectiveAddLinkParams } from "./PerspectiveAddLinkParams";
 import type { PerspectiveAddLinksParams } from "./PerspectiveAddLinksParams";
-import type { PerspectiveAddSdnaParams } from "./PerspectiveAddSdnaParams";
-import type { PerspectiveAddSdnaResult } from "./PerspectiveAddSdnaResult";
 import type { PerspectiveCommitBatchParams } from "./PerspectiveCommitBatchParams";
 import type { PerspectiveCreateSubjectParams } from "./PerspectiveCreateSubjectParams";
 import type { PerspectiveDiscardBatchParams } from "./PerspectiveDiscardBatchParams";
@@ -137,7 +136,6 @@ import type { PerspectiveFlowProposalParams } from "./PerspectiveFlowProposalPar
 import type { PerspectiveFlowReceiptVerdict } from "./PerspectiveFlowReceiptVerdict";
 import type { PerspectiveFlowStatesParams } from "./PerspectiveFlowStatesParams";
 import type { PerspectiveFlowValidOutputsParams } from "./PerspectiveFlowValidOutputsParams";
-import type { PerspectiveGetAllShaclParams } from "./PerspectiveGetAllShaclParams";
 import type { PerspectiveGetSubjectDataParams } from "./PerspectiveGetSubjectDataParams";
 import type { PerspectiveHandle } from "./PerspectiveHandle";
 import type { PerspectiveInstanceAddToCollectionParams } from "./PerspectiveInstanceAddToCollectionParams";
@@ -151,10 +149,10 @@ import type { PerspectiveMintFlowReceiptParams } from "./PerspectiveMintFlowRece
 import type { PerspectiveMintFlowReceiptResult } from "./PerspectiveMintFlowReceiptResult";
 import type { PerspectiveModelQueryParams } from "./PerspectiveModelQueryParams";
 import type { PerspectiveModelSubscribeParams } from "./PerspectiveModelSubscribeParams";
-import type { PerspectiveNamedShacl } from "./PerspectiveNamedShacl";
 import type { PerspectiveProposeFlowTransitionParams } from "./PerspectiveProposeFlowTransitionParams";
 import type { PerspectiveQueryLinksParams } from "./PerspectiveQueryLinksParams";
 import type { PerspectiveQueryParams } from "./PerspectiveQueryParams";
+import type { PerspectiveRegisterShapesParams } from "./PerspectiveRegisterShapesParams";
 import type { PerspectiveRejectFlowProposalResult } from "./PerspectiveRejectFlowProposalResult";
 import type { PerspectiveRemoveAutoProcessorParams } from "./PerspectiveRemoveAutoProcessorParams";
 import type { PerspectiveRemoveLinkParams } from "./PerspectiveRemoveLinkParams";
@@ -162,8 +160,7 @@ import type { PerspectiveRemoveLinksParams } from "./PerspectiveRemoveLinksParam
 import type { PerspectiveRemoveSubjectParams } from "./PerspectiveRemoveSubjectParams";
 import type { PerspectiveResolveInterpretationParams } from "./PerspectiveResolveInterpretationParams";
 import type { PerspectiveResynced } from "./PerspectiveResynced";
-import type { PerspectiveShacl } from "./PerspectiveShacl";
-import type { PerspectiveShaclNameParams } from "./PerspectiveShaclNameParams";
+import type { PerspectiveShapesParams } from "./PerspectiveShapesParams";
 import type { PerspectiveSparqlParams } from "./PerspectiveSparqlParams";
 import type { PerspectiveSubjectClassesOfParams } from "./PerspectiveSubjectClassesOfParams";
 import type { PerspectiveSubscribeQueryParams } from "./PerspectiveSubscribeQueryParams";
@@ -179,6 +176,7 @@ import type { ProposeOutcome } from "./ProposeOutcome";
 import type { PublishLanguageRequest } from "./PublishLanguageRequest";
 import type { PublishNeighbourhoodRequest } from "./PublishNeighbourhoodRequest";
 import type { PublishParams } from "./PublishParams";
+import type { RegisterResult } from "./RegisterResult";
 import type { RequestCapabilityRequest } from "./RequestCapabilityRequest";
 import type { RequestPaymentRequest } from "./RequestPaymentRequest";
 import type { ResetLogParams } from "./ResetLogParams";
@@ -203,11 +201,13 @@ import type { SetConfigParams } from "./SetConfigParams";
 import type { SetConfigResult } from "./SetConfigResult";
 import type { SetHostRatesRequest } from "./SetHostRatesRequest";
 import type { SetHotWalletAddressRequest } from "./SetHotWalletAddressRequest";
+import type { SetLogFilterParams } from "./SetLogFilterParams";
 import type { SetMultiUserRequest } from "./SetMultiUserRequest";
 import type { SetStatusRequest } from "./SetStatusRequest";
 import type { SetUnytMembraneProofRequest } from "./SetUnytMembraneProofRequest";
 import type { SetUserFreeAccessRequest } from "./SetUserFreeAccessRequest";
 import type { SfuAddIceCandidateParams } from "./SfuAddIceCandidateParams";
+import type { SfuAnswerResult } from "./SfuAnswerResult";
 import type { SfuAnswerServerOfferParams } from "./SfuAnswerServerOfferParams";
 import type { SfuCallJoinParams } from "./SfuCallJoinParams";
 import type { SfuCallLeaveParams } from "./SfuCallLeaveParams";
@@ -219,11 +219,14 @@ import type { SfuParticipantQualityPreference } from "./SfuParticipantQualityPre
 import type { SfuPerspectiveParams } from "./SfuPerspectiveParams";
 import type { SfuQualityPreferenceParams } from "./SfuQualityPreferenceParams";
 import type { SfuRestartIceParams } from "./SfuRestartIceParams";
+import type { SfuResumeParams } from "./SfuResumeParams";
+import type { SfuResumeResult } from "./SfuResumeResult";
 import type { SfuRoomInfo } from "./SfuRoomInfo";
 import type { SfuRoomParams } from "./SfuRoomParams";
 import type { SfuSendDataParams } from "./SfuSendDataParams";
 import type { SfuSetConfigParams } from "./SfuSetConfigParams";
 import type { SfuStatus } from "./SfuStatus";
+import type { ShapeSummary } from "./ShapeSummary";
 import type { SignMessageRequest } from "./SignMessageRequest";
 import type { SignedHead } from "./SignedHead";
 import type { TrustedAgentsWrapper } from "./TrustedAgentsWrapper";
@@ -336,6 +339,7 @@ export interface RpcMethods {
   "identity.status": { params: Record<string, never>; result: IdentityStatus };
   "language.all": { params: LanguageListParams; result: Array<LanguageHandle> };
   "language.applyTemplate": { params: ApplyTemplateRequest; result: LanguageRef };
+  "language.applyTemplateLocal": { params: ApplyTemplateRequest; result: LanguageRef };
   "language.get": { params: LanguageAddressParams; result: LanguageHandle };
   "language.meta": { params: LanguageAddressParams; result: LanguageMeta };
   "language.publish": { params: PublishLanguageRequest; result: LanguageMeta };
@@ -357,7 +361,6 @@ export interface RpcMethods {
   "perspective.addLink": { params: PerspectiveAddLinkParams; result: DecoratedLinkExpression };
   "perspective.addLinkExpression": { params: PerspectiveAddLinkExpressionParams; result: DecoratedLinkExpression };
   "perspective.addLinks": { params: PerspectiveAddLinksParams; result: Array<DecoratedLinkExpression> };
-  "perspective.addSdna": { params: PerspectiveAddSdnaParams; result: PerspectiveAddSdnaResult };
   "perspective.all": { params: Record<string, never>; result: Array<PerspectiveHandle> };
   "perspective.commitBatch": { params: PerspectiveCommitBatchParams; result: PerspectiveLinkDiff };
   "perspective.create": { params: CreatePerspectiveRequest; result: PerspectiveHandle };
@@ -372,10 +375,6 @@ export interface RpcMethods {
   "perspective.flowStates": { params: PerspectiveFlowStatesParams; result: Array<FlowStateEntry> };
   "perspective.flowValidOutputs": { params: PerspectiveFlowValidOutputsParams; result: Array<ValidOutput> };
   "perspective.get": { params: PerspectiveUuidParams; result: PerspectiveHandle | null };
-  "perspective.getAllShacl": { params: PerspectiveGetAllShaclParams; result: Array<PerspectiveNamedShacl> };
-  "perspective.getShacl": { params: PerspectiveShaclNameParams; result: PerspectiveShacl | null };
-  "perspective.getShaclNames": { params: PerspectiveUuidParams; result: Array<string> };
-  "perspective.getShaclTargetClass": { params: PerspectiveShaclNameParams; result: string | null };
   "perspective.getSubjectData": { params: PerspectiveGetSubjectDataParams; result: string };
   "perspective.instanceAddToCollection": { params: PerspectiveInstanceAddToCollectionParams; result: CollectionItemAdded };
   "perspective.instanceCreate": { params: PerspectiveInstanceCreateParams; result: InstanceCreated };
@@ -392,6 +391,7 @@ export interface RpcMethods {
   "perspective.queryLinks": { params: PerspectiveQueryLinksParams; result: Array<DecoratedLinkExpression> };
   "perspective.queryProlog": { params: PerspectiveQueryParams; result: string };
   "perspective.querySparql": { params: PerspectiveSparqlParams; result: string };
+  "perspective.registerShapes": { params: PerspectiveRegisterShapesParams; result: RegisterResult };
   "perspective.rejectFlowProposal": { params: PerspectiveFlowProposalParams; result: PerspectiveRejectFlowProposalResult };
   "perspective.rejectInterpretation": { params: PerspectiveResolveInterpretationParams; result: boolean };
   "perspective.remove": { params: PerspectiveUuidParams; result: boolean };
@@ -403,6 +403,7 @@ export interface RpcMethods {
   "perspective.runAgent": { params: RunAgentRequest; result: AgentReply };
   "perspective.runInterpretation": { params: RunInterpretationRequest; result: Array<string> };
   "perspective.runInterpretationWithHarness": { params: RunInterpretationWithHarnessRequest; result: Array<string> };
+  "perspective.shapes": { params: PerspectiveShapesParams; result: Array<ShapeSummary> };
   "perspective.snapshot": { params: PerspectiveUuidParams; result: DecoratedPerspective | null };
   "perspective.subjectClassesOf": { params: PerspectiveSubjectClassesOfParams; result: { [key in string]: Array<string> } };
   "perspective.subscribeQuery": { params: PerspectiveSubscribeQueryParams; result: PerspectiveSubscribed };
@@ -429,6 +430,7 @@ export interface RpcMethods {
   "runtime.inbox": { params: Record<string, never>; result: Array<PerspectiveExpression> };
   "runtime.info": { params: Record<string, never>; result: RuntimeInfo };
   "runtime.linkLanguageTemplates": { params: Record<string, never>; result: Array<LanguageMeta> };
+  "runtime.logFilter": { params: Record<string, never>; result: LogFilter };
   "runtime.logTail": { params: LogTailParams; result: LogTail };
   "runtime.networkMetrics": { params: Record<string, never>; result: string };
   "runtime.notifications": { params: Record<string, never>; result: Array<Notification> };
@@ -443,6 +445,7 @@ export interface RpcMethods {
   "runtime.setConfig": { params: SetConfigParams; result: SetConfigResult };
   "runtime.setFreeHostingEnabled": { params: RuntimeSetFreeHostingEnabledParams; result: boolean };
   "runtime.setHostRates": { params: SetHostRatesRequest; result: boolean };
+  "runtime.setLogFilter": { params: SetLogFilterParams; result: LogFilter };
   "runtime.setStatus": { params: SetStatusRequest; result: boolean };
   "runtime.setUnytMembraneProof": { params: SetUnytMembraneProofRequest; result: boolean };
   "runtime.tlsDomain": { params: Record<string, never>; result: string | null };
@@ -456,10 +459,11 @@ export interface RpcMethods {
   "runtime.updateNotification": { params: RuntimeUpdateNotificationParams; result: boolean };
   "runtime.verifySignature": { params: VerifySignatureRequest; result: boolean };
   "sfu.addIceCandidate": { params: SfuAddIceCandidateParams; result: boolean };
-  "sfu.callAnswerServerOffer": { params: SfuAnswerServerOfferParams; result: boolean };
+  "sfu.callAnswerServerOffer": { params: SfuAnswerServerOfferParams; result: SfuAnswerResult };
   "sfu.callJoin": { params: SfuCallJoinParams; result: CallSessionInfo };
   "sfu.callLeave": { params: SfuCallLeaveParams; result: boolean };
   "sfu.callRestartIce": { params: SfuRestartIceParams; result: boolean };
+  "sfu.callResume": { params: SfuResumeParams; result: SfuResumeResult };
   "sfu.callSetQualityPreference": { params: SfuQualityPreferenceParams; result: boolean };
   "sfu.cascadeStatus": { params: Record<string, never>; result: SfuCascadeStatus };
   "sfu.ensureMembership": { params: SfuEnsureMembershipParams; result: boolean };
@@ -543,16 +547,13 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "perspective.flowStates",
   "perspective.flowValidOutputs",
   "perspective.get",
-  "perspective.getAllShacl",
-  "perspective.getShacl",
-  "perspective.getShaclNames",
-  "perspective.getShaclTargetClass",
   "perspective.getSubjectData",
   "perspective.interpretationOverlays",
   "perspective.modelQuery",
   "perspective.queryLinks",
   "perspective.queryProlog",
   "perspective.querySparql",
+  "perspective.shapes",
   "perspective.snapshot",
   "perspective.subjectClassesOf",
   "perspective.verifyFlowReceipt",
@@ -566,6 +567,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "runtime.inbox",
   "runtime.info",
   "runtime.linkLanguageTemplates",
+  "runtime.logFilter",
   "runtime.logTail",
   "runtime.networkMetrics",
   "runtime.notifications",
@@ -603,6 +605,7 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "ai.removeEndpoint",
   "ai.updateEndpoint",
   "language.applyTemplate",
+  "language.applyTemplateLocal",
   "language.publish",
   "neighbourhood.join",
   "neighbourhood.publish",

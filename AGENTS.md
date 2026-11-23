@@ -274,11 +274,12 @@ trend page. The full contract is the header of `scripts/perf/perf.mjs`.
   (`audioMeter: "rtp-stats"`, shown in the failure). To reproduce on a
   desktop, run the suite with `XDG_RUNTIME_DIR` set to an empty directory
   and `PULSE_SERVER=unix:/nonexistent PIPEWIRE_REMOTE=/nonexistent`.
-- The suite binds the SFU to the host's outbound IPv4
-  (`AD4M_SFU_BIND_ADDR`), not loopback: Firefox gathers no loopback
-  candidate and never pairs its LAN candidates with an SFU on 127.0.0.1
-  (ICE stays `checking`, the SFU's DTLS times out), while Chromium and
-  WebKit connect. `SFU_BROWSERS_SFU_ADDR=127.0.0.1` shows that case.
+- The suite runs the executor's default SFU binding: loopback plus the
+  LAN address, both offered. Firefox needs the LAN one: it gathers no
+  loopback candidate and never pairs its LAN candidates with an SFU on
+  127.0.0.1 only (ICE stays `checking`, the SFU's DTLS times out), while
+  Chromium and WebKit connect. `SFU_BROWSERS_SFU_ADDR` binds the SFU there
+  instead (`AD4M_SFU_BIND_ADDR`); `127.0.0.1` shows the loopback case.
 - Install the browsers with `pnpm exec playwright-core install --with-deps
   chromium firefox webkit` in `tests/js`. On an Ubuntu release Playwright has
   no builds for (CI's runner is 25.04), it falls back to the 24.04 builds,
@@ -357,10 +358,15 @@ returned, and acts only on that session of the caller's DID; the SDK sends
 none of them without one, so a tab that never joined cannot end another
 tab's call (E19, E21). The executor publishes `sfu-room-roster` (to the
 listed DIDs, plus the departed session's DID on departure) after every join
-and departure, listing sessions (`participantId` + `agentDid`), and the SDK
+and departure, listing sessions (`participantId` + `agentDid`) and a
+`revision` (one sequence for every roster this process publishes: 1 the
+first time, then one more on every publish, a resume included; a later
+room, and a room created again, continues it, so a roster from an earlier
+life of the room is older), so a client can drop a roster whose
+`revision` is older than one it already applied. The SDK
 keys participants by participant id from it; when the roster stops listing
-this session (its `participantId`) for 3 s, the SDK rebuilds the call, but a
-replaced session never does; tracks are attributed only by the `trackMapping`
+this session (its `participantId`) for 3 s and `sfu.callResume` does not list
+it either, the SDK rebuilds the call, but a replaced session never does; tracks are attributed only by the `trackMapping`
 mids (which name
 the participant id); a session never receives its own media or its own
 `sfu-data` (`senderParticipantId`), but does receive its agent's other
@@ -369,38 +375,153 @@ space's policy (`maxMeshParticipants × 4`, 128 without one), and cascade
 per-node capacity only drives redirects; the server drops a peer after
 10 s of ICE `Disconnected`, or, once the client asked for an ICE restart
 (`sfu.callRestartIce`), 15 s after the request. The restart's answer ends
-that grace and the 10 s disconnect clock starts again. The deadline sweep
-also drops a peer when a server offer stays unanswered after both resends
-(resend at 10 s and at 30 s, drop at 70 s), even when ICE stays connected;
+that grace and the 10 s disconnect clock starts again. An unanswered server
+offer is resent at 10 s and 30 s, then every 30 s, and never drops a client
+peer (#1802 dropped it at 70 s, also while its media flowed). A client keeps
+that offer. An established pipe whose answer str0m rejects locally, or
+whose offer is still unanswered after those two resends, is disconnected.
+That rejection is local: a pipe answer carries no refusal, and a node that
+rejects an incoming offer only logs it, so the sender waits until the offer
+goes unanswered. The other end drops the pipe when its ICE fails. The end
+that dials (the lexically higher DID) redials at once the first time,
+whether it ended the offer or only saw the drop. The next consecutive
+failure waits 30 s, then 60 s, then 120 s, and stays at 120 s. A pipe that
+stayed connected for 120 s clears that count, so the next drop is free
+again. A timeout, a pipe that never connected, does not wait. When the new
+pipe is usable it is offered the origins already in the room, so media resumes
+without a new track. An Announce arrives every 10 s, so the announce alone
+would dial again on the next heartbeat. A crossed offer (`ChangesOutOfOrder`)
+keeps the pipe and queues the tracks again. An initial pipe that never connects stays
+through the second resend plus the 15 s ICE-restart grace, then is dropped.
+The offer carries
+an `offerId` that a resend and `sfu.callResume` repeat; the answer echoes
+it. `ParticipantId` (`P{n}`) and that offer id (`o{n}`) are minted from a
+counter that starts, once per process, at a random value at least `2^63`,
+so a restarted process does not hand a client's old id to a new session. `sfu.callAnswerServerOffer` answers `{ accepted: true }`, or
+`{ accepted: false, reason }` (`stale`, `no-pending`, `unknown-session`),
+after the event loop applies the answer. A repeat of the id accepted last
+for that session is `{ accepted: true }` and changes nothing; an older
+accepted id is `stale`. `stale` also covers an answer that does not parse,
+or whose mids are not the pending offer's, under the pending offer's own
+id: that offer stays pending. A refused answer is that value, not an RPC
+error. The RPC errors are 403 (a session of another agent) and 408 (the
+event loop did not answer, or its command channel is closed).
+`sfu.callResume` (the session's
+`participantId`) sends the pending offer and the roster again at once, for
+a client whose socket came back, and answers `{ listed: true, offer?,
+roster: { revision, participants } }` with the same offer, the same sessions,
+and the same `revision` as the roster event that resume just published, or
+`{ listed: false }` when the room or the session is not there. A session of
+another agent is 403. `sfu.callAnswerServerOffer` and `sfu.callResume` are
+408 when they have not finished within 5 s. That wait starts before the
+rooms lock, so a join that holds the lock counts, and it covers the resume
+roster publish as well as the command waiting for a slot in the bounded queue.
 on ICE `disconnected` or a network change the SDK restarts ICE in place (the
 SFU stays the only offerer: the restart comes as a server renegotiation
-offer), and rebuilds the call if that has not reconnected within 15 s; a
-failed connection is rebuilt at once, and a rebuild retries the join for
-120 s. The restart names the session's `participantId` (only that session
+offer), and rebuilds the call if that has not reconnected within 15 s; after
+a socket reconnect with no network change it restarts ICE only if ICE is not
+connected 2 s later; a failed connection is rebuilt at once, a rebuild
+retries the join for 120 s, and either terminal give-up — the 120 s spent
+without a rejoin, or a 4th rebuild inside 2 min — ends the call, in this
+order: `participant-left` for each participant, then `error`, then the
+connection closes, the `sfu.callLeave` request starts (the end does not wait
+for its reply) and `call-ended` (`{ reason: "gave-up" }`, also on the
+`Session`, which goes idle) is emitted for the UI to show; a new `join`
+starts over. A rebuild keeps the participants and clears only their media:
+it refreshes `hasAudio` and `hasVideo`, then emits one `stream-removed` per
+track, and a track that ends later does not emit a second one. Only an SDP the connection
+cannot apply rebuilds from a renegotiation: the answer names its offer's
+`offerId`, and the server refuses one naming another — `stale` or
+`no-pending` (a settled or superseded offer, or the server's own SDP step
+refusing it, as `ChangesOutOfOrder`) is non-acceptance: repair is left to
+media and session evidence, not a rebuild; `unknown-session` rebuilds the
+call. The client keeps its last answer (`lastAnswer`) and resends
+nothing by itself: an answer a socket fault lost (503, 408) goes out
+again from the cache when the executor resends its offer or the resume
+reply carries it. Once the socket is back, `sfu.callResume` returns what went by — the
+session's pending offer and the room's roster, applied like the events
+that carry them; a resume the socket fails keeps the call, and a 403 ends
+it (`call-ended`, `{ reason: "refused" }`: the executor refused the
+resume — the session is another agent's, or this agent is no longer a
+member). Of the server offers waiting, only the newest
+is applied; no RPC runs on the offer queue (an answer is sent without
+waiting for its reply) and SDP steps run to their end; a resume's ask
+waits off the queue, bounded by `RESUME_STEP_TIMEOUT_MS` (10 s) and
+by the restart's remaining window when one is in flight, so the restart
+offer it triggers is answered while the reply is still out. The restart names the session's `participantId` (only that session
 restarts, never another device of the agent), and a manager with no session
 (join not back, left, replaced) sends none. A room roster that leaves this
-session out for 3 s also rebuilds the call (the executor sends the departure
-roster to the departed DID too); a roster that lists it, as during a restart
-in place, changes nothing.
+session out for 3 s asks `sfu.callResume` and rebuilds the call when its
+reply says the session is not listed — an ask the socket fails is asked
+again within the grace while the roster still omits it; a roster that
+lists it, as during a restart in place, changes nothing.
 `ApiClient` drops an executor socket whose ping stays unanswered for a ping
 interval (10 s, `PING_INTERVAL_MS`; longer while a large write it sent may
 still be crossing a 16 kB/s link) and dials a new one, so a
-socket a network switch left OPEN is noticed in 10 to 20 s. `online` redials
-at once; `change` on `navigator.connection` and ICE `disconnected` run
-`checkConnection`, which drops a socket silent for 2 s after its ping.
+socket a network switch left OPEN is noticed in 10 to 20 s. `onNetworkChange`
+fires only for platform network events: `online` redials at once and tells
+it once the new socket is open, and `change` on `navigator.connection`
+marks a change — told once an open socket is proven — only when its
+`type` or `navigator.onLine` moved: the local path changed, so media must
+restart. On a platform that reports no `type` (desktop Chromium) a `change`
+with the reported state unmoved only has the socket judged — a real
+switch kills it and its drop redials; a moved estimate keeps it and marks
+nothing. The socket is judged by socket evidence through
+`checkConnection`, which also runs when a request
+has had no reply for 4 s (`PENDING_PROBE_MS`) on a socket nothing
+arrived on since it was sent. A request that cannot wait that long goes
+out urgent (`CallOptions.urgent`; `sfu.callRestartIce`, `sfu.callResume`
+and `sfu.callAnswerServerOffer`): its wait is 1 s
+(`URGENT_PENDING_PROBE_MS`) and the probe it starts judges a silent
+socket in 3 s (`URGENT_CHECK_CONNECTION_DEADLINE_MS`, drain allowance
+kept) instead of 8 s — it shortens only that request's timing, and a probe
+already running gets its verdict moved earlier to that wait, never later.
+The probe sends no ping when the socket
+delivered a message in the last 5 s and drops a socket that answered
+nothing for 8 s after one probe (at least 8 s: while a large write it sent
+may still be crossing the link, the wait grows by that write's drain time);
+any frame proves the socket, so a slow
+request on a socket that keeps delivering fails as an RPC timeout, not a
+dead socket. A probe that gives up only redials, at once and without
+backoff — socket evidence is not a network change, so no `onNetworkChange`
+fires for it; `onReconnect` on the new socket is its signal, and the SFU
+answers that with `socketBack` (resend what a fault kept, `sfu.callResume`,
+`checkIceSoon`), not an immediate ICE restart. The call layer never probes
+the socket: ICE `disconnected` is media evidence, and its whole answer is
+the ICE restart.
 
-SFU behind NAT (`rust-executor/src/sfu/{server,reachability}.rs`): the SFU
-binds `sfu_bind_addr` on `sfu_udp_port` (0/unset: ephemeral; a fixed port
-that is taken stops startup), runs the STUN probe on that same socket before
-the event loop owns it, and `assess` decides the advertised address
-(`sfu_public_addr`, else the probe's reflexive IP on the fixed port) and the
-reachability (`public` once STUN sees the advertised IP). Answers carry the
-host candidate and, when advertised, a srflx candidate on the same socket;
-str0m matches inbound STUN to the host candidate by destination, so the
-event loop's `destination: local_addr` stays right. Cascade pipes offer the
-host candidate only. The public address is read at startup: an IP change
-needs a restart. The four `sfu_*` keys live in the config file too; a build
-without them refuses them as unknown keys.
+SFU media addresses (`rust-executor/src/sfu/{hosts,server,reachability}.rs`):
+with no `sfu_bind_addr` (the default, whatever `--localhost` says) the SFU
+binds two sockets on one port: 127.0.0.1 and the LAN address
+(`detect_outbound_ip`, the default route's interface), and every answer
+offers both as host candidates. Firefox needs the LAN one (it gathers no
+loopback candidate); other machines on the LAN reach it too. In localhost
+mode the plain RPC port stays on loopback: the SFU adds only its media UDP
+port on the LAN, guarded by ICE credentials and DTLS (a `tls_config`
+listener binds `0.0.0.0` on its own). The LAN address is detected again
+for every answer and pipe: after a move to another network the next call
+binds the new address on the same port (old sockets stay, at most 8, in case
+the address comes back). A call in progress keeps the addresses it was
+offered: a LAN pair whose address went away fails its ICE restart in place
+and the SDK rebuilds the call, which gets the new address; a pair over
+loopback carries on. No LAN (offline): answers offer loopback only, logged,
+and each call looks again. One socket per address, never `0.0.0.0`: str0m
+matches inbound STUN to a host candidate by destination, which a socket
+bound to one address knows (the event loop passes the receiving socket's
+address), and replies leave from the address the caller sent to. An
+explicit `sfu_bind_addr` binds that address only, as before (malformed or
+unspecified: loopback).
+
+SFU behind NAT: the SFU binds on `sfu_udp_port` (0/unset: ephemeral; a fixed
+port that is taken, on loopback or the LAN address, stops startup), runs the
+STUN probe on the LAN (or explicit) socket before the event loop owns it,
+and `assess` decides the advertised address (`sfu_public_addr`, else the
+probe's reflexive IP on the fixed port) and the reachability (`public` once
+STUN sees the advertised IP). Answers carry the host candidates and, when
+advertised, a srflx candidate whose base is the LAN (or explicit) socket.
+Cascade pipes offer the host candidates only. The public address is read at
+startup: an IP change needs a restart. The four `sfu_*` keys live in the
+config file too; a build without them refuses them as unknown keys.
 
 Mesh signalling rules the scenarios pin (`core/src/neighbourhood/MeshManager.ts`):
 offers are numbered per connection and answers name theirs, so a late answer

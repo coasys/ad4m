@@ -1,0 +1,19 @@
+# cargo-nextest runs each test in its own process, so the suite can run in parallel:
+# rust-tests runs it with `cargo test -- --test-threads=1` because the services are
+# global singletons. `ci` is the profile of the trial job rust-tests-nextest;
+# rust-tests stays the required check until the two have been compared on the runners.
+[profile.ci]
+retries = 0
+fail-fast = false
+failure-output = "immediate-final"
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+# This test measures wall-clock time: 4 re-checks side by side must finish in under 60%
+# of the time they take one after another. Next to other test processes it can miss the
+# bound, so it runs with no other test beside it.
+[[profile.ci.overrides]]
+filter = "test(=perspectives::perspective_instance::subscription_recheck_tests::independent_rechecks_run_side_by_side)"
+threads-required = "num-test-threads"
+
+[profile.ci.junit]
+path = "junit.xml"

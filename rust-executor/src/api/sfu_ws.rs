@@ -33,7 +33,10 @@ use std::sync::Arc;
 use ts_rs::TS;
 
 use crate::agent::capabilities::{NEIGHBOURHOOD_READ_CAPABILITY, NEIGHBOURHOOD_UPDATE_CAPABILITY};
-use crate::sfu::{get_sfu_service, CallJoinError, CallSessionInfo, SfuConfig, SfuRoomInfo};
+use crate::sfu::{
+    get_sfu_service, CallJoinError, CallSessionInfo, SfuAnswerResult, SfuCallError, SfuConfig,
+    SfuResumeResult, SfuRoomInfo,
+};
 use crate::types::RequestContext;
 
 use super::guards::Guard;
@@ -54,6 +57,21 @@ fn service() -> Result<Arc<crate::sfu::SfuService>, WsRpcError> {
 
 fn map_room_err(e: impl ToString) -> WsRpcError {
     WsRpcError::internal(e.to_string())
+}
+
+/// `call_answer_server_offer` and `call_resume`: 403 for another agent's
+/// session, 408 when the event loop does not answer, 500 otherwise.
+fn map_call_err(e: SfuCallError) -> WsRpcError {
+    let message = e.to_string();
+    match e.status_code() {
+        403 => WsRpcError::forbidden(message),
+        408 => WsRpcError {
+            code: 408,
+            message,
+            data: None,
+        },
+        _ => WsRpcError::internal(message),
+    }
 }
 
 /// Read the params into their contract type. Dispatch has already
@@ -231,7 +249,10 @@ async fn call_set_quality_preference(
 async fn get_config(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let p: SfuNeighbourhoodParams = parse(params)?;
     member_did(&ctx, &p.neighbourhood_url)?;
-    let cfg = service()?.get_config(&p.neighbourhood_url).await;
+    let cfg = service()?
+        .get_config(&p.neighbourhood_url)
+        .await
+        .map_err(map_room_err)?;
     Ok(serde_json::to_value(cfg)?)
 }
 
@@ -261,7 +282,8 @@ async fn sfu_peer_for_neighbourhood(
     member_did(&ctx, &p.neighbourhood_url)?;
     let peer = service()?
         .sfu_peer_for_neighbourhood(&p.neighbourhood_url)
-        .await;
+        .await
+        .map_err(map_room_err)?;
     Ok(serde_json::to_value(peer)?)
 }
 
@@ -273,7 +295,8 @@ async fn sfu_peers_for_neighbourhood(
     member_did(&ctx, &p.neighbourhood_url)?;
     let peers = service()?
         .sfu_peers_for_neighbourhood(&p.neighbourhood_url)
-        .await;
+        .await
+        .map_err(map_room_err)?;
     Ok(serde_json::to_value(peers)?)
 }
 
@@ -290,17 +313,18 @@ async fn call_answer_server_offer(
 ) -> Result<Value, WsRpcError> {
     let p: SfuAnswerServerOfferParams = parse(params)?;
     let agent_did = member_did(&ctx, &p.neighbourhood_url)?;
-    let ok = service()?
+    let result = service()?
         .call_answer_server_offer(
             &p.neighbourhood_url,
             &p.room_name,
             &agent_did,
             &p.participant_id,
+            &p.offer_id,
             &p.sdp_answer,
         )
         .await
-        .map_err(map_room_err)?;
-    Ok(Value::Bool(ok))
+        .map_err(map_call_err)?;
+    Ok(serde_json::to_value(result)?)
 }
 
 // ── ICE restart ───────────────────────────────────────────────────────────────
@@ -323,6 +347,29 @@ async fn call_restart_ice(params: Value, ctx: Arc<RequestContext>) -> Result<Val
         .await
         .map_err(map_room_err)?;
     Ok(Value::Bool(ok))
+}
+
+// ── Resume ───────────────────────────────────────────────────────────────────
+//
+// The client's socket dropped and came back while its call went on (the
+// peer does not depend on the socket). Offers and rosters sent meanwhile
+// were lost: the SFU sends the pending offer and the roster again at once,
+// and answers with that same state. `{ listed: false }` when the room or
+// the session is gone. Another agent's session is 403.
+
+async fn call_resume(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let p: SfuResumeParams = parse(params)?;
+    let agent_did = member_did(&ctx, &p.neighbourhood_url)?;
+    let result = service()?
+        .call_resume(
+            &p.neighbourhood_url,
+            &p.room_name,
+            &agent_did,
+            &p.participant_id,
+        )
+        .await
+        .map_err(map_call_err)?;
+    Ok(serde_json::to_value(result)?)
 }
 
 // ── Trickle ICE ───────────────────────────────────────────────────────────────
@@ -514,12 +561,14 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         call_set_quality_preference,
     )
     .guard(update());
-    map.method::<SfuAnswerServerOfferParams, bool>(
+    map.method::<SfuAnswerServerOfferParams, SfuAnswerResult>(
         "sfu.callAnswerServerOffer",
         call_answer_server_offer,
     )
     .guard(update());
     map.method::<SfuRestartIceParams, bool>("sfu.callRestartIce", call_restart_ice)
+        .guard(update());
+    map.method::<SfuResumeParams, SfuResumeResult>("sfu.callResume", call_resume)
         .guard(update());
     map.method::<SfuNeighbourhoodParams, SfuConfig>("sfu.getConfig", get_config)
         .read()
@@ -639,6 +688,8 @@ pub struct SfuAnswerServerOfferParams {
     pub room_name: String,
     /// The caller's session, as its join returned it.
     pub participant_id: String,
+    /// The `offerId` of the `sfu-call-renegotiation-offer` this answers.
+    pub offer_id: String,
     /// JSON-encoded `RTCSessionDescriptionInit`.
     pub sdp_answer: String,
 }
@@ -652,6 +703,21 @@ pub struct SfuRestartIceParams {
     pub room_name: String,
     /// The caller's session, as its join returned it. Any other id, even
     /// another device of the same agent, is refused.
+    pub participant_id: String,
+}
+
+/// `sfu.callResume`: the session whose pending offer and roster to send again.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SfuResumeParams {
+    pub neighbourhood_url: String,
+    pub room_name: String,
+    /// A session of the caller's agent in this room, as its join returned
+    /// it. A session that is not in the room, or a room that is not there,
+    /// answers `{ listed: false }`. A session of another agent is 403. The
+    /// check is by DID: another device of the same agent may resume this
+    /// session.
     pub participant_id: String,
 }
 
@@ -946,6 +1012,92 @@ mod tests {
             crate::sfu::server::parse_trickle_candidate(&params.candidate)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// Resuming another agent's session is 403. A missing room, and an
+    /// answer for a session that is not in the room, are ordinary replies.
+    #[tokio::test]
+    async fn call_resume_for_another_agents_session_is_403() {
+        let svc = crate::sfu::SfuService::install_for_rpc_tests().await;
+        let url = "neighbourhood://rpc-resume-403";
+        let mut caller = str0m::Rtc::builder().build(std::time::Instant::now());
+        let mut change = caller.sdp_api();
+        change.add_media(
+            str0m::media::MediaKind::Audio,
+            str0m::media::Direction::SendRecv,
+            None,
+            None,
+            None,
+        );
+        let offer = serde_json::to_string(&change.apply().unwrap().0).unwrap();
+        let session = svc
+            .call_join(
+                url,
+                "r",
+                "did:alice",
+                "laptop",
+                "key-rpc-403",
+                &offer,
+                false,
+                || true,
+            )
+            .await
+            .unwrap();
+
+        let map = build_handler_map();
+        // The operator passes the neighbourhood check. The DID is pinned so
+        // the refusal is the session's owner, not a missing main-agent DID.
+        let bob = Arc::new(RequestContext::for_session(
+            crate::agent::session::Session::for_test(crate::agent::session::Principal::Operator)
+                .with_did("did:bob"),
+        ));
+        let err = map
+            .dispatch(
+                "sfu.callResume",
+                json!({
+                    "neighbourhoodUrl": url,
+                    "roomName": "r",
+                    "participantId": session.participant_id,
+                }),
+                bob.clone(),
+            )
+            .await
+            .expect_err("another agent's session");
+        assert_eq!(err.code, 403, "{}", err.message);
+        assert!(err.message.contains("another agent"), "{}", err.message);
+
+        let gone = map
+            .dispatch(
+                "sfu.callResume",
+                json!({
+                    "neighbourhoodUrl": "neighbourhood://rpc-no-such-room",
+                    "roomName": "r",
+                    "participantId": session.participant_id,
+                }),
+                bob.clone(),
+            )
+            .await
+            .expect("a missing room is a reply");
+        assert_eq!(gone, json!({ "listed": false }));
+
+        let refused = map
+            .dispatch(
+                "sfu.callAnswerServerOffer",
+                json!({
+                    "neighbourhoodUrl": url,
+                    "roomName": "r",
+                    "participantId": "P0",
+                    "offerId": "o1",
+                    "sdpAnswer": "{}",
+                }),
+                bob,
+            )
+            .await
+            .expect("a missing session is a reply");
+        assert_eq!(
+            refused,
+            json!({ "accepted": false, "reason": "unknown-session" })
         );
     }
 }
