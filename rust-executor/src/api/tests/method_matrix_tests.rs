@@ -374,6 +374,10 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "sourceLanguageHash": "QmLang", "templateData": "{}" }),
     ),
     (
+        "language.applyTemplateLocal",
+        || json!({ "sourceLanguageHash": "QmLang", "templateData": "{}" }),
+    ),
+    (
         "language.writeSettings",
         || json!({ "address": "QmLang", "settings": {} }),
     ),
@@ -491,6 +495,10 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     ("runtime.setHostRates", || json!({ "rates": [] })),
     ("runtime.logTail", || json!({ "lines": 10 })),
+    (
+        "runtime.setLogFilter",
+        || json!({ "filter": "ws_rpc=debug" }),
+    ),
     ("runtime.setUnytMembraneProof", || json!({ "proof": "p" })),
     (
         "runtime.unytSendHot",
@@ -674,6 +682,10 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1" }),
     ),
     (
+        "sfu.callResume",
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1" }),
+    ),
+    (
         "sfu.callJoin",
         || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "sdpOffer": "{}", "deviceId": "d", "sessionKey": "k" }),
     ),
@@ -683,7 +695,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     (
         "sfu.callAnswerServerOffer",
-        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1", "sdpAnswer": "{}" }),
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1", "offerId": "o1", "sdpAnswer": "{}" }),
     ),
     (
         "sfu.addIceCandidate",
@@ -1329,12 +1341,14 @@ async fn operator_methods_answer_everyone_else_admin_credential_required() {
             "runtime.config",
             "runtime.grantNotification",
             "runtime.importData",
+            "runtime.logFilter",
             "runtime.logTail",
             "runtime.openLink",
             "runtime.restart",
             "runtime.restartHolochain",
             "runtime.setConfig",
             "runtime.setHostRates",
+            "runtime.setLogFilter",
             "runtime.setUnytMembraneProof",
             "runtime.unytAgentKey",
             "runtime.unytHotAgentPubkey",

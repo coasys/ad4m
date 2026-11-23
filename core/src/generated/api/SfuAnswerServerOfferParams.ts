@@ -6,6 +6,10 @@ export type SfuAnswerServerOfferParams = { neighbourhoodUrl: string, roomName: s
  */
 participantId: string, 
 /**
+ * The `offerId` of the `sfu-call-renegotiation-offer` this answers.
+ */
+offerId: string, 
+/**
  * JSON-encoded `RTCSessionDescriptionInit`.
  */
 sdpAnswer: string, };

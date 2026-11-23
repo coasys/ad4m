@@ -72,6 +72,7 @@ use crate::perspectives::flow_context::{
 };
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::perspectives::sparql_store::EvalStop;
 
 /// One consensus event this replica recorded for the first time: the atoms
 /// that settled an edge, now marked, with the cache advanced to match.
@@ -183,7 +184,7 @@ pub async fn run_flow_consensus_pass(
 ) -> Vec<FireOutcome> {
     let loaded = async {
         let agent_did = crate::agent::did_for_context(context)?;
-        let mut flows_by_uri = load_shacl_flows(perspective).await?;
+        let mut flows_by_uri = load_shacl_flows(&EvalStop::none(), perspective).await?;
         retain_selected_flows(&mut flows_by_uri, flow_filter);
         if flows_by_uri.is_empty() {
             // No flow, so no record could be derived; this is most
