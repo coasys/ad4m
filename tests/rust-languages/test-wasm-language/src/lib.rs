@@ -15,6 +15,7 @@
 
 use ad4m_ldk::imports as rt;
 use ad4m_ldk::prelude::*;
+use wasm_bindgen::JsCast;
 
 pub struct TestLang {
     storage_dir: String,
@@ -105,6 +106,26 @@ impl ExpressionCapability for TestLang {
     }
 
     async fn expression_get(&mut self, address: Address) -> LanguageResult<Option<Expression>> {
+        // "slow:<ms>:<addr>" waits <ms> ms before reading <addr> — the
+        // runtime tests use it to hold the instance's async export lock
+        // across a real await while another call is queued behind it.
+        let address = if let Some(rest) = address.strip_prefix("slow:") {
+            let (ms, real) = rest.split_once(':').unwrap_or((rest, ""));
+            let ms: u32 = ms.parse().unwrap_or(0);
+            let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+                let set_timeout: js_sys::Function =
+                    js_sys::Reflect::get(&js_sys::global(), &"setTimeout".into())
+                        .unwrap()
+                        .unchecked_into();
+                set_timeout
+                    .call2(&::wasm_bindgen::JsValue::UNDEFINED, &resolve, &ms.into())
+                    .unwrap();
+            });
+            let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+            real.to_string()
+        } else {
+            address
+        };
         let raw = rt::storage_get(&address)?;
         if raw.is_null() || raw.is_undefined() {
             return Ok(None);

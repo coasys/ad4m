@@ -93,6 +93,15 @@ export interface LanguageSourceCapability {
     getSource(address: Address): Promise<string>;
 }
 
+export interface MountShapeEntry { name: string; shape: object }
+export interface MountShapes { version: string; shapes: MountShapeEntry[] }
+export interface MountEntry { class: string; address: Address; data: Record<string, unknown> }
+export interface MountSnapshot { entries: MountEntry[] }
+export interface MountCapability {
+    shapes(): MountShapes | Promise<MountShapes>;
+    snapshot(): MountSnapshot | Promise<MountSnapshot>;
+}
+
 // ----- Top-level language spec -----
 
 export interface LanguageSpec {
@@ -124,6 +133,9 @@ export interface LanguageSpec {
     /** Holochain signal handler (spec §8). The runtime routes Holochain
      * signals to this export based on a DnaHash → instance map. */
     handleHolochainSignal?(signal: unknown): void | Promise<void>;
+
+    /** Mount capability: shapes and records shown in a perspective (Acorn spike). Export both or neither. */
+    mount?: MountCapability;
 }
 
 /**
@@ -207,6 +219,10 @@ export interface FlatLanguageExports {
 
     // Holochain signal
     handleHolochainSignal?(signal: unknown): void | Promise<void>;
+
+    // Mount
+    mountShapes?(): MountShapes | Promise<MountShapes>;
+    mountSnapshot?(): MountSnapshot | Promise<MountSnapshot>;
 }
 
 /**
@@ -334,6 +350,12 @@ export function defineLanguage(spec: LanguageSpec): FlatLanguageExports {
 
     if (spec.handleHolochainSignal) {
         out.handleHolochainSignal = spec.handleHolochainSignal.bind(spec);
+    }
+
+    if (spec.mount) {
+        const m = spec.mount;
+        out.mountShapes = m.shapes.bind(m);
+        out.mountSnapshot = m.snapshot.bind(m);
     }
 
     return out;
