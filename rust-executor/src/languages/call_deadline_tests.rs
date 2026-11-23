@@ -123,6 +123,30 @@ async fn export_events(handle: &LanguageRuntimeHandle) -> Vec<String> {
         .expect("the events read returns the export log")
 }
 
+/// Polls the export log until `marker` appears: proof the export has entered
+/// inside the isolate, where a sleep would only guess that it has. Probe
+/// reads share the read side, so use this only while no call waits on the
+/// write side — a probe would queue behind it.
+async fn export_reaches(handle: &LanguageRuntimeHandle, marker: &str) {
+    within(Duration::from_secs(10), marker, async {
+        loop {
+            if export_events(handle).await.iter().any(|e| e == marker) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+}
+
+/// `marker`'s index in the export log, or a panic naming what was seen.
+fn event_pos(events: &[String], marker: &str) -> usize {
+    events
+        .iter()
+        .position(|e| e == marker)
+        .unwrap_or_else(|| panic!("{marker} missing from the export log: {events:?}"))
+}
+
 /// `n` calls, sent in order; each logs its index when it starts and when it ends, after
 /// awaiting a latency that differs from call to call. Returns the start and end logs.
 async fn ordered_burst(handle: &LanguageRuntimeHandle, n: usize) -> (Vec<usize>, Vec<usize>) {
@@ -1146,7 +1170,22 @@ async fn an_event_loop_error_in_a_concurrent_call_does_not_free_the_ordered_call
                 .await
         })
     };
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The gate is the runtime's marker: the ordered call is running — a
+    // sleep would only guess it got that far.
+    let running = handle.running_request();
+    within(
+        Duration::from_secs(10),
+        "the ordered call to start",
+        async {
+            loop {
+                if running.lock().unwrap().ordered.is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        },
+    )
+    .await;
 
     // Its own promise resolves; the rejected promise beside it is nobody's handler.
     let bad = within(Duration::from_secs(10), "the call that rejects", async {
@@ -1375,7 +1414,8 @@ async fn a_wasm_bundle_with_the_aldk_marker_loads_and_overlaps() {
 
     // Alice's slow read parks inside the export for 600 ms; Bob's whoami,
     // sent beside it, can only answer first by overlapping — and answers
-    // as Bob.
+    // as Bob. The gate is her export's own log entry: once it is there
+    // she holds the read side — a sleep would only guess at that.
     let mut slow = tokio::spawn({
         let handle = handle.clone();
         async move {
@@ -1388,7 +1428,7 @@ async fn a_wasm_bundle_with_the_aldk_marker_loads_and_overlaps() {
                 .await
         }
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    export_reaches(&handle, "get-start:slow:600:x").await;
     let fast = within(Duration::from_secs(10), "bob's read", async {
         handle
             .call(
@@ -1407,14 +1447,18 @@ async fn a_wasm_bundle_with_the_aldk_marker_loads_and_overlaps() {
         .and_then(|a| a.as_str())
         .map(str::to_string);
     assert_eq!(author.as_deref(), Some(bob.as_str()), "{fast}");
-    assert!(
-        !slow.is_finished(),
-        "bob's read waited for alice's slow read instead of overlapping"
-    );
     within(Duration::from_secs(10), "the slow read", &mut slow)
         .await
         .unwrap()
         .expect("the slow read answers");
+
+    // Inside the isolate the overlap is exact: Bob's export finished
+    // while Alice's still held the read side.
+    let events = export_events(&handle).await;
+    assert!(
+        event_pos(&events, "get-end:whoami") < event_pos(&events, "get-end:slow:600:x"),
+        "bob's read waited for alice's slow read instead of overlapping: {events:?}"
+    );
 }
 
 /// A plain JS bundle needs no marker: serializing unmarked bundles is for
@@ -1499,12 +1543,13 @@ async fn a_wasm_language_runs_concurrent_calls_in_order_as_their_agents() {
             .await
         })
     };
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The gate is the export's own log entry: once it is there the slow
+    // read holds the read side — a sleep would only guess at that.
+    export_reaches(&handle, "get-start:slow:600:x").await;
 
-    // The sync `interactions` export shares the read side: it answers beside
-    // the slow read, in well under the read's 600 ms — it reports "busy" only
-    // while an ordered call holds the instance.
-    let interactions_at = Instant::now();
+    // The sync `interactions` export shares the read side: it answers
+    // beside the slow read — it reports "busy" only while an ordered
+    // call holds the instance.
     let interactions = within(Duration::from_secs(10), "interactions", async {
         concurrent(
             &handle,
@@ -1518,10 +1563,6 @@ async fn a_wasm_language_runs_concurrent_calls_in_order_as_their_agents() {
     assert!(
         interactions.contains("echo"),
         "interactions() answered busy beside a held read: {interactions}"
-    );
-    assert!(
-        interactions_at.elapsed() < Duration::from_millis(500),
-        "interactions() waited for the slow read instead of sharing the read side"
     );
 
     // Alice's create, sent while the read still runs, waits on the write
@@ -1567,6 +1608,24 @@ async fn a_wasm_language_runs_concurrent_calls_in_order_as_their_agents() {
     assert_eq!(
         author, alice,
         "the create signed as {author}, not the managed user"
+    );
+
+    // Inside the isolate the lock sides are exact: the sync export ran
+    // inside the read's window, and the write-side export entered only
+    // after the read's export had exited.
+    let events = export_events(&handle).await;
+    let (slow_start, slow_end) = (
+        event_pos(&events, "get-start:slow:600:x"),
+        event_pos(&events, "get-end:slow:600:x"),
+    );
+    let sync = event_pos(&events, "interactions");
+    assert!(
+        sync > slow_start && sync < slow_end,
+        "interactions() did not run inside the slow read's window: {events:?}"
+    );
+    assert!(
+        event_pos(&events, "create-start") > slow_end,
+        "the create's export did not wait for the read's guard: {events:?}"
     );
 }
 
@@ -1763,7 +1822,9 @@ async fn a_slow_ordered_call_on_wasm_does_not_block_a_concurrent_read() {
                 .await
         }
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The gate is the export's own log entry: once it is there the slow
+    // read holds the read side — a sleep would only guess at that.
+    export_reaches(&handle, "get-start:slow:600:x").await;
 
     let read = within(Duration::from_secs(10), "the concurrent read", async {
         concurrent(
@@ -1774,15 +1835,19 @@ async fn a_slow_ordered_call_on_wasm_does_not_block_a_concurrent_read() {
     })
     .await;
     read.expect("the concurrent read answers beside the slow ordered call");
-    assert!(
-        !slow.is_finished(),
-        "the concurrent read waited for the ordered call's read side"
-    );
 
     within(Duration::from_secs(10), "the slow read", &mut slow)
         .await
         .unwrap()
         .expect("the slow read answers");
+
+    // Inside the isolate the overlap is exact: the concurrent read's
+    // export finished while the ordered call's read still held.
+    let events = export_events(&handle).await;
+    assert!(
+        event_pos(&events, "get-end:whoami") < event_pos(&events, "get-end:slow:600:x"),
+        "the concurrent read waited for the ordered call's read side: {events:?}"
+    );
 }
 
 /// The sync `interactions` export takes the read side without waiting: it
@@ -1828,9 +1893,10 @@ async fn a_sync_export_answers_beside_a_concurrent_wasm_call() {
             .await
         }
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The gate is the export's own log entry: once it is there the slow
+    // read holds the read side — a sleep would only guess at that.
+    export_reaches(&handle, "get-start:slow:600:x").await;
 
-    let sync_at = Instant::now();
     let answer = within(Duration::from_secs(10), "the sync export", async {
         concurrent(
             &handle,
@@ -1842,24 +1908,29 @@ async fn a_sync_export_answers_beside_a_concurrent_wasm_call() {
     .await
     .expect("the sync export answers");
     assert!(answer.contains("echo"), "unexpected answer: {answer}");
-    assert!(
-        sync_at.elapsed() < Duration::from_millis(500),
-        "the sync export waited for the in-flight concurrent call"
-    );
-    assert!(
-        !slow.is_finished(),
-        "the sync export waited for the concurrent call to end"
-    );
 
     within(Duration::from_secs(10), "the slow read", &mut slow)
         .await
         .unwrap()
         .expect("the slow read answers");
+
+    // Inside the isolate the proof is exact: the sync export ran inside
+    // the slow read's window rather than waiting for it to end.
+    let events = export_events(&handle).await;
+    let sync = event_pos(&events, "interactions");
+    assert!(
+        sync > event_pos(&events, "get-start:slow:600:x")
+            && sync < event_pos(&events, "get-end:slow:600:x"),
+        "the sync export did not run inside the slow read's window: {events:?}"
+    );
 }
 
 /// `expressionCreate` needs `&mut self`, so its export takes the write
-/// side and runs alone: sent beside a slow concurrent read it answers
-/// only once the read's future has dropped its read guard.
+/// side and runs alone: sent beside a slow concurrent read its export
+/// enters only once the read's export has exited. The read's hold is
+/// gated on the export log — not a sleep that only guesses it got that
+/// far — and the exclusivity check compares export entry and exit inside
+/// the isolate, not elapsed time outside it.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_ordered_export_on_wasm_still_runs_alone() {
     let Some(bundle) = wasm_language_bundle() else {
@@ -1889,6 +1960,10 @@ async fn an_ordered_export_on_wasm_still_runs_alone() {
         .load_language(context.to_json())
         .await
         .expect("the language's init() runs");
+    handle
+        .execute("(globalThis.__log = [], 0)".into())
+        .await
+        .unwrap();
 
     let mut slow = tokio::spawn({
         let handle = handle.clone();
@@ -1900,22 +1975,26 @@ async fn an_ordered_export_on_wasm_still_runs_alone() {
             .await
         }
     });
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    export_reaches(&handle, "get-start:slow:1500:x").await;
 
-    let create_at = Instant::now();
-    let created = within(Duration::from_secs(10), "the create", async {
-        concurrent(
-            &handle,
-            "globalThis.__ad4m_language_instance__.expressionCreate({note: \"write side\"})".into(),
-        )
+    // The create's script marks its start in __log; its export then
+    // queues on the write side behind the held read.
+    let created = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            concurrent(
+                &handle,
+                "(globalThis.__log.push(\"create-started\"), await globalThis.__ad4m_language_instance__.expressionCreate({note: \"write side\"}))".into(),
+            )
+            .await
+        }
+    });
+    log_reaches(&handle, r#"["create-started"]"#).await;
+
+    let addr = within(Duration::from_secs(10), "the create", created)
         .await
-    })
-    .await;
-    assert!(
-        create_at.elapsed() >= Duration::from_millis(1000),
-        "the create did not wait for the read's guard to drop"
-    );
-    let addr = created.expect("the create answers");
+        .unwrap()
+        .expect("the create answers");
     assert!(
         addr.contains("test:"),
         "unexpected expression address: {addr}"
@@ -1925,6 +2004,15 @@ async fn an_ordered_export_on_wasm_still_runs_alone() {
         .await
         .unwrap()
         .expect("the slow read answers");
+
+    // Inside the isolate the exclusivity is exact: the write-side export
+    // entered only after the read's export exited — no elapsed-time
+    // margin to get wrong.
+    let events = export_events(&handle).await;
+    assert!(
+        event_pos(&events, "create-start") > event_pos(&events, "get-end:slow:1500:x"),
+        "the create's export entered before the read's had exited: {events:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
