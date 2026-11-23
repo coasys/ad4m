@@ -1,7 +1,14 @@
 // Auto-generated from the executor's WS-RPC HandlerMap (rust-executor/src/api/ws_handler.rs).
 // Do NOT edit manually — regenerate with: pnpm run generate:api-types
 
-import type { AIModelLoadingStatus } from "./AIModelLoadingStatus";
+import type { AISession } from "./AISession";
+import type { AISessionCancelParams } from "./AISessionCancelParams";
+import type { AISessionCreate } from "./AISessionCreate";
+import type { AISessionMessage } from "./AISessionMessage";
+import type { AISessionMessagesParams } from "./AISessionMessagesParams";
+import type { AISessionSendParams } from "./AISessionSendParams";
+import type { AISessionSendStarted } from "./AISessionSendStarted";
+import type { AISessionUpdateRequest } from "./AISessionUpdateRequest";
 import type { AITask } from "./AITask";
 import type { AddAgentInfosRequest } from "./AddAgentInfosRequest";
 import type { Agent } from "./Agent";
@@ -12,27 +19,42 @@ import type { AgentReply } from "./AgentReply";
 import type { AgentRevokeTokenParams } from "./AgentRevokeTokenParams";
 import type { AgentSignature } from "./AgentSignature";
 import type { AgentStatus } from "./AgentStatus";
+import type { AgentWithIdentity } from "./AgentWithIdentity";
 import type { AgentsByDidsRequest } from "./AgentsByDidsRequest";
 import type { AiAddModelParams } from "./AiAddModelParams";
 import type { AiAddTaskParams } from "./AiAddTaskParams";
 import type { AiDiscoverModelsParams } from "./AiDiscoverModelsParams";
+import type { AiEndpoint } from "./AiEndpoint";
+import type { AiEndpointInput } from "./AiEndpointInput";
 import type { AiGetDefaultModelParams } from "./AiGetDefaultModelParams";
 import type { AiIdParams } from "./AiIdParams";
-import type { AiModelLoadingStatusParams } from "./AiModelLoadingStatusParams";
+import type { AiRemoveEndpointParams } from "./AiRemoveEndpointParams";
 import type { AiSetDefaultModelParams } from "./AiSetDefaultModelParams";
 import type { AiTranscriptionCloseParams } from "./AiTranscriptionCloseParams";
 import type { AiTranscriptionOpenParams } from "./AiTranscriptionOpenParams";
+import type { AiUpdateEndpointParams } from "./AiUpdateEndpointParams";
 import type { AiUpdateModelParams } from "./AiUpdateModelParams";
 import type { AiUpdateTaskParams } from "./AiUpdateTaskParams";
+import type { AiUpstreamModelParams } from "./AiUpstreamModelParams";
 import type { ApplyTemplateRequest } from "./ApplyTemplateRequest";
 import type { Apps } from "./Apps";
 import type { CallSessionInfo } from "./CallSessionInfo";
+import type { ClaimOfferParams } from "./ClaimOfferParams";
+import type { ClaimOfferResult } from "./ClaimOfferResult";
+import type { CollectionItemAdded } from "./CollectionItemAdded";
+import type { CollectionItemRemoved } from "./CollectionItemRemoved";
 import type { ComputeLogEntry } from "./ComputeLogEntry";
+import type { CosignInceptParams } from "./CosignInceptParams";
 import type { CreateExpressionRequest } from "./CreateExpressionRequest";
 import type { CreatePerspectiveRequest } from "./CreatePerspectiveRequest";
 import type { CreateUserRequest } from "./CreateUserRequest";
 import type { DecoratedLinkExpression } from "./DecoratedLinkExpression";
 import type { DecoratedPerspective } from "./DecoratedPerspective";
+import type { DetectedEndpoint } from "./DetectedEndpoint";
+import type { DeviceKeys } from "./DeviceKeys";
+import type { DeviceView } from "./DeviceView";
+import type { DidResolutionResult } from "./DidResolutionResult";
+import type { DiscoveredModel } from "./DiscoveredModel";
 import type { EmbedRequest } from "./EmbedRequest";
 import type { EntanglementProof } from "./EntanglementProof";
 import type { EntanglementProofPreflightRequest } from "./EntanglementProofPreflightRequest";
@@ -40,10 +62,12 @@ import type { EntanglementProofsWrapper } from "./EntanglementProofsWrapper";
 import type { EventName } from "./Events";
 import type { ExportRequest } from "./ExportRequest";
 import type { ExpressionInteractRequest } from "./ExpressionInteractRequest";
+import type { ExpressionManyEntry } from "./ExpressionManyEntry";
 import type { ExpressionManyRequest } from "./ExpressionManyRequest";
 import type { ExpressionRendered } from "./ExpressionRendered";
 import type { ExpressionUrlRequest } from "./ExpressionUrlRequest";
 import type { FireOutcome } from "./FireOutcome";
+import type { FlowFiredEntry } from "./FlowFiredEntry";
 import type { FlowStateEntry } from "./FlowStateEntry";
 import type { FriendsListRequest } from "./FriendsListRequest";
 import type { GenerateAgentRequest } from "./GenerateAgentRequest";
@@ -52,10 +76,17 @@ import type { HostRate } from "./HostRate";
 import type { HostingInfoResult } from "./HostingInfoResult";
 import type { HostingRequestPaymentResult } from "./HostingRequestPaymentResult";
 import type { HostingWalletResult } from "./HostingWalletResult";
+import type { IdentityLog } from "./IdentityLog";
+import type { IdentityStatus } from "./IdentityStatus";
 import type { ImportAgentRequest } from "./ImportAgentRequest";
 import type { ImportRequest } from "./ImportRequest";
+import type { InstanceCreated } from "./InstanceCreated";
+import type { InstanceRemoved } from "./InstanceRemoved";
+import type { InstanceUpdated } from "./InstanceUpdated";
 import type { InteractionMeta } from "./InteractionMeta";
 import type { JoinNeighbourhoodRequest } from "./JoinNeighbourhoodRequest";
+import type { JoinStatus } from "./JoinStatus";
+import type { JoinStatusParams } from "./JoinStatusParams";
 import type { JsonValue } from "./serde_json/JsonValue";
 import type { LanguageAddressParams } from "./LanguageAddressParams";
 import type { LanguageHandle } from "./LanguageHandle";
@@ -64,24 +95,35 @@ import type { LanguageMeta } from "./LanguageMeta";
 import type { LanguageRef } from "./LanguageRef";
 import type { LanguageWriteSettingsParams } from "./LanguageWriteSettingsParams";
 import type { LinkLanguageTemplatesRequest } from "./LinkLanguageTemplatesRequest";
+import type { LocalAiHardware } from "./LocalAiHardware";
+import type { LocalAiInstallParams } from "./LocalAiInstallParams";
+import type { LocalAiPlan } from "./LocalAiPlan";
+import type { LocalAiRemoveParams } from "./LocalAiRemoveParams";
+import type { LocalAiStatus } from "./LocalAiStatus";
 import type { LockAgentRequest } from "./LockAgentRequest";
+import type { LogParams } from "./LogParams";
+import type { LogTail } from "./LogTail";
+import type { LogTailParams } from "./LogTailParams";
 import type { Model } from "./Model";
+import type { ModelStatus } from "./ModelStatus";
 import type { NeighbourhoodBroadcastParams } from "./NeighbourhoodBroadcastParams";
 import type { NeighbourhoodOnlineStatusParams } from "./NeighbourhoodOnlineStatusParams";
 import type { NeighbourhoodSignalParams } from "./NeighbourhoodSignalParams";
 import type { NeighbourhoodUuidParams } from "./NeighbourhoodUuidParams";
 import type { Notification } from "./Notification";
 import type { NotificationInput } from "./NotificationInput";
+import type { OfferListing } from "./OfferListing";
+import type { OfferOpened } from "./OfferOpened";
+import type { OffersParams } from "./OffersParams";
 import type { OnlineAgent } from "./OnlineAgent";
 import type { OpenLinkRequest } from "./OpenLinkRequest";
+import type { OpenOfferParams } from "./OpenOfferParams";
 import type { OverlayView } from "./OverlayView";
 import type { PermitCapabilityRequest } from "./PermitCapabilityRequest";
 import type { PerspectiveAddAutoProcessorParams } from "./PerspectiveAddAutoProcessorParams";
 import type { PerspectiveAddLinkExpressionParams } from "./PerspectiveAddLinkExpressionParams";
 import type { PerspectiveAddLinkParams } from "./PerspectiveAddLinkParams";
 import type { PerspectiveAddLinksParams } from "./PerspectiveAddLinksParams";
-import type { PerspectiveAddSdnaParams } from "./PerspectiveAddSdnaParams";
-import type { PerspectiveAddSdnaResult } from "./PerspectiveAddSdnaResult";
 import type { PerspectiveCommitBatchParams } from "./PerspectiveCommitBatchParams";
 import type { PerspectiveCreateSubjectParams } from "./PerspectiveCreateSubjectParams";
 import type { PerspectiveDiscardBatchParams } from "./PerspectiveDiscardBatchParams";
@@ -93,18 +135,23 @@ import type { PerspectiveFlowProposalParams } from "./PerspectiveFlowProposalPar
 import type { PerspectiveFlowReceiptVerdict } from "./PerspectiveFlowReceiptVerdict";
 import type { PerspectiveFlowStatesParams } from "./PerspectiveFlowStatesParams";
 import type { PerspectiveFlowValidOutputsParams } from "./PerspectiveFlowValidOutputsParams";
-import type { PerspectiveGetAllShaclParams } from "./PerspectiveGetAllShaclParams";
 import type { PerspectiveGetSubjectDataParams } from "./PerspectiveGetSubjectDataParams";
 import type { PerspectiveHandle } from "./PerspectiveHandle";
+import type { PerspectiveInstanceAddToCollectionParams } from "./PerspectiveInstanceAddToCollectionParams";
+import type { PerspectiveInstanceCreateParams } from "./PerspectiveInstanceCreateParams";
+import type { PerspectiveInstanceRemoveFromCollectionParams } from "./PerspectiveInstanceRemoveFromCollectionParams";
+import type { PerspectiveInstanceRemoveParams } from "./PerspectiveInstanceRemoveParams";
+import type { PerspectiveInstanceUpdateParams } from "./PerspectiveInstanceUpdateParams";
 import type { PerspectiveLinkDiff } from "./PerspectiveLinkDiff";
 import type { PerspectiveLinkMutationsParams } from "./PerspectiveLinkMutationsParams";
 import type { PerspectiveMintFlowReceiptParams } from "./PerspectiveMintFlowReceiptParams";
 import type { PerspectiveMintFlowReceiptResult } from "./PerspectiveMintFlowReceiptResult";
 import type { PerspectiveModelQueryParams } from "./PerspectiveModelQueryParams";
-import type { PerspectiveNamedShacl } from "./PerspectiveNamedShacl";
+import type { PerspectiveModelSubscribeParams } from "./PerspectiveModelSubscribeParams";
 import type { PerspectiveProposeFlowTransitionParams } from "./PerspectiveProposeFlowTransitionParams";
 import type { PerspectiveQueryLinksParams } from "./PerspectiveQueryLinksParams";
 import type { PerspectiveQueryParams } from "./PerspectiveQueryParams";
+import type { PerspectiveRegisterShapesParams } from "./PerspectiveRegisterShapesParams";
 import type { PerspectiveRejectFlowProposalResult } from "./PerspectiveRejectFlowProposalResult";
 import type { PerspectiveRemoveAutoProcessorParams } from "./PerspectiveRemoveAutoProcessorParams";
 import type { PerspectiveRemoveLinkParams } from "./PerspectiveRemoveLinkParams";
@@ -112,10 +159,10 @@ import type { PerspectiveRemoveLinksParams } from "./PerspectiveRemoveLinksParam
 import type { PerspectiveRemoveSubjectParams } from "./PerspectiveRemoveSubjectParams";
 import type { PerspectiveResolveInterpretationParams } from "./PerspectiveResolveInterpretationParams";
 import type { PerspectiveResynced } from "./PerspectiveResynced";
-import type { PerspectiveShacl } from "./PerspectiveShacl";
-import type { PerspectiveShaclNameParams } from "./PerspectiveShaclNameParams";
+import type { PerspectiveShapesParams } from "./PerspectiveShapesParams";
 import type { PerspectiveSparqlParams } from "./PerspectiveSparqlParams";
 import type { PerspectiveSubjectClassesOfParams } from "./PerspectiveSubjectClassesOfParams";
+import type { PerspectiveSubscribeQueryParams } from "./PerspectiveSubscribeQueryParams";
 import type { PerspectiveSubscribed } from "./PerspectiveSubscribed";
 import type { PerspectiveSubscriptionParams } from "./PerspectiveSubscriptionParams";
 import type { PerspectiveUpdateLinkParams } from "./PerspectiveUpdateLinkParams";
@@ -127,12 +174,17 @@ import type { PromptRequest } from "./PromptRequest";
 import type { ProposeOutcome } from "./ProposeOutcome";
 import type { PublishLanguageRequest } from "./PublishLanguageRequest";
 import type { PublishNeighbourhoodRequest } from "./PublishNeighbourhoodRequest";
+import type { PublishParams } from "./PublishParams";
+import type { RegisterResult } from "./RegisterResult";
 import type { RequestCapabilityRequest } from "./RequestCapabilityRequest";
 import type { RequestPaymentRequest } from "./RequestPaymentRequest";
+import type { ResetLogParams } from "./ResetLogParams";
+import type { ResolveParams } from "./ResolveParams";
 import type { RunAgentRequest } from "./RunAgentRequest";
 import type { RunInterpretationRequest } from "./RunInterpretationRequest";
 import type { RunInterpretationWithHarnessRequest } from "./RunInterpretationWithHarnessRequest";
 import type { RuntimeComputeLogParams } from "./RuntimeComputeLogParams";
+import type { RuntimeConfig } from "./RuntimeConfig";
 import type { RuntimeFriendStatusParams } from "./RuntimeFriendStatusParams";
 import type { RuntimeGrantNotificationParams } from "./RuntimeGrantNotificationParams";
 import type { RuntimeImportResult } from "./RuntimeImportResult";
@@ -144,6 +196,8 @@ import type { RuntimeUnytSendHotParams } from "./RuntimeUnytSendHotParams";
 import type { RuntimeUnytWalletHistoryParams } from "./RuntimeUnytWalletHistoryParams";
 import type { RuntimeUpdateNotificationParams } from "./RuntimeUpdateNotificationParams";
 import type { SentMessage } from "./SentMessage";
+import type { SetConfigParams } from "./SetConfigParams";
+import type { SetConfigResult } from "./SetConfigResult";
 import type { SetHostRatesRequest } from "./SetHostRatesRequest";
 import type { SetHotWalletAddressRequest } from "./SetHotWalletAddressRequest";
 import type { SetMultiUserRequest } from "./SetMultiUserRequest";
@@ -151,8 +205,10 @@ import type { SetStatusRequest } from "./SetStatusRequest";
 import type { SetUnytMembraneProofRequest } from "./SetUnytMembraneProofRequest";
 import type { SetUserFreeAccessRequest } from "./SetUserFreeAccessRequest";
 import type { SfuAddIceCandidateParams } from "./SfuAddIceCandidateParams";
+import type { SfuAnswerResult } from "./SfuAnswerResult";
 import type { SfuAnswerServerOfferParams } from "./SfuAnswerServerOfferParams";
 import type { SfuCallJoinParams } from "./SfuCallJoinParams";
+import type { SfuCallLeaveParams } from "./SfuCallLeaveParams";
 import type { SfuCascadeStatus } from "./SfuCascadeStatus";
 import type { SfuConfig } from "./SfuConfig";
 import type { SfuEnsureMembershipParams } from "./SfuEnsureMembershipParams";
@@ -160,12 +216,17 @@ import type { SfuNeighbourhoodParams } from "./SfuNeighbourhoodParams";
 import type { SfuParticipantQualityPreference } from "./SfuParticipantQualityPreference";
 import type { SfuPerspectiveParams } from "./SfuPerspectiveParams";
 import type { SfuQualityPreferenceParams } from "./SfuQualityPreferenceParams";
+import type { SfuRestartIceParams } from "./SfuRestartIceParams";
+import type { SfuResumeParams } from "./SfuResumeParams";
+import type { SfuResumeResult } from "./SfuResumeResult";
 import type { SfuRoomInfo } from "./SfuRoomInfo";
 import type { SfuRoomParams } from "./SfuRoomParams";
 import type { SfuSendDataParams } from "./SfuSendDataParams";
 import type { SfuSetConfigParams } from "./SfuSetConfigParams";
 import type { SfuStatus } from "./SfuStatus";
+import type { ShapeSummary } from "./ShapeSummary";
 import type { SignMessageRequest } from "./SignMessageRequest";
+import type { SignedHead } from "./SignedHead";
 import type { TrustedAgentsWrapper } from "./TrustedAgentsWrapper";
 import type { UnlockAgentRequest } from "./UnlockAgentRequest";
 import type { UnytVersionInfo } from "./UnytVersionInfo";
@@ -195,7 +256,7 @@ export interface RpcMethods {
   "agent.entanglementProofPreflight": { params: EntanglementProofPreflightRequest; result: EntanglementProof };
   "agent.generate": { params: GenerateAgentRequest; result: AgentStatus };
   "agent.generateJwt": { params: GenerateJwtRequest; result: string };
-  "agent.get": { params: Record<string, never>; result: Agent };
+  "agent.get": { params: Record<string, never>; result: AgentWithIdentity };
   "agent.getApps": { params: Record<string, never>; result: Array<Apps> };
   "agent.getEntanglementProofs": { params: Record<string, never>; result: Array<EntanglementProof> };
   "agent.getTrustedAgents": { params: Record<string, never>; result: Array<string> };
@@ -210,27 +271,49 @@ export interface RpcMethods {
   "agent.status": { params: Record<string, never>; result: AgentStatus };
   "agent.unlock": { params: UnlockAgentRequest; result: AgentStatus };
   "agent.updateProfile": { params: UpdateProfileRequest; result: Agent };
+  "ai.addEndpoint": { params: AiEndpointInput; result: AiEndpoint };
   "ai.addModel": { params: AiAddModelParams; result: string };
   "ai.addTask": { params: AiAddTaskParams; result: AITask };
-  "ai.discoverModels": { params: AiDiscoverModelsParams; result: Array<string> };
+  "ai.deleteUpstreamModel": { params: AiUpstreamModelParams; result: boolean };
+  "ai.detectEndpoints": { params: Record<string, never>; result: Array<DetectedEndpoint> };
+  "ai.discoverModels": { params: AiDiscoverModelsParams; result: Array<DiscoveredModel> };
   "ai.embed": { params: EmbedRequest; result: string };
+  "ai.endpoints": { params: Record<string, never>; result: Array<AiEndpoint> };
   "ai.getDefaultModel": { params: AiGetDefaultModelParams; result: Model | null };
-  "ai.modelLoadingStatus": { params: AiModelLoadingStatusParams; result: AIModelLoadingStatus };
+  "ai.localHardware": { params: Record<string, never>; result: LocalAiHardware };
+  "ai.localInstall": { params: LocalAiInstallParams; result: LocalAiStatus };
+  "ai.localPlan": { params: Record<string, never>; result: LocalAiPlan };
+  "ai.localRemove": { params: LocalAiRemoveParams; result: boolean };
+  "ai.localStart": { params: Record<string, never>; result: LocalAiStatus };
+  "ai.localStatus": { params: Record<string, never>; result: LocalAiStatus };
+  "ai.localStop": { params: Record<string, never>; result: LocalAiStatus };
+  "ai.modelStatus": { params: AiIdParams; result: ModelStatus };
   "ai.models": { params: Record<string, never>; result: Array<Model> };
   "ai.prompt": { params: PromptRequest; result: string };
+  "ai.pullModel": { params: AiUpstreamModelParams; result: boolean };
+  "ai.removeEndpoint": { params: AiRemoveEndpointParams; result: boolean };
   "ai.removeModel": { params: AiIdParams; result: boolean };
   "ai.removeTask": { params: AiIdParams; result: boolean };
+  "ai.session": { params: AiIdParams; result: AISession };
+  "ai.sessionCancel": { params: AISessionCancelParams; result: boolean };
+  "ai.sessionCreate": { params: AISessionCreate; result: AISession };
+  "ai.sessionDelete": { params: AiIdParams; result: boolean };
+  "ai.sessionList": { params: Record<string, never>; result: Array<AISession> };
+  "ai.sessionMessages": { params: AISessionMessagesParams; result: Array<AISessionMessage> };
+  "ai.sessionSend": { params: AISessionSendParams; result: AISessionSendStarted };
+  "ai.sessionUpdate": { params: AISessionUpdateRequest; result: AISession };
   "ai.setDefaultModel": { params: AiSetDefaultModelParams; result: boolean };
   "ai.tasks": { params: Record<string, never>; result: Array<AITask> };
   "ai.transcriptionClose": { params: AiTranscriptionCloseParams; result: string };
   "ai.transcriptionOpen": { params: AiTranscriptionOpenParams; result: string };
+  "ai.updateEndpoint": { params: AiUpdateEndpointParams; result: AiEndpoint };
   "ai.updateModel": { params: AiUpdateModelParams; result: boolean };
   "ai.updateTask": { params: AiUpdateTaskParams; result: AITask };
   "events.unwatch": { params: Record<string, never>; result: boolean };
   "events.watch": { params: Partial<Record<EventName, Array<string> | null>>; result: boolean };
   "expression.create": { params: CreateExpressionRequest; result: string };
   "expression.get": { params: ExpressionUrlRequest; result: ExpressionRendered | null };
-  "expression.getMany": { params: ExpressionManyRequest; result: Array<ExpressionRendered | null> };
+  "expression.getMany": { params: ExpressionManyRequest; result: Array<ExpressionManyEntry | null> };
   "expression.getRaw": { params: ExpressionUrlRequest; result: string | null };
   "expression.interact": { params: ExpressionInteractRequest; result: string };
   "expression.interactions": { params: ExpressionUrlRequest; result: Array<InteractionMeta> };
@@ -239,6 +322,19 @@ export interface RpcMethods {
   "hosting.setHotWallet": { params: SetHotWalletAddressRequest; result: boolean };
   "hosting.wallet": { params: Record<string, never>; result: HostingWalletResult };
   "hosting.walletHistory": { params: Record<string, never>; result: JsonValue };
+  "identity.claimOffer": { params: ClaimOfferParams; result: ClaimOfferResult };
+  "identity.cosignIncept": { params: CosignInceptParams; result: JsonValue };
+  "identity.custodyStatus": { params: Record<string, never>; result: DeviceKeys };
+  "identity.devices": { params: Record<string, never>; result: Array<DeviceView> };
+  "identity.joinStatus": { params: JoinStatusParams; result: JoinStatus };
+  "identity.log": { params: LogParams; result: IdentityLog };
+  "identity.offers": { params: OffersParams; result: Array<OfferListing> };
+  "identity.openOffer": { params: OpenOfferParams; result: OfferOpened };
+  "identity.publish": { params: PublishParams; result: SignedHead };
+  "identity.rekey": { params: Record<string, never>; result: DeviceKeys };
+  "identity.resetLog": { params: ResetLogParams; result: boolean };
+  "identity.resolve": { params: ResolveParams; result: DidResolutionResult };
+  "identity.status": { params: Record<string, never>; result: IdentityStatus };
   "language.all": { params: LanguageListParams; result: Array<LanguageHandle> };
   "language.applyTemplate": { params: ApplyTemplateRequest; result: LanguageRef };
   "language.get": { params: LanguageAddressParams; result: LanguageHandle };
@@ -262,7 +358,6 @@ export interface RpcMethods {
   "perspective.addLink": { params: PerspectiveAddLinkParams; result: DecoratedLinkExpression };
   "perspective.addLinkExpression": { params: PerspectiveAddLinkExpressionParams; result: DecoratedLinkExpression };
   "perspective.addLinks": { params: PerspectiveAddLinksParams; result: Array<DecoratedLinkExpression> };
-  "perspective.addSdna": { params: PerspectiveAddSdnaParams; result: PerspectiveAddSdnaResult };
   "perspective.all": { params: Record<string, never>; result: Array<PerspectiveHandle> };
   "perspective.commitBatch": { params: PerspectiveCommitBatchParams; result: PerspectiveLinkDiff };
   "perspective.create": { params: CreatePerspectiveRequest; result: PerspectiveHandle };
@@ -273,25 +368,27 @@ export interface RpcMethods {
   "perspective.disposeSparql": { params: PerspectiveSubscriptionParams; result: boolean };
   "perspective.evaluateGetters": { params: PerspectiveEvaluateGettersParams; result: string };
   "perspective.executeCommands": { params: PerspectiveExecuteCommandsParams; result: null };
-  "perspective.flowFired": { params: PerspectiveFlowFiredParams; result: Array<string> };
+  "perspective.flowFired": { params: PerspectiveFlowFiredParams; result: Array<FlowFiredEntry> };
   "perspective.flowStates": { params: PerspectiveFlowStatesParams; result: Array<FlowStateEntry> };
   "perspective.flowValidOutputs": { params: PerspectiveFlowValidOutputsParams; result: Array<ValidOutput> };
   "perspective.get": { params: PerspectiveUuidParams; result: PerspectiveHandle | null };
-  "perspective.getAllShacl": { params: PerspectiveGetAllShaclParams; result: Array<PerspectiveNamedShacl> };
-  "perspective.getShacl": { params: PerspectiveShaclNameParams; result: PerspectiveShacl | null };
-  "perspective.getShaclNames": { params: PerspectiveUuidParams; result: Array<string> };
-  "perspective.getShaclTargetClass": { params: PerspectiveShaclNameParams; result: string | null };
   "perspective.getSubjectData": { params: PerspectiveGetSubjectDataParams; result: string };
+  "perspective.instanceAddToCollection": { params: PerspectiveInstanceAddToCollectionParams; result: CollectionItemAdded };
+  "perspective.instanceCreate": { params: PerspectiveInstanceCreateParams; result: InstanceCreated };
+  "perspective.instanceRemove": { params: PerspectiveInstanceRemoveParams; result: InstanceRemoved };
+  "perspective.instanceRemoveFromCollection": { params: PerspectiveInstanceRemoveFromCollectionParams; result: CollectionItemRemoved };
+  "perspective.instanceUpdate": { params: PerspectiveInstanceUpdateParams; result: InstanceUpdated };
   "perspective.interpretationOverlays": { params: PerspectiveUuidParams; result: Array<OverlayView> };
   "perspective.linkMutations": { params: PerspectiveLinkMutationsParams; result: PerspectiveLinkDiff };
   "perspective.mintFlowReceipt": { params: PerspectiveMintFlowReceiptParams; result: PerspectiveMintFlowReceiptResult };
   "perspective.modelQuery": { params: PerspectiveModelQueryParams; result: string };
-  "perspective.modelSubscribe": { params: PerspectiveModelQueryParams; result: PerspectiveSubscribed };
+  "perspective.modelSubscribe": { params: PerspectiveModelSubscribeParams; result: PerspectiveSubscribed };
   "perspective.proposeFlowTransition": { params: PerspectiveProposeFlowTransitionParams; result: ProposeOutcome };
   "perspective.publishSnapshot": { params: PerspectiveUuidParams; result: string };
   "perspective.queryLinks": { params: PerspectiveQueryLinksParams; result: Array<DecoratedLinkExpression> };
   "perspective.queryProlog": { params: PerspectiveQueryParams; result: string };
   "perspective.querySparql": { params: PerspectiveSparqlParams; result: string };
+  "perspective.registerShapes": { params: PerspectiveRegisterShapesParams; result: RegisterResult };
   "perspective.rejectFlowProposal": { params: PerspectiveFlowProposalParams; result: PerspectiveRejectFlowProposalResult };
   "perspective.rejectInterpretation": { params: PerspectiveResolveInterpretationParams; result: boolean };
   "perspective.remove": { params: PerspectiveUuidParams; result: boolean };
@@ -303,9 +400,10 @@ export interface RpcMethods {
   "perspective.runAgent": { params: RunAgentRequest; result: AgentReply };
   "perspective.runInterpretation": { params: RunInterpretationRequest; result: Array<string> };
   "perspective.runInterpretationWithHarness": { params: RunInterpretationWithHarnessRequest; result: Array<string> };
+  "perspective.shapes": { params: PerspectiveShapesParams; result: Array<ShapeSummary> };
   "perspective.snapshot": { params: PerspectiveUuidParams; result: DecoratedPerspective | null };
   "perspective.subjectClassesOf": { params: PerspectiveSubjectClassesOfParams; result: { [key in string]: Array<string> } };
-  "perspective.subscribeQuery": { params: PerspectiveQueryParams; result: PerspectiveSubscribed };
+  "perspective.subscribeQuery": { params: PerspectiveSubscribeQueryParams; result: PerspectiveSubscribed };
   "perspective.subscribeSparql": { params: PerspectiveQueryParams; result: PerspectiveSubscribed };
   "perspective.update": { params: PerspectiveUpdateParams; result: PerspectiveHandle };
   "perspective.updateLink": { params: PerspectiveUpdateLinkParams; result: DecoratedLinkExpression };
@@ -315,6 +413,7 @@ export interface RpcMethods {
   "runtime.addHcAgentInfos": { params: AddAgentInfosRequest; result: boolean };
   "runtime.addLinkLanguageTemplates": { params: LinkLanguageTemplatesRequest; result: Array<string> };
   "runtime.computeLog": { params: RuntimeComputeLogParams; result: Array<ComputeLogEntry> };
+  "runtime.config": { params: Record<string, never>; result: RuntimeConfig };
   "runtime.createNotification": { params: NotificationInput; result: string };
   "runtime.deleteNotification": { params: RuntimeNotificationIdParams; result: boolean };
   "runtime.exportData": { params: ExportRequest; result: boolean };
@@ -328,6 +427,7 @@ export interface RpcMethods {
   "runtime.inbox": { params: Record<string, never>; result: Array<PerspectiveExpression> };
   "runtime.info": { params: Record<string, never>; result: RuntimeInfo };
   "runtime.linkLanguageTemplates": { params: Record<string, never>; result: Array<LanguageMeta> };
+  "runtime.logTail": { params: LogTailParams; result: LogTail };
   "runtime.networkMetrics": { params: Record<string, never>; result: string };
   "runtime.notifications": { params: Record<string, never>; result: Array<Notification> };
   "runtime.openLink": { params: OpenLinkRequest; result: boolean };
@@ -335,8 +435,10 @@ export interface RpcMethods {
   "runtime.quit": { params: Record<string, never>; result: boolean };
   "runtime.removeFriends": { params: FriendsListRequest; result: Array<string> };
   "runtime.removeLinkLanguageTemplates": { params: LinkLanguageTemplatesRequest; result: Array<string> };
+  "runtime.restart": { params: Record<string, never>; result: boolean };
   "runtime.restartHolochain": { params: Record<string, never>; result: boolean };
   "runtime.sendFriendMessage": { params: RuntimeSendFriendMessageParams; result: boolean };
+  "runtime.setConfig": { params: SetConfigParams; result: SetConfigResult };
   "runtime.setFreeHostingEnabled": { params: RuntimeSetFreeHostingEnabledParams; result: boolean };
   "runtime.setHostRates": { params: SetHostRatesRequest; result: boolean };
   "runtime.setStatus": { params: SetStatusRequest; result: boolean };
@@ -352,9 +454,11 @@ export interface RpcMethods {
   "runtime.updateNotification": { params: RuntimeUpdateNotificationParams; result: boolean };
   "runtime.verifySignature": { params: VerifySignatureRequest; result: boolean };
   "sfu.addIceCandidate": { params: SfuAddIceCandidateParams; result: boolean };
-  "sfu.callAnswerServerOffer": { params: SfuAnswerServerOfferParams; result: boolean };
+  "sfu.callAnswerServerOffer": { params: SfuAnswerServerOfferParams; result: SfuAnswerResult };
   "sfu.callJoin": { params: SfuCallJoinParams; result: CallSessionInfo };
-  "sfu.callLeave": { params: SfuRoomParams; result: boolean };
+  "sfu.callLeave": { params: SfuCallLeaveParams; result: boolean };
+  "sfu.callRestartIce": { params: SfuRestartIceParams; result: boolean };
+  "sfu.callResume": { params: SfuResumeParams; result: SfuResumeResult };
   "sfu.callSetQualityPreference": { params: SfuQualityPreferenceParams; result: boolean };
   "sfu.cascadeStatus": { params: Record<string, never>; result: SfuCascadeStatus };
   "sfu.ensureMembership": { params: SfuEnsureMembershipParams; result: boolean };
@@ -397,10 +501,18 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "agent.getTrustedAgents",
   "agent.isLocked",
   "agent.status",
+  "ai.detectEndpoints",
   "ai.discoverModels",
+  "ai.endpoints",
   "ai.getDefaultModel",
-  "ai.modelLoadingStatus",
+  "ai.localHardware",
+  "ai.localPlan",
+  "ai.localStatus",
+  "ai.modelStatus",
   "ai.models",
+  "ai.session",
+  "ai.sessionList",
+  "ai.sessionMessages",
   "ai.tasks",
   "expression.get",
   "expression.getMany",
@@ -409,6 +521,13 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "hosting.info",
   "hosting.wallet",
   "hosting.walletHistory",
+  "identity.custodyStatus",
+  "identity.devices",
+  "identity.joinStatus",
+  "identity.log",
+  "identity.offers",
+  "identity.resolve",
+  "identity.status",
   "language.all",
   "language.get",
   "language.meta",
@@ -423,20 +542,18 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "perspective.flowStates",
   "perspective.flowValidOutputs",
   "perspective.get",
-  "perspective.getAllShacl",
-  "perspective.getShacl",
-  "perspective.getShaclNames",
-  "perspective.getShaclTargetClass",
   "perspective.getSubjectData",
   "perspective.interpretationOverlays",
   "perspective.modelQuery",
   "perspective.queryLinks",
   "perspective.queryProlog",
   "perspective.querySparql",
+  "perspective.shapes",
   "perspective.snapshot",
   "perspective.subjectClassesOf",
   "perspective.verifyFlowReceipt",
   "runtime.computeLog",
+  "runtime.config",
   "runtime.freeHostingEnabled",
   "runtime.friendStatus",
   "runtime.friends",
@@ -445,6 +562,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "runtime.inbox",
   "runtime.info",
   "runtime.linkLanguageTemplates",
+  "runtime.logTail",
   "runtime.networkMetrics",
   "runtime.notifications",
   "runtime.outbox",
@@ -472,9 +590,14 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
 export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "agent.generate",
   "agent.unlock",
-  "ai.addModel",
+  "ai.deleteUpstreamModel",
   "ai.embed",
+  "ai.localInstall",
+  "ai.localStart",
   "ai.prompt",
+  "ai.pullModel",
+  "ai.removeEndpoint",
+  "ai.updateEndpoint",
   "language.applyTemplate",
   "language.publish",
   "neighbourhood.join",
@@ -483,4 +606,10 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "perspective.runInterpretation",
   "perspective.runInterpretationWithHarness",
   "runtime.restartHolochain",
+]);
+
+/** Calls that open something on the executor that outlives them (a live query): the client cancels one that timed out, as one it aborted. */
+export const OPENS_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
+  "perspective.modelSubscribe",
+  "perspective.subscribeQuery",
 ]);

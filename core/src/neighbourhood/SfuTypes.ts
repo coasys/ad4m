@@ -11,6 +11,8 @@ import type { SfuQualityPreferenceParams } from "../generated/api/SfuQualityPref
 
 export type { CallSessionInfo } from "../generated/api/CallSessionInfo"
 export type { IceServer } from "../generated/api/IceServer"
+export type { SfuAnswerRefusal } from "../generated/api/SfuAnswerRefusal"
+export type { SfuAnswerResult } from "../generated/api/SfuAnswerResult"
 export type { SfuCallRenegotiationOffer } from "../generated/api/SfuCallRenegotiationOffer"
 export type { SfuCascadePipe } from "../generated/api/SfuCascadePipe"
 export type { SfuCascadeStatus } from "../generated/api/SfuCascadeStatus"
@@ -18,8 +20,12 @@ export type { SfuConfig } from "../generated/api/SfuConfig"
 export type { SfuDataMessage } from "../generated/api/SfuDataMessage"
 export type { SfuMigrateEvent } from "../generated/api/SfuMigrateEvent"
 export type { SfuParticipantQualityPreference } from "../generated/api/SfuParticipantQualityPreference"
+export type { SfuResumeResult } from "../generated/api/SfuResumeResult"
+export type { SfuResumeRoster } from "../generated/api/SfuResumeRoster"
 export type { SfuRoomInfo } from "../generated/api/SfuRoomInfo"
 export type { SfuRoomRoster } from "../generated/api/SfuRoomRoster"
+export type { SfuRosterParticipant } from "../generated/api/SfuRosterParticipant"
+export type { SfuSessionReplaced } from "../generated/api/SfuSessionReplaced"
 export type { SfuRoomParticipantInfo } from "../generated/api/SfuRoomParticipantInfo"
 export type { SfuStatus } from "../generated/api/SfuStatus"
 export type { TrackMapEntry } from "../generated/api/TrackMapEntry"
@@ -32,6 +38,8 @@ export type SfuQualityPreference = SfuQualityPreferenceParams["preference"]
 
 /** Browser-side participant — carries a live MediaStream. */
 export interface SfuParticipantInfo {
+    /** The participant's session: an agent in the call from two devices is two participants. On the mesh path, the DID. */
+    participantId: string
     agentDid: string
     stream: MediaStream
     hasAudio: boolean

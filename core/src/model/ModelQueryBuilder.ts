@@ -8,9 +8,10 @@
 import type { Ad4mModel } from "./Ad4mModel";
 import type { LinkStatus, PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { LiveQuery } from "../perspectives/LiveQuery";
+import { requireTotalCount } from "./query-common";
 import type {
   Where, Order, IncludeMap, Query,
-  ResultsWithTotalCount, PaginationResult,
+  Page, PaginationResult, CursorPage,
   TypedQueryWhere, TypedOrder, TypedIncludeMap, PropertyKeysOf,
 } from "./types";
 
@@ -66,7 +67,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   }
 
   /** Run `params` once and build model instances from the rows. */
-  private execute(params: Query): Promise<ResultsWithTotalCount<T>> {
+  private execute(params: Query): Promise<Page<T>> {
     if (this.unionClasses) {
       return (this.ctor as any).executeUnionQuery(this.perspective, this.unionClasses, params);
     }
@@ -75,16 +76,11 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
   /** Build model instances from a raw result pushed by a subscription. */
   private parse(raw: any): T[] {
-    const { include, properties } = this.queryParams;
+    const { include, properties } = (this.ctor as any).withIncludeAll(this.unionClasses ?? [this.ctor], this.queryParams);
     if (this.unionClasses) {
       return (this.ctor as any).parseUnionResult(this.unionClasses, this.perspective, raw, include, properties);
     }
     return (this.ctor as any).parseModelResult(this.perspective, raw, include, properties);
-  }
-
-  /** Snapshot instances for dirty tracking, as `execute` does for its rows. */
-  private takeSnapshots(instances: T[]): void {
-    (this.ctor as any).takeSnapshots(instances, this.queryParams.include);
   }
 
   /** Ends the current subscription, if any, on the client and the executor. */
@@ -98,9 +94,11 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   /** Open a live model query for `params` as the current subscription.
    *  Resolves with it and the raw initial result; `onResult` gets every later one.
    *  A failed open ends only its own query: a later call may already own
-   *  `currentSubscription`. */
+   *  `currentSubscription`. A cursor (`after`) is never sent: the executor
+   *  refuses it on a subscription, which re-runs one query, not a page walk. */
   private async live(params: Query, onResult: (raw: any) => void): Promise<{ live: LiveQuery; initial: any }> {
-    const { className, queryJson } = this.prepare(params);
+    const { after: _after, ...cursorless } = params;
+    const { className, queryJson } = this.prepare(cursorless);
     const live = new LiveQuery(
       this.perspective.client, this.perspective.uuid,
       () => this.perspective.modelSubscribe(className, queryJson),
@@ -110,10 +108,16 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     try {
       return { live, initial: await live.start() };
     } catch (e) {
-      live.dispose();
-      if (this.currentSubscription === live) this.currentSubscription = undefined;
+      this.endFailed(live);
       throw e;
     }
+  }
+
+  /** End `live` after its call failed. A later call may already own
+   *  `currentSubscription`, so only clear it if it is still `live`. */
+  private endFailed(live: LiveQuery): void {
+    live.dispose();
+    if (this.currentSubscription === live) this.currentSubscription = undefined;
   }
 
   /**
@@ -388,7 +392,20 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     return this;
   }
 
+  /** Query the class registered under `className` instead of this builder's
+   *  class (how `Ad4mModel.query(p).overrideModelClassName(name)` queries a
+   *  model known only by name). On an undecorated `Ad4mModel` builder the rows
+   *  hydrate as plain `Ad4mModel`s, and `includeAll` is not available (list
+   *  the relations in `include`).
+   *  @throws On a `queryOf()` builder: a union already names its classes, and
+   *  its result type promises instances of them. */
   overrideModelClassName(className: string): ModelQueryBuilder<T> {
+    if (this.unionClasses) {
+      throw new Error(
+        `overrideModelClassName("${className}") cannot be used on a queryOf() builder; ` +
+        `use Ad4mModel.query(perspective).overrideModelClassName("${className}") instead`,
+      );
+    }
     this.modelClassName = className;
     return this;
   }
@@ -495,12 +512,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     });
     const initialResults = parseResults(initial);
     lastFingerprint = fingerprint(initialResults);
-
-    // Take snapshots for dirty tracking
-    for (const inst of initialResults) {
-      (inst as any).takeSnapshot?.(this.queryParams.include);
-    }
-
     return initialResults;
   }
 
@@ -525,8 +536,9 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async count(): Promise<number> {
-    const { totalCount } = await this.execute({ ...this.queryParams, limit: 0 });
-    return totalCount;
+    // A count has no page a cursor can continue from — as paginate(), it is not sent.
+    const { after: _after, ...cursorless } = this.queryParams || {};
+    return requireTotalCount(await this.execute({ ...cursorless, limit: 0, count: true }));
   }
 
   /**
@@ -567,8 +579,21 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async countSubscribe(callback: (count: number) => void): Promise<number> {
     this.dispose();
-    const { initial } = await this.live({ ...this.queryParams, limit: 0 }, (raw) => callback(raw.totalCount ?? 0));
-    return initial.totalCount ?? 0;
+    // As paginateSubscribe: a push without the asked-for count is logged and
+    // skipped, since a throw here would reach the client's update dispatch.
+    const { live, initial } = await this.live({ ...this.queryParams, limit: 0, count: true }, (raw) => {
+      try {
+        callback(requireTotalCount(raw));
+      } catch (e) {
+        console.error('Count subscription error:', e);
+      }
+    });
+    try {
+      return requireTotalCount(initial);
+    } catch (e) {
+      this.endFailed(live);
+      throw e;
+    }
   }
 
   /**
@@ -595,9 +620,35 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async paginate(pageSize: number, pageNumber: number): Promise<PaginationResult<T>> {
-    const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    const { results, totalCount } = await this.execute(paginationQuery);
-    return { results, totalCount, pageSize, pageNumber };
+    // Page numbers page by offset; a cursor from the starting query has no meaning here.
+    const { after: _after, ...base } = this.queryParams || {};
+    const paginationQuery = { ...base, limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
+    const answer = await this.execute(paginationQuery);
+    return { results: answer.results, totalCount: requireTotalCount(answer), pageSize, pageNumber };
+  }
+
+  /**
+   * One page in timestamp order, continued by cursor rather than by offset.
+   *
+   * Pass no `after` (or `""`) for the first page, then each page's
+   * `nextCursor`; its absence means the last page. A row created while you
+   * page cannot shift a later page the way it shifts an `offset` page. The
+   * builder's `order` must be `timestamp`, `createdAt` or `updatedAt` (either
+   * direction) or unset; the executor refuses any other order. The builder's
+   * `offset` is ignored. Use `paginate()` for page numbers or other orders.
+   *
+   * @example
+   * ```typescript
+   * const builder = Message.query(perspective).order({ createdAt: "DESC" });
+   * let page = await builder.page(50);
+   * while (page.nextCursor) page = await builder.page(50, page.nextCursor);
+   * ```
+   */
+  async page(pageSize: number, after?: string): Promise<CursorPage<T>> {
+    // A cursor page returns no total, so `count` is dropped with `offset`: no COUNT runs for it.
+    const { offset: _offset, count: _count, ...rest } = this.queryParams || {};
+    const { results, nextCursor } = await this.execute({ ...rest, limit: pageSize, after: after ?? '' });
+    return { results, ...(nextCursor !== undefined ? { nextCursor } : {}), pageSize };
   }
 
   /**
@@ -653,8 +704,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     // the executor hydrates one page per change rather than every match.
     // Pushes arrive in revision order, so the last callback is the latest
     // state (#1051). After dispose() the live query delivers nothing.
+    // Page numbers are offsets, so a cursor (`after`) is not sent.
+    const { after: _after, ...cursorless } = this.queryParams || {};
     const paginatedQuery: Query = {
-      ...(this.queryParams || {}),
+      ...cursorless,
       limit: pageSize,
       offset: pageSize * (pageNumber - 1),
       count: true,
@@ -666,11 +719,11 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     const toPage = (raw: any): { page: PaginationResult<T>; fp: string } => {
       const results = this.parse(raw);
       const fp = fingerprint([results, raw?.totalCount]);
-      this.takeSnapshots(results);
-      return { page: { results, totalCount: raw?.totalCount, pageSize, pageNumber }, fp };
+      // `count: true` is set above, so the executor sends a total.
+      return { page: { results, totalCount: requireTotalCount(raw), pageSize, pageNumber }, fp };
     };
 
-    const { initial } = await this.live(paginatedQuery, (raw) => {
+    const { live, initial } = await this.live(paginatedQuery, (raw) => {
       try {
         const { page, fp } = toPage(raw);
         if (fp === lastFingerprint) return;
@@ -680,9 +733,15 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
         console.error('Paginate subscription error:', e);
       }
     });
-    const { page, fp } = toPage(initial);
-    lastFingerprint = fp;
-    return page;
+    let first: { page: PaginationResult<T>; fp: string };
+    try {
+      first = toPage(initial);
+    } catch (e) {
+      this.endFailed(live);
+      throw e;
+    }
+    lastFingerprint = first.fp;
+    return first.page;
   }
 
   /**

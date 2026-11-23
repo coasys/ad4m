@@ -124,19 +124,24 @@ pub struct SfuRoomInfo {
 #[serde(rename_all = "camelCase")]
 #[ts(export, rename = "SfuRoomParticipantInfo")]
 pub struct SfuParticipantInfo {
+    /// The session: an agent in the call from two devices is two participants.
+    pub participant_id: String,
     pub agent_did: String,
     pub has_audio: bool,
     pub has_video: bool,
     pub is_active_speaker: bool,
 }
 
-/// Maps one outbound SDP m-line to the originating participant's DID.
+/// Maps one outbound SDP m-line to the originating participant.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct TrackMapEntry {
     /// The SDP mid (media-line identifier) in the offer.
     pub mid: String,
+    /// The session whose media this m-line carries: one agent on two
+    /// devices sends two.
+    pub participant_id: String,
     /// DID of the participant whose media this m-line carries.
     pub agent_did: String,
     /// `"audio"` or `"video"`.
@@ -156,6 +161,13 @@ pub struct SfuCallRenegotiationOffer {
     /// DID of the participant this offer is addressed to.  Used by the
     /// events_ws fanout to filter per-user.
     pub target_did: String,
+    /// The session the offer is for. Every session of `target_did` gets
+    /// it; only this one applies it.
+    pub participant_id: String,
+    /// The id of this offer. A resend and `sfu.callResume` repeat it.
+    /// The answer names it (`sfu.callAnswerServerOffer`); an answer that
+    /// names another id is refused.
+    pub offer_id: String,
     pub neighbourhood_url: String,
     pub room_name: String,
     /// JSON-encoded `RTCSessionDescriptionInit` for the new offer.
@@ -184,6 +196,8 @@ pub struct SfuPipeRenegotiationOffer {
     pub room_id: String,
     /// JSON-encoded `RTCSessionDescriptionInit`.
     pub sdp_offer: String,
+    /// The session each new m-line carries, by this node's ids.
+    pub track_mapping: Vec<TrackMapEntry>,
 }
 
 /// Internal payload: the SFU event loop emits an SDP answer for a
@@ -220,6 +234,101 @@ pub struct SfuMigrateEvent {
     pub migrate_to_did: String,
 }
 
+/// What `sfu.callAnswerServerOffer` answers. A refusal is this value, not
+/// an RPC error. The event loop sends it after it has applied the answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SfuAnswerResult {
+    pub accepted: bool,
+    /// Set only when `accepted` is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reason: Option<SfuAnswerRefusal>,
+}
+
+impl SfuAnswerResult {
+    pub fn accepted() -> Self {
+        Self {
+            accepted: true,
+            reason: None,
+        }
+    }
+
+    pub fn refused(reason: SfuAnswerRefusal) -> Self {
+        Self {
+            accepted: false,
+            reason: Some(reason),
+        }
+    }
+}
+
+/// Why an answer was not applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "kebab-case")]
+#[ts(export)]
+pub enum SfuAnswerRefusal {
+    /// The id is not the pending offer's, and it is not the offer accepted
+    /// last for this session. Also an answer under the pending offer's own
+    /// id that does not parse, or whose m-lines are not that offer's. The
+    /// pending offer stays pending in every case.
+    Stale,
+    /// This session has no offer waiting.
+    NoPending,
+    /// The event loop has no such session.
+    UnknownSession,
+}
+
+/// What `sfu.callResume` answers. `listed: false` is the room or the
+/// session gone. A session of another agent is an RPC error, not this.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SfuResumeResult {
+    pub listed: bool,
+    /// The pending server offer, when the session is listed and one waits.
+    /// The same value the offer event carries, including its `offerId`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub offer: Option<SfuCallRenegotiationOffer>,
+    /// The room's sessions, when the session is listed. The same list and
+    /// the same `revision` the roster event carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub roster: Option<SfuResumeRoster>,
+}
+
+impl SfuResumeResult {
+    pub fn unlisted() -> Self {
+        Self {
+            listed: false,
+            offer: None,
+            roster: None,
+        }
+    }
+
+    pub fn listed(offer: Option<SfuCallRenegotiationOffer>, roster: SfuResumeRoster) -> Self {
+        Self {
+            listed: true,
+            offer,
+            roster: Some(roster),
+        }
+    }
+}
+
+/// The sessions in a [`SfuResumeResult`], at one roster revision.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SfuResumeRoster {
+    /// The same `revision` the `sfu-room-roster` event for this publish
+    /// carries. A client drops a reply whose revision is older than a
+    /// roster event it already has.
+    #[ts(type = "number")]
+    pub revision: u64,
+    pub participants: Vec<SfuRosterParticipant>,
+}
+
 /// Who is in a call room now. Published whenever the room's participants
 /// change, and delivered to each of them, so a client knows who joined and
 /// who left without waiting on media.
@@ -229,8 +338,42 @@ pub struct SfuMigrateEvent {
 pub struct SfuRoomRoster {
     pub neighbourhood_url: String,
     pub room_name: String,
-    /// DIDs of the room's participants on this node, sorted.
-    pub participants: Vec<String>,
+    /// One sequence for every roster this process publishes: 1 the first
+    /// time, then one more on every publish, a resume included. A later
+    /// room, and a room created again, continues it, so a roster from an
+    /// earlier life of the room is older. A client drops a roster older
+    /// than one it already applied.
+    #[ts(type = "number")]
+    pub revision: u64,
+    /// The room's sessions, sorted by DID, then participant id: this node's,
+    /// and those the other cascade nodes in the room announced, whose ids
+    /// name their node (`P3@did:key:...`). An agent in the call from two
+    /// devices is listed twice.
+    pub participants: Vec<SfuRosterParticipant>,
+}
+
+/// One session in an [`SfuRoomRoster`].
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SfuRosterParticipant {
+    pub agent_did: String,
+    pub participant_id: String,
+}
+
+/// A later join from the same device (another tab) replaced one of this
+/// agent's call sessions: the executor has dropped it. Delivered to the
+/// agent (`targetDid`); the session whose participant id it names stops and
+/// does not rejoin.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SfuSessionReplaced {
+    pub target_did: String,
+    pub neighbourhood_url: String,
+    pub room_name: String,
+    /// The replaced session.
+    pub participant_id: String,
 }
 
 /// Data channel message relayed through the SFU, published on the
@@ -241,6 +384,10 @@ pub struct SfuRoomRoster {
 pub struct SfuDataMessage {
     /// DID of the participant who sent the data.
     pub sender_did: String,
+    /// The session that sent it. A message reaches the sender's agent when
+    /// it is in the call on another device too; the sending session itself
+    /// drops it by this id.
+    pub sender_participant_id: String,
     pub neighbourhood_url: String,
     pub room_name: String,
     /// Label of the data channel.
@@ -256,6 +403,7 @@ impl SfuDataMessage {
     /// text (lossy).
     pub fn new(
         sender_did: String,
+        sender_participant_id: String,
         neighbourhood_url: String,
         room_name: String,
         channel_label: String,
@@ -269,6 +417,7 @@ impl SfuDataMessage {
         };
         Self {
             sender_did,
+            sender_participant_id,
             neighbourhood_url,
             room_name,
             channel_label,
@@ -295,7 +444,7 @@ pub struct CallSessionInfo {
     #[ts(optional)]
     pub redirect_to: Option<String>,
     /// Roster of existing participants at join time, format:
-    /// `"participantId:did"` (local) or `"remote-did:did"` (cascade).
+    /// `"participantId:did"`.
     /// For track-to-DID attribution, use the `track_mapping` field on
     /// each renegotiation offer — the SDP mids are assigned there.
     pub stream_mapping: Vec<String>,

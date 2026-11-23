@@ -10,20 +10,34 @@
  * through cascade pipes between executors, so the client never follows
  * a redirect or a rebalance to another node — it has no way to reach one.
  *
+ * One session per device: a join names this device (`deviceId`), and the
+ * executor gives it a participant id that every later call about the
+ * session names. The same agent on another device is another participant;
+ * a later join from this device — another tab — replaces this session, and
+ * the manager stops (`replaced`) rather than taking the call back. Each
+ * user join sends a random session key that the rebuilds of that call send
+ * again; the executor refuses (409) a key another tab's join replaced, so a
+ * tab that missed its `sfu-session-replaced` notice stops all the same.
+ *
  * Applications (Flux, WE, or any other) wrap this class with their
  * own reactive store and UI layer.  The manager itself only touches
  * Web APIs (RTCPeerConnection, MediaStream) and the AD4M
  * neighbourhood RPC surface.
  */
 
+import { RpcError } from "../apiClient"
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy"
 import type {
     CallSessionInfo,
+    SfuAnswerResult,
     SfuCallRenegotiationOffer,
     SfuConfig,
     SfuDataMessage,
     SfuQualityPreference,
+    SfuResumeResult,
     SfuRoomRoster,
+    SfuRosterParticipant,
+    SfuSessionReplaced,
 } from "./SfuTypes"
 
 // ── Public types ──────────────────────────────────────────────────
@@ -36,33 +50,60 @@ export interface SfuNeighbourhoodApi {
         neighbourhoodUrl: string,
         roomName: string,
         sdpOffer: string,
+        deviceId: string,
+        sessionKey: string,
     ): Promise<CallSessionInfo>
     sfuCallLeave(
         neighbourhoodUrl: string,
         roomName: string,
+        participantId: string,
     ): Promise<boolean>
     sfuCallSetQualityPreference(
         neighbourhoodUrl: string,
         roomName: string,
+        participantId: string,
         preference: SfuQualityPreference,
     ): Promise<boolean>
     sfuCallAnswerServerOffer(
         neighbourhoodUrl: string,
         roomName: string,
+        participantId: string,
+        offerId: string,
         sdpAnswer: string,
-    ): Promise<boolean>
+    ): Promise<SfuAnswerResult>
     subscribeSfuCallRenegotiationOffer(
         targetDid: string,
         callback: (event: SfuCallRenegotiationOffer) => void,
     ): () => void
+    /** Ask the SFU to restart ICE on the session `participantId`; the offer
+     *  arrives through `subscribeSfuCallRenegotiationOffer`. */
+    sfuCallRestartIce(
+        neighbourhoodUrl: string,
+        roomName: string,
+        participantId: string,
+    ): Promise<boolean>
+    /** Called after a network change, once calls reach the executor again. */
+    onNetworkChange(callback: () => void): () => void
+    /** Fires after the executor socket opened again after a drop (not on the
+     *  first open). */
+    onReconnect(callback: () => void): () => void
+    /** This session's state on the executor (`sfu.callResume`): listed with
+     *  the pending offer and the room's roster, or not listed. */
+    sfuCallResume(
+        neighbourhoodUrl: string,
+        roomName: string,
+        participantId: string,
+    ): Promise<SfuResumeResult>
     sfuAddIceCandidate(
         neighbourhoodUrl: string,
         roomName: string,
+        participantId: string,
         candidate: string,
     ): Promise<boolean>
     sfuSendData(
         neighbourhoodUrl: string,
         roomName: string,
+        participantId: string,
         channelLabel: string,
         data: string,
         binary?: boolean,
@@ -72,6 +113,9 @@ export interface SfuNeighbourhoodApi {
     ): () => void
     subscribeSfuRoomRoster(
         callback: (roster: SfuRoomRoster) => void,
+    ): () => void
+    subscribeSfuSessionReplaced(
+        callback: (event: SfuSessionReplaced) => void,
     ): () => void
 }
 
@@ -87,7 +131,9 @@ export interface SfuCallState {
     peerConnection: RTCPeerConnection | null
 }
 
+/** One session in the call: an agent on two devices is two participants. */
 export interface SfuParticipantState {
+    participantId: string
     did: string
     stream: MediaStream
     hasAudio: boolean
@@ -102,7 +148,24 @@ export type SfuEvent =
     | "active-speaker"
     | "stream-added"
     | "stream-removed"
+    /** `(SfuSessionReplaced)` — a later join from this device took the call over; this manager stopped. */
+    | "replaced"
+    /** `(SfuCallEnded)` — the call ended on its own and will not come back without a new `join`:
+     *  rebuilding gave up on it (`reason: "gave-up"`), or the executor refused this session's
+     *  resume (`reason: "refused"`). The manager has stopped. */
+    | "call-ended"
     | "error"
+
+/** Why a call ended without the user leaving it. */
+export interface SfuCallEnded {
+    /** `gave-up`: rebuilding could not keep the call up — MAX_REBUILDS within
+     *  REBUILD_WINDOW_MS, or a rejoin window spent without a rejoin.
+     *  `refused`: the executor refused this session's resume (403) — the
+     *  session is another agent's, or this agent is no longer a member of
+     *  the neighbourhood; `error` carries the executor's message. */
+    reason: "gave-up" | "refused"
+    error: Error
+}
 
 export type SfuEventCallback = (...args: any[]) => void
 
@@ -114,9 +177,73 @@ export interface SfuIceConfig {
 
 // ── Constants ─────────────────────────────────────────────────────
 
+/** The last answer a connection produced for a server offer. The executor
+ *  holds its pending offer until an answer lands and resends it, so a
+ *  resent offer — an event's, or one the resume's reply returns — gets
+ *  this answer sent again, without the SDP steps a second time. */
+interface CachedAnswer {
+    pc: RTCPeerConnection
+    offerId: string
+    roomName: string
+    participantId: string
+    sdpAnswer: string
+    /** The executor took the answer: resends of its offer get nothing more. */
+    accepted: boolean
+}
+
+/** A failure of the signalling socket, not of the call: the socket closed
+ *  while the call was out (503) or the reply did not come in time (408). */
+function isSocketFault(err: unknown): boolean {
+    return err instanceof RpcError && (err.status === 503 || err.status === 408)
+}
+
 const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
     { urls: "stun:stun.l.google.com:19302" },
 ]
+
+/**
+ * Where a browser profile keeps its device id. The prefix versions the
+ * stored value, as `connect`'s `{version}/ad4m-token` does; it is not the
+ * SDK release, so an upgrade does not make every browser a new device.
+ */
+const DEVICE_ID_KEY = "v1/ad4m-sfu-device-id"
+
+/** Outside a browser: one device id for the life of the process. */
+let processDeviceId: string | null = null
+
+function randomId(): string {
+    const crypto = (globalThis as any).crypto
+    if (crypto?.randomUUID) return crypto.randomUUID()
+    return Array.from({ length: 4 }, () => Math.random().toString(36).slice(2, 10)).join("")
+}
+
+/**
+ * This device's id for SFU calls, unless the app gives one. In a browser it
+ * is kept in `localStorage`, which every tab of one profile shares, so the
+ * tabs of one browser are one device; outside a browser (Node), the process
+ * is the device.
+ */
+export function defaultDeviceId(): string {
+    let storage: Storage | undefined
+    try {
+        storage = (globalThis as any).localStorage
+    } catch {
+        storage = undefined // storage denied (sandboxed frame, privacy settings)
+    }
+    if (storage) {
+        try {
+            let id = storage.getItem(DEVICE_ID_KEY)
+            if (!id) {
+                id = randomId()
+                storage.setItem(DEVICE_ID_KEY, id)
+            }
+            return id
+        } catch {
+            /* unusable storage: fall back to the process */
+        }
+    }
+    return (processDeviceId ??= randomId())
+}
 
 // ── Topology resolution ───────────────────────────────────────────
 
@@ -175,24 +302,40 @@ export class SfuManager {
     private neighbourhoodUrl: string
     private roomId: string
     private agentDid: string
+    /** The device this manager calls from: a later join from it replaces this session. */
+    private deviceId: string
+    /** This call session's key: a rebuild joins with it again, a user's join
+     *  makes a new one. The executor refuses a key a later join from this
+     *  device replaced, so a tab that missed its notice cannot take the call back. */
+    private sessionKey: string = randomId()
     private state: SfuCallState
     private callbacks: Map<SfuEvent, SfuEventCallback[]> = new Map()
     private iceServers: RTCIceServer[]
-    /** Reconnects since ICE last reached connected — not since a join: a
-     *  join can succeed while the media path never comes up. */
-    private reconnectAttempts: number = 0
-    private static readonly MAX_RECONNECTS = 3
+    /** When each rebuild of this call started, those within the last
+     *  REBUILD_WINDOW_MS. ICE connecting does not clear it: a socket that
+     *  flaps can rebuild a call whose ICE connects every time. */
+    private rebuilds: number[] = []
+    private static readonly MAX_REBUILDS = 3
+    private static readonly REBUILD_WINDOW_MS = 120_000
     /** How long one rebuild keeps retrying a join the executor cannot take yet. */
     private static readonly REJOIN_WINDOW_MS = 120_000
-    /** How long ICE may stay disconnected before a rebuild: the executor's `ICE_DISCONNECT_GRACE`. */
-    private static readonly DISCONNECT_GRACE_MS = 10_000
+    /** The executor's wait before the first resend of an unanswered offer.
+     *  `OFFER_RETRY_BASE` in `rust-executor/src/sfu/server.rs`. */
+    private static readonly OFFER_RESEND_BASE_MS = 10_000
+    /** How long ICE has to come back after that resend arrives. */
+    private static readonly RESTART_AFTER_RESEND_MS = 5_000
+    /** How long an ICE restart has to bring the connection back before a rebuild.
+     *  The window stays open through the first resend, then the previous 5 s
+     *  for ICE. A restart that connects clears the timer at once. */
+    private static readonly RESTART_TIMEOUT_MS =
+        SfuManager.OFFER_RESEND_BASE_MS + SfuManager.RESTART_AFTER_RESEND_MS
     /** A rebuild is running: a second failure signal joins it rather than starting another. */
     private reconnecting = false
     /** Bumped by `leave()`, so a reconnect in flight stops before rejoining. */
     private generation: number = 0
-    /** Which participant each received media section carries, from the server's mappings. */
-    private midToParticipant: Map<string, string> = new Map()
-    /** DIDs the roster removed and has not listed since. */
+    /** Which participant (session and agent) each received media section carries, from the server's mappings. */
+    private midToParticipant: Map<string, { participantId: string; did: string }> = new Map()
+    /** Participant ids the roster removed and has not listed since. */
     private departed: Set<string> = new Set()
     /** The sender of each kind of local media: declared at join, so a later camera or screen needs no renegotiation. */
     private senders: Map<"audio" | "video", RTCRtpSender> = new Map()
@@ -200,16 +343,85 @@ export class SfuManager {
     private replacedTracks: Map<"audio" | "video", MediaStreamTrack | null> = new Map()
     /** The last quality preference set, for a rebuilt connection to restore. */
     private qualityPreference: SfuQualityPreference | null = null
-    /** Server offers waiting to be applied, in arrival order, one at a time. */
+    /** Server-offer work, one step at a time. Every offer — an event's or a
+     *  resume reply's — runs its SDP steps to their end before the next
+     *  offer's start; no RPC waits here — an answer's send only needs the
+     *  queue to have produced it, and the executor matches each answer to
+     *  its offer by id, so answers need no order between them. A resume's
+     *  reply applies its roster and offer here, but the ask's own wait is
+     *  off the queue: the restart offer it triggers on the executor must
+     *  not wait for it. */
     private offerQueue: Promise<void> = Promise.resolve()
+    /** How long a `sfu.callResume` ask waits for its reply before dropping
+     *  it. The RPC's own timeout is 30 s, but an ICE restart has only
+     *  RESTART_TIMEOUT_MS to bring media back, and the last
+     *  RESTART_AFTER_RESEND_MS of that is the resent offer's share once its
+     *  answer is out. An ask made while a restart is in flight is bounded
+     *  by the restart's remaining time, which is always within this. */
+    private static readonly RESUME_STEP_TIMEOUT_MS =
+        SfuManager.RESTART_TIMEOUT_MS - SfuManager.RESTART_AFTER_RESEND_MS
+    /** The `offerId` of the server offer last applied to the connection.
+     *  The resume ask snapshots it: the reply's offer applies only while
+     *  this is still what it was when the ask went out. */
+    private appliedOfferId: string | null = null
+    /** The connection a `sfu.callResume` ask is out for — the ask sent and
+     *  its reply not yet applied (or its box not yet spent). One at a time
+     *  per connection: a trigger while it is set only marks `resumeAgain`,
+     *  and every ask that ends runs that one follow-up. Otherwise each of
+     *  the ask's triggers — the socket's return, ICE down during a
+     *  restart, the chain a reply's offer starts — sent its own RPC, and
+     *  each made the executor resend its pending offer. */
+    private resumeInFlight: RTCPeerConnection | null = null
+    /** A trigger while `resumeInFlight`'s ask was out wants one more ask
+     *  once it ends; `resumeAgainUnlisted` keeps whether any such trigger
+     *  was an unlisted roster's retry. */
+    private resumeAgain = false
+    private resumeAgainUnlisted = false
+    /** The last answer this connection produced for a server offer. The
+     *  executor's pending offer is the one source of what is still owed:
+     *  a socket fault on the send keeps nothing more, since the executor
+     *  resends the offer, or the resume's reply returns it. */
+    private lastAnswer: CachedAnswer | null = null
+    private reconnectUnsubscribe: (() => void) | null = null
     private renegotiationUnsubscribe: (() => void) | null = null
     private rosterUnsubscribe: (() => void) | null = null
+    /** For the manager's call, not one join: a reconnect between its leave and its join still hears a notice. */
+    private replacedUnsubscribe: (() => void) | null = null
+    /** Participant ids of this call a notice can still name: the current one, and any whose leave found it gone. */
+    private heldIds: Set<string> = new Set()
+    /** Settles when the latest join has its participant id, or failed. */
+    private joinSettled: Promise<void> = Promise.resolve()
     private dataChannelUnsubscribe: (() => void) | null = null
-    private disconnectedTimer: ReturnType<typeof setTimeout> | null = null
-    /** Running while the room's roster leaves this agent out: see `noticeRoster`. */
+    /** An ICE restart is in flight until this fires: ICE going disconnected
+     *  again joins it, a network change replaces it. */
+    private restartTimer: ReturnType<typeof setTimeout> | null = null
+    /** The restart in flight's deadline — `restartTimer`'s fire time on the
+     *  `performance.now` scale, so a wall-clock jump cannot stretch or cut
+     *  the window — so an ask it made (`sfu.callResume` after the socket's
+     *  return) is bounded by what is left of the window, never a fresh one. */
+    private restartDeadline: number | null = null
+    private networkUnsubscribe: (() => void) | null = null
+    /** Running while the room's roster leaves this session out: see `noticeRoster`. */
     private unlistedTimer: ReturnType<typeof setTimeout> | null = null
-    /** How long the roster may leave this agent out before the call is rebuilt. */
+    /** The newest applied roster left this session out and no ask has cleared
+     *  it since: an ask for it that went unanswered — a socket fault or an
+     *  expired box — is asked again within the grace. */
+    private unlisted = false
+    /** The revision of the newest applied roster that listed this session.
+     *  A resume's `listed: false` stands unless a roster newer than its ask
+     *  listed the session meanwhile — a boolean could not order the two. */
+    private listedAtRevision = 0
+    /** The highest roster `revision` this join applied; older rosters and
+     *  resume replies are dropped. Reset per join: the executor counts
+     *  revisions across all its rooms, and a restarted executor counts
+     *  from 1 again. */
+    private rosterRevision = 0
+    /** How long the roster may leave this session out before the manager asks `sfu.callResume`. */
     private static readonly UNLISTED_GRACE_MS = 3_000
+    /** How long after a socket reconnect — with no network change — ICE has to be connected before it is restarted. */
+    private static readonly ICE_CHECK_AFTER_SOCKET_MS = 2_000
+    /** Running from a socket reconnect until ICE is looked at: see `checkIceSoon`. */
+    private iceCheckTimer: ReturnType<typeof setTimeout> | null = null
 
     constructor(
         neighbourhood: SfuNeighbourhoodApi,
@@ -218,11 +430,14 @@ export class SfuManager {
         neighbourhoodUrl?: string,
         iceConfig?: SfuIceConfig,
         sfuConfig?: SfuConfig,
+        /** This device; unset, `defaultDeviceId()`. Apps outside a browser profile (Electron, tests) pass their own. */
+        deviceId?: string,
     ) {
         this.neighbourhood = neighbourhood
         this.neighbourhoodUrl = neighbourhoodUrl || ""
         this.roomId = roomId
         this.agentDid = agentDid
+        this.deviceId = deviceId || defaultDeviceId()
         this.state = {
             topology: "sfu",
             roomId,
@@ -252,51 +467,74 @@ export class SfuManager {
 
     /**
      * Rebuild the call after its connection failed: leave, then join again
-     * on this executor. Leaving first matters: the executor still holds this
-     * DID's old session until it notices the connection died.
+     * on this executor. Leaving first frees the old session's slot at once;
+     * the join would replace it anyway, as it comes from this device.
+     * Another tab's join can still replace the old session before the leave
+     * lands: that notice stops the rebuild wherever it is, and a session its
+     * join already got is left. A tab that missed the notice learns it from
+     * the rejoin: the executor refuses the replaced session key (409), and
+     * the manager stops as the notice would have stopped it, without retrying.
      *
-     * Two budgets. A rebuild whose join works but whose connection fails
-     * again counts once against `MAX_RECONNECTS`, reset when ICE connects.
-     * Within one rebuild, a join that fails because the executor cannot be
-     * reached — a restart, an outage — is retried with backoff for up to
-     * `REJOIN_WINDOW_MS`, so the call comes back on its own once it can.
+     * Two budgets. At most `MAX_REBUILDS` rebuilds start within
+     * `REBUILD_WINDOW_MS`; one more ends the call: `error`, then
+     * `call-ended` with reason `gave-up`, until the user joins again. Within one rebuild, a join that fails because
+     * the executor cannot be reached — a restart, an outage — is retried with backoff for up to
+     * `REJOIN_WINDOW_MS`, so the call comes back on its own once it can. A window spent without a
+     * rejoin ends it the same way (`giveUp`).
      */
     private async reconnect(): Promise<void> {
         const stream = this.state.localStream
         if (!stream || this.reconnecting) return
         const generation = this.generation
-        if (++this.reconnectAttempts > SfuManager.MAX_RECONNECTS) {
-            this.emit("error", new Error("SFU reconnect attempts exhausted"))
+        const now = performance.now()
+        this.rebuilds = this.rebuilds.filter((at) => now - at < SfuManager.REBUILD_WINDOW_MS)
+        if (this.rebuilds.length >= SfuManager.MAX_REBUILDS) {
+            console.error(
+                `SFU: ${this.rebuilds.length} rebuilds in ${SfuManager.REBUILD_WINDOW_MS / 1000} s; not rebuilding again`,
+            )
+            this.giveUp(new Error("SFU reconnect attempts exhausted"))
             return
         }
+        this.rebuilds.push(now)
         console.info(
-            `SFU: connection failed, reconnecting (${this.reconnectAttempts}/${SfuManager.MAX_RECONNECTS})`,
+            `SFU: connection failed, reconnecting (${this.rebuilds.length}/${SfuManager.MAX_REBUILDS} in ${SfuManager.REBUILD_WINDOW_MS / 1000} s)`,
         )
         this.reconnecting = true
+        this.endRestart()
+        const previous = this.state.participantId
         try {
-            const deadline = Date.now() + SfuManager.REJOIN_WINDOW_MS
+            const deadline = performance.now() + SfuManager.REJOIN_WINDOW_MS
             for (let delay = 1000; ; delay = Math.min(delay * 2, 10_000)) {
                 this.releaseServerEvents()
                 if (this.state.peerConnection) {
                     this.state.peerConnection.close()
                     this.state.peerConnection = null
                 }
-                try {
-                    await this.neighbourhood.sfuCallLeave(this.neighbourhoodUrl, this.roomId)
-                } catch {
-                    /* best-effort: the executor frees a dead session on its own */
-                }
-                if (generation !== this.generation) return // left meanwhile
-                this.resetParticipants()
+                await this.leaveSession()
+                if (generation !== this.generation) return // left or replaced meanwhile
+                // The people in the call have not changed: keep them, drop only
+                // the old connection's media. The rejoin's roster says who left.
+                this.clearMedia()
+                // A stream-removed handler may have left the call.
+                if (generation !== this.generation) return
                 try {
                     await this.join(stream)
                     if (this.qualityPreference) await this.setQualityPreference(this.qualityPreference)
                     return
                 } catch (e) {
                     if (generation !== this.generation) return
-                    if (Date.now() + delay > deadline) {
+                    if (e instanceof RpcError && e.status === 409) {
+                        this.stopReplaced({
+                            targetDid: this.agentDid,
+                            neighbourhoodUrl: this.neighbourhoodUrl,
+                            roomName: this.roomId,
+                            participantId: previous ?? "",
+                        })
+                        return
+                    }
+                    if (performance.now() + delay > deadline) {
                         console.error("SFU reconnect failed:", e)
-                        this.emit("error", e)
+                        this.giveUp(e instanceof Error ? e : new Error(String(e)))
                         return
                     }
                     console.warn(`SFU: rejoin failed, retrying in ${delay} ms:`, e)
@@ -307,6 +545,84 @@ export class SfuManager {
         } finally {
             this.reconnecting = false
         }
+    }
+
+    /**
+     * Repair the connection in place: the SFU offers new ICE credentials
+     * (`sfuCallRestartIce`), the offer is answered like any server offer,
+     * and the browser gathers candidates on whatever network it has now.
+     * DTLS, tracks and the room slot stay. If the connection is not back
+     * within `RESTART_TIMEOUT_MS`, the call is rebuilt. One restart at a
+     * time: a call while one is in flight does nothing.
+     *
+     * The restart names this manager's session, the participant id its
+     * current join returned: the executor restarts that session only, never
+     * another device's of the same agent. A manager with no session — its
+     * join not back yet, between a rebuild's leave and join, left, or
+     * replaced by another tab — sends nothing.
+     */
+    private restartIce(pc: RTCPeerConnection): void {
+        const participantId = this.state.participantId
+        if (this.restartTimer || this.reconnecting || this.state.peerConnection !== pc || !participantId) return
+        const generation = this.generation
+        console.info("SFU: restarting ICE")
+        const restart = setTimeout(() => {
+            this.restartTimer = null
+            this.restartDeadline = null
+            if (generation !== this.generation || this.state.peerConnection !== pc) return
+            if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") return
+            void this.reconnect()
+        }, SfuManager.RESTART_TIMEOUT_MS)
+        this.restartTimer = restart
+        this.restartDeadline = performance.now() + SfuManager.RESTART_TIMEOUT_MS
+        this.sendRestart(pc, participantId)
+    }
+
+    /**
+     * Ask the executor to restart ICE on `pc`'s session. Nothing is kept
+     * when the request does not arrive: the next resume reply says whether
+     * the executor holds this session's pending offer — none while the
+     * restart is still in flight and ICE is still down asks for a fresh
+     * one. A refusal (an executor that lost this session) leaves the
+     * decision to the restart's timeout: a blip may still heal.
+     */
+    private sendRestart(pc: RTCPeerConnection, participantId: string): void {
+        this.neighbourhood.sfuCallRestartIce(this.neighbourhoodUrl, this.roomId, participantId).catch((err) => {
+            if (isSocketFault(err)) {
+                console.warn("SFU: the ICE restart may not have reached the executor:", err)
+                return
+            }
+            console.warn("SFU: ICE restart refused:", err)
+        })
+    }
+
+    /**
+     * The socket came back with no network change: the path ICE uses is the
+     * one it had, so media that kept flowing through the fault is left
+     * alone, and ICE is restarted only if it is still not connected
+     * ICE_CHECK_AFTER_SOCKET_MS later. A restart already in flight is left
+     * alone too: the executor holds its offer and resends it, and a new
+     * request would only restart its gathering.
+     * (A network change is a different call: the path changed, so it
+     * restarts ICE at once — see the `onNetworkChange` handler in `join`.)
+     */
+    private checkIceSoon(): void {
+        if (this.iceCheckTimer) clearTimeout(this.iceCheckTimer)
+        this.iceCheckTimer = setTimeout(() => {
+            this.iceCheckTimer = null
+            const pc = this.state.peerConnection
+            if (!pc || this.reconnecting || this.restartTimer) return
+            if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") return
+            this.restartIce(pc)
+        }, SfuManager.ICE_CHECK_AFTER_SOCKET_MS)
+    }
+
+    private endRestart(): void {
+        if (this.restartTimer) {
+            clearTimeout(this.restartTimer)
+            this.restartTimer = null
+        }
+        this.restartDeadline = null
     }
 
     on(event: SfuEvent, callback: SfuEventCallback): void {
@@ -347,53 +663,67 @@ export class SfuManager {
 
     /** Join the SFU call with simulcast support. */
     async join(localStream: MediaStream): Promise<void> {
+        const generation = this.generation
+        if (!this.reconnecting) {
+            this.sessionKey = randomId()
+            this.rebuilds = []
+        }
         this.state.localStream = localStream
 
         const pc = new RTCPeerConnection({ iceServers: this.iceServers })
         this.state.peerConnection = pc
 
-        // ICE state monitoring for reconnecting.
-        // "disconnected" is often transient (network blip, route change):
-        // the connection gets the same grace the server gives it before
-        // dropping the peer, and a rebuild only follows once the server
-        // would have dropped it anyway.  "failed" reconnects at once.
+        // ICE state monitoring for recovery. "disconnected" (a route change,
+        // a network switch, a blip) restarts ICE on this connection at once;
+        // "failed" rebuilds the call at once.
         pc.oniceconnectionstatechange = () => {
             if (this.state.peerConnection !== pc) return // superseded
             if (pc.iceConnectionState === "failed") {
-                if (this.disconnectedTimer) {
-                    clearTimeout(this.disconnectedTimer)
-                    this.disconnectedTimer = null
-                }
-                this.reconnect()
+                this.endRestart()
+                void this.reconnect()
             } else if (pc.iceConnectionState === "disconnected") {
-                if (!this.disconnectedTimer) {
-                    this.disconnectedTimer = setTimeout(() => {
-                        this.disconnectedTimer = null
-                        // Only reconnect if this pc is still the active one
-                        // and still disconnected.
-                        if (
-                            this.state.peerConnection === pc &&
-                            pc.iceConnectionState === "disconnected"
-                        ) {
-                            this.reconnect()
-                        }
-                    }, SfuManager.DISCONNECT_GRACE_MS)
-                }
-            } else {
-                // Any other state (connected, completed, checking) cancels
-                // the pending disconnected timer; a working path ends a run
-                // of reconnects.
-                if (
-                    pc.iceConnectionState === "connected" ||
-                    pc.iceConnectionState === "completed"
-                ) {
-                    this.reconnectAttempts = 0
-                }
-                if (this.disconnectedTimer) {
-                    clearTimeout(this.disconnectedTimer)
-                    this.disconnectedTimer = null
-                }
+                // The restart is the whole answer: whether the socket it
+                // goes out on still answers is the socket layer's call. A
+                // restart already in flight gets no blind second request —
+                // one a network change sent while ICE still read
+                // `connected` may never have reached the executor, and
+                // only its pending offer says so: the resume's reply
+                // applies it, or asks for the restart again inside the
+                // same deadline.
+                if (this.restartTimer) this.resume(pc)
+                else this.restartIce(pc)
+            } else if (
+                pc.iceConnectionState === "connected" ||
+                pc.iceConnectionState === "completed"
+            ) {
+                // A working path ends a restart.
+                this.endRestart()
             }
+        }
+
+        // A network change: the path ICE used is gone, though ICE may still
+        // report `connected` — that is the old path's state, and it keeps
+        // reporting it until consent checks fail, seconds after the path is
+        // lost. Restart ICE at once on the socket the change opened,
+        // whatever ICE reports. A restart in flight is replaced: its
+        // request may have gone out over the old network. Listened to once
+        // per call, not per rebuild.
+        if (!this.networkUnsubscribe) {
+            this.networkUnsubscribe = this.neighbourhood.onNetworkChange(() => {
+                if (this.iceCheckTimer) {
+                    clearTimeout(this.iceCheckTimer)
+                    this.iceCheckTimer = null
+                }
+                const current = this.state.peerConnection
+                if (!current || this.reconnecting) return
+                this.endRestart()
+                this.restartIce(current)
+            })
+        }
+        // The socket came back: ICE is checked, and the executor is asked
+        // for what went by while it was down.
+        if (!this.reconnectUnsubscribe) {
+            this.reconnectUnsubscribe = this.neighbourhood.onReconnect(() => this.socketBack())
         }
 
         // Both kinds of local media, send-only, declared now whether or not a
@@ -427,14 +757,16 @@ export class SfuManager {
         pc.ontrack = (event: RTCTrackEvent) => {
             if (this.state.peerConnection !== pc) return
             const mid = event.transceiver?.mid
-            const did = mid ? this.midToParticipant.get(mid) : undefined
+            const owner = mid ? this.midToParticipant.get(mid) : undefined
             // Someone the roster said left stays gone: a late offer can still name them.
-            if (!did || did === this.agentDid || this.departed.has(did)) return
-            const participant = this.ensureParticipant(did)
+            if (!owner || owner.participantId === this.state.participantId || this.departed.has(owner.participantId)) return
+            const participant = this.ensureParticipant(owner.participantId, owner.did)
             participant.stream.addTrack(event.track)
             this.refreshKinds(participant)
             this.emit("stream-added", participant.stream, event.track)
             event.track.addEventListener("ended", () => {
+                // A rebuild may have taken the track out already, and told listeners.
+                if (!participant.stream.getTracks().includes(event.track)) return
                 participant.stream.removeTrack(event.track)
                 this.refreshKinds(participant)
                 this.emit("stream-removed", participant.stream, event.track)
@@ -453,9 +785,11 @@ export class SfuManager {
         pc.onicecandidate = (event) => {
             if (!event.candidate) return
             if (joinComplete) {
+                if (this.state.peerConnection !== pc || !this.state.participantId) return
                 this.neighbourhood.sfuAddIceCandidate(
                     this.neighbourhoodUrl,
                     this.roomId,
+                    this.state.participantId,
                     event.candidate.candidate,
                 ).catch((err) => {
                     console.error(
@@ -477,6 +811,7 @@ export class SfuManager {
         // they wait for it, then apply in order.
         let markJoined!: () => void
         const joined = new Promise<void>((resolve) => { markJoined = resolve })
+        this.joinSettled = joined
         this.subscribeServerEvents(pc, joined)
         let session: CallSessionInfo
         try {
@@ -484,29 +819,53 @@ export class SfuManager {
                 this.neighbourhoodUrl,
                 this.roomId,
                 sdpOffer,
+                this.deviceId,
+                this.sessionKey,
             )
         } catch (err) {
             // Settled either way: offers queued behind this join reach
             // `applyServerOffer`, which drops them for the abandoned connection.
+            // The executor holds no session for it, so there is nothing to leave.
             markJoined()
             this.abandon(pc)
             throw err
         }
+        if (generation !== this.generation) {
+            // Left or replaced while the join was out: the session it got is no one's.
+            markJoined()
+            this.abandon(pc)
+            await this.neighbourhood
+                .sfuCallLeave(this.neighbourhoodUrl, this.roomId, session.participantId)
+                .catch((e) => console.warn("SFU: leaving the call failed:", e))
+            return
+        }
         this.state.participantId = session.participantId
+        this.heldIds.add(session.participantId)
 
         try {
             const answer = JSON.parse(session.sdpAnswer)
             await pc.setRemoteDescription(new RTCSessionDescription(answer))
         } catch (err) {
             markJoined()
+            // Replaced or left while the answer applied: that already closed the
+            // connection and settled the session, so the join just ends.
+            if (generation !== this.generation) return
+            // The executor holds a session this connection cannot use: leave it.
             this.abandon(pc)
+            await this.leaveSession()
             throw err
         }
         markJoined()
 
         // Who was in the room when this join landed (`participantId:did`).
         // The roster event keeps it current from here.
-        this.applyRoster(session.streamMapping.map((entry) => entry.slice(entry.indexOf(":") + 1)), false)
+        this.applyRoster(
+            session.streamMapping.map((entry) => {
+                const at = entry.indexOf(":")
+                return { participantId: entry.slice(0, at), agentDid: entry.slice(at + 1) }
+            }),
+            false,
+        )
 
         // Flush buffered trickle ICE candidates
         joinComplete = true
@@ -514,6 +873,7 @@ export class SfuManager {
             this.neighbourhood.sfuAddIceCandidate(
                 this.neighbourhoodUrl,
                 this.roomId,
+                session.participantId,
                 candidate,
             ).catch((err) => {
                 console.error(
@@ -541,31 +901,68 @@ export class SfuManager {
     }
 
     /**
-     * The room's roster no longer lists this agent while `pc` is the call's:
-     * the server has dropped this session, and ICE may not say so. In E6
-     * (CI job 53158) one of six sessions never started a rebuild after a
-     * 20 s outage the server had dropped it for. Rebuild once the roster has
-     * left this agent out for `UNLISTED_GRACE_MS`; a roster that lists it
-     * again in that time cancels, since one published just before this
-     * join landed can arrive after it.
+     * The room's roster no longer lists this session (its participant id)
+     * while `pc` is the call's: the server has dropped this session, and ICE
+     * may not say so. In E6 (CI job 53158) one of six sessions never started
+     * a rebuild after a 20 s outage the server had dropped it for. The check
+     * is per session, not per agent: another device of this agent keeps the
+     * DID listed. Once the roster has left this session out for
+     * `UNLISTED_GRACE_MS`, ask the executor for this session's state
+     * (`resume`): its reply decides whether the call is rebuilt; a roster
+     * that lists it again in that time cancels, since one published just
+     * before this join landed can arrive after it. A manager with no session
+     * (between leave and join, or stopped because a later tab replaced it)
+     * starts no rebuild: `stop` clears the timer and drops `pc`, so a
+     * replaced session never rejoins and never takes the call back from the
+     * newer tab.
      */
-    private noticeRoster(pc: RTCPeerConnection, dids: string[]): void {
-        if (dids.includes(this.agentDid)) {
+    private noticeRoster(pc: RTCPeerConnection, sessions: SfuRosterParticipant[], revision: number): void {
+        const participantId = this.state.participantId
+        if (!participantId || sessions.some((s) => s.participantId === participantId)) {
+            if (participantId) this.listedAtRevision = revision
+            this.unlisted = false
             this.clearUnlistedTimer()
             return
         }
+        this.unlisted = true
         if (this.unlistedTimer) return
         this.unlistedTimer = setTimeout(() => {
             this.unlistedTimer = null
-            if (this.state.peerConnection !== pc) return
-            console.info("SFU: the room no longer lists this session, rebuilding the call")
-            void this.reconnect()
+            if (this.state.peerConnection !== pc || this.state.participantId !== participantId || !this.unlisted) return
+            this.resume(pc, true)
         }, SfuManager.UNLISTED_GRACE_MS)
     }
 
-    /** Undo a join that failed part way: its subscription and its connection. */
+    /**
+     * Leave this manager's session on the executor, if it has one, and forget
+     * it. Only the participant id a join returned is ever left: a manager
+     * that never joined, or whose join was refused, sends nothing, so it can
+     * never end a session another tab of this agent is in.
+     */
+    private async leaveSession(): Promise<void> {
+        const participantId = this.state.participantId
+        if (!participantId) return
+        this.state.participantId = null
+        // A session the leave found gone may have been replaced, its notice
+        // still on the way. One the leave ended, or that it never reached, a
+        // notice names only if this manager's own rejoin replaced it.
+        let found = true
+        try {
+            found = await this.neighbourhood.sfuCallLeave(this.neighbourhoodUrl, this.roomId, participantId)
+        } catch (e) {
+            /* best-effort: the executor frees a dead session on its own */
+            console.warn("SFU: leaving the call failed:", e)
+        }
+        if (found) this.heldIds.delete(participantId)
+    }
+
+    /** Undo a join that failed part way: its subscriptions and its connection. */
     private abandon(pc: RTCPeerConnection): void {
         this.releaseServerEvents()
+        if (this.heldIds.size === 0) {
+            this.replacedUnsubscribe?.()
+            this.replacedUnsubscribe = null
+        }
         pc.close()
         if (this.state.peerConnection === pc) this.state.peerConnection = null
     }
@@ -576,8 +973,10 @@ export class SfuManager {
      * executor sends a socket only the events it watches, and a call
      * carries the pending watch ahead of itself, so no event the join
      * causes is lost. Offers wait for `joined` and then apply one at a
-     * time, in arrival order; one that arrives for a connection already
-     * replaced is dropped.
+     * time. Of the offers waiting when a step starts, only the newest is
+     * applied (the executor has one pending offer at a time, so the others
+     * are stale), with the track mappings of all of them, in arrival order.
+     * One that arrives for a connection already replaced is dropped.
      */
     private subscribeServerEvents(pc: RTCPeerConnection, joined: Promise<void>): void {
         // Join may run more than once (a reconnect). The prior
@@ -587,105 +986,499 @@ export class SfuManager {
         const ours = (e: { neighbourhoodUrl: string; roomName: string }) =>
             e.neighbourhoodUrl === this.neighbourhoodUrl && e.roomName === this.roomId
 
+        // The executor sends this agent's offers and notices to each of its
+        // sessions; only those naming this session's participant id are ours,
+        // and that id is known once the join returns.
+        const waiting: SfuCallRenegotiationOffer[] = []
+        // A queue per connection: a step stuck on a dropped connection holds nothing of this one.
+        this.offerQueue = Promise.resolve()
+        this.listedAtRevision = 0
+        this.rosterRevision = 0
+        this.unlisted = false
+        // Per-session offer state: offer ids name one session's offers,
+        // so this session decides on its own ids afresh, and the old
+        // session's last answer is not this one's to send.
+        this.lastAnswer = null
+        this.appliedOfferId = null
+        // The old connection's resume ask and whatever it marked belong to
+        // it: its late reply applies nothing and runs nothing here.
+        this.resumeInFlight = null
+        this.resumeAgain = false
+        this.resumeAgainUnlisted = false
         this.renegotiationUnsubscribe = this.neighbourhood.subscribeSfuCallRenegotiationOffer(
             this.agentDid,
             (event) => {
                 if (!ours(event)) return
+                waiting.push(event)
                 this.offerQueue = this.offerQueue
                     .then(() => joined)
-                    .then(() => this.applyServerOffer(pc, event))
+                    .then(() => {
+                        const offers = waiting.splice(0).filter((e) => e.participantId === this.state.participantId)
+                        if (offers.length > 0) return this.applyServerOffers(pc, offers)
+                    })
+                    .catch((err) => console.warn("SFU: applying a server offer failed:", err))
             },
         )
         this.rosterUnsubscribe = this.neighbourhood.subscribeSfuRoomRoster((roster) => {
             if (!ours(roster) || this.state.peerConnection !== pc) return
+            if (roster.revision <= this.rosterRevision) return
+            this.rosterRevision = roster.revision
             void joined.then(() => {
                 if (this.state.peerConnection !== pc) return
                 this.applyRoster(roster.participants, true)
-                this.noticeRoster(pc, roster.participants)
+                this.noticeRoster(pc, roster.participants, roster.revision)
             })
+        })
+        // A notice can name the id the join in flight is about to return.
+        this.replacedUnsubscribe ??= this.neighbourhood.subscribeSfuSessionReplaced((event) => {
+            if (!ours(event)) return
+            const stopIfHeld = () => {
+                if (this.heldIds.has(event.participantId)) this.stopReplaced(event)
+            }
+            stopIfHeld()
+            void this.joinSettled.then(stopIfHeld)
         })
 
         for (const unsubscribe of previous) unsubscribe?.()
     }
 
-    /** Apply one server offer to `pc` and answer it, unless `pc` is no longer the call's. */
-    private async applyServerOffer(pc: RTCPeerConnection, event: SfuCallRenegotiationOffer): Promise<void> {
+    /** Run one bounded RPC wait — the resume's ask; after `withinMs` whoever
+     *  waits on it goes on without it. Never an SDP step: one given up on
+     *  would go on changing the connection. */
+    private timeBoxed(step: () => Promise<void>, withinMs: number): Promise<void> {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const timeout = new Promise<void>((resolve) => {
+            timer = setTimeout(() => {
+                console.warn(`SFU: an RPC wait took over ${withinMs} ms; going on without it`)
+                resolve()
+            }, withinMs)
+        })
+        const run = step().catch((err) => console.warn("SFU: a server-offer step failed:", err))
+        return Promise.race([run, timeout]).finally(() => clearTimeout(timer))
+    }
+
+    /** Apply the newest of `offers` (in arrival order) to `pc` and answer it, with the track mappings of all. */
+    private async applyServerOffers(pc: RTCPeerConnection, offers: SfuCallRenegotiationOffer[]): Promise<void> {
+        const event = offers[offers.length - 1]
         if (this.state.peerConnection !== pc) return
-        // The mapping first: the tracks this offer adds arrive while it is applied.
-        for (const entry of event.trackMapping ?? []) {
-            this.midToParticipant.set(entry.mid, entry.agentDid)
+        // The executor's resend of the offer this connection last answered —
+        // an event's resend or one the resume's reply returned: its answer
+        // is the cached one, sent again without applying the SDP a second
+        // time. Once the executor took it, its resends get nothing.
+        const last = this.lastAnswer
+        if (last && last.pc === pc && last.offerId === event.offerId) {
+            if (last.accepted) return
+            void this.sendAnswer(last)
+            return
         }
+        // The mapping first: the tracks this offer adds arrive while it is applied.
+        for (const entry of offers.flatMap((offer) => offer.trackMapping ?? [])) {
+            this.midToParticipant.set(entry.mid, { participantId: entry.participantId, did: entry.agentDid })
+        }
+        let sdpAnswer: string
         try {
             await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(event.sdpOffer)))
-            await pc.setLocalDescription(await pc.createAnswer())
-            await this.neighbourhood.sfuCallAnswerServerOffer(
-                this.neighbourhoodUrl,
-                event.roomName,
-                JSON.stringify(pc.localDescription),
-            )
+            if (this.state.peerConnection !== pc) return
+            const answer = await pc.createAnswer()
+            if (this.state.peerConnection !== pc) return
+            await pc.setLocalDescription(answer)
+            sdpAnswer = JSON.stringify(pc.localDescription)
         } catch (err) {
             if (this.state.peerConnection !== pc) return
-            // A renegotiation that fails leaves this connection out of step
-            // with the server — or the server has already dropped it. Either
-            // way the call is rebuilt; `reconnect` reports an error only if
-            // that fails too.
+            // An offer this connection cannot take leaves it out of step with
+            // the server: rebuild. `reconnect` reports an error only if that fails too.
             console.warn("SFU: renegotiation failed, rebuilding the connection:", err)
             void this.reconnect()
+            return
+        }
+        const answer: CachedAnswer = { pc, offerId: event.offerId, roomName: event.roomName, participantId: event.participantId, sdpAnswer, accepted: false }
+        this.appliedOfferId = event.offerId
+        this.lastAnswer = answer
+        // The send is not waited on: the reply only marks the answer
+        // accepted or acts on `unknown-session`, and the offer's id already
+        // matches it to its offer — so the next offer's SDP need not wait.
+        void this.sendAnswer(answer)
+    }
+
+    /**
+     * Send an answer to the executor, under the `offerId` of the offer it
+     * answers: the executor refuses one that names another offer, so a stale
+     * answer cannot use up a newer same-mid offer. The send runs beside the
+     * offer queue, not inside it — the reply is nothing a later offer's SDP
+     * steps wait on. A refusal of `stale` or
+     * `no-pending` is non-acceptance, not a failure — the offer was settled
+     * or superseded, or the server's own SDP step refused it (a str0m
+     * rejection, `ChangesOutOfOrder`) — and whether the connection needs
+     * repair is media and session evidence's call, not a rebuild's here.
+     * One of `unknown-session` rebuilds the call. A socket fault (503,
+     * 408) loses the send and keeps nothing more: the executor holds its
+     * offer and resends it — or the resume's reply returns it — and the
+     * resent offer gets the cached answer. Anything else leaves the
+     * verdict to ICE and the roster, which see whether the session is
+     * really gone.
+     */
+    private async sendAnswer(answer: CachedAnswer): Promise<void> {
+        if (this.state.peerConnection !== answer.pc || this.state.participantId !== answer.participantId) return
+        try {
+            const result = await this.neighbourhood.sfuCallAnswerServerOffer(
+                this.neighbourhoodUrl,
+                answer.roomName,
+                answer.participantId,
+                answer.offerId,
+                answer.sdpAnswer,
+            )
+            // The reply names the connection and session it went out for;
+            // one that lands after either changed is about a call that is
+            // gone: its refusal must not rebuild the new one, its
+            // acceptance must not mark this one's offer answered.
+            if (this.state.peerConnection !== answer.pc || this.state.participantId !== answer.participantId) return
+            if (result.accepted) {
+                answer.accepted = true
+            } else if (result.reason === "unknown-session") {
+                console.warn("SFU: the executor no longer holds this session; rebuilding the call")
+                void this.reconnect()
+            }
+            // `stale` or `no-pending`: not accepted — the offer was settled or
+            // superseded, or the server's own SDP step refused it.
+        } catch (err) {
+            if (this.state.peerConnection !== answer.pc) return
+            if (isSocketFault(err)) {
+                console.warn(
+                    "SFU: the answer did not reach the executor; the offer's resend gets the cached one:",
+                    err,
+                )
+                return
+            }
+            console.warn("SFU: the executor refused the answer; keeping the connection:", err)
         }
     }
 
     /**
-     * Make the participants match `dids`, the room's roster: everyone new
+     * The executor socket opened again: ICE gets its short check, and
+     * `sfu.callResume` returns what went by while the socket was down — an
+     * offer the executor still holds and resends, a roster. Nothing is
+     * replayed: the executor's pending offer is the one source of what is
+     * still owed.
+     */
+    private socketBack(): void {
+        const pc = this.state.peerConnection
+        if (!pc || this.reconnecting) return
+        this.checkIceSoon()
+        // Off the queue: the ask waits out a join still settling, and its
+        // reply applies on the queue — so the restart offer it triggers on
+        // the executor is answered while the reply is still out.
+        this.resume(pc)
+    }
+
+    /**
+     * Ask the executor for this session's state (`sfu.callResume`). The ask
+     * is not a queue step — the restart offer it triggers on the executor
+     * is answered while the reply is still out, inside the restart's
+     * window — but it waits out a join still settling, and its reply's
+     * roster and pending offer apply on the queue like the events that
+     * carry them. `listed: false` — the room or the session gone —
+     * rebuilds the call, unless a roster newer than the ask listed it
+     * again meanwhile. The reply's wait is bounded so a reply landing
+     * after it is dropped — it must not list or unlist, roster, offer or
+     * rebuild a call that already went on; while a restart is in flight
+     * the bound is the restart's remaining time, never a fresh one from
+     * the socket's return. Only the RPC is bounded: the SDP steps a reply
+     * starts run to their end like any offer's.
+     * One ask per connection at a time: while `pc`'s is out a trigger only
+     * marks `resumeAgain`, and `resumeDone` — once the reply is applied or
+     * the box spent — sends the one follow-up the marks add up to, while
+     * `pc` is still this call's.
+     * A socket fault (503, 408) keeps the call: an ask a roster left this
+     * session out for (`retryUnlisted`) is asked again within the grace
+     * while the roster still omits it — an expired box leaves the omission
+     * as unresolved as a fault — while the others wait for the next
+     * reconnect. A 403 ends it: the executor refused this session's
+     * resume — it is another agent's, or this agent lost its membership —
+     * and a refusal does not heal.
+     */
+    private resume(pc: RTCPeerConnection, retryUnlisted = false): void {
+        const participantId = this.state.participantId
+        if (!participantId || this.state.peerConnection !== pc) return
+        if (this.resumeInFlight === pc) {
+            this.resumeAgain = true
+            this.resumeAgainUnlisted ||= retryUnlisted
+            return
+        }
+        this.resumeInFlight = pc
+        const joined = this.joinSettled
+        void joined.then(async () => {
+            // The join the ask waited for may not be this call's any more.
+            if (this.state.peerConnection !== pc || this.state.participantId !== participantId) {
+                this.resumeDone(pc, participantId)
+                return
+            }
+            const askedAtRevision = this.rosterRevision
+            // What `askedAtRevision` is for the roster, this is for offers:
+            // the reply's offer applies only while the offer last applied
+            // is still the one the ask went out under — see `applyResume`.
+            const askedAtOfferId = this.appliedOfferId
+            // A restart in flight owns its remaining window: a socket that
+            // came back late in it bounds the ask by what is left, or
+            // drops it.
+            const restartLeft = this.restartDeadline === null ? Infinity : this.restartDeadline - performance.now()
+            if (restartLeft <= 0) {
+                this.resumeDone(pc, participantId)
+                return
+            }
+            let reply: { result: SfuResumeResult } | { error: unknown } | null = null
+            await this.timeBoxed(async () => {
+                try {
+                    reply = { result: await this.neighbourhood.sfuCallResume(this.neighbourhoodUrl, this.roomId, participantId) }
+                } catch (error) {
+                    reply = { error }
+                }
+            }, Math.min(SfuManager.RESUME_STEP_TIMEOUT_MS, restartLeft))
+            // The box won: whatever the RPC answers now belongs to a call
+            // that went on without it. For an ask a roster left this
+            // session out for, the omission is as unresolved as a fault
+            // left it: the grace asks again while it still holds.
+            if (reply === null) {
+                if (retryUnlisted) this.scheduleUnlistedRetry(pc, participantId)
+                this.resumeDone(pc, participantId)
+                return
+            }
+            this.offerQueue = this.offerQueue
+                .then(() => this.applyResume(pc, participantId, askedAtRevision, askedAtOfferId, reply!, retryUnlisted))
+                .catch((err) => console.warn("SFU: applying the resume's reply failed:", err))
+                .finally(() => this.resumeDone(pc, participantId))
+        })
+    }
+
+    /**
+     * `pc`'s resume ask ended — its reply applied, its box spent, or the
+     * join it waited on turned out to be another call's. The in-flight
+     * marker frees, and a trigger that marked `resumeAgain` while the ask
+     * was out gets its one follow-up, only while `pc` is still this call's
+     * connection and session. An ask ending after its connection was
+     * replaced touches nothing: the new connection's marker and marks are
+     * its own.
+     */
+    private resumeDone(pc: RTCPeerConnection, participantId: string): void {
+        if (this.resumeInFlight !== pc) return
+        this.resumeInFlight = null
+        const again = this.resumeAgain
+        const retryUnlisted = this.resumeAgainUnlisted
+        this.resumeAgain = false
+        this.resumeAgainUnlisted = false
+        if (!again || this.state.peerConnection !== pc || this.state.participantId !== participantId) return
+        this.resume(pc, retryUnlisted)
+    }
+
+    /**
+     * The grace retry an unresolved omission gets: an ask a roster left
+     * this session out for stays open until one answers — a socket fault
+     * or an expired box both leave it unanswered — so while the roster
+     * still omits this session, and no retry runs already, the grace asks
+     * again rather than waiting for a socket reconnect. True when armed.
+     */
+    private scheduleUnlistedRetry(pc: RTCPeerConnection, participantId: string): boolean {
+        // An ask for a session the call has since replaced arms nothing:
+        // the flag it reads is the current session's, and a timer taken
+        // here would only die at its own check with the current session's
+        // retry shut out.
+        if (this.state.peerConnection !== pc || this.state.participantId !== participantId) return false
+        if (!this.unlisted || this.unlistedTimer) return false
+        this.unlistedTimer = setTimeout(() => {
+            this.unlistedTimer = null
+            if (this.state.peerConnection !== pc || this.state.participantId !== participantId || !this.unlisted) return
+            this.resume(pc, true)
+        }, SfuManager.UNLISTED_GRACE_MS)
+        return true
+    }
+
+    /**
+     * Apply a `sfu.callResume` reply on the offer queue: `resume` asked it,
+     * `askedAtRevision` is the roster revision and `askedAtOfferId` the
+     * last applied offer when it did. See `resume` for what each answer
+     * means for the call.
+     */
+    private async applyResume(
+        pc: RTCPeerConnection,
+        participantId: string,
+        askedAtRevision: number,
+        askedAtOfferId: string | null,
+        reply: { result: SfuResumeResult } | { error: unknown },
+        retryUnlisted: boolean,
+    ): Promise<void> {
+        if ("error" in reply) {
+            const err = reply.error
+            if (this.state.peerConnection !== pc || this.state.participantId !== participantId) return
+            if (isSocketFault(err)) {
+                if (!(retryUnlisted && this.scheduleUnlistedRetry(pc, participantId))) {
+                    console.warn("SFU: resuming the session failed with the socket; the next reconnect asks again:", err)
+                }
+                return
+            }
+            if (err instanceof RpcError && err.status === 403) {
+                // The executor refused this session's resume — an ownership
+                // mismatch only when its message says so; it refuses a
+                // former member's own session the same way.
+                console.error(
+                    err.body.includes("another agent")
+                        ? "SFU: the session is another agent's; the call ends:"
+                        : "SFU: the executor refused this session's resume; the call ends:",
+                    err,
+                )
+                this.endCall({ reason: "refused", error: err })
+                return
+            }
+            console.warn("SFU: resuming the session failed; keeping the call:", err)
+            return
+        }
+        const result = reply.result
+        if (this.state.peerConnection !== pc || this.state.participantId !== participantId) return
+        if (!result.listed) {
+            // Only a roster applied since the request went out, and listing
+            // this session, cancels the rebuild: the last one it knows of may
+            // predate the socket drop that took the session and its departure
+            // roster with it.
+            if (this.listedAtRevision > askedAtRevision) return
+            console.info("SFU: the executor no longer lists this session, rebuilding the call")
+            void this.reconnect()
+            return
+        }
+        if (result.roster && result.roster.revision > this.rosterRevision) {
+            this.rosterRevision = result.roster.revision
+            this.applyRoster(result.roster.participants, true)
+            this.noticeRoster(pc, result.roster.participants, result.roster.revision)
+        }
+        // The ask's wait ran off the queue: an offer event could apply
+        // while the reply was out, and `appliedOfferId` then moved to what
+        // the reply carries or past it — the executor snapshotted its
+        // pending offer when the ask reached it, so nothing it sent since
+        // is older. Applying the reply's offer anyway would take the
+        // connection back to the older SDP, and its answer comes back
+        // `stale` while the newer offer's ICE credentials are lost. The
+        // executor holds its current offer and resends it, so the drop
+        // loses nothing; while `appliedOfferId` is still the ask's, the
+        // reply's offer applies.
+        const offer = result.offer?.participantId === participantId ? result.offer : undefined
+        if (offer && this.appliedOfferId === askedAtOfferId) {
+            await this.applyServerOffers(pc, [offer])
+        }
+        // While a restart is in flight and ICE is still down, the reply
+        // decides what is owed next. No offer for this session means the
+        // executor holds no pending offer for it — a restart request it
+        // never saw is the usual cause, so a fresh one is asked for. An
+        // offer may be the restart already, or only an ordinary
+        // renegotiation the drop hid — the wire does not say — so once it
+        // is answered the executor is asked again: its next reply carries
+        // the next pending offer (answered the same way) or, carrying
+        // none, asks for the restart. Each such ask inherits the restart's
+        // remaining window, so the chain cannot ask past the deadline the
+        // restart already had. ICE `checking` says the restart's answer
+        // reached the executor — nothing is owed then.
+        if (this.restartTimer && (pc.iceConnectionState === "disconnected" || pc.iceConnectionState === "failed")) {
+            if (offer) this.resume(pc)
+            else this.sendRestart(pc, participantId)
+        }
+    }
+
+    /**
+     * Make the participants match `sessions`, the room's roster: everyone new
      * joins, and — when `complete`, as the roster event is — everyone
      * missing leaves. The join's own roster can lag the room, so it only adds.
+     * This session is never a participant; this agent's other devices are.
      */
-    private applyRoster(dids: string[], complete: boolean): void {
-        const present = new Set(dids.filter((did) => did !== this.agentDid))
-        for (const did of present) {
-            this.departed.delete(did)
-            this.ensureParticipant(did)
+    private applyRoster(sessions: { participantId: string; agentDid: string }[], complete: boolean): void {
+        const present = sessions.filter((s) => s.participantId !== this.state.participantId)
+        for (const { participantId, agentDid } of present) {
+            this.departed.delete(participantId)
+            this.ensureParticipant(participantId, agentDid)
         }
         if (!complete) return
-        for (const [did, participant] of [...this.state.participants]) {
-            if (present.has(did)) continue
-            this.state.participants.delete(did)
-            this.departed.add(did)
+        const listed = new Set(present.map((s) => s.participantId))
+        for (const [participantId, participant] of [...this.state.participants]) {
+            if (listed.has(participantId)) continue
+            this.state.participants.delete(participantId)
+            this.departed.add(participantId)
             for (const [mid, owner] of this.midToParticipant) {
-                if (owner === did) this.midToParticipant.delete(mid)
+                if (owner.participantId === participantId) this.midToParticipant.delete(mid)
             }
             this.emit("participant-left", participant)
         }
     }
 
-    /** The participant for `did`, joining them to the call if they are new. */
-    private ensureParticipant(did: string): SfuParticipantState {
-        let participant = this.state.participants.get(did)
+    /** The participant for session `participantId` of `did`, joining them to the call if they are new. */
+    private ensureParticipant(participantId: string, did: string): SfuParticipantState {
+        let participant = this.state.participants.get(participantId)
         if (!participant) {
             participant = {
+                participantId,
                 did,
                 stream: new MediaStream(),
                 hasAudio: false,
                 hasVideo: false,
                 isActiveSpeaker: false,
             }
-            this.state.participants.set(did, participant)
+            this.state.participants.set(participantId, participant)
             this.emit("participant-joined", participant)
         }
         return participant
     }
 
-    private refreshKinds(participant: SfuParticipantState): void {
-        participant.hasAudio = participant.stream.getAudioTracks().length > 0
-        participant.hasVideo = participant.stream.getVideoTracks().length > 0
+    /**
+     * A later join from this device replaced a session of this call: the
+     * executor has already dropped it. Stop as `leave` does, but never
+     * rejoin — the other tab has the call now — and say so with `replaced`.
+     * A session this manager got since (a reconnect's) is left.
+     */
+    private stopReplaced(event: SfuSessionReplaced): void {
+        console.info("SFU: another tab on this device joined the call; this one stops")
+        if (this.state.participantId === event.participantId) this.state.participantId = null
+        this.stop()
+        void this.leaveSession()
+        this.resetParticipants()
+        this.emit("replaced", event)
     }
 
-    async leave(): Promise<void> {
+    /**
+     * A terminal give-up: the call cannot come back on its own. No rejoin
+     * will run, so no roster will settle who is still here — the
+     * participants are told they left first, then the failure is reported
+     * and the call ended `gave-up`.
+     */
+    private giveUp(error: Error): void {
+        this.resetParticipants()
+        this.emit("error", error)
+        this.endCall({ reason: "gave-up", error })
+    }
+
+    /**
+     * The call ended without the user leaving: stop as `leave` does, so no
+     * dead connection is left behind, and say why with `call-ended`. A new
+     * `join` starts the call again with a fresh rebuild budget.
+     */
+    private endCall(event: SfuCallEnded): void {
+        console.error(`SFU: the call ended (${event.reason})`)
+        this.stop()
+        void this.leaveSession()
+        this.resetParticipants()
+        this.emit("call-ended", event)
+    }
+
+    /** End this manager's call locally: no reconnect in flight continues, nothing is sent. */
+    private stop(): void {
         this.generation++
         this.releaseServerEvents()
-        if (this.disconnectedTimer) {
-            clearTimeout(this.disconnectedTimer)
-            this.disconnectedTimer = null
+        this.replacedUnsubscribe?.()
+        this.replacedUnsubscribe = null
+        this.heldIds.clear()
+        this.endRestart()
+        this.networkUnsubscribe?.()
+        this.networkUnsubscribe = null
+        this.reconnectUnsubscribe?.()
+        this.reconnectUnsubscribe = null
+        if (this.iceCheckTimer) {
+            clearTimeout(this.iceCheckTimer)
+            this.iceCheckTimer = null
         }
+        this.lastAnswer = null
         this.senders.clear()
         this.replacedTracks.clear()
         this.qualityPreference = null
@@ -701,15 +1494,31 @@ export class SfuManager {
             this.state.peerConnection.close()
             this.state.peerConnection = null
         }
-        try {
-            await this.neighbourhood.sfuCallLeave(
-                this.neighbourhoodUrl,
-                this.roomId,
-            )
-        } catch (e) {
-            console.error("Error leaving SFU call:", e)
-        }
+        this.state.localStream = null
+    }
+
+    private refreshKinds(participant: SfuParticipantState): void {
+        participant.hasAudio = participant.stream.getAudioTracks().length > 0
+        participant.hasVideo = participant.stream.getVideoTracks().length > 0
+    }
+
+    /** End the call: locally, and on the executor if this manager joined. */
+    async leave(): Promise<void> {
+        this.stop()
+        await this.leaveSession()
         this.resetParticipants()
+    }
+
+    /** Take the old connection's tracks out of every participant's stream,
+     *  keeping the participants and their streams for the new connection. */
+    private clearMedia(): void {
+        for (const participant of this.state.participants.values()) {
+            const tracks = participant.stream.getTracks()
+            for (const track of tracks) participant.stream.removeTrack(track)
+            this.refreshKinds(participant)
+            for (const track of tracks) this.emit("stream-removed", participant.stream, track)
+        }
+        this.midToParticipant.clear()
     }
 
     /** Forget the call's participants, telling listeners each one left. */
@@ -718,7 +1527,6 @@ export class SfuManager {
             this.emit("participant-left", participant)
         }
         this.state.participants.clear()
-        this.state.participantId = null
         this.midToParticipant.clear()
         this.departed.clear()
     }
@@ -737,6 +1545,7 @@ export class SfuManager {
             await this.neighbourhood.sfuCallSetQualityPreference(
                 this.neighbourhoodUrl,
                 this.roomId,
+                this.state.participantId,
                 preference,
             )
         } catch (e) {
@@ -788,6 +1597,7 @@ export class SfuManager {
             await this.neighbourhood.sfuSendData(
                 this.neighbourhoodUrl,
                 this.roomId,
+                this.state.participantId,
                 channelLabel,
                 data,
                 binary,
@@ -799,7 +1609,8 @@ export class SfuManager {
     }
 
     /**
-     * Subscribe to data channel messages from other participants.
+     * Subscribe to data channel messages from other participants — this
+     * agent's other devices included, this session's own messages not.
      * Returns an unsubscribe function.  Only one subscription per
      * manager instance — a second call replaces the first.
      */
@@ -814,8 +1625,10 @@ export class SfuManager {
                 /* swallow */
             }
         }
-        this.dataChannelUnsubscribe =
-            this.neighbourhood.subscribeSfuDataChannel(callback)
+        this.dataChannelUnsubscribe = this.neighbourhood.subscribeSfuDataChannel((message) => {
+            if (message.senderParticipantId && message.senderParticipantId === this.state.participantId) return
+            callback(message)
+        })
         return () => {
             if (this.dataChannelUnsubscribe) {
                 try {

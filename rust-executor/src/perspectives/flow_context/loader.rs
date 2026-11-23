@@ -22,6 +22,7 @@ use crate::perspectives::flow_instance::replica_state::FlowReplicaState;
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::{parse_flow_from_links, SHACLFlow};
+use crate::perspectives::sparql_store::EvalStop;
 use crate::types::{Link, LinkQuery};
 use std::collections::{HashMap, HashSet};
 
@@ -71,11 +72,10 @@ pub fn parse_flow_instance_from_hydrated(v: &serde_json::Value) -> Option<FlowIn
 /// to scope against, so surfacing every FlowInstance would be
 /// unbounded and violate Model C scope discipline (James PR #929 J#1).
 ///
-/// Single-URI queries push the filter down to `model_query`
-/// (`where.subject == uri`) so the existing typed-in-store path is
-/// preserved. Multi-URI batches load-all and filter in-Rust because
-/// `model_query` has no `in` operator today; the batch is bounded by
-/// the auto-processor's drained item count.
+/// The filter is pushed down to `model_query`: one URI as
+/// `where.subject == uri`, several as an array `where.subject`, which
+/// `model_query` reads as "any of" (#1257). The result is still checked
+/// against `subjects` here.
 ///
 /// Silently returns `Ok(vec![])` when the `FlowInstance` class hasn't
 /// been registered yet on this perspective — a freshly-created
@@ -89,12 +89,11 @@ pub async fn load_flow_instances(
     if subjects.is_empty() {
         return Ok(vec![]);
     }
-    // `model_query` has no `in` operator, so only a single subject is
-    // pushed down; a batch loads everything and filters here.
+    // An array `where` value is "any of" in `model_query`.
     let query = if subjects.len() == 1 {
         serde_json::json!({ "where": { "subject": subjects[0].clone() } })
     } else {
-        serde_json::json!({})
+        serde_json::json!({ "where": { "subject": subjects } })
     };
     let records = query_flow_instances(perspective, &query).await?;
     Ok(records
@@ -220,11 +219,11 @@ pub fn retain_selected_flows(
 /// the fallback is "extract without flow-aware prompting", which is
 /// exactly the pre-slice-10.2 behaviour.
 ///
-/// `subjects` is the set of base-expression URIs the extraction pass is
-/// operating on — the drained batch bases in the auto-processor path
-/// (see `InterpretationRunCursor.sources`). A FlowInstance whose
-/// `subject` matches one of these is running on the same expression the
-/// pass is interpreting and is included in the prompt.
+/// `subjects` is the set of record URIs the extraction pass may touch:
+/// the records its prompt shows as `existing` plus the dedup scope's
+/// anchor (`interpretation::run::flow_subjects_for_pass`, #1257). A
+/// FlowInstance whose `subject` matches one of these governs a record
+/// the model might update and is included in the prompt.
 ///
 /// Empty `subjects` returns an empty result rather than the whole
 /// perspective's FlowInstance set — the pre-fix behaviour (loading
@@ -242,7 +241,7 @@ pub async fn gather_active_flow_contexts(
     subjects: &[String],
     flow_filter: Option<&[String]>,
 ) -> Vec<FlowContext> {
-    let mut flows_by_uri = match load_shacl_flows(perspective).await {
+    let mut flows_by_uri = match load_shacl_flows(&EvalStop::none(), perspective).await {
         Ok(m) => m,
         Err(e) => {
             log::warn!("gather_active_flow_contexts: load_shacl_flows failed, using empty: {e:#}");
@@ -251,6 +250,10 @@ pub async fn gather_active_flow_contexts(
     };
     retain_selected_flows(&mut flows_by_uri, flow_filter);
     if flows_by_uri.is_empty() {
+        log::debug!(
+            "🧠 flow context: no flow selected, 0 active flow(s) for {} subject(s)",
+            subjects.len()
+        );
         return Vec::new();
     }
     let records = match load_flow_instances(perspective, subjects).await {
@@ -311,14 +314,18 @@ pub async fn gather_active_flow_contexts(
             contention: ContentionStatus::from_fresh_derivation(df.contested),
         }));
     }
-    build_flow_contexts(&resolved, &flows_by_uri)
+    let contexts = build_flow_contexts(&resolved, &flows_by_uri);
+    log::debug!(
+        "🧠 flow context: {} active flow(s) for {} subject(s)",
+        contexts.len(),
+        subjects.len()
+    );
+    contexts
 }
 
-/// Derive the flow-filter subject key from an extraction pass `Scope`.
-/// Kept for the strategy-path call site that has no drained-batch cursor
-/// available yet (it still uses the dedup scope's anchor URI). New code
-/// should prefer wiring `InterpretationRunCursor.sources` through and
-/// calling [`gather_active_flow_contexts`] with the batch bases.
+/// Derive the flow-filter subject key from an extraction pass `Scope`:
+/// the dedup scope's anchor URI, one of the subjects
+/// `interpretation::run::flow_subjects_for_pass` loads flows for.
 pub fn scope_subject(scope: &Scope) -> &str {
     match scope {
         Scope::Model { id, .. } => id.as_str(),
@@ -423,7 +430,14 @@ pub fn parse_flows_from_bag(links: &[Link]) -> HashMap<String, SHACLFlow> {
 /// Errors from the outer type-index query propagate; per-flow child
 /// query failures are logged and skipped so one broken flow can't blind
 /// the extraction pass to every other flow on the perspective.
+///
+/// The reads run under `stop` (`get_links_stopped`): a caller whose eval
+/// is already over — a cancelled or timed-out model query reading through
+/// `flow_valid_outputs_reading` — ends here with the stop's error instead
+/// of a partial catalogue built from failed reads. Callers with no eval
+/// bound pass [`EvalStop::none`].
 pub async fn load_shacl_flows(
+    stop: &EvalStop,
     perspective: &PerspectiveInstance,
 ) -> anyhow::Result<HashMap<String, SHACLFlow>> {
     let type_query = LinkQuery {
@@ -435,7 +449,7 @@ pub async fn load_shacl_flows(
         limit: None,
     };
     let type_links = perspective
-        .get_links(&type_query)
+        .get_links_stopped(stop, &type_query)
         .await
         .map_err(|e| anyhow::anyhow!("load_shacl_flows: get_links(type) failed: {e:#}"))?;
 
@@ -445,6 +459,12 @@ pub async fn load_shacl_flows(
     }
 
     for tl in type_links {
+        // A fired stop makes every remaining read fail fast anyway; end
+        // with the stop's error rather than skipping to a partial
+        // catalogue one warn at a time.
+        if let Some(err) = stop.stopped_err("flow catalogue scan") {
+            return Err(err);
+        }
         let flow_uri = tl.data.source;
         if flow_uri.is_empty() {
             continue;
@@ -457,7 +477,7 @@ pub async fn load_shacl_flows(
             until_date: None,
             limit: None,
         };
-        let flow_links = match perspective.get_links(&flow_query).await {
+        let flow_links = match perspective.get_links_stopped(stop, &flow_query).await {
             Ok(l) => l,
             Err(e) => {
                 log::warn!(
@@ -487,7 +507,7 @@ pub async fn load_shacl_flows(
                 until_date: None,
                 limit: None,
             };
-            match perspective.get_links(&child_query).await {
+            match perspective.get_links_stopped(stop, &child_query).await {
                 Ok(child_links) => bag.extend(child_links.into_iter().map(|d| d.data)),
                 Err(e) => log::warn!(
                     "load_shacl_flows: get_links(child of {flow_uri}) failed, skipping child: {e:#}"

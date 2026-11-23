@@ -50,6 +50,7 @@ mod tests {
             remote_did: "did:remote".into(),
             room_id: "room".into(),
             sdp_offer: "{}".into(),
+            track_mapping: Vec::new(),
         });
         publish_answer(SfuPipeRenegotiationAnswer {
             remote_did: "did:remote".into(),

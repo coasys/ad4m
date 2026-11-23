@@ -7,9 +7,10 @@ import { makeRandomId } from "./util";
 import { getPropertiesMetadata, getRelationsMetadata, setPropertyRegistryEntry, setRelationRegistryEntry, Model } from "./decorators";
 import type { PropertyOptions, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
 import { formatQueryValue, compileWhereClause } from "./query-utils";
-import { requireSingleParent, resolveParentPredicate } from "./query-common";
+import { requireSingleParent, requireTotalCount, resolveParentPredicate } from "./query-common";
 import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
 import type { SHACLShape } from "../shacl/SHACLShape";
+import type { RegisterResult } from "../generated/api/RegisterResult";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 
 import { buildSPARQLQuery, valueToLiteralIri, effectiveLiteralStorage } from "./query-sparql";
@@ -18,9 +19,9 @@ import {
   normalizeValue,
 } from "./hydration";
 import type {
-  Scope, TraverseScope, IncludeMap, Query,
-  GetOptions, AllInstancesResult, ResultsWithTotalCount,
-  PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata,
+  Scope, IncludeMap, Query,
+  GetOptions, Page, ResultsWithTotalCount,
+  PaginationResult, CursorPage, PropertyMetadata, RelationMetadata, ModelMetadata,
   IncludeProjection,
   TypedQuery, IncludeExtras, IncludeOf, LinksMap,
 } from "./types";
@@ -49,11 +50,39 @@ import { isContainedScope, isContainmentTraversal, isTraverseScope } from "./typ
  * `tests/js/tests/model/model-polymorphic.test.ts` drives both ends against one
  * executor, so the drift fails a test rather than a user's query.
  *
- * The executor also returns `__subjectClasses`, the whole set this one names the
- * head of. Nothing here reads it — it rides onto the instance with every other
- * JSON key, for a caller that wants to know a choice was made.
+ * The value is the class's target class IRI (two classes may share a name):
+ * {@link classKey} of the class it was read as. The executor also returns
+ * `__subjectClasses`, the whole set this one names the head of, by target
+ * class IRI. Nothing here reads it — it rides onto the instance with every
+ * other JSON key, for a caller that wants to know a choice was made.
  */
 const SUBJECT_CLASS_KEY = '__subjectClass';
+
+/**
+ * The IRI the executor names `cls` by (`queriedAs`: its target class), or
+ * `undefined` for something that is not a declared model class.
+ */
+function classKey(cls: unknown): string | undefined {
+  try {
+    const key = (cls as any)?.queriedAs?.();
+    return typeof key === 'string' ? key : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The namespace of a target class IRI: everything up to and including its
+ * last `#`, `:` or `/`, the split the executor's `class_name_of` makes
+ * (`urn:isbn:Book` → `urn:isbn:`, `a://b/c/Thing` → `a://b/c/`). `undefined`
+ * when there is no local name after it.
+ */
+function namespaceOf(targetClass: string | undefined): string | undefined {
+  if (!targetClass) return undefined;
+  const split = Math.max(targetClass.lastIndexOf('#'), targetClass.lastIndexOf(':'), targetClass.lastIndexOf('/'));
+  if (split < 0 || split === targetClass.length - 1) return undefined;
+  return targetClass.slice(0, split + 1);
+}
 
 /**
  * Turn on `polymorphic` for every relation that declares it, at every depth of
@@ -73,7 +102,8 @@ const SUBJECT_CLASS_KEY = '__subjectClass';
  * The walk stops descending *through* a polymorphic relation, because there is
  * nothing to descend into: its targets are of several classes by definition, so
  * no single class's metadata could say what a deeper include means. The
- * executor resolves those nested includes against each concrete class instead.
+ * executor applies each concrete class's declared default from its shape
+ * (`ad4m://polymorphic`) to those nested includes instead.
  */
 function applyPolymorphicIncludeDefaults(includes: IncludeMap, ctor: Function): void {
   const relMeta = getRelationsMetadata(ctor);
@@ -108,10 +138,10 @@ function applyPolymorphicIncludeDefaults(includes: IncludeMap, ctor: Function): 
         subQuery.preferClasses === undefined &&
         meta.instantiateAs
       ) {
-        const names = (meta.instantiateAs() ?? [])
-          .map((cls) => (cls as any)?.className)
-          .filter((name): name is string => typeof name === 'string');
-        if (names.length) subQuery.preferClasses = names;
+        const classes = (meta.instantiateAs() ?? [])
+          .map(classKey)
+          .filter((key): key is string => typeof key === 'string');
+        if (classes.length) subQuery.preferClasses = classes;
       }
     }
 
@@ -164,7 +194,7 @@ function splitIncludeProjections(include: IncludeMap): {
 }
 
 /**
- * Tag each projection with its target class name, so the executor can resolve
+ * Tag each projection with its target class IRI, so the executor can resolve
  * the target shape through its in-memory cache when applying a projection's
  * where-clause. `ctor` is the class the projections are read against; without
  * one (the members of a polymorphic relation) nothing is tagged, and the
@@ -177,10 +207,9 @@ function tagProjectionTargets(projections: Record<string, IncludeProjection>, ct
     const relMeta = allRelMeta[proj.from];
     if (!proj.targetClassName && relMeta?.target) {
       try {
-        const TargetClass = relMeta.target();
-        const targetMeta = (TargetClass as any).getModelMetadata?.();
-        if (targetMeta?.className) {
-          proj.targetClassName = targetMeta.className;
+        const TargetClass = relMeta.target() as any;
+        if (typeof TargetClass?.queriedAs === 'function') {
+          proj.targetClassName = TargetClass.queriedAs();
         }
       } catch (e) { console.debug(`prepareModelQueryParams: target class unavailable for projection:`, e); }
     }
@@ -237,6 +266,18 @@ function liftNestedProjections(includes: IncludeMap, ctor: Function | undefined)
     out[relName] = subQuery;
   }
   return out;
+}
+
+/** Snapshot a hydrated instance for dirty tracking, so `save()` on it (a query
+ *  row, a union row, a subscription push, or a record an `include` loaded)
+ *  takes the update path. Only the included relations (not `$` projections)
+ *  are recorded. Rows of a query by class name are base `Ad4mModel`s:
+ *  nothing to track. */
+function snapshotHydrated(instance: any, include?: IncludeMap): void {
+  if (!(instance instanceof Ad4mModel) || instance.constructor === Ad4mModel) return;
+  const relations = include && Object.fromEntries(Object.entries(include).filter(([k]) => !k.startsWith('$')));
+  const recorded = relations && Object.keys(relations).length > 0 ? relations : undefined;
+  (instance as any).takeSnapshot(recorded);
 }
 
 function jsonToModelInstance<T extends Ad4mModel>(
@@ -300,20 +341,20 @@ function jsonToModelInstance<T extends Ad4mModel>(
       // class back on the instance, because it had to know it in order to
       // hydrate against the right shape at all. What it cannot send is the
       // constructor, so `instantiateAs` names the classes this side can build
-      // and the name → class map is derived from them: `@Model` records each
-      // class's name on the class itself, so listing the classes and listing
-      // their names would be the same list written twice, free to disagree.
+      // and the target class → class map is derived from them: each class
+      // knows its own target class IRI, which the executor names it by (two
+      // classes may share a name).
       //
       // Built on first use rather than at decoration time, because the thunk
       // exists to be called late: a class defined further round a circular
       // import graph is not there yet when the decorator runs.
-      let byClassName: Record<string, any> | undefined;
+      let byTargetClass: Map<string, any> | undefined;
       // May resolve to nothing: a polymorphic relation is allowed to declare no
       // target at all, and the list may not name the class that arrived — it
       // says what this call site can construct, not what the relation may hold.
-      // The item then stays plain JSON — correct data, carrying its class name
-      // for a caller that wants to dispatch on it — rather than being forced
-      // through a constructor that does not exist.
+      // The item then stays plain JSON — correct data, carrying its target
+      // class for a caller that wants to dispatch on it — rather than being
+      // forced through a constructor that does not exist.
       const resolveChildClass = (item: any): any => {
         if (!meta.polymorphic) return TargetClass;
         const concrete = item?.[SUBJECT_CLASS_KEY];
@@ -322,14 +363,15 @@ function jsonToModelInstance<T extends Ad4mModel>(
         // own declared target is the right shape.
         if (typeof concrete !== 'string') return TargetClass;
         if (meta.instantiateAs) {
-          if (!byClassName) {
-            byClassName = {};
+          if (!byTargetClass) {
+            byTargetClass = new Map();
             for (const cls of meta.instantiateAs() ?? []) {
-              const name = (cls as any)?.className;
-              if (typeof name === 'string') byClassName[name] = cls;
+              const key = classKey(cls);
+              if (key) byTargetClass.set(key, cls);
             }
           }
-          if (byClassName[concrete]) return byClassName[concrete];
+          const cls = byTargetClass.get(concrete);
+          if (cls) return cls;
         }
         // The declared target is not a fallback, and having named no classes to
         // build does not make it one. Where a relation both declares a target
@@ -339,7 +381,7 @@ function jsonToModelInstance<T extends Ad4mModel>(
         // not, carrying fields that class never declared — the exact
         // mislabelling polymorphic reads exist to prevent. It fits only when it
         // is the class the executor named.
-        return (TargetClass as any)?.className === concrete ? TargetClass : undefined;
+        return TargetClass && classKey(TargetClass) === concrete ? TargetClass : undefined;
       };
       const nestedInclude =
         typeof includeVal === 'object' && includeVal !== null
@@ -370,38 +412,46 @@ function jsonToModelInstance<T extends Ad4mModel>(
     }
   }
 
+  // After its relations are built, so the snapshot holds what was loaded.
+  snapshotHydrated(instance, include);
   return instance;
 }
 
+/** One field write: the commands and parameters of one `executeAction`. */
+interface FieldWrite {
+  commands: any[];
+  parameters: { name: string; value: any }[];
+}
+
+/** The most writes `sendWrites` joins into one `executeAction` call. */
+const MAX_WRITES_PER_CALL = 200;
 
 /**
- * Put `childId` under `parent`. A containment scope `{ id }` writes through the
- * built-in `Container` (#1446): the executor runs the adder of the parent's own
- * `children` relation when its class has one (a block's `we://child`), else
- * writes `ad4m://has_child`. The other forms write their one predicate.
+ * Resolves the parent→child link of `create(…, { parent })` now, and returns the
+ * write for a child id. Resolving first means a parent that names no single
+ * instance or no relation to `childCtor` throws before anything is staged.
+ * A containment scope `{ id }` writes through the built-in `Container` (#1446):
+ * the executor runs the adder of the parent's own `children` relation when its
+ * class has one (a block's `we://child`), else writes `ad4m://has_child`. The
+ * other forms write their one predicate.
  */
-async function linkToParent(
-  perspective: PerspectiveProxy,
-  parent: Exclude<Scope, TraverseScope>,
+function parentLinkWriter(
+  scope: Scope,
   childCtor: Function,
-  childId: string,
-  batchId?: string,
-): Promise<void> {
+): (perspective: PerspectiveProxy, childId: string, batchId?: string) => Promise<unknown> {
+  const parent = requireSingleParent(scope);
   if (isContainedScope(parent)) {
-    await perspective.updateSubject(
-      "ad4m://Container",
-      parent.id,
-      { children: { action: "adder", value: [childId] } },
-      batchId,
-    );
-    return;
+    return (perspective, childId, batchId) =>
+      perspective.updateSubject(
+        "ad4m://Container",
+        parent.id,
+        { children: { action: "adder", value: [childId] } },
+        batchId,
+      );
   }
-  const link = new Link({
-    source: parent.id,
-    predicate: resolveParentPredicate(parent, childCtor),
-    target: childId,
-  });
-  await perspective.add(link, 'shared', batchId);
+  const predicate = resolveParentPredicate(parent, childCtor);
+  return (perspective, childId, batchId) =>
+    perspective.add(new Link({ source: parent.id, predicate, target: childId }), 'shared', batchId);
 }
 
 /**
@@ -541,8 +591,6 @@ export class Ad4mModel {
     return (this as any).createdAt;
   }
 
-  private static classNamesByClass = new WeakMap<typeof Ad4mModel, { [perspectiveId: string]: string }>();
-
   /**
    * Generates the SDNA (Subject DNA) Prolog rules for this model class.
    * Injected at class-definition time by the `@Model` decorator.
@@ -562,29 +610,20 @@ export class Ad4mModel {
     return { shape: null, name: '' };
   }
 
-  static async getClassName(perspective: PerspectiveProxy) {
-      // Check if this is the Ad4mModel class itself or a subclass
-      const isBaseClass = this === Ad4mModel;
-  
-      // For the base Ad4mModel class, we can't use the cache
-      if (isBaseClass) {
-        return await perspective.stringOrTemplateObjectToSubjectClassName(this);
-      }
+  /** The `@Model` name of this class: its human-facing name. Two classes
+   *  may share one; the executor addresses each by {@link getTargetClass}. */
+  static getClassName(): string {
+    const className = (this as any).className;
+    if (!className) throw new Error(`Class ${this.name} has no class name: declare it with @Model.`);
+    return className;
+  }
 
-    // Get or create the cache for this class
-    let classCache = this.classNamesByClass.get(this);
-    if (!classCache) {
-      classCache = {};
-      this.classNamesByClass.set(this, classCache);
-    }
-
-    // Get or create the cached name for this perspective
-    const perspectiveID = perspective.uuid;
-    if (!classCache[perspectiveID]) {
-      classCache[perspectiveID] = await perspective.stringOrTemplateObjectToSubjectClassName(this);
-    }
-
-    return classCache[perspectiveID];
+  /** The target class IRI of this class (`sh:targetClass` of its shape),
+   *  which the executor addresses it by. */
+  static getTargetClass(): string {
+    const targetClass = this.generateSHACL().shape?.targetClass;
+    if (!targetClass) throw new Error(`Class ${this.name} has no target class: declare it with @Model.`);
+    return targetClass;
   }
 
   /**
@@ -1016,46 +1055,35 @@ export class Ad4mModel {
     return changed;
   }
 
-  private async getData(opts?: GetOptions) {
-    // Route through the Rust model query endpoint — same pipeline as executeModelQuery
-    // but for a single instance by ID.
-    try {
-      const ctor = this.constructor as typeof Ad4mModel;
-      const query: Query = {
-        where: { id: this._baseExpression },
-        limit: 1,
-        deepQuery: true,  // Single-instance get() always evaluates property getters
-      };
-      if (opts?.properties) query.properties = opts.properties;
-      if (opts?.include) query.include = opts.include;
+  /** Hydrate this instance from the executor. `null` when no instance has this ID. */
+  private async getData(opts?: GetOptions): Promise<this | null> {
+    const ctor = this.constructor as typeof Ad4mModel;
+    const query: Query = {
+      where: { id: this._baseExpression },
+      limit: 1,
+      deepQuery: true,  // Single-instance get() always evaluates property getters
+    };
+    if (opts?.properties) query.properties = opts.properties;
+    if (opts?.include) query.include = opts.include;
 
-      const { results } = await (ctor as any).executeModelQuery(
-        this._perspective, query, null
-      );
+    const { results } = await (ctor as any).executeModelQuery(
+      this._perspective, query, null
+    );
+    if (results.length === 0) return null;
 
-      if (results.length > 0) {
-        const hydrated = results[0];
-        // Copy all hydrated values from the Rust-side result onto this instance
-        for (const [key, value] of Object.entries(hydrated as any)) {
-          if (key === '_baseExpression' || key === '_perspective' || key === '_snapshot') continue;
-          if (key.startsWith('_')) continue;
-          // Check for readonly getters
-          let isReadonly = false;
-          let proto = Object.getPrototypeOf(this);
-          while (proto) {
-            const desc = Object.getOwnPropertyDescriptor(proto, key);
-            if (desc) { isReadonly = !!(desc.get && !desc.set); break; }
-            proto = Object.getPrototypeOf(proto);
-          }
-          if (isReadonly) continue;
-          (this as any)[key] = value;
-        }
+    // Copy all hydrated values from the executor's result onto this instance
+    for (const [key, value] of Object.entries(results[0] as any)) {
+      if (key.startsWith('_')) continue;
+      // Check for readonly getters
+      let isReadonly = false;
+      let proto = Object.getPrototypeOf(this);
+      while (proto) {
+        const desc = Object.getOwnPropertyDescriptor(proto, key);
+        if (desc) { isReadonly = !!(desc.get && !desc.set); break; }
+        proto = Object.getPrototypeOf(proto);
       }
-
-      // Property getters and relation conformance getters are now evaluated
-      // Rust-side via evaluate_getters() in model_query.rs.
-    } catch (e) {
-      console.error(`getData via Rust model query failed for ${this._baseExpression}:`, e);
+      if (isReadonly) continue;
+      (this as any)[key] = value;
     }
 
     this.takeSnapshot(opts?.include);
@@ -1105,40 +1133,53 @@ export class Ad4mModel {
   }
 
   /**
+   * `query` with `includeAll` expanded to an `include` of every forward
+   * (has-many / has-one) relation of `classes`; explicit `include` entries win.
+   * @internal
+   */
+  static withIncludeAll(classes: (typeof Ad4mModel)[], query: Query): Query {
+    if (!query.includeAll) return query;
+    const { includeAll, ...rest } = query;
+    if (classes.some((c) => c === Ad4mModel)) {
+      // A query by class name runs on the undecorated base class: the client
+      // does not know the named model's relations, so it cannot expand them.
+      throw new Error("includeAll needs a decorated model class; for a query by class name, list the relations in `include`");
+    }
+    const expanded: IncludeMap = {};
+    for (const c of classes) {
+      for (const [name, rel] of Object.entries(c.getModelMetadata().relations)) {
+        if (rel.direction !== 'reverse') expanded[name] = true;
+      }
+    }
+    return { ...rest, include: { ...expanded, ...query.include } };
+  }
+
+  /**
    * Build the JSON parameters needed for a model query/subscription endpoint.
    * Returns the className and queryJson that the Rust executor expects.
    * Shape resolution happens server-side from the perspective's SHACL triples.
    * @internal
    */
   /**
-   * The name the executor knows this class by: its class name, or a
+   * The IRI the executor addresses this class by: its target class, or a
    * built-in abstract class's URI (`ad4m://TextContent`, #1446). The URI is
    * the class's own static only: a subclass is a class of its own.
    * @internal
    */
   static queriedAs(): string {
     const builtinUri = Object.prototype.hasOwnProperty.call(this, 'builtinUri') ? (this as any).builtinUri : undefined;
-    return builtinUri || this.getModelMetadata().className;
+    return builtinUri || this.getTargetClass();
   }
 
   static prepareModelQueryParams(
     query: Query = {},
     classNameOverride?: string | null,
-  ): { className: string; queryJson: string; metadata: ModelMetadata } {
-    const metadata = this.getModelMetadata();
+  ): { className: string; queryJson: string } {
+    // A query by class name runs on the undecorated base class: no metadata,
+    // so queriedAs() (which may read it) only runs without an override.
     const className = classNameOverride || this.queriedAs();
 
-    // Expand includeAll: true to a full IncludeMap covering every forward relation.
-    if (query.includeAll) {
-      const allRelMeta = getRelationsMetadata(this as any);
-      const expanded: IncludeMap = {};
-      for (const [relName, relMeta] of Object.entries(allRelMeta)) {
-        if ((relMeta as any).direction !== 'reverse') {
-          expanded[relName] = true;
-        }
-      }
-      query = { ...query, include: { ...expanded, ...query.include } };
-    }
+    query = Ad4mModel.withIncludeAll([this], query);
 
     const queryInput: any = {};
     if (query.parent && isContainedScope(query.parent)) {
@@ -1208,6 +1249,7 @@ export class Ad4mModel {
     }
     if (query.offset !== undefined) queryInput.offset = query.offset;
     if (query.limit !== undefined) queryInput.limit = query.limit;
+    if (query.after !== undefined) queryInput.after = query.after;
     if (query.count !== undefined) queryInput.count = query.count;
     if (query.links) queryInput.links = query.links;
     queryInput.deepQuery = query.deepQuery ?? true;
@@ -1221,7 +1263,6 @@ export class Ad4mModel {
     return {
       className,
       queryJson: JSON.stringify(queryInput),
-      metadata,
     };
   }
 
@@ -1241,20 +1282,6 @@ export class Ad4mModel {
     const arr = data.instances || data;
     if (!Array.isArray(arr)) return [];
     return arr.map((json: any) => jsonToModelInstance(this, perspective, json, include, properties));
-  }
-
-  /**
-   * Snapshot freshly built instances for dirty tracking, with the relations
-   * `include` loaded (its `$`-prefixed projection keys are not relations).
-   * Used by every query path, and by ModelQueryBuilder for pushed results.
-   * @internal
-   */
-  static takeSnapshots(instances: Ad4mModel[], include?: IncludeMap): void {
-    const relations = include
-      ? Object.fromEntries(Object.entries(include).filter(([k]) => !k.startsWith('$')))
-      : undefined;
-    const snapshot = relations && Object.keys(relations).length > 0 ? relations : undefined;
-    for (const inst of instances) inst.takeSnapshot?.(snapshot);
   }
 
 
@@ -1341,7 +1368,8 @@ export class Ad4mModel {
 
   /**
    * Build each row of a union result as the class the executor hydrated it as
-   * (`__subjectClass`). A row of a class not in `classes` stays plain JSON.
+   * (`__subjectClass`, the key it was asked for: {@link queriedAs}). A row of
+   * a class not in `classes` stays plain JSON.
    * @internal
    */
   static parseUnionResult(
@@ -1354,9 +1382,9 @@ export class Ad4mModel {
     const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
     const arr = data.instances || data;
     if (!Array.isArray(arr)) return [];
-    const byName = new Map(classes.map((c) => [c.getModelMetadata().className, c]));
+    const byKey = new Map(classes.map((c) => [c.queriedAs(), c]));
     return arr.map((json: any) => {
-      const cls = byName.get(json?.[SUBJECT_CLASS_KEY]);
+      const cls = byKey.get(json?.[SUBJECT_CLASS_KEY]);
       return cls ? jsonToModelInstance(cls as any, perspective, json, include, properties) : json;
     });
   }
@@ -1367,11 +1395,11 @@ export class Ad4mModel {
     classes: (typeof Ad4mModel)[],
     query: Query = {},
     options?: CallOptions,
-  ): Promise<ResultsWithTotalCount<Ad4mModel>> {
+  ): Promise<Page<Ad4mModel>> {
+    query = Ad4mModel.withIncludeAll(classes, query);
     const { classNames, queryJson } = Ad4mModel.prepareUnionQueryParams(classes, query);
     const result = await perspective.modelQuery(classNames, queryJson, options);
     const results = Ad4mModel.parseUnionResult(classes, perspective, result, query.include, query.properties);
-    Ad4mModel.takeSnapshots(results, query.include);
     return { results, totalCount: result.totalCount };
   }
 
@@ -1446,26 +1474,20 @@ export class Ad4mModel {
     query: Query = {},
     classNameOverride?: string | null,
     options?: CallOptions,
-  ): Promise<ResultsWithTotalCount<T>> {
+  ): Promise<Page<T>> {
     // Delegate query input building to the shared prepareModelQueryParams
     // helper.  The executor resolves the shape from SHACL server-side.
+    query = Ad4mModel.withIncludeAll([this], query);
     const { className, queryJson } = this.prepareModelQueryParams(
       query, classNameOverride,
     );
 
     const result = await perspective.modelQuery(className, queryJson, options);
 
-    // Convert JSON instances to model class instances, recursively constructing
-    // class instances for any included relations resolved by Rust.
-    const instances: T[] = result.instances.map((json: any) => {
-      return jsonToModelInstance(this, perspective, json, query.include, query.properties);
-    });
-
-    Ad4mModel.takeSnapshots(instances, query.include);
-
     return {
-      results: instances,
+      results: this.parseModelResult(perspective, result, query.include, query.properties),
       totalCount: result.totalCount,
+      ...(result.nextCursor !== undefined ? { nextCursor: result.nextCursor } : {}),
     };
   }
 
@@ -1561,8 +1583,8 @@ export class Ad4mModel {
     query?: Q,
     options?: CallOptions,
   ): Promise<ResultsWithTotalCount<T & IncludeExtras<T, IncludeOf<Q>>>> {
-    const out = await this.executeModelQuery(perspective, (query ?? {}) as Query, undefined, options);
-    return out as ResultsWithTotalCount<T & IncludeExtras<T, IncludeOf<Q>>>;
+    const answer = await this.executeModelQuery(perspective, { ...((query ?? {}) as Query), count: true }, undefined, options);
+    return { results: answer.results as (T & IncludeExtras<T, IncludeOf<Q>>)[], totalCount: requireTotalCount(answer) };
   }
 
   /**
@@ -1590,9 +1612,54 @@ export class Ad4mModel {
     query?: Q,
     options?: CallOptions,
   ): Promise<PaginationResult<T & IncludeExtras<T, IncludeOf<Q>>>> {
-    const paginationQuery = { ...((query ?? {}) as Query), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    const { results, totalCount } = await this.executeModelQuery(perspective, paginationQuery, undefined, options);
-    return { results: results as (T & IncludeExtras<T, IncludeOf<Q>>)[], totalCount, pageSize, pageNumber };
+    // Page numbers page by offset; a cursor from the starting query has no meaning here.
+    const { after: _after, ...base } = (query ?? {}) as Query;
+    const paginationQuery = { ...base, limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
+    const answer = await this.executeModelQuery(perspective, paginationQuery, undefined, options);
+    return { results: answer.results as (T & IncludeExtras<T, IncludeOf<Q>>)[], totalCount: requireTotalCount(answer), pageSize, pageNumber };
+  }
+
+  /**
+   * One page in timestamp order, continued by cursor rather than by offset.
+   *
+   * Pass no `after` (or `""`) for the first page, then each page's
+   * `nextCursor`. A row created while you page cannot shift a later page the
+   * way it shifts an `offset` page. The query may order by `timestamp`,
+   * `createdAt` or `updatedAt` (either direction) or not at all; the executor
+   * refuses any other order, and `offset` is dropped. Use `paginate()` for
+   * page numbers or other orders.
+   *
+   * `nextCursor` is `undefined` on the last page — and `undefined` (or `""`)
+   * as `after` asks for the first page, so loop on the cursor:
+   * `while (page.nextCursor)`. A `do … while (page.results.length)` loop
+   * passes `page?.nextCursor` — `undefined` again on the last page — and
+   * re-reads page one forever.
+   *
+   * @example
+   * ```typescript
+   * let page = await Message.page(perspective, 50, undefined, { order: { createdAt: "DESC" } });
+   * while (page.nextCursor) {
+   *   page = await Message.page(perspective, 50, page.nextCursor, { order: { createdAt: "DESC" } });
+   * }
+   * ```
+   */
+  static async page<T extends Ad4mModel, Q extends TypedQuery<T> = {}>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    pageSize: number,
+    after?: string,
+    query?: Q,
+    options?: CallOptions,
+  ): Promise<CursorPage<T & IncludeExtras<T, IncludeOf<Q>>>> {
+    // A cursor page returns no total, so `count` is dropped with `offset`: no COUNT runs for it.
+    const { offset: _offset, count: _count, ...rest } = (query ?? {}) as Query;
+    const pageQuery: Query = { ...rest, limit: pageSize, after: after ?? '' };
+    const { results, nextCursor } = await this.executeModelQuery(perspective, pageQuery, undefined, options);
+    return {
+      results: results as (T & IncludeExtras<T, IncludeOf<Q>>)[],
+      ...(nextCursor !== undefined ? { nextCursor } : {}),
+      pageSize,
+    };
   }
 
   /**
@@ -1627,23 +1694,35 @@ export class Ad4mModel {
     query?: TypedQuery<T>,
     options?: CallOptions,
   ): Promise<number> {
-    const { totalCount } = await this.executeModelQuery(perspective, { ...((query ?? {}) as Query), limit: 0 }, undefined, options);
-    return totalCount;
+    // A total is one figure over the whole scope; a cursor pages it, so `after` is dropped like `paginate` does.
+    const { after: _after, ...countQuery } = (query ?? {}) as Query;
+    return requireTotalCount(await this.executeModelQuery(perspective, { ...countQuery, limit: 0, count: true }, undefined, options));
   }
 
-  private async setProperty(key: string, value: any, batchId?: string) {
+  /** The write that sets property `key` to `value`; for `null` or `""`, a `removeLink` of every link on it (throws on a required property); none for `undefined`. */
+  private async planProperty(key: string, value: any): Promise<FieldWrite[]> {
     const metadata = this.getPropertyMetadata(key);
     if (!metadata) {
       console.warn(`Property "${key}" has no metadata, skipping`);
-      return;
+      return [];
     }
 
     // Generate actions from metadata (replaces Prolog query)
     const actions = this.generatePropertySetterAction(key, metadata);
 
-    // Skip storing empty/null/undefined values to avoid invalid empty literals (e.g. literal:string:)
-    if (value === undefined || value === null || value === "") {
-      return;
+    if (value === undefined) return [];
+    // An empty value is no value: the property has no links, and no empty
+    // literal (`literal:string:`) is stored.
+    if (value === null || value === "") {
+      // A required property's link is part of what makes the record an
+      // instance of its class: clearing it would drop the record from the
+      // class's queries with no error.
+      if (metadata.required) {
+        throw new Error(`Property "${key}" is required and cannot be cleared`);
+      }
+      // The executor's `removeLink` with target `*` removes every stored link
+      // on the property and prunes what this batch staged for it.
+      return [{ commands: [{ action: "removeLink", source: "this", predicate: metadata.through, target: "*" }], parameters: [] }];
     }
 
     const mode = effectiveLiteralStorage(metadata);
@@ -1658,7 +1737,76 @@ export class Ad4mModel {
       value = valueToLiteralIri(value);
     }
 
-    await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value }], batchId);
+    return [{ commands: actions, parameters: [{ name: "value", value }] }];
+  }
+
+  /**
+   * The `executeAction` writes of a relation change: one for a set (its
+   * `collectionSetter` takes every value), one per value for an add or remove.
+   */
+  private planRelation(key: string, kind: 'setter' | 'adder' | 'remover', value: any): FieldWrite[] {
+    const metadata = this.getRelationOptions(key);
+    if (!metadata) {
+      console.warn(`Relation "${key}" has no metadata, skipping`);
+      return [];
+    }
+
+    // Generate actions from metadata (replaces Prolog query)
+    const actions = this.generateRelationAction(key, kind);
+
+    if (value == null) return [];
+    const values = Array.isArray(value) ? value : [value];
+    const param = (v: any) => ({ name: "value", value: this.resolveRelationId(v) });
+    if (kind === 'setter') return [{ commands: actions, parameters: values.map(param) }];
+    return values.map(v => ({ commands: actions, parameters: [param(v)] }));
+  }
+
+  /**
+   * Sends writes in as few `executeAction` calls as keep their links: the
+   * executor runs a call's commands in order, so consecutive writes share one
+   * call, each with its own parameter names. A `collectionSetter` takes every
+   * parameter of its call as a member, so it goes in a call of its own. A
+   * command's `local` flag is per command, so Local and Shared links mix. The
+   * executor tries every parameter name at each position of each command, so
+   * a call holds at most `MAX_WRITES_PER_CALL` writes.
+   */
+  private async sendWrites(writes: FieldWrite[], batchId?: string): Promise<void> {
+    let group: FieldWrite[] = [];
+    const flush = async () => {
+      if (group.length === 1) {
+        await this._perspective.executeAction(group[0].commands, this._baseExpression, group[0].parameters, batchId);
+      } else if (group.length > 1) {
+        const commands: any[] = [];
+        const parameters: { name: string; value: any }[] = [];
+        group.forEach((write, i) => {
+          // The executor substitutes a parameter name wherever it occurs in a
+          // command's source, predicate or target; rename `value` the same way.
+          const name = `ad4m-model-write-${i}-value`;
+          const rename = (s: any) => (typeof s === "string" && write.parameters.length ? s.split("value").join(name) : s);
+          for (const c of write.commands) {
+            commands.push({ ...c, source: rename(c.source), predicate: rename(c.predicate), target: rename(c.target) });
+          }
+          for (const p of write.parameters) parameters.push({ name, value: p.value });
+        });
+        await this._perspective.executeAction(commands, this._baseExpression, parameters, batchId);
+      }
+      group = [];
+    };
+    for (const write of writes) {
+      if (write.commands.some((c: any) => c.action === "collectionSetter")) {
+        await flush();
+        group = [write];
+        await flush();
+      } else {
+        group.push(write);
+        if (group.length >= MAX_WRITES_PER_CALL) await flush();
+      }
+    }
+    await flush();
+  }
+
+  private async setProperty(key: string, value: any, batchId?: string) {
+    await this.sendWrites(await this.planProperty(key, value), batchId);
   }
 
   /** Resolve a relation argument to a plain string ID. Accepts either a raw
@@ -1685,90 +1833,34 @@ export class Ad4mModel {
   }
 
   private async setRelationValues(key: string, value: any, batchId?: string) {
-    const metadata = this.getRelationOptions(key);
-    if (!metadata) {
-      console.warn(`Relation "${key}" has no metadata, skipping`);
-      return;
-    }
-    this._relationsWritten.add(metadata.predicate);
-    const abstractName = this.abstractName();
-    if (abstractName) {
-      if (value != null) await this.relationThroughAbstract(abstractName, key, 'setter', value, batchId);
-      return;
-    }
-
-    // Generate actions from metadata (replaces Prolog query)
-    const actions = this.generateRelationAction(key, 'setter');
-
-    if (value != null) {
-      if (Array.isArray(value)) {
-        await this._perspective.executeAction(
-          actions,
-          this._baseExpression,
-          value.map((v) => ({ name: "value", value: this.resolveRelationId(v) })),
-          batchId
-        );
-      } else {
-        await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(value) }], batchId);
-      }
-    }
+    await this.writeRelation(key, 'setter', value, batchId);
   }
 
   private async addRelationValue(key: string, value: any, batchId?: string) {
-    const metadata = this.getRelationOptions(key);
-    if (!metadata) {
-      console.warn(`Relation "${key}" has no metadata, skipping`);
-      return;
-    }
-    this._relationsWritten.add(metadata.predicate);
-    const abstractName = this.abstractName();
-    if (abstractName) {
-      if (value != null) await this.relationThroughAbstract(abstractName, key, 'adder', value, batchId);
-      return;
-    }
-
-    // Generate actions from metadata (replaces Prolog query)
-    const actions = this.generateRelationAction(key, 'adder');
-
-    if (value != null) {
-      if (Array.isArray(value)) {
-        await Promise.all(
-          value.map((v) =>
-            this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(v) }], batchId)
-          )
-        );
-      } else {
-        await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(value) }], batchId);
-      }
-    }
+    await this.writeRelation(key, 'adder', value, batchId);
   }
 
   private async removeRelationValue(key: string, value: any, batchId?: string) {
-    const metadata = this.getRelationOptions(key);
-    if (!metadata) {
+    await this.writeRelation(key, 'remover', value, batchId);
+  }
+
+  /** A relation setter, adder or remover call: on a row read through an
+   *  abstract class it dispatches through the executor (see
+   *  {@link relationThroughAbstract}); otherwise its writes go out in as few
+   *  `executeAction` calls as {@link sendWrites} allows. */
+  private async writeRelation(key: string, kind: 'setter' | 'adder' | 'remover', value: any, batchId?: string) {
+    const predicate = this.getRelationOptions(key)?.predicate;
+    if (predicate && kind !== 'remover') this._relationsWritten.add(predicate);
+    const abstractName = this.abstractName();
+    if (!abstractName) {
+      await this.sendWrites(this.planRelation(key, kind, value), batchId);
+      return;
+    }
+    if (!this.getRelationOptions(key)) {
       console.warn(`Relation "${key}" has no metadata, skipping`);
       return;
     }
-    const abstractName = this.abstractName();
-    if (abstractName) {
-      if (value != null) await this.relationThroughAbstract(abstractName, key, 'remover', value, batchId);
-      return;
-    }
-
-    // Generate actions from metadata (replaces Prolog query)
-    const actions = this.generateRelationAction(key, 'remover');
-
-    if (value != null) {
-      if (Array.isArray(value)) {
-        await Promise.all(
-          value.map((v) =>
-            this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(v) }], batchId)
-          )
-        );
-      } else {
-        await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value: this.resolveRelationId(value) }], batchId);
-      }
-    }
+    if (value != null) await this.relationThroughAbstract(abstractName, key, kind, value, batchId);
   }
 
   /**
@@ -1776,11 +1868,16 @@ export class Ad4mModel {
    *
    * **New instances** (no snapshot yet): creates the subject via
    * `createSubject` with initial scalar values, then sets relations
-   * via `innerUpdate`.
+   * via `innerUpdate`, then (without a `batchId`) refreshes from the
+   * perspective. To create without that read, use `Model.create()`.
    *
    * **Existing instances** (snapshot present, i.e. fetched via `get()`
    * or a query): updates only dirty fields via `innerUpdate`, then
    * refreshes from the perspective.
+   *
+   * A property set to `null` or `''` has no links after the write: an
+   * existing instance's links are removed, a new instance gets none.
+   * `undefined` writes nothing.
    * 
    * @param batchId - Optional batch ID for batch operations
    * @throws Will throw if instance creation, linking, or updating fails
@@ -1806,32 +1903,43 @@ export class Ad4mModel {
       } else {
         await this.innerUpdate(true, batchId);
       }
-      if (batchId) {
-        // Batch hasn't been committed yet — getData() would fetch stale data
-        // and overwrite in-memory values. Just refresh the snapshot so further
-        // saves within the same batch diff correctly.
-        this.takeSnapshot();
-      } else {
-        await this.getData();
-      }
+      // Snapshot what was written, so further saves diff correctly.
+      this.takeSnapshot();
+      // With a caller's batch nothing is committed yet: reading would fetch
+      // stale data and overwrite in-memory values.
+      if (!batchId) await this.getData();
       return;
     }
 
     // New instance → create path. The executor refuses an abstract class
     // too; refusing here keeps the error ahead of the batch.
-    const abstractName = this.abstractName();
-    if (abstractName) {
+    if (this.abstractName()) {
+      const name = (this.constructor as typeof Ad4mModel).getClassName();
       throw new Error(
-        `'${abstractName}' is an abstract class and cannot be created. Create an instance of ` +
-        `a class that has its properties; querying '${abstractName}' reads it.`
+        `'${name}' is an abstract class and cannot be created. Create an instance of ` +
+        `a class that has its properties; querying '${name}' reads it.`
       );
     }
-    let batchCreatedHere = false;
-    if(!batchId) {
-      batchId = await this.perspective.createBatch()
-      batchCreatedHere = true;
+
+    // With a caller's batch, the caller commits; take a snapshot so a later
+    // save() in the same batch updates instead of creating again (two
+    // competing "title" values).
+    if (batchId) {
+      await this.createIn(batchId);
+      this.takeSnapshot();
+      return;
     }
 
+    // Otherwise the create gets its own batch, discarded if any step fails.
+    await Ad4mModel.transaction(this.perspective, ({ batchId }) => this.createIn(batchId));
+    // The record now exists: snapshot first, so if the re-read below fails a
+    // retried save() updates instead of creating a second copy.
+    this.takeSnapshot();
+    await this.getData();
+  }
+
+  /** Stage the writes that create this instance in `batchId`. */
+  private async createIn(batchId: string) {
     const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
 
     // Track properties resolved through expression_create — a signed literal
@@ -1841,7 +1949,7 @@ export class Ad4mModel {
 
     const initialValues = {};
     for (const [key, value] of Object.entries(this)) {
-      if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
+      if (value !== undefined && value !== null && value !== "" && !(Array.isArray(value) && value.length > 0) && !value?.action) {
         const propMeta = metadata.properties[key];
         // Only offer keys with a declared, settable model property. This
         // excludes ORM bookkeeping fields (_baseExpression, _perspective —
@@ -1861,37 +1969,23 @@ export class Ad4mModel {
       }
     }
 
-    const className = await this.perspective.stringOrTemplateObjectToSubjectClassName(this);
-
     await this.perspective.createSubject(
-      className,
+      this,
       this._baseExpression,
       initialValues,
       batchId
     );
 
     // Relations via innerUpdate; createSubject wrote the scalar properties.
-    await this.innerUpdate(false, batchId)
+    const writes = await this.updateWrites(false);
 
     for (const key of deferredExpressionProps) {
       const value = (this as any)[key];
       if (value !== undefined && value !== null) {
-        await this.setProperty(key, value, batchId);
+        writes.push(...await this.planProperty(key, value));
       }
     }
-
-    // If we got a batchId passed in, we let the caller decide when to commit.
-    // We can't call getData() since the instance won't exist in the perspective
-    // until the batch is committed.
-    if (batchCreatedHere) {
-      await this.perspective.commitBatch(batchId)
-      await this.getData();
-    } else {
-      // Take a snapshot so that a subsequent save() within the same batch
-      // routes through the UPDATE path instead of CREATE, avoiding duplicate
-      // links (e.g. two competing "title" values).
-      this.takeSnapshot();
-    }
+    await this.sendWrites(writes, batchId);
   }
 
   /** The name the executor knows the class by when it is abstract (#1435):
@@ -1949,6 +2043,12 @@ export class Ad4mModel {
   }
 
   private async innerUpdate(setProperties: boolean = true, batchId?: string) {
+    await this.sendWrites(await this.updateWrites(setProperties), batchId);
+  }
+
+  /** The writes of the changed fields, in field order (see {@link sendWrites}). */
+  private async updateWrites(setProperties: boolean = true): Promise<FieldWrite[]> {
+    const writes: FieldWrite[] = [];
     const ctor = this.constructor as typeof Ad4mModel;
 
     // Determine which fields actually changed (skip unchanged when snapshot exists)
@@ -1987,29 +2087,33 @@ export class Ad4mModel {
         }
       }
 
-      if (value !== undefined && value !== null) {
+      if (value !== undefined) {
         if (value?.action) {
+          const envelopePredicate = this.getRelationOptions(key)?.predicate;
+          if (envelopePredicate && value.action !== "remover") this._relationsWritten.add(envelopePredicate);
           switch (value.action) {
             case "setter":
-              await this.setRelationValues(key, value.value, batchId);
+              writes.push(...this.planRelation(key, 'setter', value.value));
               break;
             case "adder":
-              await this.addRelationValue(key, value.value, batchId);
+              writes.push(...this.planRelation(key, 'adder', value.value));
               break;
             case "remover":
-              await this.removeRelationValue(key, value.value, batchId);
+              writes.push(...this.planRelation(key, 'remover', value.value));
               break;
             default:
-              await this.setRelationValues(key, value.value, batchId);
+              writes.push(...this.planRelation(key, 'setter', value.value));
               break;
           }
         } else if (Array.isArray(value)) {
           // Handle all arrays as relations, including empty ones (which clears the relation).
           // A record being created under an id minted here has no links to
           // clear, so an empty relation there costs a round trip and writes nothing.
-          if (value.length === 0 && !this._snapshot && this._idMinted && !this._relationsWritten.has(this.getRelationOptions(key)?.predicate ?? key)) continue;
-          await this.setRelationValues(key, value, batchId);
-        } else if (value !== undefined && value !== null && value !== "") {
+          const predicate = this.getRelationOptions(key)?.predicate ?? key;
+          if (value.length === 0 && !this._snapshot && this._idMinted && !this._relationsWritten.has(predicate)) continue;
+          this._relationsWritten.add(predicate);
+          writes.push(...this.planRelation(key, 'setter', value));
+        } else {
           // A scalar handed to a relation field is a single-member relation.
           //
           // This used to `continue` — "Skip, it's a relation, not a regular
@@ -2036,7 +2140,11 @@ export class Ad4mModel {
           // both paths at once.
           const relationMeta = this.getRelationOptions(key);
           if (relationMeta) {
-            await this.setRelationValues(key, [value], batchId);
+            // `null` and `""` are not relation members; relations empty with `[]`.
+            if (value !== null && value !== "") {
+              this._relationsWritten.add(relationMeta.predicate);
+              writes.push(...this.planRelation(key, 'setter', [value]));
+            }
             continue;
           }
 
@@ -2047,11 +2155,12 @@ export class Ad4mModel {
               continue;
             }
 
-            await this.setProperty(key, value, batchId);
+            writes.push(...await this.planProperty(key, value));
           }
         }
       }
     }
+    return writes;
   }
 
   /**
@@ -2087,10 +2196,10 @@ export class Ad4mModel {
 
     const instanceIds = instances.map(inst => inst.id || (inst as any)._baseExpression);
 
-    // The executor reads getter SPARQL from the perspective's SHACL triples
-    // (written by `addSdna`), so no shape JSON is shipped with the call.
+    // The executor reads getter SPARQL from the registered shape, so no
+    // shape JSON is shipped with the call.
     const result = await perspective.evaluateGetters(
-      metadata.className,
+      this.queriedAs(),
       instanceIds,
       propertyNames,
     );
@@ -2139,13 +2248,13 @@ export class Ad4mModel {
    * @param optsOrInclude - Optional hydration options. Accepts two forms:
    *   - `GetOptions` wrapper: `{ include: { comments: true }, properties: ['title'] }`
    *   - `IncludeMap` shorthand: `{ comments: true }` (equivalent to `{ include: { comments: true } }`)
-   * @returns The populated model instance
-   * @throws Will throw if data retrieval fails
+   * @returns This instance, populated, or `null` when no instance has this ID
+   * @throws If the read fails
    *
    * @example
    * ```typescript
    * const recipe = new Recipe(perspective, existingId);
-   * await recipe.get();
+   * if (!(await recipe.get())) throw new Error('not found');
    * console.log(recipe.name, recipe.ingredients);
    *
    * // Shorthand — pass IncludeMap directly:
@@ -2155,7 +2264,7 @@ export class Ad4mModel {
    * await recipe.get({ include: { ingredients: true }, properties: ['name'] });
    * ```
    */
-  async get(optsOrInclude?: GetOptions | IncludeMap) {
+  async get(optsOrInclude?: GetOptions | IncludeMap): Promise<this | null> {
     // Normalise: if the caller passed a plain IncludeMap shorthand (no `include`
     // or `properties` key at the top level) wrap it in GetOptions automatically.
     let opts: GetOptions | undefined;
@@ -2172,9 +2281,15 @@ export class Ad4mModel {
 
   /**
    * Deletes the model instance from the perspective.
+   *
+   * Also removes every incoming link (any link whose target is this
+   * instance, e.g. a parent's `@HasMany` link to it), so no reference to the
+   * deleted instance is left behind. Incoming links are read from committed
+   * state: a link to this instance added earlier in the same batch is not
+   * removed.
    * 
    * @param batchId - Optional batch ID for batch operations
-   * @throws Will throw if removal fails
+   * @throws Will throw if removing the instance's links or its incoming links fails
    * 
    * @example
    * ```typescript
@@ -2208,39 +2323,37 @@ export class Ad4mModel {
       //
       // Instead we only remove outgoing links whose predicate is declared
       // by THIS model's schema (properties + relations).
-      try {
-        const knownPredicates = new Set<string>();
-        for (const p of Object.values(metadata.properties)) {
-          if (p.predicate) knownPredicates.add(p.predicate);
-        }
-        for (const r of Object.values(metadata.relations)) {
-          if (r.predicate) knownPredicates.add(r.predicate);
-        }
+      const knownPredicates = new Set<string>();
+      for (const p of Object.values(metadata.properties)) {
+        if (p.predicate) knownPredicates.add(p.predicate);
+      }
+      for (const r of Object.values(metadata.relations)) {
+        if (r.predicate) knownPredicates.add(r.predicate);
+      }
 
-        const outgoingLinks = await this._perspective.get(new LinkQuery({ source: this._baseExpression }));
-        const ownLinks = outgoingLinks.filter(
-          (link) => link.data.predicate && knownPredicates.has(link.data.predicate)
-        );
-        if (ownLinks.length > 0) {
-          await this._perspective.removeLinks(ownLinks, batchId);
-        }
-      } catch (e) {
-        console.warn(`delete(): failed to remove outgoing links for ${this._baseExpression}:`, e);
+      const outgoingLinks = await this._perspective.get(new LinkQuery({ source: this._baseExpression }));
+      const ownLinks = outgoingLinks.filter(
+        (link) => link.data.predicate && knownPredicates.has(link.data.predicate)
+      );
+
+      if (ownLinks.length > 0) {
+        await this._perspective.removeLinks(ownLinks, batchId);
       }
     }
 
-    // Clean up incoming links — remove any links that point **to** this instance.
-    // Unlike outgoing links (scoped above), incoming links originate from OTHER
-    // nodes.  Removing them doesn't damage sibling models on this node; it
-    // prevents dangling references elsewhere (e.g. a parent's has_child link).
-    try {
-      const incomingLinks = await this._perspective.get(new LinkQuery({ target: this._baseExpression }));
-      if (incomingLinks.length > 0) {
-        await this._perspective.removeLinks(incomingLinks, batchId);
-      }
-    } catch (e) {
-      // Non-fatal: the subject was already deleted; incoming link cleanup is best-effort
-      console.warn(`delete(): failed to clean up incoming links for ${this._baseExpression}:`, e);
+    // Remove every incoming link — any link that points **to** this instance,
+    // whatever model or relation it belongs to (including polymorphic
+    // relations, which name no single target class, e.g. a parent's child
+    // link). Unlike outgoing links (scoped above), incoming links have OTHER
+    // subjects as their source. Removing them doesn't damage sibling models
+    // on this base expression; leaving them would leave dangling references.
+    // A failed read or removal rejects delete(): a delete that silently leaves
+    // references behind is worse than one that reports its failure.
+    // The read sees committed links only: links staged earlier in the same
+    // batch (`batchId`) are not returned by `get()` and so are not removed.
+    const incomingLinks = await this._perspective.get(new LinkQuery({ target: this._baseExpression }));
+    if (incomingLinks.length > 0) {
+      await this._perspective.removeLinks(incomingLinks, batchId);
     }
   }
 
@@ -2252,13 +2365,25 @@ export class Ad4mModel {
    * Creates and saves a new model instance in one step.
    *
    * @param perspective - The perspective to create the instance in
-   * @param data - Property values to assign before saving
+   * @param data - Property values to assign before saving (`null` or `''`
+   *               leaves a property unwritten)
    * @param options - Optional settings:
    *   - `parent` — a `Scope` (model form or raw form) whose `id` will
    *     be used to create an incoming link from the parent to the new instance.
    *   - `batchId` — an existing batch id; when provided the link write and
    *     `save()` are added to the batch instead of committed immediately.
-   * @returns The saved model instance
+   *   - `returns` — `'id'` (default) returns the instance built from the
+   *     values written, with its `id`, and sends no read after the commit:
+   *     `author`, `createdAt`, `updatedAt`, getters and relations that were
+   *     not written stay unset. `'row'` reads the row back after the commit
+   *     (one round trip) and fills them. Not allowed with `batchId`: nothing
+   *     is committed yet to read.
+   * @returns The created model instance (see `returns`). A later `save()` on
+   *   it updates; it does not create again.
+   * @throws If a write or the commit fails (the batch it opened is discarded);
+   *   with `returns: 'row'`, also if the read fails after the commit (the
+   *   record exists then: the message names its id, so do not retry the
+   *   create); with `returns: 'row'` and a `batchId`, before anything is written
    *
    * @example
    * ```typescript
@@ -2283,33 +2408,43 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     data: Record<string, any> = {},
-    options?: { parent?: Scope; batchId?: string },
+    options?: { parent?: Scope; batchId?: string; returns?: 'id' | 'row' },
   ): Promise<T> {
+    if (options?.returns === 'row' && options.batchId) {
+      throw new Error(
+        "create(): returns: 'row' reads the row after the commit, which a caller's batch (batchId) has not had yet. " +
+        "Commit the batch, then read the instance with get()."
+      );
+    }
     const instance = new this(perspective) as T;
     Object.assign(instance, data);
+    // Resolved before any write, so an invalid parent stages nothing.
+    const linkParent = options?.parent ? parentLinkWriter(options.parent, this) : undefined;
 
-    // When a parent scope is provided without a caller-supplied batch, open a
-    // new batch ourselves so that the instance creation and the parent→child
-    // link are committed atomically.  If either step throws, commitBatch is
-    // never reached and the batch is implicitly abandoned (rollback).
-    if (options?.parent && !options?.batchId) {
-      const batchId = await perspective.createBatch();
-      await instance.save(batchId);
-      await linkToParent(perspective, requireSingleParent(options.parent), this, instance.id, batchId);
-      await perspective.commitBatch(batchId);
-      // Hydrate the instance now that the batch has been committed (mirrors the
-      // behaviour of save() when it manages its own batch).
-      await instance.get();
+    // In a caller's batch, the caller commits.
+    if (options?.batchId) {
+      await instance.save(options.batchId);
+      await linkParent?.(perspective, instance.id, options.batchId);
       return instance;
     }
 
-    await instance.save(options?.batchId);
+    // Otherwise open a batch so that the instance and the parent→child link
+    // are committed together. If any step throws, the batch is discarded
+    // (nothing is written, and it does not stay open on the executor) and the
+    // original error is rethrown.
+    await Ad4mModel.transaction(perspective, async ({ batchId }) => {
+      await instance.save(batchId);
+      await linkParent?.(perspective, instance.id, batchId);
+    });
 
-    // Create parent → child link if a parent scope was provided
-    if (options?.parent) {
-      await linkToParent(perspective, requireSingleParent(options.parent), this, instance.id, options?.batchId);
+    // The instance holds what it wrote and its snapshot is taken (save() did
+    // that), so nothing is read back unless the caller asked for the row.
+    if (options?.returns === 'row') {
+      const failed = (cause?: unknown) =>
+        Object.assign(new Error(`${this.name}.create(): ${instance.id} was created, but reading it back failed`), { cause });
+      const row = await instance.getData().catch((e) => { throw failed(e); });
+      if (!row) throw failed();
     }
-
     return instance;
   }
 
@@ -2321,8 +2456,10 @@ export class Ad4mModel {
    *
    * @param perspective - The perspective containing the instance
    * @param id - The expression URI of the instance to update
-   * @param data - Property values to merge before saving
+   * @param data - Property values to merge before saving (`null` or `''`
+   *               removes the property's links)
    * @returns The updated model instance
+   * @throws If no instance has this `id` (nothing is written)
    *
    * @example
    * ```typescript
@@ -2338,7 +2475,9 @@ export class Ad4mModel {
     data: Record<string, any>,
   ): Promise<T> {
     const instance = new this(perspective, id) as T;
-    await instance.get();
+    if (!(await instance.get())) {
+      throw new Error(`${this.getModelMetadata().className} not found: ${id}`);
+    }
     Object.assign(instance, data);
     await instance.save();
     return instance;
@@ -2347,10 +2486,11 @@ export class Ad4mModel {
   /**
    * Deletes an existing model instance identified by `id`.
    *
-   * Also cleans up any incoming links that point to this instance.
+   * Also removes every incoming link that points to this instance.
    *
    * @param perspective - The perspective containing the instance
    * @param id - The expression URI of the instance to delete
+   * @throws Will throw if removing the instance's links or its incoming links fails
    *
    * @example
    * ```typescript
@@ -2370,10 +2510,11 @@ export class Ad4mModel {
   /**
    * Deletes an existing model instance identified by `id`.
    *
-   * Also cleans up any incoming links that point to this instance.
+   * Also removes every incoming link that points to this instance.
    *
    * @param perspective - The perspective containing the instance
    * @param id - The expression URI of the instance to delete
+   * @throws Will throw if removing the instance's links or its incoming links fails
    *
    * @example
    * ```typescript
@@ -2407,14 +2548,15 @@ export class Ad4mModel {
   static async register(
     this: typeof Ad4mModel,
     perspective: PerspectiveProxy,
-  ): Promise<void> {
-    await perspective.ensureSDNASubjectClass(this);
+  ): Promise<RegisterResult> {
+    return Ad4mModel.registerAll(perspective, [this]);
   }
 
   /**
-   * Batch-registers multiple model classes on a perspective in a single RPC call.
-   * This is significantly faster than calling `register()` on each model individually
-   * because it eliminates N-1 round-trips and mutex acquisitions.
+   * Registers model classes on a perspective in one call. A class whose
+   * stored shape already is its shape is `unchanged` and nothing is written,
+   * so registering on every start is cheap; built-in classes (`TextContent`)
+   * live in the executor and are skipped.
    *
    * @param perspective - The perspective to register the models on
    * @param models - Array of Ad4mModel subclasses to register
@@ -2427,8 +2569,15 @@ export class Ad4mModel {
   static async registerAll(
     perspective: PerspectiveProxy,
     models: (typeof Ad4mModel)[],
-  ): Promise<void> {
-    await perspective.ensureSubjectClasses(models);
+  ): Promise<RegisterResult> {
+    const shapes = models
+      .filter(model => !Object.prototype.hasOwnProperty.call(model, 'builtinUri'))
+      .map(model => {
+        const { shape } = model.generateSHACL();
+        if (!shape) throw new Error(`Class ${model.name} has no shape: declare it with @Model.`);
+        return shape as SHACLShape;
+      });
+    return perspective.registerShapes(shapes);
   }
 
   /**
@@ -2436,8 +2585,8 @@ export class Ad4mModel {
    *
    * All `save`, `update`, and `delete` calls made via the provided `batchId`
    * are buffered and flushed atomically when the callback completes.
-   * If the callback throws, the batch is **not** committed, preventing
-   * partial writes.
+   * If the callback throws, the batch is discarded, not committed, and the
+   * error is rethrown: no partial writes.
    *
    * @param perspective - The perspective to operate on
    * @param fn - Async callback that receives a `TransactionContext` object.
@@ -2463,9 +2612,15 @@ export class Ad4mModel {
     fn: (tx: { batchId: string }) => Promise<R>,
   ): Promise<R> {
     const batchId = await perspective.createBatch();
-    const result = await fn({ batchId });
-    await perspective.commitBatch(batchId);
-    return result;
+    try {
+      const result = await fn({ batchId });
+      await perspective.commitBatch(batchId);
+      return result;
+    } catch (e) {
+      // A failed discard must not hide the original error.
+      await perspective.discardBatch(batchId).catch(() => {});
+      throw e;
+    }
   }
 
   /**
@@ -2576,7 +2731,7 @@ export class Ad4mModel {
    * This method recovers those values so that old perspectives are queried
    * with the correct type-discriminator triple.
    *
-   * @param shape - SHACL node shape (as returned by `PerspectiveProxy.getAllShacl()`)
+   * @param shape - SHACL node shape (as returned by `PerspectiveProxy.shapes()`)
    * @param name  - Class name to assign (e.g. "Channel")
    * @returns Generated Ad4mModel subclass, ready for querying
    */
@@ -2669,7 +2824,10 @@ export class Ad4mModel {
       }
     }
 
-    const ModelDecorator = Model({ name });
+    // The class keeps the shape's target class, which the executor
+    // addresses it by: its namespace is everything before the local name.
+    const namespace = namespaceOf(shape.targetClass);
+    const ModelDecorator = Model({ name, ...(namespace && { namespace }) });
     ModelDecorator(DynamicModelClass);
 
     return DynamicModelClass as typeof Ad4mModel;

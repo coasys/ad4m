@@ -47,25 +47,35 @@ async fn subscribe_replies_json_at_revision_zero() {
     let p = registered_perspective(&[("Todo", TODO_SDNA)]).await;
     let reply = call(
         "perspective.subscribeQuery",
-        json!({ "uuid": p.0, "query": "SELECT ?s WHERE { ?s <test://none> ?o }" }),
+        json!({ "uuid": p.0, "query": "SELECT ?s WHERE { ?s <test://none> ?o }",
+                "subscriptionId": "query-sub" }),
         admin_conn_ctx("c"),
     )
     .await
     .unwrap();
     assert_eq!(reply["result"], json!([]));
     assert_eq!(reply["revision"], json!(0));
-    assert!(reply["subscriptionId"].is_string());
+    assert_eq!(
+        reply["subscriptionId"],
+        json!("query-sub"),
+        "the client's id"
+    );
 
     let reply = call(
         "perspective.modelSubscribe",
-        json!({ "uuid": p.0, "class_name": "Todo", "query_json": "{}" }),
+        json!({ "uuid": p.0, "class_name": "Todo", "query_json": "{}",
+                "subscriptionId": "model-sub" }),
         admin_conn_ctx("c"),
     )
     .await
     .unwrap();
     assert_eq!(reply["result"]["instances"], json!([]));
     assert_eq!(reply["revision"], json!(0));
-    assert!(reply["subscriptionId"].is_string());
+    assert_eq!(
+        reply["subscriptionId"],
+        json!("model-sub"),
+        "the client's id"
+    );
 }
 
 #[tokio::test]
@@ -73,7 +83,8 @@ async fn resync_subscription_returns_revision_and_result() {
     let p = registered_perspective(&[]).await;
     let sub = call(
         "perspective.subscribeQuery",
-        json!({ "uuid": p.0, "query": "SELECT ?s WHERE { ?s <test://none> ?o }" }),
+        json!({ "uuid": p.0, "query": "SELECT ?s WHERE { ?s <test://none> ?o }",
+                "subscriptionId": "s" }),
         admin_conn_ctx("c"),
     )
     .await
@@ -114,11 +125,11 @@ async fn subscribing_needs_a_socket() {
     for (method, params) in [
         (
             "perspective.subscribeQuery",
-            json!({ "uuid": p.0, "query": "SELECT ?s WHERE { ?s ?p ?o }" }),
+            json!({ "uuid": p.0, "query": "SELECT ?s WHERE { ?s ?p ?o }", "subscriptionId": "s" }),
         ),
         (
             "perspective.modelSubscribe",
-            json!({ "uuid": p.0, "class_name": "Todo", "query_json": "{}" }),
+            json!({ "uuid": p.0, "class_name": "Todo", "query_json": "{}", "subscriptionId": "s" }),
         ),
     ] {
         let err = call(method, params, admin_ctx())
@@ -128,12 +139,48 @@ async fn subscribing_needs_a_socket() {
     }
 }
 
+/// A subscription re-runs one query; a cursor would re-run the same page
+/// forever, so `after` (even `""`) is a bad request on `modelSubscribe`.
+#[tokio::test]
+async fn model_subscribe_refuses_a_cursor() {
+    let p = registered_perspective(&[("Todo", TODO_SDNA)]).await;
+    for (classes, after) in [
+        (json!({ "class_name": "Todo" }), json!("")),
+        (json!({ "class_name": "Todo" }), json!("c1")),
+        (json!({ "class_names": ["Todo"] }), json!("")),
+    ] {
+        let mut params = json!({
+            "uuid": p.0,
+            "query_json": json!({ "limit": 5, "after": after }).to_string(),
+            "subscriptionId": "cursor-sub",
+        });
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(classes.as_object().unwrap().clone());
+        let err = call("perspective.modelSubscribe", params, admin_conn_ctx("c"))
+            .await
+            .expect_err("a subscription cannot page by cursor");
+        assert_eq!(err.code, 400, "{classes} after={after}");
+        assert!(err.message.contains("after"), "{}", err.message);
+    }
+    // Without a cursor the same query subscribes.
+    call(
+        "perspective.modelSubscribe",
+        json!({ "uuid": p.0, "class_name": "Todo", "query_json": r#"{"limit":5}"#,
+                "subscriptionId": "cursor-sub" }),
+        admin_conn_ctx("c"),
+    )
+    .await
+    .expect("no cursor: subscribes");
+}
+
 #[tokio::test]
 async fn dispose_query_ends_only_this_connections_subscription() {
     let p = registered_perspective(&[]).await;
     let sub = call(
         "perspective.subscribeQuery",
-        json!({ "uuid": p.0, "query": "SELECT ?s WHERE { ?s ?p ?o }" }),
+        json!({ "uuid": p.0, "query": "SELECT ?s WHERE { ?s ?p ?o }", "subscriptionId": "s" }),
         admin_conn_ctx("c"),
     )
     .await
@@ -148,4 +195,129 @@ async fn dispose_query_ends_only_this_connections_subscription() {
     assert_eq!(dispose("other").await.unwrap(), json!(false));
     assert_eq!(dispose("c").await.unwrap(), json!(true));
     assert_eq!(dispose("c").await.unwrap(), json!(false));
+}
+
+// ── client-minted ids ───────────────────────────────────────────────────
+
+/// `perspective.subscribeQuery` and `modelSubscribe` with `subscriptionId` set to `id`.
+fn opens(uuid: &str, id: &str) -> [(&'static str, Value); 2] {
+    [
+        (
+            "perspective.subscribeQuery",
+            json!({ "uuid": uuid, "query": "SELECT ?s WHERE { ?s ?p ?o }", "subscriptionId": id }),
+        ),
+        (
+            "perspective.modelSubscribe",
+            json!({ "uuid": uuid, "class_name": "Todo", "query_json": "{}", "subscriptionId": id }),
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn a_subscribe_needs_the_clients_id() {
+    let p = registered_perspective(&[("Todo", TODO_SDNA)]).await;
+    for (method, mut params) in opens(&p.0, "s") {
+        params.as_object_mut().unwrap().remove("subscriptionId");
+        let err = call(method, params, admin_conn_ctx("c"))
+            .await
+            .expect_err("no subscriptionId");
+        assert_eq!(err.code, 400, "{method}: {}", err.message);
+    }
+}
+
+#[tokio::test]
+async fn a_subscribe_with_a_malformed_id_gets_400_and_registers_nothing() {
+    let p = registered_perspective(&[("Todo", TODO_SDNA)]).await;
+    let too_long = "a".repeat(65);
+    for id in ["", "line\nbreak", "a b", too_long.as_str()] {
+        for (method, params) in opens(&p.0, id) {
+            let err = call(method, params, admin_conn_ctx("c"))
+                .await
+                .expect_err("malformed id");
+            assert_eq!(err.code, 400, "{method} with {id:?}: {}", err.message);
+        }
+        let disposed = call(
+            "perspective.disposeQuery",
+            json!({ "uuid": p.0, "subscriptionId": id }),
+            admin_conn_ctx("c"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(disposed, json!(false), "{id:?} registered");
+    }
+    // The longest valid id opens.
+    let longest = "a".repeat(64);
+    let [(method, params), _] = opens(&p.0, &longest);
+    call(method, params, admin_conn_ctx("c")).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_subscribe_with_a_taken_id_gets_409_and_registers_nothing() {
+    let p = registered_perspective(&[("Todo", TODO_SDNA)]).await;
+    let [(method, params), _] = opens(&p.0, "taken");
+    call(method, params, admin_conn_ctx("c")).await.unwrap();
+    for connection in ["c", "other"] {
+        for (method, params) in opens(&p.0, "taken") {
+            let err = call(method, params, admin_conn_ctx(connection))
+                .await
+                .expect_err("the id is taken");
+            assert_eq!(err.code, 409, "{method} on {connection}: {}", err.message);
+        }
+    }
+    // The first subscription is the only one, still the first connection's.
+    let dispose = |connection: &'static str| {
+        call(
+            "perspective.disposeQuery",
+            json!({ "uuid": p.0, "subscriptionId": "taken" }),
+            admin_conn_ctx(connection),
+        )
+    };
+    assert_eq!(dispose("other").await.unwrap(), json!(false));
+    assert_eq!(dispose("c").await.unwrap(), json!(true));
+    assert_eq!(dispose("c").await.unwrap(), json!(false));
+}
+
+/// A call whose cancel arrived while it opened ends its subscription: the client disposes
+/// the id after the cancel, and that dispose may have run before the subscription was
+/// registered.
+#[tokio::test]
+async fn a_subscribe_cancelled_while_it_opens_leaves_nothing() {
+    let p = registered_perspective(&[("Todo", TODO_SDNA)]).await;
+    for (method, params) in opens(&p.0, "cancelled") {
+        let mut ctx = (*admin_conn_ctx("c")).clone();
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        ctx.cancel_token = Some(token);
+        let err = call(method, params, Arc::new(ctx))
+            .await
+            .expect_err("cancelled");
+        assert_eq!(err.code, 499, "{method}: {}", err.message);
+        let resync = call(
+            "perspective.resyncSubscription",
+            json!({ "uuid": p.0, "subscriptionId": "cancelled" }),
+            admin_conn_ctx("c"),
+        )
+        .await
+        .expect_err("nothing registered");
+        assert_eq!(resync.code, 404, "{method}");
+    }
+}
+
+#[test]
+fn the_live_query_opens_are_the_methods_marked_opens() {
+    let map = build_handler_map();
+    let marked: Vec<&str> = map
+        .specs()
+        .iter()
+        .filter(|s| s.opens)
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(
+        marked,
+        ["perspective.modelSubscribe", "perspective.subscribeQuery"]
+    );
+    for name in marked {
+        assert!(map.opens(name), "{name}: the connection reads the marker");
+    }
+    assert!(!map.opens("perspective.disposeQuery"));
 }

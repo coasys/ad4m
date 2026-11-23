@@ -12,6 +12,9 @@
  *   sequence                         → last applied server sequence number
  *   held/{link_hash}                 → {op, link}: an inbound wire link this
  *                                      agent holds no key for yet (see sync.ts)
+ *   render/progress                  → {upto, next, page}: a fresh member's
+ *                                      paged /render in progress, so a restart
+ *                                      resumes it
  */
 
 import { getStorage } from "./adapters.js";
@@ -250,4 +253,33 @@ export function heldLinks(): HeldLink[] {
 export function clearHeld(): void {
     const storage = getStorage();
     for (const key of storage.listKeys(HELD_PREFIX)) storage.delete(key);
+}
+
+// ---------------------------------------------------------------------------
+// Paged /render in progress (see sync.ts, bootstrap)
+// ---------------------------------------------------------------------------
+
+export interface RenderProgress {
+    /** The snapshot's pinned sequence; null until the first page came back. */
+    upto: number | null;
+    /** Cursor of the next page; null for the first. */
+    next: string | null;
+    /** Pages applied so far. */
+    page: number;
+}
+
+const RENDER_PROGRESS_KEY = "render/progress";
+
+export function getRenderProgress(): RenderProgress | null {
+    const raw = getStorage().get(RENDER_PROGRESS_KEY);
+    return raw ? (JSON.parse(raw) as RenderProgress) : null;
+}
+
+export function setRenderProgress(progress: RenderProgress): void {
+    getStorage().put(RENDER_PROGRESS_KEY, JSON.stringify(progress));
+}
+
+/** Ends a render: drops its progress. */
+export function clearRender(): void {
+    getStorage().delete(RENDER_PROGRESS_KEY);
 }

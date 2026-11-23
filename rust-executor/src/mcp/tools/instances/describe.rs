@@ -3,10 +3,11 @@
 //! Projects the registered SHACL classes (and flows) into plain JSON an
 //! agent can read: property names, friendly types, cardinality, hints.
 
-use super::{class_properties, pretty, Ad4mMcpHandler, PropView};
+use super::{class_properties, pretty, prop_json, Ad4mMcpHandler};
 use crate::perspectives::flow_context::load_shacl_flows;
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::perspectives::sparql_store::EvalStop;
 use crate::types::PerspectiveHandle;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
@@ -60,12 +61,12 @@ pub(crate) fn describe_class(
     let mut properties: Vec<Value> = infos
         .iter()
         .filter(|i| !i.flag() && !i.collection())
-        .map(PropView::to_json)
+        .map(prop_json)
         .collect();
     let mut collections: Vec<Value> = infos
         .iter()
         .filter(|i| !i.flag() && i.collection())
-        .map(PropView::to_json)
+        .map(prop_json)
         .collect();
     flag_unresolved_relation_targets(&mut properties, registered);
     flag_unresolved_relation_targets(&mut collections, registered);
@@ -92,7 +93,7 @@ pub(crate) fn describe_class(
 /// enough for an agent to read: states with their hints, transitions with
 /// the action name that triggers them, and which classes a flow runs on.
 pub(crate) async fn describe_flows(perspective: &PerspectiveInstance) -> Vec<Value> {
-    let flows = match load_shacl_flows(perspective).await {
+    let flows = match load_shacl_flows(&EvalStop::none(), perspective).await {
         Ok(f) => f,
         Err(e) => {
             log::warn!("describe_perspective: could not load flows: {e:#}");
@@ -150,17 +151,18 @@ pub(crate) async fn describe_perspective_value(
     perspective: &PerspectiveInstance,
     handle: &PerspectiveHandle,
 ) -> Value {
-    let mut class_names = perspective
-        .get_subject_classes_from_shacl()
-        .await
-        .unwrap_or_default();
-    class_names.sort();
-    class_names.dedup();
+    // A class whose name another class shares is listed by its IRI.
+    let class_keys = perspective.class_keys().unwrap_or_default();
 
-    let registered: BTreeSet<&str> = class_names.iter().map(String::as_str).collect();
+    let names = perspective.class_names().unwrap_or_default();
+    let registered: BTreeSet<&str> = class_keys
+        .iter()
+        .chain(&names)
+        .map(String::as_str)
+        .collect();
 
-    let mut classes = Vec::with_capacity(class_names.len());
-    for name in &class_names {
+    let mut classes = Vec::with_capacity(class_keys.len());
+    for name in &class_keys {
         match perspective.get_shape(name) {
             Ok(shape) => classes.push(describe_class(name, &shape, &registered)),
             // Never drop a class silently — an agent that can't see a class
@@ -193,7 +195,7 @@ pub(crate) async fn describe_perspective_value(
 impl Ad4mMcpHandler {
     /// Describe the data model of a perspective — the discovery step before any instance_* call.
     #[tool(
-        description = "Describe the data model of a perspective: every registered subject class (model) with its properties (name, type, required, cardinality, hints), its collections, and any flows (state machines). Call this right after list_perspectives / neighbourhood_join_from_url — it returns the schema as data so you can then use the generic instance_create / instance_query / instance_get / instance_update / instance_add_to_collection / instance_remove_from_collection / instance_remove tools with class_name set to one of the returned class names. Property values passed to those tools are validated against this schema."
+        description = "Describe the data model of a perspective: every registered subject class (model) with its properties (name, type, required, cardinality, hints), its collections, and any flows (state machines). Call this right after list_perspectives / neighbourhood_join_from_url — it returns the schema as data so you can then use the generic instance_create / instance_query / instance_get / instance_update / instance_add_to_collection / instance_remove_from_collection / instance_remove tools with class_name set to one of the returned class names. Property values passed to those tools are validated against this schema. A property may list allowed_values: only those values are accepted on write."
     )]
     pub async fn describe_perspective(
         &self,

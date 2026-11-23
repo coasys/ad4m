@@ -1,5 +1,5 @@
 import path from "path";
-import { Ad4mClient, Ad4mModel, ExpressionProof, Link, LinkExpression, LinkInput, Model, Perspective, PerspectiveUnsignedInput, Property } from "@coasys/ad4m";
+import { Ad4mClient, Ad4mModel, ExpressionProof, Link, LinkExpression, LinkInput, Model, Perspective, PerspectiveProxy, PerspectiveUnsignedInput, Property } from "@coasys/ad4m";
 import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
@@ -390,6 +390,52 @@ describe("Multi-User Simple integration tests", () => {
         })
     })
 
+    describe("Resource metrics", () => {
+        after(cleanupAllMainExecutorPerspectives);
+
+        async function getMetrics(token?: string) {
+            const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+            const response = await fetch(`${baseUrl(apiPort)}/metrics`, { headers });
+            return { status: response.status, body: await response.text() };
+        }
+
+        it("counts a user's links and queries and shows them to the admin only", async () => {
+            await createTestUser("metrics@example.com", "password");
+            const token = await adminAd4mClient!.agent.loginUser("metrics@example.com", "password");
+            const client = new Ad4mClient(baseUrl(apiPort), token);
+            const did = (await client.agent.me()).did;
+
+            const perspective = await client.perspective.add("Metrics Perspective");
+            await perspective.add(new Link({ source: "ad4m://self", predicate: "ad4m://has", target: "literal://string:one" }));
+            await perspective.add(new Link({ source: "ad4m://self", predicate: "ad4m://has", target: "literal://string:two" }));
+            const links = await perspective.get(new LinkQuery({ source: "ad4m://self" }));
+            expect(links.length).to.equal(2);
+
+            const admin = await getMetrics(ADMIN_CREDENTIAL);
+            expect(admin.status).to.equal(200);
+            const lines = admin.body.split("\n");
+            const value = (prefix: string) => {
+                const line = lines.find((l) => l.startsWith(prefix));
+                expect(line, `${prefix} in /metrics`).to.not.be.undefined;
+                return Number(line!.split(" ").pop());
+            };
+            expect(value(`ad4m_perspective_links_added_total{perspective="${perspective.uuid}"}`)).to.equal(2);
+            expect(value(`ad4m_perspective_queries_total{perspective="${perspective.uuid}"}`)).to.be.at.least(1);
+            // At least: signing up may write links (a profile) on the user's behalf.
+            expect(value(`ad4m_user_links_written_total{user="${did}"}`)).to.be.at.least(2);
+            expect(value(`ad4m_user_queries_total{user="${did}"}`)).to.be.at.least(1);
+            expect(value(`ad4m_user_perspectives{user="${did}"}`)).to.be.at.least(1);
+
+            // Per-user labels are personal data: a user and an anonymous caller get nothing.
+            const asUser = await getMetrics(token);
+            expect(asUser.status).to.equal(403);
+            expect(asUser.body).to.not.contain("ad4m_");
+            const anonymous = await getMetrics();
+            expect(anonymous.status).to.equal(403);
+            expect(anonymous.body).to.not.contain("ad4m_");
+        });
+    });
+
     describe("Perspective Isolation", () => {
         after(cleanupAllMainExecutorPerspectives);
 
@@ -566,13 +612,13 @@ describe("Multi-User Simple integration tests", () => {
         
         before(async () => {
             // Import necessary decorators and classes
-            const { Model, Property } = await import("@coasys/ad4m");
+            const { Ad4mModel, Model, Property } = await import("@coasys/ad4m");
 
             // Define a proper subject class with decorators
             @Model({
                 name: "TestSubject"
             })
-            class TestSubjectClass {
+            class TestSubjectClass extends Ad4mModel {
                 @Property({
                     through: "test://name",
                     initial: "test://initial",
@@ -599,8 +645,8 @@ describe("Multi-User Simple integration tests", () => {
             // User 1 creates perspective and ensures SDNA subject class
             const p1 = await client1.perspective.add("User 1 Subject Test Perspective");
             
-            // User 1 ensures SDNA subject class
-            await p1.ensureSDNASubjectClass(TestSubject);
+            // User 1 registers the subject class
+            await p1.registerShapes([TestSubject.generateSHACL().shape]);
 
 
             // User 1 creates a subject instance
@@ -621,8 +667,8 @@ describe("Multi-User Simple integration tests", () => {
             // User 2 creates perspective and does similar operations
             const p2 = await client2.perspective.add("User 2 Subject Test Perspective");
             
-            // User 2 ensures the same SDNA subject class
-            await p2.ensureSDNASubjectClass(TestSubject);
+            // User 2 registers the same subject class
+            await p2.registerShapes([TestSubject.generateSHACL().shape]);
 
             // User 2 creates a subject instance
             await p2.createSubject(new TestSubject(), "test://subject2", {name: "Test Subject 2"});
@@ -852,12 +898,14 @@ describe("Multi-User Simple integration tests", () => {
             console.log("User 1 DID:", user1Agent.did);
             console.log("User 2 DID:", user2Agent.did);
 
-            // Poll until agents are published and retrievable by DID
+            // Poll until agents are published and retrievable by DID. user.create replies
+            // before the publish (which queues behind other agents' publishes on the
+            // agent language), so this wait covers it: 30 s, the RPC timeout it used to get.
             await pollUntil(async () => {
                 const r1 = await adminAd4mClient!.agent.byDID(user1Agent.did);
                 const r2 = await adminAd4mClient!.agent.byDID(user2Agent.did);
                 return r1 !== null && r2 !== null;
-            }, { timeoutMs: 10000, label: "agents published and retrievable by DID" });
+            }, { timeoutMs: 30000, label: "agents published and retrievable by DID" });
 
             // Retrieve the users from the agent language by their DIDs
             try {
@@ -1375,15 +1423,11 @@ describe("Multi-User Simple integration tests", () => {
             }
 
 
-            console.log("Ensuring User 1 model...");
-            await perspective1.ensureSDNASubjectClass(User1Model);
-            console.log("User 1 model ensured");
+            const classNames = async (p: PerspectiveProxy) => (await p.shapes()).map((s) => s.name);
 
-            // Poll until SDNA subject class is available
-            await pollUntil(async () => {
-                const classes = await perspective1.subjectClasses();
-                return classes.some((c: any) => c === "User1Model" || c.name === "User1Model");
-            }, { timeoutMs: 10000, label: "User1Model SDNA class available" });
+            // Registration answers once the class is usable: no polling.
+            await User1Model.register(perspective1);
+            expect(await classNames(perspective1)).to.deep.equal(["User1Model"]);
 
             let user1Model = new User1Model(perspective1);
             user1Model.user1Property = "User1 created this";
@@ -1421,16 +1465,8 @@ describe("Multi-User Simple integration tests", () => {
                 user2Property: string = "";
             }
 
-            console.log("Ensuring User 2 model...");
-            await user2SharedPerspective!.ensureSDNASubjectClass(User2Model);
-            console.log("User 2 model ensured");
-
-
-            // Poll until User2Model SDNA class is available
-            await pollUntil(async () => {
-                const classes = await user2SharedPerspective!.subjectClasses();
-                return classes.some((c: any) => c === "User2Model" || c.name === "User2Model");
-            }, { timeoutMs: 10000, label: "User2Model SDNA class available" });
+            await User2Model.register(user2SharedPerspective!);
+            expect(await classNames(user2SharedPerspective!)).to.include("User2Model");
 
             let user2Model = new User2Model(user2SharedPerspective!);
             user2Model.user2Property = "User2 created this";
@@ -1441,18 +1477,11 @@ describe("Multi-User Simple integration tests", () => {
             console.log("Testing prolog pool isolation...");
 
             // Poll until both users see both SDNA classes (shared neighbourhood sync)
-            await pollUntil(async () => {
-                const c1 = await perspective1.subjectClasses();
-                return c1.length >= 2;
-            }, { timeoutMs: 15000, label: "User 1 sees both SDNA classes" });
+            await pollUntil(async () => (await classNames(perspective1)).length >= 2,
+                { timeoutMs: 15000, label: "User 1 sees both SDNA classes" });
 
-            let classesSeenByUser1 = await perspective1.subjectClasses()
-            console.log("User 1 sees classes:", classesSeenByUser1);
-            expect(classesSeenByUser1.length).to.equal(2);
-
-            let classesSeenByUser2 = await user2SharedPerspective!.subjectClasses()
-            console.log("User 2 sees classes:", classesSeenByUser2);
-            expect(classesSeenByUser2.length).to.equal(2);
+            expect(await classNames(perspective1)).to.deep.equal(["User1Model", "User2Model"]);
+            expect(await classNames(user2SharedPerspective!)).to.deep.equal(["User1Model", "User2Model"]);
 
             console.log("✅ Prolog pool working correctly - both users see shared SDNA classes");
         });

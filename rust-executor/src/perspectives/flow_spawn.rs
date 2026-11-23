@@ -22,6 +22,7 @@ use super::flow_classes::mint_flow_instance;
 use super::flow_context::{load_flow_instances, load_shacl_flows, FlowInstanceRecord};
 use super::perspective_instance::PerspectiveInstance;
 use super::shacl_parser::SHACLFlow;
+use super::sparql_store::EvalStop;
 use crate::agent::AgentContext;
 
 /// One flow that should be started on a given item.
@@ -108,12 +109,14 @@ pub fn spawn_candidates(
 ///
 /// `states[0]` by the ordering convention documented on TS
 /// `SHACLFlow.fromLinks` and enforced in `parse_flow_from_links`: states are
-/// sorted by declared `value`, because link order isn't preserved on the graph.
+/// sorted by declared `value`, ties broken by state name (#1202), because
+/// link order isn't preserved on the graph and differs between replicas.
 /// `None` for a zero-state (atomic-action) flow.
 ///
 /// Also `None` when `states[0]` has an empty name. A `hasState` edge whose
 /// `stateName` link hasn't synced yet parses as `""` at value `0.0` and sorts
-/// to (or ties for) the front — partially-observed revisions are a real
+/// to the front (`""` is the smallest name, so it wins any tie at the lowest
+/// value) — partially-observed revisions are a real
 /// phenomenon (see the 2026-08-20 flake notes in `interpretation/overlay`).
 /// An instance minted at state `""` would be permanently stuck: no
 /// transition leaves `""`, and dedup suppresses on `(flow_uri, subject)`
@@ -176,7 +179,7 @@ pub async fn run_flow_spawn_pass(
         return Vec::new();
     }
 
-    let mut flows = match load_shacl_flows(perspective).await {
+    let mut flows = match load_shacl_flows(&EvalStop::none(), perspective).await {
         Ok(flows) if !flows.is_empty() => flows,
         Ok(_) => return Vec::new(),
         Err(e) => {
@@ -667,7 +670,7 @@ mod tests {
 
         // Stage checks, so a failure names the broken link in the chain rather
         // than just "nothing spawned".
-        let catalogue_on_graph = load_shacl_flows(&perspective)
+        let catalogue_on_graph = load_shacl_flows(&EvalStop::none(), &perspective)
             .await
             .expect("load_shacl_flows");
         let on_graph = catalogue_on_graph

@@ -62,7 +62,6 @@
  */
 
 import { PerspectiveProxy } from "./PerspectiveProxy";
-import { Ad4mModel } from "../model/Ad4mModel";
 import { FlowInstanceRecord, FlowTransitionProposal } from "./FlowModels";
 import { SHACLFlow, FlowState, FlowTransition } from "../shacl/SHACLFlow";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
@@ -292,9 +291,10 @@ export class FlowInstance {
    * A flow runs on a subject once: a run that has reached its last state is
    * returned too, not replaced by a new one.
    *
-   * Idempotently registers the hardwired `FlowInstanceRecord` +
-   * `FlowTransitionProposal` @Model classes on first call — the on-graph
-   * shape matches the Rust-side hardwired SDNA (parity-locked in
+   * Registers no class: `FlowInstance` and `FlowTransitionProposal` are
+   * hard-wired in the executor, which registers each before the first
+   * instance of it is written and reads one not registered yet as empty.
+   * The `@Model` classes here read the executor's shape (parity-locked in
    * `flow-instance.test.ts` / `flow-transition-proposal.test.ts`).
    *
    * The returned wrapper carries the parsed `SHACLFlow` alongside the
@@ -324,19 +324,17 @@ export class FlowInstance {
     if (flow.states.length === 0) {
       throw `Flow "${flowName}" has no states — FlowInstance.start is for stateful flows only; zero-state flows fire via the forthcoming atomic-action path (§6.3)`;
     }
-    // Register the hardwired runtime classes if this is the first flow
-    // instance on the perspective. registerAll is a single batched RPC and
-    // no-ops when both classes are already present.
-    await Ad4mModel.registerAll(perspective, [FlowInstanceRecord, FlowTransitionProposal]);
     // Property keys must be the FlowInstanceRecord @Model field names —
     // `subject` (not `baseExpression`, which collides with Ad4mModel's
     // synthetic hydration field and would be silently shadowed on read).
     // No explicit start-time field: Ad4mModel synthesises `createdAt` on
     // hydration from the earliest link timestamp on the instance's URI.
-    // Convention: `SHACLFlow.states` is stored sorted ascending by `value`
-    // (enforced by `fromLinks`), so `states[0]` is the initial state. A
-    // flow author who wants a specific state as the entry point must give
-    // it the lowest `value` in the set.
+    // Convention: `SHACLFlow.states` is stored sorted ascending by `value`,
+    // ties broken by state name (enforced by `fromLinks`, same key as
+    // rust-executor — #1202), so `states[0]` is the initial state. A flow
+    // author who wants a specific state as the entry point must give it
+    // the lowest `value` in the set, and not share that value with another
+    // state unless the name order is the intended one.
     //
     // A run already on this subject for this flow is the one to return:
     // minting another would leave two runs, each with its own state, and
@@ -370,7 +368,7 @@ export class FlowInstance {
     const record = await FlowInstanceRecord.create(perspective, {
       flowUri: flow.flowUri,
       subject: baseExpression,
-    });
+    }, { returns: 'row' }); // the row's createdAt is `startedAtMillis`
     return FlowInstance.wrap(perspective, flow, record, flow.states[0].name);
   }
 

@@ -1,9 +1,11 @@
 /**
  * E14: callers reach an SFU behind NAT through the address it advertises.
  *
- * The executor binds its SFU on 127.0.0.1, on a fixed port P, and advertises
- * 127.0.0.2 as its public address (`AD4M_SFU_UDP_PORT`,
- * `AD4M_SFU_PUBLIC_ADDR`): its answers offer the host candidate 127.0.0.1:P
+ * The executor binds its SFU on 127.0.0.1 only (`AD4M_SFU_BIND_ADDR`: the
+ * default would offer the LAN address too, which callers reach directly), on a
+ * fixed port P, and advertises 127.0.0.2 as its public address
+ * (`AD4M_SFU_UDP_PORT`, `AD4M_SFU_PUBLIC_ADDR`): its answers offer the host
+ * candidate 127.0.0.1:P
  * and the server-reflexive candidate 127.0.0.2:P. On this host, UDP to
  * 127.0.0.2:P is translated to 127.0.0.1:P, and UDP sent to 127.0.0.1:P
  * directly is dropped. A call therefore works only if the callers use the
@@ -19,8 +21,10 @@ import { e2eScenario } from "../scenario.js";
 const EVERYONE = ["ann", "ben", "cat"];
 const LOCAL = "127.0.0.1";
 const PUBLISHED = "127.0.0.2";
-/** Fixed for the run; a taken port stops the executor with a message that names it. */
-const PORT = 42000 + Math.floor(Math.random() * 1000);
+/** Fixed for the run; a taken port stops the executor with a message that names it.
+ *  Below Linux's ephemeral range (32768–60999), so another socket's ephemeral
+ *  port (the other executors' WebRTC ones) cannot take it first. */
+const PORT = 23000 + Math.floor(Math.random() * 1000);
 const ADVERTISED = `${PUBLISHED}:${PORT}`;
 
 export const e14AdvertisedAddress = e2eScenario({
@@ -30,7 +34,7 @@ export const e14AdvertisedAddress = e2eScenario({
   world: {
     users: EVERYONE.map((name) => ({ name })),
     neighbourhoods: [{ name: "space", owner: "ann", members: EVERYONE, call: { mode: "designated" } }],
-    executorEnv: { AD4M_SFU_UDP_PORT: String(PORT), AD4M_SFU_PUBLIC_ADDR: PUBLISHED },
+    executorEnv: { AD4M_SFU_BIND_ADDR: LOCAL, AD4M_SFU_UDP_PORT: String(PORT), AD4M_SFU_PUBLIC_ADDR: PUBLISHED },
   },
   unavailable: () => (natAvailable() ? null : "needs passwordless `sudo -n iptables` with the nat table"),
   async run({ call: inSpace, step }) {

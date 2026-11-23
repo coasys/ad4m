@@ -1,0 +1,18 @@
+{
+  "@context": {
+    "@version": 1.1,
+    "@protected": true,
+    "coasys": "https://id.coasys.org/ns/did-scid-coasys/v1#",
+    "coasys:bot": {
+      "@id": "coasys:bot",
+      "@context": {
+        "@protected": true,
+        "can": { "@id": "coasys:can", "@container": "@set" },
+        "expires": {
+          "@id": "coasys:expires",
+          "@type": "http://www.w3.org/2001/XMLSchema#integer"
+        }
+      }
+    }
+  }
+}

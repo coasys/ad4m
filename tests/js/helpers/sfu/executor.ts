@@ -204,7 +204,8 @@ export async function startExecutor(
     ...(config.extraArgs ?? []),
   ], {
     stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, RUST_LOG: "info" },
+    // Ends with this process, however it ends (see spawnExecutor in utils/utils.ts).
+    env: { ...process.env, RUST_LOG: "info", AD4M_EXIT_WITH_PARENT: "true" },
   });
 
   if (config.logPath) {

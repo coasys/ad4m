@@ -1,9 +1,10 @@
 //! `instance_query` + `instance_get` — read instances of any subject class.
 
 use super::{
-    error_json, fetch_instance, instance_uri, link_target, normalize_filter, not_found, pretty,
-    resolve_class, run_model_query, Ad4mMcpHandler, DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT,
+    error_json, instance_uri, link_target, normalize_filter, not_found, pretty, resolve_class,
+    Ad4mMcpHandler, DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT,
 };
+use crate::perspectives::instances::{fetch_instance_stopped, run_model_query_stopped};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -52,8 +53,8 @@ impl Ad4mMcpHandler {
     )]
     pub async fn instance_query(&self, params: Parameters<InstanceQueryParams>) -> String {
         let p = &params.0;
-        let perspective = match self.get_readable_perspective(&p.perspective_id).await {
-            Ok(perspective) => perspective,
+        let (perspective, gate) = match self.gated_readable_perspective(&p.perspective_id).await {
+            Ok(v) => v,
             Err(e) => return e,
         };
         let (class_name, shape) = match resolve_class(&perspective, &p.class_name).await {
@@ -62,7 +63,8 @@ impl Ad4mMcpHandler {
         };
 
         let mut query = json!({
-            "limit": p.limit.unwrap_or(DEFAULT_QUERY_LIMIT).min(MAX_QUERY_LIMIT)
+            "limit": p.limit.unwrap_or(DEFAULT_QUERY_LIMIT).min(MAX_QUERY_LIMIT),
+            "count": true
         });
         if let Some(offset) = p.offset {
             query["offset"] = json!(offset);
@@ -79,7 +81,7 @@ impl Ad4mMcpHandler {
             query["parent"] = json!({ "id": link_target(parent.trim()) });
         }
 
-        match run_model_query(&perspective, &class_name, &query).await {
+        match run_model_query_stopped(&gate.stop(), &perspective, &class_name, &query).await {
             Ok((instances, total)) => pretty(&json!({
                 "class_name": class_name,
                 "count": instances.len(),
@@ -96,8 +98,8 @@ impl Ad4mMcpHandler {
     )]
     pub async fn instance_get(&self, params: Parameters<InstanceGetParams>) -> String {
         let p = &params.0;
-        let perspective = match self.get_readable_perspective(&p.perspective_id).await {
-            Ok(perspective) => perspective,
+        let (perspective, gate) = match self.gated_readable_perspective(&p.perspective_id).await {
+            Ok(v) => v,
             Err(e) => return e,
         };
         let (class_name, _shape) = match resolve_class(&perspective, &p.class_name).await {
@@ -108,7 +110,7 @@ impl Ad4mMcpHandler {
             Ok(uri) => uri,
             Err(e) => return e,
         };
-        match fetch_instance(&perspective, &class_name, &base_uri).await {
+        match fetch_instance_stopped(&gate.stop(), &perspective, &class_name, &base_uri).await {
             Ok(Some(instance)) => pretty(&instance),
             Ok(None) => not_found(&class_name, &base_uri),
             Err(e) => error_json(format!("Error reading {class_name} instance: {e}")),

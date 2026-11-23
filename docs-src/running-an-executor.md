@@ -108,14 +108,17 @@ After startup, **write down** where the admin credential lives (the file path �
 
 ### Step 3: Generate Agent
 
-First run only. Creates cryptographic keys and DID identity.
+First run only. Creates cryptographic keys and DID identity. It refuses (409)
+an agent that is already initialised — a second `generate` does not replace the
+existing keys and DID; unlock the existing agent instead (Step 4).
 
 ```bash
 ad4m --executor-url http://localhost:12000 agent generate --passphrase <passphrase>
 ```
 
 **There is no REST endpoint for this.** The executor's only HTTP routes are
-`/`, `/health`, `/internal/shutdown` and the binary audio feed — everything
+`/`, `/health`, `/metrics` (operator only, see "Resource metrics" below),
+`/internal/shutdown` and the binary audio feed — everything
 else, `agent.generate` included, is a WebSocket-RPC method (`api/mod.rs`).
 The CLI above is the WS client; see `references/setup.md` → "WebSocket RPC API (Fallback)" to call it
 directly.
@@ -166,6 +169,27 @@ ad4m --executor-url http://localhost:12000 agent status
 
 # Expected: initialized + unlocked, with the agent's did:key:z6Mk… DID
 ```
+
+### Resource metrics
+
+`GET /metrics` gives the executor's resource counters in the Prometheus text
+format: per perspective (queries, query time, live subscriptions, subscription
+re-checks, links added and removed, store bytes on disk), per user DID
+(queries, query time, live subscriptions, links written, perspectives owned),
+per language (calls, call time, errors, calls in flight) and executor-wide
+(open perspectives, open SPARQL stores, queries in flight).
+
+The output names users and perspectives, so only the operator reads it: send
+the admin credential as a bearer token. Any other caller gets 403.
+
+```bash
+printf 'Authorization: Bearer %s\n' "$AD4M_ADMIN_CREDENTIAL" |
+  curl -s -H @- http://localhost:12000/metrics
+```
+
+A Prometheus scrape job sets the same header with `authorization: { credentials_file: … }`.
+Counters start at 0 when the executor starts, and when a language or perspective
+loads again.
 
 ## Operator Networking for Remote Executors
 

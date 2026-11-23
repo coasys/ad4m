@@ -53,6 +53,10 @@ pub fn build_system_tray(app: &AppHandle) -> Result<()> {
             "toggle_window" => toggle_main_window(app),
             "quit" => {
                 let _ = remove_file(executor_port_path());
+                // The in-process executor's local AI runtimes would outlive this exit.
+                rust_executor::ai_service::local::stop_children_blocking(
+                    std::time::Duration::from_secs(3),
+                );
                 app.exit(0);
                 std::process::exit(0);
             }

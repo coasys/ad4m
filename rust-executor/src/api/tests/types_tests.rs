@@ -390,19 +390,7 @@ fn parse_notification_input_no_icon() {
     assert!(req.app_icon_path.is_none());
 }
 
-// ── SDNA / Commands ──
-
-#[test]
-fn parse_add_sdna_request() {
-    let json = json!({
-        "name": "my-sdna",
-        "sdnaCode": "some prolog code",
-        "sdnaType": "subject_class"
-    });
-    let req: AddSdnaRequest = serde_json::from_value(json).unwrap();
-    assert_eq!(req.name, "my-sdna");
-    assert_eq!(req.sdna_type, "subject_class");
-}
+// ── Commands ──
 
 #[test]
 fn parse_execute_commands_request() {

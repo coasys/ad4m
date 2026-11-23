@@ -51,7 +51,12 @@ use std::time::Duration;
 /// reads. Sync delivers a proposal's five links, or a batch of votes, as
 /// separate diffs in quick succession; one pass over all of them is the
 /// same result for a fraction of the work.
+#[cfg(not(test))]
 pub const FLOW_PASS_DEBOUNCE: Duration = Duration::from_millis(300);
+/// Unit tests wait this real time before every pass they trigger, and none
+/// of them depends on its length, so they use a short one.
+#[cfg(test)]
+pub const FLOW_PASS_DEBOUNCE: Duration = Duration::from_millis(10);
 
 /// The parts of a `SHACLFlow` definition the fold reads: states and the
 /// value that picks the genesis, transitions, and consensus rules (on the
@@ -247,7 +252,8 @@ impl PerspectiveInstance {
                 true
             } else if crate::user_management::is_multi_user_enabled() {
                 let managed = managed.get_or_insert_with(|| {
-                    crate::db::Ad4mDb::with_global_instance(|db| db.list_users())
+                    crate::db_backend::db_backend()
+                        .list_users()
                         .map(|users| users.into_iter().map(|u| u.did).collect())
                         .unwrap_or_else(|e| {
                             log::warn!("seeding minted flow instances: could not list users ({e})");

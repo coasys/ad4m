@@ -105,6 +105,12 @@ export type CallBody =
     | { kind: "reset" }
     /** Application data, relayed over signalling because the mesh has no server. SDK-only. */
     | { kind: "data"; label: string; data: string; binary: boolean }
+    /**
+     * The sender is still in the call: sent to all on a timer by the session
+     * (`MeshManager.beat`), reported as the `beat` event. Not persisted. An SDK
+     * from before it parses it to nothing and drops it without a word.
+     */
+    | { kind: "beat" }
 
 export interface CallEnvelope extends CallGenerations {
     v: number
@@ -156,6 +162,8 @@ export function parseCallMessage(payload: unknown): CallMessage | null {
 
     if (msg.kind === "reset") return { ...envelope, kind: "reset" }
 
+    if (msg.kind === "beat") return { ...envelope, kind: "beat" }
+
     if (msg.kind === "data") {
         const { label, data, binary } = msg as { label?: unknown; data?: unknown; binary?: unknown }
         if (typeof label !== "string" || typeof data !== "string") return null
@@ -199,8 +207,38 @@ export interface TelepresenceProxy {
 }
 
 /**
+ * A mesh peer: one agent on one device. An agent calling from two devices is
+ * two peers, each with its own connection to everyone else, so neither device's
+ * media or teardown can stand in for the other's.
+ */
+export function meshPeerId(did: string, device: string): string {
+    if (!isMeshDevice(device)) throw new Error(`mesh: device id must be non-empty and without '#': ${JSON.stringify(device)}`)
+    return `${did}#${device}`
+}
+
+/** A device id a mesh peer id can carry: `#` would move the split in {@link agentOfMeshPeer}. */
+function isMeshDevice(device: unknown): device is string {
+    return typeof device === "string" && device.length > 0 && !device.includes("#")
+}
+
+/** The agent a mesh peer id belongs to. */
+export function agentOfMeshPeer(peerId: string): string {
+    const at = peerId.lastIndexOf("#")
+    return at === -1 ? peerId : peerId.slice(0, at)
+}
+
+/**
  * Bridge NeighbourhoodProxy telepresence to the SignallingChannel
- * the mesh consumes.
+ * the mesh consumes, as the peer `selfDid` on `selfDevice`.
+ *
+ * ## Peers are devices
+ *
+ * The sender a message reports is a {@link meshPeerId}: the link's author,
+ * which the executor verified, and the device the author's payload names. A
+ * device is only the author's own claim, so it can tell this agent's devices
+ * apart but never speak for another agent. Only this device's own echo is
+ * dropped: a broadcast from another device of this agent — the executor hands
+ * one to every client of the agent — is a peer like any other.
  *
  * ## Why unicast runs emulated over broadcast
  *
@@ -213,9 +251,12 @@ export interface TelepresenceProxy {
 export function createTelepresenceChannel(
     proxy: TelepresenceProxy,
     selfDid: string,
+    selfDevice: string,
 ): SignallingChannel {
+    const self = meshPeerId(selfDid, selfDevice)
     const resultListeners = new Set<(result: { ok: boolean; ms: number }) => void>()
     let subscribed: Promise<void> = Promise.resolve()
+    let warnedNoDevice = false
     const report = (result: { ok: boolean; ms: number }) => {
         for (const cb of resultListeners) {
             try { cb(result) } catch (e) {
@@ -233,7 +274,7 @@ export function createTelepresenceChannel(
             try {
                 sent = proxy.sendBroadcastU({
                     links: [{
-                        source: JSON.stringify(payload),
+                        source: JSON.stringify({ device: selfDevice, message: payload }),
                         predicate: RTC_PREDICATE,
                         target: to?.agentId ?? TARGET_ALL,
                     }],
@@ -272,18 +313,30 @@ export function createTelepresenceChannel(
                 if (typeof predicate !== "string" || predicate !== RTC_PREDICATE) return
 
                 // Emulated unicast: drop messages addressed to someone else
-                if (target && target !== TARGET_ALL && target !== selfDid) return
-                // Drop our own echo
-                if (link.author === selfDid) return
+                if (target && target !== TARGET_ALL && target !== self) return
 
-                let parsed: unknown
+                let parsed: { device?: unknown; message?: unknown }
                 try {
                     parsed = JSON.parse(source as string)
                 } catch {
                     return
                 }
+                if (typeof parsed !== "object" || parsed === null) return
+                const { device, message } = parsed
+                if (!isMeshDevice(device)) {
+                    // An SDK from before peers were devices sends none: say so once, or a mixed call just looks empty.
+                    if (device === undefined && !warnedNoDevice) {
+                        warnedNoDevice = true
+                        console.warn(`mesh: ${link.author} sends no device id (an older SDK); its mesh messages are ignored`)
+                    }
+                    return
+                }
 
-                cb(link.author as string, parsed)
+                const from = meshPeerId(link.author, device)
+                // Drop this device's own echo, and only that.
+                if (from === self) return
+
+                cb(from, message)
             }
 
             subscribed = proxy.addSignalHandler(handler).catch((err) => {
@@ -316,6 +369,8 @@ export type MeshEvent =
     | "peer-state"
     /** `(did, { rung, attempts })` — a repair was attempted on this pair. */
     | "peer-recovery"
+    /** `(did)` — a peer of this call beat ({@link MeshManager.beat}), listed in the roster or not. */
+    | "beat"
     | "error"
 
 export type MeshEventCallback = (...args: any[]) => void
@@ -344,6 +399,9 @@ export interface MeshManagerOptions {
     /** How often the mesh looks at its own connections. `0` disables the timer;
      *  {@link MeshManager.tick} still works, which is how tests drive it. */
     sweepMs?: number
+    /** Called after a network change (see `ApiClient.onNetworkChange`): every
+     *  pair restarts ICE then, rather than waiting for each to notice. */
+    onNetworkChange?: (callback: () => void) => () => void
 }
 
 /** Public STUN, and no TURN. Two servers, because ICE queries them in parallel. */
@@ -506,6 +564,8 @@ export class MeshManager {
      * Cleared only when a renegotiation is answered.
      */
     private renegotiationRepairs: Map<string, number> = new Map()
+    private onNetworkChange: MeshManagerOptions["onNetworkChange"]
+    private unwatchNetwork: (() => void) | null = null
 
     constructor(options: MeshManagerOptions) {
         this.channel = options.channel
@@ -521,6 +581,7 @@ export class MeshManager {
             ?? ((configuration) => new RTCPeerConnection(configuration))
         this.now = options.now ?? (() => Date.now())
         this.sweepMs = options.sweepMs ?? SWEEP_INTERVAL_MS
+        this.onNetworkChange = options.onNetworkChange
     }
 
     // ── Events ──────────────────────────────────────────────────────
@@ -598,6 +659,12 @@ export class MeshManager {
             const to = (payload as { to?: unknown }).to
             if (typeof to === "string" && to !== TARGET_ALL && to !== this.selfId) return
 
+            // Liveness, not signalling: reported for any sender, never held.
+            if (message.kind === "beat") {
+                this.emit("beat", from)
+                return
+            }
+
             // Only peers the roster placed in the call. Without this, anyone on
             // the channel could open a connection by sending an offer.
             const slot = this.slots.get(from)
@@ -616,6 +683,8 @@ export class MeshManager {
         })
         // A session announces itself once `join` returns; peers offer at once.
         await this.channel.listening?.()
+        // Left or destroyed while the channel came up: start nothing.
+        if (this.closed) return
 
         /*
          * Spend the transport's first-send cost on something that does not
@@ -627,11 +696,14 @@ export class MeshManager {
         this.publish({ v: CALL_PROTOCOL_VERSION, call: this.callId, warm: true })
 
         if (this.sweepMs > 0) this.sweep = setInterval(() => this.tick(), this.sweepMs)
+        this.unwatchNetwork = this.onNetworkChange?.(() => this.restartAll()) ?? null
     }
 
     async leave(): Promise<void> {
         this.closed = true
         if (this.sweep) { clearInterval(this.sweep); this.sweep = null }
+        this.unwatchNetwork?.()
+        this.unwatchNetwork = null
         this.unwatchPublish?.()
         this.unwatchPublish = null
         if (this.channelUnsubscribe) {
@@ -769,6 +841,16 @@ export class MeshManager {
         this.publish({ v: CALL_PROTOCOL_VERSION, call: this.callId, to: TARGET_ALL, kind: "data", label, data, binary })
     }
 
+    /**
+     * Tell every peer of the call that this one is still in it. Through
+     * {@link publish}, so a beat's publish result is counted like any other
+     * send. Nothing once the mesh has left.
+     */
+    beat(): void {
+        if (this.closed) return
+        this.publish({ v: CALL_PROTOCOL_VERSION, call: this.callId, to: TARGET_ALL, kind: "beat" })
+    }
+
     subscribeDataChannel(callback: (msg: SfuDataMessage) => void): () => void {
         this.dataListeners.add(callback)
         return () => this.dataListeners.delete(callback)
@@ -777,6 +859,8 @@ export class MeshManager {
     private handleData(from: string, message: { label: string; data: string; binary: boolean }): void {
         const msg: SfuDataMessage = {
             senderDid: from,
+            // The mesh keys its peers by DID: one session per agent.
+            senderParticipantId: from,
             neighbourhoodUrl: "",
             roomName: this.callId,
             channelLabel: message.label,
@@ -952,7 +1036,9 @@ export class MeshManager {
                 slot.earlyCandidates = slot.earlyCandidates.filter((held) => held.gen && held.gen !== slot.remoteGeneration)
                 if (slot.offerDeferred && pc.signalingState === "stable") void negotiate()
             }
-            if (state === "disconnected" && !slot.disconnectedAt) slot.disconnectedAt = this.now()
+            if (state === "disconnected" && !slot.disconnectedAt) {
+                slot.disconnectedAt = this.now()
+            }
             if (state === "connected" || state === "failed") slot.disconnectedAt = 0
             this.emit("peer-state", peerId, state)
             // `failed` is actionable at once — there is nothing in flight to wait for.
@@ -1290,6 +1376,37 @@ export class MeshManager {
         // Undo the increment `rebuild` is about to make again, so one repair counts once.
         slot.attempts = attempts - 1
         this.rebuild(peerId, { announce: true, rung: "rebuild" })
+    }
+
+    /**
+     * The network changed: every pair's path is likely gone, though ICE has
+     * noticed on none yet. Each negotiated pair takes the ladder's first rung
+     * now, all at once — an ICE restart is one offer per pair, and waiting
+     * for each to time out costs seconds of silence. Pairs still negotiating
+     * have nothing to restart; the sweep keeps looking after them.
+     *
+     * It skips the sweep's guards (`outstanding`, one pair per sweep) on
+     * purpose. They stop the sweep reading a slow send as a lost one and
+     * escalating every pair at once. Here nothing is judged lost, and the
+     * rung is the first one: one offer per pair, each to a different peer.
+     * A restart offer that is lost falls to the sweep, guards and all.
+     */
+    private restartAll(): void {
+        if (this.closed) return
+        const at = this.now()
+        for (const [peerId, slot] of this.slots) {
+            if (!slot.remoteReady || typeof slot.pc.restartIce !== "function") continue
+            // Spaced from the sweep's next rung, but not charged to the pair's
+            // budget: a network change judges no pair lost.
+            slot.lastAttempt = at
+            try {
+                slot.pc.restartIce()
+                this.emit("peer-recovery", peerId, { rung: "ice-restart", attempts: slot.attempts })
+            } catch (error) {
+                this.fail(`restarting ice with ${peerId}`, error)
+            }
+        }
+        this.lastRepairAt = at
     }
 
     /** Whether this pair has been given long enough, and whether it is this side's turn to act. */

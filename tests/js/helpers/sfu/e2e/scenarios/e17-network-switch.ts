@@ -6,9 +6,12 @@
  * /proc. Sockets it opens afterwards work, as on the new network. Nothing
  * closes the old ones: no FIN or RST ever arrives, so the old WebSocket stays
  * OPEN with nobody answering on it, as a browser keeps it after a network
- * switch. The SDK must notice that by itself, dial a new socket, and rebuild
- * the call over it; with no user action and no page refresh, everyone must
- * hear and see everyone again within RECOVERY_MS.
+ * switch, and no `online` event fires (Safari and Firefox fire none for a
+ * Wi-Fi to Wi-Fi switch). The SDK must notice that by itself, dial a new
+ * socket, and repair the call over it; with no user action and no page
+ * refresh, everyone must hear and see everyone again within RECOVERY_MS.
+ * ICE going disconnected makes the SDK check its socket at once
+ * (`ApiClient.checkConnection`) rather than at the next ping deadline.
  *
  * Needs `sudo -n tc`; skipped without it. Shares E6's host lease.
  */
@@ -19,7 +22,7 @@ import { e2eScenario } from "../scenario.js";
 
 const EVERYONE = ["u1", "u2", "u3"];
 /** From the switch to everyone hearing and seeing everyone again. */
-const RECOVERY_MS = 90_000;
+const RECOVERY_MS = 15_000;
 const debug = (line: string) => {
   if (process.env.E2E_DEBUG) console.log(`[e17] ${new Date().toISOString().slice(11, 23)} ${line}`);
 };
@@ -44,6 +47,7 @@ export const e17NetworkSwitch = e2eScenario({
         await call.eventually(call.seesEveryone(CAMERA), 60_000, "video");
       });
 
+      const departuresBefore = (await call.who("u2").snapshot()).departures;
       metric("network_switch_recovery_ms", await step(`u2 switches networks: everyone hears and sees everyone again within ${RECOVERY_MS / 1000} s`, async () => {
         const old = socketPorts(call.who("u2").pid);
         // Both must go dark: the executor connection (TCP) and the media path (UDP).
@@ -57,9 +61,16 @@ export const e17NetworkSwitch = e2eScenario({
         const left = () => Math.max(1, RECOVERY_MS - (Date.now() - switched));
         await call.eventually(call.rosterIsEveryone(), left(), "roster after the switch");
         await call.eventually(call.hearsEveryone(), left(), "audio after the switch");
-        await call.eventually(call.seesEveryone(CAMERA), left(), "video after the switch");
+        // Video flowing again, at whatever layer the sender's bandwidth estimate runs: full size is E9's.
+        await call.eventually(call.seesEveryone(), left(), "video after the switch");
         return Date.now() - switched;
       }));
+      // A rebuilt call drops and re-adds every participant; an ICE restart keeps them.
+      const rebuilds = (await call.who("u2").snapshot()).departures - departuresBefore;
+      metric("u2_rebuilds", rebuilds);
+      await step("u2's call came back in place, not rebuilt", async () => {
+        if (rebuilds !== 0) throw new Error(`u2's call was rebuilt ${rebuilds} time(s)`);
+      });
 
       await step("no session reported an error", () => call.eventually(call.noErrors(), 1, "errors"));
     } finally {

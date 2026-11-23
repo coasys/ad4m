@@ -15,8 +15,10 @@ use crate::perspectives::flow_context::{
 };
 use crate::perspectives::get_perspective;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::perspectives::shacl_parser::SHACLFlow;
-use crate::types::DecoratedLinkExpression;
+use crate::perspectives::shacl_parser::{parse_flow_to_links, SHACLFlow};
+use crate::perspectives::sparql_store::EvalStop;
+use crate::types::{DecoratedLinkExpression, Link};
+use ad4m_client::literal::Literal;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -76,6 +78,32 @@ pub struct FlowValidOutputsParams {
     pub state: Option<String>,
 }
 
+/// The links of the flow `flow_json` named `flow_name`, with the index links
+/// `getFlow` and `sdnaFlows` read: `ad4m://self ad4m://has_flow <name>` and
+/// `<name> ad4m://flow_uri <flow>`.
+pub(crate) fn flow_registration_links(
+    flow_json: &str,
+    flow_name: &str,
+) -> anyhow::Result<Vec<Link>> {
+    let mut links = parse_flow_to_links(flow_json, flow_name)?;
+    let flow_uri = links
+        .first()
+        .map(|link| link.source.clone())
+        .ok_or_else(|| anyhow::anyhow!("flow '{flow_name}' gives no links"))?;
+    let name = Literal::from_string(flow_name.to_string()).to_url()?;
+    links.push(Link {
+        source: "ad4m://self".to_string(),
+        predicate: Some("ad4m://has_flow".to_string()),
+        target: name.clone(),
+    });
+    links.push(Link {
+        source: name,
+        predicate: Some("ad4m://flow_uri".to_string()),
+        target: flow_uri,
+    });
+    Ok(links)
+}
+
 // ============================================================================
 // Tool Implementations
 // ============================================================================
@@ -88,14 +116,33 @@ impl Ad4mMcpHandler {
     pub async fn add_flow(&self, params: Parameters<AddFlowParams>) -> String {
         let p = &params.0;
 
+        // The method's guard answers before the caller's own arguments are read: a
+        // perspective the caller may not write is refused, not parsed against.
+        if let Err(e) = self
+            .admit_method(
+                "perspective.addLinks",
+                &json!({ "uuid": p.perspective_id, "links": [], "status": "shared" }),
+            )
+            .await
+        {
+            return method_error(e);
+        }
+
+        let links = match flow_registration_links(&p.shacl_json, &p.flow_name) {
+            Ok(links) => links,
+            Err(e) => return format!("Error adding flow: {e:#}"),
+        };
         let params = json!({
             "uuid": p.perspective_id,
-            "name": p.flow_name,
-            "sdnaType": "flow",
-            "shaclJson": p.shacl_json,
+            "links": links,
+            "status": "shared",
         });
         let added = self
-            .call::<Value>("perspective.addSdna", params, labelled("Error adding flow"))
+            .call::<Value>(
+                "perspective.addLinks",
+                params,
+                labelled("Error adding flow"),
+            )
             .await;
         match added {
             Ok(_) => pretty(&json!({
@@ -204,7 +251,7 @@ impl Ad4mMcpHandler {
         perspective: &PerspectiveInstance,
         flow_ref: &str,
     ) -> anyhow::Result<(String, Option<SHACLFlow>)> {
-        let mut flows = load_shacl_flows(perspective).await?;
+        let mut flows = load_shacl_flows(&EvalStop::none(), perspective).await?;
         if let Some(flow) = flows.remove(flow_ref) {
             return Ok((flow_ref.to_string(), Some(flow)));
         }
@@ -303,7 +350,7 @@ impl Ad4mMcpHandler {
                 ..record
             }));
         }
-        let flows = load_shacl_flows(perspective).await?;
+        let flows = load_shacl_flows(&EvalStop::none(), perspective).await?;
         let derived = crate::perspectives::flow_instance::derive_states(
             perspective,
             std::slice::from_ref(&record),
@@ -492,7 +539,6 @@ mod tests {
     use super::*;
     use crate::perspectives::flow_classes::mint_flow_instance;
     use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
-    use crate::perspectives::shacl_parser::parse_flow_to_links;
     use crate::types::LinkStatus;
 
     /// Two states, one transition — so "every transition in the flow"
@@ -530,6 +576,41 @@ mod tests {
 
     fn delivery_flow() -> SHACLFlow {
         serde_json::from_str(&delivery_flow_json()).expect("SHACLFlow deserializes from its JSON")
+    }
+
+    /// `add_flow` writes the flow's definition and the name index `getFlow`
+    /// and `get_flows` read, and the flow then resolves by name.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_flow_links_hold_the_definition_and_the_name_index() {
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let links = flow_registration_links(&delivery_flow_json(), "Delivery").unwrap();
+        let name = Literal::from_string("Delivery".into()).to_url().unwrap();
+        let has = |source: &str, predicate: &str, target: &str| {
+            links.iter().any(|l| {
+                l.source == source
+                    && l.predicate.as_deref() == Some(predicate)
+                    && l.target == target
+            })
+        };
+        assert!(has("ad4m://self", "ad4m://has_flow", &name));
+        assert!(has(&name, "ad4m://flow_uri", "delivery://DeliveryFlow"));
+        assert!(
+            !links
+                .iter()
+                .any(|l| l.predicate.as_deref() == Some("ad4m://shape")),
+            "a flow is not registered as a class"
+        );
+
+        perspective
+            .add_links(links, LinkStatus::Shared, None, &ctx)
+            .await
+            .unwrap();
+        let (uri, flow) = Ad4mMcpHandler::resolve_flow(&perspective, "Delivery")
+            .await
+            .unwrap();
+        assert_eq!(uri, "delivery://DeliveryFlow");
+        assert!(flow.is_some());
+        assert!(flow_registration_links("{", "Delivery").is_err());
     }
 
     #[test]

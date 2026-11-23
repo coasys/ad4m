@@ -21,9 +21,11 @@
 //! ```
 
 pub mod errors;
+pub mod identity;
 pub mod imports;
 pub mod macros;
 pub mod state;
+pub mod token;
 pub mod traits;
 pub mod types;
 
@@ -49,6 +51,24 @@ pub mod __serde {
         let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
         value.serialize(&serializer)
     }
+
+    /// As `to_js`, with `None` and `()` as `null` rather than `undefined`,
+    /// so a value reaches JS in the form `serde_json` gives it. The
+    /// identity and token shims answer through this: their wire types
+    /// write an absent optional field as `null`.
+    pub fn to_json_js<T: ?Sized + Serialize>(
+        value: &T,
+    ) -> Result<JsValue, crate::errors::LanguageError> {
+        let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+        Ok(value.serialize(&serializer)?)
+    }
+
+    /// Reads a shim argument. `undefined` reads as `None` for an `Option`.
+    pub fn from_js<T: serde::de::DeserializeOwned>(
+        value: JsValue,
+    ) -> Result<T, crate::errors::LanguageError> {
+        Ok(serde_wasm_bindgen::from_value(value)?)
+    }
 }
 
 pub mod prelude {
@@ -56,9 +76,9 @@ pub mod prelude {
     pub use crate::errors::{ErrorCode, LanguageError, LanguageResult};
     pub use crate::imports as runtime;
     pub use crate::traits::{
-        ExpressionCapability, HolochainSignalHandler, Language, PeersCapability,
-        PerspectiveCommitCapability, PerspectiveQueryCapability, PerspectiveSyncCapability,
-        TelepresenceCapability,
+        ExpressionCapability, HolochainSignalHandler, IdentityCapability, Language,
+        PeersCapability, PerspectiveCommitCapability, PerspectiveQueryCapability,
+        PerspectiveSyncCapability, TelepresenceCapability, TokenCapability,
     };
     pub use crate::types::*;
 }

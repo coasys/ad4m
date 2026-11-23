@@ -48,6 +48,11 @@ export function subscribeToPerspective(
     perspective.on("link-removed", ({ link }) => {
       subscribers.get(removedKey)!.forEach((cb) => cb(link));
     });
+    // An update replaces a link: subscribers see the old one leave and the new one arrive.
+    perspective.on("link-updated", ({ oldLink, newLink }) => {
+      subscribers.get(removedKey)!.forEach((cb) => cb(oldLink));
+      subscribers.get(addedKey)!.forEach((cb) => cb(newLink));
+    });
   }
 
   subscribe(addedKey, added);

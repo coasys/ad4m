@@ -21,7 +21,8 @@ use super::capabilities::{
 };
 use super::session::{AuthError, TokenId};
 use super::AgentContext;
-use crate::db::{Ad4mDb, GrantRow};
+use crate::db::GrantRow;
+use crate::db_backend::DbBackend;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -223,7 +224,9 @@ impl Grants {
     /// after a restart, so its token is never handed out.
     pub fn insert(&self, grant: LiveGrant) -> Result<Arc<LiveGrant>, String> {
         let row = grant.row()?;
-        with_db(|db| db.add_grant(&row).map_err(|e| e.to_string()))?;
+        crate::db_backend::db_backend()
+            .add_grant(&row)
+            .map_err(|e| e.to_string())?;
         let grant = Arc::new(grant);
         let now = now();
         let mut live = self.live.write().map_err(|e| e.to_string())?;
@@ -270,7 +273,9 @@ impl Grants {
             grant.ended.cancel();
         }
         let ids: Vec<String> = grants.iter().map(|g| g.id.0.clone()).collect();
-        with_db(|db| db.revoke_grants(&ids).map_err(|e| e.to_string())).map_err(GrantError::Store)
+        crate::db_backend::db_backend()
+            .revoke_grants(&ids)
+            .map_err(|e| GrantError::Store(e.to_string()))
     }
 
     /// Revokes the grant of the token `id`.
@@ -283,9 +288,19 @@ impl Grants {
     /// ones too: `revoke` ends a grant before its write, so after a failed write the
     /// grant is ended here but active in the database, which a restart loads.
     pub fn revoke_agent(&self, agent: &AgentContext) -> Result<usize, GrantError> {
+        self.revoke_where(|g| g.agent == *agent)
+    }
+
+    /// Revokes every grant of every agent, as [`Grants::revoke_agent`] does for one: the key
+    /// that signed their tokens is gone (`identity.rekey` on the local wallet).
+    pub fn revoke_all(&self) -> Result<usize, GrantError> {
+        self.revoke_where(|_| true)
+    }
+
+    fn revoke_where(&self, matches: impl Fn(&LiveGrant) -> bool) -> Result<usize, GrantError> {
         let grants: Vec<Arc<LiveGrant>> = read(&self.live)
             .values()
-            .filter(|g| g.agent == *agent)
+            .filter(|g| matches(g))
             .cloned()
             .collect();
         if grants.is_empty() {
@@ -306,8 +321,9 @@ impl Grants {
             grant.ended.cancel();
         }
         let ids: Vec<String> = grants.iter().map(|g| g.id.0.clone()).collect();
-        with_db(|db| db.delete_grants(&ids).map_err(|e| e.to_string()))
-            .map_err(GrantError::Store)?;
+        crate::db_backend::db_backend()
+            .delete_grants(&ids)
+            .map_err(|e| GrantError::Store(e.to_string()))?;
         let mut live = write(&self.live);
         for grant in grants {
             live.remove(&grant.id);
@@ -330,7 +346,7 @@ impl Grants {
     }
 
     /// Adds the grants that `db` holds, after it deletes the rows of expired tokens.
-    pub fn load(&self, db: &Ad4mDb) -> Result<(), String> {
+    pub fn load(&self, db: &dyn DbBackend) -> Result<(), String> {
         db.delete_grants_expired_before(prune_cutoff(now()))
             .map_err(|e| e.to_string())?;
         let mut live = write(&self.live);
@@ -355,13 +371,6 @@ fn read<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
 fn write<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
     lock.write()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-fn with_db<R>(f: impl FnOnce(&Ad4mDb) -> Result<R, String>) -> Result<R, String> {
-    let db = Ad4mDb::global_instance();
-    let db = db.lock().map_err(|e| e.to_string())?;
-    let db = db.as_ref().ok_or("the database is not open")?;
-    f(db)
 }
 
 /// A row whose token expired before this, leeway included, can go.
@@ -414,7 +423,7 @@ pub fn mint(
 /// deletes expired rows and loads the rest. The app registry of executors before grants
 /// (`apps_data.json`) is not read: data from before grants is not supported.
 pub fn load_at_start() -> Result<(), String> {
-    with_db(|db| Grants::global().load(db))
+    Grants::global().load(crate::db_backend::db_backend())
 }
 
 #[cfg(test)]
@@ -598,7 +607,7 @@ mod tests {
         Grants::global().revoke_id(&revoked.id).unwrap();
 
         let reloaded = Grants::default();
-        Ad4mDb::with_global_instance(|db| reloaded.load(db)).unwrap();
+        reloaded.load(crate::db_backend::db_backend()).unwrap();
         let back = reloaded.get(&kept.id).expect("the active grant is back");
         assert_eq!(back.app_name(), "grants-kept");
         assert_eq!(format!("{:?}", back.caps), format!("{:?}", kept.caps));
@@ -636,7 +645,7 @@ mod tests {
         assert_eq!(Grants::global().revoke_agent(&alice).unwrap(), 1);
 
         let reloaded = Grants::default();
-        Ad4mDb::with_global_instance(|db| reloaded.load(db)).unwrap();
+        reloaded.load(crate::db_backend::db_backend()).unwrap();
         assert!(
             reloaded.get(&failed.id).is_none(),
             "the retry wrote the ended grant"
@@ -646,7 +655,12 @@ mod tests {
 
     #[test]
     fn loading_drops_expired_rows() {
-        let db = Ad4mDb::new(":memory:").unwrap();
+        crate::test_utils::ensure_test_db();
+        let db = crate::db_backend::db_backend();
+        let (expired, live) = (
+            format!("expired-{}", uuid::Uuid::new_v4()),
+            format!("live-{}", uuid::Uuid::new_v4()),
+        );
         let row = |id: &str, expires_at: u64| GrantRow {
             id: id.into(),
             request_id: id.into(),
@@ -656,15 +670,16 @@ mod tests {
             expires_at,
             created_at: 0,
         };
-        db.add_grant(&row("expired", now() - TOKEN_EXPIRY_LEEWAY_SECONDS - 10))
+        db.add_grant(&row(&expired, now() - TOKEN_EXPIRY_LEEWAY_SECONDS - 10))
             .unwrap();
-        db.add_grant(&row("live", now() + 3600)).unwrap();
+        db.add_grant(&row(&live, now() + 3600)).unwrap();
         let grants = Grants::default();
-        grants.load(&db).unwrap();
-        assert!(grants.get(&TokenId("live".into())).is_some());
-        assert!(grants.get(&TokenId("expired".into())).is_none());
+        grants.load(db).unwrap();
+        assert!(grants.get(&TokenId(live.clone())).is_some());
+        assert!(grants.get(&TokenId(expired.clone())).is_none());
         let ids: Vec<String> = db.grants().unwrap().into_iter().map(|r| r.id).collect();
-        assert_eq!(ids, ["live"], "the expired row is deleted");
+        assert!(ids.contains(&live));
+        assert!(!ids.contains(&expired), "the expired row is deleted");
     }
 
     #[test]
