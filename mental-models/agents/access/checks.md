@@ -27,7 +27,7 @@ An **access check** applies a session's grant to one call: a capability check pl
 | MCP tool without an RPC method | `Guard::perspective(perspective_query_capability)` to read, `perspective_update_capability` to write | the same guard (`get_readable_perspective`, `get_writable_perspective`) | the same |
 | Event stream ([Events](../interfaces/events.md)) | any authenticated session; per event `Event::capability` (`Topic::capability`) | the event's `Audience`, which the publisher names; `Session::may_receive` | event not sent |
 | Live query updates | at subscribe | the subscribing RPC connection only | — |
-| Language ops (JS) | none: language code is trusted with the ops; it cannot publish executor events | signs as `get_runtime_agent_context()`; `agent_create_signed_expression_for_user` checks the runtime's user | error |
+| Language ops (JS) | none: language code is trusted with the ops; it cannot publish executor events | signs as the call's agent (its call token); `agent_create_signed_expression_for_user` checks the call's user | error |
 
 Ownership rule (`can_access_perspective_with_did`):
 

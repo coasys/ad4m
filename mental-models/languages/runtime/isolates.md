@@ -33,16 +33,18 @@ Sandbox (`JsCore::new_for_language`):
 Threading:
 
 1. `process_requests` selects between the request channel and the V8 event loop, so timers and signals run between requests.
-2. Requests run one at a time. For `Execute(js, ctx)` the thread-local `AgentContext` is set to `ctx`, the script runs, and the context is reset to the main agent.
-3. Nothing interrupts a running request: its caller waits until it ends. Once it has run for the language call deadline (`LANGUAGE_CALL_DEADLINE`, 60 s), an `Execute` queued behind it gets an error, and a new `Execute` fails at once without being queued. The runtime never starts an `Execute` whose caller has gone. Loading and teardown always wait.
-4. Holochain signals arrive through `lib.rs::holochain_signal_receiver`. It looks up the cell in `HOLOCHAIN_SIGNAL_HANDLERS` and calls `__handleHolochainSignal__` in that language's isolate.
+2. Each `Execute(js, ctx, kind)` has a `CallKind`. An **ordered** call runs alone among the ordered calls, in send order: commits, sync, expression creates, interactions, signal delivery. A **concurrent** call (a read, or an emit whose order does not matter) starts at once and runs beside the others, up to `MAX_CONCURRENT_CALLS` (16) in flight. On a WASM language (wasm-bindgen bundle) every call runs ordered. Loading, callback registration and teardown run alone, in send order.
+3. Each call carries its own agent. The runtime registers `ctx` under the call's id (`register_call_agent`); the script takes it out as a call token (`agent_call_token`), and the agent ops act as that token's agent. Code outside any call has no agent, and the ops refuse.
+4. Nothing interrupts a running call: its caller waits until it ends. Once the running ordered call has run for the language call deadline (`LANGUAGE_CALL_DEADLINE`, 60 s), an ordered call queued behind it gets an error, and a new ordered call fails at once without being queued. A call that has not started within the deadline after it was sent also gets an error. The runtime never starts a call whose caller has gone.
+5. Holochain signals arrive through `lib.rs::holochain_signal_receiver`. It looks up the cell in `HOLOCHAIN_SIGNAL_HANDLERS` and calls `__handleHolochainSignal__` in that language's isolate.
 
 </details>
 
 <details><summary>Where in the code</summary>
 
 - [rust-executor/src/js_core/mod.rs](../../../rust-executor/src/js_core/mod.rs): `JsCore`, `new_for_language` (permissions), `execute`.
-- [rust-executor/src/languages/language_runtime_handle.rs](../../../rust-executor/src/languages/language_runtime_handle.rs): `LANGUAGE_CALL_DEADLINE`, `wait_for_call`; [language_runtime.rs](../../../rust-executor/src/languages/language_runtime.rs): `process_requests`, `RunningRequest`.
+- [rust-executor/src/languages/language_runtime_handle.rs](../../../rust-executor/src/languages/language_runtime_handle.rs): `LANGUAGE_CALL_DEADLINE`, `wait_for_call`, `is_wasm_bundle`; [language_runtime.rs](../../../rust-executor/src/languages/language_runtime.rs): `CallKind`, `MAX_CONCURRENT_CALLS`, `process_requests`, `RunningRequest`.
+- [rust-executor/src/js_core/agent_extension.rs](../../../rust-executor/src/js_core/agent_extension.rs): `register_call_agent`, `CallAgent`, the agent of each call.
 - [rust-executor/src/js_core/options.rs](../../../rust-executor/src/js_core/options.rs): `ad4m_language_extensions()` (the op extensions every isolate gets), worker options, module loader.
 - [rust-executor/src/js_core/host.js](../../../rust-executor/src/js_core/host.js): the `ad4m:host` module.
 - [rust-executor/src/js_core/language_bootstrap.js](../../../rust-executor/src/js_core/language_bootstrap.js): main module of every isolate; `initLanguage`, the export table, DOM and `Buffer` shims.

@@ -16,7 +16,7 @@ This file defines each term that ADAM uses in its own way, once, in alphabetical
 
 **Agent** (`AgentContext`, `did_for_context`): An Ed25519 key pair in the executor's wallet, named by its `did:key` DID. The executor signs and stores data on behalf of the agent. Example: "The executor signs the link as the agent." [Agents](agents/README.md)
 
-**Agent context** (`AgentContext::{Main, Managed { did }}`): The value that names the agent a call acts as. The executor keeps it in a thread-local while a language call runs. Example: "A language call runs in the agent context of the main agent." [Identity](agents/identity/README.md)
+**Agent context** (`AgentContext::{Main, Managed { did }}`): The value that names the agent a call acts as. Each language call carries its own; the call's script holds it as a call token. Example: "A language call runs in the agent context of the main agent." [Identity](agents/identity/README.md)
 
 **Agent language** (`LanguageController::get_agent_language`, `bootstrap-languages/centralized-agent-language/`): The expression language behind the `did` alias. Its expressions are agent profiles, keyed by DID. Example: "`agent.byDID` reads the profile from the agent language." [Agent languages](languages/other-kinds/agent-languages.md)
 
