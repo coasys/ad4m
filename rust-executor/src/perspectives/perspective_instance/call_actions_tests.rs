@@ -708,3 +708,55 @@ async fn an_abstract_call_adder_never_runs_the_link_resolver() {
         .unwrap();
     assert_eq!(resolved().await, json!(0), "a call adder ran the resolver");
 }
+
+#[tokio::test]
+async fn execute_commands_refuses_a_call_before_writing_anything() {
+    let lang = load_mount_test_language().await;
+    let (mut p, ctx) = mounted("MountThing", thing_shape(&lang).await).await;
+    let before = link_count(&p).await;
+    let commands = || {
+        vec![
+            Command {
+                action: Action::AddLink,
+                source: Some("this".to_string()),
+                predicate: Some("test://p".to_string()),
+                target: Some("test://t".to_string()),
+                local: None,
+            },
+            Command {
+                action: Action::Call,
+                source: Some(format!("{lang}://class/MountThing")),
+                predicate: Some("create".to_string()),
+                target: Some("{}".to_string()),
+                local: None,
+            },
+        ]
+    };
+
+    let err = p
+        .execute_commands(commands(), "test://base".to_string(), vec![], None, &ctx)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("call"), "{err}");
+    assert_eq!(
+        link_count(&p).await,
+        before,
+        "the addLink before the call was written"
+    );
+
+    let batch = p.create_batch().await;
+    let err = p
+        .execute_commands(
+            commands(),
+            "test://base".to_string(),
+            vec![],
+            Some(batch.clone()),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("call"), "{err}");
+    p.commit_batch(batch, &ctx).await.unwrap();
+    assert_eq!(link_count(&p).await, before, "the batch staged the addLink");
+    assert!(calls(&lang).await.is_empty(), "the call ran");
+}
