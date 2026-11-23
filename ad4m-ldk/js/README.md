@@ -235,7 +235,8 @@ every 15 seconds, so a missed signal is corrected then.
 - A call runs as the agent who made the write. On a multi-user executor
   that can be a managed user, so use the host imports (`agentDid()` and
   the rest) instead of a cached identity.
-- `mountSnapshot()` runs as the owner of the mounting perspective.
+- `mountSnapshot()` runs as the owner of the mounting perspective. A perspective
+  with more than one owner can't mount a Language.
 
 ## Optional extensions
 

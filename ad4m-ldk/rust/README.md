@@ -253,7 +253,8 @@ again every 15 seconds, so a missed signal is corrected then.
 - A call runs as the agent who made the write. On a multi-user executor
   that can be a managed user, so read the agent through the host imports
   (`rt::agent_did()`) instead of caching it.
-- `mount_snapshot()` runs as the owner of the mounting perspective.
+- `mount_snapshot()` runs as the owner of the mounting perspective. A perspective
+  with more than one owner can't mount a Language.
 
 ## Optional extensions
 

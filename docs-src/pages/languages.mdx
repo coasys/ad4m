@@ -557,7 +557,10 @@ a resync. A `create` must return the `address` of the new record, and
 **Who the call runs as.** A call runs as the agent who made the write, and
 that agent needs the `expression:update` capability. On a multi-user
 executor, a managed user's call runs as that user. A mount reads
-`mountSnapshot()` as the perspective's owner.
+`mountSnapshot()` as the perspective's owner, and only the owner can mount.
+A perspective with more than one owner can't mount a Language, and an agent
+can't join a neighbourhood whose perspective has a mount unless it already
+owns that perspective.
 
 **Rules:**
 
