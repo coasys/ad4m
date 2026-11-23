@@ -223,6 +223,10 @@ impl PerspectiveInstance {
                     self.stored_judgements(std::mem::take(&mut combined_diff.additions));
                 published.additions =
                     self.stored_judgements(std::mem::take(&mut published.additions));
+                // The same for the new half of each link-updated event.
+                for (_, new) in &mut updated {
+                    *new = self.stored_judgements(vec![new.clone()]).remove(0);
+                }
             }
         }
 
