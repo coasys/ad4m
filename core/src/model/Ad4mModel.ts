@@ -14,7 +14,6 @@ import type { RegisterResult } from "../generated/api/RegisterResult";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 
 import { buildSPARQLQuery, valueToLiteralIri, effectiveLiteralStorage } from "./query-sparql";
-import { ModelQueryBuilder } from "./ModelQueryBuilder";
 import { LiveQuery } from "../perspectives/LiveQuery";
 import type { LiveOptions } from "../perspectives/LiveQuery";
 import {
@@ -548,23 +547,23 @@ function parentLinkWriter(
  *   limit: 10
  * });
  * 
- * // Use the fluent query builder
- * const popularRecipes = await Recipe.query(perspective)
- *   .where({ averageRating: { gt: 4.5 } })
- *   .order({ averageRating: "DESC" })
- *   .limit(5)
- *   .get();
+ * // Sort and limit
+ * const popularRecipes = await Recipe.findAll(perspective, {
+ *   where: { averageRating: { gt: 4.5 } },
+ *   order: { averageRating: "DESC" },
+ *   limit: 5
+ * });
  * 
  * // Follow real-time updates with a live query
- * const live = Recipe.live(perspective, { where: { status: "recipe://cooking" } });
+ * const live = Recipe.query(perspective, { where: { status: "recipe://cooking" } });
  * live.subscribe(({ data }) => {
  *   if (data) console.log("Currently being cooked:", data.results);
  * });
  * 
  * // Paginate results
- * const { results, totalCount, pageNumber } = await Recipe.query(perspective)
- *   .where({ status: "recipe://published" })
- *   .paginate(10, 1);
+ * const { results, totalCount, pageNumber } = await Recipe.paginate(perspective, 10, 1, {
+ *   where: { status: "recipe://published" }
+ * });
  * ```
  */
 export class Ad4mModel {
@@ -1269,7 +1268,7 @@ export class Ad4mModel {
 
   /**
    * Parse raw model query/subscription result JSON into typed model instances.
-   * Used by ModelQueryBuilder to convert subscription updates without circular imports.
+   * Used by live queries to convert subscription updates without circular imports.
    * @internal
    */
   static parseModelResult<T extends Ad4mModel>(
@@ -1440,37 +1439,20 @@ export class Ad4mModel {
   }
 
   /**
-   * A {@link ModelQueryBuilder} over several model classes: the builder form of
-   * {@link findAllOf}. For a live result use {@link liveOf}.
-   *
-   * @example
-   * ```typescript
-   * const items = await Ad4mModel.queryOf(perspective, [Placement, EdgeRoute])
-   *   .parent(canvas.id, "canvas://item")
-   *   .get();
-   * ```
-   */
-  static queryOf<C extends (typeof Ad4mModel)[]>(
-    perspective: PerspectiveProxy,
-    classes: [...C],
-    query?: Query,
-  ): ModelQueryBuilder<InstanceType<C[number]>> {
-    return new ModelQueryBuilder<InstanceType<C[number]>>(perspective, Ad4mModel, query, classes);
-  }
-
-  /**
    * A live page of the query: one {@link LiveQuery} that opens at once, holds
    * the current {@link Page} and moves to the next one whenever the result
    * changes. The snapshot's `initial` is true for the opening page only.
    *
    * `Page.totalCount` is set when the query asks for `count`. A cursor
    * (`after`) is not sent: a live query re-runs one query, it does not walk
-   * pages. `options.className` queries by class name, as
-   * `overrideModelClassName` does on the builder. Call `dispose()` when done.
+   * pages. `options.className` queries the class registered under that name
+   * instead of this class (rows of an undecorated `Ad4mModel` hydrate as plain
+   * `Ad4mModel`s, and `includeAll` is not available: list the relations in
+   * `include`). Call `dispose()` when done.
    *
    * @example
    * ```typescript
-   * const live = Recipe.live(perspective, { where: { status: "cooking" }, limit: 10, count: true });
+   * const live = Recipe.query(perspective, { where: { status: "cooking" }, limit: 10, count: true });
    * const page = await live.first;
    * const stop = live.subscribe((snap) => render(snap.data?.results));
    * // later
@@ -1478,27 +1460,27 @@ export class Ad4mModel {
    * live.dispose();
    * ```
    */
-  static live<T extends Ad4mModel>(
+  static query<T extends Ad4mModel, Q extends TypedQuery<T> = {}>(
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
-    query?: Query,
+    query?: Q,
     options: LiveOptions & { className?: string } = {},
-  ): LiveQuery<Page<T>> {
-    const { after: _after, ...cursorless } = query ?? {};
+  ): LiveQuery<Page<T & IncludeExtras<T, IncludeOf<Q>>>> {
+    const { after: _after, ...cursorless } = (query ?? {}) as Query;
     const withAll = Ad4mModel.withIncludeAll([this], cursorless);
     const { className, queryJson } = this.prepareModelQueryParams(withAll, options.className);
-    return new LiveQuery<Page<T>>(
+    return new LiveQuery<Page<T & IncludeExtras<T, IncludeOf<Q>>>>(
       perspective.client, perspective.uuid,
       (signal) => perspective.client.subscribe(perspective.uuid, { className, queryJson }, { signal, timeoutMs: options.timeoutMs }),
       (raw) => ({
-        results: this.parseModelResult(perspective, raw, withAll.include, withAll.properties),
+        results: this.parseModelResult(perspective, raw, withAll.include, withAll.properties) as (T & IncludeExtras<T, IncludeOf<Q>>)[],
         ...(raw?.totalCount !== undefined ? { totalCount: raw.totalCount } : {}),
       }),
     );
   }
 
-  /** {@link live} over several model classes: one live query that re-runs when any of them changes. */
-  static liveOf<C extends (typeof Ad4mModel)[]>(
+  /** {@link query} over several model classes: one live query that re-runs when any of them changes. */
+  static queryOf<C extends (typeof Ad4mModel)[]>(
     perspective: PerspectiveProxy,
     classes: [...C],
     query?: Query,
@@ -2239,7 +2221,7 @@ export class Ad4mModel {
    *
    * @example
    * ```typescript
-   * const messages = await Message.query(perspective).deepQuery(false).limit(30).get();
+   * const messages = await Message.findAll(perspective, { deepQuery: false, limit: 30 });
    * // messages[i].replyingTo is undefined (getter skipped)
    *
    * // Evaluate getters for the visible subset
@@ -2662,7 +2644,7 @@ export class Ad4mModel {
    *   recipe.name = "Spaghetti";
    *   await recipe.save(tx.batchId);
    *
-   *   const old = await Recipe.query(perspective).where({ name: "Stale" }).run();
+   *   const old = await Recipe.findAll(perspective, { where: { name: "Stale" } });
    *   for (const r of old) await r.delete(tx.batchId);
    * });
    * // All changes committed atomically here
@@ -2682,36 +2664,6 @@ export class Ad4mModel {
       await perspective.discardBatch(batchId).catch(() => {});
       throw e;
     }
-  }
-
-  /**
-   * Creates a query builder for fluent query construction.
-   * 
-   * @param perspective - The perspective to query
-   * @param query - Optional initial query parameters
-   * @returns A new query builder instance
-   * 
-   * @example
-   * ```typescript
-   * const recipes = await Recipe.query(perspective)
-   *   .where({ category: "Dessert" })
-   *   .order({ rating: "DESC" })
-   *   .limit(5)
-   *   .run();
-   * 
-   * // With real-time updates: a live query with the same filter
-   * const live = Recipe.live(perspective, { where: { status: "cooking" } });
-   * const { results } = await live.first;
-   * console.log("Currently cooking:", results);
-   * live.dispose();
-   * ```
-   */
-  static query<T extends Ad4mModel>(
-    this: typeof Ad4mModel & (new (...args: any[]) => T),
-    perspective: PerspectiveProxy,
-    query?: TypedQuery<T>,
-  ): ModelQueryBuilder<T> {
-    return new ModelQueryBuilder<T>(perspective, this as any, (query ?? {}) as Query);
   }
 
   /**

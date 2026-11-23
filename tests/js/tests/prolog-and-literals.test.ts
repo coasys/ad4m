@@ -104,7 +104,7 @@ describe("Prolog + Literals", () => {
                 type: string = ""
 
                 static async all(perspective: PerspectiveProxy): Promise<Message[]> {
-                    return Message.query(perspective).get() as Promise<Message[]>
+                    return Message.findAll(perspective) as Promise<Message[]>
                 }
 
                 @Optional({
@@ -134,15 +134,15 @@ describe("Prolog + Literals", () => {
                 // isSubjectInstance = [hasLink("todo://state")]
 
                 static async all(perspective: PerspectiveProxy): Promise<Todo[]> {
-                    return Todo.query(perspective).get() as Promise<Todo[]>
+                    return Todo.findAll(perspective) as Promise<Todo[]>
                 }
 
                 static async allReady(perspective: PerspectiveProxy): Promise<Todo[]> {
-                    return Todo.query(perspective).where({ state: "todo://ready" }).get() as Promise<Todo[]>
+                    return Todo.findAll(perspective, { where: { state: "todo://ready" } }) as Promise<Todo[]>
                 }
 
                 static async allDone(perspective: PerspectiveProxy): Promise<Todo[]> {
-                    return Todo.query(perspective).where({ state: "todo://done" }).get() as Promise<Todo[]>
+                    return Todo.findAll(perspective, { where: { state: "todo://done" } }) as Promise<Todo[]>
                 }
 
                 //@ts-ignore
@@ -1553,7 +1553,7 @@ describe("Prolog + Literals", () => {
                     expect(count3).to.equal(5);
                 });
 
-                it("count() and a live count work on the query builder", async () => {
+                it("count() and a live count", async () => {
                     // Create recipes
                     const recipe1 = new Recipe(perspective!);
                     recipe1.name = "Recipe 1";
@@ -1567,20 +1567,19 @@ describe("Prolog + Literals", () => {
                     recipe3.name = "Recipe 3";
                     await recipe3.save();
 
-                    // Test count() on query builder
-                    const query = Recipe.query(perspective!);
-                    const count = await query.count();
+                    // Test count()
+                    const count = await Recipe.count(perspective!);
                     expect(count).to.equal(3);
 
                     // Test count with where clause
-                    const filteredQuery = Recipe.query(perspective!)
-                        .where({ name: ["Recipe 1", "Recipe 2"] });
-                    const filteredCount = await filteredQuery.count();
+                    const filteredCount = await Recipe.count(perspective!, {
+                        where: { name: ["Recipe 1", "Recipe 2"] }
+                    });
                     expect(filteredCount).to.equal(2);
 
                     // A live count
                     let lastCount = 0;
-                    const live = Recipe.live(perspective!, { limit: 0, count: true });
+                    const live = Recipe.query(perspective!, { limit: 0, count: true });
                     const subscription = (await watch(live, (page) => {
                         lastCount = page.totalCount!;
                     })).totalCount;
@@ -1662,25 +1661,17 @@ describe("Prolog + Literals", () => {
                     expect(countLt3).to.equal(findAllLt3.length);
                     expect(countLt3).to.equal(2); // recipes 1 and 2
 
-                    // Test query builder count() with gt operator
-                    const queryCountGt3 = await Recipe.query(perspective!)
-                        .where({ number: { gt: 3 } })
-                        .count();
-                    const queryGetGt3 = await Recipe.query(perspective!)
-                        .where({ number: { gt: 3 } })
-                        .get();
-                    expect(queryCountGt3).to.equal(queryGetGt3.length);
-                    expect(queryCountGt3).to.equal(2);
+                    // Test count() with gt operator
+                    const countGt3 = await Recipe.count(perspective!, { where: { number: { gt: 3 } } });
+                    const findAllGt3 = await Recipe.findAll(perspective!, { where: { number: { gt: 3 } } });
+                    expect(countGt3).to.equal(findAllGt3.length);
+                    expect(countGt3).to.equal(2);
 
-                    // Test query builder count() with between operator
-                    const queryCountBetween = await Recipe.query(perspective!)
-                        .where({ number: { between: [2, 4] } })
-                        .count();
-                    const queryGetBetween = await Recipe.query(perspective!)
-                        .where({ number: { between: [2, 4] } })
-                        .get();
-                    expect(queryCountBetween).to.equal(queryGetBetween.length);
-                    expect(queryCountBetween).to.equal(3);
+                    // Test count() with between operator
+                    const countBetween = await Recipe.count(perspective!, { where: { number: { between: [2, 4] } } });
+                    const findAllBetween = await Recipe.findAll(perspective!, { where: { number: { between: [2, 4] } } });
+                    expect(countBetween).to.equal(findAllBetween.length);
+                    expect(countBetween).to.equal(3);
 
                     // Test count() with timestamp filtering
                     // Get the timestamp of recipe3
@@ -1706,7 +1697,7 @@ describe("Prolog + Literals", () => {
                     }
                 })
 
-                it("paginate() and a live page work on the query builder", async () => {
+                it("paginate() and a live page", async () => {
                     // Create test recipes
                     for (let i = 1; i <= 10; i++) {
                         const recipe = new Recipe(perspective!);
@@ -1715,24 +1706,23 @@ describe("Prolog + Literals", () => {
                     }
 
                     // Test paginate()
-                    const query = Recipe.query(perspective!);
-                    const page1 = await query.paginate(3, 1);
+                    const page1 = await Recipe.paginate(perspective!, 3, 1);
                     expect(page1.results.length).to.equal(3);
                     expect(page1.totalCount).to.equal(10);
                     expect(page1.results[0].name).to.equal("Recipe 1");
                     expect(page1.results[2].name).to.equal("Recipe 3");
 
-                    const page2 = await query.paginate(3, 2);
+                    const page2 = await Recipe.paginate(perspective!, 3, 2);
                     expect(page2.results.length).to.equal(3);
                     expect(page2.results[0].name).to.equal("Recipe 4");
 
-                    const lastPage = await query.paginate(3, 4);
+                    const lastPage = await Recipe.paginate(perspective!, 3, 4);
                     expect(lastPage.results.length).to.equal(1);
                     expect(lastPage.results[0].name).to.equal("Recipe 10");
 
                     // A live page
                     let lastResult: any = null;
-                    const live = Recipe.live(perspective!, { limit: 3, offset: 0, count: true });
+                    const live = Recipe.query(perspective!, { limit: 3, offset: 0, count: true });
                     const initialResult = await watch(live, (result) => {
                         lastResult = result;
                     });
@@ -1770,7 +1760,7 @@ describe("Prolog + Literals", () => {
                     live.dispose();
                 })
 
-                it("query builder works with subscriptions", async () => {
+                it("a live query works with subscriptions", async () => {
                     @Model({
                         name: "Notification"
                     })
@@ -1803,13 +1793,13 @@ describe("Prolog + Literals", () => {
 
                     // Set up subscription for high-priority unread notifications
                     let updateCount = 0;
-                    const builder = Notification.live(perspective!, {
+                    const live = Notification.query(perspective!, {
                         where: {
                             priority: { gt: 5 },
                             read: false
                         }
                     });
-                    const initialResults = (await watch(builder, (page) => {
+                    const initialResults = (await watch(live, (page) => {
                         notifications = page.results;
                         updateCount++;
                     })).results;
@@ -1866,10 +1856,10 @@ describe("Prolog + Literals", () => {
                     expect(notifications.length).to.equal(1);
 
                     // Dispose the subscription to prevent cross-test interference
-                    builder.dispose();
+                    live.dispose();
                 });
 
-                it("query builder should filter by subject class", async () => {
+                it("a query should filter by subject class", async () => {
                     // Define a second subject class
                     @Model({
                         name: "Note1"
@@ -1921,15 +1911,14 @@ describe("Prolog + Literals", () => {
                     await note2.save();
 
                     // Query for recipes - this should only return the recipe instance
-                    const note1Results = await Note1.query(perspective!).where({ name: "Test Item" }).get()
-                    
-                    //console.log("note1Results: ", note1Results)
-                    // This assertion will fail because the query builder doesn't filter by class
+                    const note1Results = await Note1.findAll(perspective!, { where: { name: "Test Item" } })
+
+                    // The query filters by class, so Note2's instance is not returned
                     expect(note1Results.length).to.equal(1);
                     expect(note1Results[0]).to.be.instanceOf(Note1);
                 });
 
-                it("query builder works with single query object, complex query and subscriptions", async () => {
+                it("a live query works with a single query object, a complex query and subscriptions", async () => {
                     @Model({
                         name: "Task"
                     })
@@ -1977,14 +1966,14 @@ describe("Prolog + Literals", () => {
 
                     // Set up subscription for upcoming incomplete tasks assigned to "alice"
                     let updateCount = 0;
-                    const builder = Task.live(perspective!, { 
+                    const live = Task.query(perspective!, { 
                         where: { 
                             dueDate: { lte: nextWeekTimestamp },
                             completed: false,
                             assignee: "alice"
                         }
                     });
-                    const initialResults = (await watch(builder, (page) => {
+                    const initialResults = (await watch(live, (page) => {
                         tasks = page.results;
                         updateCount++;
                     })).results;
@@ -2064,7 +2053,7 @@ describe("Prolog + Literals", () => {
                     expect(tasks.length).to.equal(1);   
 
                     // Dispose the subscription to prevent cross-test interference
-                    builder.dispose();
+                    live.dispose();
                 });
 
                 it("transform option in property decorators works", async () => {
@@ -2266,8 +2255,8 @@ describe("Prolog + Literals", () => {
                     it("should demonstrate subscription performance", async () => {
                         // Measure latency of update
                         const subscriptionCallback = sinon.fake();
-                        const queryBuilder = TestModel.live(perspective, { where: { status: "perf-test" } });
-                        await watch(queryBuilder, subscriptionCallback);
+                        const live = TestModel.query(perspective, { where: { status: "perf-test" } });
+                        await watch(live, subscriptionCallback);
 
                         const start = Date.now();
                         const model = new TestModel(perspective);
@@ -2296,7 +2285,7 @@ describe("Prolog + Literals", () => {
                         console.log(`TestModel.save() latency: ${saveLatency}ms`);
                         console.log(`Subscription update latency: ${subscriptionLatency}ms`);
 
-                        queryBuilder.dispose();
+                        live.dispose();
                     });
 
                     // Two liveSparql() callers on the same query each get their
@@ -2337,7 +2326,7 @@ describe("Prolog + Literals", () => {
                     });
                 });
 
-                describe('ModelQueryBuilder', () => {
+                describe('Model.query (live)', () => {
                     let perspective: PerspectiveProxy;
 
                     // Define a simple test model
@@ -2357,7 +2346,7 @@ describe("Prolog + Literals", () => {
                     }
 
                     beforeEach(async () => {
-                        perspective = await ad4m!.perspective.add("query-builder-test");
+                        perspective = await ad4m!.perspective.add("query-live-test");
                         await TestModel.register(perspective!);
                     });
 
@@ -2374,7 +2363,7 @@ describe("Prolog + Literals", () => {
                         const callback2 = sinon.fake();
 
                         // Create first subscription
-                        const live1 = TestModel.live(perspective, { where: { status: "active" } });
+                        const live1 = TestModel.query(perspective, { where: { status: "active" } });
                         const initialResults1 = (await watch(live1, (page) => callback1(page.results))).results;
                         expect(initialResults1).to.be.an('array');
                         expect(initialResults1.length).to.equal(0);
@@ -2404,8 +2393,8 @@ describe("Prolog + Literals", () => {
 
                         // Dispose the first subscription, then open a second one
                         live1.dispose();
-                        const builder = TestModel.live(perspective, { where: { status: "active" } });
-                        const initialResults2 = (await watch(builder, (page) => callback2(page.results))).results;
+                        const live = TestModel.query(perspective, { where: { status: "active" } });
+                        const initialResults2 = (await watch(live, (page) => callback2(page.results))).results;
                         expect(initialResults2).to.be.an('array');
                         expect(initialResults2.length).to.equal(1);
 
@@ -2432,7 +2421,7 @@ describe("Prolog + Literals", () => {
                         expect(callback2.lastCall.args[0].length).to.equal(2);
 
                         // Dispose subscription
-                        builder.dispose();
+                        live.dispose();
 
                         // Add another model - should not trigger callback
                         const model3 = new TestModel(perspective);
@@ -2450,21 +2439,21 @@ describe("Prolog + Literals", () => {
                         expect(callback2.callCount).to.equal(1);
                     });
 
-                    // Builder A's dispose must leave builder B's subscription on the
+                    // Live query A's dispose must leave live B's subscription on the
                     // same query running.
-                    it('keeps another builder on the same query alive when one disposes', async () => {
-                        const builderA = TestModel.live(perspective, { where: { status: "active" } });
-                        const builderB = TestModel.live(perspective, { where: { status: "active" } });
+                    it('keeps another live on the same query alive when one disposes', async () => {
+                        const liveA = TestModel.query(perspective, { where: { status: "active" } });
+                        const liveB = TestModel.query(perspective, { where: { status: "active" } });
                         const callbackA = sinon.fake();
                         const callbackB = sinon.fake();
 
-                        const initialA = (await watch(builderA, (page) => callbackA(page.results))).results;
-                        const initialB = (await watch(builderB, (page) => callbackB(page.results))).results;
+                        const initialA = (await watch(liveA, (page) => callbackA(page.results))).results;
+                        const initialB = (await watch(liveB, (page) => callbackB(page.results))).results;
                         expect(initialA.length).to.equal(0);
                         expect(initialB.length).to.equal(0);
 
                         // A lets go; the executor must keep the subscription for B.
-                        builderA.dispose();
+                        liveA.dispose();
 
                         const model = new TestModel(perspective);
                         model.name = "Shared 1";
@@ -2480,7 +2469,7 @@ describe("Prolog + Literals", () => {
                         expect(callbackA.callCount).to.equal(0);
 
                         // B lets go too: nothing fires any more.
-                        builderB.dispose();
+                        liveB.dispose();
                         const model2 = new TestModel(perspective);
                         model2.name = "Shared 2";
                         model2.status = "active";
@@ -2491,12 +2480,12 @@ describe("Prolog + Literals", () => {
                     });
 
                     it('handles count subscriptions and disposal', async () => {
-                        const builder = TestModel.live(perspective, {
+                        const live = TestModel.query(perspective, {
                             where: { status: "active" }, limit: 0, count: true,
                         });
 
                         const countCallback = sinon.fake();
-                        const initialCount = (await watch(builder, (page) => countCallback(page.totalCount))).totalCount;
+                        const initialCount = (await watch(live, (page) => countCallback(page.totalCount))).totalCount;
                         expect(initialCount).to.equal(0);
 
                         // Subscription-init delay: SPARQL change-watchers register
@@ -2526,7 +2515,7 @@ describe("Prolog + Literals", () => {
                         let count = countCallback.callCount
 
                         // Dispose subscription
-                        builder.dispose();
+                        live.dispose();
 
                         // Add another model - should not trigger callback
                         const model2 = new TestModel(perspective);
@@ -2542,12 +2531,12 @@ describe("Prolog + Literals", () => {
                     });
 
                     it('handles paginated subscriptions and disposal', async () => {
-                        const builder = TestModel.live(perspective, {
+                        const live = TestModel.query(perspective, {
                             where: { status: "active" }, limit: 2, offset: 0, count: true,
                         });
 
                         const pageCallback = sinon.fake();
-                        const initialPage = await watch(builder, pageCallback);
+                        const initialPage = await watch(live, pageCallback);
                         expect(initialPage.results.length).to.equal(0);
                         expect(initialPage.totalCount).to.equal(0);
 
@@ -2596,7 +2585,7 @@ describe("Prolog + Literals", () => {
                         let count = pageCallback.callCount
 
                         // Dispose subscription
-                        builder.dispose();
+                        live.dispose();
 
                         // Add another model - should not trigger callback
                         const model3 = new TestModel(perspective);
@@ -2736,8 +2725,8 @@ describe("Prolog + Literals", () => {
                         // Set up subscription for emoji content
                         let updateCount = 0;
                         let subscriptionResults: EmojiMessage[] = [];
-                        const builder = EmojiMessage.live(perspective!);
-                        const initialResults = (await watch(builder, (page) => {
+                        const live = EmojiMessage.query(perspective!);
+                        const initialResults = (await watch(live, (page) => {
                             subscriptionResults = page.results;
                             updateCount++;
                         })).results;
@@ -2791,7 +2780,7 @@ describe("Prolog + Literals", () => {
                         expect(found!.body).to.equal("Subscription test with emoji: 🎯✅");
 
                         // Dispose the subscription to prevent cross-test interference
-                        builder.dispose();
+                        live.dispose();
                     });
                 });
             })

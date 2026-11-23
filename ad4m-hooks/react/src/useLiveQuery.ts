@@ -3,6 +3,7 @@ import {
   PerspectiveProxy,
   Ad4mModel,
   Query,
+  TypedQuery,
   Scope,
   LiveQuery,
   Page,
@@ -163,9 +164,9 @@ export function useLiveQuery<T extends Ad4mModel>(
    *  typing. */
   function open(q: Query): LiveQuery<Page<Ad4mModel>> {
     if (typeof model === "string") {
-      return Ad4mModel.live(perspective, q, { className: model });
+      return Ad4mModel.query(perspective, q as TypedQuery<Ad4mModel>, { className: model }) as unknown as LiveQuery<Page<Ad4mModel>>;
     }
-    return (model as ModelCtor<T>).live(perspective, q) as unknown as LiveQuery<Page<Ad4mModel>>;
+    return (model as ModelCtor<T>).query(perspective, q as TypedQuery<T>) as unknown as LiveQuery<Page<Ad4mModel>>;
   }
 
   useEffect(() => {

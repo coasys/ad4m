@@ -121,7 +121,7 @@ function stableKey(value: unknown): string {
 }
 
 /**
- * One live query on the executor, opened by `Model.live()` or
+ * One live query on the executor, opened by `Model.query()` or
  * `perspective.liveSparql()`.
  *
  * It holds the last result, applies each update to it, calls

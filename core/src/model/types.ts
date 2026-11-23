@@ -407,7 +407,7 @@ export type Query = {
    * `timestamp` / `createdAt` / `updatedAt`, either direction), a `limit`, and
    * no non-zero `offset`; the executor refuses it on any other query. Unlike
    * `offset`, a row added before the cursor does not shift the next page.
-   * The subscribe RPC rejects a cursor, so `live()` and `liveOf()` drop it before sending.
+   * The subscribe RPC rejects a cursor, so `Ad4mModel.query` and `queryOf` drop it before sending.
    */
   after?: string;
   /** Ask for `totalCount`. Without it the result has none and the executor runs no COUNT query. */

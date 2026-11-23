@@ -4,6 +4,7 @@ import {
   Page,
   PerspectiveProxy,
   Query,
+  TypedQuery,
   Scope,
 } from "@coasys/ad4m";
 import {
@@ -170,9 +171,9 @@ export function useLiveQuery<T extends Ad4mModel>(
    *  typing. */
   function open(q: Query, p: PerspectiveProxy): LiveQuery<Page<Ad4mModel>> {
     if (typeof model === "string") {
-      return Ad4mModel.live(p, q, { className: model });
+      return Ad4mModel.query(p, q as TypedQuery<Ad4mModel>, { className: model }) as unknown as LiveQuery<Page<Ad4mModel>>;
     }
-    return (model as ModelCtor<T>).live(p, q) as unknown as LiveQuery<Page<Ad4mModel>>;
+    return (model as ModelCtor<T>).query(p, q as TypedQuery<T>) as unknown as LiveQuery<Page<Ad4mModel>>;
   }
 
   function mergeEntries(oldEntries: T[], newEntries: T[]): T[] {

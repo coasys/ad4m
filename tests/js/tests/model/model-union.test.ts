@@ -114,11 +114,11 @@ describe("Ad4mModel — one query over several classes", function () {
 
   it("pages once over the union with interleaved sort keys", async () => {
     const { n2, t3, n4 } = await interleaved();
-    const page = await Ad4mModel.queryOf(perspective, [UnionTask, UnionNote])
-      .order({ position: "ASC" } as any)
-      .limit(3)
-      .offset(1)
-      .get();
+    const page = await Ad4mModel.findAllOf(perspective, [UnionTask, UnionNote], {
+      order: { position: "ASC" } as any,
+      limit: 3,
+      offset: 1,
+    });
 
     expect(page.map((r) => r.id)).to.deep.equal([n2.id, t3.id, n4.id]);
     expect(page[0]).to.be.instanceOf(UnionNote);
@@ -126,7 +126,10 @@ describe("Ad4mModel — one query over several classes", function () {
     expect((page[0] as UnionNote).body).to.equal("two");
     expect((page[1] as UnionTask).status).to.equal("open");
 
-    const total = await Ad4mModel.queryOf(perspective, [UnionTask, UnionNote]).count();
+    // The total over the union comes with a live query that asks for a count.
+    const counted = Ad4mModel.queryOf(perspective, [UnionTask, UnionNote], { limit: 0, count: true });
+    const total = (await counted.first).totalCount;
+    counted.dispose();
     expect(total).to.equal(5);
   });
 
@@ -197,9 +200,9 @@ describe("Ad4mModel — one query over several classes", function () {
   it("one live subscription fires on an edit to each class", async () => {
     const { t1, n2 } = await interleaved();
     const batches: Ad4mModel[][] = [];
-    const builder = Ad4mModel.liveOf(perspective, [UnionTask, UnionNote]);
-    const initial = (await builder.first).results;
-    builder.subscribe((s) => {
+    const live = Ad4mModel.queryOf(perspective, [UnionTask, UnionNote]);
+    const initial = (await live.first).results;
+    live.subscribe((s) => {
       if (s.status === "ready" && !s.initial) batches.push(s.data!.results);
     });
     expect(initial.length).to.equal(5);
@@ -220,7 +223,7 @@ describe("Ad4mModel — one query over several classes", function () {
         "note edit reaches the union subscription",
       );
     } finally {
-      builder.dispose();
+      live.dispose();
     }
   });
 });

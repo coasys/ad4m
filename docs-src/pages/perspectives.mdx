@@ -180,7 +180,7 @@ stop();
 live.dispose();
 ```
 
-`liveSparql()` returns a `LiveQuery`, the one handle for every live query (`Model.live()` returns the same type for a model query). It has `first` (a promise of the opening result), `getSnapshot()` (the current `{ status, data, initial, ... }`, the same object until something changes), `subscribe(fn)` (calls `fn` at once when a value exists, then once per change, and returns an unsubscribe function), `onStatus(fn)` and `dispose()`. A result equal to the last one emits nothing: a resync or a re-open that finds the same rows is silent.
+`liveSparql()` returns a `LiveQuery`, the one handle for every live query (`Model.query()` returns the same type for a model query). It has `first` (a promise of the opening result), `getSnapshot()` (the current `{ status, data, initial, ... }`, the same object until something changes), `subscribe(fn)` (calls `fn` at once when a value exists, then once per change, and returns an unsubscribe function), `onStatus(fn)` and `dispose()`. A result equal to the last one emits nothing: a resync or a re-open that finds the same rows is silent.
 
 Live queries provide real-time updates but require proper cleanup:
 

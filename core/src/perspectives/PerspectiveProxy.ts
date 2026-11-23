@@ -126,7 +126,7 @@ export class PerspectiveProxy {
     #handle: PerspectiveHandle
     #client: PerspectiveClient
 
-    /** @internal Exposed for ModelQueryBuilder subscription management */
+    /** @internal The client live queries open their subscriptions through. */
     get client(): PerspectiveClient { return this.#client; }
 
     /** Releases of the handlers `on()` registered and has not released yet. */

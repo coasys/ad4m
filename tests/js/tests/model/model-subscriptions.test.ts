@@ -1,7 +1,7 @@
 /**
  * Ad4mModel — subscription integration tests
  *
- * Covers: Model.live() opening value, SPARQL live-query
+ * Covers: Model.query() opening value, SPARQL live-query
  * re-fire on link-added and link-removed, dispose() stopping callbacks,
  * a live count, parent-scoped live queries, re-opening after the
  * client's socket reconnects, and the writes on related records that re-run
@@ -9,7 +9,7 @@
  * order keys, `producedByFlow`).
  *
  * Adapted from PR #694 subscription tests for our SPARQL-based subscription
- * system (Model.live / LiveQuery.dispose).
+ * system (Model.query / LiveQuery.dispose).
  *
  * Run with:
  *   pnpm ts-mocha -p tsconfig.json --timeout 120000 --serial --exit tests/model/model-subscriptions.test.ts
@@ -131,7 +131,7 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
   // ── 1. Immediate initial callback ─────────────────────────────────────────
 
   it("subscribe() returns initial results immediately", async () => {
-    const live = TestPost.live(perspective);
+    const live = TestPost.query(perspective);
     const initialResults = (await watch(live, () => {})).results;
     live.dispose();
     expect(Array.isArray(initialResults)).to.be.true;
@@ -141,7 +141,7 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
 
   it("subscribe() calls callback when a relevant link is added", async () => {
     const all: TestPost[][] = [];
-    const live = TestPost.live(perspective);
+    const live = TestPost.query(perspective);
     // Initial results returned via Promise only — callback fires for subsequent updates
     (await watch(live, (page) => all.push(page.results))).results;
 
@@ -171,7 +171,7 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
     const postId = post.id;
 
     const all: TestPost[][] = [];
-    const live = TestPost.live(perspective);
+    const live = TestPost.query(perspective);
     // Initial results returned via Promise — callback fires for subsequent updates only
     const initialResults = (await watch(live, (page) => all.push(page.results))).results;
     expect(initialResults.some((p: any) => p.id === postId)).to.be.true;
@@ -200,7 +200,7 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
 
   it("dispose() stops further callback invocations", async () => {
     let callCount = 0;
-    const live = TestPost.live(perspective);
+    const live = TestPost.query(perspective);
     await watch(live, () => {
       callCount++;
     });
@@ -224,7 +224,7 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
 
   it("a live count returns the correct count and changes after add", async () => {
     const counts: number[] = [];
-    const live = TestPost.live(perspective, { limit: 0, count: true });
+    const live = TestPost.query(perspective, { limit: 0, count: true });
     const opening = await watch(live, (page) => counts.push(page.totalCount!));
     const initialCount = opening.totalCount!;
     expect(live.getSnapshot().initial).to.equal(true);
@@ -237,7 +237,7 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
       "live count rises by one",
     );
     live.dispose();
-    expect(await TestPost.query(perspective).count()).to.equal(initialCount + 1);
+    expect(await TestPost.count(perspective)).to.equal(initialCount + 1);
   });
 
   // ── 5b. Reconnect ─────────────────────────────────────────────────────────
@@ -253,7 +253,7 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
       }
     }
     const client = new Ad4mClient(baseUrl(apiPort), adminCredential, { webSocketImpl: TrackedWebSocket });
-    const live = TestPost.live((await client.perspective.byUUID(perspective.uuid))!);
+    const live = TestPost.query((await client.perspective.byUUID(perspective.uuid))!);
     try {
       const all: TestPost[][] = [];
       (await watch(live, (page) => all.push(page.results))).results;
@@ -289,7 +289,7 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
     const post = await TestPost.create(perspective, { title: "Tagged", body: "" });
 
     const all: TestPost[][] = [];
-    const live = TestPost.live(perspective);
+    const live = TestPost.query(perspective);
     // Initial results returned via Promise — callback fires for subsequent updates only
     const initialResults = (await watch(live, (page) => all.push(page.results))).results;
     const initialTagCount = (initialResults.find((p: any) => p.id === post.id)?.tags ?? []).length;
@@ -321,7 +321,7 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
     const post = await TestPost.create(perspective, { title: "Sub Post", body: "" });
 
     const all: TestPost[][] = [];
-    const live = TestPost.live(perspective, { parent: { id: channel.id, model: TestChannel, field: "posts" } });
+    const live = TestPost.query(perspective, { parent: { id: channel.id, model: TestChannel, field: "posts" } });
     // Initial results returned via Promise — callback fires for subsequent updates only
     const initialResults = (await watch(live, (page) => all.push(page.results))).results;
     expect(initialResults).to.have.length(0);
@@ -344,7 +344,7 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
     const channel = await TestChannel.create(perspective, { name: "sub-chan-batch" });
 
     const pages: Array<{ results: TestPost[]; totalCount?: number }> = [];
-    const live = TestPost.live(perspective, {
+    const live = TestPost.query(perspective, {
       parent: { id: channel.id, model: TestChannel, field: "posts" },
       order: { createdAt: "DESC" },
       limit: 10,
@@ -382,7 +382,7 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
     await channel.addPosts(post.id);
 
     const all: TestPost[][] = [];
-    const live = TestPost.live(perspective, { parent: { id: channel.id, model: TestChannel, field: "posts" } });
+    const live = TestPost.query(perspective, { parent: { id: channel.id, model: TestChannel, field: "posts" } });
     // Initial results returned via Promise — callback fires for subsequent updates only
     const initialResults = (await watch(live, (page) => all.push(page.results))).results;
     expect(initialResults.some((p: any) => p.id === post.id)).to.be.true;
@@ -409,7 +409,7 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
     const channelB = await TestChannel.create(perspective, { name: "chan-b" });
 
     const all: TestPost[][] = [];
-    const live = TestPost.live(perspective, { parent: { id: channelA.id, model: TestChannel, field: "posts" } });
+    const live = TestPost.query(perspective, { parent: { id: channelA.id, model: TestChannel, field: "posts" } });
     (await watch(live, (page) => all.push(page.results))).results;
 
     // Initial results returned via Promise — callback fires for subsequent updates only
@@ -441,7 +441,7 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
     await new Promise((r) => setTimeout(r, 1000));
 
     const all: TestComment[][] = [];
-    const live = TestComment.live(perspective, { include: { reactions: true } });
+    const live = TestComment.query(perspective, { include: { reactions: true } });
     const initial = (await watch(live, (page) => all.push(page.results))).results;
     expect(initial[0].reactions.map((r) => r.emoji)).to.deep.equal(["👍"]);
     await new Promise((r) => setTimeout(r, 1000));
@@ -472,7 +472,7 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
     await new Promise((r) => setTimeout(r, 1000));
 
     const all: TestPost[][] = [];
-    const live = TestPost.live(perspective);
+    const live = TestPost.query(perspective);
     const initial = (await watch(live, (page) => all.push(page.results))).results;
     expect(initial.find((p) => p.id === post.id)!.comments).to.deep.equal([]);
     await new Promise((r) => setTimeout(r, 1000));
@@ -508,7 +508,7 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
     await settle();
 
     const all: TestPost[][] = [];
-    const live = TestPost.live(perspective, { where: { title: "published" } });
+    const live = TestPost.query(perspective, { where: { title: "published" } });
     const initial = (await watch(live, (page) => all.push(page.results))).results;
     expect(initial).to.deep.equal([]);
     await settle();
@@ -533,7 +533,7 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
     await settle();
 
     const all: TestPost[][] = [];
-    const live = TestPost.live(perspective, { where: { comments: { some: { body: "yes" } } } } as any);
+    const live = TestPost.query(perspective, { where: { comments: { some: { body: "yes" } } } } as any);
     const initial = (await watch(live, (page) => all.push(page.results))).results;
     expect(initial).to.deep.equal([]);
     await settle();
@@ -558,7 +558,7 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
     await settle();
 
     const all: TestComment[][] = [];
-    const live = TestComment.live(perspective, { include: { reactions: { where: { emoji: "🎉" } } } });
+    const live = TestComment.query(perspective, { include: { reactions: { where: { emoji: "🎉" } } } });
     const initial = (await watch(live, (page) => all.push(page.results))).results;
     expect(initial.find((c) => c.id === comment.id)!.reactions).to.deep.equal([]);
     await settle();
@@ -591,7 +591,7 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
       (posts?.find((p) => p.id === post.id)?.comments?.[0] as TestComment | undefined)?.reactions?.[0]?.emoji;
 
     const all: TestPost[][] = [];
-    const live = TestPost.live(perspective, { include: { comments: { include: { reactions: true } } } });
+    const live = TestPost.query(perspective, { include: { comments: { include: { reactions: true } } } });
     const initial = (await watch(live, (page) => all.push(page.results))).results;
     expect(emojiOf(initial)).to.equal("👍");
     await settle();
@@ -624,7 +624,7 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
       posts?.find((p) => p.id === post.id)?.pinnedComment as TestComment | null | undefined;
 
     const all: TestPost[][] = [];
-    const live = TestPost.live(perspective, { include: { pinnedComment: { include: { reactions: true } } } });
+    const live = TestPost.query(perspective, { include: { pinnedComment: { include: { reactions: true } } } });
     const initial = (await watch(live, (page) => all.push(page.results))).results;
     expect(pinnedOf(initial)?.id).to.equal(first.id);
     await settle();
@@ -662,7 +662,7 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
     await settle();
 
     const all: TestPost[][] = [];
-    const live = TestPost.live(perspective, { order: { "pinnedComment.body": "ASC" } as any, limit: 10 });
+    const live = TestPost.query(perspective, { order: { "pinnedComment.body": "ASC" } as any, limit: 10 });
     const initial = (await watch(live, (page) => all.push(page.results))).results;
     expect(initial.map((p) => p.id)).to.deep.equal([p1.id, p2.id]);
     await settle();
@@ -699,7 +699,7 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
       await settle();
 
       const all: SubProducedDeliverable[][] = [];
-      const live = SubProducedDeliverable.live(p, {
+      const live = SubProducedDeliverable.query(p, {
         where: { producedByFlow: { flow: PRODUCED_FLOW_URI } },
       });
       const initial = (await watch(live, (page) => all.push(page.results))).results;

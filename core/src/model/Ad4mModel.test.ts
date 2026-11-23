@@ -723,7 +723,7 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
     expect(count).toBe(10);
   });
 
-  it("routes ModelQueryBuilder.get() through modelQuery", async () => {
+  it("routes findAll() with a where through modelQuery", async () => {
     mockPerspective.modelQuery.mockResolvedValue({
       instances: [
         { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
@@ -731,9 +731,7 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
       totalCount: 1
     });
 
-    const results = await Recipe.query(mockPerspective)
-      .where({ name: "Pasta" })
-      .get();
+    const results = await Recipe.findAll(mockPerspective, { where: { name: "Pasta" } });
 
     expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
@@ -741,22 +739,20 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
     expect(results[0].name).toBe("Pasta");
   });
 
-  it("routes ModelQueryBuilder.count() through modelQuery", async () => {
+  it("routes count() with a where through modelQuery", async () => {
     mockPerspective.modelQuery.mockResolvedValue({
       instances: [],
       totalCount: 3
     });
 
-    const count = await Recipe.query(mockPerspective)
-      .where({ rating: { gt: 4 } })
-      .count();
+    const count = await Recipe.count(mockPerspective, { where: { rating: { gt: 4 } } });
 
     expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
     expect(count).toBe(3);
   });
 
-  it("routes ModelQueryBuilder.paginate() through modelQuery", async () => {
+  it("routes paginate() with a where through modelQuery", async () => {
     mockPerspective.modelQuery.mockResolvedValue({
       instances: [
         { id: "literal:recipe1", name: "Pasta", rating: 5, ingredients: ["pasta"] }
@@ -764,9 +760,7 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
       totalCount: 1
     });
 
-    const page = await Recipe.query(mockPerspective)
-      .where({ rating: { gt: 3 } })
-      .paginate(10, 1);
+    const page = await Recipe.paginate(mockPerspective, 10, 1, { where: { rating: { gt: 3 } } });
 
     expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect(mockPerspective.infer).not.toHaveBeenCalled();
@@ -823,13 +817,10 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
       expect(q.count).toBeUndefined();
     });
 
-    it("ModelQueryBuilder.page() sends the cursor instead of an offset", async () => {
+    it("page() sends the cursor instead of an offset", async () => {
       mockPerspective.modelQuery.mockResolvedValue({ instances: [], nextCursor: "c2" });
 
-      const page = await Recipe.query(mockPerspective)
-        .where({ rating: { gt: 3 } })
-        .offset(30)
-        .page(10, "c1");
+      const page = await Recipe.page(mockPerspective, 10, "c1", { where: { rating: { gt: 3 } }, offset: 30 });
 
       const q = sentQuery();
       expect(q.after).toBe("c1");
@@ -858,13 +849,6 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
       expect(q.limit).toBe(0);
       expect(q.count).toBe(true);
       expect(count).toBe(7);
-
-      // The builder's count() drops it too — a seeded cursor counts the same scope.
-      const viaBuilder = await Recipe.query(mockPerspective, { after: "c1" } as any).count();
-      const q2 = sentQuery(1);
-      expect(q2.after).toBeUndefined();
-      expect(q2.limit).toBe(0);
-      expect(viaBuilder).toBe(7);
     });
 
     it("findAll forwards `after` and executeModelQuery returns nextCursor", async () => {
@@ -973,22 +957,20 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     expect(mockPerspective.modelQuery).toHaveBeenCalled();
   });
 
-  it("should apply filtering in ModelQueryBuilder.count() with gt operator", async () => {
+  it("should apply filtering in count() with gt operator", async () => {
     mockPerspective.modelQuery.mockResolvedValue({
       instances: [],
       totalCount: 2
     });
 
-    // Count recipes with rating > 3 using ModelQueryBuilder
-    const count = await Recipe.query(mockPerspective)
-      .where({ rating: { gt: 3 } })
-      .count();
+    // Count recipes with rating > 3
+    const count = await Recipe.count(mockPerspective, { where: { rating: { gt: 3 } } });
     
     expect(count).toBe(2);
     expect(mockPerspective.modelQuery).toHaveBeenCalled();
   });
 
-  it("should apply filtering in ModelQueryBuilder.count() with timestamp between", async () => {
+  it("should apply filtering in count() with timestamp between", async () => {
     mockPerspective.modelQuery.mockResolvedValue({
       instances: [],
       totalCount: 3
@@ -997,10 +979,9 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     const startTimestamp = new Date("2023-01-02T00:00:00Z").getTime();
     const endTimestamp = new Date("2023-01-04T00:00:00Z").getTime();
     
-    // Count using ModelQueryBuilder
-    const count = await Recipe.query(mockPerspective)
-      .where({ timestamp: { between: [startTimestamp, endTimestamp] } })
-      .count();
+    const count = await Recipe.count(mockPerspective, {
+      where: { timestamp: { between: [startTimestamp, endTimestamp] } },
+    });
     
     expect(count).toBe(3);
     expect(mockPerspective.modelQuery).toHaveBeenCalled();
@@ -1326,7 +1307,7 @@ describe("Push-down FILTER for literal equality", () => {
   });
 });
 
-// ── Model.live ───────────────────────────────────────────────────────────────
+// ── Model.query (live) ───────────────────────────────────────────────────────────────
 
 /** A perspective whose client answers `subscribe` with `initial` and keeps the
  *  update and reconnect listeners, so a test can push updates and reconnect. */
@@ -1383,10 +1364,10 @@ function testModel(name: string) {
 const ids = (page: any) => page.results.map((r: any) => r.id);
 const settle = () => new Promise(r => setTimeout(r, 10));
 
-describe("Model.live", () => {
+describe("Model.query (live)", () => {
   it("opens through perspective.subscribe with the model's query and returns the first page", async () => {
     const { perspective, client } = liveHarness({ instances: [{ id: "p2a" }, { id: "p2b" }], totalCount: 12 });
-    const live = testModel("LiveFirst").live(perspective, { limit: 10, offset: 10, count: true });
+    const live = testModel("LiveFirst").query(perspective, { limit: 10, offset: 10, count: true });
 
     const page = await live.first;
 
@@ -1404,7 +1385,7 @@ describe("Model.live", () => {
 
   it("marks the opening value initial and a change not", async () => {
     const { perspective, push } = liveHarness({ instances: [{ id: "a" }], totalCount: 1 });
-    const live = testModel("LiveInitial").live(perspective);
+    const live = testModel("LiveInitial").query(perspective);
     await live.first;
     expect(live.getSnapshot().initial).toBe(true);
 
@@ -1417,7 +1398,7 @@ describe("Model.live", () => {
 
   it("does not invoke a listener before the first value, then once at the opening value", async () => {
     const { perspective } = liveHarness();
-    const live = testModel("LiveTiming").live(perspective);
+    const live = testModel("LiveTiming").query(perspective);
     const seen: any[] = [];
     live.subscribe(s => seen.push(s));
     expect(seen).toHaveLength(0);
@@ -1431,7 +1412,7 @@ describe("Model.live", () => {
 
   it("delivers each page from the pushed rows without a second query", async () => {
     const { perspective, push } = liveHarness();
-    const live = testModel("LivePush").live(perspective, { limit: 10 });
+    const live = testModel("LivePush").query(perspective, { limit: 10 });
     await live.first;
     const pages: any[] = [];
     live.subscribe(s => pages.push(s.data));
@@ -1450,7 +1431,7 @@ describe("Model.live", () => {
     // A create past the page leaves the rows as they were and moves the
     // count; the executor pushes that as a delta with no upserts.
     const { perspective, push } = liveHarness({ instances: [{ id: "a" }], totalCount: 1 });
-    const live = testModel("LiveOutside").live(perspective, { limit: 1, count: true });
+    const live = testModel("LiveOutside").query(perspective, { limit: 1, count: true });
     await live.first;
 
     push({ ids: ["a"], upsert: [], totalCount: 2 });
@@ -1463,7 +1444,7 @@ describe("Model.live", () => {
   it("emits nothing for a page equal to the last one", async () => {
     // A resync or a reconnect re-open replaces the result wholesale.
     const { perspective, push } = liveHarness({ instances: [{ id: "a" }], totalCount: 1 });
-    const live = testModel("LiveUnchanged").live(perspective, { limit: 1, count: true });
+    const live = testModel("LiveUnchanged").query(perspective, { limit: 1, count: true });
     await live.first;
     const seen: any[] = [];
     live.subscribe(s => seen.push(s));
@@ -1482,7 +1463,7 @@ describe("Model.live", () => {
     // The pushes carry the rows, in revision order, so the last snapshot is
     // the last push.
     const { perspective, push } = liveHarness();
-    const live = testModel("LiveLatest").live(perspective, { limit: 10, count: true });
+    const live = testModel("LiveLatest").query(perspective, { limit: 10, count: true });
     await live.first;
     const pages: any[] = [];
     live.subscribe(s => pages.push(s.data));
@@ -1498,7 +1479,7 @@ describe("Model.live", () => {
 
   it("delivers nothing after dispose", async () => {
     const { client, perspective, push } = liveHarness();
-    const live = testModel("LiveDispose").live(perspective);
+    const live = testModel("LiveDispose").query(perspective);
     await live.first;
     const callback = jest.fn();
     live.subscribe(callback);
@@ -1515,7 +1496,7 @@ describe("Model.live", () => {
     const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
     try {
       const { perspective, push } = liveHarness();
-      const live = testModel("LiveThrow").live(perspective);
+      const live = testModel("LiveThrow").query(perspective);
       await live.first;
       const pages: any[] = [];
       live.subscribe(s => {
@@ -1536,7 +1517,7 @@ describe("Model.live", () => {
   it("rejects `first` when the open fails", async () => {
     const { perspective, client } = liveHarness();
     client.subscribe.mockRejectedValueOnce(new Error("boom"));
-    const live = testModel("LiveOpenFails").live(perspective);
+    const live = testModel("LiveOpenFails").query(perspective);
 
     await expect(live.first).rejects.toThrow("boom");
     expect(live.getSnapshot()).toMatchObject({ status: "error" });
@@ -1557,20 +1538,16 @@ describe("totalCount is asked for only by the readers of it (P3)", () => {
   const sentQuery = (fn: jest.Mock) => JSON.parse(fn.mock.calls[0][1]);
   const perspective = () => liveHarness({ instances: [], totalCount: 4 }).perspective;
 
-  it("findAll() and get() send no count", async () => {
+  it("findAll() sends no count", async () => {
     const p = perspective();
     await CountedThing.findAll(p, { limit: 5 });
     expect(sentQuery(p.modelQuery)).not.toHaveProperty("count");
-    const q = perspective();
-    await CountedThing.query(q).limit(5).get();
-    expect(sentQuery(q.modelQuery)).not.toHaveProperty("count");
   });
 
-  it("findAllAndCount(), count() and the builder's count() send count: true", async () => {
+  it("findAllAndCount() and count() send count: true", async () => {
     for (const run of [
       (p: any) => CountedThing.findAllAndCount(p, { limit: 5 }),
       (p: any) => CountedThing.count(p),
-      (p: any) => CountedThing.query(p).count(),
     ]) {
       const p = perspective();
       await run(p);
@@ -1578,9 +1555,9 @@ describe("totalCount is asked for only by the readers of it (P3)", () => {
     }
   });
 
-  it("live() with count: true opens its subscription with count: true", async () => {
+  it("query() with count: true opens its subscription with count: true", async () => {
     const h = liveHarness({ instances: [], totalCount: 4 });
-    const live = CountedThing.live(h.perspective, { limit: 0, count: true });
+    const live = CountedThing.query(h.perspective, { limit: 0, count: true });
     expect((await live.first).totalCount).toBe(4);
     expect(h.sent()[0]).toMatchObject({ limit: 0, count: true });
     live.dispose();
@@ -1590,9 +1567,9 @@ describe("totalCount is asked for only by the readers of it (P3)", () => {
 describe("live queries never send a cursor (P8)", () => {
   const withCursor = { limit: 5, after: "c1" };
 
-  it("live() drops the query's `after`", async () => {
+  it("query() drops the query's `after`", async () => {
     const h = liveHarness();
-    const live = testModel("CursorlessThing").live(h.perspective, withCursor);
+    const live = testModel("CursorlessThing").query(h.perspective, withCursor);
     await live.first;
     expect(h.sent()).toHaveLength(1);
     expect(h.sent()[0]).not.toHaveProperty("after");
@@ -1602,7 +1579,7 @@ describe("live queries never send a cursor (P8)", () => {
 
   it("an offset page is the subscription itself, without `after`", async () => {
     const h = liveHarness();
-    const live = testModel("CursorlessPage").live(h.perspective, { ...withCursor, limit: 10, offset: 10, count: true });
+    const live = testModel("CursorlessPage").query(h.perspective, { ...withCursor, limit: 10, offset: 10, count: true });
     await live.first;
     const [sub] = h.sent();
     expect(sub).not.toHaveProperty("after");
@@ -1618,10 +1595,10 @@ describe("live queries never send a cursor (P8)", () => {
 // when it closes; there is no keepalive)
 // ============================================================================
 
-describe("Model.live reconnect", () => {
+describe("Model.query reconnect", () => {
   it("re-opens after a reconnect", async () => {
     const h = liveHarness();
-    const live = testModel("ReconnectLive").live(h.perspective);
+    const live = testModel("ReconnectLive").query(h.perspective);
     await live.first;
     await h.reconnect();
     expect(h.opens()).toBe(2);
@@ -1631,7 +1608,7 @@ describe("Model.live reconnect", () => {
 
   it("delivers the count from the re-opened subscription, not marked initial", async () => {
     const h = liveHarness((n: number) => ({ instances: [], totalCount: n }));
-    const live = testModel("ReconnectCount").live(h.perspective, { limit: 0, count: true });
+    const live = testModel("ReconnectCount").query(h.perspective, { limit: 0, count: true });
     expect((await live.first).totalCount).toBe(1);
     const counts: any[] = [];
     live.subscribe(s => counts.push([s.data!.totalCount, s.initial]));
@@ -1645,7 +1622,7 @@ describe("Model.live reconnect", () => {
 
   it("a re-open with an equal page emits nothing", async () => {
     const h = liveHarness({ instances: [{ id: "a" }], totalCount: 1 });
-    const live = testModel("ReconnectEqual").live(h.perspective, { limit: 10, count: true });
+    const live = testModel("ReconnectEqual").query(h.perspective, { limit: 10, count: true });
     await live.first;
     const seen = jest.fn();
     live.subscribe(seen);
@@ -1660,7 +1637,7 @@ describe("Model.live reconnect", () => {
 
   it("a disposed live query does not re-open", async () => {
     const h = liveHarness();
-    const live = testModel("ReconnectDisposed").live(h.perspective);
+    const live = testModel("ReconnectDisposed").query(h.perspective);
     await live.first;
     live.dispose();
     await h.reconnect();
@@ -1999,16 +1976,10 @@ describe("deepQuery — getter evaluation", () => {
     });
   });
 
-  describe("deepQuery via ModelQueryBuilder", () => {
-    it("deepQuery() method sets deepQuery flag on queryParams", () => {
-      const builder = DeepQueryTestMessage.query(mockPerspective);
-      (builder as any).deepQuery();
-      expect((builder as any).queryParams.deepQuery).toBe(true);
-    });
-
+  describe("deepQuery in the query", () => {
     it("deepQuery defaults to true when not explicitly set", async () => {
       mockPerspective.modelQuery.mockResolvedValueOnce({ instances: [], totalCount: 0 });
-      await DeepQueryTestMessage.query(mockPerspective).get();
+      await DeepQueryTestMessage.findAll(mockPerspective);
 
       expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
       const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
@@ -2018,7 +1989,7 @@ describe("deepQuery — getter evaluation", () => {
 
     it("deepQuery can be explicitly set to false", async () => {
       mockPerspective.modelQuery.mockResolvedValueOnce({ instances: [], totalCount: 0 });
-      await DeepQueryTestMessage.query(mockPerspective).deepQuery(false).get();
+      await DeepQueryTestMessage.findAll(mockPerspective, { deepQuery: false });
 
       expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
       const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
@@ -3437,14 +3408,11 @@ describe("linkStatus — wire format", () => {
     expect(JSON.parse(queryJson)).not.toHaveProperty("linkStatus");
   });
 
-  it("travels as `linkStatus` when set, from the query and the builder", () => {
+  it("travels as `linkStatus` when set, from the query", () => {
     const { queryJson } = (LinkStatusWireCard as any).prepareModelQueryParams({
       linkStatus: "shared",
     });
     expect(JSON.parse(queryJson).linkStatus).toBe("shared");
-
-    const builder = LinkStatusWireCard.query({} as any).linkStatus("local");
-    expect((builder as any).queryParams.linkStatus).toBe("local");
   });
 });
 
@@ -3467,24 +3435,21 @@ describe("includeUnverified — wire format", () => {
     expect(JSON.parse(queryJson)).not.toHaveProperty("includeUnverified");
   });
 
-  it("travels as `includeUnverified` when set, from the query and the builder", () => {
+  it("travels as `includeUnverified` when set, from the query", () => {
     const { queryJson } = (UnverifiedWireRecipe as any).prepareModelQueryParams({
       includeUnverified: true,
     });
     expect(JSON.parse(queryJson).includeUnverified).toBe(true);
-
-    const builder = UnverifiedWireRecipe.query({} as any).includeUnverified();
-    expect((builder as any).queryParams.includeUnverified).toBe(true);
   });
 });
 
 // ── One subscription per live query ───────────────────────────────────
-describe("Model.live ownership", () => {
+describe("Model.query ownership", () => {
   it("a failed open ends no other live query's subscription", async () => {
     const h = liveHarness();
     h.client.subscribe.mockRejectedValueOnce(new Error("refused"));
-    const failing = testModel("OwnershipFail").live(h.perspective);
-    const working = testModel("OwnershipFail").live(h.perspective);
+    const failing = testModel("OwnershipFail").query(h.perspective);
+    const working = testModel("OwnershipFail").query(h.perspective);
 
     await expect(failing.first).rejects.toThrow("refused");
     await working.first;
@@ -3499,7 +3464,7 @@ describe("Model.live ownership", () => {
     let resolveOpen!: (v: any) => void;
     h.client.subscribe.mockImplementationOnce(() => new Promise(resolve => { resolveOpen = resolve; }));
     const callback = jest.fn();
-    const live = testModel("OwnershipEarly").live(h.perspective);
+    const live = testModel("OwnershipEarly").query(h.perspective);
     live.subscribe(callback);
 
     live.dispose();
@@ -3515,7 +3480,7 @@ describe("Model.live ownership", () => {
 
   it("dispose() ends the subscription once, however often it is called", async () => {
     const h = liveHarness();
-    const live = testModel("OwnershipOnce").live(h.perspective);
+    const live = testModel("OwnershipOnce").query(h.perspective);
     await live.first;
 
     live.dispose();
@@ -3574,13 +3539,6 @@ describe("Ad4mModel.findAllOf / queryOf (one query over several classes, #1238)"
     expect(results[1]).toBeInstanceOf(UnionNoteU);
     // A class the caller did not list stays plain JSON.
     expect(results[2]).not.toBeInstanceOf(Ad4mModel);
-  });
-
-  it("queryOf().count() reads the union's totalCount", async () => {
-    const perspective = { modelQuery: jest.fn().mockResolvedValue(rows), uuid: "p" } as any;
-    const count = await Ad4mModel.queryOf(perspective, [UnionTaskU, UnionNoteU]).count();
-    expect(count).toBe(7);
-    expect(JSON.parse(perspective.modelQuery.mock.calls[0][1]).limit).toBe(0);
   });
 
   it("refuses a projection key the classes tag with different target classes", () => {
@@ -3672,7 +3630,7 @@ describe("save() on an instance pushed by a subscription", () => {
   it("updates the instance rather than creating a second one", async () => {
     const { perspective, push } = makePerspective([{ id: "push://t1", kind: "push://task", title: "v1" }]);
     let pushed: PushedTask[] = [];
-    const live = PushedTask.live(perspective);
+    const live = PushedTask.query(perspective);
     live.subscribe((s) => { pushed = s.data!.results; });
     await live.first;
 
@@ -3690,10 +3648,10 @@ describe("save() on an instance pushed by a subscription", () => {
     expect(written(perspective)).toEqual(["literal:string:v3"]);
   });
 
-  it("updates an instance pushed to a liveOf() query", async () => {
+  it("updates an instance pushed to a queryOf() live query", async () => {
     const { perspective, push } = makePerspective([]);
     let pushed: Ad4mModel[] = [];
-    const live = Ad4mModel.liveOf(perspective, [PushedTask, PushedNote]);
+    const live = Ad4mModel.queryOf(perspective, [PushedTask, PushedNote]);
     live.subscribe((s) => { pushed = s.data!.results; });
     await live.first;
 
@@ -3779,7 +3737,7 @@ describe("includeAll", () => {
 
   it("hydrates the forward relations of a live query's result", async () => {
     const h = liveHarness({ instances: [row], totalCount: 1 });
-    const live = IncAllList.live(h.perspective, { includeAll: true });
+    const live = IncAllList.query(h.perspective, { includeAll: true });
     const [list] = (await live.first).results;
     live.dispose();
 
@@ -4258,7 +4216,7 @@ describe("get() and update() on a missing instance", () => {
   });
 });
 
-describe("querying by class name (overrideModelClassName)", () => {
+describe("live query by class name", () => {
   @Model({ name: "ByNameCard" })
   class ByNameCard extends Ad4mModel {
     @Flag({ through: "byname://kind", value: "byname://card" })
@@ -4267,38 +4225,36 @@ describe("querying by class name (overrideModelClassName)", () => {
     title: string = "";
   }
 
-  @Model({ name: "ByNameNote" })
-  class ByNameNote extends Ad4mModel {
-    @Property({ through: "byname://body" })
-    body: string = "";
-  }
-
   const rows = [
     { id: "byname://c1", kind: "byname://card", title: "one" },
     { id: "byname://c2", kind: "byname://card", title: "two" },
   ];
-  const makePerspective = () => liveHarness({ instances: rows, totalCount: rows.length }).perspective;
+  const makeHarness = () => liveHarness({ instances: rows, totalCount: rows.length });
   const data = (results: any[]) => results.map((r) => ({ id: r.id, title: r.title }));
   const query = { where: { title: "one" }, order: { title: "ASC" as const }, limit: 5 };
 
-  it("get() sends the same query and returns the same rows as a query by class", async () => {
-    const byClass = makePerspective();
-    const byName = makePerspective();
-    const viaClass = await ByNameCard.query(byClass, query).get();
-    const viaName = await Ad4mModel.query(byName, query).overrideModelClassName("ByNameCard").get();
+  it("sends the same query body and returns the same rows as a query by class", async () => {
+    const byClass = makeHarness();
+    const byName = makeHarness();
+    const liveClass = ByNameCard.query(byClass.perspective, query);
+    const liveName = Ad4mModel.query(byName.perspective, query, { className: "ByNameCard" });
+    const viaClass = (await liveClass.first).results;
+    const viaName = (await liveName.first).results;
+    liveClass.dispose();
+    liveName.dispose();
 
     // The class name travels as given; the class query names it by its target
     // class IRI. The executor reads both as the same class (a bare name reads
     // the least IRI), so the query body is identical.
-    expect(byName.modelQuery.mock.calls[0][0]).toBe("ByNameCard");
-    expect(byName.modelQuery.mock.calls[0][1]).toBe(byClass.modelQuery.mock.calls[0][1]);
+    expect(byName.perspective.client.subscribe.mock.calls[0][1].className).toBe("ByNameCard");
+    expect(byName.perspective.client.subscribe.mock.calls[0][1].queryJson)
+      .toBe(byClass.perspective.client.subscribe.mock.calls[0][1].queryJson);
     expect(data(viaName)).toEqual(data(viaClass));
   });
 
-  it("count() and live() work by class name", async () => {
-    const perspective = makePerspective();
-    await expect(Ad4mModel.query(perspective).overrideModelClassName("ByNameCard").count()).resolves.toBe(2);
-    const live = Ad4mModel.live(perspective, undefined, { className: "ByNameCard" });
+  it("opens a subscription named by the class name", async () => {
+    const perspective = makeHarness().perspective;
+    const live = Ad4mModel.query(perspective, undefined, { className: "ByNameCard" });
     const { results } = await live.first;
     live.dispose();
 
@@ -4306,19 +4262,12 @@ describe("querying by class name (overrideModelClassName)", () => {
     expect(data(results)).toEqual(data(rows));
   });
 
-  it("throws on a queryOf() builder instead of dropping the union", () => {
-    const perspective = makePerspective();
-    expect(() => Ad4mModel.queryOf(perspective, [ByNameCard, ByNameNote]).overrideModelClassName("ByNameCard"))
-      .toThrow(/queryOf\(\)/);
-    expect(perspective.modelQuery).not.toHaveBeenCalled();
-  });
-
-  it("rejects includeAll with a clear error (the client does not know the named model's relations)", async () => {
-    const perspective = makePerspective();
-    await expect(
-      Ad4mModel.query(perspective, { includeAll: true }).overrideModelClassName("ByNameCard").get(),
-    ).rejects.toThrow(/includeAll needs a decorated model class/);
-    expect(perspective.modelQuery).not.toHaveBeenCalled();
+  it("rejects includeAll with a clear error (the client does not know the named model's relations)", () => {
+    const perspective = makeHarness().perspective;
+    expect(() =>
+      Ad4mModel.query(perspective, { includeAll: true }, { className: "ByNameCard" }),
+    ).toThrow(/includeAll needs a decorated model class/);
+    expect(perspective.client.subscribe).not.toHaveBeenCalled();
   });
 });
 

@@ -9,7 +9,6 @@
  * no `totalCount` instead of reporting zero matches.
  */
 import { Ad4mModel } from './Ad4mModel';
-import { ModelQueryBuilder } from './ModelQueryBuilder';
 import { Model, Property } from './decorators';
 import { PerspectiveProxy } from '../perspectives/PerspectiveProxy';
 import type { PaginationResult, ResultsWithTotalCount } from './types';
@@ -20,7 +19,6 @@ class Note extends Ad4mModel {}
 
 type FindAllAndCount = Awaited<ReturnType<typeof Note.findAllAndCount<Note>>>;
 type StaticPaginate = Awaited<ReturnType<typeof Note.paginate<Note>>>;
-type BuilderPaginate = Awaited<ReturnType<ModelQueryBuilder<Note>['paginate']>>;
 
 describe('count results type', () => {
   it('totalCount is required where the call always asks for the count', () => {
@@ -29,8 +27,7 @@ describe('count results type', () => {
       IsRequired<PaginationResult<Note>, 'totalCount'>,
       IsRequired<FindAllAndCount, 'totalCount'>,
       IsRequired<StaticPaginate, 'totalCount'>,
-      IsRequired<BuilderPaginate, 'totalCount'>,
-    ] = [true, true, true, true, true];
+    ] = [true, true, true, true];
     expect(required.every(Boolean)).toBe(true);
   });
 });
@@ -60,8 +57,6 @@ describe('an answer without the count that was asked for', () => {
     ['Model.count', () => CountedNote.count(perspective)],
     ['Model.findAllAndCount', () => CountedNote.findAllAndCount(perspective)],
     ['Model.paginate', () => CountedNote.paginate(perspective, 10, 1)],
-    ['query().count', () => CountedNote.query(perspective).count()],
-    ['query().paginate', () => CountedNote.query(perspective).paginate(10, 1)],
   ])('%s throws naming totalCount', async (_name, call) => {
     await expect(call()).rejects.toThrow(/totalCount/);
   });

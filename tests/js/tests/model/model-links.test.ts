@@ -12,7 +12,7 @@
  *      are the stored `LinkExpression`s (same author, timestamp, signature).
  *   3. Fail-closed keys: a reverse relation or an unresolvable key is an
  *      error, not `[]`; "asked, none found" is `[]`, "not asked" is absent.
- *   4. The same option through the fluent builder, an `include` sub-query and
+ *   4. The same option through an `include` sub-query and
  *      the raw `perspective.modelQuery` RPC.
  *   5. A live subscription re-fires when a link it asks for lands, even on a
  *      predicate the model does not declare (a subscribed revocation check
@@ -228,18 +228,6 @@ describe("Ad4mModel — links option (per-link rows)", function () {
 
   // ── 4. other entry points ─────────────────────────────────────────────────
 
-  it("works through the fluent builder", async () => {
-    const post = await TestPost.create(perspective, { title: "fluent" });
-    const tag = await TestTag.create(perspective, { label: "t" });
-    await post.addTags(tag.id);
-
-    const [found] = await TestPost.query(perspective)
-      .where({ id: post.id } as any)
-      .links(["tags"])
-      .get();
-    expect(found.__links!.tags.map((r) => r.data.target)).to.deep.equal([tag.id]);
-  });
-
   it("works inside an include sub-query, and only there", async () => {
     const post = await TestPost.create(perspective, { title: "outer" });
     const c = await TestComment.create(perspective, { body: "inner" });
@@ -347,7 +335,7 @@ describe("Ad4mModel — links option (per-link rows)", function () {
     await sleep(1000);
 
     const all: TestPost[][] = [];
-    const live = TestPost.live(perspective, { where: { id: post.id }, links: [TOMBSTONE] } as any);
+    const live = TestPost.query(perspective, { where: { id: post.id }, links: [TOMBSTONE] } as any);
     const initial = (await live.first).results;
     live.subscribe((s) => {
       if (s.status === "ready" && !s.initial) all.push(s.data!.results);
@@ -386,7 +374,7 @@ describe("Ad4mModel — links option (per-link rows)", function () {
     await sleep(1000);
 
     const all: TestPost[][] = [];
-    const live = TestPost.live(perspective, {
+    const live = TestPost.query(perspective, {
       where: { id: post.id },
       include: { comments: { links: [TOMBSTONE] } },
     } as any);
