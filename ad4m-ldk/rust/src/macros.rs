@@ -35,8 +35,9 @@
 //!     later call then returns a "panicked" `LanguageError` instead of
 //!     waiting for the lock that the aborted call still holds.
 //!   * a `__ad4mAldkVersion` marker export (`MARKER_EXPORT`), which
-//!     answers the ALDK version (`VERSION`): the executor refuses a
-//!     wasm-bindgen bundle that does not carry it, because only a bundle
+//!     answers the ALDK version (`VERSION`): only a wasm-bindgen bundle
+//!     that carries it runs its calls by their declared kind — without
+//!     it the executor serializes every call, because only a bundle
 //!     built with this ALDK pins each call's agent and splits the
 //!     instance lock by export kind.
 //!   * lifecycle exports: `name`, `version`, `isPublic`, `init`, `teardown`, `interactions`
@@ -121,10 +122,11 @@ macro_rules! ad4m_language {
             }
         };
 
-        /// Marks the bundle as built with a concurrency-aware ALDK — the
-        /// executor refuses a wasm-bindgen bundle whose glue does not
-        /// carry this marker. Returns the ALDK version the bundle was
-        /// built against.
+        /// Marks the bundle as built with a concurrency-aware ALDK — only
+        /// a wasm-bindgen bundle whose glue carries it runs its calls by
+        /// their declared kind; the executor serializes every call on one
+        /// without it. Returns the ALDK version the bundle was built
+        /// against.
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "__ad4mAldkVersion")]
         pub fn __ad4m_aldk_version() -> String {
             $crate::VERSION.to_string()

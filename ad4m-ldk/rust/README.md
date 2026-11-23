@@ -123,10 +123,12 @@ borrow (aborting the whole WASM module). Take the borrow, read or write,
 drop it — then await.
 
 `ad4m_language!` also emits a `__ad4mAldkVersion` marker export carrying
-the ALDK version. The executor refuses to load a wasm-bindgen bundle
-without it: a bundle built by an older ALDK pins no agent token and has
-no per-export lock side, so its calls could not safely run beside others
-— rebuild with this ALDK or later.
+the ALDK version. Only a wasm-bindgen bundle that carries it runs its
+calls by their declared kind: a bundle built by an older ALDK pins no
+agent token and has no per-export lock side, so the executor serializes
+every call into it — each runs ordered, whatever the caller declared.
+The bundle still loads (published bundles keep circulating); rebuild
+with this ALDK or later for the declared kinds.
 
 Each call's host-agent operations (`rt::agent_did()`, `rt::agent_sign()`,
 …) act as the agent that placed the call, even across awaits: the macro

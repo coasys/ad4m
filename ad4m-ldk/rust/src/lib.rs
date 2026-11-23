@@ -32,17 +32,18 @@ pub mod traits;
 pub mod types;
 
 /// This crate's version — what the `__ad4mAldkVersion` export of an
-/// `ad4m_language!` bundle returns, and the version the executor names
-/// when it refuses a WASM bundle that predates [`MARKER_EXPORT`].
+/// `ad4m_language!` bundle returns.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The export an `ad4m_language!` bundle carries to show it was built
 /// with a concurrency-aware ALDK ([`VERSION`] or later): every suspending
 /// export pins its call's agent token across polls (`agent::WithAgent`)
 /// and takes the instance-lock side its declared kind says
-/// (`state::CallLock`). The executor refuses a wasm-bindgen bundle whose
-/// glue does not name it: run beside other calls, its exports would read
-/// and sign as whichever call's ambient context resumed them.
+/// (`state::CallLock`). Only a wasm-bindgen bundle whose glue names it
+/// runs its calls by their declared kind: an unmarked bundle still loads,
+/// but the executor serializes every call into it — overlapped, its
+/// exports would read and sign as whichever call's ambient context
+/// resumed them.
 /// Must equal the `js_name` of the marker export `ad4m_language!` emits —
 /// the macro expansion checks that at compile time.
 pub const MARKER_EXPORT: &str = "__ad4mAldkVersion";
