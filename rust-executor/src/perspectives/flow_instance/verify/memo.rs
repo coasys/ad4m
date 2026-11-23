@@ -153,6 +153,10 @@ pub struct VerdictMemo {
     /// read of an unchanged set re-verifies nothing.
     #[cfg(test)]
     verifications: std::sync::atomic::AtomicUsize,
+    /// Test-only: a stop to fire right after the next verification, so a
+    /// test can cancel a run in the middle of its receipt loop.
+    #[cfg(test)]
+    cancel_after_verification: Mutex<Option<crate::perspectives::sparql_store::EvalStop>>,
 }
 
 impl Default for VerdictMemo {
@@ -168,6 +172,8 @@ impl VerdictMemo {
             settled: Mutex::new(LruCache::new(capacity)),
             #[cfg(test)]
             verifications: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            cancel_after_verification: Mutex::new(None),
         }
     }
 
@@ -188,11 +194,32 @@ impl VerdictMemo {
         self.verifications
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let settled = settle(catalogue, receipt);
+        #[cfg(test)]
+        if let Some(stop) = self
+            .cancel_after_verification
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            stop.cancel();
+        }
         let weight = settled.as_ref().map_or(0, SettledRun::bytes);
         if let Some(key) = key.filter(|_| weight <= MEMO_ENTRY_MAX_BYTES) {
             self.lock().put(key, settled.clone());
         }
         settled
+    }
+
+    /// Test-only: fire `stop` right after the next verification this memo runs.
+    #[cfg(test)]
+    pub fn cancel_after_next_verification(
+        &self,
+        stop: crate::perspectives::sparql_store::EvalStop,
+    ) {
+        *self
+            .cancel_after_verification
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(stop);
     }
 
     /// How many verifications this memo has actually run.

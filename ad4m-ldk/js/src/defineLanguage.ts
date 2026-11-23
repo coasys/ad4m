@@ -204,9 +204,83 @@ export function resolveMountCallSources<T>(shape: T, languageAddress: string): T
     };
 }
 
-/** Whether a shape's JSON text contains the `{language}` placeholder at all. */
+function textHasLanguage(value: unknown): boolean {
+    return typeof value === "string" && value.includes("{language}");
+}
+
+function actionHasLanguage(action: unknown): boolean {
+    if (!action || typeof action !== "object") return false;
+    const a = action as { source?: unknown; target?: unknown };
+    return textHasLanguage(a.source) || textHasLanguage(a.target);
+}
+
+function listHasLanguage(list: unknown): boolean {
+    return Array.isArray(list) && list.some(actionHasLanguage);
+}
+
+/**
+ * Whether a call action's `source` or `target` still contains `{language}`.
+ * Only the lists `resolveMountCallSources` rewrites are checked — constructor,
+ * destructor, setter, adder and remover. Other shape text (an
+ * `interpretation_hint`, a path, a `has_value`) is left alone and must not
+ * force a `languageAddress()` call.
+ */
 function usesLanguagePlaceholder(shape: object): boolean {
-    return JSON.stringify(shape).includes("{language}");
+    const s = shape as {
+        constructor_actions?: unknown;
+        destructor_actions?: unknown;
+        properties?: unknown;
+    };
+    if (listHasLanguage(s.constructor_actions) || listHasLanguage(s.destructor_actions)) return true;
+    if (!Array.isArray(s.properties)) return false;
+    return s.properties.some((p) => {
+        if (!p || typeof p !== "object") return false;
+        const prop = p as { setter?: unknown; adder?: unknown; remover?: unknown };
+        return listHasLanguage(prop.setter) || listHasLanguage(prop.adder) || listHasLanguage(prop.remover);
+    });
+}
+
+/**
+ * The node-shape URI the executor stores when `node_shape_uri` is absent.
+ *
+ * `rust-executor/src/languages/mount_types.rs` only names the mount envelope.
+ * Registration (`perspective_instance::shapes::register_shapes`) calls
+ * `shape_links(shape, class_name_of(target_class))`, and with no
+ * `node_shape_uri` that builds `{extract_namespace(target_class)}{class_name}Shape`
+ * (`shacl_parser::shape_links`). `class_name_of` is the text after the
+ * rightmost `#`, `:` or `/`. These two splits match
+ * `shacl_parser::extract_namespace` and `extract_local_name` for the URIs
+ * that parser accepts. A target class that parser cannot namespace (no
+ * `://` and no `#`) yields `undefined` — the executor refuses the shape,
+ * and a parent link is left as declared rather than invented.
+ */
+function derivedMountShapeUri(targetClass: string): string | undefined {
+    const schemePos = targetClass.indexOf("://");
+    let namespace: string | undefined;
+    if (schemePos !== -1) {
+        const after = targetClass.slice(schemePos + 3);
+        if (!after.includes("/") && !after.includes("#")) {
+            namespace = targetClass.slice(0, schemePos + 3);
+        }
+    }
+    if (namespace === undefined) {
+        const hashPos = targetClass.lastIndexOf("#");
+        if (hashPos !== -1) namespace = targetClass.slice(0, hashPos + 1);
+    }
+    if (namespace === undefined && schemePos !== -1) {
+        const after = targetClass.slice(schemePos + 3);
+        const lastSlash = after.lastIndexOf("/");
+        if (lastSlash !== -1) namespace = targetClass.slice(0, schemePos + 3 + lastSlash + 1);
+    }
+    if (namespace === undefined) return undefined;
+    const localAt = Math.max(
+        targetClass.lastIndexOf("#"),
+        targetClass.lastIndexOf(":"),
+        targetClass.lastIndexOf("/"),
+    );
+    const local = localAt < 0 ? targetClass : targetClass.slice(localAt + 1);
+    if (!local) return undefined;
+    return `${namespace}${local}Shape`;
 }
 
 /**
@@ -416,7 +490,8 @@ export function defineLanguage(spec: LanguageSpec): FlatLanguageExports {
             // `languageAddress()` host call unless overridden).
             const resolveAddress = async (): Promise<string> => {
                 const la = m.languageAddress;
-                if (typeof la === "function") return la();
+                // `la()` would drop the mount receiver (`languageAddress() { return this.x }`).
+                if (typeof la === "function") return la.call(m);
                 if (la) return la;
                 // Lazy so that loading the LDK outside a language runtime
                 // (unit tests in Node) never resolves `ad4m:host`; a file
@@ -429,6 +504,11 @@ export function defineLanguage(spec: LanguageSpec): FlatLanguageExports {
             out.mountShapes = async () => {
                 const version = typeof m.version === "function" ? await m.version() : m.version;
                 const shapes: MountShapeEntry[] = [];
+                // Declared `node_shape_uri` (`{namespace}{name}Shape`) → the URI
+                // the executor derives from `target_class` once that field is
+                // dropped. Parent links are rewritten from the map after every
+                // class is seen, so a child listed before its parent still matches.
+                const declaredToDerived = new Map<string, string>();
                 let address: string | undefined;
                 for (const cls of m.classes) {
                     const gen = cls.generateSHACL?.();
@@ -440,11 +520,17 @@ export function defineLanguage(spec: LanguageSpec): FlatLanguageExports {
                     }
                     const name = gen.name ?? cls.className ?? cls.name;
                     const shape = gen.shape.toJSON() as Record<string, unknown>;
+                    const declared = shape.node_shape_uri;
+                    const targetClass = shape.target_class;
                     // A mount shape keeps no node_shape_uri: the executor's
                     // shape parser derives `{ns}{Class}Shape` from
                     // `target_class` when it is absent — the form
                     // hand-written mountShapes() already use.
                     delete shape.node_shape_uri;
+                    if (typeof declared === "string" && typeof targetClass === "string") {
+                        const derived = derivedMountShapeUri(targetClass);
+                        if (derived) declaredToDerived.set(declared, derived);
+                    }
                     if (usesLanguagePlaceholder(shape) && address === undefined) {
                         address = await resolveAddress();
                     }
@@ -452,6 +538,15 @@ export function defineLanguage(spec: LanguageSpec): FlatLanguageExports {
                         name,
                         shape: address === undefined ? shape : resolveMountCallSources(shape, address),
                     });
+                }
+                for (const entry of shapes) {
+                    const shape = entry.shape as Record<string, unknown>;
+                    if (!Array.isArray(shape.parent_shapes)) continue;
+                    shape.parent_shapes = shape.parent_shapes.map((uri) =>
+                        typeof uri === "string" && declaredToDerived.has(uri)
+                            ? declaredToDerived.get(uri)
+                            : uri
+                    );
                 }
                 return { version, shapes };
             };
