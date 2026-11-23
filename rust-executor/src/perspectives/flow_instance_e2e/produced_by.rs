@@ -229,6 +229,137 @@ async fn a_forged_receipt_in_the_graph_neither_lists_nor_passes_the_filter() {
     );
 }
 
+/// A `producedByFlow` query holds a run slot while it reads each output back
+/// through its class. With one slot that inner read must run inside the slot
+/// already held, not wait for another: the query answers, and the slot frees.
+///
+/// Red if the inner read goes back through the scheduled runner (deadlock).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_produced_by_query_reads_its_outputs_inside_its_own_slot() {
+    let mut f = seed_satisfied_fixture(None).await;
+    let instance = f.instance_uri.clone();
+    propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("propose");
+    crate::perspectives::flow_instance::produced::mint_flow_receipt(
+        &mut f.perspective,
+        &instance,
+        &f.ctx,
+    )
+    .await
+    .expect("mint");
+
+    let slots = crate::perspectives::perspective_instance::hold_all_but(1);
+    let read = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        tasks_produced_by(
+            &f,
+            serde_json::json!({ "where": { "producedByFlow": { "flow": f.flow_uri } } }),
+        ),
+    )
+    .await;
+    drop(slots);
+    let (ids, total) = read.expect("the query finished with one slot");
+    assert_eq!(ids, vec![TASK.to_string()]);
+    assert_eq!(total, 1);
+}
+
+/// An abandoned `producedByFlow` run — its last caller gone, or its deadline
+/// passed — must not keep scanning a receipt index nobody waits on: the
+/// catalogue read, the index read and each entry's body checks all run under
+/// the run's own stop, so the read ends with the stop's error and frees the
+/// slot instead of finishing the scan and never reaches the verifier.
+///
+/// Red if the loaders still read under `EvalStop::none()` (`get_links`): the
+/// cancelled call then answers the outputs as usual, and the memo counts a
+/// verification.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stopped_produced_by_read_ends_with_the_stop_error_and_verifies_nothing() {
+    use crate::perspectives::flow_instance::produced::{
+        flow_valid_outputs_reading, load_flow_receipts,
+    };
+    use crate::perspectives::sparql_store::EvalStop;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    mint_honest_task_receipt(&mut f).await;
+    let memo = f.perspective.receipt_verdict_memo.clone();
+    let before = memo.verifications();
+
+    let err = load_flow_receipts(&EvalStop::cancelled(), &f.perspective, &f.flow_uri)
+        .await
+        .expect_err("the receipt scan ends at the stop");
+    assert!(
+        err.to_string().contains("query cancelled"),
+        "the stop's own error — got: {err:#}"
+    );
+
+    let err = flow_valid_outputs_reading(
+        &EvalStop::cancelled(),
+        &f.perspective,
+        &f.perspective,
+        &f.flow_uri,
+        None,
+    )
+    .await
+    .expect_err("a stopped run does not answer valid outputs");
+    assert!(
+        err.to_string().contains("query cancelled"),
+        "the stop's own error — got: {err:#}"
+    );
+    assert_eq!(
+        memo.verifications(),
+        before,
+        "no receipt is verified under a fired stop"
+    );
+}
+
+/// A run cancelled **during** receipt verification stops verifying at once:
+/// it does not finish the loop while holding its blocking slot, and it
+/// answers the stop error, never the receipts verified so far. Four honest
+/// receipts; the stop fires right after the first verification, so exactly
+/// one is verified.
+///
+/// Red when `verified_outputs` ignores the stop: all four are verified and
+/// the partial list reaches the caller.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_cancelled_mid_verification_stops_verifying_and_errors() {
+    use crate::perspectives::flow_instance::produced::flow_valid_outputs_reading;
+    use crate::perspectives::sparql_store::EvalStop;
+
+    const N: usize = 4;
+    let mut f = seed_satisfied_fixture(None).await;
+    for i in 0..N {
+        let task = format!("ad4m://task/cancelled-{i}");
+        f.seed_task(&task, &format!("Cancelled {i}")).await;
+        let receipt = fixture_minted_receipt(&f, &format!("run-{i}"), &task).await;
+        plant_receipt(&mut f, &receipt).await;
+    }
+    let memo = f.perspective.receipt_verdict_memo.clone();
+    let before = memo.verifications();
+
+    let stop = EvalStop::none();
+    memo.cancel_after_next_verification(stop.clone());
+    let err = flow_valid_outputs_reading(&stop, &f.perspective, &f.perspective, &f.flow_uri, None)
+        .await
+        .expect_err("a run cancelled mid-verification does not answer a partial list");
+    assert!(
+        err.to_string().contains("query cancelled"),
+        "the stop's own error - got: {err:#}"
+    );
+    assert_eq!(
+        memo.verifications() - before,
+        1,
+        "verification ended at the stop: one receipt verified, not all {N}"
+    );
+}
+
 /// The live-content check: an output edited AFTER the run completed is no
 /// longer what the quorum committed to, so the enumeration and the filter
 /// stop returning it — while the receipt itself keeps verifying, because a
@@ -680,7 +811,9 @@ async fn fixture_minted_receipt(
     use crate::perspectives::flow_instance::test_support::{did_of, signed_link, T1};
     use crate::perspectives::flow_instance::ProposalLinks;
 
-    let flows = load_shacl_flows(&f.perspective).await.expect("flows");
+    let flows = load_shacl_flows(&EvalStop::none(), &f.perspective)
+        .await
+        .expect("flows");
     let flow = &flows[&f.flow_uri];
     let outputs = f.task_outputs(&[task.to_string()]).await;
     assert_eq!(
@@ -752,7 +885,7 @@ async fn two_hundred_and_fifty_seven_honest_receipts_all_load() {
     }
     expected.sort();
 
-    let receipts = load_flow_receipts(&f.perspective, &flow)
+    let receipts = load_flow_receipts(&EvalStop::none(), &f.perspective, &flow)
         .await
         .expect("257 honest receipts are honest use, not a flood");
     assert_eq!(receipts.len(), N, "every honest receipt loads");
@@ -894,7 +1027,7 @@ async fn a_flood_of_junk_index_entries_is_skipped_and_the_genuine_receipt_still_
         .await
         .expect("plant the flood");
 
-    let receipts = load_flow_receipts(&f.perspective, &flow)
+    let receipts = load_flow_receipts(&EvalStop::none(), &f.perspective, &flow)
         .await
         .expect("junk is skipped, never refused");
     assert_eq!(
@@ -947,7 +1080,7 @@ async fn a_body_over_the_receipt_size_cap_is_skipped_and_the_honest_receipt_besi
     );
     plant_receipt(&mut f, &bulky).await;
 
-    let receipts = load_flow_receipts(&f.perspective, &flow)
+    let receipts = load_flow_receipts(&EvalStop::none(), &f.perspective, &flow)
         .await
         .expect("an oversize body is skipped, never refused");
     assert_eq!(
