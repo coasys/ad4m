@@ -118,18 +118,15 @@ fn forwarding_ip(headers: &axum::http::HeaderMap) -> Option<std::net::IpAddr> {
     if let Some(value) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
         return last_ip(value);
     }
+    // One address. A list or any other extra text is not that address.
     headers
         .get("x-real-ip")
         .and_then(|v| v.to_str().ok())
-        .and_then(first_ip)
+        .and_then(parse_ip)
 }
 
 fn last_ip(value: &str) -> Option<std::net::IpAddr> {
     value.split(',').next_back().and_then(parse_ip)
-}
-
-fn first_ip(value: &str) -> Option<std::net::IpAddr> {
-    value.split(',').next().and_then(parse_ip)
 }
 
 fn parse_ip(value: &str) -> Option<std::net::IpAddr> {
@@ -2120,6 +2117,18 @@ mod client_ip_tests {
         let headers = headers(&[("x-forwarded-for", "198.51.100.7")]);
         assert_eq!(client_ip(peer, &headers, &trusted), "198.51.100.7");
         assert_eq!(client_ip(peer, &headers, &[]), "192.0.2.10");
+    }
+
+    /// `X-Real-IP` is one address. A trusted peer that sends anything else, including
+    /// `198.51.100.7, garbage`, is treated as if the header were missing.
+    #[test]
+    fn a_trusted_peer_x_real_ip_with_extra_text_keeps_the_socket_peer() {
+        let peer = peer("192.0.2.10:443");
+        let trusted = parse_trusted_proxies("192.0.2.10");
+        let malformed = headers(&[("x-real-ip", "198.51.100.7, garbage")]);
+        assert_eq!(client_ip(peer, &malformed, &trusted), "192.0.2.10");
+        let one = headers(&[("x-real-ip", "198.51.100.7")]);
+        assert_eq!(client_ip(peer, &one, &trusted), "198.51.100.7");
     }
 }
 
