@@ -19,20 +19,31 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen(module = "ad4m:host")]
 extern "C" {
     // ----- Agent (spec §7.1) -----
+    // Every agent import takes the call's `CallAgent` token as its last
+    // argument: wasm-bindgen-futures does not restore each task's V8 async
+    // context, so the ambient token an exported future resumes under may be
+    // another call's. `agent.rs` keeps the caller's token in a thread-local
+    // for these wrappers to pass explicitly. A host that predates the
+    // argument ignores it and answers as the ambient call agent — extra
+    // arguments are the one ABI change an older host absorbs without
+    // breaking, unlike a new named import that would fail to link.
     #[wasm_bindgen(js_name = "agentDid", catch)]
-    pub fn agent_did() -> Result<String, JsValue>;
+    fn agent_did_with(call: JsValue) -> Result<String, JsValue>;
     #[wasm_bindgen(js_name = "agentSigningKeyId", catch)]
-    pub fn agent_signing_key_id() -> Result<String, JsValue>;
+    fn agent_signing_key_id_with(call: JsValue) -> Result<String, JsValue>;
     #[wasm_bindgen(js_name = "agentSign", catch)]
-    pub fn agent_sign(payload: &[u8]) -> Result<Vec<u8>, JsValue>;
+    fn agent_sign_with(payload: &[u8], call: JsValue) -> Result<Vec<u8>, JsValue>;
     #[wasm_bindgen(js_name = "agentSignStringHex", catch)]
-    pub fn agent_sign_string_hex(payload: &str) -> Result<String, JsValue>;
+    fn agent_sign_string_hex_with(payload: &str, call: JsValue) -> Result<String, JsValue>;
     /// Opens a box sealed to the calling agent; returns the plaintext as hex.
     /// Fails for a box sealed to any other DID.
     #[wasm_bindgen(js_name = "agentOpenSealed", catch)]
-    pub fn agent_open_sealed(sealed: JsValue) -> Result<String, JsValue>;
+    fn agent_open_sealed_with(sealed: JsValue, call: JsValue) -> Result<String, JsValue>;
     #[wasm_bindgen(js_name = "agentCreateSignedExpression", catch)]
-    pub fn agent_create_signed_expression(data: JsValue) -> Result<JsValue, JsValue>;
+    fn agent_create_signed_expression_with(
+        data: JsValue,
+        call: JsValue,
+    ) -> Result<JsValue, JsValue>;
 
     // ----- Holochain (spec §7.2) -----
     // These JS-side imports return Promises — `registerDNAs` installs an
@@ -134,6 +145,44 @@ extern "C" {
 }
 
 // ---------------------------------------------------------------------------
+// Agent imports — thin wrappers that pass the call's agent token through.
+// `agent::current_arg()` is the token `agent::export_future` installed for
+// the polling call, `undefined` outside an export poll (a sync export's
+// whole body runs at entry, so the ambient context is then the call's own).
+// ---------------------------------------------------------------------------
+
+/// The DID of the agent the current call acts as.
+pub fn agent_did() -> Result<String, JsValue> {
+    agent_did_with(crate::agent::current_arg())
+}
+
+/// The signing key id of the agent the current call acts as.
+pub fn agent_signing_key_id() -> Result<String, JsValue> {
+    agent_signing_key_id_with(crate::agent::current_arg())
+}
+
+/// Sign `payload` as the agent the current call acts as.
+pub fn agent_sign(payload: &[u8]) -> Result<Vec<u8>, JsValue> {
+    agent_sign_with(payload, crate::agent::current_arg())
+}
+
+/// Sign `payload` as the agent the current call acts as; hex output.
+pub fn agent_sign_string_hex(payload: &str) -> Result<String, JsValue> {
+    agent_sign_string_hex_with(payload, crate::agent::current_arg())
+}
+
+/// Opens a box sealed to the calling agent; returns the plaintext as hex.
+/// Fails for a box sealed to any other DID.
+pub fn agent_open_sealed(sealed: JsValue) -> Result<String, JsValue> {
+    agent_open_sealed_with(sealed, crate::agent::current_arg())
+}
+
+/// Create a signed expression as the agent the current call acts as.
+pub fn agent_create_signed_expression(data: JsValue) -> Result<JsValue, JsValue> {
+    agent_create_signed_expression_with(data, crate::agent::current_arg())
+}
+
+// ---------------------------------------------------------------------------
 // Safe typed wrappers around the JsValue-shaped emit imports.
 //
 // `serde_wasm_bindgen::to_value` defaults to serializing Rust maps and
@@ -224,7 +273,9 @@ pub async fn holochain_call_typed<T: Serialize + ?Sized>(
 pub fn agent_create_signed_expression_typed<T: Serialize + ?Sized>(
     data: &T,
 ) -> crate::errors::LanguageResult<JsValue> {
-    Ok(agent_create_signed_expression(crate::__serde::to_js(data)?)?)
+    Ok(agent_create_signed_expression(crate::__serde::to_js(
+        data,
+    )?)?)
 }
 
 /// Response from `http_fetch_typed`.
@@ -285,16 +336,16 @@ fn fetch_response(v: &JsValue) -> HttpFetchResponse {
         .ok()
         .and_then(|b| b.as_string())
         .unwrap_or_default();
-    HttpFetchResponse { status, body: resp_body }
+    HttpFetchResponse {
+        status,
+        body: resp_body,
+    }
 }
 
 /// POST a JSON-serializable body to `url` and return the response body as
 /// a String. Sets `Content-Type: application/json` automatically. Returns
 /// `Err` on non-2xx status codes or network failures.
-pub async fn http_post_json<T: Serialize + ?Sized>(
-    url: &str,
-    body: &T,
-) -> Result<String, JsValue> {
+pub async fn http_post_json<T: Serialize + ?Sized>(url: &str, body: &T) -> Result<String, JsValue> {
     let body_s = serde_json::to_string(body)
         .map_err(|e| JsValue::from_str(&format!("http_post_json serialize: {}", e)))?;
     let headers = "{\"Content-Type\":\"application/json\"}";

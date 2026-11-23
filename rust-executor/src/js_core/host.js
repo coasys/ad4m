@@ -77,15 +77,22 @@ function holochainDelegate() {
 // Agent (Spec section 7.1)
 // ============================================================================
 
-export function agentDid() { return agent().did(); }
-export function agentSigningKeyId() { return agent().signingKeyId(); }
-export function agentSign(payload) { return agent().sign(payload); }
-export function agentSignStringHex(payload) { return agent().signStringHex(payload); }
-export function agentOpenSealed(sealed) { return agent().openSealed(sealed); }
-export function agentCreateSignedExpression(data) { return agent().createSignedExpression(data); }
+// Every agent function takes the call's CallAgent token as an optional
+// last argument `call`: a WASM language pins it explicitly because
+// wasm-bindgen-futures does not restore each task's V8 async context.
+// Missing/undefined -> the ambient context answers (old bundles, JS
+// languages, calls outside an export's poll); `null` means the pinned
+// call has no agent and the op refuses. The runtime global
+// `__ad4mCallAgentToken()` hands a WASM export its call's token at entry.
+export function agentDid(call) { return agent().did(call); }
+export function agentSigningKeyId(call) { return agent().signingKeyId(call); }
+export function agentSign(payload, call) { return agent().sign(payload, call); }
+export function agentSignStringHex(payload, call) { return agent().signStringHex(payload, call); }
+export function agentOpenSealed(sealed, call) { return agent().openSealed(sealed, call); }
+export function agentCreateSignedExpression(data, call) { return agent().createSignedExpression(data, call); }
 export function agentGetAllLocalUserDids() { return agent().getAllLocalUserDIDs(); }
-export function agentCreateSignedExpressionForUser(userEmail, data) {
-    return agent().createSignedExpressionForUser(userEmail, data);
+export function agentCreateSignedExpressionForUser(userEmail, data, call) {
+    return agent().createSignedExpressionForUser(userEmail, data, call);
 }
 export function agentDidForUser(userEmail) { return agent().didForUser(userEmail); }
 
