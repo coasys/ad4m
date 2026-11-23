@@ -421,6 +421,8 @@ function jsonToModelInstance<T extends Ad4mModel>(
 interface FieldWrite {
   commands: any[];
   parameters: { name: string; value: any }[];
+  /** Links to remove instead: the property's links, for an empty value. */
+  removals?: any[];
 }
 
 /** The most writes `sendWrites` joins into one `executeAction` call. */
@@ -1699,7 +1701,7 @@ export class Ad4mModel {
     return requireTotalCount(await this.executeModelQuery(perspective, { ...countQuery, limit: 0, count: true }, undefined, options));
   }
 
-  /** The `executeAction` write that sets property `key` to `value`; none for an empty value. */
+  /** The write that sets property `key` to `value`; for `null` or `""`, the removal of its links (none when it has none); none for `undefined`. */
   private async planProperty(key: string, value: any): Promise<FieldWrite[]> {
     const metadata = this.getPropertyMetadata(key);
     if (!metadata) {
@@ -1710,9 +1712,12 @@ export class Ad4mModel {
     // Generate actions from metadata (replaces Prolog query)
     const actions = this.generatePropertySetterAction(key, metadata);
 
-    // Skip storing empty/null/undefined values to avoid invalid empty literals (e.g. literal:string:)
-    if (value === undefined || value === null || value === "") {
-      return [];
+    if (value === undefined) return [];
+    // An empty value is no value: the property has no links, and no empty
+    // literal (`literal:string:`) is stored.
+    if (value === null || value === "") {
+      const links = await this._perspective.get(new LinkQuery({ source: this._baseExpression, predicate: metadata.through }));
+      return links.length ? [{ commands: [], parameters: [], removals: links }] : [];
     }
 
     const mode = effectiveLiteralStorage(metadata);
@@ -1783,7 +1788,10 @@ export class Ad4mModel {
       group = [];
     };
     for (const write of writes) {
-      if (write.commands.some((c: any) => c.action === "collectionSetter")) {
+      if (write.removals) {
+        await flush();
+        await this._perspective.removeLinks(write.removals, batchId);
+      } else if (write.commands.some((c: any) => c.action === "collectionSetter")) {
         await flush();
         group = [write];
         await flush();
@@ -1863,6 +1871,10 @@ export class Ad4mModel {
    * **Existing instances** (snapshot present, i.e. fetched via `get()`
    * or a query): updates only dirty fields via `innerUpdate`, then
    * refreshes from the perspective.
+   *
+   * A property set to `null` or `''` has no links after the write: an
+   * existing instance's links are removed, a new instance gets none.
+   * `undefined` writes nothing.
    * 
    * @param batchId - Optional batch ID for batch operations
    * @throws Will throw if instance creation, linking, or updating fails
@@ -1934,7 +1946,7 @@ export class Ad4mModel {
 
     const initialValues = {};
     for (const [key, value] of Object.entries(this)) {
-      if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
+      if (value !== undefined && value !== null && value !== "" && !(Array.isArray(value) && value.length > 0) && !value?.action) {
         const propMeta = metadata.properties[key];
         // Only offer keys with a declared, settable model property. This
         // excludes ORM bookkeeping fields (_baseExpression, _perspective —
@@ -2072,7 +2084,7 @@ export class Ad4mModel {
         }
       }
 
-      if (value !== undefined && value !== null) {
+      if (value !== undefined) {
         if (value?.action) {
           const envelopePredicate = this.getRelationOptions(key)?.predicate;
           if (envelopePredicate && value.action !== "remover") this._relationsWritten.add(envelopePredicate);
@@ -2098,7 +2110,7 @@ export class Ad4mModel {
           if (value.length === 0 && !this._snapshot && this._idMinted && !this._relationsWritten.has(predicate)) continue;
           this._relationsWritten.add(predicate);
           writes.push(...this.planRelation(key, 'setter', value));
-        } else if (value !== undefined && value !== null && value !== "") {
+        } else {
           // A scalar handed to a relation field is a single-member relation.
           //
           // This used to `continue` — "Skip, it's a relation, not a regular
@@ -2125,8 +2137,11 @@ export class Ad4mModel {
           // both paths at once.
           const relationMeta = this.getRelationOptions(key);
           if (relationMeta) {
-            this._relationsWritten.add(relationMeta.predicate);
-            writes.push(...this.planRelation(key, 'setter', [value]));
+            // `null` and `""` are not relation members; relations empty with `[]`.
+            if (value !== null && value !== "") {
+              this._relationsWritten.add(relationMeta.predicate);
+              writes.push(...this.planRelation(key, 'setter', [value]));
+            }
             continue;
           }
 
@@ -2347,7 +2362,8 @@ export class Ad4mModel {
    * Creates and saves a new model instance in one step.
    *
    * @param perspective - The perspective to create the instance in
-   * @param data - Property values to assign before saving
+   * @param data - Property values to assign before saving (`null` or `''`
+   *               leaves a property unwritten)
    * @param options - Optional settings:
    *   - `parent` — a `Scope` (model form or raw form) whose `id` will
    *     be used to create an incoming link from the parent to the new instance.
@@ -2423,7 +2439,8 @@ export class Ad4mModel {
    *
    * @param perspective - The perspective containing the instance
    * @param id - The expression URI of the instance to update
-   * @param data - Property values to merge before saving
+   * @param data - Property values to merge before saving (`null` or `''`
+   *               removes the property's links)
    * @returns The updated model instance
    * @throws If no instance has this `id` (nothing is written)
    *

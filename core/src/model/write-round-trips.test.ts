@@ -33,6 +33,15 @@ class RoundTripCall extends Ad4mModel {
   attachments: string[] = [];
 }
 
+@Model({ name: "RoundTripOptional" })
+class RoundTripOptional extends Ad4mModel {
+  @Property({ through: "rt://note" })
+  note: string = "";
+
+  @Property({ through: "rt://rank" })
+  rank: string = "";
+}
+
 // Two relations over one predicate.
 @Model({ name: "RoundTripShared" })
 class RoundTripShared extends Ad4mModel {
@@ -65,8 +74,8 @@ function shaclLinks(classes: any[]) {
   });
 }
 
-function countingProxy(registered: any[], rttMs = 0) {
-  const store = shaclLinks(registered);
+function countingProxy(registered: any[], rttMs = 0, stored: any[] = []) {
+  const store = [...shaclLinks(registered), ...stored];
   const summaries = registered.map((cls) => ({
     name: cls.getClassName(),
     shape: cls.generateSHACL().shape.toJSON(),
@@ -353,5 +362,60 @@ const rtt = Number(process.env.SDK_RTT_MS || 0);
       "createSubject(decorated instance)": await time((p) => p.createSubject(new RoundTripNote(undefined as any), "rt://n")),
     };
     console.log(`RTT ${rtt} ms, ${runs} runs\n` + Object.entries(rows).map(([k, v]) => `${k}: ${v}`).join("\n"));
+  });
+});
+
+describe("an empty value clears a property", () => {
+  const noteLink = link("rt://opt/1", "rt://note", "literal://string:old");
+  const removals = (sent: any[][]) => sent.filter((c) => c[0] === "removeLinks");
+  const writes = (sent: any[][]) => sent.filter((c) => c[0] === "executeCommands");
+  const existing = async (proxy: PerspectiveProxy, note: string | null | undefined) => {
+    const opt = new RoundTripOptional(proxy, "rt://opt/1");
+    opt.note = "old";
+    (opt as any).takeSnapshot();
+    (opt as any).note = note;
+    return opt;
+  };
+
+  it.each([[""], [null]])("update with %p removes the property's links in the caller's batch", async (empty) => {
+    const { proxy, sent } = countingProxy([RoundTripOptional], 0, [noteLink]);
+    const opt = await existing(proxy, empty as any);
+    await opt.save("batch-1");
+    expect(removals(sent)).toHaveLength(1);
+    expect(removals(sent)[0][2]).toEqual([expect.objectContaining({ data: noteLink.data })]);
+    expect(removals(sent)[0]).toContain("batch-1");
+    expect(writes(sent)).toHaveLength(0);
+  });
+
+  it.each([[""], [null]])("Model.create with %p stores no link", async (empty) => {
+    const { proxy, calls, sent } = countingProxy([RoundTripOptional]);
+    await RoundTripOptional.create(proxy, { note: empty as any, rank: "1" });
+    const createSubject = sent.find((c) => c[0] === "createSubject")!;
+    expect(JSON.stringify(createSubject)).not.toContain("note");
+    expect(JSON.stringify(createSubject)).toContain("rank");
+    expect(calls).not.toContain("removeLinks");
+    expect(writes(sent)).toHaveLength(0);
+  });
+
+  it("an absent value writes nothing", async () => {
+    const { proxy, calls } = countingProxy([RoundTripOptional], 0, [noteLink]);
+    const opt = await existing(proxy, undefined);
+    await opt.save("batch-1");
+    expect(calls).toEqual([]);
+  });
+
+  it("a property already cleared, set to '' again, writes nothing extra", async () => {
+    const { proxy, calls } = countingProxy([RoundTripOptional]);
+    const opt = await existing(proxy, "");
+    await opt.save("batch-1");
+    expect(calls).toEqual(["queryLinks"]);
+  });
+
+  it("update clears one property and sets another in one batch", async () => {
+    const { proxy, calls } = countingProxy([RoundTripOptional], 0, [noteLink]);
+    const opt = await existing(proxy, "");
+    opt.rank = "2";
+    await opt.save("batch-1");
+    expect(calls).toEqual(["queryLinks", "removeLinks", "executeCommands"]);
   });
 });

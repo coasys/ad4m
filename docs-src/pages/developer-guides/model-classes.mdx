@@ -691,6 +691,13 @@ await recipe.save();  // Only the name field is updated
 await Recipe.update(perspective, recipe.id, { name: "White Chocolate Cake" });
 ```
 
+**An empty value clears the property.** Setting a property to `null` or `''` on `save()`, `update()` or `create()` leaves it with no links (and no empty literal). On `create()` the property is simply not written. `undefined` writes nothing, and a relation is emptied with `[]`:
+
+```typescript
+recipe.category = null; // or ''
+await recipe.save();    // the category links are removed
+```
+
 ### Deleting
 
 ```typescript
