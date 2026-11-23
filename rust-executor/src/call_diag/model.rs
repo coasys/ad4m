@@ -83,9 +83,11 @@ fn summarize(query: &str) -> (String, String) {
                 order.push(json!([property, direction]));
             };
             match &q["order"] {
+                // Source key order: a multi-key `order` ranks by key order
+                // (serde_json keeps insertion order here, `preserve_order`).
                 Value::Object(map) => {
-                    for key in keys(&q["order"]) {
-                        add(key, &map[key]);
+                    for (key, direction) in map {
+                        add(key, direction);
                     }
                 }
                 Value::Array(items) => {
@@ -210,6 +212,17 @@ mod tests {
         assert!(b.1.contains(&("perspective", "b".into())));
         assert!(b.1.contains(&("results", "1".into())));
         assert!(!format!("{:?}", b.1).contains("private"));
+    }
+
+    #[test]
+    fn multi_key_order_keeps_its_key_order() {
+        let a = summarize(r#"{"order":{"timestamp":"DESC","name":"ASC"}}"#);
+        let b = summarize(r#"{"order":{"name":"ASC","timestamp":"DESC"}}"#);
+        assert_ne!(
+            a.1, b.1,
+            "different primary sort keys must not share a shape hash"
+        );
+        assert!(a.0.find("timestamp").unwrap() < a.0.find("name").unwrap());
     }
 
     #[test]
