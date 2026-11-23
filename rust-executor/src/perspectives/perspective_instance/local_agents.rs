@@ -69,7 +69,7 @@ mod tests {
 
     impl SetLocal {
         fn of(request: LanguageRuntimeRequest) -> Self {
-            let LanguageOperation::Execute(script, _) = request.operation else {
+            let LanguageOperation::Execute(script, ..) = request.operation else {
                 panic!("not a script: {:?}", request.operation);
             };
             let agents = script

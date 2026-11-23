@@ -220,6 +220,60 @@ async fn refresh_keeps_foreign_type_links() {
     }
 }
 
+/// A property the new shape drops is stale own links: they go, while an
+/// annotation another app put on the same property node stays.
+#[tokio::test]
+async fn refresh_drops_a_removed_property_but_keeps_its_annotations() {
+    let (mut perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
+    perspective
+        .register_shapes(vec![note()], &ctx)
+        .await
+        .unwrap();
+    let body = property_node("body");
+    perspective
+        .add_link(
+            Link {
+                source: body.clone(),
+                predicate: Some("we://display".into()),
+                target: "we://card".into(),
+            },
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    let mut slim = note();
+    slim.properties
+        .retain(|p| p.name.as_deref() != Some("body"));
+    let result = perspective
+        .register_shapes(vec![slim.clone()], &ctx)
+        .await
+        .unwrap();
+
+    assert_eq!(result.written, vec!["ns://Note".to_string()]);
+    assert_eq!(
+        count(&perspective, "ns://NoteShape", "sh://property", &body),
+        0,
+        "the shape no longer lists the property"
+    );
+    let remaining: Vec<(String, String)> = perspective
+        .sparql_store
+        .get_links_by_source(&crate::perspectives::sparql_store::EvalStop::none(), &body)
+        .unwrap()
+        .into_iter()
+        .map(|l| (l.data.predicate.unwrap_or_default(), l.data.target))
+        .collect();
+    assert_eq!(
+        remaining,
+        vec![("we://display".to_string(), "we://card".to_string())],
+        "the dropped node's own links are gone; only the annotation stays"
+    );
+    let stored = perspective.shapes(None).unwrap();
+    assert_eq!(stored[0].shape, stored_form(&slim));
+}
+
 #[tokio::test]
 async fn shapes_equals_the_stored_shape() {
     let (mut perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
