@@ -60,7 +60,11 @@ pub struct ShapeSummary {
 
 /// The identity of a stored triple: the target as the store reads it back,
 /// so `literal:string:a b` and `literal:string:a%20b` are one triple.
-type Triple = (String, String, String);
+pub(super) type Triple = (String, String, String);
+
+/// A class's stored own links by target class IRI, as `register_shapes`
+/// compares them: the cache entry the fast path reads.
+pub(super) type OwnLinks = BTreeMap<String, BTreeSet<Triple>>;
 
 fn triple(link: &Link) -> Triple {
     (
@@ -83,6 +87,8 @@ impl PerspectiveInstance {
         &self,
         target_class: &str,
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+        #[cfg(test)]
+        probe::bump();
         let own_of = |node: ShapeNode, source: &str| -> Result<_, AnyError> {
             Ok(self
                 .sparql_store
@@ -139,12 +145,19 @@ impl PerspectiveInstance {
             .map(|l| l.data.source)
             .collect();
         let mut registry = Vec::new();
+        let mut own_links = BTreeMap::new();
         for target_class in classes {
             let links: Vec<Link> = self
                 .own_shape_links(&target_class)?
                 .into_iter()
                 .map(|l| l.data)
                 .collect();
+            // The triple set is kept for every class, also one whose shape
+            // does not parse: the fast path still must not read it again.
+            own_links.insert(
+                target_class.clone(),
+                links.iter().map(triple).collect::<BTreeSet<Triple>>(),
+            );
             if let Some(shape) = shape_from_links(&target_class, &links) {
                 registry.push(ShapeSummary {
                     name: class_name_of(&target_class),
@@ -160,9 +173,31 @@ impl PerspectiveInstance {
         let mut cache = self.abstract_cache.write().unwrap();
         // Read against shapes that changed meanwhile: answer, don't keep.
         if cache.generation == generation {
+            cache.own_links = Some(Arc::new(own_links));
             cache.registry = Some(registry.clone());
         }
         Ok(registry)
+    }
+
+    /// The own-link triple sets cached beside the registry, keyed by target
+    /// class IRI, with the shapes generation they belong to (read under one
+    /// lock: `forget_derived_shapes` bumps the generation and drops the sets
+    /// together). `register_shapes` compares a registration's expected
+    /// links against them for its fast path. Filled through
+    /// `shape_registry` when cold. `None` when a fill raced a shape change
+    /// and was not kept: the caller then takes the slow path.
+    fn shape_own_links(&self) -> Result<Option<(Arc<OwnLinks>, u64)>, AnyError> {
+        let snapshot = |cache: &super::abstract_classes::AbstractCache| {
+            cache
+                .own_links
+                .clone()
+                .map(|own_links| (own_links, cache.generation))
+        };
+        if let Some(cached) = snapshot(&self.abstract_cache.read().unwrap()) {
+            return Ok(Some(cached));
+        }
+        self.shape_registry()?;
+        Ok(snapshot(&self.abstract_cache.read().unwrap()))
     }
 
     /// The registered classes `names` names (all of them for `None`), each
@@ -212,6 +247,31 @@ impl PerspectiveInstance {
             .collect())
     }
 
+    /// Refuse a shape URI a node other than its class already holds.
+    /// `register_shapes` runs it on both paths: before an all-unchanged
+    /// answer from the cache, and under `sdna_change_mutex` before a write.
+    fn refuse_held_shape_uris(&self, shape_uris: &BTreeMap<&str, &str>) -> Result<(), AnyError> {
+        for (shape_uri, target_class) in shape_uris {
+            let holders = self.sparql_store.query_links(
+                &EvalStop::none(),
+                None,
+                Some(SHAPE_PREDICATE),
+                Some(shape_uri),
+                None,
+                None,
+                None,
+            )?;
+            if let Some(other) = holders.iter().find(|l| l.data.source != *target_class) {
+                return Err(anyhow!(
+                    "Shape '{shape_uri}' already belongs to class '{}': class '{target_class}' \
+                     needs its own shape URI.",
+                    other.data.source
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Register `shapes`, each as the class of its target class IRI.
     ///
     /// A class whose stored own links already are the ones its shape gives
@@ -259,27 +319,32 @@ impl PerspectiveInstance {
             ));
         }
 
+        // A call whose classes all match the registry's cached own-link
+        // sets writes nothing: answer it without `sdna_change_mutex` and
+        // without a store read per node. Race: a registration that commits
+        // between the cache's fill and this answer is taken as having
+        // committed after it — the answer describes the state just before
+        // its commit, what this call would see had it taken the mutex
+        // first.
+        if let Some((own_links, generation)) = self.shape_own_links()? {
+            let all_unchanged = expected.iter().all(|(target_class, links)| {
+                let wanted: BTreeSet<Triple> = links.iter().map(triple).collect();
+                own_links.get(target_class) == Some(&wanted)
+            });
+            if all_unchanged {
+                self.refuse_held_shape_uris(&shape_uris)?;
+                return Ok(RegisterResult {
+                    unchanged: expected.keys().cloned().collect(),
+                    written: Vec::new(),
+                    generation,
+                });
+            }
+        }
+
         let mutex = self.sdna_change_mutex.clone();
         let _guard = mutex.lock().await;
 
-        for (shape_uri, target_class) in &shape_uris {
-            let holders = self.sparql_store.query_links(
-                &EvalStop::none(),
-                None,
-                Some(SHAPE_PREDICATE),
-                Some(shape_uri),
-                None,
-                None,
-                None,
-            )?;
-            if let Some(other) = holders.iter().find(|l| l.data.source != *target_class) {
-                return Err(anyhow!(
-                    "Shape '{shape_uri}' already belongs to class '{}': class '{target_class}' \
-                     needs its own shape URI.",
-                    other.data.source
-                ));
-            }
-        }
+        self.refuse_held_shape_uris(&shape_uris)?;
 
         let mut unchanged = Vec::new();
         let mut written = Vec::new();
@@ -314,10 +379,10 @@ impl PerspectiveInstance {
         if !written.is_empty() {
             self.link_mutations(mutations, LinkStatus::Shared, context)
                 .await?;
-            // The cache is keyed by what readers ask for: a class's IRI and
-            // its name. A new class of a name can change which class the name
-            // reads (the least IRI), so every entry goes.
-            self.clear_shape_cache();
+            // The write dropped every cached shape (`write_link_diff`): the
+            // cache is keyed by what readers ask for, a class's IRI and its
+            // name, and a new class of a name can change which class the name
+            // reads (the least IRI).
         }
         self.shape_registry()?;
         for target_class in &written {
@@ -342,6 +407,34 @@ impl PerspectiveInstance {
         let shape: SHACLShape = serde_json::from_str(shape_json)
             .map_err(|e| anyhow!("Failed to parse SHACL JSON: {e}"))?;
         self.register_shapes(vec![shape], context).await
+    }
+}
+
+#[cfg(test)]
+pub(super) mod probe {
+    //! Test hook: how often `own_shape_links` read the store on the
+    //! calling thread, so a test can see an unchanged `register_shapes`
+    //! ran the fast path (no reads). Thread-local: tests run in parallel
+    //! on their own threads and would disturb a shared counter. It stays
+    //! exact because every `own_shape_links` call a test makes runs on
+    //! the test's own thread — `#[tokio::test]`'s current-thread runtime,
+    //! and no `spawn_blocking` or other thread reaches it.
+    use std::cell::Cell;
+
+    thread_local! {
+        static OWN_SHAPE_READS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn count() -> usize {
+        OWN_SHAPE_READS.get()
+    }
+
+    pub(super) fn reset() {
+        OWN_SHAPE_READS.set(0);
+    }
+
+    pub(super) fn bump() {
+        OWN_SHAPE_READS.set(OWN_SHAPE_READS.get() + 1);
     }
 }
 

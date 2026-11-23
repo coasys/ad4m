@@ -43,6 +43,11 @@ pub(super) struct AbstractCache {
     pub(super) containment: Option<crate::perspectives::model_query::containment::ContainmentEdges>,
     /// The registered classes and their shapes (see `super::shapes`).
     pub(super) registry: Option<Arc<Vec<super::shapes::ShapeSummary>>>,
+    /// Each registered class's stored own-link triple set, filled with
+    /// `registry` by the same read (see `super::shapes`): the fast path of
+    /// `register_shapes` compares a registration's expected links against
+    /// it instead of reading the store again.
+    pub(super) own_links: Option<Arc<super::shapes::OwnLinks>>,
 }
 
 /// The classes a model query or subscription reads: those it names, or an
@@ -64,7 +69,7 @@ pub(super) const UNRESOLVED: u64 = u64::MAX;
 
 impl PerspectiveInstance {
     /// Drop every cached shape, and what was derived from them.
-    pub(super) fn clear_shape_cache(&self) {
+    pub(in crate::perspectives) fn clear_shape_cache(&self) {
         self.shape_cache.write().unwrap().clear();
         self.forget_derived_shapes();
     }
@@ -78,6 +83,7 @@ impl PerspectiveInstance {
         cache.resolved.clear();
         cache.containment = None;
         cache.registry = None;
+        cache.own_links = None;
     }
 
     /// How many times the installed shapes have changed. Read it *before*
