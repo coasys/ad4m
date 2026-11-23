@@ -213,6 +213,7 @@ fn signal_from(author: &str, links: &[(&str, serde_json::Value)]) -> Perspective
                     status: None,
                     verdict: None,
                     person: None,
+                    by_bot: None,
                 })
                 .collect(),
         },

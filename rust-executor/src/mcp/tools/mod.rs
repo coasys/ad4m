@@ -227,7 +227,10 @@ impl ServerHandler for Ad4mMcpHandler {
                 crate::bots::MCP_REASON
                     .scope(
                         reason,
-                        crate::metrics::as_caller(did.as_deref(), this.dispatch_tool(request, context)),
+                        crate::metrics::as_caller(
+                            did.as_deref(),
+                            this.dispatch_tool(request, context),
+                        ),
                     )
                     .await
             }
