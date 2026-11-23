@@ -370,15 +370,18 @@ cannot apply rebuilds from a renegotiation: the answer names its offer's
 `no-pending` (a settled or superseded offer, or the server's own SDP step
 refusing it, as `ChangesOutOfOrder`) is non-acceptance: repair is left to
 media and session evidence, not a rebuild; `unknown-session` rebuilds the
-call. An answer a socket fault kept (503, 408) goes out again once the
-socket is back, and `sfu.callResume` then returns what went by — the
+call. The client keeps its last answer (`lastAnswer`) and resends
+nothing by itself: an answer a socket fault lost (503, 408) goes out
+again from the cache when the executor resends its offer or the resume
+reply carries it. Once the socket is back, `sfu.callResume` returns what went by — the
 session's pending offer and the room's roster, applied like the events
 that carry them; a resume the socket fails keeps the call, and a 403 ends
 it (`call-ended`, `{ reason: "refused" }`: the executor refused the
 resume — the session is another agent's, or this agent is no longer a
 member). Of the server offers waiting, only the newest
-is applied; only the offer queue's RPC waits are bounded (10 s) — SDP
-steps run to their end — and a resume's ask waits off the queue, bounded
+is applied; no RPC runs on the offer queue (an answer is sent without
+waiting for its reply) and SDP steps run to their end; a resume's ask
+waits off the queue, bounded by `RESUME_STEP_TIMEOUT_MS` (10 s) and
 by the restart's remaining window when one is in flight, so the restart
 offer it triggers is answered while the reply is still out. The restart names the session's `participantId` (only that session
 restarts, never another device of the agent), and a manager with no session
