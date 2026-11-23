@@ -5,7 +5,7 @@ use super::*;
 use crate::agent::signatures::TestSigner;
 use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
 use crate::perspectives::perspective_instance::SubjectClassOption;
-use crate::types::LinkExpression;
+use crate::types::{LinkExpression, PerspectiveDiff};
 use std::collections::BTreeSet;
 
 /// A note with a title and a body.
@@ -691,9 +691,9 @@ async fn a_removed_shape_own_link_is_rewritten_not_read_as_unchanged() {
     );
 }
 
-/// `update_link` publishes its own event, not through
-/// `pubsub_publish_diff`, so it clears the own-link cache itself: an
-/// edited constructor link is rewritten by the next registration.
+/// `update_link` writes through `persist_link_diff`, which drops the
+/// own-link cache: an edited constructor link is rewritten by the next
+/// registration.
 #[tokio::test]
 async fn an_updated_shape_own_link_is_rewritten_not_read_as_unchanged() {
     let (mut perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
@@ -785,6 +785,45 @@ async fn an_imported_extra_own_link_is_removed_not_read_as_unchanged() {
     crate::perspectives::unregister_perspective(&perspective.uuid);
 
     assert!(result.unchanged.is_empty());
+    assert_eq!(result.written, vec!["ns://Note".to_string()]);
+    assert_eq!(
+        count(&perspective, "ns://NoteShape", "ad4m://constructor", extra),
+        0,
+        "the extra own link is gone"
+    );
+}
+
+/// The contract sits at the store write: a caller cancelled after
+/// `persist_link_diff` (no publish, no `add_link` epilogue) leaves the link
+/// stored, and the cache must already be dropped.
+#[tokio::test]
+async fn a_persisted_own_link_drops_the_cache_before_the_write_returns() {
+    let (mut perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
+    perspective
+        .register_shapes(vec![note()], &ctx)
+        .await
+        .unwrap();
+    let repeat = perspective
+        .register_shapes(vec![note()], &ctx)
+        .await
+        .unwrap();
+    assert_eq!(repeat.unchanged, vec!["ns://Note".to_string()]);
+
+    let extra = "literal://string:extra";
+    perspective
+        .persist_link_diff(&PerspectiveDiff::from_additions(vec![peer_copy(&Link {
+            source: "ns://NoteShape".into(),
+            predicate: Some("ad4m://constructor".into()),
+            target: extra.into(),
+        })]))
+        .await
+        .unwrap();
+
+    let result = perspective
+        .register_shapes(vec![note()], &ctx)
+        .await
+        .unwrap();
+    assert!(result.unchanged.is_empty(), "answered a stale unchanged");
     assert_eq!(result.written, vec!["ns://Note".to_string()]);
     assert_eq!(
         count(&perspective, "ns://NoteShape", "ad4m://constructor", extra),

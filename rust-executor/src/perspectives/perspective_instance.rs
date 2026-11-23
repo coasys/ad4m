@@ -126,13 +126,12 @@ fn notification_pool_name(uuid: &str) -> String {
     format!("notification_{}", uuid)
 }
 
-/// True iff any addition or removal in the diff could be a class's own
-/// link on any of its nodes — [`is_own_link`] tried with each
-/// [`ShapeNode`], since a diff does not say which of a class's nodes its
-/// link sits on. Used by `diff_from_link_language` and
-/// `pubsub_publish_diff` to decide whether a write changed a stored
-/// SHACL definition and the cached shapes (registry, own-link sets,
-/// `shape_cache`) must be dropped.
+/// True iff any of the links could be a class's own link on any of its
+/// nodes — [`is_own_link`] tried with each [`ShapeNode`], since a diff does
+/// not say which of a class's nodes its link sits on. Used by every store
+/// write (`write_link_diff`, `persist_remote_diff`) to decide whether it
+/// changed a stored SHACL definition, so the cached shapes (registry,
+/// own-link sets, `shape_cache`) must be dropped before the write returns.
 ///
 /// The match is the whole own-link vocabulary, the same one the
 /// registry's cached triple sets hold. Only the SHACL writers
@@ -142,16 +141,13 @@ fn notification_pool_name(uuid: &str) -> String {
 /// still uses one of those predicates only costs a refill. An own-link
 /// change the scan misses would leave `register_shapes` answering a
 /// stale `unchanged`, so matching too much is safe and too little is not.
-fn inbound_touches_shacl(diff: &DecoratedPerspectiveDiff) -> bool {
-    diff.additions
-        .iter()
-        .chain(diff.removals.iter())
-        .any(|decorated| {
-            let predicate = decorated.data.predicate.as_deref().unwrap_or("");
-            [ShapeNode::Class, ShapeNode::Shape, ShapeNode::Property]
-                .into_iter()
-                .any(|node| is_own_link(node, predicate, &decorated.data.target))
-        })
+pub(super) fn touches_shape<'a>(links: impl IntoIterator<Item = &'a Link>) -> bool {
+    links.into_iter().any(|link| {
+        let predicate = link.predicate.as_deref().unwrap_or("");
+        [ShapeNode::Class, ShapeNode::Shape, ShapeNode::Property]
+            .into_iter()
+            .any(|node| is_own_link(node, predicate, &link.target))
+    })
 }
 
 /// The error a live query that is not SPARQL gets. Live queries are SPARQL or
@@ -212,7 +208,7 @@ pub(crate) fn is_sparql_query(query: &str) -> bool {
 }
 
 #[cfg(test)]
-mod inbound_touches_shacl_tests {
+mod touches_shape_tests {
     //! Regression guard for the shape-cache invalidation predicate. If
     //! either the positive OR the negative set drifts, `diff_from_link_language`
     //! either misses SHACL updates (stale cache) or thrashes the cache
@@ -239,6 +235,15 @@ mod inbound_touches_shacl_tests {
         }
     }
 
+    fn diff_touches_shape(diff: &DecoratedPerspectiveDiff) -> bool {
+        touches_shape(
+            diff.additions
+                .iter()
+                .chain(diff.removals.iter())
+                .map(|l| &l.data),
+        )
+    }
+
     fn diff(additions: Vec<DecoratedLinkExpression>) -> DecoratedPerspectiveDiff {
         DecoratedPerspectiveDiff {
             additions,
@@ -250,12 +255,12 @@ mod inbound_touches_shacl_tests {
     /// own; the cached abstract index must still be dropped (#1435).
     #[test]
     fn abstract_marker_and_alias_count_as_shacl() {
-        assert!(inbound_touches_shacl(&diff(vec![link(
+        assert!(diff_touches_shape(&diff(vec![link(
             "ns://TextContentShape",
             crate::perspectives::shacl_parser::ABSTRACT_PREDICATE,
             "literal:true",
         )])));
-        assert!(inbound_touches_shacl(&diff(vec![link(
+        assert!(diff_touches_shape(&diff(vec![link(
             "ns://Message.body",
             crate::perspectives::shacl_parser::ALIAS_PREDICATE,
             "literal:string:%7B%7D",
@@ -264,7 +269,7 @@ mod inbound_touches_shacl_tests {
 
     #[test]
     fn class_shape_assignment_triggers_invalidation() {
-        assert!(inbound_touches_shacl(&diff(vec![link(
+        assert!(diff_touches_shape(&diff(vec![link(
             "ad4m://InterpretationRun",
             "ad4m://shape",
             "ad4m://InterpretationRunShape",
@@ -280,7 +285,7 @@ mod inbound_touches_shacl_tests {
             "ad4m://has_shacl",
         ] {
             assert!(
-                !inbound_touches_shacl(&diff(vec![link(
+                !diff_touches_shape(&diff(vec![link(
                     "ad4m://self",
                     predicate,
                     "literal:string:Recipe"
@@ -292,7 +297,7 @@ mod inbound_touches_shacl_tests {
 
     #[test]
     fn class_marker_rdf_type_triggers_invalidation() {
-        assert!(inbound_touches_shacl(&diff(vec![link(
+        assert!(diff_touches_shape(&diff(vec![link(
             "ad4m://InterpretationRun",
             "rdf://type",
             "ad4m://SubjectClass",
@@ -304,7 +309,7 @@ mod inbound_touches_shacl_tests {
         // A normal application instance's rdf://type link (e.g. a Flux
         // message declaring its class) MUST NOT flush the cache — every
         // message send would churn it.
-        assert!(!inbound_touches_shacl(&diff(vec![link(
+        assert!(!diff_touches_shape(&diff(vec![link(
             "flux://message/abc",
             "rdf://type",
             "ns://Message",
@@ -320,7 +325,7 @@ mod inbound_touches_shacl_tests {
             "sh://minCount",
         ] {
             assert!(
-                inbound_touches_shacl(&diff(vec![link(
+                diff_touches_shape(&diff(vec![link(
                     "ad4m://SomeShape.prop",
                     predicate,
                     "xsd:string"
@@ -333,7 +338,7 @@ mod inbound_touches_shacl_tests {
     #[test]
     fn plain_data_link_does_not_invalidate() {
         // Application data — the common case, must not touch the cache.
-        assert!(!inbound_touches_shacl(&diff(vec![link(
+        assert!(!diff_touches_shape(&diff(vec![link(
             "msg://hello",
             "ns://body",
             "literal:string:hi",
@@ -356,7 +361,7 @@ mod inbound_touches_shacl_tests {
             "ad4m://transform",
         ] {
             assert!(
-                inbound_touches_shacl(&diff(vec![link(
+                diff_touches_shape(&diff(vec![link(
                     "flux://message/abc.body",
                     predicate,
                     "some-value"
@@ -374,12 +379,12 @@ mod inbound_touches_shacl_tests {
             "ad4m://shape",
             "ad4m://oldShape",
         ));
-        assert!(inbound_touches_shacl(&diff));
+        assert!(diff_touches_shape(&diff));
     }
 
     #[test]
     fn empty_diff_does_not_invalidate() {
-        assert!(!inbound_touches_shacl(&DecoratedPerspectiveDiff::default()));
+        assert!(!diff_touches_shape(&DecoratedPerspectiveDiff::default()));
     }
 }
 
@@ -1956,16 +1961,8 @@ impl PerspectiveInstance {
         };
         effects.fold_into(&mut decorated_diff);
 
-        // If any of the inbound links change a class's SHACL definition,
-        // drop that entry from the in-memory shape cache so the next
-        // `model_query` re-parses fresh state from the SPARQL store.
-        // Without this, a locally cached shape can shadow updates the
-        // remote registered (rename, added property, etc.); with it, a
-        // peer that has never registered a class locally still picks up
-        // the class the moment its SHACL arrives.
-        if inbound_touches_shacl(&decorated_diff) {
-            self.clear_shape_cache();
-        }
+        // A class's SHACL arriving here has already dropped the cached
+        // shapes: `persist_remote_diff` does it with the store write.
 
         // Queue the Prolog fact update and the notification + live-query checks
         self.update_prolog_engines(decorated_diff.clone()).await;
@@ -2105,14 +2102,6 @@ impl PerspectiveInstance {
         // change to a flow definition queues the re-derivation that a synced
         // one gets from `diff_from_link_language`. A no-op for anything else.
         self.schedule_flow_pass_on_definition_change(decorated_diff);
-        // A class's SHACL written or removed by any path — `register_shapes`, a raw
-        // link write, a wipe — can change which classes are abstract, their
-        // aliases, which classes an abstract class reads (#1435) and which
-        // class a bare name reads (the least IRI of that name), so any such
-        // write drops every cached shape and what is derived from them.
-        if inbound_touches_shacl(decorated_diff) {
-            self.clear_shape_cache();
-        }
         // A `FlowInstance` minted by an agent this executor acts for gets its
         // bookkeeping row now, before any pass can treat it as a catch-up
         // (#1424). Awaited, not spawned: a client's `start` is followed at
@@ -2511,18 +2500,12 @@ impl PerspectiveInstance {
             self.persist_link_diff(&diff)
                 .await?
                 .fold_into(&mut decorated_diff);
-            // An update publishes its own topic rather than going through
-            // `pubsub_publish_diff`, so it drops the cached shapes itself:
-            // here, before the next await, so a caller that cancels cannot
-            // leave the write committed and the cache stale.
-            if inbound_touches_shacl(&decorated_diff) {
-                self.clear_shape_cache();
-            }
 
             // Queue the Prolog fact update and the notification + live-query checks
             self.update_prolog_engines(decorated_diff.clone()).await;
 
-            // For the same reason, it queues the definition sweep here.
+            // An update publishes its own topic rather than going through
+            // `pubsub_publish_diff`, so it queues the definition sweep here.
             self.schedule_flow_pass_on_definition_change(&decorated_diff);
 
             // One event, to all of the owners.
@@ -4174,8 +4157,26 @@ impl PerspectiveInstance {
         // One store transaction for the whole diff, so a batch lands as one
         // write. On failure nothing was written; fall back to one link at a
         // time.
+        //
+        // A class's SHACL written or removed by any path (`register_shapes`, a raw
+        // link write, a sync, an import) can change which classes are abstract,
+        // their aliases, which classes an abstract class reads (#1435) and which
+        // class a bare name reads (the least IRI of that name). So a write that
+        // touches a shape own link drops every cached shape and what is derived
+        // from them, here, right after the store write and before any await: a
+        // caller cancelled later cannot leave the write committed and the cache
+        // stale.
+        let touches = touches_shape(
+            removals
+                .iter()
+                .chain(additions.iter())
+                .map(|link| &link.data),
+        );
         match self.sparql_store.apply_diff(&removals, &additions) {
             Ok(()) => {
+                if touches {
+                    self.clear_shape_cache();
+                }
                 crate::metrics::record_link_writes(&self.metrics, additions.len(), removals.len());
                 return Ok(effects);
             }
@@ -4201,6 +4202,9 @@ impl PerspectiveInstance {
                 Ok(_) => added += 1,
                 Err(e) => log::warn!("Failed to add link to SPARQL store: {:?}", e),
             }
+        }
+        if touches {
+            self.clear_shape_cache();
         }
         crate::metrics::record_link_writes(&self.metrics, added, removed);
 

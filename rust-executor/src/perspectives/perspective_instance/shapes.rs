@@ -379,10 +379,10 @@ impl PerspectiveInstance {
         if !written.is_empty() {
             self.link_mutations(mutations, LinkStatus::Shared, context)
                 .await?;
-            // The cache is keyed by what readers ask for: a class's IRI and
-            // its name. A new class of a name can change which class the name
-            // reads (the least IRI), so every entry goes.
-            self.clear_shape_cache();
+            // The write dropped every cached shape (`write_link_diff`): the
+            // cache is keyed by what readers ask for, a class's IRI and its
+            // name, and a new class of a name can change which class the name
+            // reads (the least IRI).
         }
         self.shape_registry()?;
         for target_class in &written {

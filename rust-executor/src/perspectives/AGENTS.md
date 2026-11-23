@@ -43,8 +43,12 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   Links from older versions (`ad4m://has_subject_class`, `ad4m://sdna`, `ad4m://has_shacl`,
   `ad4m://shacl_shape_uri`) are not read and not written. `shape_cache` is keyed by the key
   the caller passed (a target class IRI or a name); it and the registry are cleared whole
-  (`clear_shape_cache`) by `register_shapes`, by every local or inbound diff that touches
-  shape links, and by `import_perspective`, so an IRI key and a name key never hold a stale or crossed shape.
+  (`clear_shape_cache`) by every store write that touches a shape own link (`touches_shape`).
+  The clear sits in the write itself (`write_link_diff`, and `persist_remote_diff` for synced
+  diffs), right after the store write and before it returns, with no await in between: a caller
+  cancelled after the write cannot leave the link stored and the cache stale. No caller clears
+  after its write (`register_shapes`, `import_perspective`, the publish path); a reload that
+  rebuilds the store clears too. So an IRI key and a name key never hold a stale or crossed shape.
   `get_shape(class)` → `Arc<ModelShape>`, `class` a target class IRI or a name.
 - `register_shapes` compares the own links a shape gives with the own links stored, as
   triples. Equal sets write nothing (`unchanged`); otherwise one Shared diff adds what is
