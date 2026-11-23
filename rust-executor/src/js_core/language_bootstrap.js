@@ -202,13 +202,15 @@ function createHolochainDelegate(languageAddress) {
     return {
         async registerDNAs(dnas, signalCallback) {
             const results = [];
-            // Per-language agent key (issue #1099): with the global conductor
-            // key, two languages bundling the same DNA + network seed collide
-            // on one cell (cell id = DNA hash + agent pubkey) — zome calls can
-            // share the recovered app, but signal routing is per-cell and
-            // last-writer-wins. A language-scoped key gives each language its
-            // own cell. Resolved once per language; an app already installed
-            // under this language's own app id keeps its key (and cell).
+            // Per-language agent key (part of issue #1099): with the global
+            // conductor key, two languages bundling the same DNA + network
+            // seed collide on one cell (cell id = DNA hash + agent pubkey).
+            // A language-scoped key gives each language its own cell. This
+            // alone does not fix #1099's remote telepresence routing: the
+            // DID -> agent-key links still live in the shared DNA space, so a
+            // DID's remote signals still go to one key. Resolved once per
+            // language; an app already installed under this language's own
+            // app id keeps its key (and cell).
             //
             // Adoption must consider every DNA's app id, not just the first:
             // a language whose existing install sits under a later DNA (e.g.

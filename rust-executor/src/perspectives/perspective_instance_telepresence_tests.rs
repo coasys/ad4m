@@ -112,7 +112,7 @@ async fn stub_language(peers: Vec<String>, caps: &[Capability]) -> StubLanguage 
             let mut lost = Vec::new();
             while let Some(request) = requests.recv().await {
                 let reply = match &request.operation {
-                    LanguageOperation::Execute(script, _, _) => {
+                    LanguageOperation::Execute(script, ..) => {
                         scripts.lock().unwrap().push(script.clone());
                         if script.contains("peersRemote") {
                             Ok(serde_json::to_string(&*peers.lock().unwrap()).unwrap())
