@@ -49,6 +49,7 @@ use base64::prelude::*;
 use error::LanguageError;
 use language::Language;
 use language_context::LanguageContext;
+use language_runtime::CallKind;
 use language_runtime_handle::LanguageRuntimeHandle;
 use log::{error, info, warn};
 use mount_types::{MountShapes, MountSnapshot};
@@ -255,6 +256,12 @@ impl LanguageController {
             language_address.clone(),
         );
 
+        if is_system_language {
+            // Its Holochain calls stay on the main agent's cells whoever makes them (#1775).
+            crate::holochain_service::user_cells::UserCells::global()
+                .mark_system_language(&language_address);
+        }
+
         // Spawn dedicated runtime in its own thread (sandboxed to storage_directory)
         let starting = span(format!("loadLanguage.runtimeStart {}", language_address));
         let runtime_handle = LanguageRuntimeHandle::spawn(
@@ -407,15 +414,33 @@ impl LanguageController {
         runtimes.contains_key(&resolved)
     }
 
-    /// Execute a script on a specific language runtime
-    ///
-    /// First tries dedicated per-language Rust runtime with proper thread isolation.
-    /// Falls back to JS-side LanguageController for dynamically installed languages
-    /// that don't have their own Rust runtime.
+    /// Run a script on a language's runtime as the main agent, in order with the language's
+    /// other ordered calls (`CallKind::Ordered`).
     pub async fn execute_on_language(
         &self,
         language_address: &str,
         script: &str,
+    ) -> Result<String, LanguageError> {
+        self.call_language(
+            language_address,
+            script,
+            AgentContext::main_agent(),
+            CallKind::Ordered,
+        )
+        .await
+    }
+
+    /// Run a script on a language's runtime as `agent_context`, scheduled as `kind`:
+    /// `CallKind::Ordered` runs it one at a time with the language's other ordered calls, in
+    /// send order; `CallKind::Concurrent` starts it at once beside the other calls — only
+    /// for a call that changes no state a later call depends on and needs no position in the
+    /// send order (a read, an emit whose order the protocol tolerates).
+    pub(crate) async fn call_language(
+        &self,
+        language_address: &str,
+        script: &str,
+        agent_context: AgentContext,
+        kind: CallKind,
     ) -> Result<String, LanguageError> {
         // Resolve system aliases ("did", "lang", "neighbourhood",
         // "perspective") once at the bottom so every caller — including
@@ -431,18 +456,17 @@ impl LanguageController {
         };
         let language_address = resolved.as_str();
 
-        // Try Rust-side per-language runtime first
         let handle = {
             let runtimes = self.runtimes.lock().await;
             runtimes.get(language_address).cloned()
         };
 
         if let Some(handle) = handle {
-            return handle.execute(script.to_string()).await.map_err(|e| {
-                LanguageError::RuntimeError {
-                    address: language_address.to_string(),
-                    message: e,
-                }
+            let script = script.to_string();
+            let result = handle.call(script, agent_context, kind).await;
+            return result.map_err(|e| LanguageError::RuntimeError {
+                address: language_address.to_string(),
+                message: e,
             });
         }
 
@@ -451,45 +475,22 @@ impl LanguageController {
         })
     }
 
-    /// Execute a script in a language runtime with a specific agent context.
-    /// The agent context is passed through the channel so the runtime thread
-    /// sets it as the thread-local before executing the script.
+    /// Run a script on a language's runtime as `agent_context`, in order with the
+    /// language's other ordered calls. The agent travels with the call: the agent ops the
+    /// script reaches, also after an await, act as it.
     pub async fn execute_on_language_with_context(
         &self,
         language_address: &str,
         script: &str,
         agent_context: &AgentContext,
     ) -> Result<String, LanguageError> {
-        // Mirror execute_on_language: resolve system aliases so callers
-        // can pass "did" / "lang" / "neighbourhood" / "perspective"
-        // interchangeably with the real content hash.
-        let resolved = {
-            let aliases = self.language_aliases.lock().await;
-            aliases
-                .get(language_address)
-                .cloned()
-                .unwrap_or_else(|| language_address.to_string())
-        };
-        let language_address = resolved.as_str();
-
-        let handle = {
-            let runtimes = self.runtimes.lock().await;
-            runtimes.get(language_address).cloned()
-        };
-
-        if let Some(handle) = handle {
-            return handle
-                .execute_with_context(script.to_string(), agent_context.clone())
-                .await
-                .map_err(|e| LanguageError::RuntimeError {
-                    address: language_address.to_string(),
-                    message: e,
-                });
-        }
-
-        Err(LanguageError::NotFound {
-            address: language_address.to_string(),
-        })
+        self.call_language(
+            language_address,
+            script,
+            agent_context.clone(),
+            CallKind::Ordered,
+        )
+        .await
     }
 
     /// Calculate IPFS hash for a language bundle using the same algorithm as utils_extension::hash()
@@ -637,7 +638,12 @@ impl LanguageController {
         );
 
         let meta_result = self
-            .execute_on_language(&language_language_address, &meta_script)
+            .call_language(
+                &language_language_address,
+                &meta_script,
+                AgentContext::main_agent(),
+                CallKind::Concurrent,
+            )
             .await?;
 
         let meta_expression: JsonValue =
@@ -655,7 +661,12 @@ impl LanguageController {
         );
 
         let bundle_source = self
-            .execute_on_language(&language_language_address, &source_script)
+            .call_language(
+                &language_language_address,
+                &source_script,
+                AgentContext::main_agent(),
+                CallKind::Concurrent,
+            )
             .await
             .map_err(|e| LanguageError::LoadError {
                 address: address.to_string(),
@@ -986,7 +997,12 @@ impl LanguageController {
         let ask = |script: String| async move {
             tokio::time::timeout(
                 LANGUAGE_FETCH_TIMEOUT,
-                self.execute_on_language(ll_addr, &script),
+                self.call_language(
+                    ll_addr,
+                    &script,
+                    AgentContext::main_agent(),
+                    CallKind::Concurrent,
+                ),
             )
             .await
             .map_err(|_| {
@@ -1508,7 +1524,12 @@ impl LanguageController {
         );
         let reading = span("applyTemplate.templateMeta");
         let meta_result = self
-            .execute_on_language(&language_language_address, &meta_script)
+            .call_language(
+                &language_language_address,
+                &meta_script,
+                AgentContext::main_agent(),
+                CallKind::Concurrent,
+            )
             .await?;
         drop(reading);
 
@@ -1530,7 +1551,12 @@ impl LanguageController {
         );
         let reading = span("applyTemplate.templateSource");
         let source_language = self
-            .execute_on_language(&language_language_address, &source_script)
+            .call_language(
+                &language_language_address,
+                &source_script,
+                AgentContext::main_agent(),
+                CallKind::Concurrent,
+            )
             .await?;
         drop(reading);
 
@@ -1778,6 +1804,7 @@ impl LanguageController {
         // per-language runtime registered" debug branch instead — quieter
         // and honest about the state of the system.
         crate::js_core::languages_extension::drop_holochain_signal_handlers_for_language(address);
+        crate::holochain_service::user_cells::UserCells::global().forget_language(address);
 
         // Teardown the per-language Rust runtime (if loaded there).
         // Errors here (e.g. runtime not loaded, teardown failure) must not abort
@@ -1864,7 +1891,12 @@ impl LanguageController {
             resolved_address_lit
         );
         let meta_result = self
-            .execute_on_language(&language_language_address, &meta_script)
+            .call_language(
+                &language_language_address,
+                &meta_script,
+                AgentContext::main_agent(),
+                CallKind::Concurrent,
+            )
             .await?;
 
         let mut language_meta: JsonValue =
@@ -1925,7 +1957,12 @@ impl LanguageController {
                 resolved_address_lit
             );
             let language_source = self
-                .execute_on_language(&language_language_address, &source_script)
+                .call_language(
+                    &language_language_address,
+                    &source_script,
+                    AgentContext::main_agent(),
+                    CallKind::Concurrent,
+                )
                 .await?;
 
             let trimmed = language_source.trim();
@@ -2028,7 +2065,12 @@ impl LanguageController {
                 template_source_language_address_lit
             );
             let source_meta_result = self
-                .execute_on_language(&language_language_address, &source_meta_script)
+                .call_language(
+                    &language_language_address,
+                    &source_meta_script,
+                    AgentContext::main_agent(),
+                    CallKind::Concurrent,
+                )
                 .await?;
 
             let source_language_meta: JsonValue = serde_json::from_str(&source_meta_result)
@@ -2082,7 +2124,12 @@ impl LanguageController {
                 resolved_address_lit
             );
             let language_source = self
-                .execute_on_language(&language_language_address, &source_script)
+                .call_language(
+                    &language_language_address,
+                    &source_script,
+                    AgentContext::main_agent(),
+                    CallKind::Concurrent,
+                )
                 .await?;
 
             let trimmed = language_source.trim();
@@ -2249,7 +2296,12 @@ impl LanguageController {
         );
 
         let meta_result = self
-            .execute_on_language(&language_language_address, &meta_script)
+            .call_language(
+                &language_language_address,
+                &meta_script,
+                AgentContext::main_agent(),
+                CallKind::Concurrent,
+            )
             .await?;
 
         let meta_expression: JsonValue =
@@ -2312,8 +2364,13 @@ impl LanguageController {
             addr_lit
         );
 
-        self.execute_on_language(&language_language_address, &source_script)
-            .await
+        self.call_language(
+            &language_language_address,
+            &source_script,
+            AgentContext::main_agent(),
+            CallKind::Concurrent,
+        )
+        .await
     }
 
     /// Get the agent language
@@ -2441,7 +2498,7 @@ impl LanguageController {
         // keep this note so future refactors don't "helpfully"
         // pre-resolve and double-lock.
         let constructor_icon = match self
-            .execute_on_language(
+            .call_language(
                 address,
                 r#"(function() {
                     const lang = globalThis.__ad4m_language_instance__;
@@ -2451,6 +2508,8 @@ impl LanguageController {
                     }
                     return "null";
                 })()"#,
+                AgentContext::main_agent(),
+                CallKind::Concurrent,
             )
             .await
         {
@@ -2473,7 +2532,7 @@ impl LanguageController {
         };
 
         let icon = match self
-            .execute_on_language(
+            .call_language(
                 address,
                 r#"(function() {
                     const lang = globalThis.__ad4m_language_instance__;
@@ -2483,6 +2542,8 @@ impl LanguageController {
                     }
                     return "null";
                 })()"#,
+                AgentContext::main_agent(),
+                CallKind::Concurrent,
             )
             .await
         {
@@ -2505,7 +2566,7 @@ impl LanguageController {
         };
 
         let settings_icon = match self
-            .execute_on_language(
+            .call_language(
                 address,
                 r#"(function() {
                     const lang = globalThis.__ad4m_language_instance__;
@@ -2515,6 +2576,8 @@ impl LanguageController {
                     }
                     return "null";
                 })()"#,
+                AgentContext::main_agent(),
+                CallKind::Concurrent,
             )
             .await
         {
@@ -2575,7 +2638,14 @@ impl LanguageController {
             escaped_addr
         );
 
-        let result = self.execute_on_language(lang_address, &script).await?;
+        let result = self
+            .call_language(
+                lang_address,
+                &script,
+                AgentContext::main_agent(),
+                CallKind::Concurrent,
+            )
+            .await?;
         Ok(matches!(
             serde_json::from_str::<bool>(result.trim()),
             Ok(true)
@@ -2641,7 +2711,14 @@ impl LanguageController {
             escaped_addr
         );
 
-        let result = self.execute_on_language(lang_address, &script).await?;
+        let result = self
+            .call_language(
+                lang_address,
+                &script,
+                AgentContext::main_agent(),
+                CallKind::Concurrent,
+            )
+            .await?;
 
         if result.trim() == "null" || result.trim() == "undefined" || result.is_empty() {
             return Ok(None);
@@ -2939,18 +3016,27 @@ impl LanguageController {
             escaped_addr
         );
 
-        let result = self.execute_on_language(&lang_address, &script).await?;
+        let result = self
+            .call_language(
+                &lang_address,
+                &script,
+                AgentContext::main_agent(),
+                CallKind::Concurrent,
+            )
+            .await?;
 
         serde_json::from_str(&result).map_err(|e| LanguageError::SerializationError {
             message: format!("Failed to parse interactions: {}", e),
         })
     }
 
-    /// Execute an interaction on an expression.
+    /// Execute an interaction on an expression, as `agent` (the caller): the language runs it
+    /// for that agent, so its `agentDid()` and its Holochain calls are the caller's (#1775).
     pub async fn expression_interact(
         &self,
         url: &str,
         call: &InteractionCall,
+        agent: &AgentContext,
     ) -> Result<Option<String>, LanguageError> {
         let (lang_address, expression_address) = Self::parse_expr_url(url)?;
 
@@ -3044,7 +3130,9 @@ impl LanguageController {
             escaped_name,
         );
 
-        let result = self.execute_on_language(&lang_address, &script).await?;
+        let result = self
+            .call_language(&lang_address, &script, agent.clone(), CallKind::Ordered)
+            .await?;
 
         let trimmed = result.trim();
         if trimmed == "null" || trimmed == "undefined" {

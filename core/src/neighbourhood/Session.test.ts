@@ -71,7 +71,8 @@ function fakeApi() {
         sfuCallAnswerServerOffer: jest.fn(),
         sfuCallRestartIce: jest.fn(),
         onNetworkChange: jest.fn().mockReturnValue(() => {}),
-        checkConnection: jest.fn(),
+        onReconnect: jest.fn().mockReturnValue(() => {}),
+        sfuCallResume: jest.fn(),
         subscribeSfuCallRenegotiationOffer: jest.fn(),
         sfuAddIceCandidate: jest.fn(),
         sfuSendData: jest.fn(),
@@ -263,7 +264,6 @@ describe("mesh path", () => {
             // A mesh peer is the agent on this device.
             selfId: "did:me#this-device",
             onNetworkChange: expect.any(Function),
-            checkConnection: expect.any(Function),
         })
     })
 
@@ -767,6 +767,27 @@ describe("SFU path", () => {
         expect(SfuManager).toHaveBeenCalledTimes(2)
     })
 
+    it("an SFU call that gave up says call-ended and goes idle, and can be joined again", async () => {
+        const session = createSession(baseConfig({ topology: "sfu" }))
+        const dataUnsubscribe = jest.fn()
+        mockSfuManagerInstance.subscribeDataChannel.mockReturnValue(dataUnsubscribe)
+        await session.join(fakeMediaStream())
+        const states = collectStates(session)
+        const ended: unknown[] = []
+        session.on("call-ended", (event: unknown) => ended.push(event))
+
+        const event = { reason: "gave-up", error: new Error("SFU reconnect attempts exhausted") }
+        for (const [name, handler] of mockSfuManagerInstance.on.mock.calls) if (name === "call-ended") handler(event)
+
+        expect(ended).toEqual([event])
+        expect(states).toEqual(["idle"])
+        expect(dataUnsubscribe).toHaveBeenCalled()
+        expect(session.participants).toEqual([])
+
+        await session.join(fakeMediaStream())
+        expect(session.getState()).toBe("active")
+    })
+
     it("a replaced call is idle by the time its listeners hear it, so a listener may join again", async () => {
         const session = createSession(baseConfig({ topology: "sfu" }))
         await session.join(fakeMediaStream())
@@ -1256,6 +1277,36 @@ describe("a mesh device that dies without leaving", () => {
         await w.session.leave()
         expect(w.writes()).toBe(2)
         expect(w.own()).toEqual([])
+    })
+
+    // The executor answers `onlineAgents` with an error when its link language
+    // stalls (ad4m#1855): it does not know the remote agents. That poll must
+    // change nothing, never read as a roster without the remote peers.
+    it("keeps remote peers while onlineAgents fails on a stalled language", async () => {
+        let stalled = false
+        const statuses = new Map<string, Link[]>()
+        const w = world({
+            onlineAgents: jest.fn(async () => {
+                if (stalled) throw new Error("get_online_agents did not answer within 2s")
+                return [...statuses].map(([did, links]) => ({ did, status: statusOf(links) }))
+            }),
+        })
+        statuses.set("did:bob", [presence("did:bob#desk"), marker("did:bob#desk")])
+        setInterval(() => w.beatFrom("did:bob#desk"), BEAT_MS)
+        await w.session.join(fakeMediaStream())
+        await jest.advanceTimersByTimeAsync(POLL_MS)
+        expect(w.roster()).toEqual(["did:bob#desk"])
+
+        stalled = true
+        const calls = mockMeshManagerInstance.setRoster.mock.calls.length
+        await jest.advanceTimersByTimeAsync(10 * POLL_MS)
+        expect(mockMeshManagerInstance.setRoster.mock.calls.length).toBe(calls)
+        expect(w.roster()).toEqual(["did:bob#desk"])
+
+        stalled = false
+        await jest.advanceTimersByTimeAsync(POLL_MS)
+        expect(w.roster()).toEqual(["did:bob#desk"])
+        await w.session.leave()
     })
 
     it("keeps beating while the roster poll hangs on onlineAgents", async () => {
