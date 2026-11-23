@@ -150,7 +150,13 @@ async fn holochain_signal_receiver() {
                             continue;
                         }
 
-                        let maybe_lang_address: Option<String> = {
+                        // A managed user's own cell (#1775): its signal goes to the language
+                        // as that user, so what the language does with it acts for that user.
+                        let user_route = holochain_service::user_cells::UserCells::global()
+                            .route_for_cell(&cell_id_key);
+                        let maybe_lang_address: Option<String> = if let Some(route) = &user_route {
+                            Some(route.language.clone())
+                        } else {
                             let handlers = js_core::languages_extension::HOLOCHAIN_SIGNAL_HANDLERS
                                 .read()
                                 .unwrap_or_else(|p| p.into_inner());
@@ -174,10 +180,18 @@ async fn holochain_signal_receiver() {
                                 args_json
                             );
                             let lang_addr = lang_address.clone();
+                            let signal_agent = match &user_route {
+                                Some(route) => agent::AgentContext::managed(route.did.clone()),
+                                None => agent::AgentContext::main_agent(),
+                            };
                             tokio::spawn(async move {
                                 let controller = languages::LanguageController::global_instance();
                                 if let Err(e) = controller
-                                    .execute_on_language(&lang_addr, &signal_script)
+                                    .execute_on_language_with_context(
+                                        &lang_addr,
+                                        &signal_script,
+                                        &signal_agent,
+                                    )
                                     .await
                                 {
                                     log::warn!(

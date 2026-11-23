@@ -293,7 +293,7 @@ pub(crate) async fn resolve_class(
         return Err(error);
     }
     match perspective
-        .get_shape_or_wait(class_name, CLASS_SYNC_WAIT)
+        .get_shape_or_wait(&EvalStop::none(), class_name, CLASS_SYNC_WAIT)
         .await
     {
         Ok(shape) => {
@@ -394,7 +394,11 @@ pub(crate) async fn run_model_query_stopped(
     query: &Value,
 ) -> Result<(Vec<Value>, usize), String> {
     let raw = perspective
-        .model_query_stopped(stop, class_name, &query.to_string())
+        .model_query_classes_stopped(
+            stop,
+            &crate::perspectives::model_query::QueryClasses::One(class_name.to_string()),
+            &query.to_string(),
+        )
         .await
         .map_err(|e| format!("{e:#}"))?;
     let parsed: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;

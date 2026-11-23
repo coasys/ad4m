@@ -38,7 +38,7 @@ pub(crate) async fn interact(url: &str, name: &str, params: Value) -> Result<Val
         parameters_stringified: params.to_string(),
     };
     let result = LanguageController::global_instance()
-        .expression_interact(url, &call)
+        .expression_interact(url, &call, &crate::agent::AgentContext::main_agent())
         .await?;
     Ok(match result {
         Some(s) => serde_json::from_str(&s).unwrap_or(Value::String(s)),
