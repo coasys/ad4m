@@ -32,7 +32,7 @@ use crate::types::ModelType;
 /// How many transcript entries a turn hands the model, and the most they may take.
 /// TODO(history-compaction): summarise what falls off instead of dropping it.
 const HISTORY_MAX_MESSAGES: u32 = 200;
-const HISTORY_MAX_BYTES: usize = 128 * 1024;
+pub(crate) const HISTORY_MAX_BYTES: usize = 128 * 1024;
 
 /// The tools an AI session never sees, of the static surface: each would mint a token
 /// or replace the session the turn acts within (`store_token_and_respond` rewrites the

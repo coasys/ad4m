@@ -1542,6 +1542,54 @@ mod injected_path_dispatch_tests {
         assert_eq!(out.last().unwrap()["content"], "small question");
     }
 
+    /// The team-call shape: an earlier tool result is what pushes the request
+    /// over the context budget, and the assistant's short answer sits after
+    /// it. The cut keeps a prefix of the result (the call is still shown);
+    /// it does not delete the result and leave only the answer.
+    #[test]
+    fn an_earlier_tool_result_is_cut_not_dropped_when_the_budget_is_tight() {
+        let marker = "WIRE_TARGETS Josh and Data decided the wire target";
+        let messages = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({"role": "user", "content": "what did they decide?"}),
+            json!({
+                "role": "assistant", "content": null,
+                "tool_calls": [{"id": "c1", "type": "function",
+                                "function": {"name": "query_links", "arguments": "{}"}}],
+            }),
+            json!({
+                "role": "tool",
+                "tool_call_id": "c1",
+                "content": format!("{marker}\n{}", "z".repeat(8_000)),
+            }),
+            json!({"role": "assistant", "content": "They decided the wire target."}),
+            json!({"role": "user", "content": "what exactly?"}),
+        ];
+        let out = trim_messages_to_budget(&messages, 2_000, "m");
+        assert!(
+            out.iter().any(|m| m["content"] == "what exactly?"),
+            "the question fell off: {out:?}"
+        );
+        let tool = out
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .expect("the earlier tool result was dropped");
+        let content = tool["content"].as_str().unwrap_or("");
+        assert!(
+            content.contains(marker),
+            "the cut lost the result: {content:.240}"
+        );
+        assert!(
+            out.iter().any(|m| {
+                m.get("tool_calls")
+                    .and_then(|c| c.as_array())
+                    .is_some_and(|calls| calls.iter().any(|c| c["id"] == "c1"))
+            }),
+            "the call stayed without its result: {out:?}"
+        );
+        assert!(msg_size(&out) <= 2_000, "{} bytes", msg_size(&out));
+    }
+
     #[test]
     fn results_after_the_question_are_stubbed_not_dropped() {
         // The tail is in the pinned region: nothing before the last user
