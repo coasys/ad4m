@@ -10837,6 +10837,456 @@ mod tests {
         );
     }
 
+    /// #1936 review: re-adding a member that still has an ordering entry must
+    /// not close a cycle.
+    ///
+    /// Start `a` after HEAD, `b` after `a`, `c` after `b`. Remove `a`, then
+    /// add `a` again. A blind append writes `a` after `c` while `b` still
+    /// follows `a` and `c` still follows `b`, so the winning entries loop and
+    /// nothing is reachable from the head. The read has to come back
+    /// `[b, c, a]`, and every member has to be reachable from the head.
+    #[tokio::test]
+    async fn readding_a_removed_member_keeps_every_member_reachable_from_head() {
+        let mut perspective = ordered_collection_perspective().await;
+        let parent = "we://parent/readd";
+        create_ordered_parent(&mut perspective, parent).await;
+        for child in ["we://a", "we://b", "we://c"] {
+            add_ordered_member(&mut perspective, parent, child).await;
+        }
+        assert_eq!(
+            read_ordered_children(&perspective, parent).await,
+            vec!["we://a", "we://b", "we://c"],
+            "the chain before the removal"
+        );
+
+        remove_ordered_member(&mut perspective, parent, "we://a").await;
+        assert_eq!(
+            read_ordered_children(&perspective, parent).await,
+            vec!["we://b", "we://c"],
+            "removing a leaves b then c, still reachable through a's old entry"
+        );
+
+        add_ordered_member(&mut perspective, parent, "we://a").await;
+        assert_valid_order(&perspective, parent, &["we://b", "we://c", "we://a"]).await;
+    }
+
+    /// The same cycle, without a removal: adding a member that is already in
+    /// the collection and is not the tail. `generate_append` moves it to the
+    /// end by superseding its entry, and the neighbour that still points at
+    /// it closes the loop.
+    #[tokio::test]
+    async fn adding_an_existing_non_tail_member_again_keeps_a_valid_order() {
+        let mut perspective = ordered_collection_perspective().await;
+        let parent = "we://parent/repeat";
+        create_ordered_parent(&mut perspective, parent).await;
+        for child in ["we://a", "we://b", "we://c"] {
+            add_ordered_member(&mut perspective, parent, child).await;
+        }
+        add_ordered_member(&mut perspective, parent, "we://a").await;
+        assert_valid_order(&perspective, parent, &["we://b", "we://c", "we://a"]).await;
+    }
+
+    /// An ordinary `addLink` whose predicate no shape orders must not classify
+    /// the source or load shapes. Classification is the expensive part, and it
+    /// used to run before anything asked whether the predicate was ordered.
+    #[tokio::test]
+    async fn unordered_add_link_runs_no_class_or_shape_queries() {
+        let mut perspective = setup().await;
+        let ctx = AgentContext::main_agent();
+        // `children` is ordered, so a cache that simply stays empty would be
+        // a wrong answer. `body` is not, and that is the link under test.
+        let shacl = r#"{
+            "target_class": "we://Note",
+            "properties": [
+                { "path": "we://flag", "name": "flag", "has_value": "we://note",
+                  "min_count": 1, "max_count": 1 },
+                { "path": "we://body", "name": "body" },
+                { "path": "we://children", "name": "children", "ordering": "linkedList" }
+            ],
+            "constructor_actions": [
+                {"action": "addLink", "source": "this", "predicate": "we://flag", "target": "we://note"}
+            ]
+        }"#;
+        perspective
+            .register_shape_json(shacl, &ctx)
+            .await
+            .expect("register Note");
+        perspective
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some("Note".to_string()),
+                    query: None,
+                },
+                "we://note/1".to_string(),
+                None,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("create note");
+
+        let before = perspective.sparql_store.queries_run().len();
+        perspective
+            .execute_commands(
+                vec![Command {
+                    source: Some("this".to_string()),
+                    predicate: Some("we://body".to_string()),
+                    target: Some("value".to_string()),
+                    local: None,
+                    action: Action::AddLink,
+                }],
+                "we://note/1".to_string(),
+                vec![Parameter {
+                    name: "value".to_string(),
+                    value: serde_json::Value::String("we://body/1".to_string()),
+                }],
+                None,
+                &ctx,
+            )
+            .await
+            .expect("unordered addLink");
+        let ran = perspective.sparql_store.queries_run();
+        let fresh: Vec<&str> = ran[before..].iter().map(String::as_str).collect();
+        let class_or_shape: Vec<&str> = fresh
+            .iter()
+            .copied()
+            .filter(|q| is_class_or_shape_query(q))
+            .collect();
+        assert!(
+            class_or_shape.is_empty(),
+            "unordered addLink ran {} class/shape queries (of {} new queries): {class_or_shape:#?}",
+            class_or_shape.len(),
+            fresh.len()
+        );
+
+        // The ordered predicate on the same class still records a position,
+        // so the gate is not "skip every addLink".
+        perspective
+            .execute_commands(
+                vec![Command {
+                    source: Some("this".to_string()),
+                    predicate: Some("we://children".to_string()),
+                    target: Some("value".to_string()),
+                    local: None,
+                    action: Action::AddLink,
+                }],
+                "we://note/1".to_string(),
+                vec![Parameter {
+                    name: "value".to_string(),
+                    value: serde_json::Value::String("we://kid/1".to_string()),
+                }],
+                None,
+                &ctx,
+            )
+            .await
+            .expect("ordered addLink");
+        let order_links = perspective
+            .get_links(&LinkQuery {
+                source: Some("we://note/1".to_string()),
+                predicate: Some(
+                    crate::perspectives::ordering::COLLECTION_ORDER_PREDICATE.to_string(),
+                ),
+                ..Default::default()
+            })
+            .await
+            .expect("order links");
+        assert!(
+            !order_links.is_empty(),
+            "an ordered predicate still writes an entry after the unordered one was skipped"
+        );
+    }
+
+    fn is_class_or_shape_query(query: &str) -> bool {
+        query.contains("ad4m://SubjectClass")
+            || query.contains("sh://property")
+            || query.contains("ad4m://shape")
+            || query.contains("VALUES ?s")
+    }
+
+    async fn ordered_collection_perspective() -> PerspectiveInstance {
+        let mut perspective = setup().await;
+        let ctx = AgentContext::main_agent();
+        let child_shacl = r#"{
+            "target_class": "we://Child",
+            "properties": [
+                { "path": "we://flag", "name": "flag", "has_value": "we://child",
+                  "min_count": 1, "max_count": 1 }
+            ],
+            "constructor_actions": [
+                {"action": "addLink", "source": "this", "predicate": "we://flag", "target": "we://child"}
+            ]
+        }"#;
+        let parent_shacl = r#"{
+            "target_class": "we://Parent",
+            "properties": [
+                { "path": "we://flag", "name": "flag", "has_value": "we://parent",
+                  "min_count": 1, "max_count": 1 },
+                { "path": "we://children", "name": "children", "collection": true,
+                  "relation_kind": "hasMany", "ordering": "linkedList",
+                  "target_class_name": "Child",
+                  "getter": "SELECT ?target WHERE { <Base> <we://children> ?target . ?target <we://flag> <we://child> . }",
+                  "setter": [{"action": "collectionSetter", "source": "this", "predicate": "we://children", "target": "value"}] },
+                { "path": "ad4m://collection_order", "name": "_collectionOrder" }
+            ],
+            "constructor_actions": [
+                {"action": "addLink", "source": "this", "predicate": "we://flag", "target": "we://parent"}
+            ]
+        }"#;
+        perspective
+            .register_shape_json(child_shacl, &ctx)
+            .await
+            .expect("register Child");
+        perspective
+            .register_shape_json(parent_shacl, &ctx)
+            .await
+            .expect("register Parent");
+        for id in ["we://a", "we://b", "we://c"] {
+            perspective
+                .create_subject(
+                    SubjectClassOption {
+                        class_name: Some("Child".to_string()),
+                        query: None,
+                    },
+                    id.to_string(),
+                    None,
+                    None,
+                    &ctx,
+                )
+                .await
+                .expect("create child");
+        }
+        perspective
+    }
+
+    async fn create_ordered_parent(perspective: &mut PerspectiveInstance, id: &str) {
+        perspective
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some("Parent".to_string()),
+                    query: None,
+                },
+                id.to_string(),
+                None,
+                None,
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("create parent");
+    }
+
+    async fn run_member_command(
+        perspective: &mut PerspectiveInstance,
+        parent: &str,
+        child: &str,
+        action: Action,
+    ) {
+        let what = format!("{action:?}");
+        perspective
+            .execute_commands(
+                vec![Command {
+                    source: Some("this".to_string()),
+                    predicate: Some("we://children".to_string()),
+                    target: Some("value".to_string()),
+                    local: None,
+                    action,
+                }],
+                parent.to_string(),
+                vec![Parameter {
+                    name: "value".to_string(),
+                    value: serde_json::Value::String(child.to_string()),
+                }],
+                None,
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{what} {child} on {parent}: {e}"));
+    }
+
+    async fn add_ordered_member(perspective: &mut PerspectiveInstance, parent: &str, child: &str) {
+        run_member_command(perspective, parent, child, Action::AddLink).await;
+    }
+
+    async fn remove_ordered_member(
+        perspective: &mut PerspectiveInstance,
+        parent: &str,
+        child: &str,
+    ) {
+        run_member_command(perspective, parent, child, Action::RemoveLink).await;
+    }
+
+    async fn read_ordered_children(perspective: &PerspectiveInstance, parent: &str) -> Vec<String> {
+        let query = format!(
+            r#"{{"where":{{"id":"{parent}"}},"include":{{"children":true}},"deepQuery":true}}"#
+        );
+        let raw = perspective
+            .model_query("Parent", &query)
+            .await
+            .expect("read parent");
+        child_ids_from_model_query(&raw)
+    }
+
+    /// The order the winning entries actually encode, or why it is not a
+    /// chain from the head. A read that falls back to link order can still
+    /// look right when the entries loop, so this walks the entries.
+    async fn assert_valid_order(
+        perspective: &PerspectiveInstance,
+        parent: &str,
+        expected: &[&str],
+    ) {
+        let read = read_ordered_children(perspective, parent).await;
+        let members = member_targets(perspective, parent).await;
+        let entries = ordering_entries(perspective, parent).await;
+        let chain = chain_from_head(&entries, &members);
+        assert_eq!(
+            read.as_slice(),
+            expected,
+            "read order, chain {chain:?}, members {members:?}"
+        );
+        match chain {
+            Ok(order) => assert_eq!(
+                order, expected,
+                "every member must be reachable from the head, with no cycle"
+            ),
+            Err(why) => panic!("ordering entries are not a chain from the head: {why}"),
+        }
+    }
+
+    async fn member_targets(perspective: &PerspectiveInstance, parent: &str) -> Vec<String> {
+        let mut targets: Vec<String> = perspective
+            .get_links(&LinkQuery {
+                source: Some(parent.to_string()),
+                predicate: Some("we://children".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("member links")
+            .into_iter()
+            .map(|l| l.data.target)
+            .collect();
+        targets.sort();
+        targets.dedup();
+        targets
+    }
+
+    async fn ordering_entries(
+        perspective: &PerspectiveInstance,
+        parent: &str,
+    ) -> Vec<crate::perspectives::ordering::OrderingEntry> {
+        let targets: Vec<String> = perspective
+            .get_links(&LinkQuery {
+                source: Some(parent.to_string()),
+                predicate: Some(
+                    crate::perspectives::ordering::COLLECTION_ORDER_PREDICATE.to_string(),
+                ),
+                ..Default::default()
+            })
+            .await
+            .expect("order links")
+            .into_iter()
+            .map(|l| l.data.target)
+            .collect();
+        crate::perspectives::ordering::parse_ordering_entries(&targets, "we://children")
+    }
+
+    /// Winning `after` pointer per item, then the members in the order a walk
+    /// from [`LIST_HEAD`](crate::perspectives::ordering::LIST_HEAD) emits them.
+    /// A cycle, or a member the walk never reaches, is an error.
+    fn chain_from_head(
+        entries: &[crate::perspectives::ordering::OrderingEntry],
+        members: &[String],
+    ) -> Result<Vec<String>, String> {
+        use crate::perspectives::ordering::LIST_HEAD;
+        use std::collections::{HashMap, HashSet};
+
+        let mut best: HashMap<&str, &crate::perspectives::ordering::OrderingEntry> = HashMap::new();
+        for entry in entries {
+            best.entry(entry.item.as_str())
+                .and_modify(|winner| {
+                    let new_key = (
+                        entry.pid.as_str(),
+                        entry.after.as_deref().unwrap_or(LIST_HEAD),
+                    );
+                    let old_key = (
+                        winner.pid.as_str(),
+                        winner.after.as_deref().unwrap_or(LIST_HEAD),
+                    );
+                    if new_key > old_key {
+                        *winner = entry;
+                    }
+                })
+                .or_insert(entry);
+        }
+        let after: HashMap<&str, &str> = best
+            .iter()
+            .map(|(item, entry)| (*item, entry.after.as_deref().unwrap_or(LIST_HEAD)))
+            .collect();
+
+        // Follow predecessor pointers. Each item has one, so a loop is a cycle
+        // even when the head can no longer reach it.
+        let mut color: HashMap<&str, u8> = HashMap::new();
+        fn visit<'a>(
+            node: &'a str,
+            after: &HashMap<&'a str, &'a str>,
+            color: &mut HashMap<&'a str, u8>,
+        ) -> bool {
+            match color.get(node).copied().unwrap_or(0) {
+                1 => return true,
+                2 => return false,
+                _ => {}
+            }
+            color.insert(node, 1);
+            if let Some(pred) = after.get(node) {
+                if *pred != LIST_HEAD && visit(pred, after, color) {
+                    return true;
+                }
+            }
+            color.insert(node, 2);
+            false
+        }
+        for item in after.keys().copied() {
+            if visit(item, &after, &mut color) {
+                return Err(format!("cycle involving {item}"));
+            }
+        }
+
+        let mut followers: HashMap<&str, Vec<&str>> = HashMap::new();
+        for (item, pred) in &after {
+            followers.entry(*pred).or_default().push(*item);
+        }
+        for list in followers.values_mut() {
+            list.sort();
+        }
+        let member_set: HashSet<&str> = members.iter().map(String::as_str).collect();
+        let mut order = Vec::new();
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut stack = vec![LIST_HEAD];
+        while let Some(current) = stack.pop() {
+            if !seen.insert(current) {
+                return Err(format!("cycle at {current}"));
+            }
+            if current != LIST_HEAD && member_set.contains(current) {
+                order.push(current.to_string());
+            }
+            if let Some(next) = followers.get(current) {
+                for item in next.iter().rev() {
+                    stack.push(*item);
+                }
+            }
+        }
+        let mut missing: Vec<&str> = member_set
+            .iter()
+            .copied()
+            .filter(|member| !seen.contains(member))
+            .collect();
+        missing.sort();
+        if !missing.is_empty() {
+            return Err(format!(
+                "not reachable from {LIST_HEAD}: {missing:?}; walked {order:?}"
+            ));
+        }
+        Ok(order)
+    }
+
     fn child_ids_from_model_query(raw: &str) -> Vec<String> {
         let parsed: serde_json::Value = serde_json::from_str(raw).expect("model_query json");
         parsed["instances"]

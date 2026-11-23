@@ -269,6 +269,32 @@ describe("Ad4mModel — CRDT-ordered collections", function () {
     expect(await readTasks(column.id)).to.deep.equal([c.id, b.id]);
   });
 
+  it("appends a removed member again without losing the chain", async () => {
+    const { a, b, c } = await seedTasks();
+    const column = await OrderColumn.create(perspective, {});
+    await (column as any).addTasks(a.id);
+    await (column as any).addTasks(b.id);
+    await (column as any).addTasks(c.id);
+    await (column as any).removeTasks(a.id);
+    await (column as any).addTasks(a.id);
+
+    // a still had an entry. Appending it has to retarget the neighbour that
+    // pointed through the hole, or the entries loop and the read falls off
+    // the head. a comes back at the end: b, c, a.
+    expect(await readTasks(column.id)).to.deep.equal([b.id, c.id, a.id]);
+  });
+
+  it("moves an existing non-tail member to the end when it is added again", async () => {
+    const { a, b, c } = await seedTasks();
+    const column = await OrderColumn.create(perspective, {});
+    await (column as any).addTasks(a.id);
+    await (column as any).addTasks(b.id);
+    await (column as any).addTasks(c.id);
+    await (column as any).addTasks(a.id);
+
+    expect(await readTasks(column.id)).to.deep.equal([b.id, c.id, a.id]);
+  });
+
   it("survives a reorder saved twice in a row", async () => {
     const { a, b, c } = await seedTasks();
     const column = await OrderColumn.create(perspective, {
