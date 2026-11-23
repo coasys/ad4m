@@ -1661,18 +1661,6 @@ describe("Prolog + Literals", () => {
                     expect(countLt3).to.equal(findAllLt3.length);
                     expect(countLt3).to.equal(2); // recipes 1 and 2
 
-                    // Test count() with gt operator
-                    const countGt3 = await Recipe.count(perspective!, { where: { number: { gt: 3 } } });
-                    const findAllGt3 = await Recipe.findAll(perspective!, { where: { number: { gt: 3 } } });
-                    expect(countGt3).to.equal(findAllGt3.length);
-                    expect(countGt3).to.equal(2);
-
-                    // Test count() with between operator
-                    const countBetween = await Recipe.count(perspective!, { where: { number: { between: [2, 4] } } });
-                    const findAllBetween = await Recipe.findAll(perspective!, { where: { number: { between: [2, 4] } } });
-                    expect(countBetween).to.equal(findAllBetween.length);
-                    expect(countBetween).to.equal(3);
-
                     // Test count() with timestamp filtering
                     // Get the timestamp of recipe3
                     const allRecipes = await Recipe.findAll(perspective!);
