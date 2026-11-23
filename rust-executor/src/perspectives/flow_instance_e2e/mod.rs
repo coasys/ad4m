@@ -29,6 +29,7 @@ use super::flow_instance::pass::{run_flow_consensus_pass, FireOutcome};
 use super::flow_instance::propose::propose_flow_transition;
 use super::flow_instance::replica_state::FlowReplicaState;
 use super::flow_instance::{fold_read_set, FlowInstance, ReadSet};
+use super::sparql_store::EvalStop;
 use crate::agent::signatures::TestSigner;
 use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus, PerspectiveDiff};
 
@@ -78,7 +79,9 @@ fn forget_bookkeeping(f: &Fixture) {
 
 /// The evidence seal the engine would compute for `to_state` right now.
 async fn seal_for(f: &Fixture, to_state: &str) -> String {
-    let flows = load_shacl_flows(&f.perspective).await.expect("flows");
+    let flows = load_shacl_flows(&EvalStop::none(), &f.perspective)
+        .await
+        .expect("flows");
     let records = f.instances().await;
     recompute_evidence_hash(
         &f.perspective,

@@ -9,6 +9,7 @@ pub mod event_interest;
 pub mod events_ws;
 pub mod guards;
 pub mod internal;
+pub mod metrics;
 pub mod openai_compat;
 pub mod types;
 pub mod ws_rpc;
@@ -94,6 +95,8 @@ pub fn api_router(state: AppState) -> Router {
             }),
         )
         .route("/health", get(|| async { Json(json!({"status": "ok"})) }))
+        // Resource counters in the Prometheus text format, for the operator only
+        .route("/metrics", get(metrics::metrics))
         // Internal platform → executor endpoint (INTERNAL_API_TOKEN auth)
         .route("/internal/shutdown", post(internal::internal_shutdown));
 
@@ -279,7 +282,7 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
 
         tokio::spawn(async move {
             axum_server::from_tcp_rustls(tls_listener, rustls_config)
-                .serve(tls_app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+                .serve(tls_app.into_make_service_with_connect_info::<SocketAddr>())
                 .await
                 // Same reasoning as the MCP HTTPS listener: the cleartext API
                 // below is bound to 127.0.0.1 because TLS is *configured*, not
@@ -304,7 +307,7 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
     // The peer address reaches `ws_rpc`: `user.sessionChallenge` budgets by it.
     axum::serve(
         listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await?;
 

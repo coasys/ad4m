@@ -638,6 +638,20 @@ Language about the *set of local agents that exist on this executor*
 acting agent is *which one of those local agents is currently
 acting*. Both concepts are needed; neither substitutes for the other.
 
+**Call scheduling and callbacks.** The executor may run more than one
+call at a time against a JS language's instance (eligible reads run
+beside other calls), each with its own acting agent. It never does so
+against a WASM language: wasm-bindgen polls all of a module's futures
+from one microtask queue that does not restore each task's acting-agent
+context, and the Rust ALDK's async exports hold the instance's single
+lock across their awaits, so every call into a WASM language runs
+ordered. Whatever fires from inside an export's invocation — an `emit*`
+import, a callback closure the language was handed, a promise it
+started — runs as that invoking call's agent, whichever agent that is.
+A call with no acting-agent token acts as no agent: the agent
+operations (`agentDid()`, `agentSign()`, `createSignedExpression()`,
+the sealed boxes) refuse rather than fall back to the main agent.
+
 #### Multi-user imports
 
 `agentGetAllLocalUserDids()`, `agentDidForUser(email)`, and

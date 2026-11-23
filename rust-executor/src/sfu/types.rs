@@ -164,6 +164,10 @@ pub struct SfuCallRenegotiationOffer {
     /// The session the offer is for. Every session of `target_did` gets
     /// it; only this one applies it.
     pub participant_id: String,
+    /// The id of this offer. A resend and `sfu.callResume` repeat it.
+    /// The answer names it (`sfu.callAnswerServerOffer`); an answer that
+    /// names another id is refused.
+    pub offer_id: String,
     pub neighbourhood_url: String,
     pub room_name: String,
     /// JSON-encoded `RTCSessionDescriptionInit` for the new offer.
@@ -230,6 +234,101 @@ pub struct SfuMigrateEvent {
     pub migrate_to_did: String,
 }
 
+/// What `sfu.callAnswerServerOffer` answers. A refusal is this value, not
+/// an RPC error. The event loop sends it after it has applied the answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SfuAnswerResult {
+    pub accepted: bool,
+    /// Set only when `accepted` is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reason: Option<SfuAnswerRefusal>,
+}
+
+impl SfuAnswerResult {
+    pub fn accepted() -> Self {
+        Self {
+            accepted: true,
+            reason: None,
+        }
+    }
+
+    pub fn refused(reason: SfuAnswerRefusal) -> Self {
+        Self {
+            accepted: false,
+            reason: Some(reason),
+        }
+    }
+}
+
+/// Why an answer was not applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "kebab-case")]
+#[ts(export)]
+pub enum SfuAnswerRefusal {
+    /// The id is not the pending offer's, and it is not the offer accepted
+    /// last for this session. Also an answer under the pending offer's own
+    /// id that does not parse, or whose m-lines are not that offer's. The
+    /// pending offer stays pending in every case.
+    Stale,
+    /// This session has no offer waiting.
+    NoPending,
+    /// The event loop has no such session.
+    UnknownSession,
+}
+
+/// What `sfu.callResume` answers. `listed: false` is the room or the
+/// session gone. A session of another agent is an RPC error, not this.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SfuResumeResult {
+    pub listed: bool,
+    /// The pending server offer, when the session is listed and one waits.
+    /// The same value the offer event carries, including its `offerId`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub offer: Option<SfuCallRenegotiationOffer>,
+    /// The room's sessions, when the session is listed. The same list and
+    /// the same `revision` the roster event carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub roster: Option<SfuResumeRoster>,
+}
+
+impl SfuResumeResult {
+    pub fn unlisted() -> Self {
+        Self {
+            listed: false,
+            offer: None,
+            roster: None,
+        }
+    }
+
+    pub fn listed(offer: Option<SfuCallRenegotiationOffer>, roster: SfuResumeRoster) -> Self {
+        Self {
+            listed: true,
+            offer,
+            roster: Some(roster),
+        }
+    }
+}
+
+/// The sessions in a [`SfuResumeResult`], at one roster revision.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SfuResumeRoster {
+    /// The same `revision` the `sfu-room-roster` event for this publish
+    /// carries. A client drops a reply whose revision is older than a
+    /// roster event it already has.
+    #[ts(type = "number")]
+    pub revision: u64,
+    pub participants: Vec<SfuRosterParticipant>,
+}
+
 /// Who is in a call room now. Published whenever the room's participants
 /// change, and delivered to each of them, so a client knows who joined and
 /// who left without waiting on media.
@@ -239,6 +338,13 @@ pub struct SfuMigrateEvent {
 pub struct SfuRoomRoster {
     pub neighbourhood_url: String,
     pub room_name: String,
+    /// One sequence for every roster this process publishes: 1 the first
+    /// time, then one more on every publish, a resume included. A later
+    /// room, and a room created again, continues it, so a roster from an
+    /// earlier life of the room is older. A client drops a roster older
+    /// than one it already applied.
+    #[ts(type = "number")]
+    pub revision: u64,
     /// The room's sessions, sorted by DID, then participant id: this node's,
     /// and those the other cascade nodes in the room announced, whose ids
     /// name their node (`P3@did:key:...`). An agent in the call from two

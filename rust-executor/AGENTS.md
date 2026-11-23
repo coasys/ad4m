@@ -27,6 +27,11 @@ cd .. && pnpm run test-main                        # JS integration suites again
 `timing: <step> [address] <ms>ms` (`logging::span`), logged when the step ends. `applyTemplate`,
 `publish` and `join` are the totals of the three calls; `applyTemplate.*`, `publish.*`,
 `installLanguage.*`, `loadLanguage.*` and `holochain.*` are their steps.
+
+**Where a call spends its time:** `grep '\[call-diag\]'` (`call_diag.rs`): socket open and close,
+late pongs, RPCs over 2 s, broadcasts over 1 s, language queues every 30 s. `runtime.setLogFilter`
+raises a module's level for a while without a restart (`log_filter.rs`, `LOGGING.md`).
+
 Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call real LLMs.
 
 ## Module map (what lives where)
@@ -53,6 +58,7 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 | `bots/` | Bots: managed agents whose key the owner's log marks as a bot's, the owner's grant (spaces, actions, pause, revoke) checked before the guard of every call a bot makes, the activity log with each write's reason, `bot.*` | `src/bots/AGENTS.md` |
 | `db.rs`, `db/` | All SQLite access (`rusqlite`): `impl Ad4mDb` in `db.rs` plus child modules in `db/`. Executor code reaches it through `db_backend::db_backend()`, never `Ad4mDb` directly. Perspective **links** are not here (they are in `perspectives/sparql_store.rs`); `db` holds handles, diffs, agent data, AI models/tasks, users, billing, notifications. | `src/db/AGENTS.md` |
 | `db_backend.rs` | `DbBackend`: the executor's database, one domain method per `Ad4mDb` method that executor code calls (`ad4m_db_methods!`), plus key-value methods for the shared records. `LocalDb` runs on SQLite; `SharedDb` (`config.db_backend == "shared"`) serves the key-value methods from the platform Worker over HTTP and every domain method from SQLite | `src/db/AGENTS.md` |
+| `metrics.rs` | Resource counters for `GET /metrics` (`api/metrics.rs`): `PerspectiveCounters` on each `PerspectiveInstance` (`metrics` field), `LanguageCallStats` on each `LanguageRuntimeHandle`, `UserCounters` per acting DID, two executor-wide gauges. Hot paths only add to atomics; a client query counts from `query_gate` until its `EvalStop` drops; link writes count in `write_link_diff`, for the caller of the RPC request (`metrics::as_caller` in `HandlerMap::dispatch`); gauges owned elsewhere (subscriptions, owners, store bytes) are read at scrape time | — |
 | `pubsub.rs` | Global broadcast bus: one channel of typed events (`events.rs`: `Topic`, `Audience`, `Event`) for every event (live query updates too, as `Event::for_connection`); feeds `api/events_ws.rs` | `src/api/AGENTS.md` |
 | `types/` | `core.rs` = domain types (Link, Expression, Perspective…), `domain.rs` = wire/input types; some duplicates, see spec item 5 | — |
 | `runtime_service/`, `entanglement_service/`, `neighbourhoods.rs`, `billing.rs`, `email_service.rs`, `user_management.rs`, `unyt_service.rs`, `wallet.rs`, `perspective_snapshot.rs`, `logging.rs` | Smaller services; `unyt_service.rs` = Unyt/mHOT currency DNA + payments | — |
@@ -108,7 +114,13 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 - **JS ↔ Rust bridge**: `#[op2]` extensions in `js_core/*_extension.rs`, `holochain_service/`,
   `runtime_service/`; JS side in the sibling `.js` file and `js_core/host.js`. Every Language
   runtime gets every one of these extensions, so third-party language code reaches every op: an op
-  that signs must sign as `get_runtime_agent_context()`, never as the main agent directly. The one
+  that signs must take the call's agent token (`#[cppgc] call: Option<&CallAgent>`, passed by
+  `caller()` in `agent_extension.js`) and sign as `agent_of(call)?`, never as the main agent
+  directly: calls into one language overlap, so the agent travels with the call, not the thread
+  (`js_core/agent_extension.rs`, "The agent a call acts as"). No token means no agent: the op
+  refuses. Host code that enters language JS goes through the token machinery
+  (`__ad4mRunCall` via `LanguageRuntime::execute_as_host` for scripts, `__ad4mEnterCallAgent`
+  via `JsCore::load_module_from_source` for the bundle's `mod_evaluate`), never a bare `execute`. The one
   other kind of JS runtime is a tool bundle's (`tool_bundles/sandbox.rs`), and it gets none of
   them: only its own `tool_bundle_host` extension. Never register a `js_core` extension there.
   Languages are called by building JS source strings and evaluating them (`languages/mod.rs`).
