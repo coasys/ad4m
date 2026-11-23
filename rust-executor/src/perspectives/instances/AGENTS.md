@@ -29,6 +29,7 @@ Invariants:
   (a mounted class's constructor, setters or destructor; through an abstract class, the
   record's own classes') runs with no batch at all: it refuses any `batch_id`
   (`CallsInBatch`) before calling or writing, since a language call cannot be rolled back.
+  Language writes are not transactional: a create retried after an unclear failure can mint a new URL.
   A collection whose adder (remover) is a `call`: `add_to_collection`
   (`remove_from_collection`) runs that call with `{collection: [member]}` and writes no
   membership link; the language's delta does. `update` takes a collection only through a
