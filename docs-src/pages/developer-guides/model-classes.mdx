@@ -150,6 +150,7 @@ A class is addressed by its target class IRI (`flux://Note`). Its name, the last
 
 - Every SDK call that names a model's class (queries, creates, updates, deletes, includes, getters) sends its target class IRI, so `we://Topic` and `flux://Topic` live side by side in one Perspective, each read and written as its own class.
 - `registerShapes` takes a class whatever name other classes hold. It refuses one target class twice in one call, a shape URI another class holds, and a shape URI that does not end in `{Name}Shape`.
+- Re-registering is the intended pattern at app start: an unchanged call writes nothing and is answered from the executor's cached registry — the stored links are compared exactly, never just the shape's hash.
 - A bare name passed to the executor (`perspective.createSubject("Note", ...)`, an MCP tool) reads the class of that name with the least IRI: `a://Note` over `b://Note`. Pass the IRI to reach any other.
 - `perspective.shapes(["Note"])` lists every class of that name, least IRI first; `perspective.shapes(["b://Note"])` only that one.
 - A relation to another class resolves through the target class of the shape it names, so `sh:class b://NoteShape` reaches `b://Note` even when `a://Note` exists.
@@ -661,6 +662,20 @@ const recipe = await Recipe.create(perspective, { name: "Cake" }, {
 });
 ```
 
+`create` returns the instance it built from your values, with its `id`, and reads nothing back
+after the commit. `author`, `createdAt`, `updatedAt`, getters and relations you did not write are
+not set. Pass `returns: 'row'` to read the row after the commit (one more round trip) and fill them:
+
+```typescript
+const recipe = await Recipe.create(perspective, { name: "Cake" }, { returns: "row" });
+console.log(recipe.author, recipe.createdAt);
+```
+
+`returns: 'row'` cannot be combined with `batchId` (nothing is committed yet to read), and it
+rejects if the read fails after the commit: the record exists then, and the error names its id, so
+do not retry the create. A later `save()` on the returned instance updates it. Instance
+`save()` on a new instance still refreshes the instance after its commit.
+
 ### Reading
 
 ```typescript
@@ -689,6 +704,15 @@ await recipe.save();  // Only the name field is updated
 
 // Static update shorthand
 await Recipe.update(perspective, recipe.id, { name: "White Chocolate Cake" });
+```
+
+**An empty value clears the property.** Setting a property to `null` or `''` on `save()`, `update()` or `create()` leaves it with no links (and no empty literal). On `create()` the property is simply not written. `undefined` writes nothing, and a relation is emptied with `[]`. A required property cannot be cleared: the write throws, because its link is part of what makes the record an instance of the class.
+
+The clear is the executor's own `removeLink` with target `*`: it removes every link on that property, also links other agents wrote, and a value staged earlier in the same batch. It holds the same through an abstract class and for `perspective.updateSubject`.
+
+```typescript
+recipe.category = null; // or ''
+await recipe.save();    // the category links are removed
 ```
 
 ### Deleting

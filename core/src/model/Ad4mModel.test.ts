@@ -4364,9 +4364,9 @@ describe("save() create path and its own batch", () => {
     expect(perspective.add).not.toHaveBeenCalled();
   });
 
-  // Once the commit succeeded the record exists: a create() that rejected
-  // would leave the caller no instance, and a retry would make a second record.
-  describe("create() when the re-read after a committed write fails", () => {
+  // create() returns what it wrote and reads nothing after the commit, unless
+  // asked for the row with `returns: 'row'`.
+  describe("create() returns", () => {
     @Model({ name: "ReadBackCard" })
     class ReadBackCard extends Ad4mModel {
       @Flag({ through: "rb://kind", value: "rb://card" })
@@ -4389,32 +4389,92 @@ describe("save() create path and its own batch", () => {
       modelQuery: jest.fn(async () => { throw reread; }),
     }) as any;
 
-    let warn: jest.SpyInstance;
-    beforeEach(() => { warn = jest.spyOn(console, "warn").mockImplementation(() => {}); });
-    afterEach(() => warn.mockRestore());
-
-    it("returns the instance it wrote and warns with the read error", async () => {
+    it("sends no read after the commit by default", async () => {
       const perspective = makePerspective();
 
       const card = await ReadBackCard.create(perspective, { title: "written" });
 
       expect(perspective.commitBatch).toHaveBeenCalledWith("batch-1");
-      expect(perspective.modelQuery).toHaveBeenCalled();
+      expect(perspective.modelQuery).not.toHaveBeenCalled();
       expect(card.id).toBeTruthy();
       expect(card.title).toBe("written");
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining(card.id), reread);
+      expect((card as any).author).toBeUndefined();
+      expect((card as any).createdAt).toBeUndefined();
     });
 
-    it("returns the instance with a parent too", async () => {
+    it("reads the row after the commit with returns: 'row', and fills author and createdAt", async () => {
+      const perspective = makePerspective();
+      perspective.modelQuery.mockImplementation(async () => ({
+        instances: [{ id: "rb://row", author: "did:key:alice", createdAt: 1700000000000, title: "stored" }],
+        totalCount: 1,
+      }));
+      perspective.createSubject.mockImplementation(async (instance: any) => { instance._baseExpression = "rb://row"; });
+
+      const card = await ReadBackCard.create(perspective, { title: "written" }, { returns: "row" });
+
+      expect(perspective.commitBatch.mock.invocationCallOrder[0])
+        .toBeLessThan(perspective.modelQuery.mock.invocationCallOrder[0]);
+      expect(card.author).toBe("did:key:alice");
+      expect(card.createdAt).toBe(1700000000000);
+      expect(card.title).toBe("stored");
+    });
+
+    it("rejects with the read error when returns: 'row' cannot read, naming the created id", async () => {
       const perspective = makePerspective();
 
-      const card = await ReadBackCard.create(
+      const err = await ReadBackCard.create(perspective, { title: "written" }, { returns: "row" }).catch((e) => e);
+
+      expect(perspective.commitBatch).toHaveBeenCalledWith("batch-1");
+      expect(err.message).toMatch(/was created, but reading it back failed/);
+      expect(err.cause).toBe(reread);
+    });
+
+    it("refuses returns: 'row' in a caller's batch before it writes", async () => {
+      const perspective = makePerspective();
+
+      await expect(
+        ReadBackCard.create(perspective, { title: "written" }, { returns: "row", batchId: "caller-batch" }),
+      ).rejects.toThrow(/returns: 'row'.*batchId/);
+      expect(perspective.createSubject).not.toHaveBeenCalled();
+    });
+
+    it("then save() updates: the snapshot is set, no second create", async () => {
+      const perspective = makePerspective();
+      perspective.stringOrTemplateObjectToSubjectClassName.mockResolvedValue("ReadBackCard");
+      perspective.updateSubject = jest.fn(async () => {});
+
+      const card = await ReadBackCard.create(perspective, { title: "written" });
+      perspective.createSubject.mockClear();
+      card.title = "changed";
+      jest.spyOn(card as any, "getData").mockResolvedValue(card);
+      jest.spyOn(card as any, "innerUpdate").mockResolvedValue(undefined);
+      await card.save();
+
+      expect(perspective.createSubject).not.toHaveBeenCalled();
+      expect((card as any).innerUpdate).toHaveBeenCalled();
+    });
+
+    it("writes the parent link in the create's own batch, and reads nothing", async () => {
+      const perspective = makePerspective();
+
+      await ReadBackCard.create(
         perspective, { title: "written" }, { parent: { id: "rb://parent", predicate: "rb://child" } },
       );
 
+      expect(perspective.add).toHaveBeenCalledWith(
+        expect.objectContaining({ source: "rb://parent", predicate: "rb://child" }), "shared", "batch-1");
       expect(perspective.commitBatch).toHaveBeenCalledWith("batch-1");
-      expect(card.title).toBe("written");
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining(card.id), reread);
+      expect(perspective.modelQuery).not.toHaveBeenCalled();
+    });
+
+    it("discards its batch when a write fails", async () => {
+      const perspective = makePerspective();
+      const failure = new Error("createSubject failed");
+      perspective.createSubject.mockRejectedValue(failure);
+
+      await expect(ReadBackCard.create(perspective, { title: "written" })).rejects.toBe(failure);
+      expect(perspective.discardBatch).toHaveBeenCalledWith("batch-1");
+      expect(perspective.commitBatch).not.toHaveBeenCalled();
     });
 
     it("still rejects when the commit fails, and does not read", async () => {
