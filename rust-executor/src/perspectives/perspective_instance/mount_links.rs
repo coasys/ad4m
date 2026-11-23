@@ -24,10 +24,20 @@ use crate::types::{
     DecoratedLinkExpression, DecoratedPerspectiveDiff, Link, LinkExpression, LinkStatus,
 };
 
+/// How often a test's mounts read the ledger (`mount_written`).
+#[cfg(test)]
+pub(super) static LEDGER_READS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// The reifiers one mount wrote, as the ledger lists them.
 pub(super) struct MountWritten(HashSet<String>);
 
 impl MountWritten {
+    /// Record that the mount wrote `links` (`add_mount_links`' result).
+    pub(super) fn extend(&mut self, links: &[LinkExpression]) {
+        self.0.extend(links.iter().map(SparqlStore::reifier_of));
+    }
+
     /// Whether the mount wrote `link` (and it is still `Local`).
     pub(super) fn contains(&self, link: &DecoratedLinkExpression) -> bool {
         link.status == Some(LinkStatus::Local)
@@ -63,6 +73,8 @@ impl MountWrittenByLanguage<'_> {
 impl PerspectiveInstance {
     /// The links the mount of `lang` wrote.
     pub(super) fn mount_written(&self, lang: &str) -> Result<MountWritten, AnyError> {
+        #[cfg(test)]
+        LEDGER_READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(MountWritten(self.sparql_store.mount_written(lang)?))
     }
 
@@ -77,13 +89,13 @@ impl PerspectiveInstance {
     /// Write `links` as the mount of `lang`'s own `Local` links, signed by
     /// the main agent: stored and marked in one transaction (under
     /// `persist_lock`, as every store write), then Prolog facts and the
-    /// link events as for any write (`Local`: no commit). Returns how many
+    /// link events as for any write (`Local`: no commit). Returns the links
     /// it wrote.
     pub(super) async fn add_mount_links(
         &mut self,
         lang: &str,
         links: Vec<Link>,
-    ) -> Result<usize, AnyError> {
+    ) -> Result<Vec<LinkExpression>, AnyError> {
         let context = AgentContext::main_agent();
         let mut expressions = Vec::with_capacity(links.len());
         for link in links {
@@ -100,15 +112,15 @@ impl PerspectiveInstance {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.sparql_store.add_mount_links(&expressions, lang)?;
         }
-        let count = expressions.len();
         let decorated = DecoratedPerspectiveDiff::from_additions(
             expressions
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Local)))
                 .collect(),
         );
         self.spawn_prolog_facts_update(decorated.clone(), None);
         self.pubsub_publish_diff(&decorated).await;
-        Ok(count)
+        Ok(expressions)
     }
 }

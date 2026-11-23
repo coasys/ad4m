@@ -33,6 +33,7 @@ use tokio::time::sleep;
 
 use super::mount_gates::{pause, MountPoint};
 use super::mount_lifecycle::{next_mount_seq, MountPhase, MountSlot};
+use super::mount_links::MountWritten;
 use super::{PerspectiveInstance, SdnaType};
 use crate::agent::AgentContext;
 use crate::languages::mount_types::{MountDelta, MountEntry, MountShapes, MountSyncReport};
@@ -307,12 +308,17 @@ impl PerspectiveInstance {
         }
         let mut report = MountSyncReport::default();
         let mut wanted_sources = HashSet::new();
+        // The ledger is read once per snapshot; `write_record` adds what it
+        // writes.
+        let mut written = self.mount_written(lang_address)?;
         for record in records {
             wanted_sources.insert(record.source.clone());
             if slot.newer_than_snapshot(&record.address, seq) {
                 continue;
             }
-            let r = self.write_record(lang_address, record).await?;
+            let r = self
+                .write_record(lang_address, &mut written, record)
+                .await?;
             report.added += r.added;
             report.removed += r.removed;
         }
@@ -321,7 +327,7 @@ impl PerspectiveInstance {
         // links the mount owns under that source.
         let prefix = format!("{lang_address}://");
         let doomed: Vec<LinkExpression> = self
-            .owned_links(lang_address)
+            .owned_links(lang_address, &written)
             .await?
             .into_iter()
             .filter(|l| {
@@ -372,12 +378,15 @@ impl PerspectiveInstance {
         };
         let mut report = MountSyncReport::default();
         let own = self.mount_own_classes(lang_address).await?;
+        let mut written = self.mount_written(lang_address)?;
         for record in self.stage_records(lang_address, &own, &delta.changed)? {
             if !slot.delta_applies(&record.address, seq) {
                 continue;
             }
             let address = record.address.clone();
-            let r = self.write_record(lang_address, record).await?;
+            let r = self
+                .write_record(lang_address, &mut written, record)
+                .await?;
             slot.delta_applied(&address, seq);
             report.added += r.added;
             report.removed += r.removed;
@@ -387,7 +396,6 @@ impl PerspectiveInstance {
                 continue;
             }
             slot.delta_applied(address, seq);
-            let written = self.mount_written(lang_address)?;
             let doomed: Vec<LinkExpression> = self
                 .get_links(&LinkQuery {
                     source: Some(format!("{lang_address}://{address}")),
@@ -774,9 +782,9 @@ impl PerspectiveInstance {
     async fn owned_links(
         &self,
         lang_address: &str,
+        written: &MountWritten,
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
         let prefix = format!("{lang_address}://");
-        let written = self.mount_written(lang_address)?;
         Ok(self
             .get_links(&LinkQuery::default())
             .await?
@@ -793,10 +801,12 @@ impl PerspectiveInstance {
     /// wrote with exactly this source, wanted = the expansion. `current −
     /// wanted` is removed, `wanted − current` added; equal links stay
     /// untouched (no subscription noise). Anyone else's link under the
-    /// source is neither adopted nor removed.
+    /// source is neither adopted nor removed. `written` is the mount's
+    /// ledger, read once by the caller; the links this writes join it.
     async fn write_record(
         &mut self,
         lang_address: &str,
+        written: &mut MountWritten,
         record: StagedRecord,
     ) -> Result<MountSyncReport, AnyError> {
         let StagedRecord {
@@ -809,7 +819,6 @@ impl PerspectiveInstance {
             .map(|l| (l.predicate.clone(), l.target.clone()))
             .collect();
 
-        let written = self.mount_written(lang_address)?;
         let current = self
             .get_links(&LinkQuery {
                 source: Some(source.clone()),
@@ -847,7 +856,9 @@ impl PerspectiveInstance {
             report.removed += self.remove_links(doomed, None).await?.len();
         }
         if !additions.is_empty() {
-            report.added += self.add_mount_links(lang_address, additions).await?;
+            let added = self.add_mount_links(lang_address, additions).await?;
+            report.added += added.len();
+            written.extend(&added);
         }
         Ok(report)
     }

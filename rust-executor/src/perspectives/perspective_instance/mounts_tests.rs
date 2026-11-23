@@ -893,3 +893,28 @@ async fn mount_works_next_to_a_raw_mount_link() {
     assert_eq!(p.mounts().await.unwrap(), vec![lang.clone()]);
     assert_eq!(things(&p).await.len(), 1);
 }
+
+// --- A resync reads the ledger once per snapshot -----------------------------
+
+/// The mount ledger is read a fixed number of times per sync, not once per
+/// record: an unchanged snapshot of ten records costs the same reads as
+/// one of a single record.
+#[tokio::test]
+async fn a_resync_reads_the_ledger_once_per_snapshot() {
+    let lang = load_mount_test_language().await;
+    for i in 0..10 {
+        create(&lang, json!({"title": format!("t{i}")})).await;
+    }
+    let (mut p, _ctx) = mounted(&lang).await;
+    crate::perspectives::unregister_mount(&lang, &p.uuid);
+
+    use std::sync::atomic::Ordering;
+    let before = super::mount_links::LEDGER_READS.load(Ordering::SeqCst);
+    let report = p.sync_mount(&lang).await.unwrap();
+    let reads = super::mount_links::LEDGER_READS.load(Ordering::SeqCst) - before;
+    assert_eq!((report.added, report.removed), (0, 0));
+    assert!(
+        reads <= 3,
+        "an unchanged sync of ten records read the ledger {reads} times"
+    );
+}
