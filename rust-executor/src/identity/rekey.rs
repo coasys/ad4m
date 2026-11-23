@@ -411,7 +411,9 @@ mod tests {
     }
 
     /// A second re-key waits until the first has moved every place, so the owners end on the
-    /// last key. A test that holds the perspective stops the first re-key after its key change.
+    /// last key. Holding the writer mutex stops owner migration in
+    /// `update_perspective_with`, after the first re-key changed the wallet key.
+    /// Snapshot readers remain available while that migration is paused.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn two_rekeys_run_one_after_the_other() {
         let dir = tempfile::tempdir().unwrap();
@@ -428,6 +430,9 @@ mod tests {
         let second = tokio::spawn(rekey_main());
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         let during = crate::agent::did();
+        let owners_during = instance.persisted.load().owners.clone();
+        let first_waiting = !first.is_finished();
+        let second_waiting = !second.is_finished();
         drop(held);
         let first = first.await.unwrap().unwrap();
         let second = second.await.unwrap().unwrap();
@@ -435,6 +440,9 @@ mod tests {
         crate::perspectives::remove_perspective(&owned.uuid).await;
         crate::test_utils::setup_agent();
 
+        assert_eq!(owners_during, Some(vec![old]), "owner migration is paused");
+        assert!(first_waiting, "the first re-key waits for its owner write");
+        assert!(second_waiting, "the second re-key waits for the first");
         assert_eq!(during, first_key, "the second re-key waits for the first");
         assert_eq!(first.sign, first_key);
         assert_ne!(second.sign, first_key);
@@ -457,6 +465,8 @@ mod tests {
         let new = key_after(&old).await;
         call.abort();
         assert!(call.await.unwrap_err().is_cancelled());
+        // The caller is gone but the detached migration is still paused on its write.
+        let owners_during = instance.persisted.load().owners.clone();
         drop(held);
         let mut owners = None;
         for _ in 0..500 {
@@ -471,6 +481,7 @@ mod tests {
         crate::perspectives::remove_perspective(&owned.uuid).await;
         crate::test_utils::setup_agent();
 
+        assert_eq!(owners_during, Some(vec![old]), "owner migration was paused");
         assert_eq!(owners, Some(vec![new]));
     }
 
