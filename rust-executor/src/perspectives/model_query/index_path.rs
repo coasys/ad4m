@@ -21,6 +21,7 @@
 //!   timestamp synonym, ascending or descending), and the store applies the
 //!   window (no per-anchor limit, no walk, no filter after hydration).
 //! - `limit` is set and not 0, and `offset` is at most [`MAX_INDEX_OFFSET`].
+//! - No `after` cursor: the index pages by offset only.
 //! - No `where`, no `linkStatus`, and `includeUnverified` is not `true`: the
 //!   index holds members by verified links of any status.
 //! - The class has a flag, its rule in the index is the rule of this shape,

@@ -170,6 +170,40 @@ fn inbound_touches_shacl(diff: &DecoratedPerspectiveDiff) -> bool {
 /// still runs through `perspective.queryProlog`).
 pub(crate) const PROLOG_LIVE_QUERY_UNSUPPORTED: &str = "Prolog live queries are no longer supported; subscribe with a SPARQL query or a model query (perspective.modelSubscribe)";
 
+/// The error a model subscription that sends `after` gets. A subscription
+/// re-runs one query on every matching write, so a cursor would re-read the
+/// same page forever; cursor paging is a one-shot `perspective.modelQuery`.
+pub(crate) const MODEL_SUBSCRIPTION_CURSOR_UNSUPPORTED: &str = "Model subscriptions do not take an `after` cursor: a subscription re-runs one query, so it would re-read the same page forever. Subscribe without `after` (use `limit`/`offset`), and page by cursor with perspective.modelQuery";
+
+/// Whether a model query JSON sends a cursor (`after`, even `""`). `null`
+/// reads as no cursor, as it does in the query itself. JSON that does not
+/// parse is left to the query, which reports it.
+pub(crate) fn model_query_sends_cursor(query_json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(query_json)
+        .ok()
+        .and_then(|q| q.get("after").map(|a| !a.is_null()))
+        .unwrap_or(false)
+}
+
+/// The refusals [`PerspectiveInstance::model_query_classes_within`]'s early
+/// answers would skip — the `after` rules that need no shape. A union (or
+/// an abstract class, which resolves to one) refuses `after` reads itself
+/// ([`super::model_query::refuse_union_reads`]); one class refuses the
+/// unsupported cursors of [`super::model_query::refuse_unsupported_cursor`].
+fn refuse_before_empty_model_answer(
+    classes: &super::model_query::QueryClasses,
+    query_input: &super::model_query::ModelQueryInput,
+) -> Result<(), deno_core::anyhow::Error> {
+    match classes {
+        super::model_query::QueryClasses::Union(_) => {
+            super::model_query::refuse_union_reads(query_input)
+        }
+        super::model_query::QueryClasses::One(_) => {
+            super::model_query::refuse_unsupported_cursor(query_input).map(|_| ())
+        }
+    }
+}
+
 pub(crate) fn is_sparql_query(query: &str) -> bool {
     let trimmed = query.trim();
     // Match SPARQL keywords followed by whitespace or '{' / '<' to avoid
@@ -478,6 +512,10 @@ impl SubscribedQuery {
 /// A batch with its creation timestamp, for timeout-based cleanup.
 struct TimestampedBatch {
     diff: PerspectiveDiff,
+    /// `(old, new)` pairs staged by `update_link`. Each half also sits in
+    /// `diff`, so batch-aware reads see it; `commit_batch` publishes a pair
+    /// whose halves are both still there as one update.
+    updates: Vec<(LinkExpression, LinkExpression)>,
     created_at: Instant,
 }
 
@@ -2127,6 +2165,37 @@ impl PerspectiveInstance {
         }
     }
 
+    /// Publish one `link-updated` event, to all of the perspective's
+    /// `event_recipients`, for each `(old, new)` pair, and queue the
+    /// flow-definition sweep that `pubsub_publish_diff` queues for other
+    /// writes (once for the whole set).
+    async fn publish_link_updates(
+        &self,
+        updates: &[(DecoratedLinkExpression, DecoratedLinkExpression)],
+    ) {
+        if updates.is_empty() {
+            return;
+        }
+        let (olds, news): (Vec<_>, Vec<_>) = updates.iter().cloned().unzip();
+        self.schedule_flow_pass_on_definition_change(&DecoratedPerspectiveDiff::from(news, olds));
+
+        // Only the recipients come from the handle; the lock is released before publishing.
+        let owners = super::event_recipients(&*self.persisted.lock().await);
+
+        // One event per update, to all of the owners.
+        for (old_link, new_link) in updates {
+            super::publish_to_owners(
+                Topic::LinkUpdated,
+                owners.clone(),
+                PerspectiveLinkUpdatedEvent {
+                    perspective_uuid: self.uuid.clone(),
+                    old_link: old_link.clone(),
+                    new_link: new_link.clone(),
+                },
+            );
+        }
+    }
+
     pub async fn add_link_expression(
         &mut self,
         link_expression: LinkExpression,
@@ -2464,28 +2533,25 @@ impl PerspectiveInstance {
         let new_link_expression =
             LinkExpression::from(create_signed_expression(new_link.normalize(), context)?);
 
+        // Both links keep the stored status. The old one is the stored link:
+        // the caller's `old_link` may carry no status, which reads as Shared.
+        let mut stored_new = new_link_expression.clone();
+        stored_new.status = Some(link_status.clone());
+        let mut stored_old = link.clone();
+        stored_old.status = Some(link_status.clone());
+
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
             let batch = batches
                 .get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
-            let diff = &mut batch.diff;
 
-            // Queue the stored link with its stored status: the caller's
-            // `old_link` may carry none, which the commit reads as Shared.
-            let mut stored_old = link.clone();
-            stored_old.status = Some(link_status.clone());
-            diff.removals.push(stored_old);
-            let mut new_link_expr = new_link_expression.clone();
-            new_link_expr.status = Some(link_status.clone());
-            diff.additions.push(new_link_expr.clone());
+            batch.diff.removals.push(stored_old.clone());
+            batch.diff.additions.push(stored_new.clone());
+            batch.updates.push((stored_old, stored_new.clone()));
 
-            Ok(DecoratedLinkExpression::from((new_link_expr, link_status)))
+            Ok(DecoratedLinkExpression::from((stored_new, link_status)))
         } else {
-            let mut stored_new = new_link_expression.clone();
-            stored_new.status = Some(link_status.clone());
-            let mut stored_old = link.clone();
-            stored_old.status = Some(link_status.clone());
             let diff = PerspectiveDiff::from(vec![stored_new], vec![stored_old]);
             let decorated_new_link_expression =
                 DecoratedLinkExpression::from((new_link_expression.clone(), link_status.clone()));
@@ -2502,22 +2568,13 @@ impl PerspectiveInstance {
                 .fold_into(&mut decorated_diff);
 
             // Queue the Prolog fact update and the notification + live-query checks
-            self.update_prolog_engines(decorated_diff.clone()).await;
+            self.update_prolog_engines(decorated_diff).await;
 
-            // An update publishes its own topic rather than going through
-            // `pubsub_publish_diff`, so it queues the definition sweep here.
-            self.schedule_flow_pass_on_definition_change(&decorated_diff);
-
-            // One event, to all of the owners.
-            super::publish_to_owners(
-                Topic::LinkUpdated,
-                super::event_recipients(&handle),
-                PerspectiveLinkUpdatedEvent {
-                    perspective_uuid: handle.uuid.clone(),
-                    old_link: decorated_old_link.clone(),
-                    new_link: decorated_new_link_expression.clone(),
-                },
-            );
+            self.publish_link_updates(&[(
+                decorated_old_link,
+                decorated_new_link_expression.clone(),
+            )])
+            .await;
 
             if link_status == LinkStatus::Shared {
                 self.spawn_commit_and_handle_error(&diff);
@@ -3868,6 +3925,16 @@ impl PerspectiveInstance {
         let mut query_input: super::model_query::ModelQueryInput = serde_json::from_str(query_json)
             .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
 
+        // A malformed `after` fails the same way however the query would have
+        // been answered: the empty results below (a hard-wired class nothing
+        // wrote yet, a producedByFlow filter nothing passes) must not take an
+        // unparseable cursor for a last page.
+        if let Some(after) = query_input.after.as_deref() {
+            if !after.is_empty() {
+                super::model_query::KeysetCursor::decode(after)?;
+            }
+        }
+
         // `where.producedByFlow` is resolved here, not in the pipeline: it
         // needs the perspective (receipts, flow catalogue) and signature
         // verification, neither of which SPARQL or the post-hydration filter
@@ -3907,9 +3974,14 @@ impl PerspectiveInstance {
             one => one.clone(),
         };
         if unstored_hardwired.iter().all(|u| *u) {
+            // The empty answer still fails what the query would be refused
+            // for without a shape: a union's `after` rules, or one class's
+            // unsupported cursor.
+            refuse_before_empty_model_answer(classes, &query_input)?;
             return serde_json::to_string(&super::model_query::ModelQueryResult {
                 instances: vec![],
                 total_count: query_input.count.unwrap_or(false).then_some(0),
+                next_cursor: None,
             })
             .map_err(|e| {
                 deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
@@ -3933,10 +4005,15 @@ impl PerspectiveInstance {
             .await?;
         let named = classes;
         let classes = &targets.classes;
+        // The early answers below — no class resolved, a `producedByFlow`
+        // filter nothing passes — skip the pipeline, so they make its
+        // shape-free refusals themselves, the same way.
+        refuse_before_empty_model_answer(classes, &query_input)?;
         if classes.names().is_empty() {
             return serde_json::to_string(&super::model_query::ModelQueryResult {
                 instances: vec![],
                 total_count: query_input.count.unwrap_or(false).then_some(0),
+                next_cursor: None,
             })
             .map_err(|e| {
                 deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
@@ -3988,6 +4065,7 @@ impl PerspectiveInstance {
                 return serde_json::to_string(&super::model_query::ModelQueryResult {
                     instances: vec![],
                     total_count: query_input.count.unwrap_or(false).then_some(0),
+                    next_cursor: None,
                 })
                 .map_err(|e| {
                     deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
@@ -5920,6 +5998,8 @@ impl PerspectiveInstance {
     ///
     /// `classes` is one class or a union (#1238). A union is one subscription:
     /// it re-runs when a diff touches the trigger set of any class it names.
+    /// A query that sends `after` fails with
+    /// [`MODEL_SUBSCRIPTION_CURSOR_UNSUPPORTED`].
     pub async fn model_subscribe_and_query(
         &self,
         stop: &EvalStop,
@@ -5929,6 +6009,9 @@ impl PerspectiveInstance {
         connection_id: String,
         subscriber: Option<String>,
     ) -> Result<(String, u64, String), AnyError> {
+        if model_query_sends_cursor(&query_json) {
+            return Err(anyhow!(MODEL_SUBSCRIPTION_CURSOR_UNSUPPORTED));
+        }
         // An abstract class (#1435) is watched through the classes it reads
         // now; `refresh_abstract_subscriptions` resolves it again when the
         // installed shapes change. The generation is read first, so a change
@@ -6842,6 +6925,7 @@ impl PerspectiveInstance {
                     additions: Vec::new(),
                     removals: Vec::new(),
                 },
+                updates: Vec::new(),
                 created_at: now,
             },
         );
@@ -9061,6 +9145,92 @@ mod tests {
         );
     }
 
+    /// A malformed `after` fails even when the query would answer empty:
+    /// `ad4m://FlowInstance` is a hard-wired class nothing wrote here, so the
+    /// query returns before the pipeline's decode could run. A valid first
+    /// page still answers empty — and writes nothing.
+    #[tokio::test]
+    async fn test_model_query_decodes_after_before_an_empty_answer() {
+        use base64::Engine;
+        let perspective = setup().await;
+        let err = perspective
+            .model_query_within(
+                "ad4m://FlowInstance",
+                r#"{"after":"!","limit":1}"#,
+                Duration::from_secs(1),
+            )
+            .await
+            .expect_err("a malformed cursor is an error, not an empty page");
+        assert!(err.to_string().contains("Invalid `after` cursor"), "{err}");
+
+        // And every `after` rule the pipeline refuses without a shape fails
+        // the same way here: the empty result must not stand in for the
+        // refusal a stored class would give.
+        for (name, query) in [
+            (
+                "a property order",
+                r#"{"after":"","limit":1,"order":{"title":"ASC"}}"#,
+            ),
+            ("`limit: 0`", r#"{"after":"","limit":0}"#),
+            ("no `limit`", r#"{"after":""}"#),
+            (
+                "a non-zero `offset`",
+                r#"{"after":"","limit":1,"offset":2}"#,
+            ),
+            ("an `include` cursor", r#"{"include":{"rel":{"after":""}}}"#),
+        ] {
+            let err = perspective
+                .model_query_within("ad4m://FlowInstance", query, Duration::from_secs(1))
+                .await
+                .expect_err(&format!("{name}: refused, not an empty page"));
+            assert!(err.to_string().contains("`after`"), "{name}: {err}");
+        }
+
+        // A cursor taken from a page read the other way is refused too —
+        // the order's direction needs no shape to compare.
+        let desc_cursor = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"ts":"2026-01-01T00:00:00.000Z","id":"ns://a","desc":true}"#);
+        let err = perspective
+            .model_query_within(
+                "ad4m://FlowInstance",
+                &format!(r#"{{"after":"{desc_cursor}","limit":1,"order":{{"timestamp":"ASC"}}}}"#),
+                Duration::from_secs(1),
+            )
+            .await
+            .expect_err("a cursor from the other direction: refused");
+        assert!(
+            err.to_string().contains("opposite order direction"),
+            "{err}"
+        );
+
+        let first = perspective
+            .model_query_within(
+                "ad4m://FlowInstance",
+                r#"{"after":"","limit":1}"#,
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("a first page of an unstored class reads empty");
+        let first: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(first["instances"].as_array().unwrap().len(), 0);
+        // And a well-formed cursor decodes and reads empty too.
+        let cursor = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"ts":"2026-01-01T00:00:00.000Z","id":"ns://a","desc":false}"#);
+        let query = format!(r#"{{"after":"{cursor}","limit":1}}"#);
+        perspective
+            .model_query_within("ad4m://FlowInstance", &query, Duration::from_secs(1))
+            .await
+            .expect("a well-formed cursor decodes");
+        assert!(
+            perspective
+                .get_links(&LinkQuery::default())
+                .await
+                .unwrap()
+                .is_empty(),
+            "the empty answers wrote nothing"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // #909: an include's target-class SHACL that has not synced yet gets the
     // same bounded wait as the queried class's own.
@@ -9872,6 +10042,246 @@ mod tests {
             link.target,
             msg
         );
+    }
+
+    /// M9: a link updated inside a batch reaches subscribers as one
+    /// `link-updated` event to all of the owners on commit, not as a removal
+    /// plus an addition, and both links keep the stored status.
+    #[tokio::test]
+    async fn test_commit_batch_publishes_batched_update_as_link_updated() {
+        let mut perspective = setup().await;
+        let owners = vec![
+            "did:test:owner-a".to_string(),
+            "did:test:owner-b".to_string(),
+        ];
+        perspective.persisted.lock().await.owners = Some(owners.clone());
+        let old: LinkExpression = perspective
+            .add_link(
+                create_link(),
+                LinkStatus::Local,
+                None,
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap()
+            .into();
+        let new_link = create_link();
+
+        let batch_id = perspective.create_batch().await;
+        perspective
+            .update_link(
+                old.clone(),
+                new_link.clone(),
+                Some(batch_id.clone()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap();
+
+        let pubsub = crate::pubsub::get_global_pubsub().await;
+        let mut rx = pubsub.subscribe_events();
+
+        perspective
+            .commit_batch(batch_id, &AgentContext::main_agent())
+            .await
+            .unwrap();
+
+        // The event channel is global: keep only this perspective's events.
+        let uuid = perspective.uuid.clone();
+        let mut mine = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if event.perspective.as_deref() == Some(uuid.as_str()) {
+                mine.push(event);
+            }
+        }
+        let of = |topic: Topic| {
+            mine.iter()
+                .filter(|e| e.topic == topic)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert!(of(Topic::LinkAdded).is_empty(), "no ADDED for an update");
+        assert!(
+            of(Topic::LinkRemoved).is_empty(),
+            "no REMOVED for an update"
+        );
+        let updated = of(Topic::LinkUpdated);
+        assert_eq!(updated.len(), 1, "one UPDATED for the update");
+        match &updated[0].audience {
+            crate::events::Audience::Dids(dids) => {
+                let mut dids = dids.clone();
+                dids.sort();
+                assert_eq!(dids, owners, "the UPDATED goes to all of the owners");
+            }
+            _ => panic!("the UPDATED goes to the owners' DIDs"),
+        }
+        for event in &updated {
+            let v = &event.payload;
+            assert_eq!(v["oldLink"]["data"]["target"], old.data.target.as_str());
+            assert_eq!(v["newLink"]["data"]["target"], new_link.target.as_str());
+            assert_eq!(v["oldLink"]["status"], "LOCAL");
+            assert_eq!(v["newLink"]["status"], "LOCAL");
+        }
+
+        let stored = perspective
+            .get_links(&LinkQuery {
+                source: Some(new_link.source.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].status, Some(LinkStatus::Local));
+        let old_left = perspective
+            .get_links(&LinkQuery {
+                source: Some(old.data.source.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(old_left.is_empty(), "the old link is removed");
+    }
+
+    /// M9: a batched update reaches the link language only when its link is
+    /// Shared. A Local update stays on this replica, as a non-batch one does.
+    #[tokio::test]
+    async fn test_commit_batch_sends_only_shared_updates_to_the_link_language() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let local: LinkExpression = perspective
+            .add_link(create_link(), LinkStatus::Local, None, &context)
+            .await
+            .unwrap()
+            .into();
+        let shared: LinkExpression = perspective
+            .add_link(create_link(), LinkStatus::Shared, None, &context)
+            .await
+            .unwrap()
+            .into();
+
+        // A neighbourhood whose link language records what it is sent.
+        let sent = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let record = sent.clone();
+        perspective.persisted.lock().await.neighbourhood =
+            Some(DecoratedNeighbourhoodExpression::default());
+        *perspective.link_language.write().await = Some(Language::with_test_commit(
+            "test-link-language".to_string(),
+            Arc::new(move |diff: PerspectiveDiff| {
+                let mut sent = record.lock().unwrap();
+                sent.extend(diff.additions.iter().map(|l| format!("+{}", l.data.target)));
+                sent.extend(diff.removals.iter().map(|l| format!("-{}", l.data.target)));
+                Ok(None)
+            }),
+        ));
+
+        let new_local = create_link();
+        let new_shared = create_link();
+        let batch_id = perspective.create_batch().await;
+        for (old, new) in [(&local, &new_local), (&shared, &new_shared)] {
+            perspective
+                .update_link(old.clone(), new.clone(), Some(batch_id.clone()), &context)
+                .await
+                .unwrap();
+        }
+        perspective.commit_batch(batch_id, &context).await.unwrap();
+
+        // The commit is spawned: wait until the Shared update has arrived.
+        // (The spawned commit of the Shared add above may land here too.)
+        let shared_update = [
+            format!("+{}", new_shared.target),
+            format!("-{}", shared.data.target),
+        ];
+        let mut got = Vec::new();
+        for _ in 0..100 {
+            got = sent.lock().unwrap().clone();
+            if shared_update.iter().all(|e| got.contains(e)) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            shared_update.iter().all(|e| got.contains(e)),
+            "the Shared update is sent: {got:?}"
+        );
+        let local_targets = [&local.data.target, &new_local.target];
+        assert!(
+            !got.iter()
+                .any(|e| local_targets.iter().any(|t| &e[1..] == t.as_str())),
+            "nothing of the Local update is sent: {got:?}"
+        );
+    }
+
+    /// M9: an update whose new link later work in the batch dropped commits
+    /// as a plain removal. Here `setSingleTarget` on the same source and
+    /// predicate prunes the staged new link and sets a third target.
+    #[tokio::test]
+    async fn test_commit_batch_publishes_an_update_broken_by_set_single_target_as_a_removal() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let old: LinkExpression = perspective
+            .add_link(create_link(), LinkStatus::Shared, None, &context)
+            .await
+            .unwrap()
+            .into();
+        let source = old.data.source.clone();
+        let predicate = old.data.predicate.clone();
+        let updated = Link {
+            target: "test://updated".to_string(),
+            ..old.data.clone()
+        };
+
+        let batch_id = perspective.create_batch().await;
+        perspective
+            .update_link(old.clone(), updated, Some(batch_id.clone()), &context)
+            .await
+            .unwrap();
+        perspective
+            .execute_commands(
+                vec![Command {
+                    source: Some(source.clone()),
+                    predicate: predicate.clone(),
+                    target: Some("test://final".to_string()),
+                    local: None,
+                    action: Action::SetSingleTarget,
+                }],
+                source.clone(),
+                vec![],
+                Some(batch_id.clone()),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let pubsub = crate::pubsub::get_global_pubsub().await;
+        let mut rx = pubsub.subscribe_events();
+        perspective.commit_batch(batch_id, &context).await.unwrap();
+
+        let uuid = perspective.uuid.clone();
+        let mut updates = 0;
+        while let Ok(event) = rx.try_recv() {
+            if event.perspective.as_deref() == Some(uuid.as_str())
+                && event.topic == Topic::LinkUpdated
+            {
+                updates += 1;
+            }
+        }
+        assert_eq!(
+            updates, 0,
+            "no UPDATED for an update whose new link was dropped"
+        );
+
+        let stored: Vec<String> = perspective
+            .get_links(&LinkQuery {
+                source: Some(source),
+                predicate,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|l| l.data.target)
+            .collect();
+        assert_eq!(stored, vec!["test://final".to_string()]);
     }
 
     /// Regression: paginated `get_links(limit=N)` must use the bounded-heap

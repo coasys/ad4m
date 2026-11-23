@@ -376,6 +376,28 @@ async fn one_millisecond_orders_by_iri() {
     }
 }
 
+/// A cursor query goes to SPARQL: the index pages by offset only, so it would
+/// give the first page again and drop the cursor.
+#[tokio::test]
+async fn a_cursor_query_goes_to_sparql() {
+    let world = World::empty();
+    let s = TestSigner::generate();
+    for i in 0..5 {
+        world.add(&flag_link(&s, &format!("si://m/{i}"), T0 + i));
+    }
+    world.index();
+    assert!(
+        world
+            .compare(&query(json!({"limit": 2})), "no cursor")
+            .await
+    );
+    let first = query(json!({"limit": 2, "after": ""}));
+    assert!(!world.compare(&first, "first page").await);
+    let after = world.run(&world.plain, &first).await.next_cursor.unwrap();
+    let second = query(json!({"limit": 2, "after": after}));
+    assert!(!world.compare(&second, "second page").await);
+}
+
 /// A member whose flag time is not in the executor's form makes the class go
 /// to SPARQL, which then gives what it always gave.
 #[tokio::test]
@@ -581,6 +603,7 @@ async fn bench_newest_20_of_100k_under_one_parent() {
         direction: OrderDirection::DESC,
         offset: Some(offset),
         limit: Some(20),
+        keyset: None,
     };
     let mut samples = Vec::new();
     for n in 0..9 {
@@ -620,6 +643,7 @@ fn newest_first(offset: usize, limit: usize) -> SparqlPagination {
         direction: OrderDirection::DESC,
         offset: Some(offset),
         limit: Some(limit),
+        keyset: None,
     }
 }
 
