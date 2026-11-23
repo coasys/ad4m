@@ -503,3 +503,149 @@ async fn an_invalid_entry_leaves_no_records_and_a_retry_works() {
         "the retry imported nothing: {instances:?}"
     );
 }
+
+// --- An interrupted first mount leaves nothing behind -----------------------
+
+/// A first mount writes its pending mark before any record, and drops it
+/// once the mount link is written.
+#[tokio::test]
+async fn a_first_mount_is_pending_until_its_mount_link() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "a"})).await;
+    let (p, _shapes, _ctx) =
+        crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
+
+    let gate = gates::arm(&lang, MountPoint::EntryRead);
+    let mut mounting = p.clone();
+    let l = lang.clone();
+    let mount = tokio::spawn(async move { mounting.mount(&l).await });
+    gate.arrived().await;
+    let pending = links_at(&p, &format!("{lang}://project"), "ad4m://mount_pending").await;
+    gate.release();
+    mount.await.unwrap().unwrap();
+    crate::perspectives::unregister_mount(&lang, &p.uuid);
+
+    assert_eq!(
+        pending.len(),
+        1,
+        "no pending mark while the records were written"
+    );
+    assert!(
+        links_at(&p, &format!("{lang}://project"), "ad4m://mount_pending")
+            .await
+            .is_empty(),
+        "the pending mark outlived the mount"
+    );
+}
+
+/// A start that finds a pending first mount without its mount link (the
+/// executor stopped between the records and the mount link) removes what
+/// that mount wrote.
+#[tokio::test]
+async fn a_restart_removes_what_an_interrupted_first_mount_wrote() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "a"})).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let previous = crate::perspectives::get_app_data_path();
+    crate::perspectives::set_app_data_path(dir.path().to_str().unwrap().to_string());
+
+    let check = async {
+        let (mut p, _ctx) = mounted(&lang).await;
+        // What a first mount leaves when the executor stops before its
+        // mount link: its records, its version link and its pending mark.
+        let mount_links: Vec<LinkExpression> = p
+            .get_links(&LinkQuery {
+                predicate: Some("ad4m://mount".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_iter()
+            .map(LinkExpression::from)
+            .collect();
+        p.remove_links(mount_links, None).await.unwrap();
+        p.add_mount_links(
+            &lang,
+            vec![Link {
+                source: format!("{lang}://project"),
+                predicate: Some("ad4m://mount_pending".to_string()),
+                target: "literal:string:pending".to_string(),
+            }],
+        )
+        .await
+        .unwrap();
+        assert!(!lang_links(&p, &lang).await.is_empty());
+
+        let handle = p.persisted.lock().await.clone();
+        let uuid = handle.uuid.clone();
+        let store = p.sparql_store.clone();
+        crate::perspectives::unregister_mount(&lang, &uuid);
+        drop(p);
+        for _ in 0..200 {
+            if std::sync::Arc::strong_count(&store) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        drop(store);
+
+        let mut reopened = PerspectiveInstance::new(handle, None);
+        reopened.restore_mounts().await;
+        let left = lang_links(&reopened, &lang).await;
+        assert!(
+            left.is_empty(),
+            "the interrupted mount's links stayed: {left:?}"
+        );
+        assert!(things(&reopened).await.is_empty());
+
+        // A new mount works.
+        reopened.mount(&lang).await.unwrap();
+        crate::perspectives::unregister_mount(&lang, &uuid);
+        assert_eq!(things(&reopened).await.len(), 1);
+    }
+    .await;
+    *crate::perspectives::APP_DATA_PATH.write().unwrap() = previous;
+    check
+}
+
+/// A `mount` future dropped while it runs leaves the mount `Inactive` with
+/// nothing written, so a retry mounts.
+#[tokio::test]
+async fn a_dropped_mount_can_be_retried() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "a"})).await;
+    let (mut p, _shapes, _ctx) =
+        crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
+
+    let gate = gates::arm(&lang, MountPoint::EntryRead);
+    let mut mounting = p.clone();
+    let l = lang.clone();
+    let mount = tokio::spawn(async move { mounting.mount(&l).await });
+    gate.arrived().await;
+    mount.abort();
+    let _ = mount.await;
+
+    let mut phase = super::mount_lifecycle::MountPhase::Mounting;
+    for _ in 0..40 {
+        phase = p.mount_lifecycles.lock(&lang).await.phase.clone();
+        if phase == super::mount_lifecycle::MountPhase::Inactive {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        phase,
+        super::mount_lifecycle::MountPhase::Inactive,
+        "the dropped mount stayed Mounting"
+    );
+    let left = lang_links(&p, &lang).await;
+    assert!(
+        left.is_empty(),
+        "the dropped mount's links stayed: {left:?}"
+    );
+
+    p.mount(&lang).await.unwrap();
+    crate::perspectives::unregister_mount(&lang, &p.uuid);
+    assert_eq!(things(&p).await.len(), 1);
+}

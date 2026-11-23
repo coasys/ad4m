@@ -51,6 +51,11 @@ const MOUNT_PROJECT_PATH: &str = "project";
 /// `<lang>://project -[ad4m://mount_shapes_version]-> literal:string:<v>`
 /// records which `mountShapes()` version is installed (design §2.4).
 const VERSION_PREDICATE: &str = "ad4m://mount_shapes_version";
+/// `<lang>://project -[ad4m://mount_pending]-> literal:string:pending`:
+/// a first mount is writing its records and has not written its mount
+/// link yet. A start that finds one without a mount link removes what the
+/// interrupted mount wrote (`clean_interrupted_mounts`).
+const PENDING_PREDICATE: &str = "ad4m://mount_pending";
 /// `<lang>://project -[ad4m://mounts_class]-> literal:string:<name>`: the
 /// class links builds before A9 wrote; only `refuse_mirror_of_an_older_build`
 /// still looks for them.
@@ -88,7 +93,40 @@ struct StagedRecord {
 /// Bookkeeping predicates never belong to a record, so the snapshot sweep
 /// and the per-address diff must leave them alone.
 fn is_bookkeeping(predicate: Option<&str>) -> bool {
-    predicate == Some(VERSION_PREDICATE)
+    matches!(predicate, Some(VERSION_PREDICATE) | Some(PENDING_PREDICATE))
+}
+
+/// The pending mark (`PENDING_PREDICATE`) of `lang`'s mount.
+fn pending_link(lang_address: &str) -> Result<Link, AnyError> {
+    Ok(Link {
+        source: mount_target(lang_address),
+        predicate: Some(PENDING_PREDICATE.to_string()),
+        target: literal_target(&Value::String("pending".to_string()))?,
+    })
+}
+
+/// Moves a mount left `Mounting` back to `Inactive`, and removes what it
+/// wrote, when the `mount` future is dropped before it finishes (a caller
+/// gave up on it). `mount` disarms it once `mount_as` returns.
+struct AbandonedMount {
+    perspective: Option<PerspectiveInstance>,
+    lang_address: String,
+    generation: u64,
+}
+
+impl Drop for AbandonedMount {
+    fn drop(&mut self) {
+        let Some(mut perspective) = self.perspective.take() else {
+            return;
+        };
+        let lang_address = std::mem::take(&mut self.lang_address);
+        let generation = self.generation;
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                perspective.abandon_mount(&lang_address, generation).await;
+            });
+        }
+    }
 }
 
 impl PerspectiveInstance {
@@ -101,7 +139,10 @@ impl PerspectiveInstance {
     /// records (its class claims stay, so a retry may install over its own
     /// shapes), and a retry runs it all again. While it runs the mount is
     /// `Mounting`: no sync or delta applies, and an `unmount` meanwhile
-    /// wins.
+    /// wins. A pending mark written before the records lets a start clean
+    /// up a mount the executor stopped in (`clean_interrupted_mounts`), and
+    /// a dropped `mount` future is cleaned up like a failed mount
+    /// (`AbandonedMount`).
     pub async fn mount(&mut self, lang_address: &str) -> Result<(), AnyError> {
         self.refuse_mirror_of_an_older_build(lang_address).await?;
         let generation = {
@@ -116,7 +157,13 @@ impl PerspectiveInstance {
                 }
             }
         };
+        let mut abandoned = AbandonedMount {
+            perspective: Some(self.clone()),
+            lang_address: lang_address.to_string(),
+            generation,
+        };
         let result = self.mount_as(lang_address, generation).await;
+        abandoned.perspective = None;
         if result.is_err() {
             let mut slot = self.mount_lifecycles.lock(lang_address).await;
             if slot.generation == generation && slot.phase == MountPhase::Mounting {
@@ -124,6 +171,87 @@ impl PerspectiveInstance {
             }
         }
         result
+    }
+
+    /// A `mount` at `generation` was dropped before it finished: if it is
+    /// still `Mounting`, make it `Inactive` and remove what it wrote under
+    /// `<lang>://`, as a failed mount does.
+    async fn abandon_mount(&mut self, lang_address: &str, generation: u64) {
+        let mut slot = self.mount_lifecycles.lock(lang_address).await;
+        if slot.generation != generation || slot.phase != MountPhase::Mounting {
+            return;
+        }
+        self.mount_lifecycles.enter(&mut slot, MountPhase::Inactive);
+        if let Err(e) = self.remove_written_under(lang_address).await {
+            log::warn!(
+                "perspective {}: cleaning up the abandoned mount of {lang_address} failed: {e}",
+                self.uuid
+            );
+        }
+    }
+
+    /// Startup: a pending mark (`PENDING_PREDICATE`) the mount ledger
+    /// lists is a first mount the executor stopped in. Without its mount
+    /// link, remove everything it wrote under `<lang>://` (its records
+    /// would be queryable and never updated); with it, the mount finished
+    /// and only the mark is left to drop. A mount this process is running
+    /// is left alone.
+    async fn clean_interrupted_mounts(&mut self) -> Result<(), AnyError> {
+        let marks = self
+            .get_links(&LinkQuery {
+                predicate: Some(PENDING_PREDICATE.to_string()),
+                ..Default::default()
+            })
+            .await?;
+        let mut langs = Vec::new();
+        {
+            let mut written = self.mount_written_by_language();
+            for mark in marks {
+                let Ok((lang, _)) = LanguageController::parse_expr_url(&mark.data.source) else {
+                    continue;
+                };
+                if mark.data.source == mount_target(&lang) && written.wrote(&lang, &mark)? {
+                    langs.push(lang);
+                }
+            }
+        }
+        langs.sort();
+        langs.dedup();
+        for lang in langs {
+            let slot = self.mount_lifecycles.lock(&lang).await;
+            if slot.phase != MountPhase::Inactive {
+                continue;
+            }
+            if self.has_mount_link(&lang).await? {
+                self.remove_pending(&lang).await?;
+            } else {
+                log::warn!(
+                    "perspective {}: removing what an interrupted mount of {lang} wrote",
+                    self.uuid
+                );
+                self.remove_written_under(&lang).await?;
+            }
+            drop(slot);
+        }
+        Ok(())
+    }
+
+    /// Remove the pending mark of `lang`'s mount.
+    async fn remove_pending(&mut self, lang_address: &str) -> Result<(), AnyError> {
+        let written = self.mount_written(lang_address)?;
+        let marks: Vec<LinkExpression> = self
+            .get_links(&LinkQuery {
+                source: Some(mount_target(lang_address)),
+                predicate: Some(PENDING_PREDICATE.to_string()),
+                ..Default::default()
+            })
+            .await?
+            .into_iter()
+            .filter(|l| written.contains(l))
+            .map(LinkExpression::from)
+            .collect();
+        self.remove_links(marks, None).await?;
+        Ok(())
     }
 
     /// `mount`'s work for the mount `generation` names.
@@ -141,6 +269,10 @@ impl PerspectiveInstance {
         }
         self.install_mount_shapes(lang_address, &shapes).await?;
         let written = async {
+            // Written before any record: a start that finds it without a
+            // mount link removes what this mount wrote.
+            self.add_mount_links(lang_address, vec![pending_link(lang_address)?])
+                .await?;
             let own = self.mount_own_classes(lang_address).await?;
             let records = self.stage_records(lang_address, &own, &snapshot.entries)?;
             self.write_snapshot(lang_address, &mut slot, records, seq)
@@ -158,6 +290,7 @@ impl PerspectiveInstance {
                 )
                 .await?;
             }
+            self.remove_pending(lang_address).await?;
             Ok::<(), AnyError>(())
         }
         .await;
@@ -527,6 +660,12 @@ impl PerspectiveInstance {
     /// warning (a peer without the passphrase cannot install it, design
     /// §5.2). Never fails.
     pub(crate) async fn restore_mounts(&mut self) {
+        if let Err(e) = self.clean_interrupted_mounts().await {
+            log::warn!(
+                "perspective {}: cleaning up interrupted mounts failed: {e}",
+                self.uuid
+            );
+        }
         let langs = match self.mounts().await {
             Ok(langs) => langs,
             Err(e) => {
@@ -741,7 +880,7 @@ impl PerspectiveInstance {
         Ok(())
     }
 
-    /// Delete the bookkeeping links the mount wrote under `<lang>://project`.
+    /// Delete the version link the mount wrote under `<lang>://project`.
     async fn remove_bookkeeping(&mut self, lang_address: &str) -> Result<(), AnyError> {
         let written = self.mount_written(lang_address)?;
         let doomed: Vec<LinkExpression> = self
@@ -751,7 +890,9 @@ impl PerspectiveInstance {
             })
             .await?
             .into_iter()
-            .filter(|l| written.contains(l) && is_bookkeeping(l.data.predicate.as_deref()))
+            .filter(|l| {
+                written.contains(l) && l.data.predicate.as_deref() == Some(VERSION_PREDICATE)
+            })
             .map(LinkExpression::from)
             .collect();
         self.remove_links(doomed, None).await?;
