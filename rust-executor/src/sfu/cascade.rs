@@ -332,23 +332,52 @@ impl CascadeManager {
         );
     }
 
-    /// A pipe peer died, and `healthy_stretch` says whether a connected
-    /// stretch reached [`PIPE_HEALTHY_RESET`] before this death. When it
-    /// did, the failure count resets and this end is a first failure.
+    /// The pipe `participant_id` died, and `healthy_stretch` says whether a
+    /// connected stretch reached [`PIPE_HEALTHY_RESET`] before this death.
+    /// When it did, the failure count resets and this end is a first failure.
     /// Dead-pipe cleanup calls this. The comparison is the peer's: a
-    /// disconnected period is not measured here.
+    /// disconnected period is not measured here. A notice for a pipe that is
+    /// no longer the one stored for `(room_id, remote_did)` changes nothing:
+    /// a leave or an eviction removed it, and a later announce stored a
+    /// replacement, which keeps its entry, its known-node entry and its
+    /// failure count.
     pub fn apply_pipe_death(
         &mut self,
+        participant_id: &ParticipantId,
         room_id: &str,
         remote_did: &str,
         reason: &str,
         now: Instant,
         healthy_stretch: bool,
     ) -> Option<ParticipantId> {
+        let key = (room_id.to_string(), remote_did.to_string());
+        if self
+            .pipes
+            .get(&key)
+            .is_some_and(|meta| &meta.participant_id != participant_id)
+        {
+            debug!(
+                "SFU cascade: notice for pipe {participant_id} to {remote_did} in {room_id} is stale; a newer pipe holds the entry"
+            );
+            return None;
+        }
         if healthy_stretch {
             self.note_healthy_stretch(room_id, remote_did);
         }
         self.on_pipe_died(room_id, remote_did, reason, now)
+    }
+
+    /// Drop every redial entry that can no longer change a dial: no pipe is
+    /// stored for its pair, and its wait ended a healthy interval ago
+    /// ([`PIPE_HEALTHY_RESET`]). A pipe that connected after the wait and
+    /// stayed up that long would have reset the count anyway, so the next
+    /// failure is a first one. Without this, every pair that ever failed
+    /// keeps an entry for the life of the process.
+    pub fn prune_redials(&mut self, now: Instant) {
+        let pipes = &self.pipes;
+        self.redials.retain(|key, redial| {
+            pipes.contains_key(key) || now < redial.not_before + PIPE_HEALTHY_RESET
+        });
     }
 
     /// A pipe peer died. An ended offer (`reason` `"offer"`) arms the redial
@@ -1484,13 +1513,14 @@ mod tests {
         mgr.establish_pipe(remote, &room).unwrap();
         mgr.on_pipe_died(&key, remote, "drop", t0);
         mgr.set_now(t0 + PIPE_REDIAL_BACKOFF);
-        mgr.establish_pipe(remote, &room)
+        let (pipe, _) = mgr
+            .establish_pipe(remote, &room)
             .expect("the second failure waits 30 s");
 
         let t_short = t0 + PIPE_REDIAL_BACKOFF;
         let t_early = t_short + PIPE_HEALTHY_RESET - Duration::from_millis(1);
         mgr.set_now(t_early);
-        mgr.apply_pipe_death(&key, remote, "drop", t_early, false);
+        mgr.apply_pipe_death(&pipe.id, &key, remote, "drop", t_early, false);
         assert!(
             mgr.establish_pipe(remote, &room).is_err(),
             "a pipe connected for less than the healthy interval keeps its backoff"
@@ -1498,11 +1528,12 @@ mod tests {
 
         let t_up = t_early + PIPE_REDIAL_BACKOFF * 2;
         mgr.set_now(t_up);
-        mgr.establish_pipe(remote, &room)
+        let (pipe, _) = mgr
+            .establish_pipe(remote, &room)
             .expect("the third failure waits 60 s");
         let t_drop = t_up + PIPE_HEALTHY_RESET;
         mgr.set_now(t_drop);
-        mgr.apply_pipe_death(&key, remote, "drop", t_drop, true);
+        mgr.apply_pipe_death(&pipe.id, &key, remote, "drop", t_drop, true);
         mgr.establish_pipe(remote, &room)
             .expect("a pipe that stayed connected for the healthy interval redials at once");
 
@@ -1514,5 +1545,68 @@ mod tests {
         mgr.set_now(t_drop + PIPE_REDIAL_BACKOFF);
         mgr.establish_pipe(remote, &room)
             .expect("backoff starts again at 30 s");
+    }
+
+    /// A death notice for a pipe a leave already removed must not delete the
+    /// replacement stored under the same key.
+    #[test]
+    fn a_stale_death_notice_leaves_the_replacement_pipe_in_place() {
+        let room = RoomId::new("nh", "stale-notice");
+        let key = room.to_string();
+        let remote = "did:key:nodeA";
+        let t0 = Instant::now();
+        let mut mgr = CascadeManager::new("did:key:nodeB".into(), test_addr(10190), 8);
+        mgr.set_now(t0);
+        mgr.handle_sfu_announce(remote.into(), key.clone(), 1, 8, Vec::new());
+        let (old, _) = mgr.establish_pipe(remote, &room).unwrap();
+        let old_id = old.id.clone();
+        mgr.remove_node_from_room(&key, remote);
+        mgr.handle_sfu_announce(remote.into(), key.clone(), 1, 8, Vec::new());
+        let (new, _) = mgr.establish_pipe(remote, &room).unwrap();
+
+        let removed = mgr.apply_pipe_death(&old_id, &key, remote, "timeout", t0, false);
+        assert!(removed.is_none(), "the stale notice removes nothing");
+        assert_eq!(
+            mgr.pipes
+                .get(&(key.clone(), remote.to_string()))
+                .map(|m| m.participant_id.clone()),
+            Some(new.id.clone()),
+            "the replacement keeps its entry"
+        );
+        assert!(
+            mgr.known_nodes
+                .get(&key)
+                .is_some_and(|nodes| nodes.contains_key(remote)),
+            "the replacement keeps its known-node entry"
+        );
+
+        let removed = mgr.apply_pipe_death(&new.id, &key, remote, "timeout", t0, false);
+        assert_eq!(removed, Some(new.id.clone()), "its own notice removes it");
+    }
+
+    /// A pair that failed once keeps no entry after its wait and a healthy
+    /// interval; a pair with a live pipe keeps its entry.
+    #[test]
+    fn prune_redials_drops_entries_that_can_no_longer_matter() {
+        let room = RoomId::new("nh", "prune");
+        let key = room.to_string();
+        let remote = "did:key:nodeA";
+        let t0 = Instant::now();
+        let mut mgr = CascadeManager::new("did:key:nodeB".into(), test_addr(10191), 8);
+        mgr.set_now(t0);
+        mgr.establish_pipe(remote, &room).unwrap();
+        mgr.on_pipe_died(&key, remote, "offer", t0);
+        assert_eq!(mgr.redials.len(), 1);
+
+        mgr.prune_redials(t0 + PIPE_HEALTHY_RESET - Duration::from_millis(1));
+        assert_eq!(mgr.redials.len(), 1, "the entry still counts");
+        mgr.prune_redials(t0 + PIPE_HEALTHY_RESET);
+        assert!(mgr.redials.is_empty(), "the entry is gone");
+
+        mgr.on_pipe_died(&key, remote, "offer", t0);
+        mgr.set_now(t0);
+        mgr.establish_pipe(remote, &room).unwrap();
+        mgr.prune_redials(t0 + PIPE_HEALTHY_RESET * 2);
+        assert_eq!(mgr.redials.len(), 1, "a live pipe keeps its entry");
     }
 }
