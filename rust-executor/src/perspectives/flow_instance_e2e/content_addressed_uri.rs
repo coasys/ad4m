@@ -113,7 +113,9 @@ async fn an_honest_run_through_the_real_co_sign_path_mints_a_verifying_receipt()
         .expect("the real co-sign path signs the committed proposal");
     assert_eq!(f.derived().await.state, "scoped", "n = 2 settled");
 
-    let flows = load_shacl_flows(&f.perspective).await.expect("flows");
+    let flows = load_shacl_flows(&EvalStop::none(), &f.perspective)
+        .await
+        .expect("flows");
     let flow = &flows[&f.flow_uri];
     let loaded = load_outputs(&f.perspective, &[task_ref(TASK)])
         .await

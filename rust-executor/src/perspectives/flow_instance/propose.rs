@@ -83,6 +83,7 @@ use crate::perspectives::flow_evaluator::{
     find_live_proposals, recompute_evidence_seal, write_proposal, EvidenceSeal, SatisfiedTransition,
 };
 use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::perspectives::sparql_store::EvalStop;
 use crate::types::LinkQuery;
 
 /// What one `propose_flow_transition` call did, and where the flow stands
@@ -149,7 +150,7 @@ pub async fn propose_flow_transition(
     // `accept_flow_proposal`.
     let lock = perspective.flow_pass_lock.clone();
     let _passes = lock.lock().await;
-    let flows = load_shacl_flows(perspective).await?;
+    let flows = load_shacl_flows(&EvalStop::none(), perspective).await?;
     let instances = load_all_flow_instances(perspective).await?;
     let record = instances
         .iter()
