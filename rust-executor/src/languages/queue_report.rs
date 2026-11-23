@@ -1,7 +1,8 @@
 //! Every 30 s, one `[call-diag] event=language.queue` line per language with calls waiting:
-//! how many, how long the oldest has waited, how long the running call has run. A language
-//! runs one call at a time (`language_runtime.rs`), so one slow call (a key-grant job's HTTP
-//! time-outs) holds every caller behind it; these lines show which language and since when.
+//! how many, how long the oldest has waited, how long the running ordered call has run. A
+//! language runs its ordered calls one at a time (`language_runtime.rs`), so one slow call (a
+//! key-grant job's HTTP time-outs) holds every ordered caller behind it; these lines show which
+//! language and since when.
 //! Nothing is logged while every queue is empty.
 
 use std::time::Duration;

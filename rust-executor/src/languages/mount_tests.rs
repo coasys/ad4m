@@ -168,3 +168,105 @@ async fn the_project_address_reports_the_language_address() {
         .unwrap();
     assert_eq!(reported, Value::String(addr));
 }
+
+#[tokio::test]
+async fn mount_shapes_returns_the_parsed_shapes() {
+    let addr = load_mount_test_language().await;
+    let shapes = LanguageController::global_instance()
+        .mount_shapes(&addr)
+        .await
+        .unwrap();
+    assert_eq!(shapes.version, "1");
+    assert_eq!(shapes.shapes.len(), 1);
+    assert_eq!(shapes.shapes[0].name, "MountThing");
+    assert_eq!(
+        shapes.shapes[0].shape["constructor_actions"][0]["source"],
+        json!(format!("{addr}://class/MountThing"))
+    );
+}
+
+#[tokio::test]
+async fn mount_snapshot_lists_the_records() {
+    let addr = load_mount_test_language().await;
+    interact(
+        &format!("{addr}://class/MountThing"),
+        "create",
+        json!({"title": "a"}),
+    )
+    .await
+    .unwrap();
+    interact(
+        &format!("{addr}://class/MountThing"),
+        "create",
+        json!({"title": "b", "done": true, "tags": ["x"]}),
+    )
+    .await
+    .unwrap();
+
+    let snapshot = LanguageController::global_instance()
+        .mount_snapshot(&addr)
+        .await
+        .unwrap();
+    assert_eq!(snapshot.entries.len(), 2);
+    let by_address: std::collections::HashMap<&str, _> = snapshot
+        .entries
+        .iter()
+        .map(|e| (e.address.as_str(), e))
+        .collect();
+    assert_eq!(by_address["t1"].r#class, "MountThing");
+    assert_eq!(
+        by_address["t1"].data,
+        json!({"title": "a", "done": false, "tags": []})
+    );
+    assert_eq!(
+        by_address["t2"].data,
+        json!({"title": "b", "done": true, "tags": ["x"]})
+    );
+}
+
+#[tokio::test]
+async fn a_language_without_mount_exports_cannot_be_mounted() {
+    crate::test_utils::init_v8_platform();
+    crate::test_utils::test_languages_directory();
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+
+    let source = format!(
+        "export const name = \"plain\"; export async function init() {{}}\n// instance {}\n",
+        uuid::Uuid::new_v4()
+    );
+    let controller = LanguageController::global_instance();
+    let (_, path) = controller.save_language_bundle(&source, None).unwrap();
+    let addr = controller.load_language(path, false).await.unwrap();
+
+    let error = controller.mount_shapes(&addr).await.unwrap_err();
+    assert!(
+        error.to_string().contains("language cannot be mounted"),
+        "{error}"
+    );
+    let error = controller.mount_snapshot(&addr).await.unwrap_err();
+    assert!(
+        error.to_string().contains("language cannot be mounted"),
+        "{error}"
+    );
+}
+
+/// The mount exports are not a `Capability` (those are agent-language only), so
+/// the same break test as
+/// `capability::tests::the_bootstrap_copies_every_capability_export_onto_the_instance`
+/// gets its own copy here: an export missing from `flatExportNames` never
+/// reaches the `language` object the mount calls evaluate.
+#[test]
+fn the_bootstrap_copies_the_mount_exports() {
+    let bootstrap = include_str!("../js_core/language_bootstrap.js");
+    let start = bootstrap
+        .find("const flatExportNames = [")
+        .expect("language_bootstrap.js lists its flat exports");
+    let list = &bootstrap[start..start + bootstrap[start..].find("];").unwrap()];
+    for name in ["mountShapes", "mountSnapshot"] {
+        assert!(
+            list.contains(&format!("\"{name}\"")),
+            "language_bootstrap.js does not copy {name} onto the language instance"
+        );
+    }
+}

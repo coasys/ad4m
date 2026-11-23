@@ -8,6 +8,9 @@ const records = new Map();
 // every executed interaction, in order: { address, name, params }
 const calls = [];
 let counter = 0;
+// version reported by mountShapes(); setVersion changes it so a remount
+// can be told apart from the first install
+let mountVersion = "1";
 
 export async function init() {}
 export function isPublic() { return false; }
@@ -44,6 +47,9 @@ export function interactions(address) {
         execute: async () => { records.clear(); calls.length = 0; counter = 0; return true; } },
       { label: "Address", name: "address", parameters: [],
         execute: async () => languageAddress() },
+      // Change the version mountShapes() reports (tests re-install on version change).
+      { label: "Set version", name: "setVersion", parameters: [],
+        execute: async (params) => { mountVersion = plain(params).version; return true; } },
       // Change a record "from outside" (like a stock Acorn user would). Emits a delta only if emit is true.
       { label: "Outside change", name: "outsideChange", parameters: [],
         execute: async (params) => {
@@ -80,6 +86,32 @@ export function interactions(address) {
     ];
   }
   return [];
+}
+
+export function mountShapes() {
+  const lang = languageAddress();
+  const update = [{ action: "call", source: "this", predicate: "update", target: "{}" }];
+  return {
+    version: mountVersion,
+    shapes: [{
+      name: CLASS,
+      shape: {
+        target_class: "mounttest://Thing",
+        constructor_actions: [{ action: "call", source: lang + "://class/" + CLASS, predicate: "create", target: "{}" }],
+        destructor_actions: [{ action: "call", source: "this", predicate: "delete", target: "{}" }],
+        properties: [
+          { path: "rdf://type", name: "type", has_value: "mounttest://Thing", min_count: 1, max_count: 1 },
+          { path: "mounttest://title", name: "title", max_count: 1, writable: true, setter: update },
+          { path: "mounttest://done", name: "done", max_count: 1, writable: true, setter: update },
+          { path: "mounttest://tag", name: "tags", collection: true, writable: true, setter: update },
+        ],
+      },
+    }],
+  };
+}
+
+export function mountSnapshot() {
+  return { entries: [...records.entries()].map(([address, data]) => ({ class: CLASS, address, data })) };
 }
 
 export async function expressionGet(address) {

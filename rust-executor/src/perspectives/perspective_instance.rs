@@ -90,6 +90,8 @@ mod expected_links;
 pub use expected_links::{ExpectedLinks, LinksChanged};
 // A batch's effective view of the graph for the validated write core.
 mod batch_view;
+// Remote telepresence broadcasts, off the link-language queue's critical path.
+mod language_broadcasts;
 
 #[cfg(test)]
 #[path = "perspective_instance_subscription_tests.rs"]
@@ -114,6 +116,10 @@ mod broadcast_diag_tests;
 #[cfg(test)]
 #[path = "perspective_instance_pending_diffs_tests.rs"]
 mod pending_diffs_tests;
+
+#[cfg(test)]
+#[path = "perspective_instance_telepresence_tests.rs"]
+mod telepresence_tests;
 
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
@@ -618,6 +624,10 @@ impl LoopWakes {
 /// yet fetchable). A new link language on the handle retries at once.
 const LINK_LANGUAGE_RETRY_MIN: Duration = Duration::from_millis(500);
 const LINK_LANGUAGE_RETRY_MAX: Duration = Duration::from_secs(30);
+/// How long `online_agents` waits on the link language's roster call before
+/// answering the locally known users instead: the language runtime serves
+/// one call at a time, and a stalled call must not stall the roster.
+const ONLINE_AGENTS_LANGUAGE_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long a notification check waits after the first changed link, so a
 /// burst of links is checked once.
 const NOTIFICATION_DEBOUNCE: Duration = Duration::from_millis(100);
@@ -649,6 +659,10 @@ pub struct PerspectiveInstance {
     local_agents_mutex: Arc<Mutex<()>>,
     prolog_update_mutex: Arc<RwLock<()>>,
     link_language: Arc<RwLock<Option<Language>>>,
+    /// Remote telepresence broadcasts waiting on the link language, drained
+    /// one at a time by a background task so `send_broadcast` never waits on
+    /// the language's serial queue (see `language_broadcasts`).
+    language_broadcasts: Arc<std::sync::Mutex<language_broadcasts::BroadcastQueue>>,
     /// Wakes the background loops that wait on state changes instead of a
     /// timer: `ensure_link_language` when the handle's link language changes
     /// (a publish sets `neighbourhood`), `nh_sync_loop` once it attaches,
@@ -808,6 +822,7 @@ impl PerspectiveInstance {
             local_agents_mutex: Arc::new(Mutex::new(())),
             prolog_update_mutex: Arc::new(RwLock::new(())),
             link_language: Arc::new(RwLock::new(None)),
+            language_broadcasts: Arc::new(std::sync::Mutex::new(Default::default())),
             wakes: Arc::new(LoopWakes::default()),
             trigger_notification_check: Arc::new(AtomicBool::new(false)),
             trigger_subscription_check: Arc::new(AtomicBool::new(false)),
@@ -1111,6 +1126,7 @@ impl PerspectiveInstance {
     pub async fn teardown_background_tasks(&self) {
         self.is_teardown.store(true, Ordering::Release);
         self.wakes.all();
+        self.language_broadcasts.lock().unwrap().abort();
     }
 
     /// Return diagnostic stats for this perspective's memory-relevant data structures.
@@ -1446,7 +1462,9 @@ impl PerspectiveInstance {
             .unwrap_or(false)
     }
 
-    async fn has_link_language(&self) -> bool {
+    /// Whether the link language is attached to this perspective. A
+    /// neighbourhood without one has no remote members to check.
+    pub(crate) async fn has_link_language(&self) -> bool {
         let link_language_guard = self.link_language.read().await;
         link_language_guard.is_some()
     }
@@ -4708,15 +4726,49 @@ impl PerspectiveInstance {
 
     pub async fn online_agents(&self) -> Result<Vec<OnlineAgent>, AnyError> {
         // Remote peers via the link language's telepresence adapter (when one is
-        // present — i.e. a real multi-executor neighbourhood).
+        // present — i.e. a real multi-executor neighbourhood). The language
+        // runtime serves one call at a time, so the call is time-boxed: a
+        // slow or stuck language call must not stall the roster. On timeout
+        // or error the answer is that error: the remote agents are unknown,
+        // and the co-located users alone would read as a roster without
+        // them (`MeshManager.setRoster` drops every peer it does not list).
         let link_language_clone = self.link_language.read().await.clone();
         let has_link_language = link_language_clone.is_some();
+        let remote = match link_language_clone {
+            Some(mut link_language) => {
+                match time::timeout(
+                    ONLINE_AGENTS_LANGUAGE_TIMEOUT,
+                    link_language.get_online_agents(),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(anyhow!(
+                        "get_online_agents did not answer within {:?}",
+                        ONLINE_AGENTS_LANGUAGE_TIMEOUT
+                    )),
+                }
+            }
+            None => Ok(Vec::new()),
+        };
         // A remote multi-user node publishes its agents' statuses as one bundle;
         // `unpack` turns it back into one verified entry per agent.
-        let mut agents: Vec<OnlineAgent> = if let Some(mut link_language) = link_language_clone {
-            hosted_status::unpack(link_language.get_online_agents().await?)
-        } else {
-            Vec::new()
+        let mut agents: Vec<OnlineAgent> = match remote {
+            Ok(remote_agents) => {
+                let agents = hosted_status::unpack(remote_agents);
+                if let Some(url) = self.persisted.lock().await.shared_url.clone() {
+                    for agent in &agents {
+                        crate::sfu::config_store::saw_member(&url, &agent.did);
+                    }
+                }
+                agents
+            }
+            Err(e) => {
+                log::warn!(
+                    "online_agents: the link-language call failed or timed out ({e}); the roster is unknown"
+                );
+                return Err(e);
+            }
         };
 
         // Co-located multi-tenancy users: a neighbourhood's locally-managed
@@ -4744,11 +4796,9 @@ impl PerspectiveInstance {
         // source" error whenever there's no link language AND we found no
         // locally-online managed users. Callers (notably the auto-processor
         // watcher) rely on that error to fall through to their claim-based path
-        // rather than reading an empty set as "everyone is offline". We only
-        // diverge from the old link-language passthrough when we actually have
-        // co-located managed users to report. (A link language that returns an
-        // empty set is a genuine "nobody online" and stays `Ok(vec![])`, as
-        // before.)
+        // rather than reading an empty set as "everyone is offline". A link
+        // language that answered an empty set is a genuine "nobody online" and
+        // stays `Ok(vec![])`.
         if agents.is_empty() && !has_link_language {
             return Err(self.no_link_language_error().await);
         }
@@ -4893,13 +4943,21 @@ impl PerspectiveInstance {
         }
         phase("local_delivery");
 
-        // Also send through link language for remote users
+        // Remote members get the broadcast through the link language, off
+        // this RPC's critical path: the language runtime serves one call at
+        // a time, and a slow call there must not hold — or fail — a
+        // broadcast. The send is queued and drained in the background, or
+        // skipped when every member is local; only a full queue fails here.
         let link_language_clone = self.link_language.read().await.clone();
         phase("link_language_lock");
-        if let Some(mut link_language) = link_language_clone {
-            let sent = link_language.send_broadcast(payload).await;
+        if let Some(link_language) = link_language_clone {
+            let queued = self.broadcast_remotely(
+                link_language,
+                payload,
+                current_perspective_handle.shared_url.as_deref(),
+            );
             phase("language");
-            sent
+            queued
         } else {
             Err(self.no_link_language_error().await)
         }

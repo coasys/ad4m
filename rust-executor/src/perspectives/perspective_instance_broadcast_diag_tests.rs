@@ -1,6 +1,8 @@
 //! `neighbourhood.sendBroadcast` slower than 1 s logs one `[call-diag] event=broadcast.slow`
 //! line naming where the time went. On 2026-11-19 broadcasts took 14-29 s and nothing in the
-//! log said why; the link language's queue was the suspect.
+//! log said why; the link language's queue was the suspect. Since #1855 the remote send is
+//! queued for a background task (`language_broadcasts`), so the language's queue and call no
+//! longer count towards the RPC; the line still names the phases the RPC waits on.
 
 use super::*;
 use crate::call_diag::capture;
@@ -10,14 +12,15 @@ use crate::languages::LanguageController;
 use serde_json::json;
 use std::collections::HashSet;
 
-/// A link language that waits behind a 300 ms call and then takes 1.2 s for the broadcast:
-/// the line splits its time into the queue and the call, and the call is the largest phase.
+/// A broadcast that waits 1.2 s for the link-language lock (a language being installed or
+/// swapped holds it): the line splits the RPC's time into its phases, and that wait is the
+/// largest.
 #[tokio::test]
-async fn a_slow_broadcast_logs_its_phases_and_the_language_call_is_the_largest() {
+async fn a_slow_broadcast_logs_its_phases_and_names_the_largest() {
     crate::test_utils::setup_wallet();
     crate::test_utils::setup_agent();
 
-    // A link language this test plays: each call runs for the time its script asks.
+    // A link language this test plays: it answers each call at once.
     let address = format!("QmSlowBroadcast{}", Uuid::new_v4().simple());
     let (tx, mut requests) = tokio::sync::mpsc::unbounded_channel::<
         crate::languages::language_runtime::LanguageRuntimeRequest,
@@ -31,20 +34,8 @@ async fn a_slow_broadcast_logs_its_phases_and_the_language_call_is_the_largest()
         HashSet::from([Capability::TelepresenceSendBroadcast]),
     );
     tokio::spawn(async move {
-        // One call at a time, in order, as a language runtime runs them.
         while let Some(request) = requests.recv().await {
-            let crate::languages::language_runtime::LanguageOperation::Execute(script, _) =
-                &request.operation
-            else {
-                continue;
-            };
             let _ = request.started.set(std::time::Instant::now());
-            let ms = if script.contains("telepresenceSendBroadcast") {
-                1200
-            } else {
-                300
-            };
-            tokio::time::sleep(Duration::from_millis(ms)).await;
             let _ = request.response_tx.send(Ok("null".to_string()));
         }
     });
@@ -60,12 +51,17 @@ async fn a_slow_broadcast_logs_its_phases_and_the_language_call_is_the_largest()
     *instance.link_language.write().await = Some(Language::new(address.clone()));
     crate::perspectives::register_perspective(instance.uuid.clone(), instance.clone());
 
-    // Another call holds the language first (a key-grant job, a commit).
-    let busy = tokio::spawn({
-        let handle = handle.clone();
-        async move { handle.execute("await somethingElse()".to_string()).await }
+    // Something else holds the link-language lock for 1.2 s.
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+    let holder = tokio::spawn({
+        let link_language = instance.link_language.clone();
+        async move {
+            let _guard = link_language.write().await;
+            let _ = locked_tx.send(());
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+        }
     });
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    locked_rx.await.unwrap();
 
     let map = crate::api::ws_handler::build_handler_map();
     let sent = map
@@ -77,7 +73,7 @@ async fn a_slow_broadcast_logs_its_phases_and_the_language_call_is_the_largest()
         .await
         .unwrap();
     assert_eq!(sent, json!(true));
-    busy.await.unwrap().unwrap();
+    holder.await.unwrap();
 
     let perspective = format!("perspective={}", instance.uuid);
     let lines = capture::lines("broadcast.slow", &[&perspective]);
@@ -102,10 +98,9 @@ async fn a_slow_broadcast_logs_its_phases_and_the_language_call_is_the_largest()
         "language_other_ms",
     ];
     let largest = phases.iter().max_by_key(|p| ms(p)).unwrap();
-    assert_eq!(*largest, "language_call_ms", "{line}");
-    assert!(ms("language_call_ms") >= 1200, "{line}");
-    assert!(ms("language_queue_ms") >= 200, "{line}");
-    assert!(ms("total_ms") >= 1400, "{line}");
+    assert_eq!(*largest, "link_language_lock_ms", "{line}");
+    assert!(ms("link_language_lock_ms") >= 1100, "{line}");
+    assert!(ms("total_ms") >= 1100, "{line}");
     assert!(ms("payload_bytes") > 0, "{line}");
     assert_eq!(capture::field(line, "outcome").as_deref(), Some("ok"));
     assert_eq!(capture::field(line, "did").as_deref(), Some("admin"));

@@ -147,9 +147,10 @@ async fn send_broadcast(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 }
 
 /// One `[call-diag] event=broadcast.slow` line: where a slow broadcast spent its time.
-/// `language` is the whole link-language call; inside it `language_queue` is the wait behind
-/// the language's other calls, `language_call` the call itself, and `language_other` the rest
-/// (finding the runtime, encoding the payload).
+/// `language` is the hand-off to the link language: since #1855 the remote send is queued
+/// for a background task, so `language_queue` (the wait behind the language's other calls)
+/// and `language_call` (the call itself) are only set by a send made inside the RPC, and
+/// `language_other` is the rest of `language`.
 fn log_slow_broadcast(
     params: &Value,
     ctx: &RequestContext,
