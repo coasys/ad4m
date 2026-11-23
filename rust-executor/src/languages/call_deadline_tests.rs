@@ -1286,6 +1286,102 @@ async fn a_wasm_language_runs_concurrent_calls_in_order_as_their_agents() {
     );
 }
 
+/// Two concurrent calls on a WASM language must overlap and each act as its own
+/// agent. `expressionGet("whoami")` answers with an expression authored by the
+/// agent the calling call runs as, so the `author` field reports which agent
+/// the export's host calls signed for. The slow read awaits inside the export,
+/// so the fast read can only answer first by running beside it — under the
+/// handle's forced `Ordered` it queues behind and answers after it; under a
+/// lifted forcing without the ALDK's per-call agent token it answers behind
+/// the lock or signs as the other call's agent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wasm_language_runs_concurrent_calls_each_as_its_own_agent() {
+    let Some(bundle) = wasm_language_bundle() else {
+        eprintln!(
+            "test-wasm-language bundle missing; run `bash tests/rust-languages/build.sh` — skipping"
+        );
+        return;
+    };
+
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+    let alice =
+        crate::test_utils::create_test_user(&format!("alice.{}@example.org", uuid::Uuid::new_v4()));
+    let bob =
+        crate::test_utils::create_test_user(&format!("bob.{}@example.org", uuid::Uuid::new_v4()));
+
+    let address = "QmTestWasmConcurrent".to_string();
+    let (handle, dir) = spawn_runtime(&address);
+    let context = LanguageContext::new(
+        crate::agent::did(),
+        crate::agent::signing_key_id(),
+        None,
+        dir.path().to_path_buf(),
+        address.clone(),
+    );
+    handle
+        .load_module(bundle, context.clone())
+        .await
+        .expect("the WASM bundle loads");
+    handle
+        .load_language(context.to_json())
+        .await
+        .expect("the language's init() runs");
+
+    let get = |handle: LanguageRuntimeHandle, agent: AgentContext, address: &'static str| {
+        tokio::spawn(async move {
+            let script = format!(
+                "JSON.stringify(await globalThis.__ad4m_language_instance__.expressionGet({}))",
+                serde_json::to_string(address).unwrap()
+            );
+            handle
+                .call(script, agent, CallKind::Concurrent)
+                .await
+                .map(|r| {
+                    serde_json::from_str::<serde_json::Value>(&r)
+                        .unwrap()
+                        .pointer("/author")
+                        .and_then(|a| a.as_str())
+                        .map(str::to_string)
+                })
+        })
+    };
+
+    // Alice's slow read starts first and awaits inside the export.
+    let slow = get(
+        handle.clone(),
+        AgentContext::managed(alice.clone()),
+        "slow:600:whoami",
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Bob's read, sent while Alice's is still in flight.
+    let fast = get(handle.clone(), AgentContext::managed(bob.clone()), "whoami");
+
+    let fast = within(Duration::from_secs(10), "the fast read", fast)
+        .await
+        .unwrap();
+    let slow_finished_early = slow.is_finished();
+    let slow = within(Duration::from_secs(10), "the slow read", slow)
+        .await
+        .unwrap();
+
+    let fast_author = fast.expect("the fast read answers").unwrap_or_default();
+    assert_eq!(
+        fast_author, bob,
+        "the fast read signed as {fast_author}, not its own agent"
+    );
+    assert!(
+        !slow_finished_early,
+        "the fast read waited for the slow read instead of running beside it"
+    );
+    let slow_author = slow.expect("the slow read answers").unwrap_or_default();
+    assert_eq!(
+        slow_author, alice,
+        "the slow read signed as {slow_author}, not its own agent"
+    );
+}
+
 /// A concurrent-marked call on a WASM language runs ordered, so its caller's
 /// deadline is the ordered one: behind a running call already past the
 /// deadline it is refused at once (not queued to wait out the concurrent

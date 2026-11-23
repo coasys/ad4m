@@ -126,6 +126,18 @@ impl ExpressionCapability for TestLang {
         } else {
             address
         };
+        // "whoami" never reaches storage: it answers with an expression
+        // authored by the agent the call runs as — the concurrency tests
+        // read the calling call's own agent token through it.
+        if address == "whoami" {
+            let did = rt::agent_did()?;
+            return Ok(Some(Expression {
+                author: did.clone(),
+                timestamp: String::new(),
+                data: serde_json::Value::String(did),
+                proof: ExpressionProof::default(),
+            }));
+        }
         let raw = rt::storage_get(&address)?;
         if raw.is_null() || raw.is_undefined() {
             return Ok(None);
