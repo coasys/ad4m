@@ -18,7 +18,7 @@
 //! Removals of Shared links are not checked for authority here.
 
 use super::monotonic::RetractionEffects;
-use super::perspective_instance::PerspectiveInstance;
+use super::perspective_instance::{touches_shape, PerspectiveInstance};
 #[cfg(doc)]
 use super::sparql_store::SparqlStore;
 use crate::types::{LinkExpression, PerspectiveDiff};
@@ -93,12 +93,24 @@ impl PerspectiveInstance {
             .filter(|l| !effects.covers(l))
             .filter(|l| applied("addition", l, self.sparql_store.add_remote_link(l)))
             .collect();
-        Ok((
-            PerspectiveDiff {
-                additions,
-                removals,
-            },
-            effects,
-        ))
+        let applied = PerspectiveDiff {
+            additions,
+            removals,
+        };
+        // The same rule as `write_link_diff`: a write that touches a shape
+        // own link drops the cached shapes before it returns, so a peer that
+        // never registered a class still reads it the moment its SHACL
+        // arrives, and no await sits between the write and the clear.
+        if touches_shape(
+            applied
+                .additions
+                .iter()
+                .chain(applied.removals.iter())
+                .map(|l| &l.data)
+                .chain(effects.retracted.iter().map(|l| &l.data)),
+        ) {
+            self.clear_shape_cache();
+        }
+        Ok((applied, effects))
     }
 }
