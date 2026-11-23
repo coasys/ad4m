@@ -439,6 +439,11 @@ impl PerspectiveInstance {
                     })
                     .collect();
                 if op != Op::Set {
+                    // A call adder or remover leaves no link actions: its
+                    // members are the call's payload, not values to resolve.
+                    if actions.is_empty() {
+                        continue;
+                    }
                     for member in self.members(class, own, value, context).await? {
                         commands.extend(actions.iter().map(|c| Command {
                             target: Some(member.clone()),

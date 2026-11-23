@@ -4879,6 +4879,16 @@ impl PerspectiveInstance {
         //log::info!("⚙️ EXECUTE COMMANDS: Starting execution of {} commands for expression '{}', batch_id: {:?}",
         //    commands.len(), expression, batch_id);
 
+        // Calls into a language are made by `call_actions` before a command
+        // list gets here. Refuse one before any command of the list writes
+        // (or stages) a link.
+        if commands.iter().any(|c| c.action == Action::Call) {
+            return Err(anyhow!(
+                "a call action cannot run through executeCommands: write the instance \
+                 through its class instead"
+            ));
+        }
+
         let jsvalue_to_string = |value: &Value| -> String {
             match value {
                 serde_json::Value::String(s) => s.clone(),
@@ -4960,9 +4970,7 @@ impl PerspectiveInstance {
 
             match command.action {
                 Action::Call => {
-                    // Calls into a language are made by `call_actions`
-                    // before `execute_commands` sees a command list; one
-                    // reaching here slipped past a dispatch point.
+                    // Refused before the loop.
                     return Err(anyhow!("internal: call action reached execute_commands"));
                 }
                 Action::AddLink => {
