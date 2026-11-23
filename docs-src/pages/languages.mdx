@@ -272,16 +272,6 @@ types, so you get auto-complete on `agentDid`, `holochainCall`,
 `emitPerspectiveDiff`, etc., and the TypeScript compiler can check
 your usage.
 
-### Mounted classes
-
-A Language can mount its own records into a perspective as instances of a
-class. You describe the class with the model decorators and pass it to
-`defineLanguage({ mount: { classes } })`. A setter names only an
-interaction, and the executor finds the Language and expression from the
-instance URL. See
-[Mounted classes](https://github.com/coasys/ad4m/tree/dev/ad4m-ldk/js#mounted-classes)
-in the LDK README.
-
 ### Rust with `ad4m_language!`
 
 The Rust ALDK gives you a trait-based API plus a macro that wires
