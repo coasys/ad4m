@@ -1170,22 +1170,30 @@ fn wasm_language_bundle() -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
-/// A wasm-bindgen bundle whose glue lacks the ALDK concurrency marker is
-/// refused at load, with an error naming the ALDK version needed: its
-/// exports do not pin the call's agent token across polls, so a call
-/// resumed beside another could sign as that call's agent. The "unmarked"
-/// bundle here is the fixture bundle with the marker renamed — still a
-/// working wasm-bindgen bundle, only without the marker.
+/// A wasm-bindgen bundle whose glue lacks the ALDK concurrency marker still
+/// loads — bundles are content-addressed, so ones published before the
+/// marker keep circulating — but every call into it is serialized: `send`
+/// forces `CallKind::Ordered`, as `is_wasm_bundle` did for every WASM
+/// bundle before the marker existed. The "unmarked" bundle here is the
+/// fixture bundle with the marker renamed — still a working wasm-bindgen
+/// bundle, only without the marker.
+///
+/// Alice's slow read and Bob's whoami both go out `CallKind::Concurrent`.
+/// The gate is the runtime's `Running` markers, not a sleep: Alice's call
+/// must hold the one `ordered` slot while it runs and `concurrent` must
+/// stay empty, so Bob's starts only once hers has finished. On the marked
+/// bundle the same pair overlaps
+/// (`a_wasm_bundle_with_the_aldk_marker_loads_and_overlaps`).
 #[tokio::test(flavor = "multi_thread")]
-async fn a_wasm_bundle_without_the_aldk_marker_is_refused_at_load() {
+async fn a_wasm_bundle_without_the_aldk_marker_loads_and_serializes_calls() {
     let bundle = wasm_language_bundle()
         .expect("test-wasm-language bundle missing; run `bash tests/rust-languages/build.sh`");
     assert!(bundle.contains(ad4m_ldk::MARKER_EXPORT));
     let unmarked = bundle.replace(ad4m_ldk::MARKER_EXPORT, "__ldkVersionMarker");
     assert!(!unmarked.contains(ad4m_ldk::MARKER_EXPORT));
 
-    crate::test_utils::setup_wallet();
-    crate::test_utils::setup_agent();
+    let (alice, bob) = two_users();
+
     let address = "QmTestWasmUnmarked".to_string();
     let (handle, dir) = spawn_runtime(&address);
     let context = LanguageContext::new(
@@ -1193,14 +1201,112 @@ async fn a_wasm_bundle_without_the_aldk_marker_is_refused_at_load() {
         crate::agent::signing_key_id(),
         None,
         dir.path().to_path_buf(),
-        address,
+        address.clone(),
     );
-    let err = handle
-        .load_module(unmarked, context)
+    handle
+        .load_module(unmarked, context.clone())
         .await
-        .expect_err("a WASM bundle without the marker must be refused at load");
-    assert!(err.contains(ad4m_ldk::MARKER_EXPORT), "{err}");
-    assert!(err.contains(ad4m_ldk::VERSION), "{err}");
+        .expect("an unmarked WASM bundle still loads");
+    handle
+        .load_language(context.to_json())
+        .await
+        .expect("the language's init() runs");
+
+    // Alice's slow read parks 600 ms inside the export: on an unmarked
+    // bundle it is rewritten to ordered before it is sent, so it must come
+    // up as THE ordered call — never an entry in `concurrent`.
+    let alice_call = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            handle
+                .call(
+                    "globalThis.__ad4m_language_instance__.expressionGet(\"slow:600:x\")".into(),
+                    AgentContext::managed(alice),
+                    CallKind::Concurrent,
+                )
+                .await
+        }
+    });
+    let running = handle.running_request();
+    within(
+        Duration::from_secs(10),
+        "alice's call to take the ordered slot",
+        async {
+            loop {
+                {
+                    let running = running.lock().unwrap();
+                    assert!(
+                        running.concurrent.is_empty(),
+                        "alice's call ran concurrent on the unmarked WASM bundle"
+                    );
+                    if running.ordered.is_some() {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        },
+    )
+    .await;
+
+    // Bob's read, sent beside hers: queued behind the ordered call, it may
+    // start only once hers has finished — until then `concurrent` stays
+    // empty and his call cannot complete.
+    let bob_call = tokio::spawn({
+        let handle = handle.clone();
+        let bob = bob.clone();
+        async move {
+            handle
+                .call(
+                    "JSON.stringify(await globalThis.__ad4m_language_instance__.expressionGet(\"whoami\"))"
+                        .into(),
+                    AgentContext::managed(bob),
+                    CallKind::Concurrent,
+                )
+                .await
+        }
+    });
+    within(
+        Duration::from_secs(15),
+        "bob's call to wait for alice's",
+        async {
+            loop {
+                {
+                    let running = running.lock().unwrap();
+                    assert!(
+                        running.concurrent.is_empty(),
+                        "bob's call ran beside alice's on the unmarked WASM bundle"
+                    );
+                    assert!(
+                        !bob_call.is_finished() || alice_call.is_finished(),
+                        "bob's call ended before alice's: they ran beside each other"
+                    );
+                    if alice_call.is_finished() {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        },
+    )
+    .await;
+
+    // Serialized calls keep their own ambient agent context, so Bob's read
+    // answers as Bob even without the pinned token a marked bundle installs.
+    let bob_answer = within(Duration::from_secs(10), "bob's read", bob_call)
+        .await
+        .unwrap()
+        .expect("bob's read answers");
+    let author = serde_json::from_str::<serde_json::Value>(&bob_answer)
+        .unwrap()
+        .pointer("/author")
+        .and_then(|a| a.as_str())
+        .map(str::to_string);
+    assert_eq!(author.as_deref(), Some(bob.as_str()), "{bob_answer}");
+    within(Duration::from_secs(10), "alice's read", alice_call)
+        .await
+        .unwrap()
+        .expect("alice's read answers");
 }
 
 /// The fixture bundle carries the marker — built with this ALDK — so it
@@ -1281,8 +1387,8 @@ async fn a_wasm_bundle_with_the_aldk_marker_loads_and_overlaps() {
         .expect("the slow read answers");
 }
 
-/// A plain JS bundle is not checked for the marker: the refusal is for
-/// wasm-bindgen bundles only.
+/// A plain JS bundle needs no marker: serializing unmarked bundles is for
+/// wasm-bindgen output only — a JS bundle's calls keep their declared kind.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_js_bundle_loads_without_the_marker() {
     crate::test_utils::setup_wallet();

@@ -48,15 +48,18 @@ beside them. Everything runs on the runtime's one task (`process_requests`):
 the V8 event loop keeps one waker.
 
 A bundle that is wasm-bindgen output (a Rust/ALDK language) honors its calls'
-declared kind: the runtime no longer rewrites `CallKind::Concurrent` to
-ordered — but only a bundle carrying the ALDK's concurrency marker may run
-that way. `load_module` refuses a wasm-bindgen bundle whose glue does not
-name `__ad4mAldkVersion` (`ad4m_ldk::MARKER_EXPORT`, an export
-`ad4m_language!` emits since ad4m-ldk 0.13.0-test-1): an older bundle has
-none of the two properties below, so run beside other calls its exports
-could read and sign as another call's agent. Bundles are content-addressed
-and old ones keep circulating, hence refusal at load rather than a forced
-ordered fallback. Two ALDK-side properties make overlap safe. First, the agent: a
+declared kind only when it carries the ALDK's concurrency marker,
+`__ad4mAldkVersion` (`ad4m_ldk::MARKER_EXPORT`, an export `ad4m_language!`
+emits since ad4m-ldk 0.13.0-test-1). A wasm-bindgen bundle without it
+(`is_wasm_bundle` in `language_runtime_handle.rs`) still loads — bundles are
+content-addressed and ones published before the marker keep circulating, the
+seed's pinned agent language among them — but every call into it stays
+`CallKind::Ordered`: `load_module` marks it `unmarked_wasm` and `send`
+rewrites a concurrent-declared call's kind, exactly what `is_wasm_bundle`
+did to every WASM bundle's calls before the marker existed. Serialized, an
+older bundle needs none of the two properties below; run beside other calls,
+its exports could read and sign as another call's agent. Two ALDK-side
+properties make overlap safe. First, the agent: a
 wasm-bindgen-futures queue polls all of a module's futures without restoring
 each task's V8 async context, so ALDK pins the call's `CallAgent` token itself
 — `agent::export_future` takes it once at export entry
