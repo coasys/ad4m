@@ -267,6 +267,21 @@ impl PerspectiveInstance {
         Ok(())
     }
 
+    /// The names and target class IRIs of every class `lang_address`
+    /// claimed: the classes its records may name.
+    pub(super) async fn mount_own_classes(
+        &self,
+        lang_address: &str,
+    ) -> Result<HashSet<String>, AnyError> {
+        Ok(self
+            .class_claims()
+            .await?
+            .into_iter()
+            .filter(|c| c.owner == lang_address)
+            .flat_map(|c| std::iter::once(c.name).chain(c.targets))
+            .collect())
+    }
+
     /// Every class claim in the store.
     async fn class_claims(&self) -> Result<Vec<ClassClaim>, AnyError> {
         let by_predicate = |predicate: &str| LinkQuery {

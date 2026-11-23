@@ -424,3 +424,70 @@ async fn register_shapes_waits_for_a_mount_between_check_and_install() {
     mounted.unwrap();
     registered.unwrap();
 }
+
+// --- A record names only this mount's classes -------------------------------
+
+/// A record whose `class` is a class the app registered, not one the mount
+/// installed, writes nothing: no flag or property links of the app's
+/// class under the language's address.
+#[tokio::test]
+async fn a_record_of_a_class_the_mount_did_not_install_writes_nothing() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "a"})).await;
+    let (mut p, ctx) = mounted(&lang).await;
+    crate::perspectives::unregister_mount(&lang, &p.uuid);
+    p.add_sdna(
+        "AppNote".to_string(),
+        String::new(),
+        SdnaType::SubjectClass,
+        Some(
+            json!({
+                "target_class": "app://AppNote",
+                "properties": [
+                    {"path": "rdf://type", "name": "type", "has_value": "app://AppNote", "min_count": 1, "max_count": 1},
+                    {"path": "app://title", "name": "title", "max_count": 1}
+                ]
+            })
+            .to_string(),
+        ),
+        &ctx,
+    )
+    .await
+    .unwrap();
+
+    let generation = p.active_mount_generation(&lang).await.unwrap();
+    for class in ["AppNote", "app://AppNote"] {
+        let delta = crate::languages::mount_types::MountDelta {
+            address: Some("t9".to_string()),
+            changed: vec![crate::languages::mount_types::MountEntry {
+                r#class: class.to_string(),
+                address: "t9".to_string(),
+                data: json!({"title": "forged"}),
+            }],
+            removed: vec![],
+        };
+        let result = p
+            .apply_mount_delta(
+                &lang,
+                &delta,
+                generation,
+                super::mount_lifecycle::next_mount_seq(),
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "a record of {class} was applied: {result:?}"
+        );
+    }
+    let forged = p
+        .get_links(&LinkQuery {
+            source: Some(format!("{lang}://t9")),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        forged.is_empty(),
+        "links of another class were written: {forged:?}"
+    );
+}

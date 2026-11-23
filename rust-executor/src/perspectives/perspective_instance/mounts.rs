@@ -140,7 +140,8 @@ impl PerspectiveInstance {
         }
         self.install_mount_shapes(lang_address, &shapes).await?;
         let written = async {
-            let records = self.stage_records(lang_address, &snapshot.entries)?;
+            let own = self.mount_own_classes(lang_address).await?;
+            let records = self.stage_records(lang_address, &own, &snapshot.entries)?;
             self.write_snapshot(lang_address, &mut slot, records, seq)
                 .await?;
             if !self.has_mount_link(lang_address).await? {
@@ -248,21 +249,33 @@ impl PerspectiveInstance {
             self.install_mount_shapes(lang_address, &shapes).await?;
             slot.schema_installed(seq);
         }
-        let records = self.stage_records(lang_address, &snapshot.entries)?;
+        let own = self.mount_own_classes(lang_address).await?;
+        let records = self.stage_records(lang_address, &own, &snapshot.entries)?;
         self.write_snapshot(lang_address, &mut slot, records, seq)
             .await
     }
 
     /// Expand `entries` into the records they want, before any is
-    /// written: an entry that does not expand fails them all.
+    /// written: an entry that does not expand fails them all. An entry's
+    /// `class` must be one of `own`, the classes this mount installed
+    /// (`mount_own_classes`): a language writes no flag or property links for
+    /// another app's class, or a core one.
     fn stage_records(
         &self,
         lang_address: &str,
+        own: &HashSet<String>,
         entries: &[MountEntry],
     ) -> Result<Vec<StagedRecord>, AnyError> {
         entries
             .iter()
             .map(|entry| {
+                if !own.contains(&entry.r#class) {
+                    return Err(anyhow!(
+                        "mounted record {}: class {} is not a class {lang_address} installed",
+                        entry.address,
+                        entry.r#class
+                    ));
+                }
                 let source = format!("{lang_address}://{}", entry.address);
                 let links = self
                     .expand_entry(entry, &source)
@@ -358,7 +371,8 @@ impl PerspectiveInstance {
             return Ok(MountSyncReport::default());
         };
         let mut report = MountSyncReport::default();
-        for record in self.stage_records(lang_address, &delta.changed)? {
+        let own = self.mount_own_classes(lang_address).await?;
+        for record in self.stage_records(lang_address, &own, &delta.changed)? {
             if !slot.delta_applies(&record.address, seq) {
                 continue;
             }
