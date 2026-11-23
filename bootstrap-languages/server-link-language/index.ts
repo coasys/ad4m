@@ -28,6 +28,7 @@ import {
     grantMissingRoomKeys,
     keyRingRefreshChanged,
     rotateRoomKey,
+    rotationLog,
     type KeyRingStatus,
     type RoomRole,
 } from "./src/room-keys.js";
@@ -115,6 +116,10 @@ function logKeyRingRefresh(
         versions: openKeyVersions(),
     });
     (changed ? console.info : console.debug)(message);
+}
+
+function logRotation(event: "attempt" | "skipped" | "complete", message: string): void {
+    (rotationLog(event) === "info" ? console.info : console.debug)(message);
 }
 
 function setupKeyRingCoalesced(): Promise<void> {
@@ -223,7 +228,10 @@ async function rotateIfAdminWithoutKey(): Promise<void> {
         roomRole = await readRoomRole();
     }
     if (adminRotationStep(keyRingStatus, rotatedThisRun, roomRole) !== "rotate") return;
-    console.info(`[server-link-language] admin holds no room key (${keyRingStatus}) — generating a new one`);
+    logRotation(
+        "attempt",
+        `[server-link-language] admin holds no room key (${keyRingStatus}) — generating a new one`,
+    );
     await performRotation();
 }
 
@@ -261,11 +269,15 @@ async function performRotation(): Promise<void> {
         const token = await auth.getValidToken();
         const result = await rotateRoomKey(getConfig(), token);
         if (!result) {
-            console.info("[server-link-language] no ACL member to seal a room key to — skipping rotation");
+            logRotation(
+                "skipped",
+                "[server-link-language] no ACL member to seal a room key to — skipping rotation",
+            );
             return;
         }
         rotatedThisRun = true;
-        console.info(
+        logRotation(
+            "complete",
             `[server-link-language] client-side key rotation complete: version ${result.version}, ` +
             `${result.recipients.length} recipient(s)`,
         );

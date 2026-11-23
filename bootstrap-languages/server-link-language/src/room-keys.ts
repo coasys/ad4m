@@ -89,6 +89,17 @@ export function keyRingRefreshChanged(
 }
 
 /**
+ * Where a rotation is logged. An attempt that has not completed is debug:
+ * a commit retry reaches it again while the key stays pending, and a skip
+ * (nobody to seal to) does not set `rotatedThisRun`, so both repeat. The
+ * completed rotation is the change and stays at info. A thrown rotation is
+ * `console.error` at the catch, not this.
+ */
+export function rotationLog(event: "attempt" | "skipped" | "complete"): "debug" | "info" {
+    return event === "complete" ? "info" : "debug";
+}
+
+/**
  * Room admin only (the server refuses anyone else): a new room key version,
  * sealed to the DID of every ACL member. Returns null, and rotates nothing,
  * when no member's DID can be sealed to.

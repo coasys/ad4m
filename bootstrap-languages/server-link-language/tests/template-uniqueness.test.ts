@@ -10,6 +10,7 @@ import {
     adminRotationStep,
     afterFailedKeyRead,
     keyRingRefreshChanged,
+    rotationLog,
 } from "../src/room-keys.js";
 import { generateRoomKey } from "../src/encryption.js";
 
@@ -185,5 +186,13 @@ describe("keyRingRefreshChanged", () => {
             ),
             true,
         );
+    });
+});
+
+describe("rotationLog", () => {
+    it("keeps an unfinished attempt and a skip off info; the completed rotation stays", () => {
+        assert.strictEqual(rotationLog("attempt"), "debug");
+        assert.strictEqual(rotationLog("skipped"), "debug");
+        assert.strictEqual(rotationLog("complete"), "info");
     });
 });
