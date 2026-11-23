@@ -313,7 +313,7 @@ async fn handle_ws(
 ) {
     let opened = Instant::now();
     crate::call_diag!(
-        log::Level::Info,
+        log::Level::Debug,
         "ws.open",
         "did" => caller_label(&ctx),
         "conn" => ctx.connection_id.clone().unwrap_or_default(),
@@ -429,7 +429,7 @@ async fn handle_ws(
             }
         });
     crate::call_diag!(
-        log::Level::Info,
+        log::Level::Debug,
         "ws.close",
         "did" => caller_label(&ctx),
         "conn" => ctx.connection_id.clone().unwrap_or_default(),
@@ -935,18 +935,20 @@ impl Connection {
             guard.remove(&id);
             drop(guard);
             let response = response.to_string();
-            let total = received.elapsed();
+            let done = Instant::now();
+            let total = done.saturating_duration_since(received);
             if total > SLOW_RPC {
-                let started = handler_started.get().copied();
+                let (queued_ms, handler_ms, total_ms) =
+                    rpc_timing(received, handler_started.get().copied(), done);
                 crate::call_diag!(
                     log::Level::Warn,
                     "rpc.slow",
                     "method" => msg_type,
                     "did" => caller_label(&base_ctx),
                     "conn" => base_ctx.connection_id.clone().unwrap_or_default(),
-                    "queued_ms" => started.map_or(total, |s| s - received).as_millis(),
-                    "handler_ms" => started.map_or(Duration::ZERO, |s| s.elapsed()).as_millis(),
-                    "total_ms" => total.as_millis(),
+                    "queued_ms" => queued_ms,
+                    "handler_ms" => handler_ms,
+                    "total_ms" => total_ms,
                     "response_bytes" => response.len(),
                     "outcome" => outcome(&response),
                 );
@@ -954,6 +956,16 @@ impl Connection {
             let _ = tx.send(response);
         });
     }
+}
+
+/// Milliseconds queued before the handler, inside the handler, and in total, all measured
+/// at one completion instant `done`. `started` is `None` when the call was cancelled before
+/// dispatch: the handler time is then zero and the whole wait is queued.
+fn rpc_timing(received: Instant, started: Option<Instant>, done: Instant) -> (u128, u128, u128) {
+    let total = done.saturating_duration_since(received);
+    let handler = started.map_or(Duration::ZERO, |at| done.saturating_duration_since(at));
+    let queued = started.map_or(total, |at| at.saturating_duration_since(received));
+    (queued.as_millis(), handler.as_millis(), total.as_millis())
 }
 
 /// `ok`, or `error:<code>`, from a reply's JSON text.
@@ -1670,7 +1682,7 @@ mod socket_tests {
         let ip_field = format!("ip={ip}");
         let opened = capture::lines("ws.open", &[&ip_field]);
         assert_eq!(opened.len(), 1, "{opened:?}");
-        assert_eq!(opened[0].level, log::Level::Info);
+        assert_eq!(opened[0].level, log::Level::Debug);
         capture::assert_format(&opened[0].line);
         assert_eq!(
             capture::field(&opened[0].line, "did").as_deref(),
@@ -1698,7 +1710,7 @@ mod socket_tests {
         .expect("a close line");
         assert_eq!(closed.len(), 1, "{closed:?}");
         let line = &closed[0].line;
-        assert_eq!(closed[0].level, log::Level::Info);
+        assert_eq!(closed[0].level, log::Level::Debug);
         capture::assert_format(line);
         let field = |key| capture::field(line, key).unwrap_or_else(|| panic!("no {key} in {line}"));
         assert_eq!(field("conn"), conn);
@@ -2020,14 +2032,19 @@ mod liveness_tests {
     #[tokio::test(start_paused = true)]
     async fn a_pong_sent_at_once_is_not_logged() {
         use crate::call_diag::capture;
+        use crate::types::RequestContext;
+        // This connection's id, so a late pong from another test is not this one's.
+        let ctx = RequestContext::operator_for_test().on_connection("pong-on-time");
+        let conn = "conn=pong-on-time";
         let stats = ConnStats::default();
-        let before = capture::lines("ws.pong-late", &[]).len();
+        let before = capture::lines("ws.pong-late", &[conn]).len();
         stats.ping_arrived(Instant::now());
         tokio::time::advance(Duration::from_millis(900)).await;
-        stats.pong_left(None, 0);
-        assert_eq!(capture::lines("ws.pong-late", &[]).len(), before);
+        stats.pong_left(Some(&ctx), 0);
+        assert_eq!(capture::lines("ws.pong-late", &[conn]).len(), before);
         // A pong without a ping (a client that sent none) is not counted either.
-        stats.pong_left(None, 0);
+        stats.pong_left(Some(&ctx), 0);
+        assert_eq!(capture::lines("ws.pong-late", &[conn]).len(), before);
     }
 }
 
@@ -2096,5 +2113,32 @@ mod client_ip_tests {
         let headers = headers(&[("x-forwarded-for", "198.51.100.7")]);
         assert_eq!(client_ip(peer, &headers, &trusted), "198.51.100.7");
         assert_eq!(client_ip(peer, &headers, &[]), "192.0.2.10");
+    }
+}
+
+#[cfg(test)]
+mod rpc_timing_tests {
+    use super::rpc_timing;
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    #[test]
+    fn both_durations_come_from_one_completion_instant() {
+        let received = Instant::now();
+        let started = received + Duration::from_millis(40);
+        let done = started + Duration::from_millis(2100);
+        let (queued, handler, total) = rpc_timing(received, Some(started), done);
+        assert_eq!(queued, 40);
+        assert_eq!(handler, 2100);
+        assert_eq!(total, 2140);
+        assert!(total >= handler);
+        assert_eq!(queued + handler, total);
+
+        // Cancelled before dispatch: the handler never started.
+        let (queued, handler, total) =
+            rpc_timing(received, None, received + Duration::from_millis(15));
+        assert_eq!(handler, 0);
+        assert_eq!(queued, 15);
+        assert_eq!(total, 15);
     }
 }
