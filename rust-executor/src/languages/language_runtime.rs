@@ -31,6 +31,9 @@ pub(crate) struct LanguageRuntimeRequest {
     pub queued_at: Instant,
     /// Names the request in `RunningRequest`.
     pub id: u64,
+    /// Set by the runtime when it starts the call: the caller splits its wait into time
+    /// queued and time running (`call_diag::phase`).
+    pub started: Arc<std::sync::OnceLock<Instant>>,
 }
 
 impl LanguageRuntimeRequest {
@@ -80,6 +83,10 @@ pub(crate) enum CallKind {
     /// needs no position in the send order.
     Concurrent,
 }
+
+/// The calls sent to a runtime that it has not started yet: id → when sent.
+/// For the queue report (`queue_report`).
+pub(crate) type QueuedRequests = Arc<Mutex<std::collections::BTreeMap<u64, Instant>>>;
 
 /// Operations that can be sent to a LanguageRuntime
 #[derive(Debug)]
@@ -425,10 +432,13 @@ impl LanguageRuntime {
         &'a self,
         request: LanguageRuntimeRequest,
         running: &RunningRequest,
+        queued: &QueuedRequests,
     ) -> LocalBoxFuture<'a, Finished> {
         let running = running.clone();
+        let queued = queued.clone();
         Box::pin(async move {
             let is_concurrent = request.operation.is_concurrent();
+            queued.lock().unwrap().remove(&request.id);
             // An `Execute` whose caller has gone (the call deadline, or a dropped future) is
             // not run: nobody would get the result, and the caller may have queued the work
             // again (a commit goes to the pending diffs).
@@ -436,11 +446,13 @@ impl LanguageRuntime {
                 let mut running = running.lock().unwrap();
                 let skip = request.caller_gone();
                 if !skip {
+                    let now = Instant::now();
                     if is_concurrent {
                         running.concurrent.insert(request.id);
                     } else {
-                        running.ordered = Some((request.id, Instant::now()));
+                        running.ordered = Some((request.id, now));
                     }
+                    let _ = request.started.set(now);
                 }
                 skip
             };
@@ -449,9 +461,10 @@ impl LanguageRuntime {
                 response_tx,
                 queued_at,
                 id,
+                started: _,
             } = request;
             let addr = &self.language_address;
-            debug!("[lang:{}] Processing operation: {:?}", addr, operation);
+            debug!("[lang:{}] Processing operation: {}", addr, operation.name());
             // Time in this runtime's queue (#1133 symptom ①): the counterpart of the
             // `[hc-actor] … waited` line.
             let waited = queued_at.elapsed();
@@ -577,6 +590,7 @@ impl LanguageRuntime {
         self,
         mut rx: UnboundedReceiver<LanguageRuntimeRequest>,
         running: RunningRequest,
+        queued: QueuedRequests,
     ) {
         let local_set = tokio::task::LocalSet::new();
         let js_core = self.js_core.clone();
@@ -627,7 +641,7 @@ impl LanguageRuntime {
                             continue;
                         }
                         let request = queue.remove(i).unwrap();
-                        let call = this.begin(request, &running);
+                        let call = this.begin(request, &running, &queued);
                         if is_concurrent {
                             concurrent.push(call);
                         } else {

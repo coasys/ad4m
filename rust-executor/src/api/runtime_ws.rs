@@ -65,6 +65,28 @@ async fn restart_runtime(_params: Value, _ctx: Arc<RequestContext>) -> Result<Va
     stop_after_answer(crate::exit::ExitReason::RestartRequested)
 }
 
+/// `runtime.setLogFilter { filter, ttlSeconds? }`: log `filter` (`ws_rpc=debug,sfu=debug`)
+/// over the startup filter for `ttlSeconds` (default 1800, at most 14400), then revert by
+/// itself. An empty `filter` reverts at once.
+async fn set_log_filter(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: SetLogFilterParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let ttl = body
+        .ttl_seconds
+        .map(|secs| std::time::Duration::from_secs(u64::from(secs)))
+        .unwrap_or(crate::log_filter::DEFAULT_TTL);
+    let status = crate::log_filter::state()
+        .set_override(&body.filter, ttl)
+        .map_err(WsRpcError::bad_request)?;
+    Ok(serde_json::to_value(LogFilter::from(status))?)
+}
+
+/// `runtime.logFilter`: the filter in force, the startup filter and when an override reverts.
+async fn log_filter(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let status = crate::log_filter::state().status();
+    Ok(serde_json::to_value(LogFilter::from(status))?)
+}
+
 /// `runtime.logTail { lines }`: the newest lines of this run's log file (at most 2000).
 async fn log_tail(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: LogTailParams = serde_json::from_value(params)
@@ -756,6 +778,11 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<LogTailParams, LogTail>("runtime.logTail", log_tail)
         .read()
         .guard(Guard::Operator);
+    map.method::<SetLogFilterParams, LogFilter>("runtime.setLogFilter", set_log_filter)
+        .guard(Guard::Operator);
+    map.method::<NoParams, LogFilter>("runtime.logFilter", log_filter)
+        .read()
+        .guard(Guard::Operator);
     // Always errors: status updates have no implementation yet. The contract
     // is the SDK's call.
     map.method::<SetStatusRequest, bool>("runtime.setStatus", set_status)
@@ -950,6 +977,44 @@ pub struct RuntimeUnytSendHotParams {
 pub struct LogTailParams {
     /// How many of the newest lines; at most 2000 are returned.
     pub lines: u32,
+}
+
+/// `runtime.setLogFilter` params.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SetLogFilterParams {
+    /// Directives like `ws_rpc=debug,sfu=debug`: a name matches whole module path segments
+    /// anywhere in a log target. Targets it does not name keep the startup filter. Empty:
+    /// back to the startup filter now.
+    pub filter: String,
+    /// How long the filter holds before the startup filter is back; default 1800, at most
+    /// 14400.
+    #[ts(optional)]
+    pub ttl_seconds: Option<u32>,
+}
+
+/// `runtime.logFilter` and `runtime.setLogFilter` result.
+#[derive(serde::Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct LogFilter {
+    /// The filter the executor started with (`RUST_LOG`).
+    pub startup_filter: String,
+    /// The override in force over the startup filter, or `null`.
+    pub override_filter: Option<String>,
+    /// When the override reverts (RFC 3339, UTC), or `null`.
+    pub reverts_at: Option<String>,
+}
+
+impl From<crate::log_filter::FilterStatus> for LogFilter {
+    fn from(status: crate::log_filter::FilterStatus) -> Self {
+        LogFilter {
+            startup_filter: status.startup,
+            override_filter: status.current,
+            reverts_at: status.reverts_at.map(|t| t.to_rfc3339()),
+        }
+    }
 }
 
 /// `runtime.logTail` result: the newest lines of this run's log file, oldest first.
