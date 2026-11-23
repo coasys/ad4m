@@ -101,6 +101,28 @@ async fn concurrent(handle: &LanguageRuntimeHandle, script: String) -> Result<St
         .await
 }
 
+/// The test language's own export log, read through `expressionGet("events")`:
+/// each export records its entry and exit inside the isolate, so call ordering
+/// is proven there rather than by task completion outside it — a call can end
+/// in the runtime while its caller's task still waits to be polled.
+async fn export_events(handle: &LanguageRuntimeHandle) -> Vec<String> {
+    let answer = within(Duration::from_secs(10), "the events read", async {
+        concurrent(
+            handle,
+            "JSON.stringify(await globalThis.__ad4m_language_instance__.expressionGet(\"events\"))"
+                .into(),
+        )
+        .await
+    })
+    .await
+    .expect("the events read answers");
+    serde_json::from_str::<serde_json::Value>(&answer)
+        .ok()
+        .and_then(|v| v.pointer("/data").cloned())
+        .and_then(|d| serde_json::from_value::<Vec<String>>(d).ok())
+        .expect("the events read returns the export log")
+}
+
 /// `n` calls, sent in order; each logs its index when it starts and when it ends, after
 /// awaiting a latency that differs from call to call. Returns the start and end logs.
 async fn ordered_burst(handle: &LanguageRuntimeHandle, n: usize) -> (Vec<usize>, Vec<usize>) {
@@ -1181,7 +1203,10 @@ fn wasm_language_bundle() -> Option<String> {
 /// Alice's slow read and Bob's whoami both go out `CallKind::Concurrent`.
 /// The gate is the runtime's `Running` markers, not a sleep: Alice's call
 /// must hold the one `ordered` slot while it runs and `concurrent` must
-/// stay empty, so Bob's starts only once hers has finished. On the marked
+/// stay empty. The serialization proof is the language's own export log:
+/// Bob's export enters only once Alice's has exited — a wrapper task's
+/// completion order would only say when the test executor got around to
+/// polling it, not when the language finished the call. On the marked
 /// bundle the same pair overlaps
 /// (`a_wasm_bundle_with_the_aldk_marker_loads_and_overlaps`).
 #[tokio::test(flavor = "multi_thread")]
@@ -1251,7 +1276,7 @@ async fn a_wasm_bundle_without_the_aldk_marker_loads_and_serializes_calls() {
 
     // Bob's read, sent beside hers: queued behind the ordered call, it may
     // start only once hers has finished — until then `concurrent` stays
-    // empty and his call cannot complete.
+    // empty.
     let bob_call = tokio::spawn({
         let handle = handle.clone();
         let bob = bob.clone();
@@ -1277,11 +1302,7 @@ async fn a_wasm_bundle_without_the_aldk_marker_loads_and_serializes_calls() {
                         running.concurrent.is_empty(),
                         "bob's call ran beside alice's on the unmarked WASM bundle"
                     );
-                    assert!(
-                        !bob_call.is_finished() || alice_call.is_finished(),
-                        "bob's call ended before alice's: they ran beside each other"
-                    );
-                    if alice_call.is_finished() {
+                    if alice_call.is_finished() && bob_call.is_finished() {
                         break;
                     }
                 }
@@ -1293,20 +1314,29 @@ async fn a_wasm_bundle_without_the_aldk_marker_loads_and_serializes_calls() {
 
     // Serialized calls keep their own ambient agent context, so Bob's read
     // answers as Bob even without the pinned token a marked bundle installs.
-    let bob_answer = within(Duration::from_secs(10), "bob's read", bob_call)
-        .await
-        .unwrap()
-        .expect("bob's read answers");
+    let bob_answer = bob_call.await.unwrap().expect("bob's read answers");
     let author = serde_json::from_str::<serde_json::Value>(&bob_answer)
         .unwrap()
         .pointer("/author")
         .and_then(|a| a.as_str())
         .map(str::to_string);
     assert_eq!(author.as_deref(), Some(bob.as_str()), "{bob_answer}");
-    within(Duration::from_secs(10), "alice's read", alice_call)
-        .await
-        .unwrap()
-        .expect("alice's read answers");
+    alice_call.await.unwrap().expect("alice's read answers");
+
+    // Inside the isolate the serialization is exact: Bob's export entered
+    // only once Alice's had exited.
+    let events = export_events(&handle).await;
+    assert_eq!(
+        events,
+        vec![
+            "get-start:slow:600:x",
+            "get-end:slow:600:x",
+            "get-start:whoami",
+            "get-end:whoami",
+            "get-start:events",
+        ],
+        "the unmarked bundle's calls were not serialized"
+    );
 }
 
 /// The fixture bundle carries the marker — built with this ALDK — so it
