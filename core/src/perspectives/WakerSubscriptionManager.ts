@@ -649,7 +649,7 @@ export class WakerSubscriptionManager {
     }
 
     // `of`: the query the result is from, for the log (a mention subscription has two).
-    // `opening` marks the result the query holds when it opens (a snapshot with `initial`):
+    // `opening` marks the result the query holds when `readOpening` reads it:
     // the listener only reports later changes, so `readOpening` is the one chance to see what
     // was written meanwhile.
     // A mention subscription reads it as `"history"` (recorded as seen, no wake) or `"news"`
@@ -763,10 +763,14 @@ export class WakerSubscriptionManager {
     // query's is news only after a restart and once a text query of this subscription has read
     // its history (`textHistoryRead`): it may have listened without it, so the seen set may not
     // hold what the text query finds (#1735).
+    // The data each query's listener or opening read last took, by reference: a snapshot that
+    // only changed its status (a failed re-open, a recovery) holds the same data again.
+    const consumed = new Map<LiveQuery<any>, unknown>();
     const readOpening = async (p: LiveQuery<any>, of: string) => {
       const snapshot = p.getSnapshot();
       if (snapshot.status !== "ready") return;
       const result = snapshot.data;
+      consumed.set(p, result);
       const isText = p !== mentionProxy;
       const news = restored && (!isText || sub.type !== "mention" || sub.textHistoryRead === true);
       try {
@@ -779,10 +783,15 @@ export class WakerSubscriptionManager {
         sub.textHistoryRead = true;
       }
     };
-    // The opening value is `readOpening`'s; every later one is an update.
+    // Until `readOpening` has read a query, its deliveries are skipped: the opening read takes
+    // the latest result, however many updates the handle applied before, under the history/news
+    // rule. Only a delivery after it is an update.
     const listen = (p: LiveQuery<any>, of: string) => {
       p.subscribe((snapshot) => {
-        if (snapshot.status === "ready" && !snapshot.initial) void handleResult(snapshot.data, of);
+        if (snapshot.status !== "ready" || !consumed.has(p)) return;
+        if (consumed.get(p) === snapshot.data) return;
+        consumed.set(p, snapshot.data);
+        void handleResult(snapshot.data, of);
       });
       p.onStatus((status) => this.onReopenStatus(sub, proxies, p, status));
     };

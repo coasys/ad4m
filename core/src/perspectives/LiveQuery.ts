@@ -199,8 +199,10 @@ export class LiveQuery<T> {
     readonly getSnapshot = (): Snapshot<T> => this.#snapshot
 
     /** Call `fn` with the current snapshot at once when the query is no longer
-     *  loading, then with each change. Returns a remover. */
+     *  loading, then with each change. Returns a remover. A disposed handle
+     *  calls nobody and keeps nothing. */
     readonly subscribe = (fn: (snapshot: Snapshot<T>) => void): Unsubscribe => {
+        if (this.#disposed) return () => {}
         this.#listeners.add(fn)
         if (this.#snapshot.status !== 'loading') this.#call(fn)
         return () => { this.#listeners.delete(fn) }
@@ -310,7 +312,11 @@ export class LiveQuery<T> {
     }
 
     #notify() {
-        for (const fn of [...this.#listeners]) this.#call(fn)
+        // A listener may remove another, or dispose the handle, while this runs.
+        for (const fn of [...this.#listeners]) {
+            if (this.#disposed) return
+            if (this.#listeners.has(fn)) this.#call(fn)
+        }
     }
 
     /** Make `raw` the current result. Nothing changes, and nobody hears of it,
@@ -335,7 +341,7 @@ export class LiveQuery<T> {
 
     /** Show that a re-open failed: the snapshot keeps its data. */
     #showReopening() {
-        if (this.#snapshot.status === 'loading') return
+        if (this.#snapshot.status === 'loading' || this.#snapshot.reopening) return
         this.#snapshot = { ...this.#snapshot, reopening: true }
         this.#notify()
     }
@@ -353,15 +359,18 @@ export class LiveQuery<T> {
 
     /** Take `result` at `revision`, then apply the updates buffered meanwhile. */
     #replace(revision: number, result: any) {
+        if (this.#disposed) return
         this.#revision = revision
         this.#result = result
         const buffered = this.#buffer ?? []
         this.#buffer = null
         this.#showOrSkip(result)
+        // A listener may have disposed the handle: nothing more is applied.
         for (const update of buffered) this.#receive(update)
     }
 
     #receive(update: QueryUpdate | QueryLagged) {
+        if (this.#disposed) return
         if (this.#buffer) {
             this.#buffer.push(update)
             return
@@ -388,6 +397,7 @@ export class LiveQuery<T> {
     }
 
     #resync() {
+        if (this.#disposed) return
         const generation = this.#generation
         const id = this.#id!
         this.#buffer = []

@@ -127,7 +127,7 @@ export function useLiveQuery<T extends Ad4mModel>(
   const parentId = parent && "id" in parent ? parent.id : undefined;
   const held = (!!parent && "id" in parent && !parentId) || (typeof model === "string" && !model);
   const source = live ?? (held ? EMPTY : LOADING);
-  const snapshot = useSyncExternalStore(source.subscribe, source.getSnapshot);
+  const snapshot = useSyncExternalStore(source.subscribe, source.getSnapshot, source.getSnapshot);
 
   /** Build the full query from user options + pagination + parent + instance filter. */
   function buildQuery(): Query {
@@ -202,7 +202,8 @@ export function useLiveQuery<T extends Ad4mModel>(
   }, [snapshot, preserveReferences]);
   previous.current = entries;
 
-  const loading = snapshot.status === "loading";
+  // A query that could not open is not loading.
+  const loading = !openError && snapshot.status === "loading";
   const error = openError || (snapshot.status === "error" ? snapshot.error!.message : "");
 
   const loadMore = useCallback(() => {

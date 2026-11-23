@@ -81,6 +81,8 @@ class FakeLive {
     private options: {
       open?: FakeOpen;
       opening?: any;
+      /** Whether the opening value is marked `initial` (default); `false` is a handle that already applied an update. */
+      initial?: boolean;
       onListen?: (emit: (result: any) => Promise<void>) => void;
       onStatus?: (listener: (status: any) => void) => void;
       onDispose?: () => void;
@@ -91,7 +93,7 @@ class FakeLive {
     this.first = new Promise<void>((res, rej) => { resolve = res; this.#reject = rej; });
     this.first.catch(() => {});
     const ready = () => {
-      this.#snapshot = { status: 'ready', data: options.opening ?? result(), initial: true, reopening: false };
+      this.#snapshot = { status: 'ready', data: options.opening ?? result(), initial: options.initial ?? true, reopening: false };
       resolve();
     };
     if (open === 'open') ready();
@@ -1342,6 +1344,92 @@ describe('WakerSubscriptionManager', () => {
     await waitUntil(() => wakes.length > 0, 1000);
     manager.disposeAll();
     expect(wakes).toEqual([['test://new']]);
+  });
+
+  // A handle that applied an update before the manager listened delivers a snapshot that is not
+  // `initial`; the manager still reads it as the opening result, as history.
+  it('takes a result the handle already updated to before listening as history', async () => {
+    const delivers: Record<string, (result: any) => Promise<void>> = {};
+    const wakes: string[][] = [];
+    const manager = makeManager({
+      perspectiveClient: { querySparql: () => Promise.resolve([]), modelQuery: () => Promise.resolve({ instances: [], totalCount: 0 }) },
+      logger: noopLogger(),
+      live: (_uuid: string, _query: string, className?: string | string[]) => {
+        const path = pathOf(className);
+        return new FakeLive(path, {
+          opening: path === 'text' ? result(named('test://old')) : result(),
+          initial: false,
+          onListen: (emit) => { delivers[path] = emit; },
+        });
+      },
+      debounceMs: 10,
+      retryPendingMs: 60_000,
+      onWake: (_sub: any, _result: any, mentions: any) => { wakes.push(mentions!.map((m: any) => m.address)); },
+    });
+    await manager.subscribe({ ...sub, id: 'mention-history' });
+    await new Promise((r) => setTimeout(r, 50));
+    manager.disposeAll();
+    expect(wakes).toEqual([]);
+  });
+
+  // After a restart the mention query's opening result is news, and its parent lookups take a
+  // while; the text query is read after them. A change the text query delivers meanwhile is
+  // part of its opening result, history until it has read its history once.
+  it('takes a result the handle delivers before its opening read as history', async () => {
+    const delivers: Record<string, (result: any) => Promise<void>> = {};
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    const wakes: string[][] = [];
+    let lookups = 0;
+    const manager = makeManager({
+      perspectiveClient: {
+        querySparql: () => { lookups++; return held.then(() => []); },
+        modelQuery: () => { lookups++; return held.then(() => ({ instances: [], totalCount: 0 })); },
+      },
+      logger: noopLogger(),
+      live: answeringLive(delivers, [], { text: undefined, mentions: result(mentionRow('test://seen')) }),
+      debounceMs: 10,
+      retryPendingMs: 60_000,
+      onWake: (_sub: any, _result: any, mentions: any) => { wakes.push(mentions!.map((m: any) => m.address)); },
+      previousSeenMessages: { 'mention-window': [] },
+    } as any);
+    const subscribed = manager.subscribe({ ...sub, id: 'mention-window', textHistoryRead: false });
+    // The mention query's opening read is waiting on its lookups.
+    await waitUntil(() => !!delivers.text && lookups > 0, 1000);
+    await delivers.text(result(named('test://old')));
+    release();
+    await subscribed;
+    await new Promise((r) => setTimeout(r, 50));
+    manager.disposeAll();
+    expect(wakes).toEqual([['test://seen']]);
+  });
+
+  // A failed re-open republishes the same data with `reopening` set, and recovery again: not news.
+  it('does not wake on a snapshot that holds the data it already read', async () => {
+    let deliver: ((result: any) => Promise<void>) | undefined;
+    const wakes: any[] = [];
+    const manager = makeManager({
+      perspectiveClient,
+      logger: noopLogger(),
+      live: () => new FakeLive('text', { onListen: (emit) => { deliver = emit; } }),
+      debounceMs: 10,
+      onWake: (_sub: any, result: any) => { wakes.push(result); },
+    });
+    await manager.subscribe({
+      id: 'channel-status',
+      type: 'channel-messages',
+      perspective: 'fake-uuid',
+      channel: 'test://call',
+      query: '{}',
+      className: 'ad4m://Container',
+    });
+    const rows = { instances: [{ id: 'test://call', children: ['test://block'] }], totalCount: 1 };
+    for (let i = 0; i < 3; i++) {
+      await deliver!(rows);
+      await new Promise((r) => setTimeout(r, 40));
+    }
+    manager.disposeAll();
+    expect(wakes).toHaveLength(1);
   });
 
   it('reads a model subscription by row id', async () => {
