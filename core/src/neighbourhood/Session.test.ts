@@ -71,7 +71,8 @@ function fakeApi() {
         sfuCallAnswerServerOffer: jest.fn(),
         sfuCallRestartIce: jest.fn(),
         onNetworkChange: jest.fn().mockReturnValue(() => {}),
-        checkConnection: jest.fn(),
+        onReconnect: jest.fn().mockReturnValue(() => {}),
+        sfuCallResume: jest.fn(),
         subscribeSfuCallRenegotiationOffer: jest.fn(),
         sfuAddIceCandidate: jest.fn(),
         sfuSendData: jest.fn(),
@@ -263,7 +264,6 @@ describe("mesh path", () => {
             // A mesh peer is the agent on this device.
             selfId: "did:me#this-device",
             onNetworkChange: expect.any(Function),
-            checkConnection: expect.any(Function),
         })
     })
 
@@ -765,6 +765,27 @@ describe("SFU path", () => {
         await session.join(fakeMediaStream())
         expect(session.getState()).toBe("active")
         expect(SfuManager).toHaveBeenCalledTimes(2)
+    })
+
+    it("an SFU call that gave up says call-ended and goes idle, and can be joined again", async () => {
+        const session = createSession(baseConfig({ topology: "sfu" }))
+        const dataUnsubscribe = jest.fn()
+        mockSfuManagerInstance.subscribeDataChannel.mockReturnValue(dataUnsubscribe)
+        await session.join(fakeMediaStream())
+        const states = collectStates(session)
+        const ended: unknown[] = []
+        session.on("call-ended", (event: unknown) => ended.push(event))
+
+        const event = { reason: "gave-up", error: new Error("SFU reconnect attempts exhausted") }
+        for (const [name, handler] of mockSfuManagerInstance.on.mock.calls) if (name === "call-ended") handler(event)
+
+        expect(ended).toEqual([event])
+        expect(states).toEqual(["idle"])
+        expect(dataUnsubscribe).toHaveBeenCalled()
+        expect(session.participants).toEqual([])
+
+        await session.join(fakeMediaStream())
+        expect(session.getState()).toBe("active")
     })
 
     it("a replaced call is idle by the time its listeners hear it, so a listener may join again", async () => {

@@ -243,7 +243,7 @@ async fn union_returns_a_record_of_two_classes_once_with_both_classes() {
         .map(|v| v.as_str().unwrap())
         .collect();
     all.sort();
-    assert_eq!(all, vec!["Note", "Task"]);
+    assert_eq!(all, vec!["app://models/Note", "app://models/Task"]);
 
     let q = query(serde_json::json!({"preferClasses": ["Task"]}));
     let result = execute_union_query(&store, &classes(&["Task", "Note"]), &q, &resolver)
@@ -447,6 +447,8 @@ async fn union_refuses_per_anchor_slicing_and_relation_order_keys() {
     for q in [
         serde_json::json!({"parent": {"ids": ["app://p"], "predicate": "app://has", "limitPerAnchor": 2}}),
         serde_json::json!({"order": {"owner.name": "ASC"}}),
+        // The keyset is one class's order in the store (P8).
+        serde_json::json!({"after": "", "limit": 2}),
     ] {
         let err = execute_union_query(&store, &classes(&["Task", "Note"]), &query(q), &resolver)
             .await
@@ -457,6 +459,39 @@ async fn union_refuses_per_anchor_slicing_and_relation_order_keys() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("at least one class"), "{err}");
+}
+
+/// An `include` cursor is refused whether or not the union page has rows:
+/// the selection query clears `include`, and an empty page never reaches the
+/// per-class fetch whose depth-0 check refuses it, so `refuse_union_reads`
+/// has to say no itself.
+#[tokio::test]
+async fn union_refuses_an_include_cursor_even_on_an_empty_page() {
+    let (store, resolver) = task_and_note();
+    task(&store, "app://t1", Some(1), "open", "10");
+    for (name, q) in [
+        (
+            "empty page",
+            serde_json::json!({"where": {"status": "nowhere"},
+                "include": {"sub": {"after": "", "limit": 1}}}),
+        ),
+        (
+            "non-empty page",
+            serde_json::json!({"include": {"sub": {"after": "", "limit": 1}}}),
+        ),
+        (
+            "nested include",
+            serde_json::json!({"include": {"sub": {"include": {"sub2": {"after": ""}}}}}),
+        ),
+    ] {
+        let err = execute_union_query(&store, &classes(&["Task", "Note"]), &query(q), &resolver)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("classNames") && err.to_string().contains("`after`"),
+            "{name}: {err}"
+        );
+    }
 }
 
 /// A record of two requested classes is kept when one of its readings passes
@@ -647,7 +682,10 @@ async fn union_hydrates_only_the_page() {
         );
         for (row, &i) in result.instances.iter().zip(&expected) {
             assert_eq!(row["__subjectClass"], class_of(i), "{q}: {row}");
-            assert_eq!(row["__subjectClasses"], serde_json::json!([class_of(i)]));
+            assert_eq!(
+                row["__subjectClasses"],
+                serde_json::json!([format!("app://models/{}", class_of(i))])
+            );
             assert_eq!(
                 row["file"],
                 serde_json::json!(format!("data:{};base64,{i}", file_type(i))),
@@ -719,7 +757,7 @@ async fn union_page_classifies_a_two_class_record_and_filters_after_hydration() 
             .map(|v| v.as_str().unwrap())
             .collect();
         all.sort();
-        assert_eq!(all, vec!["Clip", "Post"], "{q}");
+        assert_eq!(all, vec!["app://models/Clip", "app://models/Post"], "{q}");
     }
 
     // `timestamp` is matched after hydration.

@@ -7,6 +7,7 @@
 //! target-class shapes (themselves cached).
 
 use super::containment::{contains_patterns, has_child_only, ContainmentEdge};
+use super::cursor::{refuse_unsupported_cursor, KeysetCursor};
 use super::eval_transform::eval_transform;
 use super::filtering::{matches_where, sort_instances};
 use super::getters::evaluate_getters;
@@ -28,7 +29,7 @@ use super::types::{
 };
 use super::utils::{validate_iri, values_or_str_filter, MAX_INCLUDE_DEPTH};
 use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
-use deno_core::anyhow::Error;
+use anyhow::Error;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -246,7 +247,7 @@ pub(super) fn order_fully_pushable(
                         .include_relations
                         .iter()
                         .find(|r| r.name == rel_name && !r.predicate.is_empty())
-                        .and_then(|rel| resolver.get_shape(&rel.target_class_name).ok())
+                        .and_then(|rel| resolver.get_shape(rel.target()).ok())
                         .map(|target_shape| {
                             target_shape.properties.iter().any(|p| {
                                 p.name == prop_name && !p.is_collection && !p.predicate.is_empty()
@@ -562,6 +563,7 @@ pub(super) async fn select_ids(
         direction: OrderDirection::ASC,
         offset: None,
         limit: None,
+        keyset: None,
     };
     let InstanceQueryPlan::TwoPhase {
         pagination_subquery,
@@ -596,6 +598,7 @@ pub(super) async fn execute_model_query_inner(
         return Ok(ModelQueryResult {
             instances: vec![],
             total_count: query_input.count.unwrap_or(false).then_some(0),
+            next_cursor: None,
         });
     }
 
@@ -631,10 +634,24 @@ pub(super) async fn execute_model_query_inner(
     // `count()` in TypeScript is exactly `limit: 0`. A walk has to be walked to be counted.
     let wants_count = query_input.count.unwrap_or(false);
     let is_count_only = query_input.limit == Some(0);
+    // The count-only returns below answer before the page pipeline — and its
+    // cursor refusals — runs, so the `after` checks have to come first: a
+    // count-only query has no page a cursor can point into, and an `include`
+    // cursor would be dropped the way it would be on any other early answer.
+    // `refuse_unsupported_cursor` holds every `after` rule that needs no
+    // shape (`model_query_classes_within` runs it ahead of its own empty
+    // answers) and returns the decoded cursor the keyset block below pages
+    // from; what is still refused there needs the shape.
+    let cursor = if depth == 0 {
+        refuse_unsupported_cursor(query_input)?
+    } else {
+        None
+    };
     if is_count_only && !wants_count {
         return Ok(ModelQueryResult {
             instances: vec![],
             total_count: None,
+            next_cursor: None,
         });
     }
     let count_only_can_skip_the_walk = !matches!(
@@ -663,6 +680,7 @@ pub(super) async fn execute_model_query_inner(
             return Ok(ModelQueryResult {
                 instances: vec![],
                 total_count: Some(count),
+                next_cursor: None,
             });
         }
     }
@@ -725,12 +743,40 @@ pub(super) async fn execute_model_query_inner(
     // taken one of its parent's places. That is the same trade `limit_per_anchor` has always made,
     // and the alternative — fetching a level whole to filter it — is what the limit exists to avoid.
     let scope_needs_phases = anchor_limit.is_some() || walk.is_some();
+
+    // Keyset cursor (`after`), top-level queries only: `Some(None)` = first
+    // page in cursor mode, `Some(Some(c))` = continue after `c`. Only the
+    // timestamp order, fully in the store, with a `limit` and without a
+    // non-zero `offset`; see `cursor.rs`. A containment walk with no order is
+    // ordered by the walk, not by timestamp, so it takes no cursor either.
+    // Anything else that sends `after` is refused: a missing `nextCursor`
+    // would read as the last page.
+    let keyset: Option<Option<KeysetCursor>> = match query_input.after.as_deref() {
+        Some(_) if depth == 0 => {
+            // The rules that read only the query ran above; what remains
+            // needs the shape: the page's `where` and `order` must be ones
+            // the store can evaluate, or a `limit` cut in the store would
+            // not be the page the caller asked for.
+            if !can_push_pagination {
+                return Err(Error::msg(
+                    "`after` cursors need the timestamp order (no `order`, or one of \
+                     timestamp/createdAt/updatedAt), a `limit`, a `where` the store can \
+                     evaluate, no non-zero `offset`, and no per-anchor limit or `levels`. \
+                     Page any other query with `offset`.",
+                ));
+            }
+            Some(cursor)
+        }
+        _ => None,
+    };
+
     // A containment walk with no order keeps the walk's order, which the
     // store cannot sort by: it is applied below, with the window, after
     // hydration.
     let sparql_pagination = if walk_order.is_some() {
         None
     } else if scope_needs_phases
+        || keyset.is_some()
         || (can_push_pagination && (query_input.limit.is_some() || query_input.offset.is_some()))
     {
         let direction = query_input
@@ -775,22 +821,19 @@ pub(super) async fn execute_model_query_inner(
                         .iter()
                         .find(|r| r.name == rel_name && !r.predicate.is_empty())
                         .and_then(|rel| {
-                            resolver
-                                .get_shape(&rel.target_class_name)
-                                .ok()
-                                .and_then(|ts| {
-                                    ts.properties
-                                        .iter()
-                                        .find(|p| {
-                                            p.name == prop_name
-                                                && !p.is_collection
-                                                && !p.predicate.is_empty()
-                                        })
-                                        .map(|p| SortKey::RelationProperty {
-                                            rel_pred: rel.predicate.clone(),
-                                            prop_pred: p.predicate.clone(),
-                                        })
-                                })
+                            resolver.get_shape(rel.target()).ok().and_then(|ts| {
+                                ts.properties
+                                    .iter()
+                                    .find(|p| {
+                                        p.name == prop_name
+                                            && !p.is_collection
+                                            && !p.predicate.is_empty()
+                                    })
+                                    .map(|p| SortKey::RelationProperty {
+                                        rel_pred: rel.predicate.clone(),
+                                        prop_pred: p.predicate.clone(),
+                                    })
+                            })
                         })
                         .unwrap_or(SortKey::Timestamp)
                 } else {
@@ -808,6 +851,7 @@ pub(super) async fn execute_model_query_inner(
                 None
             },
             limit: if push_window { query_input.limit } else { None },
+            keyset: keyset.clone(),
         })
     } else {
         None
@@ -830,6 +874,8 @@ pub(super) async fn execute_model_query_inner(
     // Captures the source IRI order returned by the phase-1 pagination subquery
     // so we can restore it after hydration (which uses BTreeMap, alphabetical order).
     let mut pagination_source_order: Option<Vec<String>> = None;
+    // Cursor mode: size of the id page and its last `(first timestamp, id)`.
+    let mut page_tail: Option<(usize, Option<(String, String)>)> = None;
 
     let raw_results: Vec<Value> = match query_plan {
         InstanceQueryPlan::Single(sparql) => {
@@ -866,6 +912,15 @@ pub(super) async fn execute_model_query_inner(
                     let mut page_results: Vec<Value> = serde_json::from_str(&page_json)?;
                     if let Some(n) = anchor_limit {
                         slice_per_anchor(&mut page_results, n);
+                    }
+                    if keyset.is_some() {
+                        let last = page_results.last().and_then(|r| {
+                            Some((
+                                r["_first_ts"].as_str()?.to_string(),
+                                r["source"].as_str()?.to_string(),
+                            ))
+                        });
+                        page_tail = Some((page_results.len(), last));
                     }
                     page_results
                         .iter()
@@ -998,7 +1053,13 @@ pub(super) async fn execute_model_query_inner(
     // drops rows (no post-hydration filter, no per-anchor slice), and the id phase groups by
     // `?source` over the same scope patterns the COUNT's `DISTINCT ?source` reads, so its page
     // length (not the hydrated instances) is the figure the COUNT would extend.
-    let page_total = if window_pushed {
+    //
+    // A page after a cursor is the exception: the rows before the cursor are skipped by the keyset,
+    // not by an `offset` the page could add back, so a short page there tells only how many rows
+    // follow the cursor. Such a page takes the COUNT; a first cursor page (`after: ""`) starts at
+    // the beginning, like offset 0, and keeps the shortcut.
+    let after_a_cursor = matches!(keyset, Some(Some(_)));
+    let page_total = if window_pushed && !after_a_cursor {
         pagination_source_order.as_ref().and_then(|page| {
             total_from_short_page(query_input.offset, query_input.limit, page.len())
         })
@@ -1078,6 +1139,18 @@ pub(super) async fn execute_model_query_inner(
         } else {
             instances.into_iter().skip(offset).collect()
         }
+    };
+
+    // A full page may have a successor; a short one is the last.
+    let next_cursor = match (&keyset, query_input.limit, page_tail) {
+        (Some(_), Some(limit), Some((len, Some((ts, id))))) if limit > 0 && len >= limit => {
+            let direction = sparql_pagination
+                .as_ref()
+                .map(|pg| pg.direction)
+                .unwrap_or(OrderDirection::ASC);
+            Some(KeysetCursor::new(ts, id, direction).encode())
+        }
+        _ => None,
     };
 
     // The language-backed values the filter and sort did not read, for the page only, and of
@@ -1172,6 +1245,7 @@ pub(super) async fn execute_model_query_inner(
     Ok(ModelQueryResult {
         instances: final_instances,
         total_count,
+        next_cursor,
     })
 }
 

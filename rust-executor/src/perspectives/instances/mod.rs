@@ -46,7 +46,10 @@ use crate::mcp::shacl;
 use crate::perspectives::model_query::is_safe_iri_target;
 use crate::perspectives::model_query::types::{ModelShape, ShapeProperty, ShapeRelation};
 use crate::perspectives::model_query::utils::parse_literal_value;
-use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
+use crate::perspectives::perspective_instance::{
+    PerspectiveInstance, ShapeSummary, SubjectClassOption,
+};
+use crate::perspectives::sparql_store::EvalStop;
 use crate::types::{LinkExpression, LinkQuery};
 use crate::utils::{normalize_legacy_literal, other_literal_spelling};
 use serde_json::{json, Value};
@@ -270,33 +273,94 @@ pub(crate) fn generate_instance_uri() -> String {
     format!("ad4m://obj/{random_id}")
 }
 
-/// Resolve a caller-supplied class name to its canonical spelling and shape.
+/// Resolve a caller-supplied class key to its canonical spelling and shape.
 ///
-/// Exact name first (waiting briefly for SHACL to sync on a neighbourhood), then
-/// case-insensitive, else [`InstanceError::UnknownClass`] with the registered classes.
+/// The shape registry (`shape_registry`, listed by `class_keys`) is the only
+/// class lookup: a key is a unique class name or a target class IRI, and an
+/// IRI reads exactly its class, shared name or not. A bare name two registered
+/// classes share resolves to neither — [`InstanceError::AmbiguousClass`] names
+/// their IRIs. The exact key is tried first (waiting briefly for SHACL to sync
+/// on a neighbourhood), then the names case-insensitively — held to the same
+/// rule, a match onto a shared name is ambiguous too — else
+/// [`InstanceError::UnknownClass`] with the class keys. A class that exists
+/// only as an `rdf://type ad4m://SubjectClass` link has no shape, so it is not
+/// in the registry and resolves to nothing.
 pub(crate) async fn resolve_class(
     perspective: &PerspectiveInstance,
     class_name: &str,
 ) -> Result<(String, Arc<ModelShape>), InstanceError> {
-    if let Ok(shape) = perspective
-        .get_shape_or_wait(class_name, CLASS_SYNC_WAIT)
+    if let Some(error) = ambiguous_class(perspective, class_name) {
+        return Err(error);
+    }
+    match perspective
+        .get_shape_or_wait(&EvalStop::none(), class_name, CLASS_SYNC_WAIT)
         .await
     {
-        return Ok((class_name.to_string(), shape));
-    }
-    if let Some(canonical) = shacl::find_class_name(perspective, &class_name.to_lowercase()).await {
-        if let Ok(shape) = perspective.get_shape(&canonical) {
-            return Ok((canonical, shape));
+        Ok(shape) => {
+            // A second class of the name may have synced in during the wait.
+            match ambiguous_class(perspective, class_name) {
+                Some(error) => Err(error),
+                None => Ok((class_name.to_string(), shape)),
+            }
+        }
+        Err(_) => {
+            // Case-insensitive next — agents get the casing wrong often enough
+            // that a hard failure is not worth it — on a name one class owns.
+            // A Unicode fold, like the lowercased lookups elsewhere:
+            // `Ärger` answers to `ärger`.
+            let registry = perspective.shape_registry().unwrap_or_default();
+            let folded = class_name.to_lowercase();
+            let matches: Vec<&ShapeSummary> = registry
+                .iter()
+                .filter(|s| s.name.to_lowercase() == folded)
+                .collect();
+            match matches.as_slice() {
+                [] => Err(InstanceError::UnknownClass {
+                    class_name: class_name.to_string(),
+                    registered: perspective.class_keys().unwrap_or_default(),
+                }),
+                [class] => match perspective.get_shape(&class.name) {
+                    Ok(shape) => Ok((class.name.clone(), shape)),
+                    Err(error) => Err(InstanceError::Failed {
+                        class_name: class_name.to_string(),
+                        step: WriteStep::ReadShape,
+                        error,
+                    }),
+                },
+                _ => {
+                    let mut candidates: Vec<String> = matches
+                        .iter()
+                        .map(|s| s.shape.target_class.clone())
+                        .collect();
+                    candidates.sort();
+                    candidates.dedup();
+                    Err(InstanceError::AmbiguousClass {
+                        class_name: class_name.to_string(),
+                        candidates,
+                    })
+                }
+            }
         }
     }
-    let mut registered = perspective
-        .get_subject_classes_from_shacl()
-        .await
-        .unwrap_or_default();
-    registered.sort();
-    Err(InstanceError::UnknownClass {
-        class_name: class_name.to_string(),
-        registered,
+}
+
+/// `key` names a class name two or more registered classes carry:
+/// [`InstanceError::AmbiguousClass`] with their target class IRIs. A key that
+/// is itself a registered target class IRI names that class alone and is
+/// never ambiguous.
+fn ambiguous_class(perspective: &PerspectiveInstance, key: &str) -> Option<InstanceError> {
+    let registry = perspective.shape_registry().unwrap_or_default();
+    if registry.iter().any(|s| s.shape.target_class == key) {
+        return None;
+    }
+    let candidates: Vec<String> = registry
+        .iter()
+        .filter(|s| s.name == key)
+        .map(|s| s.shape.target_class.clone())
+        .collect();
+    (candidates.len() > 1).then(|| InstanceError::AmbiguousClass {
+        class_name: key.to_string(),
+        candidates,
     })
 }
 
@@ -319,14 +383,22 @@ pub(crate) async fn resolve_writable_class(
     }
 }
 
-/// Run a model query for `class_name` and return `(instances, total_count)`.
-pub(crate) async fn run_model_query(
+/// Run a model query for `class_name` under `stop` and return
+/// `(instances, total_count)`: the client call's gate bounds the query's
+/// evaluations and counts it (`GET /metrics`) once for the call, however many
+/// model queries run under the gate.
+pub(crate) async fn run_model_query_stopped(
+    stop: &EvalStop,
     perspective: &PerspectiveInstance,
     class_name: &str,
     query: &Value,
 ) -> Result<(Vec<Value>, usize), String> {
     let raw = perspective
-        .model_query(class_name, &query.to_string())
+        .model_query_classes_stopped(
+            stop,
+            &crate::perspectives::model_query::QueryClasses::One(class_name.to_string()),
+            &query.to_string(),
+        )
         .await
         .map_err(|e| format!("{e:#}"))?;
     let parsed: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
@@ -360,7 +432,17 @@ pub(crate) async fn fetch_instance(
     class_name: &str,
     base_uri: &str,
 ) -> Result<Option<Value>, String> {
-    Ok(find_instance(perspective, class_name, base_uri)
+    fetch_instance_stopped(&EvalStop::none(), perspective, class_name, base_uri).await
+}
+
+/// [`fetch_instance`] under `stop`: see [`run_model_query_stopped`]'s doc.
+pub(crate) async fn fetch_instance_stopped(
+    stop: &EvalStop,
+    perspective: &PerspectiveInstance,
+    class_name: &str,
+    base_uri: &str,
+) -> Result<Option<Value>, String> {
+    Ok(find_instance(stop, perspective, class_name, base_uri)
         .await?
         .map(|(_, instance)| instance))
 }
@@ -368,13 +450,14 @@ pub(crate) async fn fetch_instance(
 /// [`fetch_instance`], with the URI the instance is stored under: `base_uri`, or its other
 /// `literal:` spelling when that is where the lookup found it.
 async fn find_instance(
+    stop: &EvalStop,
     perspective: &PerspectiveInstance,
     class_name: &str,
     base_uri: &str,
 ) -> Result<Option<(String, Value)>, String> {
     let lookup = |uri: String| async move {
         let query = json!({ "where": { "id": uri.clone() }, "limit": 1 });
-        let (instances, _) = run_model_query(perspective, class_name, &query).await?;
+        let (instances, _) = run_model_query_stopped(stop, perspective, class_name, &query).await?;
         Ok::<Option<(String, Value)>, String>(instances.into_iter().next().map(|i| (uri, i)))
     };
 
@@ -396,7 +479,7 @@ async fn require_instance(
     class_name: &str,
     base_uri: &str,
 ) -> Result<String, InstanceError> {
-    match find_instance(perspective, class_name, base_uri).await {
+    match find_instance(&EvalStop::none(), perspective, class_name, base_uri).await {
         Ok(Some((stored, _))) => Ok(stored),
         Ok(None) => Err(InstanceError::NotFound {
             class_name: class_name.to_string(),

@@ -21,36 +21,9 @@ use crate::types::{
 use base64::Engine;
 
 use super::guards::{Guard, IdParam, Owner};
+use super::perspectives_ws::check_credits;
 use super::types::*;
 use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
-
-/// Refuses a request whose user has no compute credits left. A caller without a user
-/// (the operator, an app) pays nothing. `agent_did` is the managed agent the request acts as.
-fn check_compute_credits_ws(agent_did: Option<&str>) -> Result<(), WsRpcError> {
-    if agent_did.is_none() {
-        return Ok(());
-    }
-    let global_free = crate::db_backend::db_backend()
-        .get_free_hosting_enabled()
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-    if global_free {
-        return Ok(());
-    }
-    if let Some(did) = agent_did {
-        let free = crate::db_backend::db_backend()
-            .get_agent_free_access(did)
-            .map_err(|e| WsRpcError::internal(e.to_string()))?;
-        if !free {
-            let credits = crate::db_backend::db_backend()
-                .get_agent_credits(did)
-                .map_err(|e| WsRpcError::internal(e.to_string()))?;
-            if credits <= 0.0 {
-                return Err(WsRpcError::forbidden("Insufficient compute credits"));
-            }
-        }
-    }
-    Ok(())
-}
 
 // ── Models ──
 
@@ -441,7 +414,7 @@ fn without_endpoint_urls(message: &str, endpoints: &[crate::types::Endpoint]) ->
 }
 
 async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_compute_credits_ws(ctx.user_did())?;
+    check_credits(ctx.user_did())?;
 
     // The task the guard checked.
     let task_id = PROMPT_TASK_ID.require(&params)?;
@@ -461,7 +434,7 @@ async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 }
 
 async fn ai_embed(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_compute_credits_ws(ctx.user_did())?;
+    check_credits(ctx.user_did())?;
 
     let body: EmbedRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -489,7 +462,7 @@ async fn open_transcription_stream(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    check_compute_credits_ws(ctx.user_did())?;
+    check_credits(ctx.user_did())?;
 
     let body: AiTranscriptionOpenParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -737,7 +710,7 @@ pub async fn feed_transcription_stream(
     context
         .require(&AI_TRANSCRIBE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
-    check_compute_credits_ws(context.user_did()).map_err(|e| ApiError::Forbidden(e.message))?;
+    check_credits(context.user_did()).map_err(|e| ApiError::Forbidden(e.message))?;
 
     let stream_ids_header = headers
         .get("x-stream-ids")
@@ -1149,9 +1122,9 @@ mod compute_credit_tests {
         .unwrap();
 
         let results = (
-            check_compute_credits_ws(Some(&broke_did)),
-            check_compute_credits_ws(Some(&funded_did)),
-            check_compute_credits_ws(None),
+            check_credits(Some(&broke_did)),
+            check_credits(Some(&funded_did)),
+            check_credits(None),
         );
         crate::db_backend::db_backend()
             .set_free_hosting_enabled(was_free)
@@ -1210,9 +1183,9 @@ mod compute_credit_tests {
     #[test]
     fn a_closed_database_is_not_free_hosting() {
         let _closed = crate::test_utils::DbClosed::now();
-        assert!(check_compute_credits_ws(Some("did:key:z6MkClosedDbUser")).is_err());
+        assert!(check_credits(Some("did:key:z6MkClosedDbUser")).is_err());
         assert!(
-            check_compute_credits_ws(None).is_ok(),
+            check_credits(None).is_ok(),
             "a caller without a user pays nothing and reads no setting"
         );
     }

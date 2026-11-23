@@ -374,6 +374,10 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "sourceLanguageHash": "QmLang", "templateData": "{}" }),
     ),
     (
+        "language.applyTemplateLocal",
+        || json!({ "sourceLanguageHash": "QmLang", "templateData": "{}" }),
+    ),
+    (
         "language.writeSettings",
         || json!({ "address": "QmLang", "settings": {} }),
     ),
@@ -547,8 +551,6 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     ("perspective.verifyFlowReceipt", || json!({ "receipt": {} })),
     ("perspective.flowValidOutputs", || json!({ "flow": "f" })),
-    ("perspective.getShaclTargetClass", || json!({ "name": "S" })),
-    ("perspective.getShacl", || json!({ "name": "S" })),
     ("perspective.update", || json!({ "name": "n" })),
     ("perspective.addLink", || json!({ "link": link() })),
     ("perspective.addLinkExpression", || {
@@ -576,10 +578,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         "perspective.linkMutations",
         || json!({ "mutations": { "additions": [link()], "removals": [] } }),
     ),
-    (
-        "perspective.addSdna",
-        || json!({ "name": "C", "sdnaType": "subject_class" }),
-    ),
+    ("perspective.registerShapes", || json!({ "shapes": [] })),
     (
         "perspective.executeCommands",
         || json!({ "commands": "[]", "expression": "e" }),
@@ -679,6 +678,10 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1" }),
     ),
     (
+        "sfu.callResume",
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1" }),
+    ),
+    (
         "sfu.callJoin",
         || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "sdpOffer": "{}", "deviceId": "d", "sessionKey": "k" }),
     ),
@@ -688,7 +691,7 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     (
         "sfu.callAnswerServerOffer",
-        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1", "sdpAnswer": "{}" }),
+        || json!({ "neighbourhoodUrl": "neighbourhood://Qm", "roomName": "r", "participantId": "P1", "offerId": "o1", "sdpAnswer": "{}" }),
     ),
     (
         "sfu.addIceCandidate",
