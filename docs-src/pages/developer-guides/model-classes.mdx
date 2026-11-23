@@ -662,6 +662,20 @@ const recipe = await Recipe.create(perspective, { name: "Cake" }, {
 });
 ```
 
+`create` returns the instance it built from your values, with its `id`, and reads nothing back
+after the commit. `author`, `createdAt`, `updatedAt`, getters and relations you did not write are
+not set. Pass `returns: 'row'` to read the row after the commit (one more round trip) and fill them:
+
+```typescript
+const recipe = await Recipe.create(perspective, { name: "Cake" }, { returns: "row" });
+console.log(recipe.author, recipe.createdAt);
+```
+
+`returns: 'row'` cannot be combined with `batchId` (nothing is committed yet to read), and it
+rejects if the read fails after the commit: the record exists then, and the error names its id, so
+do not retry the create. A later `save()` on the returned instance updates it. Instance
+`save()` on a new instance still refreshes the instance after its commit.
+
 ### Reading
 
 ```typescript
