@@ -22,7 +22,7 @@ impl LanguageController {
                 continue;
             };
             crate::call_diag!(
-                log::Level::Info,
+                log::Level::Debug,
                 "language.queue",
                 "language" => handle.language_address,
                 "name" => handle.language_name.clone().unwrap_or_default(),
@@ -82,6 +82,7 @@ mod tests {
         controller.report_queues().await;
         let lines = capture::lines("language.queue", &[&language]);
         assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0].level, log::Level::Debug);
         capture::assert_format(&lines[0].line);
         assert_eq!(
             capture::field(&lines[0].line, "depth").as_deref(),
