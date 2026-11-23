@@ -248,9 +248,68 @@ fn is_tool_calls_message(m: &Value) -> bool {
             .is_some_and(|calls| !calls.is_empty())
 }
 
-/// Shorten the tool result at `idx` until the transcript is within
-/// [`HISTORY_MAX_BYTES`], or to [`HISTORY_OMITTED_RESULT`] when no prefix
-/// fits. `false` when this result cannot get any shorter.
+/// Bytes of `s` inside a JSON string. serde_json writes `"`, `\`, and the
+/// short control escapes as two bytes, other controls as `\u00XX`, and
+/// everything else as UTF-8. The history budget counts serialized bytes,
+/// same as the request trim in `harness_bridge`.
+fn json_escaped_len(s: &str) -> usize {
+    s.chars()
+        .map(|ch| match ch {
+            '"' | '\\' | '\u{8}' | '\u{9}' | '\u{a}' | '\u{c}' | '\u{d}' => 2,
+            c if c < '\u{20}' => 6,
+            c => c.len_utf8(),
+        })
+        .sum()
+}
+
+/// The longest prefix of `s` whose JSON-escaped form is at most
+/// `escaped_budget` bytes, as a raw byte length.
+fn escaped_prefix_len(s: &str, escaped_budget: usize) -> usize {
+    let mut used = 0;
+    let mut end = 0;
+    for (i, ch) in s.char_indices() {
+        used += match ch {
+            '"' | '\\' | '\u{8}' | '\u{9}' | '\u{a}' | '\u{c}' | '\u{d}' => 2,
+            c if c < '\u{20}' => 6,
+            c => c.len_utf8(),
+        };
+        if used > escaped_budget {
+            break;
+        }
+        end = i + ch.len_utf8();
+    }
+    end
+}
+
+/// Cut `raw` so its JSON-escaped form is at most `allowed_escaped` bytes,
+/// note included. A budget that cannot hold the note becomes
+/// [`HISTORY_OMITTED_RESULT`].
+fn cut_for_escaped_history_budget(raw: &str, allowed_escaped: usize) -> String {
+    if json_escaped_len(raw) <= allowed_escaped {
+        return raw.to_string();
+    }
+    // `kept` never has more digits than `raw.len()`, so this note is at
+    // least as long as the one appended below.
+    let note_escaped = json_escaped_len(&history_cut_note(raw.len(), raw.len()));
+    if allowed_escaped <= note_escaped {
+        return HISTORY_OMITTED_RESULT.to_string();
+    }
+    let kept = escaped_prefix_len(raw, allowed_escaped - note_escaped);
+    if kept == 0 {
+        return HISTORY_OMITTED_RESULT.to_string();
+    }
+    let next = format!("{}{}", &raw[..kept], history_cut_note(kept, raw.len()));
+    if json_escaped_len(&next) > allowed_escaped {
+        return HISTORY_OMITTED_RESULT.to_string();
+    }
+    next
+}
+
+/// Shorten the tool result at `idx` enough to shed the transcript's excess
+/// over [`HISTORY_MAX_BYTES`], or to [`HISTORY_OMITTED_RESULT`] when no
+/// prefix fits. The excess is serialized bytes. A result whose characters
+/// expand in JSON is cut on that size; one that does not keeps the raw-byte
+/// cut. `false` when this result cannot get any shorter.
 fn shrink_history_result(out: &mut [Value], idx: usize) -> bool {
     let raw = out[idx]["content"].as_str().unwrap_or("").to_string();
     if raw == HISTORY_OMITTED_RESULT {
@@ -260,14 +319,34 @@ fn shrink_history_result(out: &mut [Value], idx: usize) -> bool {
     if over == 0 {
         return false;
     }
-    let room = raw.len().saturating_sub(over);
-    let mut next = if room == 0 {
-        HISTORY_OMITTED_RESULT.to_string()
+    let escaped = json_escaped_len(&raw);
+    let mut next = if escaped == raw.len() {
+        let room = raw.len().saturating_sub(over);
+        if room == 0 {
+            HISTORY_OMITTED_RESULT.to_string()
+        } else {
+            cut_for_history_budget(&raw, room)
+        }
     } else {
-        cut_for_history_budget(&raw, room)
+        let allowed = escaped.saturating_sub(over);
+        if allowed == 0 {
+            HISTORY_OMITTED_RESULT.to_string()
+        } else {
+            cut_for_escaped_history_budget(&raw, allowed)
+        }
     };
-    if next.len() >= raw.len() {
-        if HISTORY_OMITTED_RESULT.len() < raw.len() {
+    let shorter = if escaped == raw.len() {
+        next.len() < raw.len()
+    } else {
+        json_escaped_len(&next) < escaped
+    };
+    if !shorter {
+        let omit_shorter = if escaped == raw.len() {
+            HISTORY_OMITTED_RESULT.len() < raw.len()
+        } else {
+            json_escaped_len(HISTORY_OMITTED_RESULT) < escaped
+        };
+        if omit_shorter {
             next = HISTORY_OMITTED_RESULT.to_string();
         } else {
             return false;
@@ -283,12 +362,15 @@ fn shrink_history_result(out: &mut [Value], idx: usize) -> bool {
     true
 }
 
-/// The oldest not-yet-omitted result of the tool group at the front.
+/// The oldest shrinkable result of the tool group at the front. A result
+/// the omit note would only lengthen is skipped, so a later one can be cut.
 fn shrink_front_group_result(out: &mut [Value]) -> bool {
     let mut i = 1;
     while i < out.len() && out[i]["role"] == "tool" {
-        if out[i]["content"].as_str() != Some(HISTORY_OMITTED_RESULT) {
-            return shrink_history_result(out, i);
+        if out[i]["content"].as_str() != Some(HISTORY_OMITTED_RESULT)
+            && shrink_history_result(out, i)
+        {
+            return true;
         }
         i += 1;
     }
@@ -308,15 +390,15 @@ fn fit_history_budget(out: &mut Vec<Value>) {
         transcript_bytes(out)
     );
 
-    let mut cuts = 0;
+    // Each successful shrink shortens a result, so the loop ends when
+    // nothing left in the group can shrink — that is when the group drops.
     while transcript_bytes(out) > HISTORY_MAX_BYTES {
         let last_user = out.iter().rposition(|m| m["role"] == "user").unwrap_or(0);
         if last_user == 0 {
             break;
         }
         if is_tool_calls_message(&out[0]) {
-            if cuts < 64 && shrink_front_group_result(out) {
-                cuts += 1;
+            if shrink_front_group_result(out) {
                 continue;
             }
             log::debug!(
@@ -338,17 +420,24 @@ fn fit_history_budget(out: &mut Vec<Value>) {
 
     // A result written after the question (this turn's own step) can still
     // push the transcript over. Cut it; do not drop the question to reach it.
-    let mut tail_cuts = 0;
-    while transcript_bytes(out) > HISTORY_MAX_BYTES && tail_cuts < 64 {
-        let Some(idx) = out.iter().position(|m| {
-            m["role"] == "tool" && m["content"].as_str() != Some(HISTORY_OMITTED_RESULT)
-        }) else {
-            break;
-        };
-        if !shrink_history_result(out, idx) {
+    // A result that cannot shrink is skipped. Each cut shortens one, so
+    // this ends.
+    while transcript_bytes(out) > HISTORY_MAX_BYTES {
+        let mut shrunk = false;
+        for idx in 0..out.len() {
+            if out[idx]["role"] != "tool"
+                || out[idx]["content"].as_str() == Some(HISTORY_OMITTED_RESULT)
+            {
+                continue;
+            }
+            if shrink_history_result(out, idx) {
+                shrunk = true;
+                break;
+            }
+        }
+        if !shrunk {
             break;
         }
-        tail_cuts += 1;
     }
 
     let orphans = out.iter().take_while(|m| m["role"] == "tool").count();
@@ -800,6 +889,315 @@ mod tests {
             .unwrap();
         assert_eq!(newer["content"], "x".repeat(8 * 1024));
         assert!(history.iter().any(|m| m["content"] == "and now?"));
+    }
+
+    // A result of quotes is twice as long once JSON escapes it. The excess
+    // `over` is that serialized size, so a raw-byte room of `len - over`
+    // goes to zero and the result is omitted, even though a prefix of the
+    // quotes plus the cut note fits in HISTORY_MAX_BYTES.
+    #[test]
+    fn a_quote_heavy_result_keeps_a_prefix_under_the_serialized_budget() {
+        let messages = vec![
+            row(
+                "u1",
+                1,
+                AiSessionMessageRole::User,
+                user_content("read it all"),
+                None,
+            ),
+            row(
+                "a1",
+                2,
+                AiSessionMessageRole::Assistant,
+                assistant_content("read"),
+                Some(AiTurnStatus::Done),
+            ),
+            row(
+                "t1",
+                3,
+                AiSessionMessageRole::Tool,
+                json!({ "name": "query_links", "arguments": {},
+                        "result": "\"".repeat(HISTORY_MAX_BYTES) }),
+                Some(AiTurnStatus::Done),
+            ),
+            row(
+                "u2",
+                4,
+                AiSessionMessageRole::User,
+                user_content("and now?"),
+                None,
+            ),
+        ];
+        let history = history(messages, usize::MAX);
+        assert!(
+            transcript_bytes(&history) <= HISTORY_MAX_BYTES,
+            "{} bytes",
+            transcript_bytes(&history)
+        );
+        let tool = history
+            .iter()
+            .find(|m| m["tool_call_id"] == "call_t1")
+            .expect("the quote-heavy result was dropped with its call");
+        let text = tool["content"].as_str().unwrap();
+        assert!(
+            text.contains('"'),
+            "escaped quotes were omitted whole instead of cut to a prefix: {text:.180}"
+        );
+        assert!(
+            history.iter().any(|m| m["content"] == "and now?"),
+            "the question fell off: {history:?}"
+        );
+    }
+
+    // The first result is already shorter than the omit note, so it cannot
+    // shrink. That must not drop the group or stop the scan: the next
+    // result is what puts the transcript over, and cutting it keeps both
+    // calls.
+    #[test]
+    fn a_result_that_cannot_shrink_does_not_drop_the_rest_of_its_group() {
+        let messages = vec![
+            row(
+                "u1",
+                1,
+                AiSessionMessageRole::User,
+                user_content("read it all"),
+                None,
+            ),
+            row(
+                "a1",
+                2,
+                AiSessionMessageRole::Assistant,
+                assistant_content("read"),
+                Some(AiTurnStatus::Done),
+            ),
+            row(
+                "t1",
+                3,
+                AiSessionMessageRole::Tool,
+                json!({ "name": "query_links", "arguments": {}, "result": "ok" }),
+                Some(AiTurnStatus::Done),
+            ),
+            row(
+                "t2",
+                4,
+                AiSessionMessageRole::Tool,
+                json!({ "name": "query_links", "arguments": {},
+                        "result": "x".repeat(HISTORY_MAX_BYTES) }),
+                Some(AiTurnStatus::Done),
+            ),
+            row(
+                "u2",
+                5,
+                AiSessionMessageRole::User,
+                user_content("and now?"),
+                None,
+            ),
+        ];
+        let history = history(messages, usize::MAX);
+        assert!(
+            transcript_bytes(&history) <= HISTORY_MAX_BYTES,
+            "{} bytes",
+            transcript_bytes(&history)
+        );
+        let calls = tool_call_ids(&history);
+        assert_eq!(
+            calls,
+            vec!["call_t1".to_string(), "call_t2".to_string()],
+            "the group was dropped because the short result could not shrink: {history:?}"
+        );
+        let ok = history
+            .iter()
+            .find(|m| m["tool_call_id"] == "call_t1")
+            .unwrap();
+        assert_eq!(ok["content"], "ok");
+        let big = history
+            .iter()
+            .find(|m| m["tool_call_id"] == "call_t2")
+            .unwrap();
+        assert!(
+            big["content"]
+                .as_str()
+                .unwrap()
+                .contains("HISTORY_MAX_BYTES"),
+            "the oversized result was not cut: {big}"
+        );
+    }
+
+    // Same pair, but the question is already at the front, so the cut runs
+    // on the tail path. A short result there used to stop the scan.
+    #[test]
+    fn a_tail_result_that_cannot_shrink_does_not_stop_the_cut() {
+        let messages = vec![
+            row(
+                "u1",
+                1,
+                AiSessionMessageRole::User,
+                user_content("the question being answered"),
+                None,
+            ),
+            row(
+                "a1",
+                2,
+                AiSessionMessageRole::Assistant,
+                assistant_content("read"),
+                Some(AiTurnStatus::Done),
+            ),
+            row(
+                "t1",
+                3,
+                AiSessionMessageRole::Tool,
+                json!({ "name": "query_links", "arguments": {}, "result": "ok" }),
+                Some(AiTurnStatus::Done),
+            ),
+            row(
+                "t2",
+                4,
+                AiSessionMessageRole::Tool,
+                json!({ "name": "query_links", "arguments": {},
+                        "result": "x".repeat(HISTORY_MAX_BYTES) }),
+                Some(AiTurnStatus::Done),
+            ),
+        ];
+        let history = history(messages, usize::MAX);
+        assert!(
+            transcript_bytes(&history) <= HISTORY_MAX_BYTES,
+            "{} bytes",
+            transcript_bytes(&history)
+        );
+        assert_eq!(
+            tool_call_ids(&history),
+            vec!["call_t1".to_string(), "call_t2".to_string()]
+        );
+        assert_eq!(
+            history
+                .iter()
+                .find(|m| m["tool_call_id"] == "call_t1")
+                .unwrap()["content"],
+            "ok"
+        );
+        assert!(history
+            .iter()
+            .any(|m| { m["role"] == "user" && m["content"] == "the question being answered" }));
+    }
+
+    // Sixty-four is not a bound on a tool group. One more result than that,
+    // each of the earlier ones only a byte longer than the omit note, still
+    // leaves the transcript over. The last result has to be cut too. The
+    // group stays.
+    #[test]
+    fn more_than_sixty_four_cuts_keep_the_front_group() {
+        let small = "x".repeat(super::HISTORY_OMITTED_RESULT.len() + 1);
+        let mut messages = vec![
+            row(
+                "u1",
+                1,
+                AiSessionMessageRole::User,
+                user_content("read it all"),
+                None,
+            ),
+            row(
+                "a1",
+                2,
+                AiSessionMessageRole::Assistant,
+                assistant_content("read"),
+                Some(AiTurnStatus::Done),
+            ),
+        ];
+        for i in 0..64 {
+            messages.push(row(
+                &format!("s{i}"),
+                3 + i,
+                AiSessionMessageRole::Tool,
+                json!({ "name": "query_links", "arguments": {}, "result": small }),
+                Some(AiTurnStatus::Done),
+            ));
+        }
+        messages.push(row(
+            "big",
+            80,
+            AiSessionMessageRole::Tool,
+            json!({ "name": "query_links", "arguments": {},
+                    "result": "y".repeat(HISTORY_MAX_BYTES) }),
+            Some(AiTurnStatus::Done),
+        ));
+        messages.push(row(
+            "u2",
+            81,
+            AiSessionMessageRole::User,
+            user_content("and now?"),
+            None,
+        ));
+        let history = history(messages, usize::MAX);
+        assert!(
+            transcript_bytes(&history) <= HISTORY_MAX_BYTES,
+            "{} bytes",
+            transcript_bytes(&history)
+        );
+        let calls = tool_call_ids(&history);
+        assert_eq!(
+            calls.len(),
+            65,
+            "the group was dropped after 64 cuts: {calls:?}"
+        );
+        assert!(calls.iter().any(|id| id == "call_big"));
+        assert!(history.iter().any(|m| m["content"] == "and now?"));
+    }
+
+    #[test]
+    fn more_than_sixty_four_tail_cuts_still_fit() {
+        let small = "x".repeat(super::HISTORY_OMITTED_RESULT.len() + 1);
+        let mut messages = vec![
+            row(
+                "u1",
+                1,
+                AiSessionMessageRole::User,
+                user_content("the question being answered"),
+                None,
+            ),
+            row(
+                "a1",
+                2,
+                AiSessionMessageRole::Assistant,
+                assistant_content("read"),
+                Some(AiTurnStatus::Done),
+            ),
+        ];
+        for i in 0..64 {
+            messages.push(row(
+                &format!("s{i}"),
+                3 + i,
+                AiSessionMessageRole::Tool,
+                json!({ "name": "query_links", "arguments": {}, "result": small }),
+                Some(AiTurnStatus::Done),
+            ));
+        }
+        messages.push(row(
+            "big",
+            80,
+            AiSessionMessageRole::Tool,
+            json!({ "name": "query_links", "arguments": {},
+                    "result": "y".repeat(HISTORY_MAX_BYTES) }),
+            Some(AiTurnStatus::Done),
+        ));
+        let history = history(messages, usize::MAX);
+        assert!(
+            transcript_bytes(&history) <= HISTORY_MAX_BYTES,
+            "{} bytes",
+            transcript_bytes(&history)
+        );
+        assert_eq!(tool_call_ids(&history).len(), 65);
+        assert!(history
+            .iter()
+            .any(|m| { m["role"] == "user" && m["content"] == "the question being answered" }));
+    }
+
+    fn tool_call_ids(history: &[Value]) -> Vec<String> {
+        history
+            .iter()
+            .filter_map(|m| m.get("tool_calls").and_then(|calls| calls.as_array()))
+            .flatten()
+            .filter_map(|call| call["id"].as_str().map(str::to_string))
+            .collect()
     }
 
     // A stored result bigger than the model's share of the window replays
