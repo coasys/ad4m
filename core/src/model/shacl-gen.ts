@@ -168,8 +168,23 @@ export function buildSHACL(
     }
 
     // ── Constructor / Destructor actions ────────────────────────────────
+    // `subjectConstructor` is a hand-written link-action list. It must not
+    // share a constructor list with declared `call` actions (the executor
+    // refuses a mixed list), and a mounted class emits no link actions.
     let constructorActions: any[] = [];
     if (obj.subjectConstructor && obj.subjectConstructor.length) {
+        if (mount) {
+            throw new Error(
+                `${subjectName} is a mounted class and sets subjectConstructor — ` +
+                `a mounted constructor list holds declared calls or stays empty, and must not emit link actions`
+            );
+        }
+        if (modelSpec?.constructorActions) {
+            throw new Error(
+                `${subjectName} sets both subjectConstructor and constructorActions — ` +
+                `a constructor list must not mix link actions with declared call actions`
+            );
+        }
         constructorActions = constructorActions.concat(obj.subjectConstructor);
     }
 

@@ -4,6 +4,7 @@ import {
     defineLanguage,
     resolveMountCallSources,
 } from "../src/defineLanguage.js";
+import { Model } from "../../../core/src/model/decorators";
 // The decorated class is a single source of truth shared with core's
 // `mount-classes.test.ts` — it lives under ad4m-ldk/tests/ so that
 // `ad4m-ldk/tsconfig.test.json` (TSX_TSCONFIG_PATH) covers it for tsx;
@@ -143,4 +144,115 @@ test("resolveMountCallSources substitutes {language} in every action list", () =
     assert.equal(out.properties[2].remover[0].target, '{"to":"langabc://x"}');
     // Input not mutated (generateSHACL results are memoized upstream).
     assert.equal(shape.properties[0].setter[0].source, "{language}://rec/1");
+});
+
+test("mount.classes: {language} only in interpretation_hint does not resolve an address", async () => {
+    let called = false;
+    class HintOnly {
+        static className = "HintOnly";
+        static generateSHACL() {
+            return {
+                name: "HintOnly",
+                shape: {
+                    toJSON: () => ({
+                        node_shape_uri: "h://HintOnlyShape",
+                        target_class: "h://HintOnly",
+                        interpretation_hint: "Keep {language} literal",
+                        properties: [],
+                    }),
+                },
+            };
+        }
+    }
+    const lang = defineLanguage({
+        name: "m",
+        async init() {},
+        mount: {
+            classes: [HintOnly as any],
+            version: "1",
+            snapshot: emptySnapshot,
+            languageAddress() {
+                called = true;
+                return "should-not-run";
+            },
+        },
+    });
+    const shapes = await lang.mountShapes!();
+    assert.equal(called, false);
+    assert.equal((shapes.shapes[0].shape as any).interpretation_hint, "Keep {language} literal");
+});
+
+test("mount.classes: languageAddress keeps the mount receiver", async () => {
+    class NeedsAddr {
+        static className = "NeedsAddr";
+        static generateSHACL() {
+            return {
+                name: "NeedsAddr",
+                shape: {
+                    toJSON: () => ({
+                        node_shape_uri: "n://NeedsAddrShape",
+                        target_class: "n://NeedsAddr",
+                        constructor_actions: [
+                            { action: "call", source: "{language}://class/NeedsAddr", predicate: "create", target: "{}" },
+                        ],
+                        properties: [],
+                    }),
+                },
+            };
+        }
+    }
+    const mount = {
+        x: "from-this",
+        classes: [NeedsAddr as any],
+        version: "1",
+        snapshot: emptySnapshot,
+        languageAddress() { return this.x; },
+    };
+    const lang = defineLanguage({
+        name: "m",
+        async init() {},
+        mount,
+    });
+    const shapes = await lang.mountShapes!();
+    assert.equal(
+        (shapes.shapes[0].shape as any).constructor_actions[0].source,
+        "from-this://class/NeedsAddr",
+    );
+});
+
+test("mount.classes: parent_shapes use the URI the executor derives from target_class", async () => {
+    @Model({
+        name: "NsParent",
+        namespace: "declared://",
+        targetClass: "other://ParentRec",
+        mount: true,
+    })
+    class NsParent {}
+
+    @Model({
+        name: "NsChild",
+        namespace: "declared://",
+        targetClass: "elsewhere://ChildRec",
+        mount: true,
+    })
+    class NsChild extends NsParent {}
+
+    const lang = defineLanguage({
+        name: "m",
+        async init() {},
+        mount: {
+            classes: [NsParent, NsChild],
+            version: "1",
+            snapshot: emptySnapshot,
+        },
+    });
+    const shapes = await lang.mountShapes!();
+    const byName = Object.fromEntries(shapes.shapes.map((s) => [s.name, s.shape as any]));
+    assert.equal(byName.NsParent.node_shape_uri, undefined);
+    assert.equal(byName.NsParent.target_class, "other://ParentRec");
+    assert.equal(byName.NsChild.node_shape_uri, undefined);
+    assert.equal(byName.NsChild.target_class, "elsewhere://ChildRec");
+    // Declared shape is `declared://NsParentShape`. The executor stores the
+    // parent at `other://ParentRecShape` (`{namespace of target_class}{local}Shape`).
+    assert.deepEqual(byName.NsChild.parent_shapes, ["other://ParentRecShape"]);
 });

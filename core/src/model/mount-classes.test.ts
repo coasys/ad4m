@@ -198,3 +198,43 @@ describe("declared call actions replace link actions per list", () => {
         ]);
     });
 });
+
+describe("subjectConstructor stays a link list of its own", () => {
+    const linkCtor = [
+        { action: "addLink", source: "this", predicate: "leg://title", target: "x" },
+    ];
+
+    it("throws when a class sets both subjectConstructor and constructorActions", () => {
+        @Model({
+            name: "BothCtors",
+            constructorActions: { interaction: "create", source: "lang://class/BothCtors" },
+        })
+        class BothCtors {
+            @Property({ through: "both://title" })
+            title!: string;
+        }
+        (BothCtors as any).prototype.subjectConstructor = linkCtor;
+        expect(() => (BothCtors as any).generateSHACL()).toThrow(/subjectConstructor/);
+    });
+
+    it("throws when a mounted class sets subjectConstructor", () => {
+        @Model({ name: "MountedCtor", mount: true, namespace: "mnt://" })
+        class MountedCtor {
+            @Property({ through: "mnt://title" })
+            title!: string;
+        }
+        (MountedCtor as any).prototype.subjectConstructor = linkCtor;
+        expect(() => (MountedCtor as any).generateSHACL()).toThrow(/subjectConstructor/);
+    });
+
+    it("still emits a lone subjectConstructor as the constructor list", () => {
+        @Model({ name: "LegacyCtor", namespace: "leg://" })
+        class LegacyCtor {
+            @Property({ through: "leg://title" })
+            title!: string;
+        }
+        (LegacyCtor as any).prototype.subjectConstructor = linkCtor;
+        const json = (LegacyCtor as any).generateSHACL().shape.toJSON();
+        expect(json.constructor_actions).toEqual(linkCtor);
+    });
+});
