@@ -16,6 +16,7 @@ pub mod language_runtime;
 pub mod language_runtime_handle;
 pub mod literal;
 mod metas;
+mod metrics;
 #[cfg(test)]
 pub(crate) mod mount_tests;
 pub mod mount_types;
@@ -1738,8 +1739,15 @@ impl LanguageController {
         }
 
         let bundle = source_lines.join("\n");
-        let (address, path) = self.save_language_bundle(&bundle, None)?;
-        self.load_language(path, false).await?;
+        let (address, _path) = self.save_language_bundle(&bundle, None)?;
+        // The same template data gives the same address. `install_language` keeps a
+        // runtime that is already loaded; `load_language` would tear it down.
+        Self::install_language(address.clone())
+            .await
+            .map_err(|e| LanguageError::LoadError {
+                address: address.clone(),
+                message: e.to_string(),
+            })?;
         Ok(address)
     }
 

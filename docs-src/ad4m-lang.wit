@@ -472,8 +472,13 @@ interface mount {
         data-json: string,
     }
 
+    /// What `mountSnapshot()` returns: the records, in an `entries` field.
+    record mount-snapshot {
+        entries: list<mount-entry>,
+    }
+
     shapes: func() -> mount-shapes;
-    snapshot: func() -> list<mount-entry>;
+    snapshot: func() -> mount-snapshot;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
