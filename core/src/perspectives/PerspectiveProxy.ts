@@ -1489,17 +1489,23 @@ export class PerspectiveProxy {
      *  a 400: Prolog live queries are not supported). Call `dispose()` when
      *  done.
      *
+     *  An ASK query gives a boolean, not rows: use `liveSparql<boolean>`.
+     *
      *  ```typescript
      *  const live = perspective.liveSparql("SELECT ?s WHERE { ?s ?p ?o }");
      *  const stop = live.subscribe(({ data, initial }) => console.log(data, initial));
+     *  const rows = await live.first;
+     *  // later
+     *  stop();
      *  live.dispose();
      *  ```
      */
-    liveSparql(sparql: string, options: LiveOptions = {}): LiveQuery<SparqlRows> {
-        return new LiveQuery<SparqlRows>(
+    liveSparql<T = SparqlRows>(sparql: string, options: LiveOptions = {}): LiveQuery<T> {
+        return new LiveQuery<T>(
             this.#client, this.uuid,
             signal => this.#client.subscribe(this.uuid, { sparql }, { signal, timeoutMs: options.timeoutMs }),
-            rows => rows,
+            // A copy: LiveQuery keeps the raw result to apply later diffs to.
+            rows => structuredClone(rows),
         );
     }
 

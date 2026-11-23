@@ -555,12 +555,11 @@ function parentLinkWriter(
  *   .limit(5)
  *   .get();
  * 
- * // Subscribe to real-time updates
- * await Recipe.query(perspective)
- *   .where({ status: "recipe://cooking" })
- *   .subscribe(recipes => {
- *     console.log("Currently being cooked:", recipes);
- *   });
+ * // Follow real-time updates with a live query
+ * const live = Recipe.live(perspective, { where: { status: "recipe://cooking" } });
+ * live.subscribe(({ data }) => {
+ *   if (data) console.log("Currently being cooked:", data.results);
+ * });
  * 
  * // Paginate results
  * const { results, totalCount, pageNumber } = await Recipe.query(perspective)
@@ -1505,14 +1504,16 @@ export class Ad4mModel {
     query?: Query,
     options: LiveOptions = {},
   ): LiveQuery<Page<InstanceType<C[number]>>> {
+    // Copy once, so a caller changing its array later does not change hydration.
+    const classList = [...classes];
     const { after: _after, ...cursorless } = query ?? {};
-    const withAll = Ad4mModel.withIncludeAll(classes, cursorless);
-    const { classNames, queryJson } = Ad4mModel.prepareUnionQueryParams(classes, withAll);
+    const withAll = Ad4mModel.withIncludeAll(classList, cursorless);
+    const { classNames, queryJson } = Ad4mModel.prepareUnionQueryParams(classList, withAll);
     return new LiveQuery<Page<InstanceType<C[number]>>>(
       perspective.client, perspective.uuid,
       (signal) => perspective.client.subscribe(perspective.uuid, { className: classNames, queryJson }, { signal, timeoutMs: options.timeoutMs }),
       (raw) => ({
-        results: Ad4mModel.parseUnionResult(classes, perspective, raw, withAll.include, withAll.properties) as InstanceType<C[number]>[],
+        results: Ad4mModel.parseUnionResult(classList, perspective, raw, withAll.include, withAll.properties) as InstanceType<C[number]>[],
         ...(raw?.totalCount !== undefined ? { totalCount: raw.totalCount } : {}),
       }),
     );
@@ -2698,12 +2699,11 @@ export class Ad4mModel {
    *   .limit(5)
    *   .run();
    * 
-   * // With real-time updates
-   * await Recipe.query(perspective)
-   *   .where({ status: "cooking" })
-   *   .subscribe(recipes => {
-   *     console.log("Currently cooking:", recipes);
-   *   });
+   * // With real-time updates: a live query with the same filter
+   * const live = Recipe.live(perspective, { where: { status: "cooking" } });
+   * const { results } = await live.first;
+   * console.log("Currently cooking:", results);
+   * live.dispose();
    * ```
    */
   static query<T extends Ad4mModel>(

@@ -166,14 +166,14 @@ const live = perspective.liveSparql(
   'SELECT ?post ?agent WHERE { ?post <sioc://likes> ?agent . }'
 );
 
-// The opening result, once the executor has computed it
-const rows = await live.first;
-
-// Every value: the opening one at once (when there is one), then each change.
+// Every value: the opening one when it arrives, then each change.
 // `initial` is true only for the opening value.
 const stop = live.subscribe(({ status, data, initial }) => {
   if (status === "ready") console.log("Posts and the agents who like them:", data, initial);
 });
+
+// The opening result, once the executor has computed it
+const rows = await live.first;
 
 // Important: Clean up when done
 stop();

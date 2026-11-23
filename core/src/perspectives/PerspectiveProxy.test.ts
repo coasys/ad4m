@@ -35,6 +35,19 @@ describe('perspective.liveSparql', () => {
     expect(client.disposeQuerySubscription).toHaveBeenCalledWith('test-uuid', 'sub-1');
   });
 
+  it('publishes a copy of the rows, so changing `data` does not corrupt later diffs', async () => {
+    const { client } = liveClient(jest.fn().mockResolvedValue({ subscriptionId: 'sub-1', result: [{ s: 'a' }], revision: 0 }));
+    let push!: (u: any) => void;
+    client.onQueryUpdate = (cb: any) => { push = cb; return () => {}; };
+    const live = createProxy(client).liveSparql('SELECT * WHERE { ?s ?p ?o }');
+    const rows = await live.first;
+    rows.push({ s: 'x' });
+    rows[0].s = 'changed';
+    push({ subscriptionId: 'sub-1', revision: 1, added: [{ s: 'b' }], removed: [] });
+    expect(live.getSnapshot().data).toEqual([{ s: 'a' }, { s: 'b' }]);
+    live.dispose();
+  });
+
   it('passes the timeout to the open call', async () => {
     const { client } = liveClient(jest.fn().mockResolvedValue({ subscriptionId: 'sub-1', result: [], revision: 0 }));
     const live = createProxy(client).liveSparql('SELECT ?x WHERE { ?x ?p ?o }', { timeoutMs: 5000 });

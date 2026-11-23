@@ -480,6 +480,27 @@ describe('LiveQuery', () => {
             expect(live.getSnapshot()).toMatchObject({ reopening: false, data: ['a'], initial: true });
         });
 
+        it('a re-open whose result cannot be projected still clears reopening in the snapshot', async () => {
+            const { client, reconnect } = fakeClient();
+            const openCall = jest.fn()
+                .mockResolvedValueOnce({ subscriptionId: 's1', result: ['a'], revision: 0 })
+                .mockRejectedValueOnce(new Error('Perspective p not found'))
+                .mockResolvedValueOnce({ subscriptionId: 's2', result: ['bad'], revision: 0 });
+            const live = new LiveQuery<any[]>(client as any, 'p', openCall, (raw: any) => {
+                if (raw[0] === 'bad') throw new Error('cannot project');
+                return raw;
+            });
+            await live.first;
+            reconnect();
+            await jest.advanceTimersByTimeAsync(0);
+            expect(live.getSnapshot().reopening).toBe(true);
+            const statuses: LiveQueryStatus[] = [];
+            live.onStatus(s => statuses.push(s));
+            await jest.advanceTimersByTimeAsync(1000);
+            expect(statuses).toEqual([{ state: 'open' }]);
+            expect(live.getSnapshot()).toMatchObject({ reopening: false, data: ['a'] });
+        });
+
         it('a second failed re-open tells the listeners nothing new', async () => {
             const { client, reconnect } = fakeClient();
             const openCall = jest.fn()

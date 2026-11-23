@@ -3506,6 +3506,9 @@ describe("Model.live ownership", () => {
     resolveOpen({ subscriptionId: "sub-p", revision: 0, result: { instances: [], totalCount: 0 } });
 
     await expect(live.first).rejects.toThrow();
+    await new Promise(resolve => setImmediate(resolve));
+    expect(h.client.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+    expect(h.client.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-p");
     expect(() => live.dispose()).not.toThrow();
     expect(callback).not.toHaveBeenCalled();
   });

@@ -190,6 +190,10 @@ export function useLiveQuery<T extends Ad4mModel>(
   }
 
   function subscribe(p: PerspectiveProxy) {
+    // End the previous query first, so it cannot put rows back.
+    stop?.();
+    stop = null;
+
     // If a parent scope is declared but its id is not yet resolved, hold off
     if (parent && "id" in parent && !parent.id) {
       collectionData.value = [];
@@ -205,9 +209,6 @@ export function useLiveQuery<T extends Ad4mModel>(
       return;
     }
 
-    // Dispose previous subscription
-    stop?.();
-    stop = null;
     loading.value = true;
 
     try {
@@ -218,7 +219,8 @@ export function useLiveQuery<T extends Ad4mModel>(
           loading.value = false;
         } else if (snapshot.status === "ready") {
           handleNewEntries(snapshot.data!.results as T[]);
-          if (snapshot.data!.totalCount !== undefined) totalCount.value = snapshot.data!.totalCount;
+          totalCount.value = snapshot.data!.totalCount ?? 0;
+          error.value = "";
           loading.value = false;
         }
       });

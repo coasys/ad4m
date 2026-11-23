@@ -133,7 +133,7 @@ function stableKey(value: unknown): string {
  *
  * The snapshot changes only when the result, the status or `reopening` does:
  * a resync, a re-open or an update that leaves the result as it was emits
- * nothing. Call `dispose()` when done.
+ * nothing, as long as the status and `reopening` are unchanged too. Call `dispose()` when done.
  */
 export class LiveQuery<T> {
     /** The first result; rejects when the first open fails or the handle is
@@ -354,6 +354,11 @@ export class LiveQuery<T> {
         } catch (e) {
             if (this.#snapshot.status === 'loading') throw e
             console.error('Live query result could not be read:', e)
+            // Keep the old data, but let the snapshot agree with the status.
+            if (this.#snapshot.reopening !== this.#reopening) {
+                this.#snapshot = { ...this.#snapshot, reopening: this.#reopening }
+                this.#notify()
+            }
         }
     }
 

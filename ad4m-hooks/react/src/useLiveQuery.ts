@@ -126,6 +126,9 @@ export function useLiveQuery<T extends Ad4mModel>(
   // nothing to query: the result is empty, not loading.
   const parentId = parent && "id" in parent ? parent.id : undefined;
   const held = (!!parent && "id" in parent && !parentId) || (typeof model === "string" && !model);
+  // One key for the whole parent scope (ids, predicate, field, ...), so a
+  // change to any part of it reopens the query. A model class counts by name.
+  const parentKey = JSON.stringify(parent ?? null, (_k, v) => (typeof v === "function" ? v.name : v));
   const source = live ?? (held ? EMPTY : LOADING);
   const snapshot = useSyncExternalStore(source.subscribe, source.getSnapshot, source.getSnapshot);
 
@@ -185,22 +188,25 @@ export function useLiveQuery<T extends Ad4mModel>(
     typeof model === "string" ? model : (model as ModelCtor<T>).name,
     pageNumber,
     JSON.stringify(userQuery),
-    parentId,
-    "field" in (parent ?? {}) ? (parent as any).field : undefined,
+    parentKey,
     id,
   ]);
 
-  // The entries of the last result, kept while the next query opens, and
-  // reused instance by instance with `preserveReferences`.
-  const previous = useRef<T[]>([]);
+  // The entries of the last result and the perspective they came from, kept
+  // while the next query opens. With `preserveReferences` a collection reuses
+  // its instances, but only from the same perspective.
+  const previous = useRef<{ uuid?: string; entries: T[] }>({ entries: [] });
   const entries = useMemo(() => {
-    if (snapshot.status !== "ready") return previous.current;
+    if (snapshot.status !== "ready") return previous.current.entries;
     const next = snapshot.data!.results as T[];
-    if (!preserveReferences) return next;
-    const known = new Map(previous.current.map((e) => [e.id, e]));
+    if (!preserveReferences || isInstance || previous.current.uuid !== perspective?.uuid) return next;
+    const known = new Map(previous.current.entries.map((e) => [e.id, e]));
     return next.map((n) => known.get(n.id) ?? n);
-  }, [snapshot, preserveReferences]);
-  previous.current = entries;
+  }, [snapshot, preserveReferences, isInstance, perspective?.uuid]);
+  // Written after the commit, so a discarded render leaves nothing behind.
+  useEffect(() => {
+    if (snapshot.status === "ready") previous.current = { uuid: perspective?.uuid, entries };
+  }, [entries, snapshot.status, perspective?.uuid]);
 
   // A query that could not open is not loading.
   const loading = !openError && snapshot.status === "loading";
