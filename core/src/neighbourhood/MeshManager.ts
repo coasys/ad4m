@@ -554,8 +554,14 @@ export class MeshManager {
     /**
      * Replacements of one sender, one at a time. The `sender.track` check and
      * live-clone reuse both read what the previous replacement committed.
+     * Dropped when that sender's connection is closed or replaced, so a call
+     * queued behind one the browser will never settle does not wait on it.
      */
     private senderTail = new Map<RTCRtpSender, Promise<void>>()
+    /** Senders whose connection has been closed or replaced. */
+    private droppedSenders = new WeakSet<RTCRtpSender>()
+    /** Wakes a `replaceTrack` that is still pending when its sender is dropped. */
+    private droppedWaiters = new Map<RTCRtpSender, Array<() => void>>()
     private closed = false
     private channelUnsubscribe: (() => void) | null = null
     private unwatchPublish: (() => void) | null = null
@@ -819,6 +825,11 @@ export class MeshManager {
      * muting, unmuting and camera↔screen swaps never renegotiate. Pass `null`
      * to stop sending that kind. Each sender encodes a clone of `track`; the
      * track handed in is left running.
+     *
+     * Resolves when a connection closes or is replaced while its native
+     * `replaceTrack` is still pending. The browser does not settle that
+     * promise. The track is already stored here, and the connection that
+     * takes over sends it. The call does not reject for that.
      */
     async replaceTrack(kind: "audio" | "video", track: MediaStreamTrack | null): Promise<void> {
         const previous = this.outbound.get(kind)
@@ -1172,13 +1183,17 @@ export class MeshManager {
      * the one the sender still holds. The source is never stopped.
      *
      * A fresh clone is remembered in {@link inflight} for the await. Disconnect
-     * and reseat stop it there: the browser aborts a pending `replaceTrack`
-     * when the connection closes, and does not settle the promise, so the
-     * rejection handler and {@link commitTrack} need not run.
+     * and reseat stop it there. The browser aborts a pending `replaceTrack`
+     * when the connection closes and does not settle the promise, so this
+     * resolves without waiting for it and does not reject. The caller has
+     * already stored the track, and the connection that takes over sends it.
+     * A replacement queued on that sender finds the sender gone and does not
+     * mint a clone.
      *
-     * Calls on one sender run in order. `sender.track` changes only when
-     * `replaceTrack` settles, so a mute that looks while a camera is still
-     * attaching would otherwise see a null track and skip `replaceTrack(null)`.
+     * Calls on one sender run in order while the connection is live.
+     * `sender.track` changes only when `replaceTrack` settles, so a mute that
+     * looks while a camera is still attaching would otherwise see a null
+     * track and skip `replaceTrack(null)`.
      */
     private async putTrack(sender: RTCRtpSender, source: MediaStreamTrack | null): Promise<void> {
         const previous = this.senderTail.get(sender) ?? Promise.resolve()
@@ -1198,19 +1213,81 @@ export class MeshManager {
 
     /** Prepare, replace and commit one track. Caller serialises this per sender. */
     private async applyTrack(sender: RTCRtpSender, source: MediaStreamTrack | null): Promise<void> {
+        // A queued call whose predecessor was dropped must not mint a clone
+        // for a sender that no longer belongs to a live connection.
+        if (!this.senderLive(sender)) return
         const prepared = this.prepareTrack(sender, source)
+        if (!this.senderLive(sender)) {
+            if (prepared.fresh && prepared.track) this.stopClone(prepared.track)
+            return
+        }
         if (prepared.fresh && prepared.track) this.inflight.set(sender, prepared.track)
         try {
-            if (sender.track !== prepared.track) await sender.replaceTrack(prepared.track)
+            if (sender.track !== prepared.track) await this.replaceOrDrop(sender, prepared.track)
         } catch (error) {
             this.abandonInflight(sender, prepared)
             throw error
         }
         // Teardown took the clone while `replaceTrack` was pending. Recording
         // it now would undo that, and the promise may equally never settle.
+        if (!this.senderLive(sender)) return
         if (prepared.fresh && prepared.track && this.inflight.get(sender) !== prepared.track) return
         if (prepared.fresh && prepared.track) this.inflight.delete(sender)
         this.commitTrack(sender, source, prepared.track, prepared.fresh)
+    }
+
+    /**
+     * `sender.replaceTrack`, or a resolution when the sender's connection is
+     * dropped first. The native promise is left pending in that case. The
+     * browser does not settle it, and a later rejection must not surface.
+     */
+    private async replaceOrDrop(sender: RTCRtpSender, track: MediaStreamTrack | null): Promise<void> {
+        let wake = () => {}
+        const dropped = new Promise<void>((resolve) => {
+            wake = resolve
+            if (this.droppedSenders.has(sender)) {
+                resolve()
+                return
+            }
+            const waiters = this.droppedWaiters.get(sender) ?? []
+            waiters.push(resolve)
+            this.droppedWaiters.set(sender, waiters)
+        })
+        const native = sender.replaceTrack(track)
+        void native.catch(() => undefined)
+        try {
+            await Promise.race([native, dropped])
+        } finally {
+            this.forgetDroppedWaiter(sender, wake)
+        }
+    }
+
+    /** `sender` is still on a connection this mesh has not closed or replaced. */
+    private senderLive(sender: RTCRtpSender): boolean {
+        if (this.closed || this.droppedSenders.has(sender)) return false
+        for (const slot of this.slots.values()) {
+            if (this.sendersOf(slot).includes(sender)) return true
+        }
+        return false
+    }
+
+    private forgetDroppedWaiter(sender: RTCRtpSender, wake: () => void): void {
+        const waiters = this.droppedWaiters.get(sender)
+        if (!waiters) return
+        const index = waiters.indexOf(wake)
+        if (index !== -1) waiters.splice(index, 1)
+        if (waiters.length === 0) this.droppedWaiters.delete(sender)
+    }
+
+    /** Unblock replacements on senders whose connection is going away, and drop their queue. */
+    private dropSenderWork(senders: RTCRtpSender[]): void {
+        for (const sender of senders) {
+            this.droppedSenders.add(sender)
+            this.senderTail.delete(sender)
+            const waiters = this.droppedWaiters.get(sender)
+            this.droppedWaiters.delete(sender)
+            if (waiters) for (const wake of waiters) wake()
+        }
     }
 
     /** Stop a fresh clone `replaceTrack` refused, unless teardown already did. */
@@ -1293,7 +1370,8 @@ export class MeshManager {
      * has not accepted. The sources stay live for the others.
      */
     private releaseClones(slot: PeerSlot): void {
-        for (const sender of this.sendersOf(slot)) {
+        const senders = this.sendersOf(slot)
+        for (const sender of senders) {
             const pending = this.inflight.get(sender)
             if (pending) {
                 this.inflight.delete(sender)
@@ -1301,6 +1379,9 @@ export class MeshManager {
             }
             this.releaseSender(sender)
         }
+        // After the clones are stopped. Waking a waiter before that would let
+        // it record a clone this loop is about to drop.
+        this.dropSenderWork(senders)
     }
 
     /** This slot still owns `pc`. False after a disconnect or a reseat during an await. */

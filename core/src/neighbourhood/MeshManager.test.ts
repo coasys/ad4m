@@ -92,6 +92,19 @@ const track = (kind: "audio" | "video") => new FakeTrack(kind) as unknown as Med
 const asFake = (item: MediaStreamTrack | null | undefined) => item as unknown as FakeTrack
 const stream = (...tracks: MediaStreamTrack[]) => new FakeMediaStream(tracks) as unknown as MediaStream
 
+/**
+ * `"settled"` when `pending` has already produced a value. Reading the flag
+ * on the microtask after the reaction is queued, so a promise that is still
+ * waiting is `"pending"` and this does not sleep. `Promise.race` against an
+ * already-resolved promise would report `"pending"` even after a resolution.
+ */
+const alreadySettled = async (pending: Promise<unknown>) => {
+    let state: "settled" | "rejected" | "pending" = "pending"
+    pending.then(() => { state = "settled" }, () => { state = "rejected" })
+    await Promise.resolve()
+    return state
+}
+
 import {
     MeshManager,
     parseCallMessage,
@@ -1505,6 +1518,15 @@ describe("call mesh", () => {
             alice.mesh.setRoster(["did:alice", "did:bob"])
             bob.mesh.setRoster(["did:alice", "did:bob"])
 
+            const screen = new FakeTrack("video")
+            const screenClones: FakeTrack[] = []
+            const cloneScreen = screen.clone.bind(screen)
+            screen.clone = () => {
+                const copy = cloneScreen()
+                screenClones.push(copy)
+                return copy
+            }
+
             FakePeerConnection.replaceCalls = 0
             FakePeerConnection.replaceGate = new Promise<void>((resolve) => { releaseGate = resolve })
             attaching = bob.mesh.replaceTrack("video", camera as unknown as MediaStreamTrack)
@@ -1513,14 +1535,36 @@ describe("call mesh", () => {
             expect(clones).toHaveLength(1)
             const retired = clones[0]
             expect(retired.readyState).toBe("live")
+            // Queued behind the camera on the same sender. It must not run
+            // there once that connection is gone.
+            const switching = bob.mesh.replaceTrack("video", screen as unknown as MediaStreamTrack)
 
             await settle()
 
             // The replacement connection may mint its own clone. The one on
             // the connection reseat closed is the one that has to end now.
+            // Both public calls resolve while the native replaceTrack on the
+            // closed connection is still pending: the browser does not settle it.
             expect(bob.connections[0].closed).toBe(true)
             expect(retired.readyState).toBe("ended")
             expect(camera.readyState).toBe("live")
+            expect(await alreadySettled(attaching)).toBe("settled")
+            expect(await alreadySettled(switching)).toBe("settled")
+            // The queued call did not mint a clone for the sender reseat
+            // dropped. The new connection has not reached its video section:
+            // that replaceTrack is behind the audio one, still on this gate.
+            expect(screenClones).toEqual([])
+            expect(screen.readyState).toBe("live")
+            expect(bob.connections[0].getSenders().some((sender) =>
+                sender.track?.kind === "video" && asFake(sender.track).readyState === "live")).toBe(false)
+
+            releaseGate()
+            await settleAll()
+            const sent = bob.live().getSenders().filter((sender) =>
+                sender.track?.kind === "video" && asFake(sender.track).readyState === "live")
+            expect(sent).toHaveLength(1)
+            expect(asFake(sent[0].track).clonedFrom).toBe(screen)
+            expect(screenClones).toEqual([asFake(sent[0].track)])
             expect(bob.errors).toEqual([])
         } finally {
             releaseGate()
