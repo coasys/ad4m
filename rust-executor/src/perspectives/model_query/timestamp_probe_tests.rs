@@ -96,6 +96,7 @@ fn id_phase(s: &super::types::ModelShape, q: &ModelQueryInput) -> String {
         direction: OrderDirection::ASC,
         offset: None,
         limit: Some(1),
+        keyset: None,
     };
     match build_instance_sparql(s, q, Some(&pg), None, &[]) {
         InstanceQueryPlan::TwoPhase {

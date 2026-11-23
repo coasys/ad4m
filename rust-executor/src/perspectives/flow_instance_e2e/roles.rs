@@ -329,7 +329,9 @@ async fn a_newcomer_deriving_after_a_revocation_converges_on_the_settled_state()
     let read_set = f.read_set().await;
     let json = serde_json::to_string(&read_set).expect("serialises");
     let parsed: ReadSet = serde_json::from_str(&json).expect("deserialises");
-    let flows = load_shacl_flows(&f.perspective).await.expect("flows");
+    let flows = load_shacl_flows(&EvalStop::none(), &f.perspective)
+        .await
+        .expect("flows");
     assert_eq!(
         fold_read_set(&flows[&f.flow_uri], &parsed).expect("the carried evidence resolves"),
         before

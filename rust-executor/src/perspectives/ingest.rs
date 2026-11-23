@@ -18,7 +18,7 @@
 //! Removals of Shared links are not checked for authority here.
 
 use super::monotonic::RetractionEffects;
-use super::perspective_instance::PerspectiveInstance;
+use super::perspective_instance::{touches_shape, PerspectiveInstance};
 #[cfg(doc)]
 use super::sparql_store::SparqlStore;
 use crate::types::{LinkExpression, PerspectiveDiff};
@@ -129,6 +129,24 @@ impl PerspectiveInstance {
                 )
             })
             .collect::<Vec<_>>();
+        let applied = PerspectiveDiff {
+            additions,
+            removals,
+        };
+        // The same rule as `write_link_diff`: a write that touches a shape
+        // own link drops the cached shapes before it returns, so a peer that
+        // never registered a class still reads it the moment its SHACL
+        // arrives, and no await sits between the write and the clear.
+        if touches_shape(
+            applied
+                .additions
+                .iter()
+                .chain(applied.removals.iter())
+                .map(|l| &l.data)
+                .chain(effects.retracted.iter().map(|l| &l.data)),
+        ) {
+            self.clear_shape_cache();
+        }
 
         // The feed entry right after the writes — what was applied, plus the
         // retracted links the published diff reports — tagged with the
@@ -136,21 +154,16 @@ impl PerspectiveInstance {
         // covers the store's movement here too.
         self.broadcast_commit_write(
             crate::perspectives::perspective_instance::subscription_triggers::writes_of_links(
-                additions
+                applied
+                    .additions
                     .iter()
                     .map(|l| &l.data)
-                    .chain(removals.iter().map(|l| &l.data))
+                    .chain(applied.removals.iter().map(|l| &l.data))
                     .chain(effects.retracted.iter().map(|l| &l.data)),
             ),
             generations,
         );
 
-        Ok((
-            PerspectiveDiff {
-                additions,
-                removals,
-            },
-            effects,
-        ))
+        Ok((applied, effects))
     }
 }

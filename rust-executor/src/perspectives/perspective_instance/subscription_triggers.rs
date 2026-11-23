@@ -163,9 +163,10 @@ impl Writes {
     }
 
     /// Whether the batch is a schema write — the classification
-    /// `inbound_touches_shacl` makes over a diff for the shape cache, made
-    /// over these links. A kept transcript read under the old shape is stale
-    /// on such a batch whatever its data predicates are, so the
+    /// `touches_shape` makes over a write for the shape cache (a subset of
+    /// it, narrowed by the source question below), made over these links.
+    /// A kept transcript read under the old shape is stale on such a batch
+    /// whatever its data predicates are, so the
     /// auto-processor marks every processor stale (`auto_processor_mark_stale`).
     /// With per-link detail gone (a batch past [`MAX_TRACKED_LINKS`]) a
     /// predicate whose link *could* be a schema write reads as one —

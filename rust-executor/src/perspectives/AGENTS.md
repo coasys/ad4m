@@ -14,7 +14,7 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 | `write_log.rs` | Removed (#1794): the auto-processor's wake feed is now `subscription_triggers::Writes`, the per-commit write info `check_subscribed_queries` already builds |
 | `model_query/` | Typed queries over SHACL shapes: `shape.rs` loads `ModelShape` from SHACL triples → `sparql_builder.rs` → `SparqlStore` → `hydration.rs` → `filtering.rs` → `getters.rs`/`relations.rs`/`projection.rs`. Entry: `execute_model_query` (`query.rs`). `mod.rs` has the pipeline diagram. A `path` read is an edge walk: every edge keeps the proof and link-status guards, but class conformance and `where` apply only to the reached nodes that are returned — an intermediate that fails either is walked through (`levels` keeps its per-level cut). Traversal (`walk_levels`): output de-dupes per node; the next-depth frontier de-dupes per depth — under a multi-hop `path` a node reported at one depth still walks at the next (its hop predicates differ); under `levels` only newly reported nodes walk on. A pushed `where` comparison on a `resolveLanguage` property keeps an undecodable expression IRI (a raw IRI, not a `literal:` value) for hydration to mark `__unresolved` rather than rejecting it at the store, so the retry clock can admit the row when the language arrives |
 | `shacl_parser.rs` | Writer side: a class's links (`shape_links`; `parse_shacl_to_links` from JSON), which links on a class node are its own (`is_own_link`), links → shape (`shape_from_links`), `canonical_json`; flow JSON ↔ links (`parse_flow_to_links`, `parse_flow_from_links`). Types `SHACLShape`, `SHACLFlow`, `AD4MAction` |
-| `perspective_instance/shapes.rs` | Class registration: `register_shapes` (diff, under `sdna_change_mutex`) and `shapes` / `class_names` over the cached registry |
+| `perspective_instance/shapes.rs` | Class registration: `register_shapes` (all-unchanged fast path over the cached registry link sets, otherwise a diff under `sdna_change_mutex`) and `shapes` / `class_names` over the cached registry |
 | `instances/` | Validated instance writes (create, update, remove, collection items) against a class's SHACL shape: the shared core of the MCP `instance_*` tools and the `perspective.instance*` RPC methods. See `instances/AGENTS.md` |
 | `subject_classes_of.rs` | Which classes a URI conforms to (SPARQL) |
 | `sdna.rs`, `shacl_to_prolog.rs` | Prolog fact generation from links/SHACL. Only used when Prolog mode ≠ Disabled |
@@ -43,14 +43,26 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   Links from older versions (`ad4m://has_subject_class`, `ad4m://sdna`, `ad4m://has_shacl`,
   `ad4m://shacl_shape_uri`) are not read and not written. `shape_cache` is keyed by the key
   the caller passed (a target class IRI or a name); it and the registry are cleared whole
-  (`clear_shape_cache`) by `register_shapes` and by every local or inbound diff that touches
-  shape links, so an IRI key and a name key never hold a stale or crossed shape.
+  (`clear_shape_cache`) by every store write that touches a shape own link (`touches_shape`).
+  The clear sits in the write itself (`write_link_diff`, and `persist_remote_diff` for synced
+  diffs), right after the store write and before it returns, with no await in between: a caller
+  cancelled after the write cannot leave the link stored and the cache stale. No caller clears
+  after its write (`register_shapes`, `import_perspective`, the publish path); a reload that
+  rebuilds the store clears too. So an IRI key and a name key never hold a stale or crossed shape.
   `get_shape(class)` → `Arc<ModelShape>`, `class` a target class IRI or a name.
 - `register_shapes` compares the own links a shape gives with the own links stored, as
   triples. Equal sets write nothing (`unchanged`); otherwise one Shared diff adds what is
   missing and removes every copy of each stale own link. Copies of an expected triple stay
   (two peers that registered the same shape agree); links other apps put on the class, shape
   or property nodes stay. It answers once the registry and the shape cache hold the new shape.
+  The registry caches each class's own-link triple set beside its `ShapeSummary`
+  (`abstract_cache.own_links`, same generation, lifetime and clearing): an
+  all-unchanged call answers from those sets before `sdna_change_mutex`, with only the
+  shape-URI holder check left to run, so registering on every start is cheap. The
+  comparison is of the stored triples, never a shape hash — a stale `ad4m://shape` link
+  changes the set where `shape_from_links` still parses the least URI to the same shape.
+  The answer can come from the state just before a concurrent write commits, as a
+  slow-path call that took the mutex first could.
 - A class is addressed by its target class IRI; the SDK sends it on every call. Many classes
   may share a name (`class_name_of`, the IRI's local name): `we://Topic` and `flux://Topic`
   coexist. `model_query::shape::find_class` matches an IRI exactly; a bare name (MCP tools,
@@ -125,6 +137,37 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 - Background loops (`nh_sync_loop`, `pending_diffs_loop`, `fallback_sync_loop`,
   `subscribed_queries_loop`, `notification_check_loop`, auto-processor supervisor) exit on
   `is_teardown`; `teardown_background_tasks` must be called on remove.
+- Every model query runs through the runner (`perspective_instance/runner.rs`): a
+  `perspective.modelQuery`, a model subscription's first run and its re-check after a write.
+  Identical runs in flight share one store run, keyed by the classes, the query text as the
+  caller sent it (never normalised: a multi-key `order` ranks by key order, so another key order
+  is another query; the SDK sends one text per call), the shape-wait budget,
+  `SparqlStore::write_generation` and `shapes_generation` (a shape change alters a result without a link write; a peer diff and a
+  local commit both advance the write generation through `note_write`). The run is spawned under
+  its own deadline gate and takes one of `RECHECK_SLOTS`, so store reads never block async
+  workers; the entry leaves the map when the run settles. A waiter's own gate (deadline, cancel,
+  closed socket) ends its wait only; the last waiter to leave stops the run, and a run still
+  queued for a slot leaves the queue without running (the permit is acquired against the run's
+  cancel token, and the shape wait observes the run's stop). The connection's
+  running-query slot is held by the waiter, not the run. The agent is not in the key: a model
+  query's result does not depend on who asks (nothing under `model_query/` reads `AgentContext`),
+  so two agents' identical queries share one run. A re-check pass groups its subscriptions by
+  classes and query (`evaluation_key`), so N identical subscriptions, of any agents, cost one run
+  per write. A new way to run a model query must call
+  `PerspectiveInstance::run_model_query`, not `model_query_classes_within`. A read made *inside*
+  a run (a `producedByFlow` filter reads each output back) already holds a slot and the run's
+  stop, so it must not go back through the runner (a second slot deadlocks when every slot is
+  held by such runs): it goes through `runner::InRun`, a `RequiresQueryable` that calls
+  `model_query_classes_within` with the run's stop. The filter's other reads run under that
+  stop too: `flow_valid_outputs_reading` hands it to `load_shacl_flows` and
+  `load_flow_receipts`, which read links with `get_links_stopped` and check
+  `stop.stopped_err` per flow and per receipt entry, so an abandoned run frees its slot
+  instead of finishing a catalogue or receipt-index scan nobody waits on. Receipt verification
+  (`valid_outputs`, `produced_by_flow`, `first_produced_at`) takes the stop too and ends at the
+  next receipt once it fires, leaving a partial result, so `flow_valid_outputs_reading` returns
+  the stop error right after `valid_outputs` instead of a partial list. Callers with no
+  eval bound (flow passes, role gates, `flow_valid_outputs`, `mint_flow_receipt`,
+  `verify_flow_receipt`) pass `EvalStop::none()`.
 - `SparqlStore` bumps a write generation after every committed write (`write_generation`,
   `watch_writes`). The auto-processor watch loop no longer wakes on the generation alone:
   `write_link_diff` and `persist_remote_diff` broadcast each batch's
@@ -150,8 +193,8 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   ungated, because one neighbour read cannot prove membership. While turns are
   pending, the kept transcript's freshness is decided by the same trigger —
   `auto_processor_mark_stale` records a matched write, a schema write
-  (`Writes::touches_shacl`, the `inbound_touches_shacl` classification: a
-  SHACL/SDNA batch changes the shape every kept read ran under, whatever the
+  (`Writes::touches_shacl`, the `shacl_write_link` classification, a
+  subset of `touches_shape`: a SHACL/SDNA batch changes the shape every kept read ran under, whatever the
   trigger's predicates), or a `Lagged` / unclassifiable one against the
   read's scope key so the tick re-reads instead
   of draining stale turns. The tick's own feed drain (`watcher.commit_feed`)

@@ -1961,10 +1961,14 @@ mod tests {
         write_processor(&mut p, &sample_config("empty-scope"), Some(false), &ctx)
             .await
             .expect("write empty-scope");
-        p.update_subject(
-            class_option(),
-            processor_node("empty-scope"),
-            serde_json::json!({ "sourceQuery": "" }),
+        // As a raw link: `update_subject` reads `""` as "clear the property".
+        p.add_links(
+            vec![Link {
+                source: processor_node("empty-scope"),
+                predicate: Some("ad4m://source_query".into()),
+                target: "literal:string:".into(),
+            }],
+            LinkStatus::Shared,
             None,
             &ctx,
         )
@@ -1984,64 +1988,46 @@ mod tests {
         write_processor(&mut p, &sample_config("good"), Some(false), &ctx)
             .await
             .expect("write good");
-        write_processor(&mut p, &sample_config("empty-source"), Some(false), &ctx)
-            .await
-            .expect("write empty-source");
-        p.update_subject(
-            class_option(),
-            processor_node("empty-source"),
-            serde_json::json!({ "sourceClass": "" }),
-            None,
-            &ctx,
-        )
-        .await
-        .expect("empty sourceClass");
-
-        // A partial node carrying every field but `sourceText`.
+        // Raw nodes: `update_subject` reads `""` as "clear the property",
+        // and refuses to clear a required one.
+        let node = |id: &str, source_class: &str, source_text: Option<&str>| {
+            let mut fields = vec![
+                ("rdf://type", AUTO_PROCESSOR_CLASS.to_string()),
+                ("ad4m://processor_id", format!("literal:string:{id}")),
+                (
+                    "ad4m://source_class",
+                    format!("literal:string:{source_class}"),
+                ),
+                ("ad4m://debounce_ms", "literal:string:100".into()),
+                ("ad4m://batch_max", "literal:string:8".into()),
+                ("ad4m://claim_ttl_ms", "literal:string:60000".into()),
+                ("ad4m://interpretation_class", "ns://Task".into()),
+            ];
+            if let Some(text) = source_text {
+                fields.push(("ad4m://source_text", format!("literal:string:{text}")));
+            }
+            fields
+                .into_iter()
+                .map(|(predicate, target)| Link {
+                    source: processor_node(id),
+                    predicate: Some(predicate.into()),
+                    target,
+                })
+                .collect::<Vec<_>>()
+        };
         p.add_links(
-            vec![
-                Link {
-                    source: processor_node("no-text"),
-                    predicate: Some("rdf://type".into()),
-                    target: AUTO_PROCESSOR_CLASS.into(),
-                },
-                Link {
-                    source: processor_node("no-text"),
-                    predicate: Some("ad4m://processor_id".into()),
-                    target: "literal:string:no-text".into(),
-                },
-                Link {
-                    source: processor_node("no-text"),
-                    predicate: Some("ad4m://source_class".into()),
-                    target: "literal:string:ns://Message".into(),
-                },
-                Link {
-                    source: processor_node("no-text"),
-                    predicate: Some("ad4m://debounce_ms".into()),
-                    target: "literal:string:100".into(),
-                },
-                Link {
-                    source: processor_node("no-text"),
-                    predicate: Some("ad4m://batch_max".into()),
-                    target: "literal:string:8".into(),
-                },
-                Link {
-                    source: processor_node("no-text"),
-                    predicate: Some("ad4m://claim_ttl_ms".into()),
-                    target: "literal:string:60000".into(),
-                },
-                Link {
-                    source: processor_node("no-text"),
-                    predicate: Some("ad4m://interpretation_class".into()),
-                    target: "ns://Task".into(),
-                },
-            ],
+            // An empty `sourceClass`, and a node carrying every field but `sourceText`.
+            [
+                node("empty-source", "", Some("body")),
+                node("no-text", "ns://Message", None),
+            ]
+            .concat(),
             LinkStatus::Shared,
             None,
             &ctx,
         )
         .await
-        .expect("seed no-text");
+        .expect("seed empty-source and no-text");
 
         let loaded = load_processors(&p).await.expect("load");
         assert_eq!(loaded.len(), 1);
