@@ -127,15 +127,18 @@ The `ad4m` client tool provides a complete interface to interact with a running 
 
 2. For a fresh installation, generate a new agent:
 ```bash
-ad4m agent generate
+ad4m -a "$(cat <admin-credential-file>)" agent generate
 ```
 This will prompt you for a password to encrypt your agent's keys. On an agent
 that is already initialised the command is refused (409) — it never replaces the
 existing keys and DID; use `agent unlock` instead.
 
+`agent generate`, `agent unlock` and `agent lock` send no stored capability
+token, so on an executor with an admin credential they need `-a` as above.
+
 3. On subsequent starts, unlock your agent:
 ```bash
-ad4m agent unlock
+ad4m -a "$(cat <admin-credential-file>)" agent unlock
 ```
 
 4. View your agent's information:
@@ -150,10 +153,10 @@ Perspectives are semantic spaces where you can store and query linked data.
 
 1. Create a new perspective:
 ```bash
-ad4m perspectives create
+ad4m perspectives add <name>
 ```
 
-2. List all perspectives:
+2. Pick a perspective interactively:
 ```bash
 ad4m perspectives
 ```

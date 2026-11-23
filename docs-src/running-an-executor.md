@@ -113,7 +113,7 @@ an agent that is already initialised — a second `generate` does not replace th
 existing keys and DID; unlock the existing agent instead (Step 4).
 
 ```bash
-ad4m --executor-url http://localhost:12000 agent generate --passphrase <passphrase>
+ad4m --executor-url http://localhost:12000 -a "$(cat <admin-credential-file>)" agent generate --passphrase <passphrase>
 ```
 
 **There is no REST endpoint for this.** The executor's only HTTP routes are
@@ -130,7 +130,7 @@ This triggers Holochain conductor startup and language installation. Takes 30-60
 After restarting the executor, unlock the agent:
 
 ```bash
-ad4m --executor-url http://localhost:12000 agent unlock --passphrase <passphrase> --holochain true
+ad4m --executor-url http://localhost:12000 -a "$(cat <admin-credential-file>)" agent unlock --passphrase <passphrase>
 ```
 
 A service can skip this step: with `AD4M_UNLOCK_PASSPHRASE_FILE` pointing at
@@ -138,8 +138,9 @@ a mode-600 file holding the passphrase, the executor unlocks the agent
 itself at every start (see "Unlocking at startup" in
 `pages/developer-guides/executor-config.mdx`).
 
-`--holochain true` starts the Holochain conductor during unlock. Same caveat
-as Step 3: this is WS-RPC (`agent.unlock`), not a REST endpoint.
+`agent generate`, `agent unlock` and `agent lock` send no stored capability
+token, so `-a` passes the admin credential. Same caveat as Step 3: this is
+WS-RPC (`agent.unlock`), not a REST endpoint.
 
 **Skipping this step is expected to break every other auth path — by design, not by bug.** An executor is only usable once its main operator has unlocked it. The wallet keeps signing keys in memory only; immediately after a restart, before `unlock` runs, the executor holds just the encrypted cipher — it can check that a password/credential is *structurally* valid but cannot actually sign anything, so it fails at key lookup instead. **What's actually wrong here is the error message, not the lockout itself:** a third party trying to authenticate against a not-yet-unlocked executor should fail immediately with a clear "this executor hasn't been unlocked yet" message, not a confusing one that reads like a bad credential:
 

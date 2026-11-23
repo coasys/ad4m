@@ -87,12 +87,16 @@ ad4m-executor run
 ## Core Commands
 
 ### Agent Management
+
+`agent generate`, `agent unlock` and `agent lock` send no stored capability
+token, so on an executor with an admin credential they need `-a`:
+
 ```bash
 # Generate a new agent
-ad4m agent generate
+ad4m -a "$(cat <admin-credential-file>)" agent generate
 
 # Unlock your agent
-ad4m agent unlock
+ad4m -a "$(cat <admin-credential-file>)" agent unlock
 
 # View agent status
 ad4m agent status
@@ -101,7 +105,7 @@ ad4m agent status
 ad4m agent me
 
 # Lock your agent
-ad4m agent lock
+ad4m -a "$(cat <admin-credential-file>)" agent lock
 
 # Watch agent status changes
 ad4m agent watch
@@ -109,7 +113,7 @@ ad4m agent watch
 
 ### Perspectives
 ```bash
-# List all perspectives
+# Pick a perspective interactively
 ad4m perspectives
 
 # Query links in a perspective
@@ -118,8 +122,8 @@ ad4m perspectives query-links <perspective-UUID>
 # Watch perspective changes in real-time
 ad4m perspectives watch <perspective-UUID>
 
-# Create a new perspective
-ad4m perspectives create
+# Add a new perspective
+ad4m perspectives add <name>
 
 # Add links to a perspective
 ad4m perspectives add-link <perspective-UUID> <source> <predicate> <target>
