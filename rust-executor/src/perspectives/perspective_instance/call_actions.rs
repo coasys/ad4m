@@ -342,7 +342,7 @@ impl PerspectiveInstance {
         delta: &MountDelta,
         generation: Option<u64>,
         seq: u64,
-        _context: &AgentContext,
+        context: &AgentContext,
     ) {
         let Some(generation) = generation else {
             log::debug!(
@@ -351,6 +351,15 @@ impl PerspectiveInstance {
             );
             return;
         };
+        // The mirror is its single owner's (`mount_owner`): another writer's result is not
+        // applied, the owner's next sync reads what the language holds for the owner.
+        if !self.is_owned_as(context).await {
+            log::warn!(
+                "call action on {lang_address}: the writer is not the single owner of perspective {}; its delta is not applied",
+                self.uuid
+            );
+            return;
+        }
         if let Err(e) = self
             .clone()
             .apply_mount_delta(lang_address, delta, generation, seq)

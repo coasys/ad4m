@@ -75,6 +75,7 @@ pub(crate) use call_actions::SetterKind;
 // Mounted languages: the language's records mirrored as Local links
 // (design §1, §2).
 mod mounts;
+pub(crate) use mounts::owner_context_of;
 // Each mount's lifecycle phase, generation and apply lock.
 mod mount_lifecycle;
 // Which mount owns which class.

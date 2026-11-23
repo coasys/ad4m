@@ -1083,11 +1083,12 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
     }
 }
 
-async fn mount_handler(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+async fn mount_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let language_address = params.require_str("languageAddress")?;
     let mut perspective = guarded_perspective(&params).await?;
+    // Runs as the caller, who must be the perspective's single owner (#1775).
     perspective
-        .mount(&language_address)
+        .mount_by(&language_address, &ctx.acts_as())
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(Value::Bool(true))
