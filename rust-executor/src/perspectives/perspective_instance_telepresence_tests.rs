@@ -25,6 +25,9 @@ use tokio::time::timeout;
 /// time and never reached by a shorter test timeout.
 const STUB_DELAY: Duration = Duration::from_secs(20);
 
+/// Shorter than the membership check's deadline, also for two calls in a row.
+const SLOW_DELAY: Duration = Duration::from_millis(500);
+
 /// What the stub does with a call it is asked to run.
 #[derive(Clone, Copy)]
 enum StubMode {
@@ -34,6 +37,9 @@ enum StubMode {
     Block,
     /// Sleep `STUB_DELAY`, then fail — a language call that errors.
     Fail,
+    /// Sleep `SLOW_DELAY`, then answer: a call that ends inside the caller's
+    /// deadline, leaving time for something to happen while it runs.
+    Slow,
     /// Never answer, and take the next call at once: a call the runtime
     /// lost (the reply sender is kept, so the caller waits forever).
     Hang,
@@ -125,6 +131,8 @@ async fn stub_language(peers: Vec<String>, caps: &[Capability]) -> StubLanguage 
                 let blocked = matches!(*mode.lock().unwrap(), StubMode::Block | StubMode::Fail);
                 if blocked {
                     sleep(STUB_DELAY).await;
+                } else if matches!(*mode.lock().unwrap(), StubMode::Slow) {
+                    sleep(SLOW_DELAY).await;
                 }
                 let reply = match *mode.lock().unwrap() {
                     StubMode::Fail => Err("stub language is down".to_string()),
@@ -589,6 +597,101 @@ async fn a_blocked_policy_check_serves_the_last_policy() {
     crate::perspectives::unregister_perspective(&instance.uuid);
 }
 
+/// A member this executor does not host signals while the membership check
+/// runs, before any policy is cached: the check's "every member local" is
+/// out of date when it returns. It must not be cached, or broadcasts skip
+/// the remote member for the cache's lifetime.
+#[tokio::test(start_paused = true)]
+async fn a_remote_member_seen_during_the_check_is_not_lost() {
+    test_setup();
+    let stub = stub_language(
+        Vec::new(),
+        &[Capability::PeersRemote, Capability::TelepresenceGetAgents],
+    )
+    .await;
+    let instance = neighbourhood(&stub, vec![crate::agent::did()]).await;
+    let url = instance.persisted.lock().await.shared_url.clone().unwrap();
+    stub.set(StubMode::Slow);
+
+    let read = tokio::spawn({
+        let url = url.clone();
+        async move { read_policy(&url).await.into_result() }
+    });
+    // Time stands still while this task yields: the check is in the
+    // language, and stays there until the sighting is made.
+    while stub.scripts().is_empty() {
+        tokio::task::yield_now().await;
+    }
+    crate::sfu::config_store::saw_member(&url, "did:key:remote-member");
+
+    let policy = timeout(Duration::from_secs(3), read)
+        .await
+        .expect("the policy read waited past its deadline")
+        .unwrap()
+        .expect("the policy read failed");
+    assert_eq!(
+        policy.mode, "mesh",
+        "a check that started before a remote member showed up answered every member local"
+    );
+    assert!(
+        !crate::sfu::config_store::every_member_local(&url),
+        "broadcasts skip the remote member that signalled during the check"
+    );
+
+    stub.stop().await;
+    crate::perspectives::unregister_perspective(&instance.uuid);
+}
+
+/// The link language names a signal's author: only a signal whose signature
+/// verified may end an "every member local" verdict. Local delivery is the
+/// same either way.
+#[tokio::test(start_paused = true)]
+async fn only_a_verified_signal_counts_as_a_remote_member() {
+    test_setup();
+    let stub = stub_language(
+        Vec::new(),
+        &[Capability::PeersRemote, Capability::TelepresenceGetAgents],
+    )
+    .await;
+    let instance = neighbourhood(&stub, vec![crate::agent::did()]).await;
+    let handle = instance.persisted.lock().await.clone();
+    let url = handle.shared_url.clone().unwrap();
+    let policy = read_policy(&url).await.into_result().unwrap();
+    assert_eq!(
+        policy.mode, "designated",
+        "setup: expected the honest policy"
+    );
+    assert!(crate::sfu::config_store::every_member_local(&url));
+
+    let signed = |valid: bool| {
+        let mut signal = signal_from(
+            "did:key:named-by-the-language",
+            &[("desk", serde_json::json!({}))],
+        );
+        signal.proof.valid = Some(valid);
+        signal.proof.invalid = Some(!valid);
+        signal
+    };
+    crate::perspectives::publish_telepresence_signal(handle.clone(), signed(false), None);
+    assert!(
+        crate::sfu::config_store::every_member_local(&url),
+        "a signal whose signature failed ended the every-member-local verdict"
+    );
+    assert_eq!(
+        read_policy(&url).await.into_result().unwrap().mode,
+        "designated"
+    );
+
+    crate::perspectives::publish_telepresence_signal(handle, signed(true), None);
+    assert!(
+        !crate::sfu::config_store::every_member_local(&url),
+        "a verified signal from a remote member left the verdict in place"
+    );
+
+    stub.stop().await;
+    crate::perspectives::unregister_perspective(&instance.uuid);
+}
+
 /// S8: a failed check with no earlier value answers an error — never a
 /// "mesh" the check did not compute.
 #[tokio::test(start_paused = true)]
@@ -752,11 +855,13 @@ async fn a_remote_member_who_joins_inside_the_cache_window_gets_the_next_signal(
     );
 
     // A remote member joins 5 s later and beats through the link language.
+    // Published after signature checking: the stub cannot sign as another
+    // agent, and only a verified author counts as a member.
     sleep(Duration::from_secs(5)).await;
     stub.set_peers(vec!["did:key:remote".to_string()]);
-    crate::perspectives::handle_telepresence_signal_from_link_language(
+    crate::perspectives::publish_telepresence_signal(
+        instance.persisted.lock().await.clone(),
         signal_from("did:key:remote", &[("desk", beat_in("room:x"))]),
-        stub.address.clone(),
         None,
     );
     sleep(Duration::from_millis(50)).await;

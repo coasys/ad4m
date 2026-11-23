@@ -684,7 +684,9 @@ pub(crate) fn publish_telepresence_signal(
 ) {
     // A signal from a member this executor does not host ends an "every
     // member local" verdict, so the next broadcast reaches that member.
-    if let Some(url) = &handle.shared_url {
+    // Only a verified author counts: the language names the author, and a
+    // sighting holds the policy at mesh until the executor restarts.
+    if let (Some(url), Some(true)) = (&handle.shared_url, signal.proof.valid) {
         crate::sfu::config_store::saw_member(url, &signal.author);
     }
     let audience = event_recipients(&handle);

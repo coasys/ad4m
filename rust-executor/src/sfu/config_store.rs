@@ -17,7 +17,7 @@
 use deno_core::error::AnyError;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 // tokio's clock, so a paused test clock ages the cache.
 use tokio::time::Instant;
@@ -171,8 +171,20 @@ struct PolicyCacheEntry {
     stale: bool,
 }
 
+/// The members [`saw_member`] has seen per neighbourhood, and whether this
+/// executor hosts each. A member stays one, so a sighting is kept: a
+/// membership check that was already running when it came in reads it
+/// when it returns, instead of caching an "every member local" it no
+/// longer is.
+#[derive(Default)]
+struct Sightings {
+    seen: HashSet<String>,
+    remote: bool,
+}
+
 lazy_static! {
     static ref POLICY_CACHE: Mutex<HashMap<String, PolicyCacheEntry>> = Mutex::new(HashMap::new());
+    static ref SIGHTINGS: Mutex<HashMap<String, Sightings>> = Mutex::new(HashMap::new());
 }
 
 /// The resolved policy when it is less than [`POLICY_CACHE_TTL`] old.
@@ -226,16 +238,26 @@ pub(crate) fn every_member_local(neighbourhood_url: &str) -> bool {
 /// "every member local" verdict is wrong: it ends at once, so the next
 /// broadcast goes out remotely instead of being skipped for the rest of
 /// [`POLICY_CACHE_TTL`], and the next policy read checks the members again
-/// (a failed check answers mesh).
-/// Costs a map lookup unless the verdict is "every member local".
+/// (a failed check answers mesh). The sighting is also kept for a check
+/// that is running now ([`Sightings`]).
+/// Costs a map lookup for a member seen before.
 pub(crate) fn saw_member(neighbourhood_url: &str, did: &str) {
-    if !every_member_local(neighbourhood_url) || hosted_dids().iter().any(|h| h == did) {
-        return;
+    {
+        let mut sightings = SIGHTINGS.lock().expect("sightings lock");
+        let known = sightings.entry(neighbourhood_url.to_string()).or_default();
+        if !known.seen.insert(did.to_string()) {
+            return;
+        }
+        if hosted_dids().iter().any(|h| h == did) {
+            return;
+        }
+        known.remote = true;
     }
     if let Some(entry) = POLICY_CACHE
         .lock()
         .expect("policy cache lock")
         .get_mut(neighbourhood_url)
+        .filter(|entry| entry.every_member_local == Some(true))
     {
         // Only a computed policy has a verdict, and "every member local"
         // computed "designated": with a member elsewhere it is mesh, also
@@ -244,6 +266,15 @@ pub(crate) fn saw_member(neighbourhood_url: &str, did: &str) {
         entry.every_member_local = Some(false);
         entry.stale = true;
     }
+}
+
+/// Whether [`saw_member`] has seen a member this executor does not host.
+fn saw_remote_member(neighbourhood_url: &str) -> bool {
+    SIGHTINGS
+        .lock()
+        .expect("sightings lock")
+        .get(neighbourhood_url)
+        .is_some_and(|known| known.remote)
 }
 
 /// [`stored_policy`], or the policy of a neighbourhood with none: this
@@ -286,6 +317,9 @@ pub async fn read_policy(neighbourhood_url: &str) -> Result<CallPolicy, AnyError
         });
     match checked {
         Ok(hosted) => {
+            // Read after the check: a remote member that signalled while it
+            // ran is one its member list may not have had yet.
+            let hosted = hosted && !saw_remote_member(neighbourhood_url);
             let policy = CallPolicy {
                 mode: if hosted { "designated" } else { "mesh" }.to_string(),
                 ..Default::default()
