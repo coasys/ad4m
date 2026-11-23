@@ -20,7 +20,7 @@ import {
     languageAddress,
     languageSettings,
 } from "@coasys/ad4m-ldk";
-import { getOnlineAgents } from "./online-agents.ts";
+import { getOnlineAgents, singleFlight } from "./online-agents.ts";
 
 // =============================================================================
 // Module-level state
@@ -49,6 +49,14 @@ const didLinksCreated = new Set<string>();
 
 const syncMutex = new Mutex();
 let gossipRound = 0;
+
+// Overlapping roster polls share one lookup (online-agents.ts, `singleFlight`).
+const onlineAgents = singleFlight(() =>
+    getOnlineAgents(
+        async () => (await holochainCall(dnaRole, zomeName, "get_active_agents", null)) as any[],
+        (agent) => holochainCallAsync(dnaRole, zomeName, "get_agents_status", agent),
+    ),
+);
 
 // =============================================================================
 // Private helpers
@@ -322,10 +330,7 @@ const language = defineLanguage({
         },
 
         async getOnlineAgents() {
-            return getOnlineAgents(
-                async () => (await holochainCall(dnaRole, zomeName, "get_active_agents", null)) as any[],
-                (agent) => holochainCallAsync(dnaRole, zomeName, "get_agents_status", agent),
-            );
+            return onlineAgents();
         },
 
         async sendSignal(remoteDid: string, payload: unknown) {

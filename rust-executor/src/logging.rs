@@ -139,14 +139,26 @@ pub(crate) fn set_rust_log(log_config: Option<&std::collections::HashMap<String,
     env::set_var("RUST_LOG", without_mcp_session_ids(&rust_log));
 }
 
+/// Install `builder`'s output as the global logger, filtered by `RUST_LOG` (set by
+/// [`set_rust_log`]) through [`crate::log_filter`], so `runtime.setLogFilter` can change the
+/// filter while the executor runs. The builder itself passes every record: the filter is
+/// the wrapper's. `RUST_LOG_STYLE` still sets the colours.
+fn install(builder: &mut Builder) -> Result<(), log::SetLoggerError> {
+    if let Ok(style) = env::var("RUST_LOG_STYLE") {
+        builder.parse_write_style(&style);
+    }
+    builder.filter_level(LevelFilter::Trace);
+    let rust_log = env::var("RUST_LOG").unwrap_or_default();
+    crate::log_filter::install(Box::new(builder.build()), &rust_log)
+}
+
 /// Initialize logging for CLI (stdout)
 pub fn init_cli_logging(log_config: Option<&std::collections::HashMap<String, String>>) {
     set_rust_log(log_config);
 
     let mut initialized = LOGGER_INITIALIZED.lock().unwrap();
     if !*initialized {
-        // Use parse_default_env() to respect RUST_LOG environment variable
-        if let Err(e) = env_logger::Builder::new().parse_default_env().try_init() {
+        if let Err(e) = install(&mut env_logger::Builder::new()) {
             eprintln!("Failed to initialize CLI logger: {}", e);
         }
         *initialized = true;
@@ -169,7 +181,6 @@ pub fn init_file_logging(
     let mut builder = Builder::new();
     builder
         .target(Target::Pipe(Box::new(file)))
-        .parse_default_env()
         .format(|buf, record| {
             writeln!(
                 buf,
@@ -180,7 +191,7 @@ pub fn init_file_logging(
                 record.args()
             )
         });
-    if let Err(e) = builder.try_init() {
+    if let Err(e) = install(&mut builder) {
         eprintln!("Failed to initialize the file logger: {}", e);
     }
     crate::log_files::set_log_dir(dir);
@@ -196,7 +207,7 @@ fn create_launcher_logger_builder<W: Write + Send + 'static>(target: Box<W>) -> 
     let mut builder = Builder::new();
     builder
         .target(Target::Pipe(target))
-        .parse_default_env() // This reads RUST_LOG environment variable
+        .filter_level(LevelFilter::Trace) // the filter is `log_filter`'s (see `install`)
         .format(|buf, record| {
             let level = match record.level() {
                 log::Level::Error => record.level().as_str().red(),
@@ -240,7 +251,7 @@ pub fn init_launcher_logging<W: Write + Send + 'static>(
         return Ok(());
     }
 
-    if let Err(e) = create_launcher_logger_builder(target).try_init() {
+    if let Err(e) = install(&mut create_launcher_logger_builder(target)) {
         eprintln!("Failed to initialize launcher logger: {}", e);
     }
 
