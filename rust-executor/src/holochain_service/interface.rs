@@ -394,9 +394,7 @@ impl HolochainServiceInterface {
         // A failed read must propagate: treating it as "no stored key"
         // would generate and persist a new key over a valid mapping,
         // silently forking the language's cell identity.
-        if let Some(stored) =
-            crate::db::Ad4mDb::with_global_instance(|db| db.get_setting(&setting_key))?
-        {
+        if let Some(stored) = crate::db_backend::db_backend().get_setting(&setting_key)? {
             match holochain::prelude::AgentPubKey::try_from(stored.as_str()) {
                 Ok(key) => return Ok(key),
                 Err(_) => log::warn!(
@@ -409,9 +407,7 @@ impl HolochainServiceInterface {
             Some(app_info) => app_info.agent_pub_key,
             None => self.new_sign_keypair_random().await?,
         };
-        crate::db::Ad4mDb::with_global_instance(|db| {
-            db.set_setting(&setting_key, &key.to_string())
-        })?;
+        crate::db_backend::db_backend().set_setting(&setting_key, &key.to_string())?;
         Ok(key)
     }
 
