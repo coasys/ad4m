@@ -106,3 +106,47 @@ fn a_mount_and_a_sync_get_the_long_timeout() {
         assert!(spec.long, "{method} has the short timeout");
     }
 }
+
+/// `perspective.mount` runs as its caller, who must be the perspective's single owner (#1775):
+/// a perspective owned by main + Alice or Bob + Alice mounts nothing, whoever asks, and
+/// another agent cannot mount Alice's perspective as her.
+#[tokio::test]
+async fn a_mount_needs_the_caller_to_be_the_single_owner() {
+    let lang = load_mount_test_language().await;
+    let alice = "did:key:z6MkAliceSingleOwner";
+    let bob = "did:key:z6MkBobSingleOwner";
+    let main_did =
+        crate::agent::did_for_context(&crate::agent::AgentContext::main_agent()).unwrap();
+    let as_alice = || RequestContext::user_for_test(alice, update_everywhere());
+    let as_bob = || RequestContext::user_for_test(bob, update_everywhere());
+    let as_main = || RequestContext::app_for_test(update_everywhere());
+    let cases: Vec<(Vec<String>, Vec<(&str, RequestContext)>)> = vec![
+        (
+            vec![main_did.clone(), alice.to_string()],
+            vec![("alice", as_alice()), ("main", as_main())],
+        ),
+        (
+            vec![bob.to_string(), alice.to_string()],
+            vec![("alice", as_alice()), ("bob", as_bob())],
+        ),
+        (vec![alice.to_string()], vec![("main", as_main())]),
+    ];
+    for (owners, callers) in cases {
+        for (who, ctx) in callers {
+            let p = registered_perspective(&[]).await;
+            let perspective = crate::perspectives::get_perspective(&p.0).unwrap();
+            for owner in &owners {
+                perspective.persisted.lock().await.add_owner(owner);
+            }
+            let params = json!({ "uuid": p.0, "languageAddress": lang });
+            let result = call_as(ctx, "perspective.mount", params).await;
+            let mounts = perspective.mounts().await.unwrap();
+            crate::perspectives::unregister_mount(&lang, &p.0);
+            assert!(
+                result.is_err(),
+                "owners {owners:?}: {who}'s mount went through"
+            );
+            assert!(mounts.is_empty(), "owners {owners:?}, caller {who}");
+        }
+    }
+}

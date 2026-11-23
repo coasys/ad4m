@@ -67,6 +67,8 @@ takes it out once as a `CallAgent` token and keeps it in a V8 async-context
 variable that every await, promise reaction and timer of the call inherits.
 The agent ops sign as that token. With no token they refuse (signing, sealed
 boxes, and `did` / `signingKeyId` too: code with no token acts as no agent).
+So do the `HOLOCHAIN_SERVICE` ops that touch a language's cells
+(`installApp`, `getAppInfo`, `callZomeFunction`, #1775).
 The host's own entries into a language run the same way, with a main-agent
 token (`LanguageRuntime::execute_as_host`): the bundle's evaluation
 (`JsCore::load_module_from_source` evaluates it under the token, which

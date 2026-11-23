@@ -53,7 +53,7 @@ import {
 
     // The token of the call this code runs for (agent_extension.js): the ops that
     // touch a language's cells act as the caller and use the caller's own cell
-    // (#1775). null outside a call: the main agent's cell, as before.
+    // (#1775). null outside a call: the ops refuse, as the AGENT ops do.
     const callAgent = () =>
         typeof globalThis.__ad4mCallAgent === "function" ? globalThis.__ad4mCallAgent() : null;
 

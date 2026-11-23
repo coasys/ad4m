@@ -298,7 +298,9 @@ async fn a_managed_users_calls_run_as_that_user() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|a| a["what"] == "create" || a["what"] == "update")
+        .filter(|a| {
+            ["create", "update", "delete"].contains(&a["what"].as_str().unwrap_or_default())
+        })
         .map(|a| {
             (
                 a["what"].as_str().unwrap().to_string(),
@@ -313,6 +315,7 @@ async fn a_managed_users_calls_run_as_that_user() {
             ("create".to_string(), main_did),
             ("create".to_string(), alice_did.to_string()),
             ("update".to_string(), alice_did.to_string()),
+            ("delete".to_string(), alice_did.to_string()),
         ]
     );
 }
