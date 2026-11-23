@@ -363,6 +363,8 @@ async function initLanguage(contextJson) {
         "expressionGet", "expressionCreate", "expressionAddressOf",
         "isImmutableExpression", "expressionIcon", "expressionConstructorIcon",
         "expressionInteract",
+        // Mount (language-provided shapes and records)
+        "mountShapes", "mountSnapshot",
         // Perspective-commit
         "perspectiveCommit",
         // Perspective-sync
