@@ -280,7 +280,7 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
 
         tokio::spawn(async move {
             axum_server::from_tcp_rustls(tls_listener, rustls_config)
-                .serve(tls_app.into_make_service())
+                .serve(tls_app.into_make_service_with_connect_info::<SocketAddr>())
                 .await
                 // Same reasoning as the MCP HTTPS listener: the cleartext API
                 // below is bound to 127.0.0.1 because TLS is *configured*, not
@@ -302,7 +302,11 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
         listener.local_addr()?
     );
 
-    axum::serve(listener, app.into_make_service()).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

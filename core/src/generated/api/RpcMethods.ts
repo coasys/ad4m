@@ -101,6 +101,7 @@ import type { LocalAiPlan } from "./LocalAiPlan";
 import type { LocalAiRemoveParams } from "./LocalAiRemoveParams";
 import type { LocalAiStatus } from "./LocalAiStatus";
 import type { LockAgentRequest } from "./LockAgentRequest";
+import type { LogFilter } from "./LogFilter";
 import type { LogParams } from "./LogParams";
 import type { LogTail } from "./LogTail";
 import type { LogTailParams } from "./LogTailParams";
@@ -200,6 +201,7 @@ import type { SetConfigParams } from "./SetConfigParams";
 import type { SetConfigResult } from "./SetConfigResult";
 import type { SetHostRatesRequest } from "./SetHostRatesRequest";
 import type { SetHotWalletAddressRequest } from "./SetHotWalletAddressRequest";
+import type { SetLogFilterParams } from "./SetLogFilterParams";
 import type { SetMultiUserRequest } from "./SetMultiUserRequest";
 import type { SetStatusRequest } from "./SetStatusRequest";
 import type { SetUnytMembraneProofRequest } from "./SetUnytMembraneProofRequest";
@@ -429,6 +431,7 @@ export interface RpcMethods {
   "runtime.inbox": { params: Record<string, never>; result: Array<PerspectiveExpression> };
   "runtime.info": { params: Record<string, never>; result: RuntimeInfo };
   "runtime.linkLanguageTemplates": { params: Record<string, never>; result: Array<LanguageMeta> };
+  "runtime.logFilter": { params: Record<string, never>; result: LogFilter };
   "runtime.logTail": { params: LogTailParams; result: LogTail };
   "runtime.networkMetrics": { params: Record<string, never>; result: string };
   "runtime.notifications": { params: Record<string, never>; result: Array<Notification> };
@@ -443,6 +446,7 @@ export interface RpcMethods {
   "runtime.setConfig": { params: SetConfigParams; result: SetConfigResult };
   "runtime.setFreeHostingEnabled": { params: RuntimeSetFreeHostingEnabledParams; result: boolean };
   "runtime.setHostRates": { params: SetHostRatesRequest; result: boolean };
+  "runtime.setLogFilter": { params: SetLogFilterParams; result: LogFilter };
   "runtime.setStatus": { params: SetStatusRequest; result: boolean };
   "runtime.setUnytMembraneProof": { params: SetUnytMembraneProofRequest; result: boolean };
   "runtime.tlsDomain": { params: Record<string, never>; result: string | null };
@@ -564,6 +568,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "runtime.inbox",
   "runtime.info",
   "runtime.linkLanguageTemplates",
+  "runtime.logFilter",
   "runtime.logTail",
   "runtime.networkMetrics",
   "runtime.notifications",
