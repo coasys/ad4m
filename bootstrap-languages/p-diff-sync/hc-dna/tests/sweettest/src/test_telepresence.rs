@@ -40,7 +40,7 @@ async fn test_online_status() {
     // Set online status
     let status = PerspectiveExpression {
         author: "did:test:alice".to_string(),
-        timestamp: Utc::now(),
+        timestamp: Utc::now().to_rfc3339(),
         data: Perspective { links: vec![] },
         proof: ExpressionProof {
             signature: "test_sig".to_string(),
@@ -74,7 +74,7 @@ async fn test_get_online_agents_multi() {
     // Set online status for both
     let alice_status = PerspectiveExpression {
         author: "did:test:alice".to_string(),
-        timestamp: Utc::now(),
+        timestamp: Utc::now().to_rfc3339(),
         data: Perspective { links: vec![] },
         proof: ExpressionProof {
             signature: "alice_sig".to_string(),
@@ -84,7 +84,7 @@ async fn test_get_online_agents_multi() {
 
     let bob_status = PerspectiveExpression {
         author: "did:test:bob".to_string(),
-        timestamp: Utc::now(),
+        timestamp: Utc::now().to_rfc3339(),
         data: Perspective { links: vec![] },
         proof: ExpressionProof {
             signature: "bob_sig".to_string(),
@@ -104,7 +104,7 @@ async fn test_get_online_agents_multi() {
     println!("Alice sees agents: {:?}", alice_sees);
     println!("Bob sees agents: {:?}", bob_sees);
 
-    for conductor in conductors.iter_mut() {
+    for conductor in conductors.into_inner().iter_mut() {
         conductor.shutdown().await;
     }
 }
@@ -131,7 +131,7 @@ async fn test_get_active_agents() {
     // Should see at least Bob (might also include self depending on implementation)
     // The exact behavior depends on how active_agent links are created
 
-    for conductor in conductors.iter_mut() {
+    for conductor in conductors.into_inner().iter_mut() {
         conductor.shutdown().await;
     }
 }
@@ -154,7 +154,7 @@ async fn test_get_others() {
 
     println!("Alice sees others: {:?}", others);
 
-    for conductor in conductors.iter_mut() {
+    for conductor in conductors.into_inner().iter_mut() {
         conductor.shutdown().await;
     }
 }
