@@ -34,6 +34,37 @@ pub struct BootstrapSeed {
     pub identity_store: Option<IdentityStoreSeed>,
 }
 
+/// What `init` and the language-language load say when `languageLanguageBundle`
+/// has no source. An empty field would be saved as a 0-byte `bundle.js`, which
+/// does not export `init()`.
+pub(crate) const EMPTY_LANGUAGE_LANGUAGE_BUNDLE: &str = concat!(
+    "seed field languageLanguageBundle is empty; ",
+    "refusing to write a 0-byte bundle.js (the bundle does not export init())"
+);
+
+/// `languageLanguageBundle` was empty or only whitespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EmptyLanguageLanguageBundle;
+
+impl std::fmt::Display for EmptyLanguageLanguageBundle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(EMPTY_LANGUAGE_LANGUAGE_BUNDLE)
+    }
+}
+
+impl std::error::Error for EmptyLanguageLanguageBundle {}
+
+/// `Ok` when `bundle` has source beyond whitespace.
+pub(crate) fn require_language_language_bundle(
+    bundle: &str,
+) -> Result<(), EmptyLanguageLanguageBundle> {
+    if bundle.trim().is_empty() {
+        Err(EmptyLanguageLanguageBundle)
+    } else {
+        Ok(())
+    }
+}
+
 /// A seed's `identityStore`: the store's base URL and the keys (bare Ed25519 multikeys, `z6Mk…`)
 /// its signed heads must carry. A list, so the store's key can rotate. Both are required; a
 /// field this build does not know (one a newer seed adds) is ignored, so a newer seed stays

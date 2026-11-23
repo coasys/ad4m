@@ -2,7 +2,7 @@ use log::{info, warn};
 use semver::{Version, VersionReq};
 use std::error::Error;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::utils::ad4m_data_directory;
 use crate::globals::{AD4M_VERSION, MAINNET_JSON, OLDEST_VERSION};
@@ -64,16 +64,25 @@ fn write_seed_config(
     network_bootstrap_seed: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
     let target_seed_path = app_data_path.join("mainnet_seed.seed");
-    if network_bootstrap_seed.is_none() {
-        info!("No bootstrap seed supplied... using the one found in local files");
-        let seed_file_data = MAINNET_JSON;
-        fs::write(target_seed_path, seed_file_data)?;
-        info!("wrote seed file");
-    } else {
-        let seed_path = PathBuf::from(network_bootstrap_seed.unwrap());
-        let seed_file_data = fs::read_to_string(seed_path)?;
-        fs::write(target_seed_path, seed_file_data)?;
+    let supplied = network_bootstrap_seed.is_some();
+    let seed_file_data = match network_bootstrap_seed {
+        None => {
+            info!("No bootstrap seed supplied... using the one found in local files");
+            MAINNET_JSON.to_string()
+        }
+        Some(seed_path) => fs::read_to_string(seed_path)?,
     };
+    // Refuse before the write. A file that does not parse as a seed is copied
+    // as before; loading it reports the parse error. An existing
+    // mainnet_seed.seed is left in place when this returns.
+    if let Ok(seed) = serde_json::from_str::<crate::runtime_service::BootstrapSeed>(&seed_file_data)
+    {
+        crate::runtime_service::require_language_language_bundle(&seed.language_language_bundle)?;
+    }
+    fs::write(target_seed_path, seed_file_data)?;
+    if !supplied {
+        info!("wrote seed file");
+    }
     Ok(())
 }
 
@@ -150,4 +159,105 @@ fn clean_ad4m_data(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// A bootstrap seed whose `languageLanguageBundle` is `bundle`.
+    fn write_seed(dir: &Path, bundle: &str) -> PathBuf {
+        let path = dir.join("seed.json");
+        let seed = serde_json::json!({
+            "trustedAgents": [],
+            "knownLinkLanguages": [],
+            "directMessageLanguage": "",
+            "agentLanguage": "",
+            "perspectiveLanguage": "",
+            "neighbourhoodLanguage": "",
+            "languageLanguageBundle": bundle,
+        });
+        fs::write(&path, seed.to_string()).unwrap();
+        path
+    }
+
+    /// `init` with an empty or whitespace-only `languageLanguageBundle` fails
+    /// and names that seed field. It does not write `mainnet_seed.seed`.
+    #[test]
+    fn init_refuses_an_empty_language_language_bundle() {
+        for bundle in ["", " \n\t"] {
+            let dir = tempfile::tempdir().unwrap();
+            let data = dir.path().join("data");
+            let seed = write_seed(dir.path(), bundle);
+            let err = init(
+                Some(data.to_string_lossy().into_owned()),
+                Some(seed.to_string_lossy().into_owned()),
+            )
+            .expect_err("an empty languageLanguageBundle must fail init");
+            let message = err.to_string();
+            assert!(
+                message.contains("languageLanguageBundle"),
+                "the error must name the seed field, got: {message}"
+            );
+            assert!(
+                !data.join("mainnet_seed.seed").exists(),
+                "init must not write mainnet_seed.seed when languageLanguageBundle is empty"
+            );
+        }
+
+        // A folder that already has a seed keeps it: the refused seed is not written over it.
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        fs::create_dir_all(&data).unwrap();
+        fs::write(
+            data.join("last-seen-version"),
+            crate::globals::AD4M_VERSION.as_str(),
+        )
+        .unwrap();
+        fs::write(data.join("mainnet_seed.seed"), "kept").unwrap();
+        let seed = write_seed(dir.path(), "");
+        let err = init(
+            Some(data.to_string_lossy().into_owned()),
+            Some(seed.to_string_lossy().into_owned()),
+        )
+        .expect_err("an empty languageLanguageBundle must fail init");
+        assert!(
+            err.to_string().contains("languageLanguageBundle"),
+            "the error must name the seed field, got: {err}"
+        );
+        assert_eq!(
+            fs::read_to_string(data.join("mainnet_seed.seed")).unwrap(),
+            "kept"
+        );
+    }
+
+    /// A seed whose `languageLanguageBundle` has source still initialises, and
+    /// so does `init` with no seed path (the built-in seed).
+    #[test]
+    fn init_writes_a_seed_whose_language_language_bundle_is_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let bundle = "export async function init() { return {}; }\n";
+        let seed = write_seed(dir.path(), bundle);
+        init(
+            Some(data.to_string_lossy().into_owned()),
+            Some(seed.to_string_lossy().into_owned()),
+        )
+        .expect("a languageLanguageBundle with source must init");
+        let written = fs::read_to_string(data.join("mainnet_seed.seed")).unwrap();
+        let parsed: crate::runtime_service::BootstrapSeed = serde_json::from_str(&written).unwrap();
+        assert_eq!(parsed.language_language_bundle, bundle);
+
+        let builtin = tempfile::tempdir().unwrap();
+        let builtin_data = builtin.path().join("data");
+        init(Some(builtin_data.to_string_lossy().into_owned()), None)
+            .expect("the built-in seed must init");
+        let written = fs::read_to_string(builtin_data.join("mainnet_seed.seed")).unwrap();
+        let parsed: crate::runtime_service::BootstrapSeed = serde_json::from_str(&written).unwrap();
+        assert!(
+            !parsed.language_language_bundle.trim().is_empty(),
+            "the built-in seed's languageLanguageBundle is present"
+        );
+    }
 }
