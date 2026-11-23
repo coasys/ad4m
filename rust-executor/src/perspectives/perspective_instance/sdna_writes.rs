@@ -383,8 +383,8 @@ impl PerspectiveInstance {
             // basename may differ from the name the class was registered
             // under (a mount name is not its target class's basename). Give
             // the name its own class node pointing at the same shape — the
-            // alias `find_class` resolves the registered name by — as
-            // `alias_mount_class_names` does for mount-installed shapes.
+            // alias `find_class` resolves the registered name by. A mount's
+            // shapes get theirs here too.
             let target_class = shacl_links
                 .iter()
                 .find(|l| {

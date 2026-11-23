@@ -71,7 +71,8 @@ fn class_basename(node: &str) -> &str {
     after_scheme.rsplit('/').next().unwrap_or(after_scheme)
 }
 
-/// The node `alias_mount_class_names` types as the class `name`.
+/// The node `add_sdna` types as the class `name` when the name is not its
+/// target class's basename.
 fn alias_node(name: &str) -> String {
     format!("literal:string:shacl://{name}")
 }

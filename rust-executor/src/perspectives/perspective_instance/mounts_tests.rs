@@ -918,3 +918,30 @@ async fn a_resync_reads_the_ledger_once_per_snapshot() {
         "an unchanged sync of ten records read the ledger {reads} times"
     );
 }
+
+/// A mount shape whose name is not its target class's basename
+/// (`MountThing`, `mounttest://Thing`) gets its name node from `add_sdna`:
+/// one class-type link and one shape link, and queries by the name work.
+#[tokio::test]
+async fn a_mounted_class_name_gets_one_alias_node() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "a"})).await;
+    let (p, _ctx) = mounted(&lang).await;
+    crate::perspectives::unregister_mount(&lang, &p.uuid);
+
+    let node = "literal:string:shacl://MountThing".to_string();
+    for predicate in ["rdf://type", "ad4m://shape"] {
+        let links = p
+            .get_links(&LinkQuery {
+                source: Some(node.clone()),
+                predicate: Some(predicate.to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(links.len(), 1, "{predicate} on the name node: {links:?}");
+    }
+    let instances = things(&p).await;
+    assert_eq!(instances.len(), 1, "{instances:?}");
+    assert_eq!(instances[0]["title"], "a");
+}

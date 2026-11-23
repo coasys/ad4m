@@ -39,7 +39,6 @@ use crate::agent::AgentContext;
 use crate::languages::mount_types::{MountDelta, MountEntry, MountShapes, MountSyncReport};
 use crate::languages::LanguageController;
 use crate::perspectives::model_query::utils::{literal_target, parse_literal_value};
-use crate::perspectives::subject_classes_of::local_name;
 use crate::perspectives::{register_mount, unregister_mount};
 use crate::types::{DecoratedLinkExpression, Link, LinkExpression, LinkQuery, LinkStatus};
 
@@ -823,7 +822,6 @@ impl PerspectiveInstance {
             .collect();
         self.add_sdna_batch_locked(entries, &context).await?;
         drop(sdna_changing);
-        self.alias_mount_class_names(shapes).await?;
 
         self.remove_bookkeeping(lang_address).await?;
         let version = Link {
@@ -832,51 +830,6 @@ impl PerspectiveInstance {
             target: literal_target(&Value::String(shapes.version.clone()))?,
         };
         self.add_mount_links(lang_address, vec![version]).await?;
-        Ok(())
-    }
-
-    /// A mount shape's `name` is what callers query by
-    /// (`modelQuery("MountThing")`), while `load_shape` finds a class by the
-    /// basename of its `sh:targetClass` (`mounttest://Thing` → `Thing`).
-    /// When the two differ — the mount contract separates them on purpose
-    /// (design §2.3: prefixed names, stable class IRIs) — a second class node
-    /// `literal:string:shacl://<name>` becomes the alias: typed
-    /// `ad4m://SubjectClass` and pointing at the same shape URI, so
-    /// `get_shape` and `model_query` resolve the name to the shape. The
-    /// `target_class` node stays too, so its basename still resolves.
-    async fn alias_mount_class_names(&mut self, shapes: &MountShapes) -> Result<(), AnyError> {
-        let mut links = Vec::new();
-        for shape in &shapes.shapes {
-            let target_class = shape.shape["target_class"].as_str().unwrap_or_default();
-            if target_class.is_empty() || local_name(target_class) == shape.name {
-                continue;
-            }
-            let shape_uri = self
-                .get_links(&LinkQuery {
-                    source: Some(target_class.to_string()),
-                    predicate: Some("ad4m://shape".to_string()),
-                    ..Default::default()
-                })
-                .await?
-                .first()
-                .map(|l| l.data.target.clone())
-                .ok_or_else(|| anyhow!("mounted class '{}' has no shape URI", shape.name))?;
-            let name_node = format!("literal:string:shacl://{}", shape.name);
-            links.push(Link {
-                source: name_node.clone(),
-                predicate: Some("rdf://type".to_string()),
-                target: "ad4m://SubjectClass".to_string(),
-            });
-            links.push(Link {
-                source: name_node,
-                predicate: Some("ad4m://shape".to_string()),
-                target: shape_uri,
-            });
-        }
-        if !links.is_empty() {
-            self.add_links(links, LinkStatus::Shared, None, &AgentContext::main_agent())
-                .await?;
-        }
         Ok(())
     }
 
