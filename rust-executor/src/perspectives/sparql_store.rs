@@ -117,6 +117,32 @@ impl EvalStop {
         self.stop.kind.load(Ordering::Acquire) != RUNNING || self.token.is_cancelled()
     }
 
+    /// Runs `fut` unless this stop fires first: the stop's error, and `fut`
+    /// dropped, when it does. For awaits that do not check the stop themselves
+    /// (reads of another service). The stop is polled at the watchdog's
+    /// 25 ms granularity.
+    pub(crate) async fn race<T>(
+        &self,
+        what: &str,
+        fut: impl std::future::Future<Output = T>,
+    ) -> Result<T, Error> {
+        if let Some(err) = self.stopped_err(what) {
+            return Err(err);
+        }
+        let until_stopped = async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                if let Some(err) = self.stopped_err(what) {
+                    return err;
+                }
+            }
+        };
+        tokio::select! {
+            out = fut => Ok(out),
+            err = until_stopped => Err(err),
+        }
+    }
+
     /// The error a stopped eval reports, saying why; `None` while it may
     /// still run. `what` is what the eval was doing ("query", "link scan"),
     /// for the deadline's wording.

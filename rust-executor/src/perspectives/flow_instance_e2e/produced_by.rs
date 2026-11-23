@@ -1308,6 +1308,55 @@ async fn verify_flow_receipt_refreshes_the_carried_signers_before_it_judges() {
     );
 }
 
+/// A `producedByFlow` run cancelled while its signer preparation waits on a
+/// store that never answers ends at the stop, with the stop's error, and
+/// frees the query slot it held: the preparation is not a stretch of the run
+/// the stop cannot reach.
+///
+/// Red while `prepare_receipt_signers` ignores the stop: the run waits for
+/// the stalled log read, the timeout fires, and the slot stays held.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_cancelled_while_signers_are_prepared_ends_and_frees_its_slot() {
+    use crate::perspectives::flow_instance::produced::flow_valid_outputs_reading;
+    use crate::perspectives::sparql_store::EvalGate;
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    let signed = DeviceSigned::new(&mut f, 143, "ad4m://task/prepare-stalls").await;
+    plant_receipt(&mut f, &signed.receipt).await;
+    signed.age_past_the_window();
+    // The refresh's first log read enters and never leaves.
+    let entered = Arc::new(Notify::new());
+    *signed.store.pause_store.lock().unwrap() = Some((entered.clone(), Arc::new(Notify::new())));
+
+    let slots = Arc::new(tokio::sync::Semaphore::new(1));
+    let mut gate = EvalGate::request(std::time::Duration::from_secs(60), None);
+    gate.hold_slot(slots.clone().acquire_owned().await.unwrap());
+    let stop = gate.stop();
+    let canceller = async {
+        entered.notified().await;
+        stop.cancel();
+    };
+    let run = crate::identity::with_test_resolver(
+        signed.resolver.clone(),
+        flow_valid_outputs_reading(&stop, &f.perspective, &f.perspective, &f.flow_uri, None),
+    );
+    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(run, canceller)
+    })
+    .await
+    .expect("the run ends at the stop, not when the stalled read does");
+    let err = result.expect_err("a stopped run answers no outputs");
+    assert!(
+        err.to_string().contains("query cancelled"),
+        "the stop's own error - got: {err:#}"
+    );
+    drop(stop);
+    drop(gate);
+    assert_eq!(slots.available_permits(), 1, "the run's slot is free");
+}
+
 /// Data's P3 on #1597, point 2: a read prepares the carried signers of all
 /// its receipts in one call, so `DISCOVERY_PER_BATCH` caps the key-index
 /// lookups of the read, not of each receipt. `DISCOVERY_PER_BATCH + 6`
