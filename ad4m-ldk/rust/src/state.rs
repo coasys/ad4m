@@ -903,7 +903,8 @@ mod tests {
             Poll::Ready(Err(e)) => {
                 assert!(e.message.contains("ordered"), "{}", e.message);
                 assert!(
-                    e.message.contains("earlier call panicked: boom at lib.rs:9"),
+                    e.message
+                        .contains("earlier call panicked: boom at lib.rs:9"),
                     "{}",
                     e.message
                 );
@@ -917,7 +918,8 @@ mod tests {
             Poll::Ready(Err(e)) => {
                 assert!(e.message.contains("expressionGet"), "{}", e.message);
                 assert!(
-                    e.message.contains("earlier call panicked: boom at lib.rs:9"),
+                    e.message
+                        .contains("earlier call panicked: boom at lib.rs:9"),
                     "{}",
                     e.message
                 );
