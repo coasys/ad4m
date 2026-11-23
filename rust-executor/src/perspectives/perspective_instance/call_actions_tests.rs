@@ -613,3 +613,98 @@ async fn abstract_update_groups_by_concrete_name() {
     assert_eq!(updates.len(), 1, "one grouped update: {calls:?}");
     assert_eq!(updates[0]["params"], json!({"title": "z"}));
 }
+
+/// A language whose `expressionCreate` counts its calls; `count` on its
+/// `project` address reads the count back.
+async fn load_counting_resolve_language() -> String {
+    let source = format!(
+        "export const name = \"counting-resolve\";\n\
+         let count = 0;\n\
+         export async function init() {{}}\n\
+         export function isPublic() {{ return false; }}\n\
+         export async function expressionCreate(content) {{ count++; return \"counted://\" + count; }}\n\
+         export function interactions(a) {{ return a === \"project\" ? [{{ name: \"count\", label: \"count\", parameters: [], execute: async () => count }}] : []; }}\n\
+         // instance {}\n",
+        uuid::Uuid::new_v4()
+    );
+    let controller = crate::languages::LanguageController::global_instance();
+    let (_, path) = controller.save_language_bundle(&source, None).unwrap();
+    controller.load_language(path, false).await.unwrap()
+}
+
+#[tokio::test]
+async fn an_abstract_call_adder_never_runs_the_link_resolver() {
+    let lang = load_mount_test_language().await;
+    let resolver = load_counting_resolve_language().await;
+    let mut shape: Value = serde_json::from_str(&thing_shape(&lang).await).unwrap();
+    // `children` gets call adder/remover, and a resolve language a link
+    // adder would create its members on.
+    let update = shape["properties"][1]["setter"].clone();
+    shape["properties"][4]["adder"] = update.clone();
+    shape["properties"][4]["remover"] = update;
+    shape["properties"][4]["resolve_language"] = json!(resolver);
+    let (mut p, ctx) = mounted("MountThing", shape.to_string()).await;
+    let base = created_thing(&lang, &ctx, &mut p).await;
+    p.add_link(
+        Link {
+            source: base.clone(),
+            predicate: Some("rdf://type".to_string()),
+            target: "mounttest://Thing".to_string(),
+        },
+        LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .unwrap();
+    let resolved = || async {
+        interact(&format!("{resolver}://project"), "count", json!({}))
+            .await
+            .unwrap()
+    };
+    let children = json!({"children": {"action": "adder", "value": [format!("{lang}://k1")]}});
+
+    // Denied: a managed user may not make the call.
+    let alice = AgentContext::managed("did:key:z6MkAliceCallActionUser".to_string());
+    let err = p
+        .update_subject(
+            class("ad4m://Container"),
+            base.clone(),
+            children.clone(),
+            None,
+            &alice,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("main agent"), "{err}");
+    assert_eq!(resolved().await, json!(0), "a denied call ran the resolver");
+
+    // Batched: the call is refused inside a caller batch.
+    let batch = p.create_batch().await;
+    let err = p
+        .update_subject(
+            class("ad4m://Container"),
+            base.clone(),
+            children.clone(),
+            Some(batch.clone()),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("cannot run inside a batch"),
+        "{err}"
+    );
+    p.discard_batch(&batch).await;
+    assert_eq!(
+        resolved().await,
+        json!(0),
+        "a batched call ran the resolver"
+    );
+
+    // Allowed: the call runs, and still nothing is resolved.
+    p.update_subject(class("ad4m://Container"), base, children, None, &ctx)
+        .await
+        .unwrap();
+    assert_eq!(resolved().await, json!(0), "a call adder ran the resolver");
+}
