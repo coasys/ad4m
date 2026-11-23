@@ -58,10 +58,6 @@ import { isContainedScope, isContainmentTraversal, isTraverseScope } from "./typ
  */
 const SUBJECT_CLASS_KEY = '__subjectClass';
 
-/** {@link Ad4mModel.hasCallActions} per class: a class's shape is fixed once
- *  it is declared. */
-const callActionsCache = new WeakMap<Function, boolean>();
-
 /**
  * The IRI the executor names `cls` by (`queriedAs`: its target class), or
  * `undefined` for something that is not a declared model class.
@@ -1158,19 +1154,17 @@ export class Ad4mModel {
    * through the validated `perspective.instance*` RPCs, which run the
    * declared actions; every other class keeps its `executeAction` / subject
    * writes. A class from {@link fromSHACL} answers from the shape it was
-   * made from.
+   * made from. Read each time, not cached: that shape is the caller's
+   * object and its actions may change.
    */
   static hasCallActions(): boolean {
-    if (!callActionsCache.has(this)) {
-      const shape = this.ownShape();
-      const calls = (actions?: any[]) => (actions ?? []).some((a) => a?.action === 'call');
-      callActionsCache.set(this, !!shape && (
-        calls(shape.constructor_actions) ||
-        calls(shape.destructor_actions) ||
-        (shape.properties ?? []).some((p: any) => calls(p.setter) || calls(p.adder) || calls(p.remover))
-      ));
-    }
-    return callActionsCache.get(this)!;
+    const shape = this.ownShape();
+    const calls = (actions?: any[]) => (actions ?? []).some((a) => a?.action === 'call');
+    return !!shape && (
+      calls(shape.constructor_actions) ||
+      calls(shape.destructor_actions) ||
+      (shape.properties ?? []).some((p: any) => calls(p.setter) || calls(p.adder) || calls(p.remover))
+    );
   }
 
   /** The shape this class's writes follow, actions included: the shape

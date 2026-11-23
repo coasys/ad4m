@@ -375,3 +375,23 @@ describe("delete() of a call-backed model is scoped to its class", () => {
     expect(removedLinks.map((l: any) => l.data.source)).toEqual(["mounttest://parent"]);
   });
 });
+
+describe("hasCallActions reads the shape each time", () => {
+  it("a shape whose call actions are replaced by link actions writes as links", async () => {
+    const shape: any = callShape("mounttest://Changed");
+    const Changed = Ad4mModel.fromSHACL(shape, "Changed");
+    expect((Changed as any).hasCallActions()).toBe(true);
+
+    const set = (predicate: string) => [{ action: "setSingleTarget", source: "this", predicate, target: "value" }];
+    shape.constructor_actions = [{ action: "addLink", source: "this", predicate: "rdf://type", target: "mounttest://Changed" }];
+    shape.destructor_actions = [{ action: "removeLink", source: "this", predicate: "rdf://type", target: "mounttest://Changed" }];
+    for (const p of shape.properties) p.setter = set(p.path);
+    expect((Changed as any).hasCallActions()).toBe(false);
+
+    const { proxy, sent } = proxyWith();
+    const row = await fetched(Changed, proxy);
+    row.title = "b";
+    await row.save();
+    expect(methods(sent).filter((m) => m.startsWith("instance"))).toEqual([]);
+  });
+});
