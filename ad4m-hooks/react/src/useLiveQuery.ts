@@ -118,7 +118,9 @@ export function useLiveQuery<T extends Ad4mModel>(
 
   const isInstance = id !== undefined;
 
-  const [live, setLive] = useState<LiveQuery<Page<Ad4mModel>> | null>(null);
+  // The open query and the perspective it was opened on: a render can still show
+  // the previous perspective's query while the next one opens.
+  const [opened, setOpened] = useState<{ live: LiveQuery<Page<Ad4mModel>>; uuid: string } | null>(null);
   const [openError, setOpenError] = useState<string>("");
   const [pageNumber, setPageNumber] = useState(1);
 
@@ -129,7 +131,7 @@ export function useLiveQuery<T extends Ad4mModel>(
   // One key for the whole parent scope (ids, predicate, field, ...), so a
   // change to any part of it reopens the query. A model class counts by name.
   const parentKey = JSON.stringify(parent ?? null, (_k, v) => (typeof v === "function" ? v.name : v));
-  const source = live ?? (held ? EMPTY : LOADING);
+  const source = opened?.live ?? (held ? EMPTY : LOADING);
   const snapshot = useSyncExternalStore(source.subscribe, source.getSnapshot, source.getSnapshot);
 
   /** Build the full query from user options + pagination + parent + instance filter. */
@@ -169,19 +171,19 @@ export function useLiveQuery<T extends Ad4mModel>(
   useEffect(() => {
     setOpenError("");
     if (!perspective || held) {
-      setLive(null);
+      setOpened(null);
       return;
     }
-    let opened: LiveQuery<Page<Ad4mModel>>;
+    let live: LiveQuery<Page<Ad4mModel>>;
     try {
-      opened = open(buildQuery());
+      live = open(buildQuery());
     } catch (err) {
-      setLive(null);
+      setOpened(null);
       setOpenError(err instanceof Error ? err.message : String(err));
       return;
     }
-    setLive(opened);
-    return () => opened.dispose();
+    setOpened({ live, uuid: perspective.uuid });
+    return () => live.dispose();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     perspective?.uuid,
@@ -199,14 +201,14 @@ export function useLiveQuery<T extends Ad4mModel>(
   const entries = useMemo(() => {
     if (snapshot.status !== "ready") return previous.current.entries;
     const next = snapshot.data!.results as T[];
-    if (!preserveReferences || isInstance || previous.current.uuid !== perspective?.uuid) return next;
+    if (!preserveReferences || isInstance || previous.current.uuid !== opened?.uuid) return next;
     const known = new Map(previous.current.entries.map((e) => [e.id, e]));
     return next.map((n) => known.get(n.id) ?? n);
-  }, [snapshot, preserveReferences, isInstance, perspective?.uuid]);
+  }, [snapshot, preserveReferences, isInstance, opened?.uuid]);
   // Written after the commit, so a discarded render leaves nothing behind.
   useEffect(() => {
-    if (snapshot.status === "ready") previous.current = { uuid: perspective?.uuid, entries };
-  }, [entries, snapshot.status, perspective?.uuid]);
+    if (snapshot.status === "ready") previous.current = { uuid: opened?.uuid, entries };
+  }, [entries, snapshot.status, opened?.uuid]);
 
   // A query that could not open is not loading.
   const loading = !openError && snapshot.status === "loading";
