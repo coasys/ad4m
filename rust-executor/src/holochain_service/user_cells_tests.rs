@@ -157,9 +157,10 @@ async fn two_first_calls_of_one_user_install_once() {
     let cells = UserCells::default();
     let backend = Backend::default();
     cells.remember_main_app(APP, LANG, payload(APP));
+    let alice = alice();
     let (x, y) = tokio::join!(
-        cells.app_for_call(&backend, APP, Some(LANG), &alice()),
-        cells.app_for_call(&backend, APP, Some(LANG), &alice()),
+        cells.app_for_call(&backend, APP, Some(LANG), &alice),
+        cells.app_for_call(&backend, APP, Some(LANG), &alice),
     );
     assert_eq!(x.unwrap(), y.unwrap());
     assert_eq!(backend.installs.lock().unwrap().len(), 1);
