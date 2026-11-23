@@ -260,7 +260,7 @@ export function retryHeld(): PerspectiveDiff {
         (held.op === "add" ? additions : removals).push(link);
     }
     if (additions.length + removals.length > 0) {
-        console.log(
+        console.info(
             `[server-link-language] opened ${additions.length + removals.length} held link(s) with the key ring`,
         );
     }
@@ -286,7 +286,7 @@ export function retryHeld(): PerspectiveDiff {
  */
 export async function commit(diff: PerspectiveDiff): Promise<void> {
     const { config } = deps();
-    console.log(
+    console.debug(
         `[server-link-language] POST /commit: ${diff.additions.length} adds, ` +
         `${diff.removals.length} removes → room=${config.roomId}`,
     );
@@ -395,9 +395,9 @@ async function runRender(): Promise<void> {
  */
 function retryRenderIfDue(): void {
     if (_rendering || !store.getRenderProgress() || Date.now() < _renderDueAt) return;
-    console.log("[server-link-language] resuming the room render at its stored cursor");
+    console.debug("[server-link-language] resuming the room render at its stored cursor");
     startRender().then(
-        () => console.log("[server-link-language] room render finished on retry"),
+        () => console.debug("[server-link-language] room render finished on retry"),
         (err) => console.error(
             "[server-link-language] room render retry, or the catch-up after it, failed; " +
             "catch-up resumes the render after a backoff:",
@@ -478,7 +478,7 @@ async function renderPages(): Promise<void> {
             "does not hold yet; they are applied once it does",
         );
     }
-    console.log(
+    console.info(
         `[server-link-language] bootstrap: snapshot at sequence ${upto} loaded in ${progress.page} page(s)`,
     );
     store.setSequence(upto ?? 0);
@@ -517,7 +517,7 @@ export async function catchUp(): Promise<PerspectiveDiff> {
     let head = -1;
     while (!store.getRenderProgress()) {
         const res = await withToken((token) => api.fetchSync(config, token, since, _syncPageLimit));
-        console.log(
+        console.debug(
             `[server-link-language] catchUp: since=${since}, received ${res.diffs.length} diff(s), ` +
             `revision=${res.revision}, sequence=${res.sequence}` + (res.next !== null ? `, next=${res.next}` : ""),
         );
