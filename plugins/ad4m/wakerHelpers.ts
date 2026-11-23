@@ -15,6 +15,7 @@ export function buildWakeMessage(
   const lines: string[] = [
     event,
     "Read the AD4M skill for instructions on how to handle this.",
+    "When you reply, mention whoever you answer (their DID in the reply's mentions).",
     "",
     `Agent DID: ${agentDid}`,
     `Perspective: ${sub.perspective}`,

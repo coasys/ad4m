@@ -9,6 +9,7 @@ REST/WS shim. Split plan: spec item 6.
 |---|---|---|
 | `GET /api/v1/ws` | `ws_rpc.rs` | JSON-RPC-ish: `{type, id, ...params}` → `HandlerMap::dispatch`. Auth once at upgrade (`auth.rs`). Per-request cancel token (`request.cancel`). An `identity.publish` or `identity.cosignIncept` frame whose event names a member twice, or that repeats `params`, `events` or `event`, is refused from the frame's text (`identity_ws::duplicate_member_refusal`, 400 `invalid: DuplicateMember`): the params `Value` keeps only the last. The refusal comes after `HandlerMap::admit`, so a caller the guard refuses gets the access answer. **Also carries events** (`events_ws::build_event_stream`, filtered by `events.watch`) and the connection's live query updates; the only event socket |
 | `GET /health`, `POST /internal/shutdown` | `internal.rs` | `INTERNAL_API_TOKEN` |
+| `GET /metrics` | `metrics.rs` | Prometheus text of `crate::metrics::snapshot()`. Operator only (the `Guard::Operator` rule through the `RequestContext` extractor): 403 to every other caller, 401 for a token that opens no session. Users and perspectives are labels, so the output is personal data |
 | `/v1/*`, `/api/v1/openai/v1/*` | `openai_compat/router.rs` | chat/completions, embeddings, audio (`audio/transcriptions` passes through to the model's endpoint), realtime WS (`input_audio_buffer.commit` = one utterance) |
 
 ## Handler modules
@@ -152,6 +153,14 @@ Notes on some methods:
 - `neighbourhood.*` methods that name a perspective (`publish` by `perspectiveUuid`, the others
   by `uuid`) use `Owns { Perspective }` on the neighbourhood capability: the perspective that
   holds a neighbourhood decides who may use it.
+- `sfu.callResume` answers `{ listed: true, offer?, roster: { revision, participants } }`
+  or `{ listed: false }`. `revision` is the same number the `sfu-room-roster` event
+  carries for that publish: one sequence for every roster this process publishes,
+  1 the first time, then one more every publish. A later room, and a room created
+  again, continues it. `sfu.callAnswerServerOffer` and `sfu.callResume` are 408 when
+  they have not finished within 5 s. The wait starts before the rooms lock, so a
+  join that holds the lock counts, and it covers the resume roster publish as well
+  as the command waiting for a slot in the bounded queue.
 
 Which guard each method has, generated from the handler map
 (`tests/handler_table_tests.rs::render_guard_table`). `the_guard_table_in_agents_md_is_current`
@@ -164,7 +173,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-236 methods: Cap 81, CapAnyPointer 1, Executor 43, Open 5, Operator 28, Owns 76, UserOrOperator 2. Local only (the operator on this machine): 5.
+238 methods: Cap 83, CapAnyPointer 1, Executor 43, Open 5, Operator 28, Owns 76, UserOrOperator 2. Local only (the operator on this machine): 5.
 
 | Method | Guard |
 |---|---|
@@ -256,6 +265,7 @@ the guard checked:
 | `identity.status` | `Cap(agent:READ)` |
 | `language.all` | `Cap(language:READ)` |
 | `language.applyTemplate` | `Cap(language:CREATE)` |
+| `language.applyTemplateLocal` | `Cap(language:CREATE)` |
 | `language.get` | `Cap(language:READ)` |
 | `language.meta` | `Cap(language:READ)` |
 | `language.publish` | `Executor(language:CREATE)` |
@@ -377,6 +387,7 @@ the guard checked:
 | `sfu.callJoin` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.callLeave` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.callRestartIce` | `Cap(neighbourhood:UPDATE)` |
+| `sfu.callResume` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.callSetQualityPreference` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.cascadeStatus` | `Cap(neighbourhood:READ)` |
 | `sfu.ensureMembership` | `Operator` |

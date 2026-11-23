@@ -22,6 +22,7 @@ use super::flow_classes::mint_flow_instance;
 use super::flow_context::{load_flow_instances, load_shacl_flows, FlowInstanceRecord};
 use super::perspective_instance::PerspectiveInstance;
 use super::shacl_parser::SHACLFlow;
+use super::sparql_store::EvalStop;
 use crate::agent::AgentContext;
 
 /// One flow that should be started on a given item.
@@ -178,7 +179,7 @@ pub async fn run_flow_spawn_pass(
         return Vec::new();
     }
 
-    let mut flows = match load_shacl_flows(perspective).await {
+    let mut flows = match load_shacl_flows(&EvalStop::none(), perspective).await {
         Ok(flows) if !flows.is_empty() => flows,
         Ok(_) => return Vec::new(),
         Err(e) => {
@@ -669,7 +670,7 @@ mod tests {
 
         // Stage checks, so a failure names the broken link in the chain rather
         // than just "nothing spawned".
-        let catalogue_on_graph = load_shacl_flows(&perspective)
+        let catalogue_on_graph = load_shacl_flows(&EvalStop::none(), &perspective)
             .await
             .expect("load_shacl_flows");
         let on_graph = catalogue_on_graph

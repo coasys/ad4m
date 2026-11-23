@@ -12,8 +12,9 @@
 //! `model_query`, so signed literal envelopes and custom-language
 //! expressions resolve the same way `instance_query` resolves them.
 
-use super::{error_json, link_target, run_model_query, Ad4mMcpHandler, MAX_QUERY_LIMIT};
+use super::{error_json, link_target, Ad4mMcpHandler, MAX_QUERY_LIMIT};
 use crate::languages::LanguageController;
+use crate::perspectives::instances::run_model_query_stopped;
 use crate::perspectives::model_query::builtin_classes::TEXT_CONTENT_URI;
 use crate::types::Agent;
 use rmcp::{handler::server::wrapper::Parameters, tool};
@@ -93,8 +94,8 @@ impl Ad4mMcpHandler {
         params: Parameters<InstanceTranscriptParams>,
     ) -> String {
         let p = &params.0;
-        let perspective = match self.get_readable_perspective(&p.perspective_id).await {
-            Ok(perspective) => perspective,
+        let (perspective, gate) = match self.gated_readable_perspective(&p.perspective_id).await {
+            Ok(v) => v,
             Err(e) => return e,
         };
         let parent = p.parent.trim();
@@ -112,11 +113,14 @@ impl Ad4mMcpHandler {
             "limit": limit,
             "count": true,
         });
-        let (mut instances, total) =
-            match run_model_query(&perspective, TEXT_CONTENT_URI, &query).await {
-                Ok(v) => v,
-                Err(e) => return error_json(format!("Error reading TextContent instances: {e}")),
-            };
+        let result =
+            run_model_query_stopped(&gate.stop(), &perspective, TEXT_CONTENT_URI, &query).await;
+        // The query ends here: the author lookups below are no query time.
+        drop(gate);
+        let (mut instances, total) = match result {
+            Ok(v) => v,
+            Err(e) => return error_json(format!("Error reading TextContent instances: {e}")),
+        };
         if instances.is_empty() {
             return format!("(no TextContent instances under {parent})");
         }

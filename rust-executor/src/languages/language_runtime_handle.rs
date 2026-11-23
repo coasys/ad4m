@@ -56,6 +56,8 @@ pub struct LanguageRuntimeHandle {
     /// output, so every call into it runs ordered, a concurrent-marked one
     /// included — `send` rewrites such a call's kind before it is sent.
     wasm: Arc<AtomicBool>,
+    /// The script calls into this language (`GET /metrics`), shared by every clone.
+    pub(crate) call_stats: Arc<crate::metrics::LanguageCallStats>,
 }
 
 impl LanguageRuntimeHandle {
@@ -107,6 +109,7 @@ impl LanguageRuntimeHandle {
             language_name: None,
             tx,
             call_deadline: LANGUAGE_CALL_DEADLINE,
+            call_stats: Arc::default(),
             running,
             wasm: Default::default(),
         })
@@ -124,6 +127,7 @@ impl LanguageRuntimeHandle {
             language_name: None,
             tx,
             call_deadline: LANGUAGE_CALL_DEADLINE,
+            call_stats: Arc::default(),
             running: RunningRequest::default(),
             wasm: Default::default(),
         }
@@ -248,6 +252,8 @@ impl LanguageRuntimeHandle {
             self.language_address,
             &op_name[..op_name.len().min(100)]
         );
+        // A call refused below (busy, channel closed) counts as an error.
+        let counted = kind.is_some().then(|| self.call_stats.start());
         if kind == Some(CallKind::Ordered) {
             // Not queued behind a call that has run past the deadline: retries during a hang
             // would pile up in the channel. A concurrent call does not wait for that call.
@@ -275,6 +281,9 @@ impl LanguageRuntimeHandle {
         };
         let result =
             response.map_err(|e| format!("Language runtime dropped without responding: {}", e))?;
+        if let Some(call) = counted {
+            call.finish(result.is_ok());
+        }
 
         match &result {
             Ok(_) => debug!("[handle:{}] Operation completed OK", self.language_address),

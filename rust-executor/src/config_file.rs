@@ -210,7 +210,7 @@ pub struct ExecutorConfigFile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_port: Option<u16>,
     /// IP the SFU's UDP socket binds to, e.g. the machine's LAN address.
-    /// Unset: loopback, or the outbound interface with `localhost: false`.
+    /// Unset: loopback and the LAN address, both offered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sfu_bind_addr: Option<String>,
     /// UDP port the SFU binds. Unset: a free port, chosen at each start. Set

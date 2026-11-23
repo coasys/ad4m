@@ -205,6 +205,7 @@ import type { SetStatusRequest } from "./SetStatusRequest";
 import type { SetUnytMembraneProofRequest } from "./SetUnytMembraneProofRequest";
 import type { SetUserFreeAccessRequest } from "./SetUserFreeAccessRequest";
 import type { SfuAddIceCandidateParams } from "./SfuAddIceCandidateParams";
+import type { SfuAnswerResult } from "./SfuAnswerResult";
 import type { SfuAnswerServerOfferParams } from "./SfuAnswerServerOfferParams";
 import type { SfuCallJoinParams } from "./SfuCallJoinParams";
 import type { SfuCallLeaveParams } from "./SfuCallLeaveParams";
@@ -216,6 +217,8 @@ import type { SfuParticipantQualityPreference } from "./SfuParticipantQualityPre
 import type { SfuPerspectiveParams } from "./SfuPerspectiveParams";
 import type { SfuQualityPreferenceParams } from "./SfuQualityPreferenceParams";
 import type { SfuRestartIceParams } from "./SfuRestartIceParams";
+import type { SfuResumeParams } from "./SfuResumeParams";
+import type { SfuResumeResult } from "./SfuResumeResult";
 import type { SfuRoomInfo } from "./SfuRoomInfo";
 import type { SfuRoomParams } from "./SfuRoomParams";
 import type { SfuSendDataParams } from "./SfuSendDataParams";
@@ -334,6 +337,7 @@ export interface RpcMethods {
   "identity.status": { params: Record<string, never>; result: IdentityStatus };
   "language.all": { params: LanguageListParams; result: Array<LanguageHandle> };
   "language.applyTemplate": { params: ApplyTemplateRequest; result: LanguageRef };
+  "language.applyTemplateLocal": { params: ApplyTemplateRequest; result: LanguageRef };
   "language.get": { params: LanguageAddressParams; result: LanguageHandle };
   "language.meta": { params: LanguageAddressParams; result: LanguageMeta };
   "language.publish": { params: PublishLanguageRequest; result: LanguageMeta };
@@ -451,10 +455,11 @@ export interface RpcMethods {
   "runtime.updateNotification": { params: RuntimeUpdateNotificationParams; result: boolean };
   "runtime.verifySignature": { params: VerifySignatureRequest; result: boolean };
   "sfu.addIceCandidate": { params: SfuAddIceCandidateParams; result: boolean };
-  "sfu.callAnswerServerOffer": { params: SfuAnswerServerOfferParams; result: boolean };
+  "sfu.callAnswerServerOffer": { params: SfuAnswerServerOfferParams; result: SfuAnswerResult };
   "sfu.callJoin": { params: SfuCallJoinParams; result: CallSessionInfo };
   "sfu.callLeave": { params: SfuCallLeaveParams; result: boolean };
   "sfu.callRestartIce": { params: SfuRestartIceParams; result: boolean };
+  "sfu.callResume": { params: SfuResumeParams; result: SfuResumeResult };
   "sfu.callSetQualityPreference": { params: SfuQualityPreferenceParams; result: boolean };
   "sfu.cascadeStatus": { params: Record<string, never>; result: SfuCascadeStatus };
   "sfu.ensureMembership": { params: SfuEnsureMembershipParams; result: boolean };
@@ -595,6 +600,7 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "ai.removeEndpoint",
   "ai.updateEndpoint",
   "language.applyTemplate",
+  "language.applyTemplateLocal",
   "language.publish",
   "neighbourhood.join",
   "neighbourhood.publish",
