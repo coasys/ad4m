@@ -25,8 +25,9 @@ export class LinkQuery {
                 // @ts-ignore
                 this.untilDate = obj.untilDate;
             }
+            // 0 is a limit (no links), so only an absent limit is skipped.
             // @ts-ignore
-            if (obj.limit) {
+            if (obj.limit !== undefined && obj.limit !== null) {
                 // @ts-ignore
                 this.limit = obj.limit;
             }
