@@ -365,6 +365,7 @@ pub(crate) const PROPOSAL_EVIDENCE_PREDICATE: &str = "ad4m://flow/evidence";
 mod tests {
     use super::*;
     use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+    use crate::perspectives::sparql_store::EvalStop;
     use serde_json::Value;
 
     fn parse(sdna: &str) -> Value {
@@ -752,9 +753,10 @@ mod tests {
     /// Delivery fixture survived: name, both states, the one transition, and
     /// the input type.
     async fn assert_delivery_flow_loaded(perspective: &PerspectiveInstance) {
-        let flows = crate::perspectives::flow_context::load_shacl_flows(perspective)
-            .await
-            .expect("load_shacl_flows");
+        let flows =
+            crate::perspectives::flow_context::load_shacl_flows(&EvalStop::none(), perspective)
+                .await
+                .expect("load_shacl_flows");
         let flow = flows
             .get("delivery://DeliveryFlow")
             .unwrap_or_else(|| panic!("Delivery flow not loaded, got {:?}", flows.keys()));
@@ -855,9 +857,10 @@ mod tests {
             under_namespace.is_empty(),
             "flow links stored: {under_namespace:?}"
         );
-        let flows = crate::perspectives::flow_context::load_shacl_flows(perspective)
-            .await
-            .expect("load_shacl_flows");
+        let flows =
+            crate::perspectives::flow_context::load_shacl_flows(&EvalStop::none(), perspective)
+                .await
+                .expect("load_shacl_flows");
         assert!(
             !flows.contains_key("gated://GatedFlow"),
             "loader returned the refused flow"

@@ -42,7 +42,9 @@ async fn a_produced_by_flow_gate_grants_the_holder_through_the_real_store() {
     tick().await;
     let receipt = mint_honest_task_receipt(&mut f).await;
 
-    let flows = load_shacl_flows(&f.perspective).await.expect("flows");
+    let flows = load_shacl_flows(&EvalStop::none(), &f.perspective)
+        .await
+        .expect("flows");
     let ReceiptVerdict::Verified { settled_at, .. } = verify_receipt(&flows, &receipt) else {
         panic!("precondition: the honest receipt verifies");
     };

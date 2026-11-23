@@ -19,7 +19,13 @@ targetDid: string,
  * The session the offer is for. Every session of `target_did` gets
  * it; only this one applies it.
  */
-participantId: string, neighbourhoodUrl: string, roomName: string, 
+participantId: string, 
+/**
+ * The id of this offer. A resend and `sfu.callResume` repeat it.
+ * The answer names it (`sfu.callAnswerServerOffer`); an answer that
+ * names another id is refused.
+ */
+offerId: string, neighbourhoodUrl: string, roomName: string, 
 /**
  * JSON-encoded `RTCSessionDescriptionInit` for the new offer.
  */
