@@ -691,7 +691,9 @@ await recipe.save();  // Only the name field is updated
 await Recipe.update(perspective, recipe.id, { name: "White Chocolate Cake" });
 ```
 
-**An empty value clears the property.** Setting a property to `null` or `''` on `save()`, `update()` or `create()` leaves it with no links (and no empty literal). On `create()` the property is simply not written. `undefined` writes nothing, and a relation is emptied with `[]`:
+**An empty value clears the property.** Setting a property to `null` or `''` on `save()`, `update()` or `create()` leaves it with no links (and no empty literal). On `create()` the property is simply not written. `undefined` writes nothing, and a relation is emptied with `[]`. A required property cannot be cleared: the write throws, because its link is part of what makes the record an instance of the class.
+
+The clear removes every link on that property, also links other agents wrote. It reads those links when the write is planned, so inside a batch it does not see a value staged earlier in the same batch: commit that value first, or do not set it.
 
 ```typescript
 recipe.category = null; // or ''

@@ -1701,7 +1701,7 @@ export class Ad4mModel {
     return requireTotalCount(await this.executeModelQuery(perspective, { ...countQuery, limit: 0, count: true }, undefined, options));
   }
 
-  /** The write that sets property `key` to `value`; for `null` or `""`, the removal of its links (none when it has none); none for `undefined`. */
+  /** The write that sets property `key` to `value`; for `null` or `""`, the removal of its links (none when it has none; throws on a required property); none for `undefined`. */
   private async planProperty(key: string, value: any): Promise<FieldWrite[]> {
     const metadata = this.getPropertyMetadata(key);
     if (!metadata) {
@@ -1716,6 +1716,12 @@ export class Ad4mModel {
     // An empty value is no value: the property has no links, and no empty
     // literal (`literal:string:`) is stored.
     if (value === null || value === "") {
+      // A required property's link is part of what makes the record an
+      // instance of its class: clearing it would drop the record from the
+      // class's queries with no error.
+      if (metadata.required) {
+        throw new Error(`Property "${key}" is required and cannot be cleared`);
+      }
       const links = await this._perspective.get(new LinkQuery({ source: this._baseExpression, predicate: metadata.through }));
       return links.length ? [{ commands: [], parameters: [], removals: links }] : [];
     }

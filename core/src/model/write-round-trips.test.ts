@@ -42,6 +42,12 @@ class RoundTripOptional extends Ad4mModel {
   rank: string = "";
 }
 
+@Model({ name: "RoundTripRequired" })
+class RoundTripRequired extends Ad4mModel {
+  @Property({ through: "rt://title", required: true })
+  title: string = "";
+}
+
 // Two relations over one predicate.
 @Model({ name: "RoundTripShared" })
 class RoundTripShared extends Ad4mModel {
@@ -409,6 +415,17 @@ describe("an empty value clears a property", () => {
     const opt = await existing(proxy, "");
     await opt.save("batch-1");
     expect(calls).toEqual(["queryLinks"]);
+  });
+
+  it.each([[""], [null]])("update with %p on a required property throws and writes nothing", async (empty) => {
+    const titleLink = link("rt://req/1", "rt://title", "literal://string:old");
+    const { proxy, calls } = countingProxy([RoundTripRequired], 0, [titleLink]);
+    const req = new RoundTripRequired(proxy, "rt://req/1");
+    req.title = "old";
+    (req as any).takeSnapshot();
+    (req as any).title = empty;
+    await expect(req.save("batch-1")).rejects.toThrow('Property "title" is required and cannot be cleared');
+    expect(calls).toEqual([]);
   });
 
   it("update clears one property and sets another in one batch", async () => {
