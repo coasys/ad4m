@@ -184,6 +184,65 @@ fn resolve_action_list(list: &mut serde_json::Value, language_address: &str) {
     }
 }
 
+/// The node-shape URI the executor stores when `node_shape_uri` is absent:
+/// `{extract_namespace(target_class)}{class_name_of(target_class)}Shape`
+/// (`shacl_parser::shape_links`, called from `register_shapes` with
+/// `class_name_of(target_class)`). `mount_types.rs` does not derive it.
+/// `None` when the parser would refuse the target class for having no
+/// namespace — the parent link is then left as declared.
+fn derived_mount_shape_uri(target_class: &str) -> Option<String> {
+    let scheme_pos = target_class.find("://");
+    let mut namespace: Option<&str> = None;
+    if let Some(scheme_pos) = scheme_pos {
+        let after = &target_class[scheme_pos + 3..];
+        if !after.contains('/') && !after.contains('#') {
+            namespace = Some(&target_class[..scheme_pos + 3]);
+        }
+    }
+    if namespace.is_none() {
+        if let Some(hash_pos) = target_class.rfind('#') {
+            namespace = Some(&target_class[..=hash_pos]);
+        }
+    }
+    if namespace.is_none() {
+        if let Some(scheme_pos) = scheme_pos {
+            let after = &target_class[scheme_pos + 3..];
+            if let Some(last_slash) = after.rfind('/') {
+                namespace = Some(&target_class[..scheme_pos + 3 + last_slash + 1]);
+            }
+        }
+    }
+    let namespace = namespace?;
+    let local_at = ['#', ':', '/']
+        .into_iter()
+        .filter_map(|delimiter| target_class.rfind(delimiter))
+        .max()?;
+    let local = &target_class[local_at + 1..];
+    if local.is_empty() {
+        return None;
+    }
+    Some(format!("{namespace}{local}Shape"))
+}
+
+fn rewrite_parent_shapes(
+    shape: &mut serde_json::Value,
+    declared_to_derived: &std::collections::BTreeMap<String, String>,
+) {
+    let Some(parents) = shape
+        .get_mut("parent_shapes")
+        .and_then(|v| v.as_array_mut())
+    else {
+        return;
+    };
+    for uri in parents {
+        if let Some(current) = uri.as_str() {
+            if let Some(derived) = declared_to_derived.get(current) {
+                *uri = serde_json::Value::String(derived.clone());
+            }
+        }
+    }
+}
+
 fn resolve_language_placeholder(shape: &mut serde_json::Value, language_address: &str) {
     let serde_json::Value::Object(map) = shape else {
         return;
@@ -235,11 +294,26 @@ impl MountShapes {
         classes: &[MountClassShape],
         language_address: &str,
     ) -> Self {
-        let shapes = classes
+        let mut declared_to_derived = std::collections::BTreeMap::new();
+        let mut shapes: Vec<MountShapeEntry> = classes
             .iter()
             .map(|c| {
                 let mut shape = c.shape.clone();
                 if let serde_json::Value::Object(ref mut map) = shape {
+                    // Record the declared URI before dropping it. Parent links
+                    // still name that URI; the executor stores the parent at
+                    // the URI derived from its `target_class`.
+                    if let (
+                        Some(serde_json::Value::String(declared)),
+                        Some(serde_json::Value::String(target_class)),
+                    ) = (
+                        map.get("node_shape_uri").cloned(),
+                        map.get("target_class").cloned(),
+                    ) {
+                        if let Some(derived) = derived_mount_shape_uri(&target_class) {
+                            declared_to_derived.insert(declared, derived);
+                        }
+                    }
                     map.remove("node_shape_uri");
                 }
                 resolve_language_placeholder(&mut shape, language_address);
@@ -249,6 +323,9 @@ impl MountShapes {
                 }
             })
             .collect();
+        for entry in &mut shapes {
+            rewrite_parent_shapes(&mut entry.shape, &declared_to_derived);
+        }
         Self {
             version: version.into(),
             shapes,

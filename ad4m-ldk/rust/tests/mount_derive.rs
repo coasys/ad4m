@@ -164,6 +164,37 @@ fn mount_envelope_resolves_language_only_in_call_actions() {
     assert_eq!(ctor["source"], "lang://abc://class/Keep");
 }
 
+/// A child whose parent declares a different `target_class` namespace
+/// must link `parent_shapes` at the URI the executor derives
+/// (`{namespace of target_class}{local}Shape`), not the declared
+/// `{namespace}{name}Shape`. Same rule as the JS `mountShapes()`.
+#[test]
+fn mount_envelope_rewrites_parent_shapes_to_the_derived_target_class_uri() {
+    let parent = MountClassShape {
+        name: "NsParent".into(),
+        shape: serde_json::json!({
+            "node_shape_uri": "declared://NsParentShape",
+            "target_class": "other://ParentRec",
+            "properties": [],
+        }),
+    };
+    let child = MountClassShape {
+        name: "NsChild".into(),
+        shape: serde_json::json!({
+            "node_shape_uri": "declared://NsChildShape",
+            "target_class": "elsewhere://ChildRec",
+            "parent_shapes": ["declared://NsParentShape"],
+            "properties": [],
+        }),
+    };
+    let shapes = MountShapes::from_classes_at("1", &[parent, child], "unused");
+    assert!(shapes.shapes[0].shape.get("node_shape_uri").is_none());
+    assert_eq!(
+        shapes.shapes[1].shape["parent_shapes"][0],
+        "other://ParentRecShape"
+    );
+}
+
 /// `capabilities: [mount]` on `ad4m_language!` — compile coverage for
 /// the `mountShapes`/`mountSnapshot` shim arm.
 struct MountLang;
