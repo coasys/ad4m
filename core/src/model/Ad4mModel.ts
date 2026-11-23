@@ -1868,7 +1868,8 @@ export class Ad4mModel {
    *
    * **New instances** (no snapshot yet): creates the subject via
    * `createSubject` with initial scalar values, then sets relations
-   * via `innerUpdate`.
+   * via `innerUpdate`, then (without a `batchId`) refreshes from the
+   * perspective. To create without that read, use `Model.create()`.
    *
    * **Existing instances** (snapshot present, i.e. fetched via `get()`
    * or a query): updates only dirty fields via `innerUpdate`, then
@@ -2371,10 +2372,18 @@ export class Ad4mModel {
    *     be used to create an incoming link from the parent to the new instance.
    *   - `batchId` — an existing batch id; when provided the link write and
    *     `save()` are added to the batch instead of committed immediately.
-   * @returns The saved model instance. Without a `batchId` it is read back
-   *   after the commit; if that read fails, the instance is still returned
-   *   with the values it wrote and the read error goes to `console.warn`.
-   * @throws If a write or the commit fails (the batch it opened is discarded)
+   *   - `returns` — `'id'` (default) returns the instance built from the
+   *     values written, with its `id`, and sends no read after the commit:
+   *     `author`, `createdAt`, `updatedAt`, getters and relations that were
+   *     not written stay unset. `'row'` reads the row back after the commit
+   *     (one round trip) and fills them. Not allowed with `batchId`: nothing
+   *     is committed yet to read.
+   * @returns The created model instance (see `returns`). A later `save()` on
+   *   it updates; it does not create again.
+   * @throws If a write or the commit fails (the batch it opened is discarded);
+   *   with `returns: 'row'`, also if the read fails after the commit (the
+   *   record exists then: the message names its id, so do not retry the
+   *   create); with `returns: 'row'` and a `batchId`, before anything is written
    *
    * @example
    * ```typescript
@@ -2399,8 +2408,14 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     data: Record<string, any> = {},
-    options?: { parent?: Scope; batchId?: string },
+    options?: { parent?: Scope; batchId?: string; returns?: 'id' | 'row' },
   ): Promise<T> {
+    if (options?.returns === 'row' && options.batchId) {
+      throw new Error(
+        "create(): returns: 'row' reads the row after the commit, which a caller's batch (batchId) has not had yet. " +
+        "Commit the batch, then read the instance with get()."
+      );
+    }
     const instance = new this(perspective) as T;
     Object.assign(instance, data);
     // Resolved before any write, so an invalid parent stages nothing.
@@ -2422,13 +2437,13 @@ export class Ad4mModel {
       await linkParent?.(perspective, instance.id, batchId);
     });
 
-    // The record now exists. Rejecting would leave the caller no instance, and
-    // a retry would create a second record: if the re-read fails, return the
-    // instance with the values it wrote (its snapshot is already taken).
-    try {
-      await instance.getData();
-    } catch (e) {
-      console.warn(`${this.name}.create(): ${instance.id} was created, but reading it back failed`, e);
+    // The instance holds what it wrote and its snapshot is taken (save() did
+    // that), so nothing is read back unless the caller asked for the row.
+    if (options?.returns === 'row') {
+      const failed = (cause?: unknown) =>
+        Object.assign(new Error(`${this.name}.create(): ${instance.id} was created, but reading it back failed`), { cause });
+      const row = await instance.getData().catch((e) => { throw failed(e); });
+      if (!row) throw failed();
     }
     return instance;
   }

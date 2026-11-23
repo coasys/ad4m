@@ -156,13 +156,22 @@ describe("RPCs per write", () => {
   it("Model.create sends no setter for an empty relation", async () => {
     const { proxy, calls } = countingProxy([RoundTripCall]);
     await RoundTripCall.create(proxy, { title: "standup" });
+    expect(calls).toEqual(["createBatch", "createSubject", "commitBatch"]);
+  });
+
+  it("Model.create with returns: 'row' reads once after the commit", async () => {
+    const { proxy, calls } = countingProxy([RoundTripCall]);
+    // This fake's query finds no row, so the create rejects: a row that
+    // cannot be read is an error, not a silent half-filled instance.
+    await expect(RoundTripCall.create(proxy, { title: "standup" }, { returns: "row" }))
+      .rejects.toThrow(/was created, but reading it back failed/);
     expect(calls).toEqual(["createBatch", "createSubject", "commitBatch", "modelQuery"]);
   });
 
   it("create still writes a non-empty relation, and only that one", async () => {
     const { proxy, calls, sent } = countingProxy([RoundTripCall]);
     await RoundTripCall.create(proxy, { title: "standup", tags: ["rt://tag/a", "rt://tag/b"] });
-    expect(calls).toEqual(["createBatch", "createSubject", "executeCommands", "commitBatch", "modelQuery"]);
+    expect(calls).toEqual(["createBatch", "createSubject", "executeCommands", "commitBatch"]);
     const [tags] = commandsSent(sent);
     expect(tags).toContain("rt://tag");
     expect(tags).toContain("rt://tag/a");
