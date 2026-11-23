@@ -110,6 +110,10 @@ mod abstract_tests;
 mod join_tests;
 
 #[cfg(test)]
+#[path = "perspective_instance_broadcast_diag_tests.rs"]
+mod broadcast_diag_tests;
+
+#[cfg(test)]
 #[path = "perspective_instance_pending_diffs_tests.rs"]
 mod pending_diffs_tests;
 
@@ -4901,7 +4905,15 @@ impl PerspectiveInstance {
         payload: PerspectiveExpression,
         loopback: bool,
     ) -> Result<(), AnyError> {
+        // Phases for `[call-diag] event=broadcast.slow` (`call_diag::phase`).
+        let mut mark = std::time::Instant::now();
+        let mut phase = |name: &'static str| {
+            let now = std::time::Instant::now();
+            crate::call_diag::phase(name, now - mark);
+            mark = now;
+        };
         let current_perspective_handle = self.persisted.lock().await.clone();
+        phase("handle_lock");
 
         if loopback {
             // send back to all clients through neighbourhood signal subscription
@@ -4929,6 +4941,7 @@ impl PerspectiveInstance {
                 );
             }
         }
+        phase("local_delivery");
 
         // Remote members get the broadcast through the link language, off
         // this RPC's critical path: the language runtime serves one call at
@@ -4936,12 +4949,15 @@ impl PerspectiveInstance {
         // broadcast. The send is queued and drained in the background, or
         // skipped when every member is local; only a full queue fails here.
         let link_language_clone = self.link_language.read().await.clone();
+        phase("link_language_lock");
         if let Some(link_language) = link_language_clone {
-            self.broadcast_remotely(
+            let queued = self.broadcast_remotely(
                 link_language,
                 payload,
                 current_perspective_handle.shared_url.as_deref(),
-            )
+            );
+            phase("language");
+            queued
         } else {
             Err(self.no_link_language_error().await)
         }

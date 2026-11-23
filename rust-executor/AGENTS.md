@@ -27,6 +27,11 @@ cd .. && pnpm run test-main                        # JS integration suites again
 `timing: <step> [address] <ms>ms` (`logging::span`), logged when the step ends. `applyTemplate`,
 `publish` and `join` are the totals of the three calls; `applyTemplate.*`, `publish.*`,
 `installLanguage.*`, `loadLanguage.*` and `holochain.*` are their steps.
+
+**Where a call spends its time:** `grep '\[call-diag\]'` (`call_diag.rs`): socket open and close,
+late pongs, RPCs over 2 s, broadcasts over 1 s, language queues every 30 s. `runtime.setLogFilter`
+raises a module's level for a while without a restart (`log_filter.rs`, `LOGGING.md`).
+
 Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call real LLMs.
 
 ## Module map (what lives where)
