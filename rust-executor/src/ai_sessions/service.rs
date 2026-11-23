@@ -27,7 +27,7 @@ use super::run::{run_turn, TurnDeps};
 use super::store::{ai_session_store, AiSessionStore};
 use super::types::{
     assistant_content, user_content, AiSession, AiSessionChanged, AiSessionMessage,
-    AiSessionMessageRole, AiSessionUpdate, AiTurnStatus,
+    AiSessionMessageRole, AiSessionUpdate, AiTurnStatus, CUT_OFF_ERROR,
 };
 use crate::agent::capabilities::{caps_within, Capability};
 use crate::agent::AgentContext;
@@ -429,9 +429,7 @@ pub async fn send(
 
     // Rows still `running` here belong to a task that died (a panic lost its task without
     // the sweep having run): they are finished, whatever they say.
-    store
-        .interrupt_running(Some(session_id))
-        .map_err(SessionError::Failed)?;
+    cut_off_running(Some(session_id)).map_err(SessionError::Failed)?;
 
     let user = store
         .append_message(
@@ -573,18 +571,16 @@ pub fn cancel(ctx: &RequestContext, session_id: &str) -> Result<bool, SessionErr
             // start will settle the row when it finds the slot gone.
             None => Ok(true),
         },
-        None => Ok(store
-            .interrupt_running(Some(session_id))
-            .map_err(SessionError::Failed)?
-            > 0),
+        None => Ok(cut_off_running(Some(session_id)).map_err(SessionError::Failed)? > 0),
     }
 }
 
 /// The startup sweep: every turn a previous run of this executor left `running` was cut
-/// off with the process — mark them so a client never waits on a dead row. Called once
-/// from `run()` after the database opens.
+/// off with the process — mark them so a client never waits on a dead row, and log one
+/// warn per assistant turn. Called once from `run()` after the database opens. The count
+/// line is the sweep as a whole; each turn still has its own line.
 pub fn startup_sweep() {
-    match ai_session_store().interrupt_running(None) {
+    match cut_off_running(None) {
         Ok(0) => {}
         Ok(n) => log::warn!("ai sessions: marked {n} turns interrupted that a restart cut off"),
         Err(e) => log::error!("ai sessions: the startup sweep failed: {e}"),
@@ -605,7 +601,10 @@ fn release(session_id: &str, reply: &str) -> bool {
 }
 
 /// The turn's end written on its row and told to the owner: `status`, `error`, and
-/// `content_patch` merged into the row's content.
+/// `content_patch` merged into the row's content. A `failed` assistant turn also logs
+/// one warn. A provider HTTP failure is already logged where the call fails
+/// (`ai_service::providers::http::log_upstream_error`); this line is the turn, not a
+/// second dump of the upstream body.
 fn settle(
     store: &Arc<dyn AiSessionStore>,
     agent: &AgentContext,
@@ -620,9 +619,184 @@ fn settle(
         return;
     }
     match store.message(owner, reply_id) {
-        Ok(Some(row)) => publish_step(agent, &row.session_id.clone(), row),
+        Ok(Some(row)) => {
+            if status == AiTurnStatus::Failed && row.role == AiSessionMessageRole::Assistant {
+                warn_ended_turn(
+                    store,
+                    &row,
+                    "failed",
+                    row.error.as_deref().unwrap_or("the turn failed"),
+                );
+            }
+            publish_step(agent, &row.session_id.clone(), row);
+        }
         Ok(None) => log::warn!("ai sessions: turn {reply_id} settled but its row is gone"),
         Err(e) => log::error!("ai sessions: could not read the settled turn {reply_id}: {e}"),
+    }
+}
+
+/// Marks every `running` row of `session_id` (or of the whole table) `interrupted`, and
+/// logs one warn per assistant turn. Tool steps are marked with the rows and are not
+/// their own line: a turn that dies mid-call is one event.
+fn cut_off_running(session_id: Option<&str>) -> Result<u64, anyhow::Error> {
+    let store = ai_session_store();
+    let running = store.running_assistants(session_id);
+    let caught = store.interrupt_running(session_id)?;
+    match running {
+        Ok(rows) => {
+            for row in rows {
+                let cause = match row.error.as_deref() {
+                    Some(error) if !error.is_empty() => error,
+                    _ => CUT_OFF_ERROR,
+                };
+                warn_ended_turn(&store, &row, "interrupted", cause);
+            }
+        }
+        Err(e) => log::error!("ai sessions: could not list the turns a cut-off interrupted: {e}"),
+    }
+    Ok(caught)
+}
+
+/// How many characters of a turn's cause a log line keeps. The row stores the
+/// full error; a line must stay one line and must not carry a prompt an
+/// upstream body echoed back.
+const TURN_ERROR_EXCERPT_CHARS: usize = 180;
+
+/// One warn for an assistant turn that ended `failed` or `interrupted`: session, turn,
+/// model, how many tool steps it took, and a short cause. `kind` is `failed` or
+/// `interrupted`. The same string is what a test reads back.
+fn warn_ended_turn(
+    store: &Arc<dyn AiSessionStore>,
+    row: &AiSessionMessage,
+    kind: &str,
+    error: &str,
+) {
+    let session = store.session_any(&row.session_id).ok().flatten();
+    let model = session
+        .as_ref()
+        .and_then(|session| session.model.as_deref())
+        .filter(|model| !model.is_empty())
+        .unwrap_or("default");
+    let steps = session
+        .as_ref()
+        .map(|session| turn_steps(store, session.owner_did.as_deref(), row))
+        .unwrap_or(0);
+    let line = format!(
+        "ai session {} turn {} model={model} steps={steps} {kind}: {}",
+        row.session_id,
+        row.id,
+        excerpt_turn_error(error),
+    );
+    #[cfg(test)]
+    ENDED_TURN_WARNS.lock().unwrap().push(line.clone());
+    log::warn!("{line}");
+}
+
+/// Tool steps written after `row` and before the next message from the person.
+fn turn_steps(
+    store: &Arc<dyn AiSessionStore>,
+    owner: Option<&str>,
+    row: &AiSessionMessage,
+) -> usize {
+    let Ok(messages) = store.messages(owner, &row.session_id, 200, None) else {
+        return 0;
+    };
+    let next_user = messages
+        .iter()
+        .filter(|message| message.role == AiSessionMessageRole::User && message.seq > row.seq)
+        .map(|message| message.seq)
+        .min();
+    messages
+        .iter()
+        .filter(|message| {
+            message.role == AiSessionMessageRole::Tool
+                && message.seq > row.seq
+                && match next_user {
+                    Some(bound) => message.seq < bound,
+                    None => true,
+                }
+        })
+        .count()
+}
+
+fn excerpt_turn_error(error: &str) -> String {
+    let collapsed = error.split_whitespace().collect::<Vec<_>>().join(" ");
+    let scrubbed = scrub_turn_secrets(&collapsed);
+    let mut chars = scrubbed.chars();
+    let head: String = chars.by_ref().take(TURN_ERROR_EXCERPT_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
+/// `sk-…` and `Bearer …` tokens of at least 8 token characters become
+/// [`crate::config_file::REDACTED`]. A shorter tail keeps the prefix, so an
+/// ordinary word that happens to start `sk-` is left as written.
+fn scrub_turn_secrets(input: &str) -> String {
+    const PREFIXES: [&str; 2] = ["sk-", "Bearer "];
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while !rest.is_empty() {
+        let mut consumed = false;
+        for prefix in PREFIXES {
+            if let Some(after) = rest.strip_prefix(prefix) {
+                let token_bytes = secret_token_bytes(after);
+                if after[..token_bytes].chars().count() >= 8 {
+                    out.push_str(crate::config_file::REDACTED);
+                    rest = &after[token_bytes..];
+                    consumed = true;
+                    break;
+                }
+            }
+        }
+        if consumed {
+            continue;
+        }
+        let ch = rest.chars().next().expect("rest is not empty");
+        out.push(ch);
+        rest = &rest[ch.len_utf8()..];
+    }
+    out
+}
+
+fn secret_token_bytes(text: &str) -> usize {
+    text.chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .map(|c| c.len_utf8())
+        .sum()
+}
+
+#[cfg(test)]
+mod turn_log_tests {
+    use super::excerpt_turn_error;
+
+    #[test]
+    fn an_excerpt_drops_a_secret_collapses_whitespace_and_cuts_the_tail() {
+        let error = format!(
+            "sk-thisisasecretkeyvalue the model\nserver refused the turn {} TAIL",
+            "x".repeat(400)
+        );
+        let line = excerpt_turn_error(&error);
+        assert!(line.contains("<redacted>"), "{line}");
+        assert!(line.contains("the model server refused the turn"), "{line}");
+        assert!(!line.contains("sk-thisisasecretkeyvalue"), "{line}");
+        assert!(!line.contains("TAIL"), "{line}");
+        assert!(!line.contains('\n'), "{line}");
+        assert!(line.ends_with('…'), "{line}");
+    }
+
+    #[test]
+    fn a_short_token_keeps_its_prefix_and_a_bearer_token_does_not() {
+        assert_eq!(
+            excerpt_turn_error("sk-short is not a key"),
+            "sk-short is not a key"
+        );
+        assert_eq!(
+            excerpt_turn_error("denied Bearer abcdefghijklmnop"),
+            "denied <redacted>"
+        );
     }
 }
 
@@ -649,6 +823,12 @@ impl Drop for SendHold {
         }
     }
 }
+
+/// Warn lines for a turn that ended `failed` or `interrupted`. A test cannot
+/// replace the process logger: another test's `try_init` may already own it,
+/// so the line recorded here is the same string `log::warn!` is given.
+#[cfg(test)]
+pub(crate) static ENDED_TURN_WARNS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Arms a pause inside `delete` for a test, between the session's running-turn slot
 /// being cleared and its rows being deleted — the gap a send once slipped a turn

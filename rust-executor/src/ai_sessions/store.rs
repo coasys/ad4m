@@ -83,6 +83,13 @@ pub trait AiSessionStore: Send + Sync {
     /// Every `running` row — of the session `session_id`, or of the whole table when none is
     /// named — marked `interrupted`. How many it caught.
     fn interrupt_running(&self, session_id: Option<&str>) -> Result<u64, AnyError>;
+    /// Assistant rows still `running` — of the session `session_id`, or of the whole table
+    /// when none is named — in `seq` order. Read before [`interrupt_running`] so each
+    /// cut-off turn can be logged; the update only returns a count.
+    fn running_assistants(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<Vec<AiSessionMessage>, AnyError>;
 }
 
 /// [`AiSessionStore`] on the executor's `DbBackend`: the executor's SQLite tables on
@@ -185,6 +192,15 @@ impl AiSessionStore for DbAiSessionStore {
     fn interrupt_running(&self, session_id: Option<&str>) -> Result<u64, AnyError> {
         db_backend()
             .interrupt_running_ai_messages(session_id)
+            .map_err(Into::into)
+    }
+
+    fn running_assistants(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<Vec<AiSessionMessage>, AnyError> {
+        db_backend()
+            .list_running_assistant_messages(session_id)
             .map_err(Into::into)
     }
 }

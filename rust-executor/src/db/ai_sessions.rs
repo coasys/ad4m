@@ -16,7 +16,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::Ad4mDb;
 use crate::ai_sessions::types::{
-    AiSession, AiSessionMessage, AiSessionMessageRole, AiSessionUpdate, AiTurnStatus,
+    AiSession, AiSessionMessage, AiSessionMessageRole, AiSessionUpdate, AiTurnStatus, CUT_OFF_ERROR,
 };
 
 /// The `ai_sessions` and `ai_messages` tables. Called from `Ad4mDb::new` with the
@@ -379,11 +379,29 @@ impl Ad4mDb {
         let changed = self.conn.execute(
             "UPDATE ai_messages SET
                 status = 'interrupted',
-                error = COALESCE(error, 'the executor restarted, or the task that ran it ended')
+                error = COALESCE(error, ?2)
              WHERE status = 'running' AND (?1 IS NULL OR session_id = ?1)",
-            params![session_id],
+            params![session_id, CUT_OFF_ERROR],
         )?;
         Ok(changed as u64)
+    }
+
+    /// Assistant rows still `running` — of the session `session_id` when one is named,
+    /// of the whole table otherwise — in `seq` order. Read these before
+    /// [`interrupt_running_ai_messages`] so a cut-off turn can be logged with its id;
+    /// the update itself only says how many rows it caught.
+    pub fn list_running_assistant_messages(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<Vec<AiSessionMessage>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {MESSAGE_COLUMNS} FROM ai_messages
+             WHERE status = 'running' AND role = 'assistant'
+               AND (?1 IS NULL OR session_id = ?1)
+             ORDER BY seq"
+        ))?;
+        let rows = stmt.query_map(params![session_id], message_from)?;
+        rows.collect()
     }
 }
 
@@ -536,6 +554,12 @@ mod tests {
             .unwrap();
         db.append_ai_message(alice, "t1", "s1", "tool", "{}", Some("running"))
             .unwrap();
+        let running = db.list_running_assistant_messages(Some("s1")).unwrap();
+        assert_eq!(
+            running.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["a1"],
+            "a running tool step is not an assistant turn"
+        );
 
         assert!(db
             .finish_ai_message(alice, "a1", "done", None, Some(&json!({ "text": "hi" })),)

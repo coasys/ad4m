@@ -27,6 +27,8 @@ use crate::agent::capabilities::{
 };
 use crate::agent::session::{Principal, Session};
 use crate::agent::AgentContext;
+use crate::ai_service::harness::provider::ToolSchema;
+use crate::ai_service::harness::{CompletionSource, HarnessCompletion};
 use crate::db::Ad4mDb;
 use crate::events::Topic;
 use crate::types::RequestContext;
@@ -967,4 +969,137 @@ async fn a_turn_the_model_ends_silent_is_failed_not_done_and_empty() {
         "{:?}",
         reply.error
     );
+}
+
+// ── a failed or interrupted turn is one warn line ───────────────────────────
+
+/// Warn lines this session's turns produced. The capture sits next to the
+/// `log::warn!` because a test cannot install its own logger.
+fn warns_for(session_id: &str) -> Vec<String> {
+    service::ENDED_TURN_WARNS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|line| line.contains(session_id))
+        .cloned()
+        .collect()
+}
+
+/// A model whose completion fails with a fixed error. The turn then settles
+/// `failed` with that text.
+struct FailingModel {
+    error: String,
+}
+
+#[async_trait::async_trait]
+impl CompletionSource for FailingModel {
+    async fn complete(
+        &self,
+        _model_id: &str,
+        _messages: &[serde_json::Value],
+        _tools: Vec<ToolSchema>,
+    ) -> anyhow::Result<HarnessCompletion> {
+        anyhow::bail!("{}", self.error)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_turn_logs_one_warn_line() {
+    setup();
+    let did = "did:key:alice-failed-log";
+    let alice = user(did, everything());
+    let session = create(&alice);
+    let prompt = "USER-PROMPT-DO-NOT-LOG";
+    // The cause sits up front, a key-shaped token with it, and a long tail a
+    // log line must not carry — an upstream body can echo a prompt.
+    let tail = "PROMPT-TAIL-SHOULD-BE-CUT";
+    let error = format!(
+        "sk-thisisasecretkeyvalue the model server refused the turn {} {tail}",
+        "x".repeat(400)
+    );
+    let started = service::send(
+        &alice,
+        &session.id,
+        prompt,
+        deps(Arc::new(FailingModel { error })),
+    )
+    .await
+    .unwrap();
+    let reply = settled(Some(did), &started.reply_id).await;
+    assert_eq!(reply.status, Some(Failed));
+
+    // The row is marked failed just before the warn, on the turn's task.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let lines = loop {
+        let lines = warns_for(&session.id);
+        if !lines.is_empty() || std::time::Instant::now() >= deadline {
+            break lines;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(
+        lines.len(),
+        1,
+        "one warn for the failed turn, got {lines:?}"
+    );
+    let line = &lines[0];
+    assert!(line.contains(&session.id), "{line}");
+    assert!(line.contains(&started.reply_id), "{line}");
+    assert!(line.contains("model=scripted"), "{line}");
+    assert!(line.contains("steps=0"), "{line}");
+    assert!(line.contains(" failed: "), "{line}");
+    assert!(line.contains("the model server refused the turn"), "{line}");
+    assert!(line.contains("<redacted>"), "{line}");
+    assert!(!line.contains("sk-thisisasecretkeyvalue"), "{line}");
+    assert!(!line.contains(prompt), "{line}");
+    assert!(!line.contains(tail), "{line}");
+    assert!(!line.contains('\n'), "{line}");
+
+    // A turn that finishes adds nothing.
+    let _ = sent_reply(&alice, &session, deps(Scripted::answering(vec![]))).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        warns_for(&session.id).len(),
+        1,
+        "a finished turn adds no warn"
+    );
+}
+
+#[test]
+fn an_interrupted_turn_logs_one_warn_line() {
+    setup();
+    let (ctx, session) = alice("interrupted-log");
+    let did = ctx.user_did().unwrap().to_string();
+    let store = ai_session_store();
+    for (id, role) in [
+        ("interrupted-log-turn", AiSessionMessageRole::Assistant),
+        ("interrupted-log-step", AiSessionMessageRole::Tool),
+    ] {
+        store
+            .append_message(
+                Some(did.as_str()),
+                id,
+                &session.id,
+                role,
+                &json!({"text": ""}),
+                Some(Running),
+            )
+            .unwrap();
+    }
+
+    service::startup_sweep();
+
+    let lines = warns_for(&session.id);
+    assert_eq!(
+        lines.len(),
+        1,
+        "the assistant turn, not its tool step: {lines:?}"
+    );
+    let line = &lines[0];
+    assert!(line.contains("interrupted-log-turn"), "{line}");
+    assert!(!line.contains("interrupted-log-step"), "{line}");
+    assert!(line.contains("model=scripted"), "{line}");
+    assert!(line.contains("steps=1"), "{line}");
+    assert!(line.contains(" interrupted: "), "{line}");
+    assert!(line.contains("restart"), "{line}");
 }
