@@ -14,8 +14,8 @@ Every stored link has a **link status**: `Shared` (the default) or `Local`. In a
 | `perspective.removeLinks`, `linkMutations` removals | the status the link was stored with, not the call's |
 | Model property declared `local: true`, SHACL action with `local` | `Local` (`execute_commands`) |
 | Links that arrive from the link language | always `Shared` (`diff_from_link_language`); a diff does not add, relabel or remove a link stored as `Local` (`persist_remote_diff`) |
-| SDNA and SHACL links (`add_sdna`) | always `Shared` |
-| Built-in `InterpretationRun.debugPrompt` / `debugResponse` | `Local` ([hardwired_sdna/interpretation_run.json](../../../rust-executor/src/perspectives/hardwired_sdna/interpretation_run.json)) |
+| SDNA and SHACL links (`register_shapes`) | always `Shared` |
+| Built-in `InterpretationRun.debugPrompt` / `debugResponse` | `Local` ([LinkStatus](../../../rust-executor/src/types/domain.rs)); the setters carry `local` ([hardwired_sdna/interpretation_run.json](../../../rust-executor/src/perspectives/hardwired_sdna/interpretation_run.json)) |
 
 1. The status is stored as the literal `"Local"` or `"Shared"` on the link's reifier (`ad4m://ontology/status`).
 2. After the store write, only shared links go to `spawn_commit_and_handle_error`, which commits them to the link language ([Neighbourhood sync](../neighbourhoods/sync.md)). A perspective without a neighbourhood commits nothing.

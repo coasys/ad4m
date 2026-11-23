@@ -14,10 +14,10 @@ Local write (`add_link` → `add_link_expression`):
 2. `Link::validate`, then sign as the caller's `AgentContext`.
 3. `check_consensus_rule_links`: refuse a flow consensus rule this executor could not read back.
 4. With a `batch_id`: append to the batch's `PerspectiveDiff` in `batch_store` and return.
-5. `persist_link_diff` → `SparqlStore` (removals first, then additions). `retraction_effects` applies `ad4m://retracted` tombstones in every store write: it removes the link a tombstone names and does not write an addition a stored tombstone names.
+5. `persist_link_diff` → `SparqlStore` (removals first, then additions). `retraction_effects` applies `ad4m://retracted` tombstones in every store write: it removes the link a tombstone names and does not write an addition a stored tombstone names. A write that touches a shape's own links drops the shape cache and registry in the same step, before it returns (`clear_shape_cache`).
 6. `update_prolog_engines(diff)` → `spawn_prolog_facts_update`: in a spawned task, set the notification and live-query flags and record the changed predicates.
 7. If `Shared`: `spawn_commit_and_handle_error` starts `commit` in a spawned task and does not wait for it. A commit that fails becomes a pending diff ([Neighbourhood sync](../neighbourhoods/sync.md)).
-8. `pubsub_publish_diff`: queue a flow pass if a flow definition changed, drop derived shapes if SHACL changed, seed bookkeeping for newly minted flow instances, then emit one `link-added` / `link-removed` event to all owners (`publish_to_owners`; the main agent for an unowned perspective) ([Events](../../agents/interfaces/events.md)).
+8. `pubsub_publish_diff`: queue a flow pass if a flow definition changed, seed bookkeeping for newly minted flow instances, then emit one `link-added` / `link-removed` event to all owners (`publish_to_owners`; the main agent for an unowned perspective) ([Events](../../agents/interfaces/events.md)).
 
 `link_mutations` (also behind `addLinks` and `removeLinks`) runs the same steps for many links, emits events before it commits, and commits only the shared part.
 

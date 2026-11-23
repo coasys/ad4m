@@ -29,7 +29,7 @@ The local store in the language is always plaintext. Every link on the wire is c
 - [src/encryption.ts](../../../bootstrap-languages/server-link-language/src/encryption.ts): `sealToDid`, `buildKeyRing`, link encryption.
 - [src/room-keys.ts](../../../bootstrap-languages/server-link-language/src/room-keys.ts): `adminRotates`, `adminRotationStep`, `afterFailedKeyRead`, rotation and grants.
 - [src/store.ts](../../../bootstrap-languages/server-link-language/src/store.ts): the local store, the sync cursor, held links (`held/<link_hash>`), render progress (`render/progress`).
-- [rust-executor/src/agent/sealed_box.rs](../../../rust-executor/src/agent/sealed_box.rs): the executor side of `agentOpenSealed`.
+- [rust-executor/src/agent/sealed_box.rs](../../../rust-executor/src/agent/sealed_box.rs): `open_sealed_for_context`, behind the language's `agentOpenSealed` host import ([bootstrap-languages/server-link-language/src/adapters-deno.ts](../../../bootstrap-languages/server-link-language/src/adapters-deno.ts), the op `agent_open_sealed` in [rust-executor/src/js_core/agent_extension.rs](../../../rust-executor/src/js_core/agent_extension.rs)).
 - [src/api.ts](../../../bootstrap-languages/server-link-language/src/api.ts): `rotateKeys`.
 - [tests/js/utils/linkServer.ts](../../../tests/js/utils/linkServer.ts): the link server the integration tests start, with auto-admit.
 - [src/auth.ts](../../../bootstrap-languages/server-link-language/src/auth.ts), [src/ws-client.ts](../../../bootstrap-languages/server-link-language/src/ws-client.ts), [src/telepresence.ts](../../../bootstrap-languages/server-link-language/src/telepresence.ts), [src/adapters-deno.ts](../../../bootstrap-languages/server-link-language/src/adapters-deno.ts).

@@ -23,7 +23,8 @@ The executor answers four kinds of read over one perspective's Oxigraph store. *
 
 Every method checks the perspective query capability and owner access first (see [Capabilities](../../agents/access/capabilities.md) and [Access checks](../../agents/access/checks.md)).
 
-The reads are layered by signature verdict. A model query reads only links whose signature verifies (`proof_valid_filter` in [sparql_builder.rs](../../../rust-executor/src/perspectives/model_query/sparql_builder.rs)), unless the query sets `includeUnverified`. `perspective.queryLinks` and SPARQL are the raw reads: they also return unverified links, and each link carries its verdict (`proof.valid`, or `ad4m://ontology/proofValid` in SPARQL).
+The reads are layered by signature verdict. A model query reads only links whose signature verifies (`proof_valid_filter` in [sparql_builder.rs](../../../rust-executor/src/perspectives/model_query/sparql_builder.rs)), unless the query sets `includeUnverified`.
+`perspective.queryLinks` and SPARQL are the raw reads: they also return unverified links, and each link carries its verdict (`proof.valid`, or `ad4m://ontology/proofValid` in SPARQL).
 
 The executor contains a disabled Prolog engine; it is not supported. Queries use SPARQL and model queries.
 

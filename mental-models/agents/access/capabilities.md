@@ -33,7 +33,7 @@ A capability names a kind of action, not whose data. A user's default set holds 
 <details><summary>Where in the code</summary>
 
 - [rust-executor/src/agent/capabilities/types.rs](../../../rust-executor/src/agent/capabilities/types.rs): `Capability`, `Resource`, `AuthInfo`.
-- [rust-executor/src/agent/capabilities/defs.rs](../../../rust-executor/src/agent/capabilities/defs.rs): every `*_CAPABILITY`, the domain and verb constants, `get_user_default_capabilities`.
+- [rust-executor/src/agent/capabilities/defs.rs](../../../rust-executor/src/agent/capabilities/defs.rs): the capability constants (`ALL_CAPABILITY`, `AGENT_UPDATE_CAPABILITY` and the rest), the domain and verb constants, `get_user_default_capabilities`.
 - [rust-executor/src/agent/capabilities/mod.rs](../../../rust-executor/src/agent/capabilities/mod.rs): `capability_matches`, `require_capability`, `check_capability`, `anonymous_capabilities`.
 - [core/src/agent/](../../../core/src/agent) and [core/src/generated/api/](../../../core/src/generated/api): SDK types (`Capability`, `AuthInfo`).
 

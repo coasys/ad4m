@@ -51,7 +51,7 @@ An **agent session** (`perspective.runAgent`, `PerspectiveProxy.runAgent`) runs 
 - [rust-executor/src/mcp/tools/subscriptions.rs](../../../rust-executor/src/mcp/tools/subscriptions.rs): `get_mention_waker_config`, `build_mention_query`, `build_mentioning_query`, `generate_waker_query`; SDK side: [core/src/perspectives/WakerSubscriptionManager.ts](../../../core/src/perspectives/WakerSubscriptionManager.ts).
 - [rust-executor/src/mcp/tools/harness_bridge.rs](../../../rust-executor/src/mcp/tools/harness_bridge.rs): in-process tool calls.
 - [rust-executor/src/perspectives/agent_session.rs](../../../rust-executor/src/perspectives/agent_session.rs): `run_agent_session`, `SESSION_READS`, `SESSION_WRITES`; [rust-executor/src/api/agent_session_ws.rs](../../../rust-executor/src/api/agent_session_ws.rs): `perspective.runAgent`.
-- [rust-executor/src/mcp/shacl.rs](../../../rust-executor/src/mcp/shacl.rs): class shapes for the tools, read by `load_class` and by `load_class_properties_with_uri`.
+- [rust-executor/src/mcp/shacl.rs](../../../rust-executor/src/mcp/shacl.rs): class shapes for the tools, read by `load_classes`, `load_class` and `load_class_properties`.
 - [rust-executor/src/mcp/docs/](../../../rust-executor/src/mcp/docs): the `get_documentation` topics.
 - [rust-executor/src/mcp/AGENTS.md](../../../rust-executor/src/mcp/AGENTS.md), [docs-src/pages/developer-guides/mcp.mdx](../../../docs-src/pages/developer-guides/mcp.mdx).
 - [plugins/](../../../plugins): client-side plugin.

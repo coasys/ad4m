@@ -210,9 +210,9 @@ This file defines each term that ADAM uses in its own way, once, in alphabetical
 
 **Signal** (`PerspectiveInstance::send_signal`, `neighbourhood.sendSignal`): A signed payload that the link language sends to one agent of a neighbourhood and does not store. A Holochain signal is a different thing ([Holochain service](agents/executor/services/holochain.md)). Example: "Alice sends Bob a signal with an offer for the call." [Presence and signals](perspectives/neighbourhoods/presence-and-signals.md)
 
-**Social DNA (SDNA)** (`add_sdna`, `SdnaType`): The subject class and flow definitions that a perspective stores as shared links. Example: "`add_sdna` stores a subject class in the perspective." [Social DNA](perspectives/social-dna/README.md)
+**Social DNA (SDNA)** (`register_shapes`, `shape_links`): The subject class and flow definitions that a perspective stores as shared links. Example: "`register_shapes` stores a subject class in the perspective." [Social DNA](perspectives/social-dna/README.md)
 
-**Subject class** (`SdnaType::SubjectClass`, `parse_shacl_to_links`): A named SHACL shape with actions, which a perspective stores. Use "model class" for the SDK side. Example: "The perspective stores the subject class `Message`." [Subject classes](perspectives/social-dna/subject-classes.md)
+**Subject class** (`SHACLShape`, `parse_shacl_to_links`): A named SHACL shape with actions, which a perspective stores, keyed by its target class IRI. Use "model class" for the SDK side. Example: "The perspective stores the subject class `Message`." [Subject classes](perspectives/social-dna/subject-classes.md)
 
 **System language** (`is_system_language`, `SystemLanguageAddresses`): A language that the bootstrap seed or the known link languages name. The executor loads it with extra file access. Example: "The language language is a system language." [Bootstrap languages](languages/runtime/bootstrap-languages.md) — not: core language
 

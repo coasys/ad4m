@@ -12,7 +12,7 @@ A **live query** is a SPARQL or model query that the executor re-runs after rele
 2. Every write records its changed predicates (`record_changed_predicates`) and sets `trigger_subscription_check` ([Link write path](../links/write-path.md)).
 3. `subscribed_queries_loop` checks the flag every 200 ms. When it is set, it waits 250 ms to collect a burst, then runs `check_subscribed_queries`.
 4. A subscription is skipped when the writes cannot affect it: SPARQL by predicate overlap; model queries by `TriggerRules` (`any`, `joins`, `near`, `via`), which also watch classes reached through `include`, projections and `where`.
-5. Re-run the whole query and compare with `last_result` (`result_delta`). The delta makes the update small on the socket; the executor still computes the full result. Model results send `ids`, `upsert`, `totalCount`; SPARQL results send `added` / `removed` rows; otherwise the whole `result`.
+5. Re-run the whole query and compare with `last_result` (`result_delta`). Identical model subscriptions share one run per re-check (`evaluation_key`, [Model queries](model-queries.md)). The delta makes the update small on the socket; the executor still computes the full result. Model results send `ids`, `upsert`, `totalCount`; SPARQL results send `added` / `removed` rows; otherwise the whole `result`.
 6. `send_delta_update` publishes on the query-subscription topic with the connection id. The event stream delivers it only to that connection ([Events](../../agents/interfaces/events.md)).
 7. A client that misses a revision calls `perspective.resyncSubscription`. Closing the socket disposes its subscriptions (`dispose_connection_subscriptions`). A subscribe call cancelled before its first result (`request.cancel`, or the socket closing) unregisters its query (`open_subscription`).
 8. After a reconnect the SDK's `LiveQuery` subscribes again. It retries a failed re-open with backoff (1 s, doubling, at most 60 s) until it succeeds or the query is disposed, and reports it to `onStatus` listeners (`reopening`, then `open`).
@@ -23,7 +23,7 @@ Notifications: a write sets the notification flag and wakes `notification_check_
 
 <details><summary>Where in the code</summary>
 
-- [perspectives/perspective_instance/subscriptions.rs](../../../rust-executor/src/perspectives/perspective_instance/subscriptions.rs): `open_subscription`, `send_delta_update`, `subscription_state`, `dispose_*`, `result_delta`.
+- [perspectives/perspective_instance/subscriptions.rs](../../../rust-executor/src/perspectives/perspective_instance/subscriptions.rs): `open_subscription`, `send_delta_update`, `subscription_state`, `dispose_query_subscription`, `dispose_connection_subscriptions`, `result_delta`.
 - [perspectives/perspective_instance/subscription_triggers.rs](../../../rust-executor/src/perspectives/perspective_instance/subscription_triggers.rs): `TriggerRules`, which writes re-run a model subscription.
 - [perspectives/perspective_instance.rs](../../../rust-executor/src/perspectives/perspective_instance.rs): `subscribe_and_query`, `model_subscribe_and_query`, `subscribed_queries_loop`, `check_subscribed_queries`, `notification_check_loop`, `calc_notification_trigger_matches`.
 - [runtime_service/notification_access.rs](../../../rust-executor/src/runtime_service/notification_access.rs): which notifications may fire.

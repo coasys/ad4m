@@ -10,7 +10,7 @@ A **SPARQL query** (`perspective.querySparql`) runs a caller's read-only SPARQL 
 
 1. The method's guard checks the capability and owner access; the handler then reads `engine` (default `"sparql"`; any other value is refused).
 2. `validate_readonly_query` parses the text as a SPARQL query. `INSERT`, `DELETE` and other updates fail to parse and are refused. `SELECT`, `ASK`, `CONSTRUCT` and `DESCRIBE` pass.
-3. The query runs on a blocking thread. The handler stops waiting after `SPARQL_QUERY_TIMEOUT_SECS` (30 s, answer 408). The client can cancel with `request.cancel` (answer 499).
+3. The query runs on a blocking thread, through the shared `query_gate` that bounds how many client queries run at once. The gate gives each run a deadline (`query_deadline_secs`, 30 s by default; answer 504). The client can cancel with `request.cancel` (answer 499).
 4. `query_arbitrary` returns the executor's own JSON shape, not the W3C SPARQL JSON results format: `SELECT` rows as an array of JSON objects keyed by variable name, `ASK` as a boolean, and graph results as subject/predicate/object rows. Unlike the internal `query`, it does not re-encode `?target` / `?t` bindings as `literal:` strings.
 5. Two custom functions are registered: `<ad4m://fn/parse_literal>(?x)` decodes a `literal:` value, `<ad4m://fn/strip_html>(?x)` removes HTML tags.
 
@@ -28,7 +28,7 @@ SELECT ?s ?p ?o ?author WHERE {
 
 <details><summary>Where in the code</summary>
 
-- [api/perspectives_ws.rs](../../../rust-executor/src/api/perspectives_ws.rs): `query_sparql`, `SPARQL_QUERY_TIMEOUT_SECS`.
+- [api/perspectives_ws.rs](../../../rust-executor/src/api/perspectives_ws.rs): `query_sparql`, `query_eval_error_ws`; [perspectives/sparql_store.rs](../../../rust-executor/src/perspectives/sparql_store.rs): `query_gate`, `EvalGate`, `EvalStop`.
 - [perspectives/perspective_instance.rs](../../../rust-executor/src/perspectives/perspective_instance.rs): `sparql_query`, `sparql_query_cancellable`.
 - [perspectives/sparql_store.rs](../../../rust-executor/src/perspectives/sparql_store.rs): `validate_readonly_query`, `query`, `query_arbitrary`, `query_cancellable`, custom functions `parse_literal` and `strip_html`.
 - SDK: `PerspectiveProxy.querySparql` in [core/src/perspectives/PerspectiveProxy.ts](../../../core/src/perspectives/PerspectiveProxy.ts); result typing in [core/src/perspectives/SparqlBindings.ts](../../../core/src/perspectives/SparqlBindings.ts).

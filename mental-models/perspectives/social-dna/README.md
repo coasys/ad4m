@@ -13,23 +13,23 @@
 
 <details><summary>How it works</summary>
 
-Subject classes (`perspective.addSdna(name, code, "subject_class", shaclJson)`, sent by the SDK's `ensureSubjectClass`):
+Subject classes (the SDK's `Ad4mModel.register` / `registerAll` → `perspective.registerShapes`, read back with `perspective.shapes`):
 
-1. `add_sdna` parses the SHACL JSON to links (`parse_shacl_to_links`) before it touches the store.
-2. Under `sdna_change_mutex` it writes `ad4m://self → ad4m://has_subject_class → literal:<name>`, the code under `ad4m://sdna`, and the SHACL links, all `Shared`.
-3. Readers parse the links back on demand: `get_shape` → `ModelShape` (cached).
+1. `register_shapes` turns each `SHACLShape` into its links (`shape_links`) before it touches the store. A class is keyed by its target class IRI, not by a name link.
+2. Registration is a diff, not a rewrite: it compares the shape's own links with the ones stored. Equal sets write nothing (`RegisterResult.unchanged`); otherwise one `Shared` diff under `sdna_change_mutex` adds the missing links and removes the stale own links.
+3. Readers parse the links back on demand: `get_shape` → `ModelShape` (cached). `shapes` reads the registry (`ShapeSummary` per class: name, shape, hash of its canonical JSON).
 
 Flows (`PerspectiveProxy.addFlow(name, flow)` in the SDK): the SDK writes `SHACLFlow.toLinks()` plus `ad4m://self → ad4m://has_flow` and `ad4m://flow_uri` itself through `linkMutations`. It sends only the difference to the stored definition. Readers use `parse_flow_from_links` → `SHACLFlow`.
 
-The executor also registers **hard-wired classes** it needs itself (flow instances and proposals, interpretation runs and overlays, auto-processors) from JSON files in `hardwired_sdna/`. The built-in abstract classes `TextContent`, `Mentioning` and `Container` come from the same directory, but no perspective stores them (`model_query/builtin_classes.rs`).
+The executor also registers six **hard-wired classes** it needs itself (`FlowInstance`, `FlowTransitionProposal`, `AutoProcessor`, `ProcessingClaim`, `InterpretationRun`, `InterpretationOverlay`) from JSON files in `hardwired_sdna/`, through `register_shapes` (`ensure_subject_classes` in `hardwired_class.rs`). The built-in abstract classes `TextContent`, `Mentioning` and `Container` come from the same directory, but no perspective stores them (`model_query/builtin_classes.rs`).
 
 </details>
 
 <details><summary>Where in the code</summary>
 
-- [perspectives/shacl_parser.rs](../../../rust-executor/src/perspectives/shacl_parser.rs): `SHACLShape`, `SHACLFlow`, `AD4MAction`, `parse_shacl_to_links`, `parse_flow_to_links`, `parse_flow_from_links`.
-- [perspectives/perspective_instance.rs](../../../rust-executor/src/perspectives/perspective_instance.rs): `SdnaType`, `add_sdna`, `add_sdna_batch`, `add_sdna_inner`, `get_subject_classes_from_shacl`.
-- [perspectives/hardwired_class.rs](../../../rust-executor/src/perspectives/hardwired_class.rs) and [perspectives/hardwired_sdna/](../../../rust-executor/src/perspectives/hardwired_sdna): built-in classes.
+- [perspectives/shacl_parser.rs](../../../rust-executor/src/perspectives/shacl_parser.rs): `SHACLShape`, `SHACLFlow`, `AD4MAction`, `shape_links`, `shape_from_links`, `is_own_link`, `parse_shacl_to_links`, `parse_flow_to_links`, `parse_flow_from_links`.
+- [perspectives/perspective_instance/shapes.rs](../../../rust-executor/src/perspectives/perspective_instance/shapes.rs): `register_shapes`, `register_shape_json`, `shapes`, `class_names`, `class_keys`, `shape_registry`, `RegisterResult`, `ShapeSummary`.
+- [perspectives/hardwired_class.rs](../../../rust-executor/src/perspectives/hardwired_class.rs) and [perspectives/hardwired_sdna/](../../../rust-executor/src/perspectives/hardwired_sdna): `ensure_subject_classes`, `ensure_before_write`, `HardwiredClass`, the hard-wired classes.
 - SDK: [core/src/shacl/](../../../core/src/shacl) (`SHACLShape`, `SHACLFlow`), [core/src/model/](../../../core/src/model) (decorators, `shacl-gen.ts`), `addFlow` in [PerspectiveProxy.ts](../../../core/src/perspectives/PerspectiveProxy.ts).
 - Docs: [SHACL_SDNA_ARCHITECTURE.md](../../../SHACL_SDNA_ARCHITECTURE.md), [docs-src/pages/social-dna.mdx](../../../docs-src/pages/social-dna.mdx).
 

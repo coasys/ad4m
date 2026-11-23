@@ -25,7 +25,7 @@ fold(read set) → DerivedState { state, settled, contested }   (every replica, 
 FlowReplicaState (SQLite, per agent)    ── cached state + fired marks, `flow-state-changed` event
 ```
 
-RPC: `perspective.proposeFlowTransition`, `acceptFlowProposal`, `rejectFlowProposal`, `flowStates`, `flowFired`, `flowValidOutputs`, `mintFlowReceipt`, `verifyFlowReceipt`. Minting an instance or a proposal registers the hard-wired `FlowInstance` and `FlowTransitionProposal` classes first (`ensure_flow_model_classes`); so does `add_sdna` with type `flow`.
+RPC: `perspective.proposeFlowTransition`, `acceptFlowProposal`, `rejectFlowProposal`, `flowStates`, `flowFired`, `flowValidOutputs`, `mintFlowReceipt`, `verifyFlowReceipt`. Minting an instance or a proposal registers the hard-wired `FlowInstance` and `FlowTransitionProposal` classes first (`ensure_flow_model_classes`).
 
 Flow links are **monotonic**: a `Shared` link whose predicate starts with `ad4m://flow/`, or is `ad4m://acceptedBy`, is never removed by a diff. A peer's removal is dropped, and a local removal fails ([Link write path](../../links/write-path.md)). The link ends only by its author's signed tombstone, `<source> ad4m://retracted literal:string:<signature>`, which every executor applies in its own store. Role revocations (`ad4m://flow/role_grant_revoked`) and tombstones never end. The table of predicates is `MONOTONIC_PREDICATES`.
 

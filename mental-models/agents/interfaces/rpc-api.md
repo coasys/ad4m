@@ -2,7 +2,7 @@
 
 The **RPC API** is one WebSocket per client at `GET /api/v1/ws?token=…`. The client sends `{ id, type, params }`; the executor answers `{ id, result }` or `{ id, error: { code, message } }`. The same socket carries the [events](events.md) that the client asked for and the updates of its [live queries](../../perspectives/querying/live-queries.md). One `HandlerMap` registers about 190 methods in ten namespaces: `agent`, `user`, `perspective`, `neighbourhood`, `language`, `expression`, `runtime`, `ai`, `hosting` and `sfu`.
 
-**Why:** The socket replaced the earlier GraphQL API ([CHANGELOG](../../../CHANGELOG)). A client authenticates once, and the executor checks the session again on each call. Each method registers its params and result types (`map.method::<P, R>`), and a unit test writes the TypeScript contracts from them. When the committed contracts are stale, that unit test fails (`committed_sdk_rpc_methods_are_current`). At run time, dispatch still refuses params that do not fit a contract (400). There is no version negotiation: clients ship with the executor of the same revision.
+**Why:** The socket replaced the earlier GraphQL API ([CHANGELOG](../../../CHANGELOG)). A client authenticates once, and the executor checks the session again on each call. Each method registers its params and result types (`map.method::<P, R>`), and a unit test writes the TypeScript contracts from them. When the committed contracts are stale, that unit test fails (`committed_sdk_rpc_methods_are_current` in [tests/handler_table_tests.rs](../../../rust-executor/src/api/tests/handler_table_tests.rs)). At run time, dispatch still refuses params that do not fit a contract (400). There is no version negotiation: clients ship with the executor of the same revision.
 
 **Parent:** [Executor interfaces](README.md)
 
@@ -22,6 +22,7 @@ Other routes in the same axum server:
 | `POST /api/v1/ai/transcription/feed` | binary audio feed for a transcription stream |
 | `/v1/*`, `/api/v1/openai/v1/*` | OpenAI-compatible chat, embeddings, audio, realtime over `AIService` |
 | `GET /health` | open health check |
+| `GET /metrics` | resource counters, Prometheus text; the operator only ([metrics.rs](../../../rust-executor/src/api/metrics.rs)) |
 | `POST /internal/shutdown` | hosting service, `INTERNAL_API_TOKEN` |
 
 Listeners: cleartext on `127.0.0.1:port` (or `0.0.0.0` with `localhost: false`). With TLS configured, HTTPS/WSS listens on `0.0.0.0:tls_port`, and the cleartext listener stays on `127.0.0.1`.
