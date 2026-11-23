@@ -373,7 +373,7 @@ const rtt = Number(process.env.SDK_RTT_MS || 0);
 
 describe("an empty value clears a property", () => {
   const noteLink = link("rt://opt/1", "rt://note", "literal://string:old");
-  const removals = (sent: any[][]) => sent.filter((c) => c[0] === "removeLinks");
+  const clear = { action: "removeLink", source: "this", predicate: "rt://note", target: "*" };
   const writes = (sent: any[][]) => sent.filter((c) => c[0] === "executeCommands");
   const existing = async (proxy: PerspectiveProxy, note: string | null | undefined) => {
     const opt = new RoundTripOptional(proxy, "rt://opt/1");
@@ -383,14 +383,15 @@ describe("an empty value clears a property", () => {
     return opt;
   };
 
-  it.each([[""], [null]])("update with %p removes the property's links in the caller's batch", async (empty) => {
+  it.each([[""], [null]])("update with %p sends a removeLink of every link on the property, in the caller's batch", async (empty) => {
     const { proxy, sent } = countingProxy([RoundTripOptional], 0, [noteLink]);
     const opt = await existing(proxy, empty as any);
     await opt.save("batch-1");
-    expect(removals(sent)).toHaveLength(1);
-    expect(removals(sent)[0][2]).toEqual([expect.objectContaining({ data: noteLink.data })]);
-    expect(removals(sent)[0]).toContain("batch-1");
-    expect(writes(sent)).toHaveLength(0);
+    expect(sent.map((c) => c[0])).toEqual(["executeCommands"]);
+    expect(JSON.parse(sent[0][2])).toEqual([clear]);
+    expect(sent[0][3]).toBe("rt://opt/1");
+    expect(JSON.parse(sent[0][4])).toEqual([]);
+    expect(sent[0][5]).toBe("batch-1");
   });
 
   it.each([[""], [null]])("Model.create with %p stores no link", async (empty) => {
@@ -399,7 +400,6 @@ describe("an empty value clears a property", () => {
     const createSubject = sent.find((c) => c[0] === "createSubject")!;
     expect(JSON.stringify(createSubject)).not.toContain("note");
     expect(JSON.stringify(createSubject)).toContain("rank");
-    expect(calls).not.toContain("removeLinks");
     expect(writes(sent)).toHaveLength(0);
   });
 
@@ -410,11 +410,11 @@ describe("an empty value clears a property", () => {
     expect(calls).toEqual([]);
   });
 
-  it("a property already cleared, set to '' again, writes nothing extra", async () => {
+  it("a property already cleared, set to '' again, sends the removeLink and reads nothing", async () => {
     const { proxy, calls } = countingProxy([RoundTripOptional]);
     const opt = await existing(proxy, "");
     await opt.save("batch-1");
-    expect(calls).toEqual(["queryLinks"]);
+    expect(calls).toEqual(["executeCommands"]);
   });
 
   it.each([[""], [null]])("update with %p on a required property throws and writes nothing", async (empty) => {
@@ -429,10 +429,14 @@ describe("an empty value clears a property", () => {
   });
 
   it("update clears one property and sets another in one batch", async () => {
-    const { proxy, calls } = countingProxy([RoundTripOptional], 0, [noteLink]);
+    const { proxy, calls, sent } = countingProxy([RoundTripOptional], 0, [noteLink]);
     const opt = await existing(proxy, "");
     opt.rank = "2";
     await opt.save("batch-1");
-    expect(calls).toEqual(["queryLinks", "removeLinks", "executeCommands"]);
+    expect(calls).toEqual(["executeCommands"]);
+    const commands = JSON.parse(sent[0][2]);
+    expect(commands).toHaveLength(2);
+    expect(commands[0]).toEqual(clear);
+    expect(commands[1]).toMatchObject({ action: "setSingleTarget", predicate: "rt://rank" });
   });
 });

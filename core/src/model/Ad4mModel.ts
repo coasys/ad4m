@@ -421,8 +421,6 @@ function jsonToModelInstance<T extends Ad4mModel>(
 interface FieldWrite {
   commands: any[];
   parameters: { name: string; value: any }[];
-  /** Links to remove instead: the property's links, for an empty value. */
-  removals?: any[];
 }
 
 /** The most writes `sendWrites` joins into one `executeAction` call. */
@@ -1701,7 +1699,7 @@ export class Ad4mModel {
     return requireTotalCount(await this.executeModelQuery(perspective, { ...countQuery, limit: 0, count: true }, undefined, options));
   }
 
-  /** The write that sets property `key` to `value`; for `null` or `""`, the removal of its links (none when it has none; throws on a required property); none for `undefined`. */
+  /** The write that sets property `key` to `value`; for `null` or `""`, a `removeLink` of every link on it (throws on a required property); none for `undefined`. */
   private async planProperty(key: string, value: any): Promise<FieldWrite[]> {
     const metadata = this.getPropertyMetadata(key);
     if (!metadata) {
@@ -1722,8 +1720,9 @@ export class Ad4mModel {
       if (metadata.required) {
         throw new Error(`Property "${key}" is required and cannot be cleared`);
       }
-      const links = await this._perspective.get(new LinkQuery({ source: this._baseExpression, predicate: metadata.through }));
-      return links.length ? [{ commands: [], parameters: [], removals: links }] : [];
+      // The executor's `removeLink` with target `*` removes every stored link
+      // on the property and prunes what this batch staged for it.
+      return [{ commands: [{ action: "removeLink", source: "this", predicate: metadata.through, target: "*" }], parameters: [] }];
     }
 
     const mode = effectiveLiteralStorage(metadata);
@@ -1794,10 +1793,7 @@ export class Ad4mModel {
       group = [];
     };
     for (const write of writes) {
-      if (write.removals) {
-        await flush();
-        await this._perspective.removeLinks(write.removals, batchId);
-      } else if (write.commands.some((c: any) => c.action === "collectionSetter")) {
+      if (write.commands.some((c: any) => c.action === "collectionSetter")) {
         await flush();
         group = [write];
         await flush();
