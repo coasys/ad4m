@@ -115,6 +115,7 @@ import type { LocalAiPlan } from "./LocalAiPlan";
 import type { LocalAiRemoveParams } from "./LocalAiRemoveParams";
 import type { LocalAiStatus } from "./LocalAiStatus";
 import type { LockAgentRequest } from "./LockAgentRequest";
+import type { LogFilter } from "./LogFilter";
 import type { LogParams } from "./LogParams";
 import type { LogTail } from "./LogTail";
 import type { LogTailParams } from "./LogTailParams";
@@ -229,11 +230,13 @@ import type { SetConfigParams } from "./SetConfigParams";
 import type { SetConfigResult } from "./SetConfigResult";
 import type { SetHostRatesRequest } from "./SetHostRatesRequest";
 import type { SetHotWalletAddressRequest } from "./SetHotWalletAddressRequest";
+import type { SetLogFilterParams } from "./SetLogFilterParams";
 import type { SetMultiUserRequest } from "./SetMultiUserRequest";
 import type { SetStatusRequest } from "./SetStatusRequest";
 import type { SetUnytMembraneProofRequest } from "./SetUnytMembraneProofRequest";
 import type { SetUserFreeAccessRequest } from "./SetUserFreeAccessRequest";
 import type { SfuAddIceCandidateParams } from "./SfuAddIceCandidateParams";
+import type { SfuAnswerResult } from "./SfuAnswerResult";
 import type { SfuAnswerServerOfferParams } from "./SfuAnswerServerOfferParams";
 import type { SfuCallJoinParams } from "./SfuCallJoinParams";
 import type { SfuCallLeaveParams } from "./SfuCallLeaveParams";
@@ -245,6 +248,8 @@ import type { SfuParticipantQualityPreference } from "./SfuParticipantQualityPre
 import type { SfuPerspectiveParams } from "./SfuPerspectiveParams";
 import type { SfuQualityPreferenceParams } from "./SfuQualityPreferenceParams";
 import type { SfuRestartIceParams } from "./SfuRestartIceParams";
+import type { SfuResumeParams } from "./SfuResumeParams";
+import type { SfuResumeResult } from "./SfuResumeResult";
 import type { SfuRoomInfo } from "./SfuRoomInfo";
 import type { SfuRoomParams } from "./SfuRoomParams";
 import type { SfuSendDataParams } from "./SfuSendDataParams";
@@ -381,6 +386,7 @@ export interface RpcMethods {
   "identity.unlinkSelf": { params: Record<string, never>; result: SignedHead };
   "language.all": { params: LanguageListParams; result: Array<LanguageHandle> };
   "language.applyTemplate": { params: ApplyTemplateRequest; result: LanguageRef };
+  "language.applyTemplateLocal": { params: ApplyTemplateRequest; result: LanguageRef };
   "language.get": { params: LanguageAddressParams; result: LanguageHandle };
   "language.meta": { params: LanguageAddressParams; result: LanguageMeta };
   "language.publish": { params: PublishLanguageRequest; result: LanguageMeta };
@@ -471,6 +477,7 @@ export interface RpcMethods {
   "runtime.inbox": { params: Record<string, never>; result: Array<PerspectiveExpression> };
   "runtime.info": { params: Record<string, never>; result: RuntimeInfo };
   "runtime.linkLanguageTemplates": { params: Record<string, never>; result: Array<LanguageMeta> };
+  "runtime.logFilter": { params: Record<string, never>; result: LogFilter };
   "runtime.logTail": { params: LogTailParams; result: LogTail };
   "runtime.networkMetrics": { params: Record<string, never>; result: string };
   "runtime.notifications": { params: Record<string, never>; result: Array<Notification> };
@@ -485,6 +492,7 @@ export interface RpcMethods {
   "runtime.setConfig": { params: SetConfigParams; result: SetConfigResult };
   "runtime.setFreeHostingEnabled": { params: RuntimeSetFreeHostingEnabledParams; result: boolean };
   "runtime.setHostRates": { params: SetHostRatesRequest; result: boolean };
+  "runtime.setLogFilter": { params: SetLogFilterParams; result: LogFilter };
   "runtime.setStatus": { params: SetStatusRequest; result: boolean };
   "runtime.setUnytMembraneProof": { params: SetUnytMembraneProofRequest; result: boolean };
   "runtime.tlsDomain": { params: Record<string, never>; result: string | null };
@@ -498,10 +506,11 @@ export interface RpcMethods {
   "runtime.updateNotification": { params: RuntimeUpdateNotificationParams; result: boolean };
   "runtime.verifySignature": { params: VerifySignatureRequest; result: boolean };
   "sfu.addIceCandidate": { params: SfuAddIceCandidateParams; result: boolean };
-  "sfu.callAnswerServerOffer": { params: SfuAnswerServerOfferParams; result: boolean };
+  "sfu.callAnswerServerOffer": { params: SfuAnswerServerOfferParams; result: SfuAnswerResult };
   "sfu.callJoin": { params: SfuCallJoinParams; result: CallSessionInfo };
   "sfu.callLeave": { params: SfuCallLeaveParams; result: boolean };
   "sfu.callRestartIce": { params: SfuRestartIceParams; result: boolean };
+  "sfu.callResume": { params: SfuResumeParams; result: SfuResumeResult };
   "sfu.callSetQualityPreference": { params: SfuQualityPreferenceParams; result: boolean };
   "sfu.cascadeStatus": { params: Record<string, never>; result: SfuCascadeStatus };
   "sfu.ensureMembership": { params: SfuEnsureMembershipParams; result: boolean };
@@ -613,6 +622,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "runtime.inbox",
   "runtime.info",
   "runtime.linkLanguageTemplates",
+  "runtime.logFilter",
   "runtime.logTail",
   "runtime.networkMetrics",
   "runtime.notifications",
@@ -651,6 +661,7 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "ai.removeEndpoint",
   "ai.updateEndpoint",
   "language.applyTemplate",
+  "language.applyTemplateLocal",
   "language.publish",
   "neighbourhood.join",
   "neighbourhood.publish",
