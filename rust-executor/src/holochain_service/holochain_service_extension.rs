@@ -88,7 +88,7 @@ fn json_to_msgpack_value(val: &serde_json::Value) -> rmpv::Value {
             } else if let Some(u) = n.as_u64() {
                 rmpv::Value::Integer(rmpv::Integer::from(u))
             } else if let Some(f) = n.as_f64() {
-                rmpv::Value::F64(f)
+                integral_f64_to_msgpack(f)
             } else {
                 rmpv::Value::Nil
             }
@@ -119,6 +119,22 @@ fn json_to_msgpack_value(val: &serde_json::Value) -> rmpv::Value {
                 .collect();
             rmpv::Value::Map(entries)
         }
+    }
+}
+
+/// JS has no integer type, so a whole number such as `5` or `Date.now()` can
+/// reach us as f64. Encode a finite whole-number f64 that fits in i64 as a
+/// msgpack integer, so zome fields typed `u64`/`i64` decode it. Zome fields
+/// typed `f64` still accept a msgpack integer. Fractions, NaN, infinities and
+/// values outside i64 range stay F64. Minus zero becomes Integer 0, so its sign
+/// is lost; a whole number has no use for it.
+fn integral_f64_to_msgpack(f: f64) -> rmpv::Value {
+    // 2^63 is exact in f64; i64 covers [-2^63, 2^63).
+    const I64_BOUND: f64 = 9_223_372_036_854_775_808.0;
+    if f.is_finite() && f.fract() == 0.0 && (-I64_BOUND..I64_BOUND).contains(&f) {
+        rmpv::Value::Integer(rmpv::Integer::from(f as i64))
+    } else {
+        rmpv::Value::F64(f)
     }
 }
 
@@ -430,3 +446,157 @@ deno_core::extension!(
     esm_entry_point = "ext:holochain_service/holochain_service_extension.js",
     esm = [dir "src/holochain_service", "holochain_service_extension.js"]
 );
+
+#[cfg(test)]
+mod tests {
+    use super::json_to_msgpack_value;
+    use holochain::prelude::ExternIO;
+    use serde::Deserialize;
+    use serde_json::json;
+
+    fn encode(val: &serde_json::Value) -> ExternIO {
+        let mut buf = Vec::new();
+        rmpv::encode::write_value(&mut buf, &json_to_msgpack_value(val)).unwrap();
+        ExternIO::from(buf)
+    }
+
+    #[test]
+    fn integral_floats_become_msgpack_integers() {
+        assert_eq!(
+            json_to_msgpack_value(&json!(5.0)),
+            rmpv::Value::Integer(5.into())
+        );
+        assert_eq!(
+            json_to_msgpack_value(&json!(-5.0)),
+            rmpv::Value::Integer((-5i64).into())
+        );
+        assert_eq!(
+            json_to_msgpack_value(&json!(0.0)),
+            rmpv::Value::Integer(0.into())
+        );
+        // A Date.now() timestamp.
+        assert_eq!(
+            json_to_msgpack_value(&json!(1794912243597.0)),
+            rmpv::Value::Integer(1794912243597i64.into())
+        );
+        assert_eq!(
+            json_to_msgpack_value(&json!(-9_223_372_036_854_775_808.0)),
+            rmpv::Value::Integer(i64::MIN.into())
+        );
+    }
+
+    #[test]
+    fn non_integral_or_out_of_range_floats_stay_floats() {
+        assert_eq!(json_to_msgpack_value(&json!(5.5)), rmpv::Value::F64(5.5));
+        assert_eq!(
+            json_to_msgpack_value(&json!(-0.25)),
+            rmpv::Value::F64(-0.25)
+        );
+        // 2^63 and above do not fit in i64.
+        assert_eq!(
+            json_to_msgpack_value(&json!(9_223_372_036_854_775_808.0)),
+            rmpv::Value::F64(9_223_372_036_854_775_808.0)
+        );
+        assert_eq!(json_to_msgpack_value(&json!(1e30)), rmpv::Value::F64(1e30));
+        assert_eq!(
+            json_to_msgpack_value(&json!(-1e30)),
+            rmpv::Value::F64(-1e30)
+        );
+        // serde_json cannot hold NaN or infinities, so test the helper directly.
+        assert!(matches!(
+            super::integral_f64_to_msgpack(f64::NAN),
+            rmpv::Value::F64(f) if f.is_nan()
+        ));
+        assert_eq!(
+            super::integral_f64_to_msgpack(f64::INFINITY),
+            rmpv::Value::F64(f64::INFINITY)
+        );
+        assert_eq!(
+            super::integral_f64_to_msgpack(f64::NEG_INFINITY),
+            rmpv::Value::F64(f64::NEG_INFINITY)
+        );
+    }
+
+    #[test]
+    fn json_integers_are_unchanged() {
+        assert_eq!(
+            json_to_msgpack_value(&json!(u64::MAX)),
+            rmpv::Value::Integer(u64::MAX.into())
+        );
+        assert_eq!(
+            json_to_msgpack_value(&json!(i64::MIN)),
+            rmpv::Value::Integer(i64::MIN.into())
+        );
+    }
+
+    #[test]
+    fn nested_maps_and_arrays_are_converted() {
+        let v = json_to_msgpack_value(&json!({
+            "outer": { "count": 3.0, "ratio": 0.5 },
+            "list": [1.0, 2.5, [7.0]]
+        }));
+        let rmpv::Value::Map(entries) = v else {
+            panic!("expected map, got {v:?}");
+        };
+        let get = |entries: &[(rmpv::Value, rmpv::Value)], key: &str| {
+            entries
+                .iter()
+                .find(|(k, _)| k.as_str() == Some(key))
+                .map(|(_, v)| v.clone())
+                .unwrap()
+        };
+        let rmpv::Value::Map(outer) = get(&entries, "outer") else {
+            panic!("expected nested map");
+        };
+        assert_eq!(get(&outer, "count"), rmpv::Value::Integer(3.into()));
+        assert_eq!(get(&outer, "ratio"), rmpv::Value::F64(0.5));
+        assert_eq!(
+            get(&entries, "list"),
+            rmpv::Value::Array(vec![
+                rmpv::Value::Integer(1.into()),
+                rmpv::Value::F64(2.5),
+                rmpv::Value::Array(vec![rmpv::Value::Integer(7.into())]),
+            ])
+        );
+    }
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct WithU64 {
+        randomizer: u64,
+        offset: i64,
+    }
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct WithF64 {
+        ratio: f64,
+        whole: f64,
+    }
+
+    #[test]
+    fn integral_float_decodes_into_u64_and_i64_fields() {
+        let decoded: WithU64 = encode(&json!({ "randomizer": 1794912243597.0, "offset": -5.0 }))
+            .decode()
+            .unwrap();
+        assert_eq!(
+            decoded,
+            WithU64 {
+                randomizer: 1794912243597,
+                offset: -5
+            }
+        );
+    }
+
+    #[test]
+    fn typed_f64_field_still_decodes_an_integer() {
+        let decoded: WithF64 = encode(&json!({ "ratio": 0.5, "whole": 5.0 }))
+            .decode()
+            .unwrap();
+        assert_eq!(
+            decoded,
+            WithF64 {
+                ratio: 0.5,
+                whole: 5.0
+            }
+        );
+    }
+}
