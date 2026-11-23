@@ -9964,6 +9964,85 @@ mod tests {
         map.forget(&log.scid());
     }
 
+    /// The batch path reads the judgement back too: an update committed in a
+    /// batch, on a stale head the commit's own signer preparation refreshes,
+    /// publishes a `link-updated` event whose new link carries the verdict the
+    /// store wrote (`valid`), not the `cantCheck` it was decorated with before
+    /// `prepare_link_signers` ran.
+    ///
+    /// Red while the batch reads back only the additions: the event's new link
+    /// keeps `cantCheck`.
+    #[tokio::test]
+    async fn commit_batch_publishes_the_stored_judgement_of_an_updated_link() {
+        use crate::identity::cache::tests::TestLog;
+        use crate::identity::cache::{global_key_map, TrustedLog};
+        use crate::identity::resolver::ADMIT_FRESHNESS;
+
+        let mut perspective = setup().await;
+        let secret = crate::wallet::wallet_backend()
+            .get_secret_key(crate::wallet::KEY_NAME_MAIN)
+            .expect("the test wallet holds the main key");
+        let device = ed25519_dalek::SigningKey::from_bytes(
+            &secret[..32]
+                .try_into()
+                .expect("the wallet holds a 32-byte ed25519 secret"),
+        );
+        let log = TestLog::with_device(105, device);
+        let map = global_key_map();
+        map.publish(
+            &log.scid(),
+            TrustedLog {
+                state: log.chain().state().clone(),
+                trusted: 0,
+            },
+        );
+        let now = chrono::Utc::now().timestamp() as u64;
+        map.note_confirmed(&log.scid(), now - ADMIT_FRESHNESS - 10);
+
+        let context = AgentContext::main_agent();
+        let old: LinkExpression = perspective
+            .add_link(create_link(), LinkStatus::Local, None, &context)
+            .await
+            .unwrap()
+            .into();
+        let mut new_link = create_link();
+        new_link.target = "t://batch-updated".to_string();
+        let batch_id = perspective.create_batch().await;
+        perspective
+            .update_link(old, new_link.clone(), Some(batch_id.clone()), &context)
+            .await
+            .unwrap();
+        let mut rx = crate::pubsub::get_global_pubsub().await.subscribe_events();
+        perspective.commit_batch(batch_id, &context).await.unwrap();
+
+        let uuid = perspective.uuid.clone();
+        let mut newest = None;
+        while let Ok(event) = rx.try_recv() {
+            if event.topic == Topic::LinkUpdated
+                && event.perspective.as_deref() == Some(uuid.as_str())
+            {
+                newest = Some(event.payload.clone());
+            }
+        }
+        let event = newest.expect("the batch published a link-updated event");
+        assert_eq!(event["newLink"]["data"]["target"], new_link.target.as_str());
+        let stored = perspective
+            .get_links(&LinkQuery {
+                source: Some(new_link.source.clone()),
+                target: Some(new_link.target.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(stored[0].verdict, Some(LinkVerdict::Valid));
+        assert_eq!(
+            event["newLink"]["verdict"],
+            serde_json::to_value(&stored[0].verdict).unwrap(),
+            "the event reports the stored judgement"
+        );
+        map.forget(&log.scid());
+    }
+
     /// Membership is reconciled the way a model query reads it: a member
     /// whose only stored link does not count is set anew, not kept. Here the
     /// member's one link is forged, so the store judges it `invalid`.
