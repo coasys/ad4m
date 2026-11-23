@@ -1382,43 +1382,6 @@ async fn a_wasm_language_runs_concurrent_calls_each_as_its_own_agent() {
     );
 }
 
-/// A concurrent-marked call on a WASM language runs ordered, so its caller's
-/// deadline is the ordered one: behind a running call already past the
-/// deadline it is refused at once (not queued to wait out the concurrent
-/// deadline); behind one approaching it, it gets the busy error when that
-/// call passes the deadline — the error names the running call, not "did not
-/// start". `set_wasm` plays `load_module`'s share of the flag.
-#[tokio::test]
-async fn a_concurrent_call_on_wasm_gets_the_ordered_deadline() {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let handle = LanguageRuntimeHandle::from_channel("QmWasmDeadline".into(), tx)
-        .with_call_deadline(Duration::from_millis(500));
-    handle.set_wasm();
-    let running = handle.running_request();
-
-    // Already past the deadline: refused at once, never queued.
-    running.lock().unwrap().ordered = Some((u64::MAX, Instant::now() - Duration::from_secs(1)));
-    let refused = within(Duration::from_secs(1), "the refused call", async {
-        concurrent(&handle, "1 + 1".into()).await
-    })
-    .await;
-    assert!(refused
-        .expect_err("the running call is past the deadline")
-        .contains("is busy"));
-    assert!(rx.try_recv().is_err(), "the refused call was queued");
-
-    // Approaching it: the wait ends at the running call's deadline with the
-    // busy error, not at the concurrent deadline with "did not start".
-    running.lock().unwrap().ordered = Some((u64::MAX, Instant::now() - Duration::from_millis(450)));
-    let queued = within(Duration::from_secs(1), "the queued call", async {
-        concurrent(&handle, "1 + 1".into()).await
-    })
-    .await;
-    assert!(queued
-        .expect_err("the running call passed the deadline")
-        .contains("is busy"));
-}
-
 // ---------------------------------------------------------------------------
 // Benchmarks
 // ---------------------------------------------------------------------------
