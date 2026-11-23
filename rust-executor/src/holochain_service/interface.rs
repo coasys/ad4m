@@ -367,6 +367,17 @@ impl HolochainServiceInterface {
             .await
     }
 
+    /// The agent key stored for `agent` in `language_address` (see [`Self::agent_key_for`]),
+    /// if one is. Never adopts or mints one.
+    pub fn stored_agent_key_for(
+        language_address: &str,
+        agent: &AgentContext,
+    ) -> Result<Option<HoloHash<Agent>>, AnyError> {
+        let stored = crate::db_backend::db_backend()
+            .get_setting(&agent_key_setting(language_address, agent))?;
+        Ok(stored.and_then(|key| holochain::prelude::AgentPubKey::try_from(key.as_str()).ok()))
+    }
+
     /// Resolve the Holochain agent key of `agent` in one language.
     ///
     /// Each language gets its own agent key so that two languages bundling
@@ -384,8 +395,10 @@ impl HolochainServiceInterface {
     /// 2. Adoption: the key of an app already installed under `app_id` (the
     ///    language's own app id for the main agent, the user's app id for a
     ///    user) — for the main agent, an install from before per-language
-    ///    keys keeps its cell, source chain and DHT identity; for a user, an
-    ///    install that a crash kept from being recorded.
+    ///    keys keeps its cell, source chain and DHT identity. A user's key is
+    ///    stored before its app is installed, and the per-user installer asks
+    ///    only while the user's app is absent, so a user never adopts: a user
+    ///    app without a stored key is refused (`user_cells`).
     /// 3. A fresh keypair otherwise.
     ///
     /// The resolved key is persisted before it is answered, so every path is
@@ -401,10 +414,7 @@ impl HolochainServiceInterface {
         agent: &AgentContext,
         app_id: &str,
     ) -> Result<HoloHash<Agent>, AnyError> {
-        let setting_key = match agent.managed_did() {
-            None => format!("language_agent_key:{}", language_address),
-            Some(did) => format!("language_agent_key:{}:{}", language_address, did),
-        };
+        let setting_key = agent_key_setting(language_address, agent);
         // Serialize per (language, agent) across lookup → adoption → keygen →
         // persist: a concurrent caller waits here and then finds the
         // winner's key in the stored mapping instead of generating its own.
@@ -520,6 +530,14 @@ lazy_static! {
     /// installed under the losing key (cell id = DNA hash + agent key).
     static ref LANGUAGE_KEY_LOCKS: std::sync::Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>> =
         std::sync::Mutex::new(std::collections::HashMap::new());
+}
+
+/// The Ad4mDb setting that stores `agent`'s key in `language_address`.
+fn agent_key_setting(language_address: &str, agent: &AgentContext) -> String {
+    match agent.managed_did() {
+        None => format!("language_agent_key:{}", language_address),
+        Some(did) => format!("language_agent_key:{}:{}", language_address, did),
+    }
 }
 
 /// Set while `HolochainService::init` is running. What `holochain_service_once_started`
