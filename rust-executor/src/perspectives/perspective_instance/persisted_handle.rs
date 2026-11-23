@@ -47,3 +47,72 @@ impl PersistedHandle {
         self.write.lock().await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::{future::join_all, FutureExt};
+
+    #[tokio::test]
+    async fn readers_do_not_queue_behind_a_burst_of_handle_writes() {
+        const WRITERS: usize = 64;
+        const READERS: usize = 64;
+        let persisted = Arc::new(PersistedHandle::new(PerspectiveHandle {
+            name: Some("0".into()),
+            owners: Some(vec![]),
+            ..Default::default()
+        }));
+        let before = persisted.load();
+        let held = persisted.hold_writer().await;
+        let writes = join_all((0..WRITERS).map(|i| {
+            let persisted = persisted.clone();
+            async move {
+                persisted
+                    .update(|h| {
+                        h.add_owner(&format!("did:test:writer-{i}"));
+                        h.name = Some(h.owners.as_ref().unwrap().len().to_string());
+                    })
+                    .await;
+                tokio::task::yield_now().await;
+            }
+        }));
+        tokio::pin!(writes);
+        // Poll every writer into the queue before reading. No sleeps or deadlines.
+        assert!(writes.as_mut().now_or_never().is_none());
+        let reads = join_all((0..READERS).map(|_| {
+            let persisted = persisted.clone();
+            async move {
+                // The same owned snapshot used by send_broadcast.
+                let handle = persisted.snapshot();
+                assert_eq!(handle.name.as_deref(), Some("0"));
+                assert!(handle.owners.unwrap().is_empty());
+            }
+        }));
+        reads
+            .now_or_never()
+            .expect("reads complete with the writer mutex held");
+        drop(held);
+
+        let readers = join_all((0..READERS).map(|_| {
+            let persisted = persisted.clone();
+            async move {
+                for _ in 0..WRITERS {
+                    let handle = persisted.load();
+                    let count = handle.owners.as_ref().unwrap().len();
+                    assert_eq!(handle.name.as_ref().unwrap(), &count.to_string());
+                    tokio::task::yield_now().await;
+                }
+            }
+        }));
+        tokio::join!(writes, readers);
+        let after = persisted.load();
+        assert_eq!(after.owners.as_ref().unwrap().len(), WRITERS);
+        for i in 0..WRITERS {
+            assert!(after.is_owned_by(&format!("did:test:writer-{i}")));
+        }
+        assert!(
+            before.owners.as_ref().unwrap().is_empty(),
+            "snapshots stay immutable"
+        );
+    }
+}
