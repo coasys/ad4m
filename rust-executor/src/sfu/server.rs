@@ -1825,21 +1825,7 @@ impl SfuServer {
             {
                 let mut dead_peers: Vec<DeadPeer> = Vec::new();
                 let now = Instant::now();
-                for (pid, peer) in peers.iter_mut() {
-                    if peer.never_established(now) {
-                        info!(
-                            "SFU: peer {} never connected within {} s, dropping it",
-                            pid,
-                            PEER_ESTABLISH_TIMEOUT.as_secs()
-                        );
-                        peer.end_reason = Some("timeout");
-                        peer.rtc.disconnect();
-                    } else if peer.stayed_disconnected(now) {
-                        info!("SFU: peer {} stayed disconnected, dropping it", pid);
-                        peer.end_reason = Some("drop");
-                        peer.rtc.disconnect();
-                    }
-                }
+                end_expired_peers(&mut peers, now);
                 peers.retain(|pid, peer| {
                     if !peer.rtc.is_alive() {
                         info!("SFU: peer {} disconnected", pid);
@@ -2709,6 +2695,30 @@ struct DueResend {
     offer_id: String,
     sdp: String,
     track_mapping: Vec<crate::sfu::TrackMapEntry>,
+}
+
+/// Name and end every peer whose ICE time has run out. A peer already ended
+/// keeps its reason: an offer that expired on the tick its disconnect grace
+/// ran out stays `"offer"`, so the cascade still counts the failure.
+fn end_expired_peers(peers: &mut HashMap<ParticipantId, SfuPeer>, now: Instant) {
+    for (pid, peer) in peers.iter_mut() {
+        if peer.end_reason.is_some() {
+            continue;
+        }
+        if peer.never_established(now) {
+            info!(
+                "SFU: peer {} never connected within {} s, dropping it",
+                pid,
+                PEER_ESTABLISH_TIMEOUT.as_secs()
+            );
+            peer.end_reason = Some("timeout");
+            peer.rtc.disconnect();
+        } else if peer.stayed_disconnected(now) {
+            info!("SFU: peer {} stayed disconnected, dropping it", pid);
+            peer.end_reason = Some("drop");
+            peer.rtc.disconnect();
+        }
+    }
 }
 
 /// Advance every pending offer's deadline by one step. A resend is returned
@@ -5424,6 +5434,28 @@ mod tests {
         assert!(!peer.stayed_disconnected(edge));
     }
 
+    /// The offer deadline and the ICE disconnect grace can run out on one
+    /// tick. The pipe ended for its offer, and the sweep must keep that
+    /// reason: `"drop"` would let the cascade redial without the backoff.
+    #[test]
+    fn the_sweep_keeps_the_reason_of_a_peer_already_ended_for_its_offer() {
+        let (_caller, mut peer) = connected_pair();
+        peer.is_pipe = true;
+        let now = Instant::now();
+        peer.disconnected_since = Some(now - ICE_DISCONNECT_GRACE);
+        peer.ice_restart = None;
+        assert!(peer.stayed_disconnected(now), "the grace has run out");
+        peer.end_for_offer("unanswered");
+        let pid = peer.id.clone();
+        let mut peers = HashMap::from([(pid.clone(), peer)]);
+        end_expired_peers(&mut peers, now);
+        assert_eq!(
+            peers[&pid].dead_peer(now).reason,
+            "offer",
+            "an ended offer is not reclassified as a drop"
+        );
+    }
+
     /// A remote offer str0m refuses still bumps the change id, so the local
     /// offer can no longer be answered. Its tracks are offered again, and
     /// the track that was already negotiated keeps its writer.
@@ -5580,6 +5612,7 @@ mod tests {
         );
         mgr.set_now(drop_at);
         mgr.apply_pipe_death(
+            &dead.participant_id,
             &dead.room_id.to_string(),
             &dead.agent_did,
             dead.reason,
@@ -5659,6 +5692,7 @@ mod tests {
         assert!(!dead.healthy_stretch);
         mgr.set_now(drop_at);
         mgr.apply_pipe_death(
+            &dead.participant_id,
             &dead.room_id.to_string(),
             &dead.agent_did,
             dead.reason,
@@ -5705,6 +5739,7 @@ mod tests {
             assert_eq!(dead.healthy_stretch, free);
             mgr.set_now(ended);
             mgr.apply_pipe_death(
+                &dead.participant_id,
                 &dead.room_id.to_string(),
                 &dead.agent_did,
                 dead.reason,

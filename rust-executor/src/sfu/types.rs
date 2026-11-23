@@ -268,8 +268,10 @@ impl SfuAnswerResult {
 #[serde(rename_all = "kebab-case")]
 #[ts(export)]
 pub enum SfuAnswerRefusal {
-    /// The id is not the pending offer's, and it is not the offer already
-    /// accepted for this session.
+    /// The id is not the pending offer's, and it is not the offer accepted
+    /// last for this session. Also an answer under the pending offer's own
+    /// id that does not parse, or whose m-lines are not that offer's. The
+    /// pending offer stays pending in every case.
     Stale,
     /// This session has no offer waiting.
     NoPending,

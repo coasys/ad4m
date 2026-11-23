@@ -314,7 +314,7 @@ async fn emit_roster(
         revision,
         participants,
     };
-    info!(
+    debug!(
         "SFU roster: {reason} room {room_id} revision {revision} sessions {}",
         roster.participants.len()
     );
@@ -859,6 +859,7 @@ impl SfuService {
                         {
                             let mut mgr = self.cascade_manager.write().await;
                             mgr.apply_pipe_death(
+                                &dead.participant_id,
                                 &room_key,
                                 &dead.agent_did,
                                 dead.reason,
@@ -877,6 +878,7 @@ impl SfuService {
                     let mut rosters_changed: Vec<(String, &'static str)> = Vec::new();
                     {
                         let mut mgr = self.cascade_manager.write().await;
+                        mgr.prune_redials(Instant::now());
                         let evicted = mgr.evict_stale_nodes(Duration::from_secs(30));
                         for (room_id, did) in evicted {
                             info!(

@@ -341,9 +341,14 @@ it. `ParticipantId` (`P{n}`) and that offer id (`o{n}`) are minted from a
 counter that starts, once per process, at a random value at least `2^63`,
 so a restarted process does not hand a client's old id to a new session. `sfu.callAnswerServerOffer` answers `{ accepted: true }`, or
 `{ accepted: false, reason }` (`stale`, `no-pending`, `unknown-session`),
-after the event loop applies the answer. A repeat of an id already accepted
-for that session is `{ accepted: true }` and changes nothing. A refused
-answer is that value, not an RPC error. `sfu.callResume` (the session's
+after the event loop applies the answer. A repeat of the id accepted last
+for that session is `{ accepted: true }` and changes nothing; an older
+accepted id is `stale`. `stale` also covers an answer that does not parse,
+or whose mids are not the pending offer's, under the pending offer's own
+id: that offer stays pending. A refused answer is that value, not an RPC
+error. The RPC errors are 403 (a session of another agent) and 408 (the
+event loop did not answer, or its command channel is closed).
+`sfu.callResume` (the session's
 `participantId`) sends the pending offer and the roster again at once, for
 a client whose socket came back, and answers `{ listed: true, offer?,
 roster: { revision, participants } }` with the same offer, the same sessions,
