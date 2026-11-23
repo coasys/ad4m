@@ -600,11 +600,12 @@ pub(crate) async fn flow_valid_outputs_reading<Q: RequiresQueryable + ?Sized>(
     // prepare for the whole read, so the discovery cap is per read.
     // The answers the prepare skipped on stay held until the fold is done.
     let held = prepare_receipt_signers(
+        stop,
         &catalogue,
         &receipts,
         Some(&perspective.receipt_verdict_memo),
     )
-    .await;
+    .await?;
     let candidates = valid_outputs(
         stop,
         &catalogue,
@@ -674,12 +675,17 @@ pub async fn verify_flow_receipt(
 /// could evict a skipped receipt's answer, and the receipt would be
 /// re-verified with its signers not refreshed. The carried signers stay
 /// pending in the key map as long ([`crate::identity::cache::PendingHold`]).
+///
+/// The key-index and log reads race `stop`: a run that stopped (cancelled,
+/// deadline) drops them and its holds, and answers the stop's error, instead
+/// of keeping its query slot until a stalled store answers.
 #[must_use = "the held answers must outlive the read's fold"]
 pub(crate) async fn prepare_receipt_signers<'m>(
+    stop: &EvalStop,
     catalogue: &HashMap<String, SHACLFlow>,
     receipts: &[FlowReceipt],
     memo: Option<&'m VerdictMemo>,
-) -> (Option<HeldAnswers<'m>>, crate::identity::cache::PendingHold) {
+) -> anyhow::Result<(Option<HeldAnswers<'m>>, crate::identity::cache::PendingHold)> {
     let mut held = memo.map(VerdictMemo::hold_for_read);
     let links: Vec<crate::types::LinkExpression> = receipts
         .iter()
@@ -693,9 +699,13 @@ pub(crate) async fn prepare_receipt_signers<'m>(
     let signers = if links.is_empty() {
         crate::identity::cache::PendingHold::none()
     } else {
-        crate::identity::prepare_link_signers(&links).await
+        stop.race(
+            "receipt signer preparation",
+            crate::identity::prepare_link_signers(&links),
+        )
+        .await?
     };
-    (held, signers)
+    Ok((held, signers))
 }
 
 /// The verdict as the API reports it: the three-kind `outcome` a caller must
