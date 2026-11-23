@@ -320,7 +320,8 @@ async fn install_app(
 
 /// The app info of `app_id` as the calling agent sees it: the main agent's app for the main
 /// agent, the user's own copy for a managed user (installed on first use, #1775).
-#[op2(async(lazy))]
+// nofast: a fast op cannot keep the call token borrowed across its awaits.
+#[op2(async(lazy), nofast)]
 #[serde]
 async fn get_app_info(
     #[string] app_id: String,
