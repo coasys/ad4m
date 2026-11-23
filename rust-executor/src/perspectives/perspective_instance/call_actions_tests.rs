@@ -253,14 +253,15 @@ async fn a_malformed_create_result_keeps_its_address() {
 }
 
 #[tokio::test]
-async fn a_managed_user_may_not_make_a_call() {
+async fn a_managed_users_calls_run_as_that_user() {
     let lang = load_mount_test_language().await;
     let (mut p, ctx) = mounted("MountThing", thing_shape(&lang).await).await;
     let base = created_thing(&lang, &ctx, &mut p).await;
-    let alice = AgentContext::managed("did:key:z6MkAliceCallActionUser".to_string());
-    let before = link_count(&p).await;
+    let alice_did = "did:key:z6MkAliceCallActionUser";
+    let alice = AgentContext::managed(alice_did.to_string());
 
-    let err = p
+    // The constructor, a setter and the destructor each run as Alice (#1775).
+    let url = p
         .create_subject(
             class("MountThing"),
             "ignored".to_string(),
@@ -269,31 +270,51 @@ async fn a_managed_user_may_not_make_a_call() {
             &alice,
         )
         .await
-        .unwrap_err();
-    assert!(err.to_string().contains("main agent"), "{err}");
-    let err = p
-        .update_subject(
-            class("MountThing"),
-            base.clone(),
-            json!({"done": true}),
-            None,
-            &alice,
-        )
+        .unwrap();
+    assert_eq!(url, Some(format!("{lang}://t2")));
+    p.update_subject(
+        class("MountThing"),
+        base.clone(),
+        json!({"done": true}),
+        None,
+        &alice,
+    )
+    .await
+    .unwrap();
+    p.remove_subject(class("MountThing"), base, None, &alice)
         .await
-        .unwrap_err();
-    assert!(err.to_string().contains("main agent"), "{err}");
-    let err = p
-        .remove_subject(class("MountThing"), base, None, &alice)
-        .await
-        .unwrap_err();
-    assert!(err.to_string().contains("main agent"), "{err}");
+        .unwrap();
 
+    let names: Vec<String> = calls(&lang)
+        .await
+        .iter()
+        .map(|c| c["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(names, ["create", "create", "update", "delete"]);
+    let agents = interact(&format!("{lang}://project"), "agents", json!({}))
+        .await
+        .unwrap();
+    let ran_as: Vec<(String, String)> = agents
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["what"] == "create" || a["what"] == "update")
+        .map(|a| {
+            (
+                a["what"].as_str().unwrap().to_string(),
+                a["agent"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    let main_did = crate::agent::did_for_context(&AgentContext::main_agent()).unwrap();
     assert_eq!(
-        calls(&lang).await.len(),
-        1,
-        "only the main agent's create ran"
+        ran_as,
+        [
+            ("create".to_string(), main_did),
+            ("create".to_string(), alice_did.to_string()),
+            ("update".to_string(), alice_did.to_string()),
+        ]
     );
-    assert_eq!(link_count(&p).await, before);
 }
 
 #[tokio::test]
@@ -1282,19 +1303,20 @@ async fn an_abstract_call_adder_never_runs_the_link_resolver() {
     };
     let children = json!({"children": {"action": "adder", "value": [format!("{lang}://k1")]}});
 
-    // Denied: a managed user may not make the call.
-    let alice = AgentContext::managed("did:key:z6MkAliceCallActionUser".to_string());
-    let err = p
-        .update_subject(
+    // Denied: a request without expression:update may not make the call.
+    let err = with_interact_grant(
+        false,
+        p.update_subject(
             class("ad4m://Container"),
             base.clone(),
             children.clone(),
             None,
-            &alice,
-        )
-        .await
-        .unwrap_err();
-    assert!(err.to_string().contains("main agent"), "{err}");
+            &ctx,
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("expression:update"), "{err}");
     assert_eq!(resolved().await, json!(0), "a denied call ran the resolver");
 
     // Batched: the call is refused inside a caller batch.
