@@ -337,6 +337,7 @@ export interface RpcMethods {
   "identity.status": { params: Record<string, never>; result: IdentityStatus };
   "language.all": { params: LanguageListParams; result: Array<LanguageHandle> };
   "language.applyTemplate": { params: ApplyTemplateRequest; result: LanguageRef };
+  "language.applyTemplateLocal": { params: ApplyTemplateRequest; result: LanguageRef };
   "language.get": { params: LanguageAddressParams; result: LanguageHandle };
   "language.meta": { params: LanguageAddressParams; result: LanguageMeta };
   "language.publish": { params: PublishLanguageRequest; result: LanguageMeta };
@@ -599,6 +600,7 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "ai.removeEndpoint",
   "ai.updateEndpoint",
   "language.applyTemplate",
+  "language.applyTemplateLocal",
   "language.publish",
   "neighbourhood.join",
   "neighbourhood.publish",
