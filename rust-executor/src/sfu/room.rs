@@ -10,8 +10,26 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
 use std::time::Instant;
 use std::time::SystemTime;
+
+/// A random `u64` with the high bit set (`>= 2^63`).
+///
+/// Process-local id counters start here. A restarted process does not hand
+/// out the low ids a client may still hold from the previous one.
+pub(crate) fn random_upper_half_u64() -> u64 {
+    rand::random::<u64>() | (1u64 << 63)
+}
+
+static PARTICIPANT_IDS: LazyLock<AtomicU64> =
+    LazyLock::new(|| AtomicU64::new(random_upper_half_u64()));
+
+/// The next participant id starts again, as it does when the process starts.
+#[cfg(test)]
+pub fn restart_participant_ids() {
+    PARTICIPANT_IDS.store(random_upper_half_u64(), Ordering::SeqCst);
+}
 
 /// Unique identifier for a participant in the SFU.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -19,8 +37,7 @@ pub struct ParticipantId(pub u64);
 
 impl ParticipantId {
     pub fn next() -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(1);
-        Self(COUNTER.fetch_add(1, Ordering::SeqCst))
+        Self(PARTICIPANT_IDS.fetch_add(1, Ordering::SeqCst))
     }
 
     /// Read back the `Display` form (`P{n}`) a join returned.
@@ -220,21 +237,46 @@ impl SfuRoom {
         self.participants.is_empty()
     }
 
+    /// How the caller `did` relates to the session `participant_id` names.
+    pub fn session_access(&self, participant_id: &str, did: &str) -> SessionAccess {
+        let Some(pid) = ParticipantId::parse(participant_id) else {
+            return SessionAccess::Absent;
+        };
+        match self.participants.get(&pid) {
+            Some(participant) if participant.agent_did == did => {
+                SessionAccess::Own(participant.id.clone())
+            }
+            Some(_) => SessionAccess::OtherAgent,
+            None => SessionAccess::Absent,
+        }
+    }
+
     /// The session `participant_id` names, when it is in the room and is
     /// `did`'s: a caller acts on its own sessions only, never on another
     /// session of its DID by accident or on someone else's.
     pub fn session_of(&self, participant_id: &str, did: &str) -> Option<ParticipantId> {
-        let pid = ParticipantId::parse(participant_id)?;
-        self.participants
-            .get(&pid)
-            .filter(|p| p.agent_did == did)
-            .map(|p| p.id.clone())
+        match self.session_access(participant_id, did) {
+            SessionAccess::Own(pid) => Some(pid),
+            SessionAccess::Absent | SessionAccess::OtherAgent => None,
+        }
     }
 
     /// Whether `did` is in the room, on any device.
     pub fn has_did(&self, did: &str) -> bool {
         self.participants.values().any(|p| p.agent_did == did)
     }
+}
+
+/// How a caller's DID relates to a named session. [`SfuRoom::session_of`]
+/// is the own-session case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionAccess {
+    /// The session is in the room and is this DID's.
+    Own(ParticipantId),
+    /// No such session in the room, or the id does not parse.
+    Absent,
+    /// The session is in the room and belongs to another agent.
+    OtherAgent,
 }
 
 /// Room management errors.
@@ -273,13 +315,28 @@ impl std::error::Error for RoomError {}
 #[derive(Debug, Default)]
 pub struct RoomManager {
     rooms: HashMap<RoomId, SfuRoom>,
+    /// One revision for every roster this process publishes. It outlives
+    /// every room: a later room, and a room created again, continues the
+    /// sequence, so a revision never looks older than one a client applied.
+    /// A map keyed by room id grew without bound as names came and went.
+    roster_revision: u64,
 }
 
 impl RoomManager {
     pub fn new() -> Self {
         Self {
             rooms: HashMap::new(),
+            roster_revision: 0,
         }
+    }
+
+    /// The next roster revision. 1 the first time this process publishes,
+    /// then one more on every publish, whichever room it is. `id` names the
+    /// room the caller is publishing; the number is not per room. Stays at
+    /// `u64::MAX` rather than wrapping to 0.
+    pub fn next_roster_revision(&mut self, _id: &RoomId) -> u64 {
+        self.roster_revision = self.roster_revision.saturating_add(1);
+        self.roster_revision
     }
 
     /// Create a new room. Returns error if room already exists.
@@ -512,6 +569,28 @@ mod tests {
         assert_eq!(room.session_of(&laptop.0.to_string(), "did:a"), None);
     }
 
+    /// Roster revisions are one sequence for the process. A second room
+    /// does not start again at 1, and a room created again does not go
+    /// backwards.
+    #[test]
+    fn roster_revisions_are_one_sequence_across_rooms() {
+        let mut rooms = RoomManager::new();
+        let a = RoomId::new("n", "a");
+        let b = RoomId::new("n", "b");
+        assert_eq!(rooms.next_roster_revision(&a), 1);
+        assert_eq!(rooms.next_roster_revision(&a), 2);
+        rooms.create_room(a.clone(), None).unwrap();
+        rooms.destroy_room(&a).unwrap();
+        let b_first = rooms.next_roster_revision(&b);
+        assert!(b_first > 2, "room b restarted at {b_first}");
+        let b_last = rooms.next_roster_revision(&b);
+        let again = rooms.next_roster_revision(&a);
+        assert!(
+            again > b_last,
+            "a recreated room went backwards to {again}, after {b_last}"
+        );
+    }
+
     #[test]
     fn a_participant_id_reads_back_from_its_display_form() {
         let pid = ParticipantId::next();
@@ -519,5 +598,42 @@ mod tests {
         assert_eq!(ParticipantId::parse("P"), None);
         assert_eq!(ParticipantId::parse("Q1"), None);
         assert_eq!(ParticipantId::parse("P-1"), None);
+    }
+
+    /// A fresh process does not hand out a low id. After a restart a client
+    /// can still hold a session from the previous process; numbering from 1
+    /// again lets that id name another device's session.
+    #[test]
+    fn a_fresh_participant_id_starts_in_the_upper_half_and_round_trips() {
+        let first = ParticipantId::next();
+        let second = ParticipantId::next();
+        let n = first.0;
+        assert!(n >= 1u64 << 63, "fresh participant id {n} is below 2^63");
+        assert_eq!(
+            second.0,
+            n + 1,
+            "consecutive participant ids {n} then {}",
+            second.0
+        );
+        assert_eq!(first.to_string(), format!("P{n}"));
+        assert_eq!(ParticipantId::parse(&first.to_string()), Some(first));
+    }
+
+    /// A second process start does not hand out the first process's first id.
+    /// A client can still hold that id, and a new session must not take it.
+    #[test]
+    fn two_boots_do_not_hand_out_the_same_first_participant_id() {
+        restart_participant_ids();
+        let first = ParticipantId::next();
+        restart_participant_ids();
+        let second = ParticipantId::next();
+        assert_ne!(
+            first, second,
+            "two boots handed out the same first participant id {first}"
+        );
+        assert!(
+            first.0 >= 1u64 << 63 && second.0 >= 1u64 << 63,
+            "a restarted participant id is below 2^63: {first} then {second}"
+        );
     }
 }
