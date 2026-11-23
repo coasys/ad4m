@@ -7,7 +7,9 @@ use super::model_query::types::{ModelShape, ShapeResolver};
 use super::monotonic::{committable, drop_monotonic_removals, refuse_monotonic_removal};
 use super::sdna::{generic_link_fact, is_sdna_link};
 use super::shacl_parser::check_consensus_rule_links;
+use super::shacl_parser::is_own_link;
 use super::shacl_parser::property_node_name;
+use super::shacl_parser::ShapeNode;
 use super::sparql_store::EvalStop;
 use super::update_perspective_with;
 use super::utils::prolog_get_all_string_bindings;
@@ -74,6 +76,9 @@ mod shapes;
 #[cfg(test)]
 pub(crate) use abstract_classes::faults::fail_next_index;
 pub use shapes::{RegisterResult, ShapeSummary};
+mod runner;
+#[cfg(test)]
+pub(crate) use runner::hold_all_but;
 mod subscriptions;
 pub(crate) use subscriptions::{result_json, SubscriptionIdTaken};
 // Which writes re-run a model subscription (#1237).
@@ -124,45 +129,28 @@ fn notification_pool_name(uuid: &str) -> String {
     format!("notification_{}", uuid)
 }
 
-/// True iff any addition or removal in the diff carries a triple
-/// that would alter a class's stored SHACL definition:
-///   * a class's `ad4m://shape` index link,
-///   * a class-level `rdf://type ad4m://SubjectClass` marker (only
-///     that specific target — normal `rdf://type ns://SomeClass`
-///     application links must not flush the cache), or
-///   * any SHACL-vocabulary predicate (`sh://...`) which only
-///     appears on property-shape triples written by the SHACL
-///     writer, not on regular application data, or
-///   * an abstract-class marker or alias (#1435).
+/// True iff any of the links could be a class's own link on any of its
+/// nodes — [`is_own_link`] tried with each [`ShapeNode`], since a diff does
+/// not say which of a class's nodes its link sits on. Used by every store
+/// write (`write_link_diff`, `persist_remote_diff`) to decide whether it
+/// changed a stored SHACL definition, so the cached shapes (registry,
+/// own-link sets, `shape_cache`) must be dropped before the write returns.
 ///
-/// Used by `diff_from_link_language` to decide whether to
-/// invalidate the shape cache. The scan is one loop over
-/// (additions + removals) per inbound diff — cheap next to the
-/// SPARQL write. Kept intentionally narrow so that a chatty
-/// application (Flux message writes, etc.) doesn't churn the
-/// cache. `ad4m://resolveLanguage`, `getter`, `transform`,
-/// `interpretation_hint`, `identity` etc. also appear on live
-/// application data (a `@Property` decorator emits them onto every
-/// instance's property URI) and MUST NOT trigger invalidation.
-fn inbound_touches_shacl(diff: &DecoratedPerspectiveDiff) -> bool {
-    let iter = diff.additions.iter().chain(diff.removals.iter());
-    for decorated in iter {
-        let predicate = decorated.data.predicate.as_deref().unwrap_or("");
-        if predicate.starts_with("sh://") {
-            return true;
-        }
-        match predicate {
-            super::shacl_parser::SHAPE_PREDICATE => return true,
-            // The abstract-class marker and aliases (#1435) can sync apart
-            // from the rest of a shape.
-            super::shacl_parser::ABSTRACT_PREDICATE | super::shacl_parser::ALIAS_PREDICATE => {
-                return true
-            }
-            "rdf://type" if decorated.data.target == "ad4m://SubjectClass" => return true,
-            _ => {}
-        }
-    }
-    false
+/// The match is the whole own-link vocabulary, the same one the
+/// registry's cached triple sets hold. Only the SHACL writers
+/// (`SHACLShape.toLinks`, the MCP model tools) put `ad4m://constructor`,
+/// `setter`, `resolveLanguage` etc. on shape and property nodes, so
+/// application writes do not clear the cache. A link outside a shape that
+/// still uses one of those predicates only costs a refill. An own-link
+/// change the scan misses would leave `register_shapes` answering a
+/// stale `unchanged`, so matching too much is safe and too little is not.
+pub(super) fn touches_shape<'a>(links: impl IntoIterator<Item = &'a Link>) -> bool {
+    links.into_iter().any(|link| {
+        let predicate = link.predicate.as_deref().unwrap_or("");
+        [ShapeNode::Class, ShapeNode::Shape, ShapeNode::Property]
+            .into_iter()
+            .any(|node| is_own_link(node, predicate, &link.target))
+    })
 }
 
 /// The error a live query that is not SPARQL gets. Live queries are SPARQL or
@@ -223,7 +211,7 @@ pub(crate) fn is_sparql_query(query: &str) -> bool {
 }
 
 #[cfg(test)]
-mod inbound_touches_shacl_tests {
+mod touches_shape_tests {
     //! Regression guard for the shape-cache invalidation predicate. If
     //! either the positive OR the negative set drifts, `diff_from_link_language`
     //! either misses SHACL updates (stale cache) or thrashes the cache
@@ -250,6 +238,15 @@ mod inbound_touches_shacl_tests {
         }
     }
 
+    fn diff_touches_shape(diff: &DecoratedPerspectiveDiff) -> bool {
+        touches_shape(
+            diff.additions
+                .iter()
+                .chain(diff.removals.iter())
+                .map(|l| &l.data),
+        )
+    }
+
     fn diff(additions: Vec<DecoratedLinkExpression>) -> DecoratedPerspectiveDiff {
         DecoratedPerspectiveDiff {
             additions,
@@ -261,12 +258,12 @@ mod inbound_touches_shacl_tests {
     /// own; the cached abstract index must still be dropped (#1435).
     #[test]
     fn abstract_marker_and_alias_count_as_shacl() {
-        assert!(inbound_touches_shacl(&diff(vec![link(
+        assert!(diff_touches_shape(&diff(vec![link(
             "ns://TextContentShape",
             crate::perspectives::shacl_parser::ABSTRACT_PREDICATE,
             "literal:true",
         )])));
-        assert!(inbound_touches_shacl(&diff(vec![link(
+        assert!(diff_touches_shape(&diff(vec![link(
             "ns://Message.body",
             crate::perspectives::shacl_parser::ALIAS_PREDICATE,
             "literal:string:%7B%7D",
@@ -275,7 +272,7 @@ mod inbound_touches_shacl_tests {
 
     #[test]
     fn class_shape_assignment_triggers_invalidation() {
-        assert!(inbound_touches_shacl(&diff(vec![link(
+        assert!(diff_touches_shape(&diff(vec![link(
             "ad4m://InterpretationRun",
             "ad4m://shape",
             "ad4m://InterpretationRunShape",
@@ -291,7 +288,7 @@ mod inbound_touches_shacl_tests {
             "ad4m://has_shacl",
         ] {
             assert!(
-                !inbound_touches_shacl(&diff(vec![link(
+                !diff_touches_shape(&diff(vec![link(
                     "ad4m://self",
                     predicate,
                     "literal:string:Recipe"
@@ -303,7 +300,7 @@ mod inbound_touches_shacl_tests {
 
     #[test]
     fn class_marker_rdf_type_triggers_invalidation() {
-        assert!(inbound_touches_shacl(&diff(vec![link(
+        assert!(diff_touches_shape(&diff(vec![link(
             "ad4m://InterpretationRun",
             "rdf://type",
             "ad4m://SubjectClass",
@@ -315,7 +312,7 @@ mod inbound_touches_shacl_tests {
         // A normal application instance's rdf://type link (e.g. a Flux
         // message declaring its class) MUST NOT flush the cache — every
         // message send would churn it.
-        assert!(!inbound_touches_shacl(&diff(vec![link(
+        assert!(!diff_touches_shape(&diff(vec![link(
             "flux://message/abc",
             "rdf://type",
             "ns://Message",
@@ -331,7 +328,7 @@ mod inbound_touches_shacl_tests {
             "sh://minCount",
         ] {
             assert!(
-                inbound_touches_shacl(&diff(vec![link(
+                diff_touches_shape(&diff(vec![link(
                     "ad4m://SomeShape.prop",
                     predicate,
                     "xsd:string"
@@ -344,7 +341,7 @@ mod inbound_touches_shacl_tests {
     #[test]
     fn plain_data_link_does_not_invalidate() {
         // Application data — the common case, must not touch the cache.
-        assert!(!inbound_touches_shacl(&diff(vec![link(
+        assert!(!diff_touches_shape(&diff(vec![link(
             "msg://hello",
             "ns://body",
             "literal:string:hi",
@@ -352,12 +349,13 @@ mod inbound_touches_shacl_tests {
     }
 
     #[test]
-    fn ad4m_predicates_that_also_ride_application_data_do_not_invalidate() {
+    fn own_link_predicates_invalidate_on_any_node() {
         // `resolveLanguage`, `getter`, `interpretation_hint`, `identity`
-        // appear on live property URIs on real instances (a @Property
-        // decorator writes them per-instance). They must NOT invalidate
-        // the class-shape cache — the check keys off the SHACL writer's
-        // structural triples only.
+        // are own-link predicates of a property shape. The check cannot
+        // tell which node a diff's link sits on, so it clears the cache on
+        // any node: an over-clear only costs a refill, and a missed
+        // own-link change would leave the registry answering a stale
+        // `unchanged`.
         for predicate in [
             "ad4m://resolveLanguage",
             "ad4m://getter",
@@ -366,12 +364,12 @@ mod inbound_touches_shacl_tests {
             "ad4m://transform",
         ] {
             assert!(
-                !inbound_touches_shacl(&diff(vec![link(
+                diff_touches_shape(&diff(vec![link(
                     "flux://message/abc.body",
                     predicate,
                     "some-value"
                 )])),
-                "predicate `{predicate}` should NOT invalidate on plain instance data"
+                "predicate `{predicate}` is in the own-link vocabulary, so it invalidates"
             );
         }
     }
@@ -384,12 +382,12 @@ mod inbound_touches_shacl_tests {
             "ad4m://shape",
             "ad4m://oldShape",
         ));
-        assert!(inbound_touches_shacl(&diff));
+        assert!(diff_touches_shape(&diff));
     }
 
     #[test]
     fn empty_diff_does_not_invalidate() {
-        assert!(!inbound_touches_shacl(&DecoratedPerspectiveDiff::default()));
+        assert!(!diff_touches_shape(&DecoratedPerspectiveDiff::default()));
     }
 }
 
@@ -665,6 +663,8 @@ pub struct PerspectiveInstance {
     /// of every diff committed after it.
     commit_order: Arc<Mutex<()>>,
     subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
+    /// Model query runs in flight, shared by identical calls (see `runner.rs`).
+    runs: runner::Runs,
     batch_store: Arc<RwLock<HashMap<String, TimestampedBatch>>>,
     // Fallback sync tracking for ensure_public_links_are_shared
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
@@ -825,6 +825,7 @@ impl PerspectiveInstance {
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
             commit_order: Arc::new(Mutex::new(())),
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
+            runs: runner::Runs::default(),
             batch_store: Arc::new(RwLock::new(HashMap::new())),
             last_successful_fallback_sync: Arc::new(Mutex::new(None)),
             fallback_sync_interval: Arc::new(Mutex::new(Duration::from_secs(30))),
@@ -895,8 +896,11 @@ impl PerspectiveInstance {
     /// Local-only perspectives (no link language) behave identically
     /// to `get_shape` — a missing class there is a genuine
     /// caller bug, not a sync race, so we surface the error immediately.
+    ///
+    /// The wait ends with `stop`, returning its error.
     pub async fn get_shape_or_wait(
         &self,
+        stop: &EvalStop,
         class_name: &str,
         budget: Duration,
     ) -> Result<Arc<ModelShape>, AnyError> {
@@ -925,7 +929,10 @@ impl PerspectiveInstance {
                 });
             }
             // Never sleep past the deadline: the caller's budget is shared.
-            sleep(poll.min(deadline - now)).await;
+            tokio::select! {
+                _ = sleep(poll.min(deadline - now)) => {}
+                err = runner::stopped(stop) => return Err(err),
+            }
             if let Ok(shape) = self.get_shape(class_name) {
                 return Ok(shape);
             }
@@ -1983,16 +1990,8 @@ impl PerspectiveInstance {
         };
         effects.fold_into(&mut decorated_diff);
 
-        // If any of the inbound links change a class's SHACL definition,
-        // drop that entry from the in-memory shape cache so the next
-        // `model_query` re-parses fresh state from the SPARQL store.
-        // Without this, a locally cached shape can shadow updates the
-        // remote registered (rename, added property, etc.); with it, a
-        // peer that has never registered a class locally still picks up
-        // the class the moment its SHACL arrives.
-        if inbound_touches_shacl(&decorated_diff) {
-            self.clear_shape_cache();
-        }
+        // A class's SHACL arriving here has already dropped the cached
+        // shapes: `persist_remote_diff` does it with the store write.
 
         // Queue the Prolog fact update and the notification + live-query checks
         self.update_prolog_engines(decorated_diff.clone()).await;
@@ -2132,14 +2131,6 @@ impl PerspectiveInstance {
         // change to a flow definition queues the re-derivation that a synced
         // one gets from `diff_from_link_language`. A no-op for anything else.
         self.schedule_flow_pass_on_definition_change(decorated_diff);
-        // A class's SHACL written or removed by any path — `register_shapes`, a raw
-        // link write, a wipe — can change which classes are abstract, their
-        // aliases, which classes an abstract class reads (#1435) and which
-        // class a bare name reads (the least IRI of that name), so any such
-        // write drops every cached shape and what is derived from them.
-        if inbound_touches_shacl(decorated_diff) {
-            self.clear_shape_cache();
-        }
         // A `FlowInstance` minted by an agent this executor acts for gets its
         // bookkeeping row now, before any pass can treat it as a catch-up
         // (#1424). Awaited, not spawned: a client's `start` is followed at
@@ -3854,21 +3845,8 @@ impl PerspectiveInstance {
         class_name: &str,
         query_json: &str,
     ) -> Result<String, deno_core::anyhow::Error> {
-        self.model_query_stopped(&EvalStop::none(), class_name, query_json)
-            .await
-    }
-
-    /// [`Self::model_query`] under `stop`: every evaluation the query makes
-    /// ends when the call's gate fires, reporting why.
-    pub async fn model_query_stopped(
-        &self,
-        stop: &EvalStop,
-        class_name: &str,
-        query_json: &str,
-    ) -> Result<String, deno_core::anyhow::Error> {
         let classes = super::model_query::QueryClasses::One(class_name.to_string());
-        self.model_query_classes_within(stop, &classes, query_json, MODEL_QUERY_SHAPE_WAIT)
-            .await
+        self.model_query_classes(&classes, query_json).await
     }
 
     /// [`Self::model_query`] over one class or a union of classes (#1238).
@@ -3877,24 +3855,19 @@ impl PerspectiveInstance {
         classes: &super::model_query::QueryClasses,
         query_json: &str,
     ) -> Result<String, deno_core::anyhow::Error> {
-        self.model_query_classes_within(
-            &EvalStop::none(),
-            classes,
-            query_json,
-            MODEL_QUERY_SHAPE_WAIT,
-        )
-        .await
+        self.model_query_classes_stopped(&EvalStop::none(), classes, query_json)
+            .await
     }
 
-    /// [`Self::model_query_classes`] under `stop` — every evaluation the
-    /// query makes ends when the call's gate fires.
+    /// [`Self::model_query_classes`] under `stop`: `stop` ends this call's
+    /// wait; the run itself is the runner's (see `runner.rs`).
     pub async fn model_query_classes_stopped(
         &self,
         stop: &EvalStop,
         classes: &super::model_query::QueryClasses,
         query_json: &str,
     ) -> Result<String, deno_core::anyhow::Error> {
-        self.model_query_classes_within(stop, classes, query_json, MODEL_QUERY_SHAPE_WAIT)
+        self.run_model_query(stop, classes, query_json, MODEL_QUERY_SHAPE_WAIT)
             .await
     }
 
@@ -3908,7 +3881,7 @@ impl PerspectiveInstance {
         shape_wait: Duration,
     ) -> Result<String, deno_core::anyhow::Error> {
         let classes = super::model_query::QueryClasses::One(class_name.to_string());
-        self.model_query_classes_within(&EvalStop::none(), &classes, query_json, shape_wait)
+        self.run_model_query(&EvalStop::none(), &classes, query_json, shape_wait)
             .await
     }
 
@@ -3993,7 +3966,7 @@ impl PerspectiveInstance {
                 continue;
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
-            self.get_shape_or_wait(class_name, remaining).await?;
+            self.get_shape_or_wait(stop, class_name, remaining).await?;
         }
         // An abstract class (#1435) reads the concrete classes that have its
         // names, each through its view; none of them is an empty result.
@@ -4031,8 +4004,16 @@ impl PerspectiveInstance {
         let resolver = self.shape_resolver();
 
         if let Some(filter) = produced_by_flow {
-            let valid = super::flow_instance::produced::flow_valid_outputs(
+            // Inside this run's slot and under its stop: see `runner::InRun`.
+            let outputs = runner::InRun {
+                perspective: self,
+                stop,
+                shape_wait,
+            };
+            let valid = super::flow_instance::produced::flow_valid_outputs_reading(
+                stop,
                 self,
+                &outputs,
                 &filter.flow,
                 filter.state.as_deref(),
             )
@@ -4123,7 +4104,7 @@ impl PerspectiveInstance {
                 return Err(err);
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
-            self.get_shape_or_wait(&missing.class_name, remaining)
+            self.get_shape_or_wait(stop, &missing.class_name, remaining)
                 .await?;
         };
         let mut result = result;
@@ -4214,8 +4195,26 @@ impl PerspectiveInstance {
         // One store transaction for the whole diff, so a batch lands as one
         // write. On failure nothing was written; fall back to one link at a
         // time.
+        //
+        // A class's SHACL written or removed by any path (`register_shapes`, a raw
+        // link write, a sync, an import) can change which classes are abstract,
+        // their aliases, which classes an abstract class reads (#1435) and which
+        // class a bare name reads (the least IRI of that name). So a write that
+        // touches a shape own link drops every cached shape and what is derived
+        // from them, here, right after the store write and before any await: a
+        // caller cancelled later cannot leave the write committed and the cache
+        // stale.
+        let touches = touches_shape(
+            removals
+                .iter()
+                .chain(additions.iter())
+                .map(|link| &link.data),
+        );
         match self.sparql_store.apply_diff(&removals, &additions) {
             Ok(_) => {
+                if touches {
+                    self.clear_shape_cache();
+                }
                 crate::metrics::record_link_writes(&self.metrics, additions.len(), removals.len());
                 return Ok(effects);
             }
@@ -4241,6 +4240,9 @@ impl PerspectiveInstance {
                 Ok(_) => added += 1,
                 Err(e) => log::warn!("Failed to add link to SPARQL store: {:?}", e),
             }
+        }
+        if touches {
+            self.clear_shape_cache();
         }
         crate::metrics::record_link_writes(&self.metrics, added, removed);
 
@@ -5769,6 +5771,11 @@ impl PerspectiveInstance {
     /// Same collection expansion as `create_subject`: an array on an
     /// all-`addLink` setter appends one link per element; any other array
     /// stays a single `literal:json:` value.
+    ///
+    /// `null` and `""` clear the property instead: a `removeLink` with target
+    /// `*` per predicate the setter writes, which removes every stored link
+    /// there and prunes what the batch staged for it. A required property
+    /// (`sh://minCount` >= 1) refuses.
     async fn setter_commands(
         &self,
         class_name: &str,
@@ -5777,6 +5784,30 @@ impl PerspectiveInstance {
         value: &serde_json::Value,
         context: &AgentContext,
     ) -> Result<Vec<Command>, AnyError> {
+        if value.is_null() || value.as_str() == Some("") {
+            let required = self
+                .get_shape(class_name)?
+                .properties
+                .iter()
+                .any(|p| p.name == prop && p.is_required);
+            if required {
+                return Err(anyhow!(
+                    "Property `{prop}` of class `{class_name}` is required and cannot be cleared"
+                ));
+            }
+            let mut cleared: Vec<Command> = Vec::new();
+            for setter_cmd in setter {
+                if !cleared.iter().any(|c| c.predicate == setter_cmd.predicate) {
+                    cleared.push(Command {
+                        target: Some("*".to_string()),
+                        local: None,
+                        action: Action::RemoveLink,
+                        ..setter_cmd.clone()
+                    });
+                }
+            }
+            return Ok(cleared);
+        }
         let expand_collection = matches!(value, serde_json::Value::Array(_))
             && setter.iter().all(|c| c.action == Action::AddLink);
         let elements: Vec<serde_json::Value> = match (expand_collection, value) {
@@ -6039,7 +6070,7 @@ impl PerspectiveInstance {
             subscriber,
         };
         let first_result =
-            self.model_query_classes_within(stop, &classes, &query_json, MODEL_QUERY_SHAPE_WAIT);
+            self.run_model_query(stop, &classes, &query_json, MODEL_QUERY_SHAPE_WAIT);
         self.open_subscription(subscription_id, subscribed_query, first_result)
             .await
     }
@@ -6087,7 +6118,11 @@ impl PerspectiveInstance {
         // First, so the queries collected below carry the new class lists.
         let reresolved = self.refresh_abstract_subscriptions().await;
 
+        // SPARQL subscriptions' re-checks, run on the re-check slots here, and
+        // the model subscriptions', whose runs take a slot themselves.
         let mut query_futures: Vec<future::BoxFuture<'static, Option<(Vec<String>, String)>>> =
+            Vec::new();
+        let mut model_futures: Vec<future::BoxFuture<'static, Option<(Vec<String>, String)>>> =
             Vec::new();
 
         // Collect only the minimal data needed: ID, query string, predicates,
@@ -6175,61 +6210,81 @@ impl PerspectiveInstance {
             // Each future returns Option<(ids, new_result)> instead of locking individually.
             // This avoids a lock convoy where N futures all contend on subscribed_queries.
             let self_clone = self.clone();
-            let query_future = Box::pin(async move {
-                #[cfg(test)]
-                subscriptions::evaluations::note(&self_clone.uuid);
-                // Model subscriptions: re-run execute_model_query instead of raw SPARQL.
-                // With no shape wait: every subscription on the perspective is
-                // re-checked in the one pass below, so a wait here for one
-                // subscription's unsynced class would hold back every other
-                // subscription's update. A class still missing fails this pass
-                // at once and is retried on the next one.
-                // A re-check runs under its own deadline gate: one slow
-                // subscription's eval stops there and is skipped for this
-                // pass — it does not kill the subscription or hold back the
-                // others. The gate drops with the future, so an eval still
-                // stopping is still ended.
-                let gate = crate::perspectives::sparql_store::EvalGate::request(
-                    crate::perspectives::sparql_store::query_deadline(),
-                    None,
-                );
-                let stop = gate.stop();
-                let result_string = if let Some(ref params) = model_params {
+            if let Some(params) = model_params {
+                // Model subscriptions run through the runner, which puts the
+                // run on a blocking slot itself and shares it with identical
+                // runs in flight. With no shape wait: every subscription on
+                // the perspective is re-checked in the one pass below, so a
+                // wait here for one subscription's unsynced class would hold
+                // back every other subscription's update. A class still
+                // missing fails this pass at once and is retried on the next
+                // one. The run has its own deadline: one slow subscription is
+                // skipped for this pass, it does not kill the subscription or
+                // hold back the others.
+                model_futures.push(Box::pin(async move {
                     match self_clone
-                        .model_query_classes_within(
-                            &stop,
+                        .run_model_query(
+                            &EvalStop::none(),
                             &params.classes,
                             &params.query_json,
                             Duration::ZERO,
                         )
                         .await
                     {
-                        Ok(r) => r,
+                        Ok(result) => Some((ids, result)),
                         Err(e) => {
-                            log::error!(
-                                "❌ 🔗 🧠 model-based subscription query failed (subscriptions {:?}): {}",
+                            // A deadline or cancel is expected under load and
+                            // retried next pass; anything else is a warning.
+                            if crate::perspectives::sparql_store::is_stop_error(&e) {
+                                log::debug!(
+                                    "🔗 🧠 model-based subscription query stopped (subscriptions {:?}): {}",
+                                    ids,
+                                    e
+                                );
+                            } else {
+                                log::warn!(
+                                    "⚠️ 🔗 🧠 model-based subscription query failed (subscriptions {:?}): {}",
+                                    ids,
+                                    e
+                                );
+                            }
+                            None
+                        }
+                    }
+                }));
+                continue;
+            }
+            // A re-check runs under its own deadline gate: one slow
+            // subscription's eval stops there and is skipped for this
+            // pass. The gate drops with the future, so an eval still
+            // stopping is still ended.
+            query_futures.push(Box::pin(async move {
+                #[cfg(test)]
+                subscriptions::evaluations::note(&self_clone.uuid);
+                let gate = crate::perspectives::sparql_store::EvalGate::request(
+                    crate::perspectives::sparql_store::query_deadline(),
+                    None,
+                );
+                match self_clone.sparql_query_stopped(&gate.stop(), &query_string) {
+                    Ok(result) => Some((ids, result)),
+                    Err(e) => {
+                        if crate::perspectives::sparql_store::is_stop_error(&e) {
+                            log::debug!(
+                                "🔗 🔎 SPARQL subscription query stopped (subscriptions {:?}): {}",
                                 ids,
                                 e
                             );
-                            return None;
-                        }
-                    }
-                } else {
-                    match self_clone.sparql_query_stopped(&stop, &query_string) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            log::error!(
-                                "❌ 🔗 🔎 SPARQL subscription query failed (subscriptions {:?}): {}",
+                        } else {
+                            log::warn!(
+                                "⚠️ 🔗 🔎 SPARQL subscription query failed (subscriptions {:?}): {}",
                                 ids,
                                 e
                             );
-                            return None;
                         }
+                        None
                     }
-                };
-                Some((ids, result_string))
-            });
-            query_futures.push(query_future);
+                }
+            }));
         }
 
         // Run the re-checks off the async workers, a bounded number at once
@@ -6237,11 +6292,17 @@ impl PerspectiveInstance {
         // held meanwhile. Each subscription runs at most once per pass and
         // passes run one after another, so the results compared below are
         // the newest.
-        self.metrics
-            .subscription_rechecks
-            .fetch_add(query_futures.len() as u64, Ordering::Relaxed);
-        let results =
-            subscriptions::run_rechecks(query_futures, &subscriptions::RECHECK_SLOTS).await;
+        // Every re-check of the pass, the model ones run by the runner too.
+        self.metrics.subscription_rechecks.fetch_add(
+            (query_futures.len() + model_futures.len()) as u64,
+            Ordering::Relaxed,
+        );
+        let (results, model_results) = future::join(
+            subscriptions::run_rechecks(query_futures, &subscriptions::RECHECK_SLOTS),
+            future::join_all(model_futures),
+        )
+        .await;
+        let results = results.into_iter().chain(model_results);
 
         // Single lock acquisition to compare and update all results
         let mut delta_updates = Vec::new();

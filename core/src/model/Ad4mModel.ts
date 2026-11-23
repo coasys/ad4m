@@ -1699,7 +1699,7 @@ export class Ad4mModel {
     return requireTotalCount(await this.executeModelQuery(perspective, { ...countQuery, limit: 0, count: true }, undefined, options));
   }
 
-  /** The `executeAction` write that sets property `key` to `value`; none for an empty value. */
+  /** The write that sets property `key` to `value`; for `null` or `""`, a `removeLink` of every link on it (throws on a required property); none for `undefined`. */
   private async planProperty(key: string, value: any): Promise<FieldWrite[]> {
     const metadata = this.getPropertyMetadata(key);
     if (!metadata) {
@@ -1710,9 +1710,19 @@ export class Ad4mModel {
     // Generate actions from metadata (replaces Prolog query)
     const actions = this.generatePropertySetterAction(key, metadata);
 
-    // Skip storing empty/null/undefined values to avoid invalid empty literals (e.g. literal:string:)
-    if (value === undefined || value === null || value === "") {
-      return [];
+    if (value === undefined) return [];
+    // An empty value is no value: the property has no links, and no empty
+    // literal (`literal:string:`) is stored.
+    if (value === null || value === "") {
+      // A required property's link is part of what makes the record an
+      // instance of its class: clearing it would drop the record from the
+      // class's queries with no error.
+      if (metadata.required) {
+        throw new Error(`Property "${key}" is required and cannot be cleared`);
+      }
+      // The executor's `removeLink` with target `*` removes every stored link
+      // on the property and prunes what this batch staged for it.
+      return [{ commands: [{ action: "removeLink", source: "this", predicate: metadata.through, target: "*" }], parameters: [] }];
     }
 
     const mode = effectiveLiteralStorage(metadata);
@@ -1858,11 +1868,16 @@ export class Ad4mModel {
    *
    * **New instances** (no snapshot yet): creates the subject via
    * `createSubject` with initial scalar values, then sets relations
-   * via `innerUpdate`.
+   * via `innerUpdate`, then (without a `batchId`) refreshes from the
+   * perspective. To create without that read, use `Model.create()`.
    *
    * **Existing instances** (snapshot present, i.e. fetched via `get()`
    * or a query): updates only dirty fields via `innerUpdate`, then
    * refreshes from the perspective.
+   *
+   * A property set to `null` or `''` has no links after the write: an
+   * existing instance's links are removed, a new instance gets none.
+   * `undefined` writes nothing.
    * 
    * @param batchId - Optional batch ID for batch operations
    * @throws Will throw if instance creation, linking, or updating fails
@@ -1934,7 +1949,7 @@ export class Ad4mModel {
 
     const initialValues = {};
     for (const [key, value] of Object.entries(this)) {
-      if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
+      if (value !== undefined && value !== null && value !== "" && !(Array.isArray(value) && value.length > 0) && !value?.action) {
         const propMeta = metadata.properties[key];
         // Only offer keys with a declared, settable model property. This
         // excludes ORM bookkeeping fields (_baseExpression, _perspective —
@@ -2072,7 +2087,7 @@ export class Ad4mModel {
         }
       }
 
-      if (value !== undefined && value !== null) {
+      if (value !== undefined) {
         if (value?.action) {
           const envelopePredicate = this.getRelationOptions(key)?.predicate;
           if (envelopePredicate && value.action !== "remover") this._relationsWritten.add(envelopePredicate);
@@ -2098,7 +2113,7 @@ export class Ad4mModel {
           if (value.length === 0 && !this._snapshot && this._idMinted && !this._relationsWritten.has(predicate)) continue;
           this._relationsWritten.add(predicate);
           writes.push(...this.planRelation(key, 'setter', value));
-        } else if (value !== undefined && value !== null && value !== "") {
+        } else {
           // A scalar handed to a relation field is a single-member relation.
           //
           // This used to `continue` — "Skip, it's a relation, not a regular
@@ -2125,8 +2140,11 @@ export class Ad4mModel {
           // both paths at once.
           const relationMeta = this.getRelationOptions(key);
           if (relationMeta) {
-            this._relationsWritten.add(relationMeta.predicate);
-            writes.push(...this.planRelation(key, 'setter', [value]));
+            // `null` and `""` are not relation members; relations empty with `[]`.
+            if (value !== null && value !== "") {
+              this._relationsWritten.add(relationMeta.predicate);
+              writes.push(...this.planRelation(key, 'setter', [value]));
+            }
             continue;
           }
 
@@ -2347,16 +2365,25 @@ export class Ad4mModel {
    * Creates and saves a new model instance in one step.
    *
    * @param perspective - The perspective to create the instance in
-   * @param data - Property values to assign before saving
+   * @param data - Property values to assign before saving (`null` or `''`
+   *               leaves a property unwritten)
    * @param options - Optional settings:
    *   - `parent` — a `Scope` (model form or raw form) whose `id` will
    *     be used to create an incoming link from the parent to the new instance.
    *   - `batchId` — an existing batch id; when provided the link write and
    *     `save()` are added to the batch instead of committed immediately.
-   * @returns The saved model instance. Without a `batchId` it is read back
-   *   after the commit; if that read fails, the instance is still returned
-   *   with the values it wrote and the read error goes to `console.warn`.
-   * @throws If a write or the commit fails (the batch it opened is discarded)
+   *   - `returns` — `'id'` (default) returns the instance built from the
+   *     values written, with its `id`, and sends no read after the commit:
+   *     `author`, `createdAt`, `updatedAt`, getters and relations that were
+   *     not written stay unset. `'row'` reads the row back after the commit
+   *     (one round trip) and fills them. Not allowed with `batchId`: nothing
+   *     is committed yet to read.
+   * @returns The created model instance (see `returns`). A later `save()` on
+   *   it updates; it does not create again.
+   * @throws If a write or the commit fails (the batch it opened is discarded);
+   *   with `returns: 'row'`, also if the read fails after the commit (the
+   *   record exists then: the message names its id, so do not retry the
+   *   create); with `returns: 'row'` and a `batchId`, before anything is written
    *
    * @example
    * ```typescript
@@ -2381,8 +2408,14 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     data: Record<string, any> = {},
-    options?: { parent?: Scope; batchId?: string },
+    options?: { parent?: Scope; batchId?: string; returns?: 'id' | 'row' },
   ): Promise<T> {
+    if (options?.returns === 'row' && options.batchId) {
+      throw new Error(
+        "create(): returns: 'row' reads the row after the commit, which a caller's batch (batchId) has not had yet. " +
+        "Commit the batch, then read the instance with get()."
+      );
+    }
     const instance = new this(perspective) as T;
     Object.assign(instance, data);
     // Resolved before any write, so an invalid parent stages nothing.
@@ -2404,13 +2437,13 @@ export class Ad4mModel {
       await linkParent?.(perspective, instance.id, batchId);
     });
 
-    // The record now exists. Rejecting would leave the caller no instance, and
-    // a retry would create a second record: if the re-read fails, return the
-    // instance with the values it wrote (its snapshot is already taken).
-    try {
-      await instance.getData();
-    } catch (e) {
-      console.warn(`${this.name}.create(): ${instance.id} was created, but reading it back failed`, e);
+    // The instance holds what it wrote and its snapshot is taken (save() did
+    // that), so nothing is read back unless the caller asked for the row.
+    if (options?.returns === 'row') {
+      const failed = (cause?: unknown) =>
+        Object.assign(new Error(`${this.name}.create(): ${instance.id} was created, but reading it back failed`), { cause });
+      const row = await instance.getData().catch((e) => { throw failed(e); });
+      if (!row) throw failed();
     }
     return instance;
   }
@@ -2423,7 +2456,8 @@ export class Ad4mModel {
    *
    * @param perspective - The perspective containing the instance
    * @param id - The expression URI of the instance to update
-   * @param data - Property values to merge before saving
+   * @param data - Property values to merge before saving (`null` or `''`
+   *               removes the property's links)
    * @returns The updated model instance
    * @throws If no instance has this `id` (nothing is written)
    *
