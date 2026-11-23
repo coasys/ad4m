@@ -300,11 +300,20 @@ pub fn signing_key_id_for_context(context: &AgentContext) -> Result<String, AnyE
 
 pub fn did_for_context(context: &AgentContext) -> Result<String, AnyError> {
     match context {
-        AgentContext::Main => AgentService::with_global_instance(|a| {
-            a.did
+        // An error, not a panic, before the AgentService exists: callers such as
+        // `Session::acts_as_did` (on every RPC since metrics) treat it as "no DID yet".
+        AgentContext::Main => {
+            let service = AgentService::global_instance();
+            let service = service
+                .lock()
+                .map_err(|_| anyhow!("Couldn't get lock on AgentService"))?;
+            service
+                .as_ref()
+                .ok_or(anyhow!("DID requested but AgentService not initialized"))?
+                .did
                 .clone()
                 .ok_or(anyhow!("DID requested but not yet set in AgentService"))
-        }),
+        }
         AgentContext::Managed { did } => Ok(did.clone()),
     }
 }

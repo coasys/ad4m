@@ -16,6 +16,7 @@ use crate::perspectives::flow_context::{
 use crate::perspectives::get_perspective;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::{parse_flow_to_links, SHACLFlow};
+use crate::perspectives::sparql_store::EvalStop;
 use crate::types::{DecoratedLinkExpression, Link};
 use ad4m_client::literal::Literal;
 use rmcp::{handler::server::wrapper::Parameters, tool};
@@ -250,7 +251,7 @@ impl Ad4mMcpHandler {
         perspective: &PerspectiveInstance,
         flow_ref: &str,
     ) -> anyhow::Result<(String, Option<SHACLFlow>)> {
-        let mut flows = load_shacl_flows(perspective).await?;
+        let mut flows = load_shacl_flows(&EvalStop::none(), perspective).await?;
         if let Some(flow) = flows.remove(flow_ref) {
             return Ok((flow_ref.to_string(), Some(flow)));
         }
@@ -349,7 +350,7 @@ impl Ad4mMcpHandler {
                 ..record
             }));
         }
-        let flows = load_shacl_flows(perspective).await?;
+        let flows = load_shacl_flows(&EvalStop::none(), perspective).await?;
         let derived = crate::perspectives::flow_instance::derive_states(
             perspective,
             std::slice::from_ref(&record),

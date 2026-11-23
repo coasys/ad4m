@@ -19,6 +19,7 @@ use super::interpretation_test_support::{seed_instance, setup_perspective_no_llm
 use super::model_query::types::ModelShape;
 use super::perspective_instance::PerspectiveInstance;
 use super::shacl_parser::parse_flow_to_links;
+use super::sparql_store::EvalStop;
 use crate::agent::AgentContext;
 use crate::types::{Link, LinkQuery, LinkStatus};
 use std::collections::HashMap;
@@ -237,7 +238,9 @@ impl Fixture {
 
     /// Everything the engine reads to decide this instance's state.
     pub(super) async fn read_set(&self) -> ReadSet {
-        let flows = load_shacl_flows(&self.perspective).await.expect("flows");
+        let flows = load_shacl_flows(&EvalStop::none(), &self.perspective)
+            .await
+            .expect("flows");
         let records = self.instances().await;
         FlowInstance::from_record(&records[0], &flows[&self.flow_uri])
             .read_set(&self.perspective)
@@ -247,7 +250,9 @@ impl Fixture {
 
     /// The DERIVED state of the fixture's instance — the fold, never the cache.
     pub(super) async fn derived(&self) -> DerivedState {
-        let flows = load_shacl_flows(&self.perspective).await.expect("flows");
+        let flows = load_shacl_flows(&EvalStop::none(), &self.perspective)
+            .await
+            .expect("flows");
         let records = self.instances().await;
         FlowInstance::from_record(&records[0], &flows[&self.flow_uri])
             .derive_state(&self.perspective)
@@ -293,7 +298,7 @@ impl Fixture {
     /// DERIVED state, as the pass reads them — a loaded row carries none.
     async fn satisfied(&self) -> Vec<SatisfiedTransition> {
         let records = self.instances().await;
-        let flows = load_shacl_flows(&self.perspective)
+        let flows = load_shacl_flows(&EvalStop::none(), &self.perspective)
             .await
             .expect("load_shacl_flows");
         let records: Vec<FlowInstanceRecord> =
@@ -421,7 +426,9 @@ fn proposal(instance: &str, to_state: &str, reason: Option<&str>) -> LlmFlowProp
 async fn evaluate_flow_transitions_e2e() {
     let mut f = seed_fixture(Some(SCOPE_HINT)).await;
 
-    let flows = load_shacl_flows(&f.perspective).await.unwrap();
+    let flows = load_shacl_flows(&EvalStop::none(), &f.perspective)
+        .await
+        .unwrap();
     let scoped = flows[FLOW_URI]
         .states
         .iter()

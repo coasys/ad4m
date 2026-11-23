@@ -407,7 +407,9 @@ macro_rules! __ad4m_maybe_hc_signal {
         ) -> ::std::result::Result<(), ::wasm_bindgen::JsValue> {
             let s: ::serde_json::Value = ::serde_wasm_bindgen::from_value(signal)
                 .map_err($crate::errors::LanguageError::from)?;
-            __ad4m_with("handleHolochainSignal", |l| <$lang as $crate::traits::HolochainSignalHandler>::handle_holochain_signal(l, s))??;
+            __ad4m_with("handleHolochainSignal", |l| {
+                <$lang as $crate::traits::HolochainSignalHandler>::handle_holochain_signal(l, s)
+            })??;
             Ok(())
         }
     };

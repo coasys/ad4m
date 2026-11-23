@@ -5901,3 +5901,78 @@ async fn a_generated_write_on_a_unique_name_still_creates() {
     assert_eq!(out["created"], true, "{out}");
     assert_eq!(out["class_name"], "Task", "{out}");
 }
+
+/// A managed user's MCP calls count on its DID (`GET /metrics`): the links its
+/// `instance_create` writes on `ad4m_user_links_written_total`, and its
+/// `instance_query` as one query on the perspective's and the user's totals —
+/// the same caller scope and query gate an RPC call gets.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_users_instance_calls_count_on_its_did() {
+    use std::sync::atomic::Ordering;
+
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+    let _multi_user = crate::test_utils::MultiUserMode::on();
+    let email = "mcp.metrics@example.org";
+    let user_did = crate::test_utils::create_test_user(email);
+    let token = crate::user_management::generate_user_jwt(email, "test").unwrap();
+    let handler = Ad4mMcpHandler::new(
+        McpContext::new(
+            Some("test-admin".into()),
+            crate::agent::capabilities::ListenerReach::Network,
+            false,
+        )
+        .with_token(&token),
+    );
+
+    let (perspective, _shapes, _ctx) = setup_perspective_no_llm(&[("Message", MESSAGE_SDNA)]).await;
+    perspective.persisted.lock().await.owners = Some(vec![user_did.clone()]);
+    let uuid = perspective.persisted.lock().await.uuid.clone();
+    register_perspective(uuid.clone(), perspective);
+    let _guard = PerspectiveGuard(uuid.clone());
+
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    let user = crate::metrics::user(&user_did);
+    let written_before = user.links_written.load(Ordering::Relaxed);
+    let p_queries_before = perspective.metrics.queries.load(Ordering::Relaxed);
+    let u_queries_before = user.queries.load(Ordering::Relaxed);
+
+    let created = parse(
+        &handler
+            .call_tool_by_name(
+                "instance_create",
+                json!({
+                    "perspective_id": uuid,
+                    "class_name": "Message",
+                    "properties": { "body": "hi" },
+                }),
+            )
+            .await
+            .expect("instance_create dispatched"),
+    );
+    assert!(created["base_uri"].is_string(), "{created}");
+    let written = user.links_written.load(Ordering::Relaxed);
+    assert!(
+        written > written_before,
+        "the create's links count for the user: {written_before} -> {written}"
+    );
+
+    let out = parse(
+        &handler
+            .call_tool_by_name(
+                "instance_query",
+                json!({ "perspective_id": uuid, "class_name": "Message" }),
+            )
+            .await
+            .expect("instance_query dispatched"),
+    );
+    assert_eq!(out["count"], 1, "{out}");
+
+    // One gate for the tool call: exactly one query counted, however many
+    // evaluations the call ran under it.
+    assert_eq!(
+        perspective.metrics.queries.load(Ordering::Relaxed),
+        p_queries_before + 1,
+    );
+    assert_eq!(user.queries.load(Ordering::Relaxed), u_queries_before + 1);
+}

@@ -22,6 +22,18 @@ const RUNNING: u8 = 0;
 const STOP_CANCELLED: u8 = 1;
 const STOP_DEADLINE: u8 = 2;
 
+/// The wording of the two stop errors [`EvalStop::stopped_err`] builds;
+/// [`is_stop_error`] recognises them by it.
+const CANCELLED_MSG: &str = "query cancelled";
+const DEADLINE_MSG_PREFIX: &str = "SPARQL deadline";
+
+/// Whether `err` is what [`EvalStop::stopped_err`] reports: an eval ended by
+/// its deadline or a cancel. Expected under load, not a failure to act on.
+pub(crate) fn is_stop_error(err: &Error) -> bool {
+    let text = err.to_string();
+    text == CANCELLED_MSG || text.contains(DEADLINE_MSG_PREFIX)
+}
+
 /// Which way of stopping fired for one evaluation, and the deadline that was
 /// armed (the deadline error names it). Shared by the gate that fires and the
 /// evals that report.
@@ -63,6 +75,9 @@ pub struct EvalStop {
     /// live-query-opening slot too. Empty for internal evals (background
     /// loops, tests).
     permits: Vec<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    /// The client query this eval runs for (`GET /metrics`): it counts as in flight until
+    /// the gate and every eval under it have ended. `None` for internal evals.
+    timer: Option<Arc<crate::metrics::QueryTimer>>,
 }
 
 impl EvalStop {
@@ -76,6 +91,7 @@ impl EvalStop {
                 deadline: Duration::ZERO,
             }),
             permits: Vec::new(),
+            timer: None,
         }
     }
 
@@ -83,9 +99,16 @@ impl EvalStop {
     #[cfg(test)]
     pub(crate) fn cancelled() -> EvalStop {
         let stop = EvalStop::none();
-        stop.stop.mark(STOP_CANCELLED);
-        stop.token.cancel();
+        stop.cancel();
         stop
+    }
+
+    /// Fire this stop (and every clone) as cancelled: for tests that cancel
+    /// a run part-way.
+    #[cfg(test)]
+    pub(crate) fn cancel(&self) {
+        self.stop.mark(STOP_CANCELLED);
+        self.token.cancel();
     }
 
     /// Whether the eval carrying this stop must end. The evaluator checks the
@@ -99,9 +122,9 @@ impl EvalStop {
     /// for the deadline's wording.
     pub(crate) fn stopped_err(&self, what: &str) -> Option<Error> {
         match self.stop.kind.load(Ordering::Acquire) {
-            STOP_CANCELLED => Some(anyhow!("query cancelled")),
+            STOP_CANCELLED => Some(anyhow!("{CANCELLED_MSG}")),
             STOP_DEADLINE => Some(anyhow!(
-                "{what} stopped: SPARQL deadline of {:?} passed",
+                "{what} stopped: {DEADLINE_MSG_PREFIX} of {:?} passed",
                 self.stop.deadline
             )),
             _ => None,
@@ -137,6 +160,7 @@ impl EvalGate {
                 deadline,
             }),
             permits: Vec::new(),
+            timer: None,
         };
         let watchdog = Watchdog::arm(stop.clone(), deadline, cancel);
         EvalGate {
@@ -155,6 +179,11 @@ impl EvalGate {
     /// covered by the slot until they end.
     pub fn hold_slot(&mut self, permit: tokio::sync::OwnedSemaphorePermit) {
         self.stop.permits.push(Arc::new(permit));
+    }
+
+    /// Count the evals under the gate as one client query, until they have all ended.
+    pub fn time_query(&mut self, timer: crate::metrics::QueryTimer) {
+        self.stop.timer = Some(Arc::new(timer));
     }
 }
 
@@ -239,7 +268,13 @@ pub(crate) fn query_deadline() -> Duration {
 /// call, so a `request.cancel` drops it here like anywhere else. The deadline
 /// starts once the slot is held: time spent queued behind other evals is not
 /// the query's own. Drop the gate to stop the eval.
-pub(crate) async fn query_gate(ctx: &crate::types::domain::RequestContext) -> EvalGate {
+///
+/// The call counts as one query of `perspective` and of the caller's agent
+/// (`GET /metrics`) from the slot on, until its evals have ended.
+pub(crate) async fn query_gate(
+    ctx: &crate::types::domain::RequestContext,
+    perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
+) -> EvalGate {
     let mut permit = None;
     if let Some(slots) = ctx.query_slots.clone() {
         let cancelled = ctx.cancel_token.clone();
@@ -262,6 +297,10 @@ pub(crate) async fn query_gate(ctx: &crate::types::domain::RequestContext) -> Ev
     if let Some(permit) = permit {
         gate.hold_slot(permit);
     }
+    gate.time_query(crate::metrics::QueryTimer::start(
+        perspective.metrics.clone(),
+        ctx.session.acts_as_did().as_deref(),
+    ));
     gate
 }
 
@@ -1422,6 +1461,8 @@ pub struct SparqlStore {
     store: Arc<Store>,
     /// Serializes link mutations and clear across every clone of this store.
     writer: Arc<Mutex<()>>,
+    /// Counts this store as open (`ad4m_sparql_stores_open`) until its last clone drops.
+    _open: Arc<crate::metrics::OpenStore>,
     /// The write generation: bumped after every committed write, shared
     /// across clones. A reader that keeps a query result can reuse it while
     /// the generation it read before the query is unchanged, and can wait for
@@ -1530,6 +1571,7 @@ impl SparqlStore {
         Ok(SparqlStore {
             store: Arc::new(store),
             writer: Arc::new(Mutex::new(())),
+            _open: Arc::new(crate::metrics::OpenStore::open()),
             writes: Arc::new(tokio::sync::watch::Sender::new(0)),
             write_log: Arc::new(Mutex::new(WriteLog::default())),
             #[cfg(test)]
