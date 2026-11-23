@@ -1170,14 +1170,13 @@ fn wasm_language_bundle() -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
-/// A Rust/ALDK (wasm-bindgen) language runs every call ordered, a `CallKind::Concurrent`
-/// one included: wasm-bindgen-futures polls all of a module's futures from one queue that
-/// does not restore each task's async context, and ALDK's async exports hold the instance's
-/// lock across their awaits — a call beside another's reads would sign as the wrong agent,
-/// and a sync export like `interactions()` would see the busy instance. Below, the read sent
-/// concurrent still runs 600 ms when the create and the interactions() call behind it are
-/// sent; both must wait for it, and the create must still sign as the managed user, not the
-/// main agent.
+/// On a Rust/ALDK (wasm-bindgen) language each export takes the lock side it
+/// declares: `expressionGet` is `concurrent:` (the shared read side) while
+/// `expressionCreate` needs `&mut self` (the write side, alone). Below, a slow
+/// read holds the read side for 600 ms: the sync `interactions()` export
+/// answers beside it — it only ever reports busy while an ordered call holds
+/// the instance — and the create queued on the write side still runs after
+/// the read, signing as the managed user who called it, not the main agent.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_wasm_language_runs_concurrent_calls_in_order_as_their_agents() {
     let Some(bundle) = wasm_language_bundle() else {
@@ -1224,8 +1223,10 @@ async fn a_wasm_language_runs_concurrent_calls_in_order_as_their_agents() {
     };
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // A sync export. Overlapping the read it would see the instance's lock
-    // held (`try_with` → null); ordered, it runs after it and answers for real.
+    // The sync `interactions` export shares the read side: it answers beside
+    // the slow read, in well under the read's 600 ms — it reports "busy" only
+    // while an ordered call holds the instance.
+    let interactions_at = Instant::now();
     let interactions = within(Duration::from_secs(10), "interactions", async {
         concurrent(
             &handle,
@@ -1238,11 +1239,16 @@ async fn a_wasm_language_runs_concurrent_calls_in_order_as_their_agents() {
     let interactions = interactions.expect("the interactions call answers");
     assert!(
         interactions.contains("echo"),
-        "interactions() overlapped the read's lock and answered busy: {interactions}"
+        "interactions() answered busy beside a held read: {interactions}"
+    );
+    assert!(
+        interactions_at.elapsed() < Duration::from_millis(500),
+        "interactions() waited for the slow read instead of sharing the read side"
     );
 
-    // Alice's create, sent while the read still runs, runs after it — and
-    // signs as Alice, never as the agent whose call preceded it.
+    // Alice's create, sent while the read still runs, waits on the write
+    // side and runs after it — and signs as Alice, never as the agent
+    // whose call preceded it.
     let created = within(Duration::from_secs(10), "the create", async {
         handle
             .call(
@@ -1380,6 +1386,214 @@ async fn a_wasm_language_runs_concurrent_calls_each_as_its_own_agent() {
         slow_author, alice,
         "the slow read signed as {slow_author}, not its own agent"
     );
+}
+
+/// The lock side is the export's, not the call's: a slow `expressionGet`
+/// sent ordered still takes the shared read side (the export is declared
+/// `concurrent:`), so a read sent concurrent runs beside it instead of
+/// waiting 600 ms behind it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_ordered_call_on_wasm_does_not_block_a_concurrent_read() {
+    let Some(bundle) = wasm_language_bundle() else {
+        eprintln!(
+            "test-wasm-language bundle missing; run `bash tests/rust-languages/build.sh` — skipping"
+        );
+        return;
+    };
+
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+
+    let address = "QmTestWasmOrderedSlow".to_string();
+    let (handle, dir) = spawn_runtime(&address);
+    let context = LanguageContext::new(
+        crate::agent::did(),
+        crate::agent::signing_key_id(),
+        None,
+        dir.path().to_path_buf(),
+        address.clone(),
+    );
+    handle
+        .load_module(bundle, context.clone())
+        .await
+        .expect("the WASM bundle loads");
+    handle
+        .load_language(context.to_json())
+        .await
+        .expect("the language's init() runs");
+
+    let mut slow = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            handle
+                .execute(
+                    "globalThis.__ad4m_language_instance__.expressionGet(\"slow:600:x\")".into(),
+                )
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let read = within(Duration::from_secs(10), "the concurrent read", async {
+        concurrent(
+            &handle,
+            "globalThis.__ad4m_language_instance__.expressionGet(\"whoami\")".into(),
+        )
+        .await
+    })
+    .await;
+    read.expect("the concurrent read answers beside the slow ordered call");
+    assert!(
+        !slow.is_finished(),
+        "the concurrent read waited for the ordered call's read side"
+    );
+
+    within(Duration::from_secs(10), "the slow read", &mut slow)
+        .await
+        .unwrap()
+        .expect("the slow read answers");
+}
+
+/// The sync `interactions` export takes the read side without waiting: it
+/// answers while a concurrent async export's future is suspended, not
+/// "busy" — busy is only for a held write side (an ordered call).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sync_export_answers_beside_a_concurrent_wasm_call() {
+    let Some(bundle) = wasm_language_bundle() else {
+        eprintln!(
+            "test-wasm-language bundle missing; run `bash tests/rust-languages/build.sh` — skipping"
+        );
+        return;
+    };
+
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+
+    let address = "QmTestWasmSyncBeside".to_string();
+    let (handle, dir) = spawn_runtime(&address);
+    let context = LanguageContext::new(
+        crate::agent::did(),
+        crate::agent::signing_key_id(),
+        None,
+        dir.path().to_path_buf(),
+        address.clone(),
+    );
+    handle
+        .load_module(bundle, context.clone())
+        .await
+        .expect("the WASM bundle loads");
+    handle
+        .load_language(context.to_json())
+        .await
+        .expect("the language's init() runs");
+
+    let mut slow = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            concurrent(
+                &handle,
+                "globalThis.__ad4m_language_instance__.expressionGet(\"slow:600:x\")".into(),
+            )
+            .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let sync_at = Instant::now();
+    let answer = within(Duration::from_secs(10), "the sync export", async {
+        concurrent(
+            &handle,
+            "JSON.stringify(globalThis.__ad4m_language_instance__.interactions(\"expr://x\"))"
+                .into(),
+        )
+        .await
+    })
+    .await
+    .expect("the sync export answers");
+    assert!(answer.contains("echo"), "unexpected answer: {answer}");
+    assert!(
+        sync_at.elapsed() < Duration::from_millis(500),
+        "the sync export waited for the in-flight concurrent call"
+    );
+    assert!(
+        !slow.is_finished(),
+        "the sync export waited for the concurrent call to end"
+    );
+
+    within(Duration::from_secs(10), "the slow read", &mut slow)
+        .await
+        .unwrap()
+        .expect("the slow read answers");
+}
+
+/// `expressionCreate` needs `&mut self`, so its export takes the write
+/// side and runs alone: sent beside a slow concurrent read it answers
+/// only once the read's future has dropped its read guard.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ordered_export_on_wasm_still_runs_alone() {
+    let Some(bundle) = wasm_language_bundle() else {
+        eprintln!(
+            "test-wasm-language bundle missing; run `bash tests/rust-languages/build.sh` — skipping"
+        );
+        return;
+    };
+
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+
+    let address = "QmTestWasmWriteAlone".to_string();
+    let (handle, dir) = spawn_runtime(&address);
+    let context = LanguageContext::new(
+        crate::agent::did(),
+        crate::agent::signing_key_id(),
+        None,
+        dir.path().to_path_buf(),
+        address.clone(),
+    );
+    handle
+        .load_module(bundle, context.clone())
+        .await
+        .expect("the WASM bundle loads");
+    handle
+        .load_language(context.to_json())
+        .await
+        .expect("the language's init() runs");
+
+    let mut slow = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            concurrent(
+                &handle,
+                "globalThis.__ad4m_language_instance__.expressionGet(\"slow:1500:x\")".into(),
+            )
+            .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let create_at = Instant::now();
+    let created = within(Duration::from_secs(10), "the create", async {
+        concurrent(
+            &handle,
+            "globalThis.__ad4m_language_instance__.expressionCreate({note: \"write side\"})".into(),
+        )
+        .await
+    })
+    .await;
+    assert!(
+        create_at.elapsed() >= Duration::from_millis(1000),
+        "the create did not wait for the read's guard to drop"
+    );
+    let addr = created.expect("the create answers");
+    assert!(
+        addr.contains("test:"),
+        "unexpected expression address: {addr}"
+    );
+
+    within(Duration::from_secs(10), "the slow read", &mut slow)
+        .await
+        .unwrap()
+        .expect("the slow read answers");
 }
 
 // ---------------------------------------------------------------------------
