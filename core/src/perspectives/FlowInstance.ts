@@ -368,7 +368,7 @@ export class FlowInstance {
     const record = await FlowInstanceRecord.create(perspective, {
       flowUri: flow.flowUri,
       subject: baseExpression,
-    });
+    }, { returns: 'row' }); // the row's createdAt is `startedAtMillis`
     return FlowInstance.wrap(perspective, flow, record, flow.states[0].name);
   }
 
