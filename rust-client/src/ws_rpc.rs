@@ -1947,10 +1947,7 @@ mod tests {
         let caller = client.handle();
         let sub = tokio::spawn(async move {
             caller
-                .call_value(
-                    "perspective.subscribe",
-                    serde_json::json!({"uuid": "p1"}),
-                )
+                .call_value("perspective.subscribe", serde_json::json!({"uuid": "p1"}))
                 .await
         });
 
