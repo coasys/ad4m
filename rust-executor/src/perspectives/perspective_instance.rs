@@ -5758,6 +5758,11 @@ impl PerspectiveInstance {
     /// Same collection expansion as `create_subject`: an array on an
     /// all-`addLink` setter appends one link per element; any other array
     /// stays a single `literal:json:` value.
+    ///
+    /// `null` and `""` clear the property instead: a `removeLink` with target
+    /// `*` per predicate the setter writes, which removes every stored link
+    /// there and prunes what the batch staged for it. A required property
+    /// (`sh://minCount` >= 1) refuses.
     async fn setter_commands(
         &self,
         class_name: &str,
@@ -5766,6 +5771,30 @@ impl PerspectiveInstance {
         value: &serde_json::Value,
         context: &AgentContext,
     ) -> Result<Vec<Command>, AnyError> {
+        if value.is_null() || value.as_str() == Some("") {
+            let required = self
+                .get_shape(class_name)?
+                .properties
+                .iter()
+                .any(|p| p.name == prop && p.is_required);
+            if required {
+                return Err(anyhow!(
+                    "Property `{prop}` of class `{class_name}` is required and cannot be cleared"
+                ));
+            }
+            let mut cleared: Vec<Command> = Vec::new();
+            for setter_cmd in setter {
+                if !cleared.iter().any(|c| c.predicate == setter_cmd.predicate) {
+                    cleared.push(Command {
+                        target: Some("*".to_string()),
+                        local: None,
+                        action: Action::RemoveLink,
+                        ..setter_cmd.clone()
+                    });
+                }
+            }
+            return Ok(cleared);
+        }
         let expand_collection = matches!(value, serde_json::Value::Array(_))
             && setter.iter().all(|c| c.action == Action::AddLink);
         let elements: Vec<serde_json::Value> = match (expand_collection, value) {
