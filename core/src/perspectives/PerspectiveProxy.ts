@@ -718,9 +718,10 @@ export class PerspectiveProxy {
      *   query over their union, whose rows carry `__subjectClass` and
      *   `__subjectClasses` (#1238)
      * @param queryJson - Structured query as JSON string
-     * @returns Object with `instances` array, and `totalCount` when the query sets `count: true`
+     * @returns Object with `instances` array, `totalCount` when the query sets `count: true`,
+     *   and `nextCursor` when the query sends `after` and a full page came back
      */
-    async modelQuery(className: string | string[], queryJson: string, options?: CallOptions): Promise<{ instances: any[], totalCount?: number }> {
+    async modelQuery(className: string | string[], queryJson: string, options?: CallOptions): Promise<{ instances: any[], totalCount?: number, nextCursor?: string }> {
         return await this.#client.modelQuery(this.#handle.uuid, className, queryJson, options);
     }
 
@@ -788,7 +789,8 @@ export class PerspectiveProxy {
      * socket closes.
      *
      * @param className - The model class name, or several (same as modelQuery)
-     * @param queryJson - JSON-serialized query parameters (same as modelQuery)
+     * @param queryJson - JSON-serialized query parameters (same as modelQuery,
+     *   except `after`: a subscription re-runs one query, so a cursor is refused)
      * @returns `subscriptionId`, initial `result` and `revision` (0)
      */
     async modelSubscribe(className: string | string[], queryJson: string): Promise<Subscribed> {
@@ -1050,8 +1052,7 @@ export class PerspectiveProxy {
      * ```
      */
     async getSingleTarget(query: LinkQuery): Promise<string|void> {
-        delete query.target
-        const foundLinks = await this.get(query)
+        const foundLinks = await this.get(new LinkQuery({ ...query, target: undefined }))
         if(foundLinks.length)
             return foundLinks[0].data.target
         else
@@ -1146,10 +1147,12 @@ export class PerspectiveProxy {
      * ```
      *
      * A class whose stored shape already is the given one is left alone
-     * (`unchanged`): registering on every start writes nothing. The others
-     * are rewritten in one diff (`written`), which keeps links other apps
-     * put on the class. Both lists name classes by target class IRI.
-     * Answers once the executor reads the new shapes.
+     * (`unchanged`): registering on every start writes nothing, and the
+     * executor answers an all-unchanged call from its cached registry
+     * without taking the write mutex. The others are rewritten in one diff
+     * (`written`), which keeps links other apps put on the class. Both
+     * lists name classes by target class IRI. Answers once the executor
+     * reads the new shapes.
      *
      * Rejects, writing nothing, when two shapes name one class or share a
      * shape URI, or when another class holds a shape URI given here.
