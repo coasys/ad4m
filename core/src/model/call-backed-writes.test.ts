@@ -104,7 +104,10 @@ describe("a call-backed class's writes", () => {
         await (row as any).setProperty("title", "c");
         await (row as any).setRelationValues("tags", ["z"]);
         await row.delete();
-        const keys = [...bodies(sent, "instanceUpdate"), ...bodies(sent, "instanceRemove")].map((b) => b.className);
+        const keys = [
+          ...bodies(sent, "instanceUpdate").map((b) => b.className),
+          ...bodies(sent, "removeSubject"),
+        ];
         expect(keys.length).toBe(4);
         expect(new Set(keys)).toEqual(new Set([iri]));
       }
@@ -274,14 +277,15 @@ describe("a call-backed class's writes", () => {
   });
 
   describe("fromSHACL keeps the shape's call actions", () => {
-    it("delete() of an imported call-backed shape with no flag runs the destructor (instanceRemove)", async () => {
+    it("delete() of an imported call-backed shape with no flag runs the destructor (removeSubject)", async () => {
       // No `has_value` flag and every property optional: the property
       // metadata alone suggests no destructor. The shape declares one.
       const Thing = Ad4mModel.fromSHACL(callShape("mounttest://Thing"), "MountThing");
       const { proxy, sent } = proxyWith();
       const row = await fetched(Thing, proxy);
       await row.delete();
-      expect(bodies(sent, "instanceRemove")).toEqual([{ className: "mounttest://Thing", baseUri: MINTED }]);
+      expect(sent.filter((c) => c[0] === "removeSubject").map((c) => c.slice(2, 4))).toEqual([["mounttest://Thing", MINTED]]);
+      expect(methods(sent)).not.toContain("instanceRemove");
       expect(methods(sent)).not.toContain("removeLinks");
       expect((Thing as any).hasCallActions()).toBe(true);
     });
@@ -336,5 +340,38 @@ describe("an ordinary link-backed class keeps its established writes", () => {
     await row.save();
     expect(methods(sent)).not.toContain("instanceCreate");
     expect(methods(sent)).toContain("createSubject");
+  });
+});
+
+describe("delete() of a call-backed model is scoped to its class", () => {
+  // A mounted record and a local model can share a node (an annotation on
+  // the record's URI). Deleting the record runs its destructor through
+  // removeSubject and removes only incoming links, never the node's other
+  // outgoing links.
+  const Thing = Ad4mModel.fromSHACL(callShape("mounttest://Thing"), "MountThing");
+  const link = (source: string, predicate: string, target: string) => ({
+    author: "did:key:alice", timestamp: "2026-01-01T00:00:00.000Z",
+    data: { source, predicate, target }, proof: { key: "", signature: "" },
+  });
+
+  it("runs removeSubject under the class IRI and keeps a sibling model's links", async () => {
+    const { proxy, sent } = proxyWith();
+    const sibling = link(MINTED, "local://note", "literal:string:mine");
+    const incoming = link("mounttest://parent", "mounttest://child", MINTED);
+    const queried = (q: any) => (q?.target === MINTED ? [incoming] : q?.source === MINTED ? [sibling] : []);
+    const row = await fetched(Thing, proxy);
+    // Answer link queries from here on: the node holds a sibling's link and
+    // a parent points at it.
+    const original = (proxy as any).get.bind(proxy);
+    (proxy as any).get = async (q: any) => queried(q);
+    await row.delete();
+    (proxy as any).get = original;
+
+    expect(bodies(sent, "instanceRemove")).toEqual([]);
+    const removed = sent.filter((c) => c[0] === "removeSubject");
+    expect(removed.map((c) => c[2])).toEqual(["mounttest://Thing"]);
+    expect(removed.map((c) => c[3])).toEqual([MINTED]);
+    const removedLinks = sent.filter((c) => c[0] === "removeLinks").flatMap((c) => c[2]);
+    expect(removedLinks.map((l: any) => l.data.source)).toEqual(["mounttest://parent"]);
   });
 });

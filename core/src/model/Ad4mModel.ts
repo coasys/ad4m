@@ -2493,27 +2493,22 @@ export class Ad4mModel {
    * ```
    */
   async delete(batchId?: string) {
-    if (this.callBacked()) {
-      // The executor runs the declared destructor (a `call` reaches the
-      // language), then removes the links left on the node. A caller's
-      // batch is refused there when the destructor calls.
-      await this._perspective.instanceRemove({
-        className: (this.constructor as typeof Ad4mModel).queriedAs(),
-        baseUri: this._baseExpression,
-        ...(batchId && { batchId }),
-      });
-      return;
-    }
     const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
-    // Through an abstract class (#1435), `removeSubject` runs the destructors
-    // of the record's own classes.
-    const hasDestructor = !!this.abstractName() || Object.values(metadata.properties).some(
+    // A call-backed class's shape declares its destructor: `removeSubject`
+    // runs it (a `call` reaches the language; a caller's batch is refused
+    // there), under the class's target class IRI. Like any destructor it
+    // removes this class's data only: another model class may live on the
+    // same node. Through an abstract class (#1435), `removeSubject` runs the
+    // destructors of the record's own classes.
+    const callBacked = this.callBacked();
+    const hasDestructor = callBacked || !!this.abstractName() || Object.values(metadata.properties).some(
       (p) => p.required || p.flag || p.initial !== undefined
     );
 
     if (hasDestructor) {
       // Remove the subject itself (destructor actions)
-      await this._perspective.removeSubject(this, this._baseExpression, batchId);
+      const subjectClass = callBacked ? (this.constructor as typeof Ad4mModel).queriedAs() : this;
+      await this._perspective.removeSubject(subjectClass, this._baseExpression, batchId);
     } else {
       // No destructor (all-optional model).
       // SAFETY: We must NOT remove all outgoing links because another model

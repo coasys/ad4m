@@ -1378,3 +1378,78 @@ async fn execute_commands_refuses_a_call_before_writing_anything() {
     assert_eq!(link_count(&p).await, before, "the batch staged the addLink");
     assert!(calls(&lang).await.is_empty(), "the call ran");
 }
+
+/// How many of `LocalNote`'s links are on `base`.
+async fn sibling_links(p: &PerspectiveInstance, base: &str) -> usize {
+    p.get_links(&LinkQuery {
+        source: Some(base.to_string()),
+        ..Default::default()
+    })
+    .await
+    .unwrap()
+    .into_iter()
+    .filter(|l| {
+        l.data.predicate.as_deref() == Some("local://text") || l.data.target == "local://LocalNote"
+    })
+    .count()
+}
+
+/// `remove_subject` of a call-backed class, by its target class IRI (as
+/// the SDK's `delete()` sends it): the destructor's `delete` call runs,
+/// and a local model on the same node keeps its links.
+#[tokio::test]
+async fn removing_a_call_backed_record_keeps_a_sibling_model() {
+    let lang = load_mount_test_language().await;
+    let (mut p, ctx) = mounted("MountThing", thing_shape(&lang).await).await;
+    let base = created_thing(&lang, &ctx, &mut p).await;
+    p.add_sdna(
+        "LocalNote".to_string(),
+        String::new(),
+        SdnaType::SubjectClass,
+        Some(
+            json!({
+                "target_class": "local://LocalNote",
+                "constructor_actions": [
+                    {"action": "addLink", "source": "this", "predicate": "rdf://type", "target": "local://LocalNote"}
+                ],
+                "destructor_actions": [
+                    {"action": "removeLink", "source": "this", "predicate": "rdf://type", "target": "local://LocalNote"}
+                ],
+                "properties": [
+                    {"path": "rdf://type", "name": "type", "has_value": "local://LocalNote", "min_count": 1, "max_count": 1},
+                    {"path": "local://text", "name": "text", "max_count": 1, "writable": true,
+                     "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "local://text", "target": "value"}]}
+                ]
+            })
+            .to_string(),
+        ),
+        &ctx,
+    )
+    .await
+    .unwrap();
+    p.create_subject(
+        class("LocalNote"),
+        base.clone(),
+        Some(json!({"text": "mine"})),
+        None,
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(sibling_links(&p, &base).await, 2);
+
+    p.remove_subject(class("mounttest://Thing"), base.clone(), None, &ctx)
+        .await
+        .unwrap();
+
+    let log = calls(&lang).await;
+    assert!(
+        log.iter().any(|c| c["name"] == "delete"),
+        "the destructor did not call: {log:?}"
+    );
+    assert_eq!(
+        sibling_links(&p, &base).await,
+        2,
+        "the sibling model lost its links"
+    );
+}
