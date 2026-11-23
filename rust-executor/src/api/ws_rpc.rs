@@ -51,6 +51,13 @@ pub struct WsAuthQuery {
 
 // ── Entry point ─────────────────────────────────────────────────────────────
 
+/// Socket peer recorded by `into_make_service_with_connect_info`.
+///
+/// `Option<ConnectInfo<_>>` is not an extractor (`ConnectInfo` rejects when the
+/// extension is missing). `Extension` is optional, so a listener that did not record
+/// a peer yields `None` instead of rejecting the upgrade.
+type PeerExtension = axum::extract::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>;
+
 /// Axum handler for the `/api/v1/ws` upgrade.
 ///
 /// The `HandlerMap` is built once at server startup and shared via `Arc`.
@@ -61,11 +68,11 @@ pub async fn ws_rpc(
     axum::extract::Extension(handler_map): axum::extract::Extension<Arc<HandlerMap>>,
     reach: ListenerReach,
     headers: axum::http::HeaderMap,
-    connect: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    connect: Option<PeerExtension>,
 ) -> impl IntoResponse {
     let token = query.token.unwrap_or_default();
     let remote = match connect {
-        Some(axum::extract::ConnectInfo(peer)) => {
+        Some(axum::extract::Extension(axum::extract::ConnectInfo(peer))) => {
             client_ip(peer, &headers, &trusted_proxies_from_env())
         }
         // No socket peer: a forwarding header has nothing to be checked against.
