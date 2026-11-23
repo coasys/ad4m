@@ -152,7 +152,9 @@ const ELIDED_TOOL_RESULT_STUB: &str = "[elided: this tool result did not fit the
 ///      rest of the request leaves: room for `cap_tool_result`'s note
 ///      keeps a truncated prefix of the result — the turn keeps the data
 ///      that fits instead of none — and less room than that takes the
-///      elision stub, so the call/result pairing holds either way.
+///      elision stub when the stub is smaller than the result. A result
+///      already shorter than the stub stays as it is, so the call/result
+///      pairing holds either way.
 ///
 /// What trimming cannot fix stays: a question plus system prompt bigger
 /// than the budget goes out over it — mangling the person's own words is
@@ -202,15 +204,19 @@ fn trim_messages_to_budget(messages: &[Value], budget_bytes: usize, model_id: &s
             {
                 let before = out[j].1;
                 let room = budget_bytes.saturating_sub(total - before);
-                let shrunk = shrink_tool_result(&mut out[j].0, room);
-                if shrunk != before {
+                // Shrink a copy. A stub longer than this result would grow
+                // the list and steal room from a later result that can fit.
+                let mut candidate = out[j].0.clone();
+                let shrunk = shrink_tool_result(&mut candidate, room);
+                if shrunk < before {
+                    out[j].0 = candidate;
                     log::debug!(
                         "harness_bridge: context_budget cut tool result {} from {before} to {shrunk} bytes to fit the {budget_bytes}B budget for {model_id}",
                         out[j].0["tool_call_id"].as_str().unwrap_or("")
                     );
+                    total = total - before + shrunk;
+                    out[j].1 = shrunk;
                 }
-                total = total - before + shrunk;
-                out[j].1 = shrunk;
                 j += 1;
             }
             if total <= budget_bytes {
@@ -239,10 +245,15 @@ fn trim_messages_to_budget(messages: &[Value], budget_bytes: usize, model_id: &s
                 // always less than its current size — the loop condition
                 // says the rest of the request alone is not under budget
                 // — but shrinking it can be what brings the total down.
+                // Keep the original when the cut would grow it.
                 let room = budget_bytes.saturating_sub(total - *size);
-                let shrunk = shrink_tool_result(m, room);
-                total = total - *size + shrunk;
-                *size = shrunk;
+                let mut candidate = m.clone();
+                let shrunk = shrink_tool_result(&mut candidate, room);
+                if shrunk < *size {
+                    *m = candidate;
+                    total = total - *size + shrunk;
+                    *size = shrunk;
+                }
             }
         }
     }
@@ -1724,6 +1735,79 @@ mod injected_path_dispatch_tests {
         assert!(fed.contains("[truncated:"), "{fed:?}");
     }
 
+    // A group whose first result is already shorter than the elision stub.
+    // Shrinking it used to replace "ok" with the stub, which is larger, and
+    // that stole room from the result that actually needs the cut.
+    #[test]
+    fn a_short_result_before_the_question_is_not_grown() {
+        let messages = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({
+                "role": "assistant", "content": null,
+                "tool_calls": [
+                    {"id": "c1", "type": "function",
+                     "function": {"name": "t", "arguments": "{}"}},
+                    {"id": "c2", "type": "function",
+                     "function": {"name": "t", "arguments": "{}"}},
+                ],
+            }),
+            json!({"role": "tool", "tool_call_id": "c1", "content": "ok"}),
+            json!({"role": "tool", "tool_call_id": "c2", "content": "z".repeat(8_000)}),
+            json!({"role": "user", "content": "the question being answered"}),
+        ];
+        let budget = 2_000;
+        let out = trim_messages_to_budget(&messages, budget, "m");
+        assert!(msg_size(&out) <= budget, "{} bytes", msg_size(&out));
+        let ok = out
+            .iter()
+            .find(|m| m["tool_call_id"] == "c1")
+            .expect("the short result was dropped with its group");
+        assert_eq!(ok["content"], "ok");
+        let big = out.iter().find(|m| m["tool_call_id"] == "c2").unwrap();
+        assert!(
+            big["content"].as_str().unwrap().len() < 8_000,
+            "the oversized result was not cut: {big}"
+        );
+        assert!(out
+            .iter()
+            .any(|m| m["content"] == "the question being answered"));
+    }
+
+    // The same growth on the pinned tail: nothing before the question can
+    // drop, so the final pass shrinks tool results. "ok" stays "ok".
+    #[test]
+    fn a_pinned_short_result_is_not_grown_to_the_stub() {
+        let messages = vec![
+            json!({"role": "user", "content": "the question being answered"}),
+            json!({
+                "role": "assistant", "content": null,
+                "tool_calls": [
+                    {"id": "c1", "type": "function",
+                     "function": {"name": "t", "arguments": "{}"}},
+                    {"id": "c2", "type": "function",
+                     "function": {"name": "t", "arguments": "{}"}},
+                ],
+            }),
+            json!({"role": "tool", "tool_call_id": "c1", "content": "ok"}),
+            json!({"role": "tool", "tool_call_id": "c2", "content": "z".repeat(8_000)}),
+        ];
+        let budget = 2_000;
+        let out = trim_messages_to_budget(&messages, budget, "m");
+        assert!(msg_size(&out) <= budget, "{} bytes", msg_size(&out));
+        let ok = out
+            .iter()
+            .find(|m| m["tool_call_id"] == "c1")
+            .expect("the short result was dropped");
+        assert_eq!(ok["content"], "ok");
+        assert!(
+            out.iter().find(|m| m["tool_call_id"] == "c2").unwrap()["content"]
+                .as_str()
+                .unwrap()
+                .len()
+                < 8_000
+        );
+    }
+
     #[test]
     fn a_lone_question_the_budget_cannot_hold_is_left_alone() {
         // Trimming can do nothing honest here — the person's own words are
@@ -1759,8 +1843,13 @@ mod injected_path_dispatch_tests {
                     && out[j]["role"] == "tool"
                     && size(&out) > budget_bytes
                 {
-                    let room = budget_bytes.saturating_sub(size(&out) - out[j].to_string().len());
-                    shrink_tool_result(&mut out[j], room);
+                    let before = out[j].to_string().len();
+                    let room = budget_bytes.saturating_sub(size(&out) - before);
+                    let mut candidate = out[j].clone();
+                    let shrunk = shrink_tool_result(&mut candidate, room);
+                    if shrunk < before {
+                        out[j] = candidate;
+                    }
                     j += 1;
                 }
                 if size(&out) <= budget_bytes {
@@ -1780,8 +1869,13 @@ mod injected_path_dispatch_tests {
                     break;
                 }
                 if out[i]["role"] == "tool" {
-                    let room = budget_bytes.saturating_sub(size(&out) - out[i].to_string().len());
-                    shrink_tool_result(&mut out[i], room);
+                    let before = out[i].to_string().len();
+                    let room = budget_bytes.saturating_sub(size(&out) - before);
+                    let mut candidate = out[i].clone();
+                    let shrunk = shrink_tool_result(&mut candidate, room);
+                    if shrunk < before {
+                        out[i] = candidate;
+                    }
                 }
             }
         }
