@@ -1322,10 +1322,10 @@ describe('WakerSubscriptionManager', () => {
             : Promise.resolve({ instances: [], totalCount: 0 }),
       };
       const wakes: any[] = [];
-      const manager = new WakerSubscriptionManager({
+      const manager = makeManager({
         perspectiveClient: client,
         logger: noopLogger(),
-        QuerySubscriptionProxy: answeringProxyClass(delivers, []),
+        live: answeringLive(delivers, []),
         debounceMs: 10,
         retryPendingMs: 60_000,
         onWake: (_sub, _result, mentions) => { wakes.push(mentions); },
