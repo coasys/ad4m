@@ -171,5 +171,29 @@ pub fn encode_ordering_entry(entry: &OrderingEntry) -> Result<String, Error> {
     ))
 }
 
+/// Millisecond stamp for the entries one save writes.
+///
+/// `seq` restarts at 0 on every call, and an equal pid is tie-broken on
+/// `after`. A stamp that is not strictly newer than every entry already
+/// stored can lose that tie, so the save's order is not the one a reader
+/// reconstructs. Callers pass the wall clock; this moves it one millisecond
+/// past the newest pid in `entries`.
+///
+/// `collection_append_link` and `apply_collection_ordering` both go through
+/// here. An append that lands on millisecond `t` writes `t+1`. A setter that
+/// stamped `t` on its own would lose to that append, and reversing two
+/// members would leave them pointing at each other.
+pub fn ordering_timestamp_ms(now_ms: u64, entries: &[OrderingEntry]) -> u64 {
+    match entries
+        .iter()
+        .filter_map(|entry| entry.pid.split('_').next())
+        .filter_map(|millis| millis.parse::<u64>().ok())
+        .max()
+    {
+        Some(latest) if now_ms <= latest => latest.saturating_add(1),
+        _ => now_ms,
+    }
+}
+
 #[cfg(test)]
 mod tests;

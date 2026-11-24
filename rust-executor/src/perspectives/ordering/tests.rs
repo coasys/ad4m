@@ -6,7 +6,7 @@
 //! The `deletion` module below is that claim's evidence.
 
 use super::linked_list::LinkedListStrategy;
-use super::types::{OrderingEntry, LIST_HEAD};
+use super::types::{make_pid, OrderingEntry, LIST_HEAD};
 use super::*;
 
 const PRED: &str = "we://children";
@@ -32,6 +32,19 @@ fn members(items: &[&str]) -> Vec<(String, String)> {
 
 fn s() -> LinkedListStrategy {
     LinkedListStrategy::new()
+}
+
+#[test]
+fn ordering_timestamp_moves_past_an_entry_at_the_same_millisecond() {
+    let entries = vec![entry("a", LIST_HEAD, &make_pid(1_000, 0, "did:x"))];
+    assert_eq!(ordering_timestamp_ms(1_000, &entries), 1_001);
+    assert_eq!(ordering_timestamp_ms(999, &entries), 1_001);
+    assert_eq!(
+        ordering_timestamp_ms(1_002, &entries),
+        1_002,
+        "a clock already past the newest entry is left alone"
+    );
+    assert_eq!(ordering_timestamp_ms(1_000, &[]), 1_000);
 }
 
 // ---- reconstruction ------------------------------------------------------

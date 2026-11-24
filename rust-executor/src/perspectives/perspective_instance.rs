@@ -3715,8 +3715,12 @@ impl PerspectiveInstance {
                 }
         };
 
-        // A target this batch has already removed is gone as far as the batch is
-        // concerned, even though the store still has it.
+        // A target this batch has removed is gone, even though the store still
+        // has it. A target it has also staged again is not: the new expression
+        // replaces the one in `removals`. Remove A, add A, add D — D's append
+        // has to see A. Skipping every addition whose target was removed drops
+        // that replacement, D lands after C, and the read comes back
+        // `[b, c, d, a]`. A target that was only removed stays out.
         let removed: std::collections::HashSet<&str> = batch
             .diff
             .removals
@@ -3733,8 +3737,7 @@ impl PerspectiveInstance {
             out.iter().map(|l| l.data.target.clone()).collect();
 
         for expr in batch.diff.additions.iter().filter(|e| relevant(&e.data)) {
-            if removed.contains(expr.data.target.as_str()) || !seen.insert(expr.data.target.clone())
-            {
+            if !seen.insert(expr.data.target.clone()) {
                 continue;
             }
             let status = expr.status.clone().unwrap_or_default();
@@ -3806,7 +3809,13 @@ impl PerspectiveInstance {
             crate::perspectives::ordering::parse_ordering_entries(&targets, predicate);
 
         let agent_did = crate::agent::did();
-        let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        // Same stamp as `collection_append_link`. An append that lands on an
+        // existing millisecond writes `t+1`; a setter that still stamps `t`
+        // loses to that entry, and reversing two members cycles.
+        let now_ms = crate::perspectives::ordering::ordering_timestamp_ms(
+            chrono::Utc::now().timestamp_millis().max(0) as u64,
+            &current_entries,
+        );
 
         let entries = if current_entries.is_empty() {
             // No prior ordering: the first save on an ordered collection, or one
@@ -3944,20 +3953,14 @@ impl PerspectiveInstance {
 
         // `seq` restarts at 0 on every call, and an equal pid is tie-broken
         // on `after`. That tie can keep the old pointer, so the neighbour
-        // rewrite never lands and the cycle stays. A save that lands on an
-        // existing entry's millisecond is stamped one millisecond later,
-        // which sorts strictly after every entry already stored.
-        let mut now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
-        if let Some(latest) = current_entries
-            .iter()
-            .filter_map(|entry| entry.pid.split('_').next())
-            .filter_map(|millis| millis.parse::<u64>().ok())
-            .max()
-        {
-            if now_ms <= latest {
-                now_ms = latest.saturating_add(1);
-            }
-        }
+        // rewrite never lands and the cycle stays. The stamp is one
+        // millisecond past every entry already stored — the same rule the
+        // setter uses, so a setter in this millisecond cannot lose to an
+        // append that was itself bumped.
+        let now_ms = crate::perspectives::ordering::ordering_timestamp_ms(
+            chrono::Utc::now().timestamp_millis().max(0) as u64,
+            &current_entries,
+        );
         let agent_did = crate::agent::did();
         let already_placed = current_entries.iter().any(|entry| entry.item == item);
         let entries = if already_placed {
@@ -10948,6 +10951,159 @@ mod tests {
         assert_valid_order(&perspective, parent, &["we://b", "we://c", "we://a"]).await;
     }
 
+    /// #1936: remove A, add A, add D in one batch. The re-added A is a member
+    /// of the batch, so D appends after A. Dropping A because its old link is
+    /// still in `removals` places D after C and the read comes back
+    /// `[b, c, d, a]`.
+    #[tokio::test]
+    async fn readded_member_in_one_batch_is_ordered_before_the_later_append() {
+        let mut perspective = ordered_collection_perspective().await;
+        let parent = "we://parent/readd-batch";
+        create_ordered_parent(&mut perspective, parent).await;
+        create_ordered_child(&mut perspective, "we://d").await;
+        for child in ["we://a", "we://b", "we://c"] {
+            add_ordered_member(&mut perspective, parent, child).await;
+        }
+        assert_valid_order(&perspective, parent, &["we://a", "we://b", "we://c"]).await;
+
+        let batch_id = perspective.create_batch().await;
+        run_member_command_in_batch(
+            &mut perspective,
+            parent,
+            "we://a",
+            Action::RemoveLink,
+            Some(&batch_id),
+        )
+        .await;
+        run_member_command_in_batch(
+            &mut perspective,
+            parent,
+            "we://a",
+            Action::AddLink,
+            Some(&batch_id),
+        )
+        .await;
+        run_member_command_in_batch(
+            &mut perspective,
+            parent,
+            "we://d",
+            Action::AddLink,
+            Some(&batch_id),
+        )
+        .await;
+        perspective
+            .commit_batch(batch_id, &AgentContext::main_agent())
+            .await
+            .expect("commit re-add batch");
+
+        assert_valid_order(
+            &perspective,
+            parent,
+            &["we://b", "we://c", "we://a", "we://d"],
+        )
+        .await;
+    }
+
+    /// The same batch, without putting A back. A removal that is not replaced
+    /// stays out, and D appends after C.
+    #[tokio::test]
+    async fn removed_member_in_one_batch_stays_out_of_the_later_append() {
+        let mut perspective = ordered_collection_perspective().await;
+        let parent = "we://parent/remove-batch";
+        create_ordered_parent(&mut perspective, parent).await;
+        create_ordered_child(&mut perspective, "we://d").await;
+        for child in ["we://a", "we://b", "we://c"] {
+            add_ordered_member(&mut perspective, parent, child).await;
+        }
+
+        let batch_id = perspective.create_batch().await;
+        run_member_command_in_batch(
+            &mut perspective,
+            parent,
+            "we://a",
+            Action::RemoveLink,
+            Some(&batch_id),
+        )
+        .await;
+        run_member_command_in_batch(
+            &mut perspective,
+            parent,
+            "we://d",
+            Action::AddLink,
+            Some(&batch_id),
+        )
+        .await;
+        perspective
+            .commit_batch(batch_id, &AgentContext::main_agent())
+            .await
+            .expect("commit removal batch");
+
+        assert_valid_order(&perspective, parent, &["we://b", "we://c", "we://d"]).await;
+    }
+
+    /// #1936: `collection_append_link` stamps a save that lands on an existing
+    /// entry's millisecond one millisecond later. `apply_collection_ordering`
+    /// used the wall clock as it stood, so a setter could write an older pid
+    /// than an append that had already been bumped to `t+1`. The older pid
+    /// loses, and reversing two members leaves them pointing at each other.
+    ///
+    /// The planted entry is that bumped append: same position B already has,
+    /// timestamp a minute ahead of the clock. The chain is still `[a, b]`
+    /// until the setter asks for `[b, a]`.
+    #[tokio::test]
+    async fn collection_setter_beats_an_ordering_entry_stamped_ahead_of_the_clock() {
+        let mut perspective = ordered_collection_perspective().await;
+        let parent = "we://parent/stamp";
+        create_ordered_parent(&mut perspective, parent).await;
+        add_ordered_member(&mut perspective, parent, "we://a").await;
+        add_ordered_member(&mut perspective, parent, "we://b").await;
+        assert_valid_order(&perspective, parent, &["we://a", "we://b"]).await;
+
+        let future_ms =
+            (chrono::Utc::now().timestamp_millis().max(0) as u64).saturating_add(60_000);
+        let ahead = crate::perspectives::ordering::OrderingEntry {
+            predicate: "we://children".to_string(),
+            item: "we://b".to_string(),
+            pid: crate::perspectives::ordering::make_pid(future_ms, 0, &crate::agent::did()),
+            after: Some("we://a".to_string()),
+            position: None,
+        };
+        let target = crate::perspectives::ordering::encode_ordering_entry(&ahead)
+            .expect("encode planted entry");
+        perspective
+            .add_link(
+                Link {
+                    source: parent.to_string(),
+                    predicate: Some(
+                        crate::perspectives::ordering::COLLECTION_ORDER_PREDICATE.to_string(),
+                    ),
+                    target,
+                },
+                LinkStatus::Shared,
+                None,
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("plant a newer ordering entry");
+        assert_valid_order(&perspective, parent, &["we://a", "we://b"]).await;
+
+        perspective
+            .update_subject(
+                SubjectClassOption {
+                    class_name: Some("Parent".to_string()),
+                    query: None,
+                },
+                parent.to_string(),
+                serde_json::json!({ "children": ["we://b", "we://a"] }),
+                None,
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("collectionSetter reverse");
+
+        assert_valid_order(&perspective, parent, &["we://b", "we://a"]).await;
+    }
+
     /// An ordinary `addLink` whose predicate no shape orders must not classify
     /// the source or load shapes. Classification is the expensive part, and it
     /// used to run before anything asked whether the predicate was ordered.
@@ -11249,11 +11405,37 @@ mod tests {
             .expect("create parent");
     }
 
+    async fn create_ordered_child(perspective: &mut PerspectiveInstance, id: &str) {
+        perspective
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some("Child".to_string()),
+                    query: None,
+                },
+                id.to_string(),
+                None,
+                None,
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("create child");
+    }
+
     async fn run_member_command(
         perspective: &mut PerspectiveInstance,
         parent: &str,
         child: &str,
         action: Action,
+    ) {
+        run_member_command_in_batch(perspective, parent, child, action, None).await;
+    }
+
+    async fn run_member_command_in_batch(
+        perspective: &mut PerspectiveInstance,
+        parent: &str,
+        child: &str,
+        action: Action,
+        batch_id: Option<&str>,
     ) {
         let what = format!("{action:?}");
         perspective
@@ -11270,7 +11452,7 @@ mod tests {
                     name: "value".to_string(),
                     value: serde_json::Value::String(child.to_string()),
                 }],
-                None,
+                batch_id.map(str::to_string),
                 &AgentContext::main_agent(),
             )
             .await
