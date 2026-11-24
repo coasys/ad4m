@@ -7,7 +7,7 @@ import {
     linkExpressionInputToWire, linkExpressionToWire, linkMutationsToWire,
 } from "../links/Links";
 import { NeighbourhoodClient } from "../neighbourhood/NeighbourhoodClient";
-import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
+import { NeighbourhoodProxy, type SessionOwners } from "../neighbourhood/NeighbourhoodProxy";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
 import { PerspectiveHandle } from "./PerspectiveHandle";
@@ -56,6 +56,8 @@ export class PerspectiveClient {
     #apiClient: ApiClient
     #expressionClient?: ExpressionClient
     #neighbourhoodClient?: NeighbourhoodClient
+    #sessionOwners?: SessionOwners
+    #neighbourhoodProxies = new Map<string, NeighbourhoodProxy>()
     #aiClient?: AIClient
     #sparqlInFlight = new Map<string, Promise<string>>()
     /** Per perspective, how many writes through this client have settled; part of the in-flight key. */
@@ -71,6 +73,11 @@ export class PerspectiveClient {
 
     setNeighbourhoodClient(client: NeighbourhoodClient) {
         this.#neighbourhoodClient = client
+    }
+
+    /** The agent and runtime clients a neighbourhood's call sessions read the DID and SFU status from. */
+    setSessionOwners(owners: SessionOwners) {
+        this.#sessionOwners = owners
     }
 
     setAIClient(client: AIClient) {
@@ -250,6 +257,7 @@ export class PerspectiveClient {
 
     async remove(uuid: string): Promise<{perspectiveRemove: boolean}> {
         const result = await this.#apiClient.call('perspective.remove', { uuid })
+        this.#neighbourhoodProxies.delete(uuid)
         return { perspectiveRemove: result }
     }
 
@@ -637,8 +645,14 @@ export class PerspectiveClient {
         return this.#apiClient.on(type, handler, filter)
     }
 
+    /** The perspective's neighbourhood proxy: one per uuid, so its sessions and handlers are shared. */
     getNeighbourhoodProxy(uuid: string): NeighbourhoodProxy {
-        return new NeighbourhoodProxy(this.#neighbourhoodClient!, uuid)
+        let proxy = this.#neighbourhoodProxies.get(uuid)
+        if (!proxy) {
+            proxy = new NeighbourhoodProxy(this.#neighbourhoodClient!, uuid, this.#sessionOwners!)
+            this.#neighbourhoodProxies.set(uuid, proxy)
+        }
+        return proxy
     }
 
     async createBatch(uuid: string): Promise<string> {

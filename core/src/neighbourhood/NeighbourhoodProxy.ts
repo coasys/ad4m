@@ -20,18 +20,22 @@ import { createSession, type Session, type SessionCreateOptions } from "./Sessio
 import { createTelepresenceChannel } from "./MeshManager";
 import { defaultDeviceId } from "./SfuManager";
 
+/** The two values a call session needs from the client's agent and runtime. */
+export interface SessionOwners {
+    agent: { did(): Promise<string | null> }
+    runtime: { sfuStatus(): Promise<SfuStatus> }
+}
+
 export class NeighbourhoodProxy {
     #client: NeighbourhoodClient
     #pID: string
-    #agentDid: string
+    #owners: SessionOwners
     #sessions: Session[] = []
-    /** Cached SFU status — fetched once per proxy lifetime. */
-    #sfuStatusCache: SfuStatus | null = null
 
-    constructor(client: NeighbourhoodClient, pID: string, agentDid: string = "") {
+    constructor(client: NeighbourhoodClient, pID: string, owners: SessionOwners) {
         this.#client = client
         this.#pID = pID
-        this.#agentDid = agentDid
+        this.#owners = owners
     }
 
     // ── Telepresence ────────────────────────────────────────────────────
@@ -118,44 +122,37 @@ export class NeighbourhoodProxy {
     /**
      * Create a WebRTC media session.  Call `session.join(localStream)` to connect.
      *
-     * Fetches the local executor's SFU status (cached after the first
-     * call): with `topology: "auto"`, a session uses the SFU only when it
+     * Reads the caller's DID (`client.agent.did()`) and the local executor's SFU status
+     * (`client.runtime.sfuStatus()`) together; the client keeps both, so a later session
+     * reads them locally. With `topology: "auto"`, a session uses the SFU only when it
      * is public and hosts every member of the neighbourhood.
      */
     async createSession(roomName: string, options?: SessionCreateOptions): Promise<Session> {
-        // `perspective.getNeighbourhoodProxy()` builds the proxy without a DID; the session needs
-        // the caller's own, so ask the executor once.
-        if (!this.#agentDid) {
-            this.#agentDid = (await this.#client.callerDid()) ?? ""
-        }
-        if (!this.#agentDid) {
+        const [agentDid, sfuStatus] = await Promise.all([
+            this.#owners.agent.did(),
+            // Non-fatal: a session works without the SFU status.
+            this.#owners.runtime.sfuStatus().catch((): undefined => undefined),
+        ])
+        if (!agentDid) {
             throw new Error("Cannot create a call session: the executor reports no agent DID")
-        }
-        // Fetch SFU status once — reachability only changes at executor restart.
-        if (!this.#sfuStatusCache) {
-            try {
-                this.#sfuStatusCache = await this.#client.sfuStatus()
-            } catch {
-                // Non-fatal — session works without SFU advertisement.
-            }
         }
         const proxy = this
         const deviceId = options?.deviceId || defaultDeviceId()
         const session = createSession({
             api: this.#client,
             roomId: roomName,
-            agentDid: this.#agentDid,
+            agentDid,
             neighbourhoodUrl: options?.neighbourhoodUrl ?? "",
             topology: options?.topology ?? "auto",
             sfuConfig: options?.sfuConfig,
             iceServers: options?.iceServers,
             deviceId,
-            localSfuStatus: this.#sfuStatusCache ?? undefined,
+            localSfuStatus: sfuStatus,
             sfuServesAllMembers: () => proxy.#client.sfuServesAllMembers(proxy.#pID),
             // Mesh needs a signalling channel and presence callbacks.
             // SFU ignores these — they remain unused when the resolved
             // topology selects the SFU path.
-            channel: createTelepresenceChannel(proxy, proxy.#agentDid, deviceId),
+            channel: createTelepresenceChannel(proxy, agentDid, deviceId),
             ownOnlineStatus: () => proxy.ownOnlineStatus(),
             setOnlineStatus: (status) => proxy.setOnlineStatusU(status),
             onlineAgents: () => proxy.onlineAgents(),

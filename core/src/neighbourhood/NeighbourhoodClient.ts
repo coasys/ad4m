@@ -19,7 +19,6 @@ import type {
     SfuRoomInfo,
     SfuRoomRoster,
     SfuSessionReplaced,
-    SfuStatus,
 } from "./SfuTypes"
 
 export class NeighbourhoodClient {
@@ -437,21 +436,6 @@ export class NeighbourhoodClient {
     }
 
     // ── SFU diagnostic / test-harness endpoints ────────────────────────
-
-    /** The calling agent's own DID — the user's, for a user token. */
-    async callerDid(): Promise<string | null> {
-        return (await this.#apiClient.call("agent.status", {})).did
-    }
-
-    /**
-     * Read-only: SFU service status including public reachability.
-     * Returns whether this executor can relay media to remote
-     * participants (public), sits behind NAT (nat), or could not
-     * determine its reachability (unknown).
-     */
-    async sfuStatus(): Promise<SfuStatus> {
-        return this.#apiClient.call("sfu.status", {})
-    }
 
     /**
      * Read-only: how many SFU↔SFU pipe transports are fully established,

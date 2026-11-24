@@ -1,4 +1,5 @@
 import { callSafely } from './notifyListeners'
+import { Mirror } from './mirror/Mirror'
 import { LONG_METHODS, OPENS_METHODS, READ_METHODS } from './generated/api/RpcMethods'
 import type { RpcMethod, RpcMethods } from './generated/api/RpcMethods'
 import type { EventMap, EventName } from './generated/api/Events'
@@ -194,6 +195,13 @@ export class ApiClient {
         this._fetchImpl = fetchImpl
     }
 
+    /**
+     * The values this client read from its executor, one entry per data point. A reconnect
+     * or a `lagged` marker (the executor dropped events for this socket) marks every entry
+     * stale. Two clients share nothing.
+     */
+    readonly mirror = new Mirror()
+
     getBaseUrl(): string { return this.baseUrl }
     getToken(): string | undefined { return this.token }
 
@@ -312,6 +320,8 @@ export class ApiClient {
             }
             // A dropped socket's events are not this client's any more: its successor watches again.
             if (parsed.type === 'pong' || this._ws !== ws) return
+            // The executor sends this on a socket that dropped events: pushes may be lost.
+            if (parsed.type === 'query-subscription-update' && parsed.lagged === true) this.mirror.markAllStale()
             const perspective = parsed.perspectiveUuid
             const regs = this._handlers.get(parsed.type as string)
             // Like DOM events: a handler added during dispatch waits for the
@@ -350,6 +360,8 @@ export class ApiClient {
         }
         this._armPendingProbe()
         if (this._hasConnectedOnce) {
+            // Events sent while the socket was down are lost.
+            this.mirror.markAllStale()
             for (const cb of this._reconnectCallbacks) {
                 try { cb() } catch (e) {
                     console.error('Error in reconnect callback:', e)

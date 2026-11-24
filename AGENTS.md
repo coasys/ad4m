@@ -87,6 +87,33 @@ it in older docs.
 - `connect/` tests (vitest + happy-dom) fail under Node 26 (`localStorage.clear`
   undefined); run them under Node 24.
 
+## Client data mirror (`core/src/mirror/`)
+
+Each `ApiClient` owns one `Mirror` (`apiClient.mirror`): one `Entry` per data
+point the SDK reads from the executor, keyed by scope (`executor | agent |
+{perspective} | {neighbourhood}`) + RPC name + canonical params. Two clients
+share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
+`subscribe`, `read`).
+
+- States: `unknown | loading | fresh | stale | error`. A read of an unknown,
+  stale or failed entry sends one request; concurrent reads share it. A value
+  push (`entry.push`) replaces the value and notifies unless it is equal; an
+  invalidation, a reconnect (`ApiClient._onOpen` after the first open) or the
+  `lagged` marker (`{"type":"query-subscription-update","lagged":true}`) calls
+  `invalidate`: the entry is stale and reloads only if it has subscribers.
+- An answer is kept only if nothing changed the entry since its request went
+  out: one sent before a reconnect reaches its readers once and is dropped. A
+  failure is never kept.
+- Kinds (`pushed | live | fixed | immutable | declared`) say what keeps an
+  entry fresh. Built so far: `agent.status` (`pushed`: `agent-status-changed`
+  and the results of `agent.unlock/lock/generate/import`; read through
+  `client.agent.status()` and `client.agent.did()`, a status with no DID is not
+  kept) and `sfu.status` (`fixed`: `client.runtime.sfuStatus()`; a failure
+  is not kept). `NeighbourhoodProxy.createSession` reads both together;
+  `PerspectiveClient.getNeighbourhoodProxy(uuid)` returns one proxy per uuid.
+- A test that reuses one client across tests must not expect a fresh read:
+  the mirror keeps the last status. Use a new client.
+
 ## Holochain DHT and GetStrategy
 
 **Important**: Holochain currently only implements **full-arc (full-sync) DHT mode** where every node gossips and stores all data. This means:

@@ -4,6 +4,12 @@ import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 
 const signal = new PerspectiveExpression("did:test:alice", "2026-01-01T00:00:00Z", new Perspective(), { key: "key", signature: "sig" });
 
+// Signal handlers do not touch the owners; sessions are tested in clientMirror.test.ts.
+const owners = {
+  agent: { did: async () => "did:test:me" },
+  runtime: { sfuStatus: async () => { throw new Error("no sfu"); } },
+};
+
 // Mock ApiClient's on() to avoid real WebSocket connections
 jest.mock('../apiClient', () => {
   return {
@@ -24,7 +30,8 @@ describe("NeighbourhoodProxy", () => {
     const neighbourhoodClient = new NeighbourhoodClient("http://localhost:0", "test-token");
     const neighbourhoodProxy = new NeighbourhoodProxy(
       neighbourhoodClient,
-      neighbourhoodURI
+      neighbourhoodURI,
+      owners
     );
 
     let callbacks = 0;
@@ -65,7 +72,8 @@ describe("NeighbourhoodProxy", () => {
     const neighbourhoodClient = new NeighbourhoodClient("http://localhost:0", "test-token");
     const neighbourhoodProxy = new NeighbourhoodProxy(
       neighbourhoodClient,
-      neighbourhoodURI
+      neighbourhoodURI,
+      owners
     );
 
     let callbacks1 = 0;
@@ -96,28 +104,5 @@ describe("NeighbourhoodProxy", () => {
     // Check that only handler2 was called (handler1 was removed)
     expect(callbacks1).toBe(0);
     expect(callbacks2).toBe(1);
-  });
-
-  // `perspective.getNeighbourhoodProxy()` passes no DID, and that is how apps reach sessions.
-  describe("createSession with no DID given", () => {
-    function proxyAnswering(did: string | null) {
-      const client = new NeighbourhoodClient("http://localhost:0", "test-token");
-      const callerDid = jest.spyOn(client, "callerDid").mockResolvedValue(did);
-      jest.spyOn(client, "sfuStatus").mockRejectedValue(new Error("no sfu"));
-      return { proxy: new NeighbourhoodProxy(client, "uuid"), callerDid };
-    }
-
-    it("asks the executor for the caller's DID, once", async () => {
-      const { proxy, callerDid } = proxyAnswering("did:key:me");
-      const session = await proxy.createSession("room", { neighbourhoodUrl: "neighbourhood://n" });
-      await proxy.createSession("room-2", { neighbourhoodUrl: "neighbourhood://n" });
-      expect(session).toBeDefined();
-      expect(callerDid).toHaveBeenCalledTimes(1);
-    });
-
-    it("refuses when the executor reports no DID", async () => {
-      const { proxy } = proxyAnswering(null);
-      await expect(proxy.createSession("room")).rejects.toThrow("no agent DID");
-    });
   });
 });

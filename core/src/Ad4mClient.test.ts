@@ -1113,7 +1113,7 @@ describe('NeighbourhoodClient', () => {
         const releaseOffers = freshClient.neighbourhood.subscribeSfuCallRenegotiationOffer('did:me', offers);
         freshClient.neighbourhood.subscribeSfuMigrateEvent('did:me', migrations);
         freshClient.neighbourhood.subscribeSfuDataChannel(data);
-        await freshClient.neighbourhood.sfuStatus();
+        await freshClient.runtime.sfuStatus();
         const ws = lastOf(MockWebSocket.instances);
         expect(ws.rpc.map(c => c.type)).toEqual(['events.watch', 'sfu.status']);
         expect(ws.rpc[0].params).toEqual({ 'sfu-call-renegotiation-offer': null, 'sfu-data': null, 'sfu-migrate': null });
@@ -1421,7 +1421,8 @@ describe('IdentityClient', () => {
     });
 
     test('agent.status() carries the identity beside the device did', async () => {
-        const status = await ad4m.agent.status();
+        // A new client: `ad4m` keeps the status its earlier generate() and import() tests returned.
+        const status = await newClient().agent.status();
         expect(status.did).toBe('did:test:123');
         expect(status.identity).toBe('did:scid:coasys:1:QmTest');
     });

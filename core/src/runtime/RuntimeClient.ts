@@ -3,6 +3,8 @@ import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import { RuntimeInfo, SentMessage, NotificationInput, NotificationUpdate, Notification, ImportResult, UserStatistics } from "./RuntimeTypes"
 import type { HostRate, LogFilter, LogTail, RuntimeConfig, SetConfigResult, UnytVersionInfo } from "../generated/api"
 import { LanguageMeta } from "../language/LanguageMeta"
+import type { SfuStatus } from "../generated/api/SfuStatus"
+import type { Live } from "../mirror/Mirror"
 
 export class RuntimeClient {
     #apiClient: ApiClient
@@ -13,6 +15,28 @@ export class RuntimeClient {
 
     async info(): Promise<RuntimeInfo> {
         return this.#apiClient.call('runtime.info', {})
+    }
+
+    /**
+     * Whether this executor can relay media to remote participants: `public`, behind NAT
+     * (`nat`) or `unknown`. Fixed for an executor process, so one value is kept per client
+     * and read again after a reconnect; an answer sent before a reconnect is used once and
+     * not kept. A failure (the SFU is not running yet) is not kept: the next read asks again.
+     */
+    async sfuStatus(): Promise<SfuStatus> {
+        return this.live.sfuStatus().read()
+    }
+
+    /** Views on the client's mirror entries: subscribe for changes, or read. */
+    readonly live = {
+        /** The SFU status; {@link sfuStatus} reads it. */
+        sfuStatus: (): Live<SfuStatus> => this.#apiClient.mirror.entry<SfuStatus>({
+            scope: 'executor',
+            kind: 'fixed',
+            method: 'sfu.status',
+            params: {},
+            load: () => this.#apiClient.call('sfu.status', {}),
+        }),
     }
 
     async tlsDomain(): Promise<string | null> {

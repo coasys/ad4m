@@ -10,6 +10,7 @@ import {
 } from "./Agent";
 import { HostingUserInfo, PaymentRequestResult, ComputeLogEntry } from "../runtime/RuntimeTypes";
 import { AgentStatus } from "./AgentStatus";
+import type { Live } from "../mirror/Mirror";
 import { AGENT_KIND } from "./AgentKind";
 import { LinkMutations, LinkExpression, LinkInput, linkEqual } from "../links/Links";
 import { VerificationRequestResult } from "../runtime/RuntimeTypes";
@@ -61,9 +62,53 @@ export class AgentClient {
     return toAgent(await this.#apiClient.call('agent.get', {}));
   }
 
+  /**
+   * The agent's status. One value is kept per client and followed: `agent-status-changed`
+   * and the results of {@link generate}, {@link import}, {@link lock} and {@link unlock}
+   * replace it, and a reconnect makes the next read ask the executor again. Concurrent
+   * reads share one request. The returned object is shared: do not change it.
+   */
   async status(): Promise<AgentStatus> {
-    const agentStatus = await this.#apiClient.call('agent.status', {});
-    return new AgentStatus(agentStatus);
+    return this.#statusEntry().read();
+  }
+
+  /**
+   * The agent's own DID, read from {@link status}, or `null` while the executor reports none.
+   * A status with no DID is not kept: the next call asks again.
+   */
+  async did(): Promise<string | null> {
+    const did = (await this.status()).did || null;
+    if (!did) this.#statusEntry().invalidate();
+    return did;
+  }
+
+  /** Views on the client's mirror entries: subscribe for changes, or read. */
+  readonly live = {
+    /** The agent's status; {@link status} reads it. */
+    status: (): Live<AgentStatus> => this.#statusEntry(),
+  };
+
+  /** The one `agent.status` entry of this client's mirror; it hears `agent-status-changed`. */
+  #statusEntry() {
+    this.#apiClient.on('agent-status-changed', this.#onStatusChanged);
+    return this.#apiClient.mirror.entry<AgentStatus>({
+      scope: 'agent',
+      kind: 'pushed',
+      method: 'agent.status',
+      params: {},
+      load: async () => new AgentStatus(await this.#apiClient.call('agent.status', {})),
+    });
+  }
+
+  #onStatusChanged = (event: { agent: object }): void => {
+    this.#statusEntry().push(new AgentStatus(event.agent));
+  };
+
+  /** Keeps the status the executor returned from a call that changes it. */
+  #keepStatus(wire: object): AgentStatus {
+    const status = new AgentStatus(wire);
+    this.#statusEntry().push(status);
+    return status;
   }
 
   /** Creates the agent's keys and DID on first run. The executor refuses (409)
@@ -71,22 +116,22 @@ export class AgentClient {
    *  `generate` never replaces the existing keys and DID. */
   async generate(passphrase: string, options?: CallOptions): Promise<AgentStatus> {
     const result = await this.#apiClient.call('agent.generate', { passphrase }, options);
-    return new AgentStatus(result);
+    return this.#keepStatus(result);
   }
 
   async import(args: InitializeArgs): Promise<AgentStatus> {
     const result = await this.#apiClient.call('agent.import', { ...args });
-    return new AgentStatus(result);
+    return this.#keepStatus(result);
   }
 
   async lock(passphrase: string): Promise<AgentStatus> {
     const result = await this.#apiClient.call('agent.lock', { passphrase });
-    return new AgentStatus(result);
+    return this.#keepStatus(result);
   }
 
   async unlock(passphrase: string, holochain = true, options?: CallOptions): Promise<AgentStatus> {
     const result = await this.#apiClient.call('agent.unlock', { passphrase, holochain }, options);
-    return new AgentStatus(result);
+    return this.#keepStatus(result);
   }
 
   /**
