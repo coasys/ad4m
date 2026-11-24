@@ -102,6 +102,8 @@ export class KeyedCache<V> {
     #storedUsed = new Set<string>();
     /** The executor refused the client's token: nothing is served from the persistent tier any more. */
     #refused = false;
+    /** Counts {@link markStale} calls (a reset or a refusal is one): a read that sees it change knows the cache was reset under it. */
+    #marks = 0;
 
     constructor(opts: KeyedCacheOptions<V>) {
         this.#opts = opts;
@@ -144,6 +146,7 @@ export class KeyedCache<V> {
      * there; the caller passes whether to start the reads.
      */
     markStale(refetch = true, deferred?: ((current: () => boolean) => void)[]): void {
+        this.#marks++;
         const again: string[] = [];
         // With the snapshot each key's subscribers last saw: a subscriber told earlier may read
         // the key and store its stale snapshot before the key's own subscribers hear of it.
@@ -180,10 +183,10 @@ export class KeyedCache<V> {
         this.markStale(false, deferred);
     }
 
-    /** A socket opened: each watched key that is not fresh and not loading reads once, the misses of this tick in one call. */
-    reloadWatched(): void {
+    /** A socket opened: each watched key that is not fresh and not loading reads once, the misses of this tick in one call. `current` is asked before each read: a subscriber told meanwhile may have reset the mirror. */
+    reloadWatched(current: () => boolean = () => true): void {
         for (const [key, listeners] of [...this.#listeners]) {
-            if (!listeners.size) continue;
+            if (!listeners.size || !current()) continue;
             const { state } = this.#snapshot(key);
             if (state !== 'fresh' && state !== 'loading') this.#read(key, this.#loader(key)).catch(() => {});
         }
@@ -249,9 +252,11 @@ export class KeyedCache<V> {
                     } else {
                         const stored = loaded.stored;
                         const stale = stored && !!this.#opts.persistentStale;
+                        const marks = this.#marks;
                         this.#keep(key, loaded.value, stored, stale, loaded.ts);
-                        // The stored value is shown now, the source read once in the background.
-                        if (stale) this.#read(key, this.#loader(key)).catch(() => {});
+                        // The stored value is shown now, the source read once in the background, unless a
+                        // subscriber told of it reset the cache, deleted the key or replaced the value.
+                        if (stale && marks === this.#marks && this.#slots.get(key)?.stale) this.#read(key, this.#loader(key)).catch(() => {});
                     }
                     this.#prune(key);
                 }

@@ -407,3 +407,21 @@ describe('KeyedCache review round', () => {
         expect(await b).toBe('loaded:b');
     });
 });
+
+describe('KeyedCache stored value shown while a subscriber resets', () => {
+    test('a reset made by a subscriber told of the stored value starts no background read', async () => {
+        const store = new MapStore<string>();
+        store.entries.set('a', { value: 'stored', ts: Date.now() });
+        const loadMany = jest.fn(async (keys: string[]) => keys.map(k => `loaded:${k}`));
+        const cache = new KeyedCache<string>({ loadMany, persistent: store, persistentStale: true });
+        const view = cache.live('a');
+        let reset = false;
+        const off = view.subscribe((snapshot) => {
+            if (snapshot.value === 'stored' && !reset) { reset = true; cache.markStale(false); }
+        });
+        await new Promise(r => setTimeout(r, 0));
+        expect(reset).toBe(true);
+        expect(loadMany).not.toHaveBeenCalled();
+        off();
+    });
+});

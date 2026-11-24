@@ -238,6 +238,26 @@ describe('values and events across a lost socket, a close and a cold start', () 
         expect((await ad4m.agent.me()).directMessageLanguage).toBe('lang://new')
     })
 
+    it('an identity change that arrives before the first agent.get answer keeps that answer from being kept', async () => {
+        const answers: ((v: unknown) => void)[] = []
+        Sock.handle = (msg) => {
+            if (msg.type === 'agent.get') return new Promise((resolve) => { answers.push(resolve) })
+            return {}
+        }
+        const first = ad4m.agent.me()
+        await settle()
+        expect(answers.length).toBe(1)
+        // the identity was revoked while the first read was on its way
+        lastSock().reply({ type: 'agent-status-changed', agent: status('did:test:me') })
+        answers[0]({ ...profile('did:test:me', null), identity: 'did:scid:coasys:1:old' })
+        expect((await first).identity).toBe('did:scid:coasys:1:old') // used once
+        const second = ad4m.agent.me()
+        await settle()
+        expect(answers.length).toBe(2) // not kept: asks again
+        answers[1](profile('did:test:me', null))
+        expect((await second).identity).toBeUndefined()
+    })
+
     it('a scalar read after the socket dropped goes to the executor, not to the stored value', async () => {
         await ad4m.agent.did()
         expect(asks('agent.status')).toBe(1)

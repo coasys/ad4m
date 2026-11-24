@@ -483,9 +483,9 @@ them against those two guards.
   `link-added/-removed/-updated`. The rule: whoever `perspective.all` lists a perspective to must
   hear the list events of that perspective. `perspective.all` lists every perspective to the
   operator, so the three list topics go out as `Audience::DidsAndOperator(recipients)`
-  (`perspectives::list_event`), because an SDK client mirrors that list and refreshes it from
-  those events. Link, state and every other per-perspective event stay on `Dids`: the operator
-  does not read another agent's perspective (`helpers::can_access_perspective`). `query-subscription-update`
+  (`perspectives::publish_list_event`), because an SDK client mirrors that list and refreshes it from
+  those events. Link, state and every other per-perspective event stay on `Dids`: they go to the
+  perspective's owners, not to everyone who can list it. `query-subscription-update`
   (`PerspectiveInstance::send_delta_update`, which reads the recipients when it publishes)
   goes only to the subscriber (`SubscribedQuery::subscriber`, the main agent for `None`) when it
   is one of them: the query ran as the subscriber, so a co-owner must not get its results.

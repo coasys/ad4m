@@ -27,7 +27,8 @@ export interface EntrySpec<T> {
 export class Mirror {
     #entries = new Map<string, Entry<unknown>>()
     #caches = new Map<string, { staleOnReconnect: boolean; cache: KeyedCache<any> }>()
-    #lives = new Map<string, SharedLive>()
+    /** Every open live subscription per key, the newest last: one a write displaced stays here until it ends, so a reset closes it too. */
+    #lives = new Map<string, SharedLive[]>()
     #flights = new Map<string, Promise<any>>()
     /** The executor refused the client's token (see {@link refuse}); no later cache escapes it. */
     #refused = false
@@ -138,15 +139,19 @@ export class Mirror {
      */
     live<T>(spec: { perspective: string; method: string; params: unknown; keepAliveMs?: number; open: () => LiveSubscription; project: (raw: any) => T }): LiveQuery<T> {
         const key = keyOf(spec)
-        let shared = this.#lives.get(key)
+        const open = this.#lives.get(key) ?? []
+        let shared = open[open.length - 1]
         // A subscription a write of this client waits on is not joined: its result may be the one from before the write.
         if (!shared?.joinable) {
-            if (shared?.idle) shared.close()
+            if (shared?.idle) { shared.close(); open.pop() }
             const created: SharedLive = new SharedLive(spec.open(), spec.perspective, () => {
-                if (this.#lives.get(key) === created) this.#lives.delete(key)
+                const list = this.#lives.get(key)
+                if (list?.includes(created)) list.splice(list.indexOf(created), 1)
+                if (list && !list.length) this.#lives.delete(key)
             })
             shared = created
-            this.#lives.set(key, shared)
+            open.push(created)
+            this.#lives.set(key, open)
         }
         return shared.view(spec.project, spec.keepAliveMs)
     }
@@ -156,7 +161,7 @@ export class Mirror {
      * one-shot read of the same question needs no request; `undefined` otherwise. A copy.
      */
     liveResult(spec: { perspective: string; method: string; params: unknown }): { result: any } | undefined {
-        const held = this.#lives.get(keyOf(spec))?.answer()
+        const held = this.#lives.get(keyOf(spec))?.at(-1)?.answer()
         return held && { result: structuredClone(held.result) }
     }
 
@@ -170,7 +175,7 @@ export class Mirror {
      */
     wrote(perspective: string): void {
         this.#writes.set(perspective, (this.#writes.get(perspective) ?? 0) + 1)
-        for (const shared of this.#lives.values()) if (shared.perspective === perspective) shared.wrote()
+        for (const shared of this.#lives.values()) for (const one of shared) if (one.perspective === perspective) one.wrote()
     }
 
     /**
@@ -183,7 +188,7 @@ export class Mirror {
      */
     markAllStale(refetch = true): void {
         // The live results first: a subscriber told of the loss may read at once.
-        for (const shared of this.#lives.values()) shared.stale()
+        for (const open of this.#lives.values()) for (const shared of open) shared.stale()
         // Two phases: every value is marked before any subscriber is told, or one told first
         // could read another that is still fresh.
         const tell: ((current: () => boolean) => void)[] = []
@@ -223,16 +228,18 @@ export class Mirror {
         // As `markAllStale`: every value is marked before any subscriber is told. The caches
         // staying fresh through a reconnect (the expressions) are refused too.
         const tell: ((current: () => boolean) => void)[] = []
-        for (const shared of this.#lives.values()) shared.stale()
+        for (const open of this.#lives.values()) for (const shared of open) shared.stale()
         for (const entry of this.#entries.values()) entry.invalidate(false, tell)
         for (const { cache } of this.#caches.values()) cache.refuse(tell)
         this.#drain(tell)
     }
 
-    /** A socket opened: every stale or failed value with a subscriber loads once. Fresh values and reads in flight stay. */
+    /** A socket opened: every stale or failed value with a subscriber loads once. Fresh values and reads in flight stay. A reset made by a subscriber meanwhile stops the reads that follow. */
     reloadWatched(): void {
-        for (const entry of this.#entries.values()) entry.reloadWatched()
-        for (const { staleOnReconnect, cache } of this.#caches.values()) if (staleOnReconnect) cache.reloadWatched()
+        const resets = this.#resets
+        const current = () => resets === this.#resets
+        for (const entry of this.#entries.values()) if (current()) entry.reloadWatched()
+        for (const { staleOnReconnect, cache } of this.#caches.values()) if (staleOnReconnect && current()) cache.reloadWatched(current)
     }
 
     /**
@@ -244,7 +251,7 @@ export class Mirror {
      * it that resets again stops the reads the drain queued.
      */
     reset(): void {
-        for (const shared of this.#lives.values()) shared.close()
+        for (const open of this.#lives.values()) for (const shared of open) shared.close()
         this.#lives.clear()
         // The calls in flight are about to be rejected: a one-shot made now sends its own request.
         this.#flights.clear()

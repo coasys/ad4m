@@ -110,7 +110,8 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
   `Mirror.reloadWatched()`: each value with a subscriber that is stale or failed (a read
   made while the socket was down ends in `error`) loads once; fresh values and reads in
   flight are left alone. A reset (`closeAll()`)
-  or a refusal that a subscriber makes while the loss is announced stops the reads the
+  or a refusal that a subscriber makes while the loss is announced (or while a socket-open
+  reload, or the stored value of a `persistentStale` key, is being shown) stops the reads the
   announcement had queued, and `_onClose` then asks for no reconnect. So a watched value never dials a
   socket by itself, and a reconnect reads each watched value once, after the
   socket is back. A read the app started before `closeAll()` and that a keyed
@@ -236,7 +237,8 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
   (`stale()`) never lowers a write's barrier. A view that opens after a write whose update has
   not come does not join the pooled subscription (its result may be from before the write, so
   its `first` would be old): the mirror opens a new one, and its first result is that view's
-  `initial` one; the old one ends at once if no view holds it. While a resync's result and its
+  `initial` one; the old one ends at once if no view holds it, else when its last view is
+  released (after the grace) or when the client is reset, whichever comes first. While a resync's result and its
   buffered updates are applied, the result answers nothing. A live SPARQL result is a multiset: row order can differ from a
   fresh query with no `ORDER BY`. The Waker keeps its own unshared subscription.
   The write counter lives in `Mirror.wrote(scope)` only. Its cost: a write that does not

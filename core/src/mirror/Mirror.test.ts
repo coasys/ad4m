@@ -270,6 +270,34 @@ describe('Mirror entry review round', () => {
         expect(entry.getSnapshot()).toMatchObject({ state: 'fresh', value: 'a' })
     })
 
+    it('a reset made by a subscriber while the socket-open reload runs stops the reads that follow', async () => {
+        const mirror = new Mirror(() => '', () => {}, () => null)
+        const a = loader<string>()
+        const b = loader<string>()
+        const keyed = jest.fn(async (keys: string[]) => keys.map((k) => `v:${k}`))
+        const entryA = mirror.entry<string>({ method: 'agent.status', load: a.load })
+        const entryB = mirror.entry<string>({ method: 'agent.get', load: b.load })
+        const cache = mirror.cache<string>({ method: 'agent.byDIDs', options: () => ({ loadMany: keyed }) })
+        let armed = false
+        entryA.subscribe((snapshot) => { if (armed && snapshot.state === 'loading') mirror.reset() })
+        entryB.subscribe(() => {})
+        const off = cache.live('k').subscribe(() => {})
+        await new Promise((r) => setTimeout(r, 0))
+        keyed.mockClear()
+        a.asks[0].reject(new Error('no socket'))
+        b.asks[0].reject(new Error('no socket'))
+        await new Promise((r) => setTimeout(r, 0))
+        expect(entryA.getSnapshot().state).toBe('error')
+        cache.markStale(false)
+        armed = true
+        mirror.reloadWatched()
+        await new Promise((r) => setTimeout(r, 0))
+        expect(a.load).toHaveBeenCalledTimes(2)
+        expect(b.load).toHaveBeenCalledTimes(1)
+        expect(keyed).not.toHaveBeenCalled()
+        off()
+    })
+
     it('an unwatched entry that failed is not read when a socket opens', async () => {
         const { mirror, entry, load, asks } = setup<string>()
         const read = entry.read()

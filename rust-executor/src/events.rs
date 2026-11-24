@@ -226,8 +226,8 @@ pub enum Audience {
     /// lists every perspective to the operator, so a client that mirrors that list must hear
     /// when any perspective joins it, changes or leaves it. A session that is in both parts
     /// (the operator acts as the main agent, which may own the perspective) still gets one
-    /// event. Link and state events of a perspective stay on `Dids`: the operator does not
-    /// read another agent's perspective.
+    /// event. Link and state events of a perspective stay on `Dids`: they go to its owners,
+    /// not to everyone who can list it.
     DidsAndOperator(Vec<String>),
 }
 

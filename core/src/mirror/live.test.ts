@@ -562,3 +562,27 @@ describe('the barrier of a write', () => {
         expect(s.calls('perspective.subscribe')).toBe(1)
     })
 })
+
+describe('a displaced subscription and a reset', () => {
+    beforeEach(() => jest.useFakeTimers())
+    afterEach(() => jest.useRealTimers())
+
+    it('reset() ends a subscription a write displaced from its key, and its grace sends nothing after', async () => {
+        const { client, mirror, calls } = setup()
+        const a = client.liveQuery('p1', model, project)
+        await a.first
+        // the write closes the subscription to new handles: the next handle opens a second one
+        await client.addLinks('p1', [])
+        const b = client.liveQuery('p1', model, project)
+        await b.first
+        expect(calls('perspective.subscribe')).toBe(2)
+
+        mirror.reset()
+        await flush()
+        expect(calls('perspective.disposeQuery')).toBe(2)
+        a.dispose()
+        b.dispose()
+        await jest.advanceTimersByTimeAsync(DEFAULT_KEEP_ALIVE_MS * 2)
+        expect(calls('perspective.disposeQuery')).toBe(2)
+    })
+})

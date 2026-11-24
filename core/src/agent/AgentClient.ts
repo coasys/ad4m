@@ -106,9 +106,10 @@ export class AgentClient {
       load: async () => toAgent(await this.#apiClient.call('agent.get', {})) as Agent,
       on: {
         // The identity the device key speaks for is in the status too: when it moved (a revocation), the held one is old.
+        // With none held, a first read may be on its way: invalidating drops that answer (used once, not kept).
         'agent-status-changed': (event, entry) => {
           const held = entry.getSnapshot().value;
-          if (held && (held.identity ?? null) !== (event.agent.identity ?? null)) entry.invalidate();
+          if (!held || (held.identity ?? null) !== (event.agent.identity ?? null)) entry.invalidate();
         },
         'agent-updated': (event, entry) => {
           const own = this.#ownDid();
