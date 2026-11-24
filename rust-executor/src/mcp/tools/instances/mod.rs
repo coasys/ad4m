@@ -50,7 +50,7 @@
 //! The writes themselves (`instance_create` / `_update` / `_remove` /
 //! `_add_to_collection` / `_remove_from_collection`) are
 //! [`crate::perspectives::instances`], the same functions the
-//! `perspective.instance*` RPC methods call; the tools here format their
+//! `perspective.mutate` RPC method runs; the tools here format their
 //! results and errors as they always have.
 
 pub mod children;

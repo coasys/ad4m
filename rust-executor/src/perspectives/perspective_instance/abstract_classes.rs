@@ -264,6 +264,26 @@ impl PerspectiveInstance {
         Ok(())
     }
 
+    /// The target class IRIs of `base` whose shape declares a property named `property`.
+    pub(crate) fn classes_declaring(
+        &self,
+        base: &str,
+        property: &str,
+    ) -> Result<Vec<String>, AnyError> {
+        let mut found = Vec::new();
+        for class in self.own_classes(base)? {
+            if self
+                .get_shape(&class)?
+                .properties
+                .iter()
+                .any(|p| p.name == property)
+            {
+                found.push(class);
+            }
+        }
+        Ok(found)
+    }
+
     /// The classes `base` is an instance of, by target class IRI: two
     /// classes of one name are told apart, as the resolution tells them.
     fn own_classes(&self, base: &str) -> Result<Vec<String>, AnyError> {
@@ -573,11 +593,12 @@ impl PerspectiveInstance {
         Ok(())
     }
 
-    /// Delete the instance of `subject_class` at `base`: run the class's
-    /// destructor. Through an abstract class, run the destructor of each
-    /// target class, each command once; the record's other classes are left
-    /// as they are.
-    pub async fn remove_subject(
+    /// The class-side half of a delete, behind `instances::remove`: run the destructor of
+    /// `subject_class` at `base`. A class with no destructor loses the links of its own
+    /// declared predicates, and the links its constructor writes, instead. Through an abstract class, each target class does the same,
+    /// each command once; the record's other classes are left as they are. Links that point at
+    /// the instance are not touched here.
+    pub(crate) async fn remove_subject_raw(
         &mut self,
         subject_class: SubjectClassOption,
         base: String,
@@ -594,10 +615,39 @@ impl PerspectiveInstance {
         };
         let mut commands: Vec<Command> = Vec::new();
         for class in &classes {
-            let destructor = self
+            let destructor = match self
                 .get_shape_actions_from_shacl(class, "ad4m://destructor")
                 .await?
-                .ok_or_else(|| anyhow!("No destructor found for subject class: {class}."))?;
+            {
+                Some(destructor) if !destructor.is_empty() => destructor,
+                _ => {
+                    // The links the class's constructor writes (its flags) go too: they are
+                    // what makes the record an instance.
+                    let constructor = self
+                        .get_shape_actions_from_shacl(class, "ad4m://constructor")
+                        .await?
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|command| matches!(command.action, Action::AddLink))
+                        .map(|command| Command {
+                            action: Action::RemoveLink,
+                            ..command
+                        });
+                    let declared = self
+                        .get_shape(class)?
+                        .properties
+                        .iter()
+                        .map(|property| Command {
+                            source: Some("this".to_string()),
+                            predicate: Some(property.predicate.clone()),
+                            target: Some("*".to_string()),
+                            local: None,
+                            action: Action::RemoveLink,
+                        })
+                        .collect::<Vec<_>>();
+                    constructor.chain(declared).collect()
+                }
+            };
             for command in destructor {
                 if !commands.contains(&command) {
                     commands.push(command);

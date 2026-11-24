@@ -779,7 +779,7 @@ pub(crate) async fn seed_instance_with_props(
     props: serde_json::Value,
 ) {
     perspective
-        .create_subject(
+        .create_subject_raw(
             SubjectClassOption {
                 class_name: Some(class_local_name(&shape.target_class).to_string()),
                 query: None,

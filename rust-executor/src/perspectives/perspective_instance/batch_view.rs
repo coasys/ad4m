@@ -23,7 +23,7 @@
 
 use super::PerspectiveInstance;
 use crate::db::link_identity;
-use crate::types::{DecoratedLinkExpression, Link, LinkExpression, LinkQuery};
+use crate::types::{DecoratedLinkExpression, Link, LinkExpression, LinkQuery, PerspectiveDiff};
 use deno_core::error::AnyError;
 use std::collections::{HashMap, HashSet};
 
@@ -39,6 +39,12 @@ pub(crate) struct EffectiveLink {
     pub committed: bool,
     /// The batch holds staged copies of it: they drop through `cancel_batch_addition`.
     pub staged: bool,
+}
+
+/// An open batch's staged work at one moment, for [`PerspectiveInstance::restore_batch`].
+pub(crate) struct BatchSnapshot {
+    diff: PerspectiveDiff,
+    updates: Vec<(LinkExpression, LinkExpression)>,
 }
 
 impl EffectiveLink {
@@ -121,6 +127,24 @@ impl PerspectiveInstance {
             }
         }
         Ok(out)
+    }
+
+    /// A copy of the batch's staged work, or `None` when no such batch is open.
+    pub(crate) async fn snapshot_batch(&self, batch_id: &str) -> Option<BatchSnapshot> {
+        let batches = self.batch_store.read().await;
+        batches.get(batch_id).map(|batch| BatchSnapshot {
+            diff: batch.diff.clone(),
+            updates: batch.updates.clone(),
+        })
+    }
+
+    /// Put the batch's staged work back as `snapshot` had it: what was staged since is dropped.
+    /// A batch that is gone stays gone.
+    pub(crate) async fn restore_batch(&self, batch_id: &str, snapshot: BatchSnapshot) {
+        if let Some(batch) = self.batch_store.write().await.get_mut(batch_id) {
+            batch.diff = snapshot.diff;
+            batch.updates = snapshot.updates;
+        }
     }
 
     /// Drop the staged additions that are `link` (by `link_identity`), returning whether any

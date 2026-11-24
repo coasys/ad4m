@@ -32,7 +32,7 @@ pub(super) async fn write_overlay(
         // Overlay already minted (earlier pass): keep its original `kind`, just
         // bump the `run` pointer to this pass.
         perspective
-            .update_subject(
+            .update_subject_raw(
                 SubjectClassOption {
                     class_name: Some(INTERP_OVERLAY_CLASS.to_string()),
                     query: None,
@@ -47,7 +47,7 @@ pub(super) async fn write_overlay(
     } else {
         // First overlay on this base: mint it (kind flag) with kind + run.
         perspective
-            .create_subject(
+            .create_subject_raw(
                 SubjectClassOption {
                     class_name: Some(INTERP_OVERLAY_CLASS.to_string()),
                     query: None,

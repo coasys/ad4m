@@ -24,11 +24,7 @@ import type { AgentMessage } from "../generated/api/AgentMessage";
 import type { AgentReply } from "../generated/api/AgentReply";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 import type { RegisterResult } from "../generated/api/RegisterResult";
-import type {
-    CollectionItemAdded, CollectionItemRemoved, InstanceAddToCollection, InstanceCreate,
-    InstanceCreated, InstanceRemove, InstanceRemoveFromCollection, InstanceRemoved,
-    InstanceUpdate, InstanceUpdated,
-} from "../generated/api";
+import type { MutateOp, PerspectiveMutateResult, Returns } from "../generated/api";
 
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow } from "../shacl/SHACLFlow";
@@ -1375,43 +1371,24 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Creates an instance of a subject class, validated by the executor against the class's
-     * SHACL shape before anything is written (each property's type, which are required, which
-     * take a single value, `sh:in`): the same check as the MCP `instance_create` tool. A refused
-     * write rejects with an `RpcError` whose `data` is an `InstanceError` (status 422 and
-     * `kind: 'validation'` for a shape violation, with one `ValidationError` per property) and
-     * stages nothing. With `batchId` a non-validation failure can leave part of the write
-     * staged in the batch — discard it ({@link discardBatch}), don't commit it to keep
-     * earlier calls. An instance created in the same batch is not found — existence reads
-     * committed state only — so a create followed by an update, remove or
-     * `instanceAddToCollection` of the new instance in one batch fails `notFound`; put a new
-     * instance's initial collection items on the create itself.
+     * Writes instances of subject classes with an ordered list of create, update and delete
+     * ops, validated by the executor against each class's SHACL shape: the same check as the
+     * MCP `instance_*` tools. All ops apply or none do, and a later op sees what an earlier
+     * op of the call wrote. A refused call rejects with an `RpcError` whose `data` is an
+     * `InstanceError` (status 422 and `kind: 'validation'` for a shape violation, with one
+     * `ValidationError` per property) plus the `opIndex` of the failing op, and stages nothing.
+     * With `batch` the ops land on that batch's commit.
      *
      * @example
-     * const { baseUri } = await perspective.instanceCreate({ className: "Task", properties: { title: "Write" } });
+     * const { ids } = await perspective.mutate([
+     *     { op: "create", class: "Task", values: { title: "Write" } },
+     * ]);
      */
-    async instanceCreate(body: InstanceCreate): Promise<InstanceCreated> {
-        return this.#client.instanceCreate(this.#handle.uuid, body);
-    }
-
-    /** Sets single-valued properties of an instance, validated; the others stay. See {@link instanceCreate}. */
-    async instanceUpdate(body: InstanceUpdate): Promise<InstanceUpdated> {
-        return this.#client.instanceUpdate(this.#handle.uuid, body);
-    }
-
-    /** Removes an instance and every link to and from it. See {@link instanceCreate}. */
-    async instanceRemove(body: InstanceRemove): Promise<InstanceRemoved> {
-        return this.#client.instanceRemove(this.#handle.uuid, body);
-    }
-
-    /** Adds an item to a collection of an instance, validated. See {@link instanceCreate}. */
-    async instanceAddToCollection(body: InstanceAddToCollection): Promise<CollectionItemAdded> {
-        return this.#client.instanceAddToCollection(this.#handle.uuid, body);
-    }
-
-    /** Removes an item from a collection of an instance. See {@link instanceCreate}. */
-    async instanceRemoveFromCollection(body: InstanceRemoveFromCollection): Promise<CollectionItemRemoved> {
-        return this.#client.instanceRemoveFromCollection(this.#handle.uuid, body);
+    async mutate(
+        ops: MutateOp[],
+        options: { batch?: string, returns?: Returns } = {},
+    ): Promise<PerspectiveMutateResult> {
+        return this.#client.mutate(this.#handle.uuid, ops, options);
     }
 
     async getSubjectData<T>(subjectClass: T, exprAddr: string): Promise<T> {

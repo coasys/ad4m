@@ -153,6 +153,381 @@ async fn the_first_create_of_a_hard_wired_class_registers_it() {
     );
 }
 
+/// A class with a destructor (it removes the type link only), an ordered relation and a plain
+/// one.
+const NOTE_SDNA: &str = r#"{
+  "target_class": "ns://Note",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Note"}
+  ],
+  "destructor_actions": [
+    {"action":"removeLink","source":"this","predicate":"rdf://type","target":"ns://Note"}
+  ],
+  "properties": [
+    {"path":"ns://note_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://note_title","target":"value"}]},
+    {"path":"ns://note_body","name":"body","datatype":"xsd:string","max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://note_body","target":"value"}]},
+    {"path":"ns://note_tag","name":"tags","collection":true,"writable":true,
+     "setter":[{"action":"collectionSetter","source":"this","predicate":"ns://note_tag","target":"value"}],
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://note_tag","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://note_tag","target":"value"}]},
+    {"path":"ns://note_child","name":"children","collection":true,"writable":true,"ordering":"linkedList",
+     "setter":[{"action":"collectionSetter","source":"this","predicate":"ns://note_child","target":"value"}],
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://note_child","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://note_child","target":"value"}]}
+  ]
+}"#;
+
+/// No destructor: a delete removes the links of the declared predicates.
+const MEMO_SDNA: &str = r#"{
+  "target_class": "ns://Memo",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Memo"}
+  ],
+  "properties": [
+    {"path":"ns://memo_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://memo_title","target":"value"}]}
+  ]
+}"#;
+
+async fn run(
+    p: &mut PerspectiveInstance,
+    ctx: &AgentContext,
+    ops: serde_json::Value,
+) -> Result<Vec<super::mutate::Mutated>, super::MutateError> {
+    super::mutate(p, ctx, serde_json::from_value(ops).expect("ops"), None).await
+}
+
+async fn link(
+    p: &mut PerspectiveInstance,
+    ctx: &AgentContext,
+    source: &str,
+    predicate: &str,
+    target: &str,
+) {
+    p.add_link(
+        crate::types::Link {
+            source: source.into(),
+            predicate: Some(predicate.into()),
+            target: target.into(),
+        },
+        crate::types::LinkStatus::Shared,
+        None,
+        ctx,
+    )
+    .await
+    .expect("add_link");
+}
+
+mod mutate_rules {
+    use super::*;
+
+    async fn note(
+        p: &mut PerspectiveInstance,
+        ctx: &AgentContext,
+        id: &str,
+        values: serde_json::Value,
+    ) {
+        run(
+            p,
+            ctx,
+            json!([{"op":"create","class":"Note","id":id,"values":values}]),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("create {id}: {:?}", e.error));
+    }
+
+    /// `null` and `""` clear a single-valued property on update.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn null_and_empty_string_clear_a_property_on_update() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Note", NOTE_SDNA)]).await;
+        note(&mut p, &ctx, "ns://n1", json!({"title":"t","body":"b"})).await;
+        assert_eq!(
+            stored_targets(&p, "ns://n1", "ns://note_body").await.len(),
+            1
+        );
+
+        run(
+            &mut p,
+            &ctx,
+            json!([{"op":"update","class":"Note","id":"ns://n1","set":{"body":null}}]),
+        )
+        .await
+        .expect("null clears");
+        assert!(stored_targets(&p, "ns://n1", "ns://note_body")
+            .await
+            .is_empty());
+
+        run(
+            &mut p,
+            &ctx,
+            json!([{"op":"update","class":"Note","id":"ns://n1","set":{"body":"again"}}]),
+        )
+        .await
+        .expect("set");
+        assert_eq!(
+            stored_targets(&p, "ns://n1", "ns://note_body").await.len(),
+            1
+        );
+        run(
+            &mut p,
+            &ctx,
+            json!([{"op":"update","class":"Note","id":"ns://n1","set":{"body":""}}]),
+        )
+        .await
+        .expect("empty string clears");
+        assert!(stored_targets(&p, "ns://n1", "ns://note_body")
+            .await
+            .is_empty());
+    }
+
+    /// A required property is not cleared, and the call writes nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_required_property_is_not_cleared() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Note", NOTE_SDNA)]).await;
+        note(&mut p, &ctx, "ns://n1", json!({"title":"t"})).await;
+        let refused = run(
+            &mut p,
+            &ctx,
+            json!([{"op":"update","class":"Note","id":"ns://n1","set":{"title":null}}]),
+        )
+        .await
+        .err()
+        .expect("required");
+        assert!(
+            matches!(
+                refused.error,
+                super::super::InstanceError::Validation { .. }
+            ),
+            "{:?}",
+            refused.error
+        );
+        assert_eq!(
+            stored_targets(&p, "ns://n1", "ns://note_title").await.len(),
+            1
+        );
+    }
+
+    /// `null` and `""` on create write nothing for the property.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn null_and_empty_string_on_create_write_nothing() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Note", NOTE_SDNA)]).await;
+        note(
+            &mut p,
+            &ctx,
+            "ns://n1",
+            json!({"title":"t","body":null,"tags":null}),
+        )
+        .await;
+        note(&mut p, &ctx, "ns://n2", json!({"title":"t","body":""})).await;
+        for id in ["ns://n1", "ns://n2"] {
+            assert!(
+                stored_targets(&p, id, "ns://note_body").await.is_empty(),
+                "{id}"
+            );
+            assert!(
+                stored_targets(&p, id, "ns://note_tag").await.is_empty(),
+                "{id}"
+            );
+        }
+    }
+
+    /// An array on a relation sets its members: missing ones are added, extra ones removed;
+    /// `[]` empties it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_array_sets_the_members_of_a_relation() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Note", NOTE_SDNA)]).await;
+        note(
+            &mut p,
+            &ctx,
+            "ns://n1",
+            json!({"title":"t","tags":["ns://a","ns://b"]}),
+        )
+        .await;
+        assert_eq!(
+            stored_targets(&p, "ns://n1", "ns://note_tag").await,
+            vec!["ns://a", "ns://b"]
+        );
+
+        run(
+            &mut p,
+            &ctx,
+            json!([{"op":"update","class":"Note","id":"ns://n1",
+                    "set":{"tags":["ns://b","ns://c"]}}]),
+        )
+        .await
+        .expect("set members");
+        assert_eq!(
+            stored_targets(&p, "ns://n1", "ns://note_tag").await,
+            vec!["ns://b", "ns://c"]
+        );
+
+        run(
+            &mut p,
+            &ctx,
+            json!([{"op":"update","class":"Note","id":"ns://n1","set":{"tags":[]}}]),
+        )
+        .await
+        .expect("empty");
+        assert!(stored_targets(&p, "ns://n1", "ns://note_tag")
+            .await
+            .is_empty());
+    }
+
+    /// How many ordering entries `source` holds, and the order the strategy reads its members
+    /// in.
+    async fn ordered(p: &PerspectiveInstance, source: &str) -> (usize, Vec<String>) {
+        let members: Vec<(String, String)> = p
+            .get_links(&LinkQuery {
+                source: Some(source.into()),
+                predicate: Some("ns://note_child".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("members")
+            .into_iter()
+            .map(|l| (l.data.target, l.timestamp))
+            .collect();
+        let targets: Vec<String> = p
+            .get_links(&LinkQuery {
+                source: Some(source.into()),
+                predicate: Some(crate::perspectives::ordering::COLLECTION_ORDER_PREDICATE.into()),
+                ..Default::default()
+            })
+            .await
+            .expect("entries")
+            .into_iter()
+            .map(|l| l.data.target)
+            .collect();
+        let entries =
+            crate::perspectives::ordering::parse_ordering_entries(&targets, "ns://note_child");
+        let strategy =
+            crate::perspectives::ordering::create_strategy("linkedList").expect("strategy");
+        (entries.len(), strategy.reconstruct(&members, &entries))
+    }
+
+    /// A create with a relation parent, and an add, write the ordering entries; the members
+    /// read back in the order they were put in, through the ordering entries. The parent's
+    /// class comes from the parent instance.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_relation_parent_and_an_add_write_ordering_entries() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Note", NOTE_SDNA)]).await;
+        note(&mut p, &ctx, "ns://folder", json!({"title":"folder"})).await;
+        let parent = json!({"id":"ns://folder","relation":"children"});
+        run(
+            &mut p,
+            &ctx,
+            json!([
+                {"op":"create","class":"Note","id":"ns://c1","values":{"title":"1"},"parent":parent},
+                {"op":"create","class":"Note","id":"ns://c2","values":{"title":"2"},"parent":parent},
+                {"op":"create","class":"Note","id":"ns://c3","values":{"title":"3"},"parent":parent}
+            ]),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{:?}", e.error));
+        let (entries, order) = ordered(&p, "ns://folder").await;
+        assert!(entries > 0, "the create wrote no ordering entries");
+        assert_eq!(order, vec!["ns://c1", "ns://c2", "ns://c3"]);
+
+        run(
+            &mut p,
+            &ctx,
+            json!([{"op":"update","class":"Note","id":"ns://folder",
+                    "add":{"children":["ns://c4"]}}]),
+        )
+        .await
+        .expect("add");
+        assert_eq!(
+            ordered(&p, "ns://folder").await.1,
+            vec!["ns://c1", "ns://c2", "ns://c3", "ns://c4"]
+        );
+    }
+
+    /// A parent relation without `model` is refused when no class of the parent declares it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_relation_parent_names_a_class_that_declares_the_relation() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Note", NOTE_SDNA)]).await;
+        note(&mut p, &ctx, "ns://folder", json!({"title":"folder"})).await;
+        let refused = run(
+            &mut p,
+            &ctx,
+            json!([{"op":"create","class":"Note","values":{"title":"x"},
+                    "parent":{"id":"ns://folder","relation":"nope"}}]),
+        )
+        .await
+        .err()
+        .expect("no class holds it");
+        assert!(
+            matches!(
+                refused.error,
+                super::super::InstanceError::ParentClassUnresolved { .. }
+            ),
+            "{:?}",
+            refused.error
+        );
+    }
+
+    /// A delete runs the class's destructor (here it removes the type link only: the title
+    /// stays) and removes the links that point at the instance.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delete_runs_the_destructor_and_removes_incoming_links() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Note", NOTE_SDNA)]).await;
+        note(&mut p, &ctx, "ns://n1", json!({"title":"t"})).await;
+        link(&mut p, &ctx, "ns://other", "ns://points_at", "ns://n1").await;
+
+        run(
+            &mut p,
+            &ctx,
+            json!([{"op":"delete","class":"Note","id":"ns://n1"}]),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{:?}", e.error));
+        assert!(stored_targets(&p, "ns://n1", "rdf://type").await.is_empty());
+        assert_eq!(
+            stored_targets(&p, "ns://n1", "ns://note_title").await.len(),
+            1
+        );
+        assert!(stored_targets(&p, "ns://other", "ns://points_at")
+            .await
+            .is_empty());
+    }
+
+    /// Without a destructor a delete removes the links of the declared predicates; a link of
+    /// no declared predicate stays. What points at the instance goes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delete_without_a_destructor_removes_the_declared_predicates() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Memo", MEMO_SDNA)]).await;
+        run(
+            &mut p,
+            &ctx,
+            json!([{"op":"create","class":"Memo","id":"ns://m1","values":{"title":"t"}}]),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{:?}", e.error));
+        link(&mut p, &ctx, "ns://m1", "ns://undeclared", "ns://x").await;
+        link(&mut p, &ctx, "ns://other", "ns://points_at", "ns://m1").await;
+
+        run(
+            &mut p,
+            &ctx,
+            json!([{"op":"delete","class":"Memo","id":"ns://m1"}]),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{:?}", e.error));
+        assert!(stored_targets(&p, "ns://m1", "ns://memo_title")
+            .await
+            .is_empty());
+        assert_eq!(
+            stored_targets(&p, "ns://m1", "ns://undeclared").await,
+            vec!["ns://x"]
+        );
+        assert!(stored_targets(&p, "ns://other", "ns://points_at")
+            .await
+            .is_empty());
+    }
+}
+
 /// `resolve_class` reads the shape registry only: every key `class_keys`
 /// gives resolves to its one class, a name two classes share to neither.
 mod resolve_class {

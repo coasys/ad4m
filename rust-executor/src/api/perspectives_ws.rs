@@ -162,7 +162,7 @@ pub(super) fn check_credits(agent_did: Option<&str>) -> Result<(), WsRpcError> {
     Ok(())
 }
 
-fn reserve_credits(agent_did: Option<&str>, amount: f64) -> Result<(), WsRpcError> {
+pub(super) fn reserve_credits(agent_did: Option<&str>, amount: f64) -> Result<(), WsRpcError> {
     if agent_did.is_none() {
         return Ok(());
     }
@@ -186,7 +186,7 @@ fn reserve_credits(agent_did: Option<&str>, amount: f64) -> Result<(), WsRpcErro
     Ok(())
 }
 
-const DEFAULT_LINK_WRITE: f64 = 0.25;
+pub(super) const DEFAULT_LINK_WRITE: f64 = 0.25;
 
 /// Adapter that implements the harness's `CreditGate` trait against the
 /// per-user credit ledger. Each `check()` (a) refuses if the ledger says
@@ -933,25 +933,28 @@ async fn create_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value
             _ => (body.subject_class.clone(), None),
         };
 
-    let subject_class = crate::perspectives::perspective_instance::SubjectClassOption {
-        class_name: Some(resolved_class_name),
-        query: None,
-    };
     let initial_values: Option<serde_json::Value> = body
         .initial_values
         .as_ref()
         .and_then(|s| serde_json::from_str(s).ok())
         .or(parsed_initial_values);
-    perspective
-        .create_subject(
-            subject_class,
-            body.expression_address.clone(),
-            initial_values,
-            body.batch_id.clone(),
-            &agent_context,
-        )
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    let properties = match initial_values {
+        Some(Value::Object(values)) => Some(values),
+        _ => None,
+    };
+    crate::perspectives::instances::create(
+        &mut perspective,
+        &agent_context,
+        crate::perspectives::instances::InstanceCreate {
+            class_name: resolved_class_name,
+            properties,
+            base_uri: Some(body.expression_address.clone()),
+            parent: None,
+            batch_id: body.batch_id.clone(),
+        },
+    )
+    .await
+    .map_err(super::perspective_instances_ws::instance_error)?;
 
     Ok(Value::Bool(true))
 }
@@ -961,20 +964,22 @@ async fn update_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     let values: Value = serde_json::from_str(&body.values)
         .map_err(|e| WsRpcError::bad_request(format!("values: {}", e)))?;
+    let Value::Object(properties) = values else {
+        return Err(WsRpcError::bad_request("values: expected a JSON object"));
+    };
     let mut perspective = guarded_perspective(&params).await?;
-    perspective
-        .update_subject(
-            crate::perspectives::perspective_instance::SubjectClassOption {
-                class_name: Some(body.subject_class),
-                query: None,
-            },
-            body.expression_address,
-            values,
-            body.batch_id,
-            &ctx.acts_as(),
-        )
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    crate::perspectives::instances::update(
+        &mut perspective,
+        &ctx.acts_as(),
+        crate::perspectives::instances::InstanceUpdate {
+            class_name: body.subject_class,
+            base_uri: body.expression_address,
+            properties,
+            batch_id: body.batch_id,
+        },
+    )
+    .await
+    .map_err(super::perspective_instances_ws::instance_error)?;
     Ok(Value::Bool(true))
 }
 
@@ -982,18 +987,17 @@ async fn remove_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     let body: RemoveSubjectRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     let mut perspective = guarded_perspective(&params).await?;
-    perspective
-        .remove_subject(
-            crate::perspectives::perspective_instance::SubjectClassOption {
-                class_name: Some(body.subject_class),
-                query: None,
-            },
-            body.expression_address,
-            body.batch_id,
-            &ctx.acts_as(),
-        )
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    crate::perspectives::instances::remove(
+        &mut perspective,
+        &ctx.acts_as(),
+        crate::perspectives::instances::InstanceRemove {
+            class_name: body.subject_class,
+            base_uri: body.expression_address,
+            batch_id: body.batch_id,
+        },
+    )
+    .await
+    .map_err(super::perspective_instances_ws::instance_error)?;
     Ok(Value::Bool(true))
 }
 

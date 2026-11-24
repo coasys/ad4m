@@ -343,7 +343,7 @@ pub async fn write_processor(
     let batch_id = perspective.create_batch().await;
     let write_result: anyhow::Result<()> = async {
         perspective
-            .create_subject(
+            .create_subject_raw(
                 class_option(),
                 node.clone(),
                 Some(values),
@@ -932,7 +932,7 @@ mod tests {
         write_processor(&mut p, &sample_config("garbled-scope"), Some(false), &ctx)
             .await
             .expect("write");
-        p.update_subject(
+        p.update_subject_raw(
             class_option(),
             processor_node("garbled-scope"),
             serde_json::json!({ "mintScope": "not-json {" }),
@@ -988,7 +988,7 @@ mod tests {
         write_processor(&mut p, &sample_config("garbled-2"), Some(false), &ctx)
             .await
             .expect("write");
-        p.update_subject(
+        p.update_subject_raw(
             class_option(),
             processor_node("garbled-2"),
             serde_json::json!({ "debounceMs": "not-a-number" }),
@@ -1018,7 +1018,7 @@ mod tests {
         write_processor(&mut p, &sample_config("zero-ttl"), Some(false), &ctx)
             .await
             .expect("write zero-ttl");
-        p.update_subject(
+        p.update_subject_raw(
             class_option(),
             processor_node("zero-ttl"),
             serde_json::json!({ "claimTtlMs": "0" }),
@@ -1045,7 +1045,7 @@ mod tests {
         write_processor(&mut p, &sample_config("neg-wait"), Some(false), &ctx)
             .await
             .expect("write neg-wait");
-        p.update_subject(
+        p.update_subject_raw(
             class_option(),
             processor_node("neg-wait"),
             serde_json::json!({ "maxWaitMs": "-1" }),

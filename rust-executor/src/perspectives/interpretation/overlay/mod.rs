@@ -637,7 +637,7 @@ mod tests {
         .await;
 
         // Human edits the real value in place (diverging from the baseline).
-        p.update_subject(
+        p.update_subject_raw(
             SubjectClassOption {
                 class_name: Some("Intention".to_string()),
                 query: None,
@@ -692,7 +692,7 @@ mod tests {
         let base = "soa://ext/intention/seed-1";
 
         // A non-LLM actor creates the instance directly (no overlay is minted).
-        p.create_subject(
+        p.create_subject_raw(
             SubjectClassOption {
                 class_name: Some("Intention".to_string()),
                 query: None,

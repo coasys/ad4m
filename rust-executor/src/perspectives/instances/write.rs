@@ -11,15 +11,17 @@
 //! what it staged there; the caller discards the batch (`perspective.discardBatch`) rather than
 //! commit it to keep the calls that succeeded — earlier calls' staged work is the caller's,
 //! not this write's, to throw away. Reads the write does of the links it manages see the
-//! batch's staged work (`get_links_effective`); instance existence still reads committed state
-//! only, so create-then-update / -remove of a new instance in one batch fails `notFound`.
+//! batch's staged work (`get_links_effective`); instance existence reads committed state
+//! only, except in a `mutate` call, which overlays the instances its own earlier ops created or
+//! removed ([`super::Pending`]). Called alone, create-then-update of a new instance in one batch
+//! fails `notFound`.
 
 use super::validate::{resolve_collection, value_text};
 use super::{
     check_setters, class_properties, coerce_scalar, decoded_literal, fetch_instance,
     generate_instance_uri, instance_uri, link_target, property_target, property_value_target,
-    remove_all_links_of, require_instance, resolve_class, resolve_writable_class, subject_class,
-    validate_properties, InstanceError, WriteMode, WriteStep,
+    remove_incoming_links_of, require_instance, resolve_class, resolve_writable_class,
+    subject_class, validate_properties, InstanceError, Pending, WriteMode, WriteStep,
 };
 use crate::agent::AgentContext;
 use crate::mcp::shacl;
@@ -35,12 +37,12 @@ use ts_rs::TS;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct InstanceCreate {
     /// The subject class, as the perspective names it (matched case-insensitively).
     pub class_name: String,
     /// Values by property name: one JSON value per single-valued property (of the property's
-    /// type), an array of item URIs per collection. Required properties must be present.
+    /// type), an array of item URIs per relation. `null` or `""` writes nothing. Required
+    /// properties must be present.
     #[ts(optional, type = "Record<string, unknown>")]
     pub properties: Option<Map<String, Value>>,
     /// The new instance's URI. A random `ad4m://obj/…` one when absent; a bare string becomes a
@@ -56,15 +58,15 @@ pub struct InstanceCreate {
     pub batch_id: Option<String>,
 }
 
-/// Set single-valued properties of an instance; the others stay as they are.
+/// Set properties of an instance; the others stay as they are.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct InstanceUpdate {
     pub class_name: String,
     pub base_uri: String,
-    /// Values by property name, at least one; single-valued properties only.
+    /// Values by property name, at least one. `null` or `""` clears a property (a required one
+    /// is refused); an array on a relation sets its members.
     #[ts(type = "Record<string, unknown>")]
     pub properties: Map<String, Value>,
     /// An open batch to stage the write into; see `InstanceCreate`'s `batchId`.
@@ -76,7 +78,6 @@ pub struct InstanceUpdate {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct InstanceRemove {
     pub class_name: String,
     pub base_uri: String,
@@ -88,7 +89,6 @@ pub struct InstanceRemove {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct InstanceAddToCollection {
     pub class_name: String,
     pub base_uri: String,
@@ -103,7 +103,6 @@ pub struct InstanceAddToCollection {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct InstanceRemoveFromCollection {
     pub class_name: String,
     pub base_uri: String,
@@ -116,7 +115,6 @@ pub struct InstanceRemoveFromCollection {
 
 /// The items a create put into one collection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
-#[ts(export)]
 pub struct CollectionItems {
     pub collection: String,
     pub items: Vec<String>,
@@ -124,7 +122,6 @@ pub struct CollectionItems {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct InstanceCreated {
     /// The class's canonical name.
     pub class_name: String,
@@ -138,7 +135,6 @@ pub struct InstanceCreated {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct InstanceUpdated {
     pub class_name: String,
     pub base_uri: String,
@@ -147,19 +143,17 @@ pub struct InstanceUpdated {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct InstanceRemoved {
     pub class_name: String,
     pub base_uri: String,
-    /// The links the cascade removed from the effective graph; `None` through an abstract
-    /// class, whose classes' destructors ran. Inside a caller's batch they are staged, not
-    /// committed — including staged additions the call cancelled.
-    pub links_removed: Option<usize>,
+    /// The links the remove took from the effective graph: the instance's own (its destructor's,
+    /// or its declared predicates') and the incoming ones. Inside a caller's batch they are
+    /// staged, not committed — including staged additions the call cancelled.
+    pub links_removed: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct CollectionItemAdded {
     pub class_name: String,
     pub base_uri: String,
@@ -173,7 +167,6 @@ pub struct CollectionItemAdded {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct CollectionItemRemoved {
     pub class_name: String,
     pub base_uri: String,
@@ -303,6 +296,16 @@ pub async fn create(
     agent: &AgentContext,
     params: InstanceCreate,
 ) -> Result<InstanceCreated, InstanceError> {
+    create_with(perspective, agent, params, &Pending::default()).await
+}
+
+/// [`create`], with what the earlier ops of the same `mutate` call did.
+pub(crate) async fn create_with(
+    perspective: &mut PerspectiveInstance,
+    agent: &AgentContext,
+    params: InstanceCreate,
+    pending: &Pending,
+) -> Result<InstanceCreated, InstanceError> {
     // A hard-wired class (a flow run, an auto-processor) is the executor's to register: the
     // first instance written registers it, so resolving it below finds its shape.
     crate::perspectives::hardwired_class::ensure_before_write(
@@ -336,7 +339,13 @@ pub async fn create(
     // Three arms, not `if let Ok(Some(_))`: a store/query failure must not read as "no instance
     // found" and let the create land on top of an existing instance, merging its property
     // links.
-    match fetch_instance(perspective, &class_name, &base_uri).await {
+    // An id this call removed or created as another class is not found again in the store.
+    let existing = match pending.lookup(&class_name, &base_uri) {
+        Some(true) => Ok(Some(Value::Null)),
+        Some(false) => Ok(None),
+        None => fetch_instance(perspective, &class_name, &base_uri).await,
+    };
+    match existing {
         Ok(Some(_)) => {
             return Err(InstanceError::AlreadyExists {
                 class_name,
@@ -387,7 +396,7 @@ pub async fn create(
     // or by a failed call's aftermath.
     let batch = Batch::open(perspective, params.batch_id).await?;
     if let Err(e) = perspective
-        .create_subject(
+        .create_subject_raw(
             subject_class(&class_name),
             base_uri.clone(),
             initial_values,
@@ -405,6 +414,7 @@ pub async fn create(
     for (collection, items) in &validated.collections {
         let (predicate, status) = collection_links[collection].clone();
         let mut added = Vec::with_capacity(items.len());
+        let mut targets = Vec::with_capacity(items.len());
         for item in items {
             let item_str = match item {
                 Value::String(s) => s.clone(),
@@ -417,8 +427,9 @@ pub async fn create(
             let link = Link {
                 source: base_uri.clone(),
                 predicate: Some(predicate.clone()),
-                target,
+                target: target.clone(),
             };
+            targets.push(target);
             if let Err(e) = perspective
                 .add_link(link, status.clone(), Some(batch.id()), agent)
                 .await
@@ -434,6 +445,28 @@ pub async fn create(
                 ));
             }
             added.push(item_str);
+        }
+        // An ordered relation also needs the entries that place its members.
+        if let Err(e) = perspective
+            .order_appended(
+                &base_uri,
+                &predicate,
+                &[],
+                &targets,
+                status.clone(),
+                Some(batch.id()),
+                agent,
+            )
+            .await
+        {
+            batch.abandon(perspective).await;
+            return Err(failed(
+                &class_name,
+                WriteStep::ResolveCollection {
+                    collection: collection.clone(),
+                },
+                e,
+            ));
         }
         collections_set.push(super::CollectionItems {
             collection: collection.clone(),
@@ -474,12 +507,22 @@ pub async fn create(
     })
 }
 
-/// Set single-valued properties of an existing instance, in one batch. "Existing" means
+/// Set properties of an existing instance, in one batch. "Existing" means
 /// committed: an instance created in the same batch is not found yet (`notFound`).
 pub async fn update(
     perspective: &mut PerspectiveInstance,
     agent: &AgentContext,
     params: InstanceUpdate,
+) -> Result<InstanceUpdated, InstanceError> {
+    update_with(perspective, agent, params, &Pending::default()).await
+}
+
+/// [`update`], with what the earlier ops of the same `mutate` call did.
+pub(crate) async fn update_with(
+    perspective: &mut PerspectiveInstance,
+    agent: &AgentContext,
+    params: InstanceUpdate,
+    pending: &Pending,
 ) -> Result<InstanceUpdated, InstanceError> {
     let (class_name, shape) = resolve_class(perspective, &params.class_name).await?;
     if params.properties.is_empty() {
@@ -489,12 +532,21 @@ pub async fn update(
     let validated = validate_properties(&shape, &params.properties, WriteMode::Update)
         .map_err(|errors| invalid(&class_name, errors))?;
     // Through an abstract class (#1435) the record's own classes' setters write;
-    // `update_subject` checks those.
+    // `update_subject_raw` checks those.
     let is_abstract = perspective
         .is_abstract_class(&class_name)
         .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?;
+    // What the class-side write gets: the values, `null` for a property to clear, an array
+    // for the members a collection is set to.
+    let mut values = validated.scalars.clone();
+    for name in &validated.clears {
+        values.insert(name.clone(), Value::Null);
+    }
+    for (name, items) in &validated.collections {
+        values.insert(name.clone(), Value::Array(items.clone()));
+    }
     if !is_abstract {
-        let setter_errors = check_setters(perspective, &shape, &validated.scalars).await;
+        let setter_errors = check_setters(perspective, &shape, &values).await;
         if !setter_errors.is_empty() {
             return Err(invalid(&class_name, setter_errors));
         }
@@ -502,17 +554,17 @@ pub async fn update(
 
     let base_uri = instance_uri("base_uri", &params.base_uri)?;
     // Where it is stored: a legacy-spelled id's node is not the normalised one.
-    let stored = require_instance(perspective, &class_name, &base_uri).await?;
+    let stored = require_instance(perspective, &class_name, &base_uri, pending).await?;
 
     // One batch for the whole update so remove-old + add-new per property lands atomically
     // (same reasoning as the per-class setters: without it a peer can observe the property as
     // unset in between).
     let batch = Batch::open(perspective, params.batch_id).await?;
     if let Err(e) = perspective
-        .update_subject(
+        .update_subject_raw(
             subject_class(&class_name),
             stored,
-            Value::Object(validated.scalars.clone()),
+            Value::Object(values.clone()),
             Some(batch.id()),
             agent,
         )
@@ -524,7 +576,7 @@ pub async fn update(
     batch.finish(perspective, agent, &class_name).await?;
 
     Ok(InstanceUpdated {
-        updated_properties: validated.scalars.keys().cloned().collect(),
+        updated_properties: values.keys().cloned().collect(),
         class_name,
         base_uri,
     })
@@ -539,41 +591,73 @@ pub async fn remove(
     agent: &AgentContext,
     params: InstanceRemove,
 ) -> Result<InstanceRemoved, InstanceError> {
+    remove_with(perspective, agent, params, &Pending::default()).await
+}
+
+/// How many links `uri` holds, on the batch's effective graph.
+async fn links_held(
+    perspective: &PerspectiveInstance,
+    uri: &str,
+    batch_id: Option<&str>,
+) -> Result<usize, deno_core::anyhow::Error> {
+    let links = perspective
+        .get_links_effective(
+            &LinkQuery {
+                source: Some(uri.to_string()),
+                ..Default::default()
+            },
+            batch_id,
+        )
+        .await?;
+    Ok(links.len())
+}
+
+/// [`remove`], with what the earlier ops of the same `mutate` call did.
+pub(crate) async fn remove_with(
+    perspective: &mut PerspectiveInstance,
+    agent: &AgentContext,
+    params: InstanceRemove,
+    pending: &Pending,
+) -> Result<InstanceRemoved, InstanceError> {
     let (class_name, _shape) = resolve_class(perspective, &params.class_name).await?;
     let base_uri = instance_uri("base_uri", &params.base_uri)?;
     // Where it is stored: a legacy-spelled id's node is not the normalised one.
-    let stored = require_instance(perspective, &class_name, &base_uri).await?;
+    let stored = require_instance(perspective, &class_name, &base_uri, pending).await?;
     check_batch(perspective, params.batch_id.as_deref()).await?;
 
-    // Through an abstract class (#1435), the destructors of the record's classes it reads: the
-    // cascade below would delete its other classes.
-    let is_abstract = perspective
-        .is_abstract_class(&class_name)
-        .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?;
-    if is_abstract {
-        perspective
-            .remove_subject(subject_class(&class_name), stored, params.batch_id, agent)
-            .await
-            .map_err(|e| failed(&class_name, WriteStep::RemoveSubject, e))?;
-        return Ok(InstanceRemoved {
-            class_name,
-            base_uri,
-            links_removed: None,
-        });
-    }
+    // The class's side first: its destructor, else the links of its declared predicates;
+    // through an abstract class (#1435), that of each of the record's classes it reads, so its
+    // other classes keep their links. Then what points at the instance.
+    let batch = params.batch_id.as_deref();
+    let held_before = links_held(perspective, &stored, batch)
+        .await
+        .map_err(|e| failed(&class_name, WriteStep::ReadInstance, e))?;
+    perspective
+        .remove_subject_raw(
+            subject_class(&class_name),
+            stored.clone(),
+            params.batch_id.clone(),
+            agent,
+        )
+        .await
+        .map_err(|e| failed(&class_name, WriteStep::RemoveSubject, e))?;
+    let held_after = links_held(perspective, &stored, batch)
+        .await
+        .map_err(|e| failed(&class_name, WriteStep::ReadInstance, e))?;
+    let held_removed = held_before.saturating_sub(held_after);
 
     // Outside a batch the cascade is not atomic, so on failure the links already removed stay
     // removed: the error says so, with the count.
-    match remove_all_links_of(perspective, &stored, params.batch_id.as_deref()).await {
+    match remove_incoming_links_of(perspective, &stored, batch).await {
         Ok(removed) => Ok(InstanceRemoved {
             class_name,
             base_uri,
-            links_removed: Some(removed),
+            links_removed: held_removed + removed,
         }),
         Err(failure) => Err(InstanceError::PartiallyRemoved {
             class_name,
             base_uri,
-            removed: failure.removed,
+            removed: held_removed + failure.removed,
             step: failure.step,
             error: failure.error,
         }),
@@ -588,6 +672,16 @@ pub async fn add_to_collection(
     agent: &AgentContext,
     params: InstanceAddToCollection,
 ) -> Result<CollectionItemAdded, InstanceError> {
+    add_to_collection_with(perspective, agent, params, &Pending::default()).await
+}
+
+/// [`add_to_collection`], with what the earlier ops of the same `mutate` call did.
+pub(crate) async fn add_to_collection_with(
+    perspective: &mut PerspectiveInstance,
+    agent: &AgentContext,
+    params: InstanceAddToCollection,
+    pending: &Pending,
+) -> Result<CollectionItemAdded, InstanceError> {
     let (class_name, shape) = resolve_writable_class(perspective, &params.class_name).await?;
 
     let infos = class_properties(&shape);
@@ -599,7 +693,7 @@ pub async fn add_to_collection(
 
     let base_uri = instance_uri("base_uri", &params.base_uri)?;
     // Where it is stored: a legacy-spelled id's node is not the normalised one.
-    let stored = require_instance(perspective, &class_name, &base_uri).await?;
+    let stored = require_instance(perspective, &class_name, &base_uri, pending).await?;
     check_batch(perspective, params.batch_id.as_deref()).await?;
 
     let predicate = shacl::resolve_property_predicate(perspective, &class_name, &collection)
@@ -668,10 +762,14 @@ pub async fn add_to_collection(
     } else {
         property_value_target(perspective, &class_name, &collection, &coerced, agent).await
     };
+    let members: Vec<(String, String)> = existing
+        .iter()
+        .map(|e| (e.link.data.target.clone(), e.link.timestamp.clone()))
+        .collect();
     let link = Link {
-        source: stored,
-        predicate: Some(predicate),
-        target,
+        source: stored.clone(),
+        predicate: Some(predicate.clone()),
+        target: target.clone(),
     };
     // This path writes the membership link directly rather than running the collection's
     // `adder` action, so the action's `local` flag never reaches it — resolve the status from
@@ -683,7 +781,29 @@ pub async fn add_to_collection(
         LinkStatus::Shared
     };
     perspective
-        .add_link(link, status, params.batch_id, agent)
+        .add_link(link, status.clone(), params.batch_id.clone(), agent)
+        .await
+        .map_err(|e| {
+            failed(
+                &class_name,
+                WriteStep::AddCollectionItem {
+                    collection: collection.clone(),
+                    item: params.item_uri.clone(),
+                },
+                e,
+            )
+        })?;
+    // An ordered relation also needs the entry that places the new member.
+    perspective
+        .order_appended(
+            &stored,
+            &predicate,
+            &members,
+            &[target],
+            status,
+            params.batch_id,
+            agent,
+        )
         .await
         .map_err(|e| {
             failed(
@@ -711,8 +831,18 @@ pub async fn add_to_collection(
 /// exists only inside the batch leaves by cancelling its staged addition.
 pub async fn remove_from_collection(
     perspective: &mut PerspectiveInstance,
+    agent: &AgentContext,
+    params: InstanceRemoveFromCollection,
+) -> Result<CollectionItemRemoved, InstanceError> {
+    remove_from_collection_with(perspective, agent, params, &Pending::default()).await
+}
+
+/// [`remove_from_collection`], with what the earlier ops of the same `mutate` call did.
+pub(crate) async fn remove_from_collection_with(
+    perspective: &mut PerspectiveInstance,
     _agent: &AgentContext,
     params: InstanceRemoveFromCollection,
+    pending: &Pending,
 ) -> Result<CollectionItemRemoved, InstanceError> {
     let (class_name, shape) = resolve_writable_class(perspective, &params.class_name).await?;
 
@@ -723,7 +853,7 @@ pub async fn remove_from_collection(
 
     let base_uri = instance_uri("base_uri", &params.base_uri)?;
     // Where it is stored: a legacy-spelled id's node is not the normalised one.
-    let stored = require_instance(perspective, &class_name, &base_uri).await?;
+    let stored = require_instance(perspective, &class_name, &base_uri, pending).await?;
     check_batch(perspective, params.batch_id.as_deref()).await?;
 
     let predicate = shacl::resolve_property_predicate(perspective, &class_name, &collection)

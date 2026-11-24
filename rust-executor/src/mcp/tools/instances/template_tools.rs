@@ -266,7 +266,7 @@ impl Ad4mMcpHandler {
 
         let batch_id = perspective.create_batch().await;
         if let Err(e) = perspective
-            .update_subject(
+            .update_subject_raw(
                 subject_class(&class_name),
                 base_uri.to_string(),
                 Value::Object(validated.scalars),

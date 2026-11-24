@@ -163,17 +163,17 @@ try {
 succeeded stay in the open batch — and the failed call itself may have staged part of its
 work before it erred. Discard the batch with `perspective.discardBatch(batchId)`; committing
 it to keep the successful calls also commits whatever the failed call left behind. (The
-`perspective.instance*` validated writes stage nothing for a *refused* call — a 422 shape
+`perspective.mutate` validated writes stage nothing for a *refused* call — a 422 shape
 violation is detected before any link is written — but a failure that is not a refusal, like
 a store error mid-write, can still leave a partial write staged.)
 
-**A new instance is found only after its batch commits.** The `perspective.instance*`
-existence checks read committed state, so within one batch an `instanceCreate` followed by
-an `instanceUpdate`, `instanceRemove`, `instanceAddToCollection` or
-`instanceRemoveFromCollection` of the new instance's URI fails `notFound`. Put a new
-instance's initial collection items on the create itself, or commit the create before
-adding to its collections. (The link reads a write does — collection membership, the remove
-cascade — do see the batch's own staged work.)
+**Ops of one `perspective.mutate` call see each other.** An update, delete or collection
+edit op finds an instance an earlier op of the same call created. A separate call that
+stages into the same batch does not: instance existence reads committed state, so a
+`perspective.mutate` call that updates an instance an earlier call only staged into the batch
+fails `notFound`. Put create and follow-up ops in one call, or commit the create first.
+(The link reads a write does — collection membership, the remove cascade — do see the
+batch's own staged work.) A refused call leaves the batch as it was.
 
 Under the hood, `Ad4mModel.transaction()` calls `createBatch()` and `commitBatch()` for you.
 

@@ -108,7 +108,7 @@ pub struct RpcCallError {
     pub code: i32,
     pub message: String,
     /// The reply's `error.data`, when the executor attached some (e.g. the `InstanceError` of a
-    /// refused `perspective.instance*` write).
+    /// refused `perspective.mutate` write).
     pub data: Option<Value>,
 }
 

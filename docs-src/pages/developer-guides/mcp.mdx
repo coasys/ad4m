@@ -167,9 +167,8 @@ That "stores nothing" guarantee is about rejections. A failure that is not a rej
 store error in the middle of `instance_remove`'s link cascade — can leave the removals it
 already made applied; the error then says how far it got (a `partiallyRemoved`-style
 message), not that everything was rolled back. The same holds for the
-`perspective.instance*` RPC methods when `batchId` is given: a non-validation failure can
-leave part of the write staged in that open batch — discard it
-(`perspective.discardBatch`) rather than commit it to keep earlier calls.
+`perspective.mutate` RPC method with a `batch`: a refused call leaves that open batch as it
+was, ops included, and the call's ops are all applied or none.
 
 ### Dynamic SHACL Tools (opt-in)
 

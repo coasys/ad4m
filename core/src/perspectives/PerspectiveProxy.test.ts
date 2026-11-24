@@ -510,8 +510,7 @@ describe('PerspectiveProxy reads after write RPCs are fresh', () => {
   });
 });
 
-// Outside a batch, instanceRemove and instanceRemoveFromCollection remove
-// links one by one: a failure part-way rejects the call after some links are
+// A failure part-way through a write can reject the call after some links are
 // already gone. A read right after must reach the executor.
 describe('PerspectiveProxy reads after a rejected instance write are fresh', () => {
   const query = 'SELECT ?v WHERE { <ad4m://m/1> <test://text> ?v }';
@@ -522,22 +521,14 @@ describe('PerspectiveProxy reads after a rejected instance write are fresh', () 
       querySparql: jest.fn()
         .mockResolvedValueOnce([{ v: 'old' }])
         .mockResolvedValueOnce([]),
-      instanceRemove: jest.fn().mockRejectedValue(partial),
-      instanceRemoveFromCollection: jest.fn().mockRejectedValue(partial),
+      mutate: jest.fn().mockRejectedValue(partial),
     } as any;
   }
 
-  it('after instanceRemove rejects', async () => {
+  it('after mutate rejects', async () => {
     const proxy = createProxy(client());
     expect(await proxy.querySparql(query)).toEqual([{ v: 'old' }]);
-    await expect(proxy.instanceRemove({ className: 'Note', baseUri: 'ad4m://m/1' } as any)).rejects.toBe(partial);
-    expect(await proxy.querySparql(query)).toEqual([]);
-  });
-
-  it('after instanceRemoveFromCollection rejects', async () => {
-    const proxy = createProxy(client());
-    expect(await proxy.querySparql(query)).toEqual([{ v: 'old' }]);
-    await expect(proxy.instanceRemoveFromCollection({ className: 'Note', baseUri: 'ad4m://m/1', collection: 'tags', itemUri: 'x' } as any)).rejects.toBe(partial);
+    await expect(proxy.mutate([{ op: 'delete', class: 'Note', id: 'ad4m://m/1' }])).rejects.toBe(partial);
     expect(await proxy.querySparql(query)).toEqual([]);
   });
 });

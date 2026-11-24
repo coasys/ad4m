@@ -17,10 +17,13 @@ REST/WS shim. Split plan: spec item 6.
 `*_ws.rs`, one per RPC namespace: `agent`, `ai`, `expressions`, `hosting`,
 `languages`, `neighbourhoods`, `perspectives` (largest; also SHACL + interpretation
 handlers), `runtime`, `config` (`runtime.config`, `runtime.setConfig`), `users`, `identity`,
-`agent_session` (`perspective.runAgent`), and `perspective_instances` (`perspective.instance*`:
-validated instance writes over `perspectives/instances/`, the same functions as the MCP
-`instance_*` tools; a refused write is a `WsRpcError` with the `InstanceError` as `data`: 422
-for a shape violation, see the module doc). Each exposes `register_ws_handlers(&mut HandlerMap)`
+`agent_session` (`perspective.runAgent`), and `perspective_instances` (`perspective.mutate`:
+an ordered list of validated instance writes over `perspectives/instances/`, the same
+functions as the MCP `instance_*` tools; a refused write is a `WsRpcError` with the
+`InstanceError` plus the failing op's `opIndex` as `data`: 422 for a shape violation, see the
+module doc). The old `perspective.createSubject`, `updateSubject` and `removeSubject`
+(`perspectives_ws.rs`) call the same functions and word a refusal the same way.
+Each exposes `register_ws_handlers(&mut HandlerMap)`
 called from `ws_handler::build_handler_map`.
 
 Handler shape (`perspectives_ws.rs::add_link` is representative):
@@ -173,7 +176,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-240 methods: Cap 83, CapAnyPointer 1, Executor 43, Open 5, Operator 30, Owns 76, UserOrOperator 2. Local only (the operator on this machine): 5.
+236 methods: Cap 83, CapAnyPointer 1, Executor 43, Open 5, Operator 30, Owns 72, UserOrOperator 2. Local only (the operator on this machine): 5.
 
 | Method | Guard |
 |---|---|
@@ -302,16 +305,12 @@ the guard checked:
 | `perspective.flowValidOutputs` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.get` | `Owns(Perspective uuid, perspective:READ)`, 404 → `null` |
 | `perspective.getSubjectData` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.instanceAddToCollection` | `Owns(Perspective uuid, perspective:UPDATE)` |
-| `perspective.instanceCreate` | `Owns(Perspective uuid, perspective:UPDATE)` |
-| `perspective.instanceRemove` | `Owns(Perspective uuid, perspective:UPDATE)` |
-| `perspective.instanceRemoveFromCollection` | `Owns(Perspective uuid, perspective:UPDATE)` |
-| `perspective.instanceUpdate` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.interpretationOverlays` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.linkMutations` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.mintFlowReceipt` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.modelQuery` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.modelSubscribe` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.mutate` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.proposeFlowTransition` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.publishSnapshot` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.queryLinks` | `Owns(Perspective uuid, perspective:READ)` |

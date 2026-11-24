@@ -165,7 +165,7 @@ pub(crate) async fn mint_interpretation_run(
         values["debugResponse"] = response.clone().into();
     }
     perspective
-        .create_subject(
+        .create_subject_raw(
             SubjectClassOption {
                 class_name: Some(INTERP_RUN_CLASS.to_string()),
                 query: None,

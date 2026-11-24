@@ -185,7 +185,7 @@ async fn model_batch_subscription_reconnect_and_flow() {
         )
         .await
         .unwrap();
-    let got = model.get(&created.base_uri, None).await.unwrap().unwrap();
+    let got = model.get(&created, None).await.unwrap().unwrap();
     assert_eq!(got["title"], json!("first"));
     // Declared `xsd://boolean`: a stored `false` hydrates as a bool, not "false".
     assert_eq!(got["done"], json!(false));
@@ -212,30 +212,29 @@ async fn model_batch_subscription_reconnect_and_flow() {
 
     // ── update + dirty save ──────────────────────────────────────────────
     model
-        .update(&created.base_uri, props(&[("done", json!(true))]), None)
+        .update(&created, props(&[("done", json!(true))]), None)
         .await
         .unwrap();
     let updated = next_result(&mut sub, "update").await;
     let row = updated
         .instances
         .iter()
-        .find(|i| i["id"] == json!(created.base_uri))
+        .find(|i| i["id"] == json!(created))
         .unwrap();
     // The `true` round trip comes back as a bool too — both polarities of
     // the declared boolean property stay typed end to end.
     assert_eq!(row["done"], json!(true));
     assert!(row["done"].is_boolean());
 
-    // ── dirty save on a collection (R6): `instanceUpdate` refuses
+    // ── dirty save on a collection (R6): an update's `set` refuses
     // collections (`CollectionNotSettable`), so `Instance::save` diffs the
-    // array against the snapshot and goes through the item-level
-    // collection RPCs — proven by the writes landing at all. ────────────
-    let row = model.get(&created.base_uri, None).await.unwrap().unwrap();
-    let mut inst = model.instance(created.base_uri.clone(), row.as_object().unwrap().clone());
+    // array against the snapshot and sends item edits (`add`/`remove`) — proven by the writes landing at all. ────────────
+    let row = model.get(&created, None).await.unwrap().unwrap();
+    let mut inst = model.instance(created.clone(), row.as_object().unwrap().clone());
     inst.set("title", json!("first-edited"));
     inst.set("tags", json!(["tag://a", "tag://b"]));
     inst.save(None).await.unwrap();
-    let row = model.get(&created.base_uri, None).await.unwrap().unwrap();
+    let row = model.get(&created, None).await.unwrap().unwrap();
     assert_eq!(row["title"], json!("first-edited"));
     let mut tags: Vec<String> = row["tags"]
         .as_array()
@@ -247,17 +246,17 @@ async fn model_batch_subscription_reconnect_and_flow() {
     assert_eq!(tags, ["tag://a", "tag://b"]);
 
     // A pure reorder is not even dirty — a collection is a set, so this
-    // save is a no-op, not a rejected `instanceUpdate`.
-    let mut inst = model.instance(created.base_uri.clone(), row.as_object().unwrap().clone());
+    // save is a no-op, not a rejected update.
+    let mut inst = model.instance(created.clone(), row.as_object().unwrap().clone());
     inst.set("tags", json!(["tag://b", "tag://a"]));
     assert!(!inst.is_dirty());
     inst.save(None).await.unwrap();
 
     // Removal diffs item by item too: `tag://a` leaves the collection.
-    let mut inst = model.instance(created.base_uri.clone(), row.as_object().unwrap().clone());
+    let mut inst = model.instance(created.clone(), row.as_object().unwrap().clone());
     inst.set("tags", json!(["tag://b"]));
     inst.save(None).await.unwrap();
-    let row = model.get(&created.base_uri, None).await.unwrap().unwrap();
+    let row = model.get(&created, None).await.unwrap().unwrap();
     assert_eq!(row["tags"], json!(["tag://b"]));
 
     // ── batch: two collection saves into one batch commit the LAST saved
@@ -272,21 +271,21 @@ async fn model_batch_subscription_reconnect_and_flow() {
         tags.sort();
         tags
     };
-    let mut inst = model.instance(created.base_uri.clone(), row.as_object().unwrap().clone());
+    let mut inst = model.instance(created.clone(), row.as_object().unwrap().clone());
     inst.set("tags", json!([]));
     inst.save(None).await.unwrap();
-    let row = model.get(&created.base_uri, None).await.unwrap().unwrap();
+    let row = model.get(&created, None).await.unwrap().unwrap();
     assert!(tags_of(&row).is_empty(), "start: no tags, got {row}");
 
     // [] -> save [a] into B -> save [] into B -> commit B -> []
     let batch = model.batch().await.unwrap();
-    let mut inst = model.instance(created.base_uri.clone(), row.as_object().unwrap().clone());
+    let mut inst = model.instance(created.clone(), row.as_object().unwrap().clone());
     inst.set("tags", json!(["tag://a"]));
     inst.save(Some(batch.id().to_string())).await.unwrap();
     inst.set("tags", json!([]));
     inst.save(Some(batch.id().to_string())).await.unwrap();
     batch.commit().await.unwrap();
-    let row = model.get(&created.base_uri, None).await.unwrap().unwrap();
+    let row = model.get(&created, None).await.unwrap().unwrap();
     assert!(
         tags_of(&row).is_empty(),
         "add then remove in one batch must commit [], got {:?}",
@@ -294,19 +293,19 @@ async fn model_batch_subscription_reconnect_and_flow() {
     );
 
     // [a] committed -> save [] into B -> save [a] into B -> commit B -> [a]
-    let mut inst = model.instance(created.base_uri.clone(), row.as_object().unwrap().clone());
+    let mut inst = model.instance(created.clone(), row.as_object().unwrap().clone());
     inst.set("tags", json!(["tag://a"]));
     inst.save(None).await.unwrap();
-    let row = model.get(&created.base_uri, None).await.unwrap().unwrap();
+    let row = model.get(&created, None).await.unwrap().unwrap();
     assert_eq!(tags_of(&row), ["tag://a"]);
     let batch = model.batch().await.unwrap();
-    let mut inst = model.instance(created.base_uri.clone(), row.as_object().unwrap().clone());
+    let mut inst = model.instance(created.clone(), row.as_object().unwrap().clone());
     inst.set("tags", json!([]));
     inst.save(Some(batch.id().to_string())).await.unwrap();
     inst.set("tags", json!(["tag://a"]));
     inst.save(Some(batch.id().to_string())).await.unwrap();
     batch.commit().await.unwrap();
-    let row = model.get(&created.base_uri, None).await.unwrap().unwrap();
+    let row = model.get(&created, None).await.unwrap().unwrap();
     assert_eq!(
         tags_of(&row),
         ["tag://a"],

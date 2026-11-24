@@ -55,13 +55,11 @@ pub enum ValidationProblem {
     },
     /// The property cannot be written.
     ReadOnly { reason: ReadOnlyReason },
-    /// An update named a collection: its items change one by one.
-    CollectionNotSettable,
     /// A collection write named a single-valued property.
     NotACollection,
     /// A single-valued property got an array.
     ArrayForScalar { length: usize },
-    /// The value is `null`: omit the property instead.
+    /// A collection item is `null`: an item is a value.
     Null,
     /// A reference needs the URI of an instance of `targetClass`.
     NotAReference { target_class: String },
@@ -69,7 +67,7 @@ pub enum ValidationProblem {
     WrongType,
     /// The value is not one of `allowedValues` (`sh:in`).
     NotAllowed,
-    /// A create left out a required property.
+    /// A create left out a required property, or an update cleared one.
     MissingRequired,
 }
 
@@ -98,9 +96,9 @@ pub struct Cardinality {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteMode {
-    /// All required properties must be present; collections may be given as arrays.
+    /// All required properties must be present. `null` and `""` write nothing.
     Create,
-    /// Partial patch of single-valued properties only.
+    /// A partial patch. `null` and `""` clear a property.
     Update,
 }
 
@@ -109,6 +107,9 @@ pub enum WriteMode {
 #[derive(Debug, Default, PartialEq)]
 pub struct ValidatedWrite {
     pub scalars: Map<String, Value>,
+    /// Update only: the single-valued properties to clear.
+    pub clears: Vec<String>,
+    /// The members a collection is set to, in the order given. An empty list clears it.
     pub collections: Vec<(String, Vec<Value>)>,
 }
 
@@ -310,35 +311,42 @@ pub fn validate_properties(
             continue;
         }
 
+        let clears = value.is_null() || value.as_str() == Some("");
+
         if info.collection() {
-            match mode {
-                WriteMode::Update => errors.push(ValidationError::on(
-                    info,
-                    ValidationProblem::CollectionNotSettable,
-                    Some(value),
-                )),
-                WriteMode::Create => {
-                    let items: Vec<Value> = match value {
-                        Value::Array(items) => items.clone(),
-                        Value::Null => vec![],
-                        other => vec![other.clone()],
-                    };
-                    let mut coerced = Vec::with_capacity(items.len());
-                    let mut bad = false;
-                    for (index, item) in items.iter().enumerate() {
-                        match coerce_scalar(info, item) {
-                            Ok(v) => coerced.push(v),
-                            Err(mut e) => {
-                                e.item = Some(index);
-                                errors.push(e);
-                                bad = true;
-                            }
-                        }
-                    }
-                    if !bad && !coerced.is_empty() {
-                        out.collections.push((info.name().to_string(), coerced));
+            let items: Vec<Value> = match value {
+                _ if clears => vec![],
+                Value::Array(items) => items.clone(),
+                other => vec![other.clone()],
+            };
+            let mut coerced = Vec::with_capacity(items.len());
+            let mut bad = false;
+            for (index, item) in items.iter().enumerate() {
+                match coerce_scalar(info, item) {
+                    Ok(v) => coerced.push(v),
+                    Err(mut e) => {
+                        e.item = Some(index);
+                        errors.push(e);
+                        bad = true;
                     }
                 }
+            }
+            // A create with no members writes nothing; an update sets the collection to none.
+            if !bad && (mode == WriteMode::Update || !coerced.is_empty()) {
+                out.collections.push((info.name().to_string(), coerced));
+            }
+            continue;
+        }
+
+        if clears {
+            match mode {
+                WriteMode::Create => {}
+                WriteMode::Update if info.required() => errors.push(ValidationError::on(
+                    info,
+                    ValidationProblem::MissingRequired,
+                    Some(value),
+                )),
+                WriteMode::Update => out.clears.push(info.name().to_string()),
             }
             continue;
         }

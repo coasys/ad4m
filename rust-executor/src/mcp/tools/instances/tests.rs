@@ -452,7 +452,7 @@ async fn validation_names_property_type_and_cardinality() {
     assert!(ok.scalars.contains_key("name"));
     assert!(ok.scalars.contains_key("isPinned"));
 
-    // Update: no required check, collections refused.
+    // Update: no required check, an array on a collection sets its members.
     let ok = validate_properties(
         &shape,
         &props(&[("description", json!("only this"))]),
@@ -460,18 +460,20 @@ async fn validation_names_property_type_and_cardinality() {
     )
     .expect("partial update");
     assert_eq!(ok.scalars.len(), 1);
-    let errs = validate_properties(
+    let set = validate_properties(
         &shape,
         &props(&[("messages", json!(["flux://m1"]))]),
         WriteMode::Update,
     )
-    .expect_err("collection on update must fail");
-    assert!(errs[0].problem.contains("instance_add_to_collection"));
+    .expect("a collection on update sets its members");
+    assert_eq!(set.collections.len(), 1);
+    let errs = validate_properties(&shape, &props(&[("nope", json!(5))]), WriteMode::Update)
+        .expect_err("an undeclared property is refused");
 
     // The error payload carries the summary in `error` too.
     let payload = parse(&validation_failure("Channel", &errs));
-    assert!(payload["error"].as_str().unwrap().contains("messages"));
-    assert_eq!(payload["validation_errors"][0]["property"], "messages");
+    assert!(payload["error"].as_str().unwrap().contains("nope"));
+    assert_eq!(payload["validation_errors"][0]["property"], "nope");
 }
 
 /// A relation may name a `target_class` the perspective never registered
@@ -1306,7 +1308,8 @@ async fn instance_tools_round_trip_typed_data() {
     assert_eq!(got["isPinned"], false);
     assert_eq!(got["rank"], 3, "untouched property must survive the update");
 
-    let bad_upd = parse(
+    // A relation the class has no setter for is read-only, whether set or cleared.
+    let set_members = parse(
         &handler
             .instance_update(Parameters(InstanceUpdateParams {
                 perspective_id: uuid.clone(),
@@ -1316,10 +1319,10 @@ async fn instance_tools_round_trip_typed_data() {
             }))
             .await,
     );
-    assert!(bad_upd["error"]
-        .as_str()
-        .unwrap()
-        .contains("instance_add_to_collection"));
+    assert!(
+        set_members["error"].as_str().unwrap().contains("read-only"),
+        "{set_members}"
+    );
 
     // Remove: refuses when the class doesn't match, cascades when it does.
     let wrong = parse(
@@ -2155,7 +2158,7 @@ async fn instance_query_clamps_an_oversized_limit_without_hiding_the_total() {
     let batch_id = perspective.create_batch().await;
     for i in 0..total {
         perspective
-            .create_subject(
+            .create_subject_raw(
                 subject_class("Channel"),
                 format!("ad4m://obj/clamp-{i}"),
                 Some(json!({ "name": format!("channel-{i}") })),

@@ -7,7 +7,6 @@
 use super::side_effects::generated_verb_writes;
 use super::Ad4mMcpHandler;
 use crate::mcp::shacl::{self, ShaclProperty};
-use crate::perspectives::perspective_instance::SubjectClassOption;
 use crate::perspectives::{all_perspectives, get_perspective};
 use crate::types::Link;
 use crate::types::{LinkQuery, LinkStatus};
@@ -522,28 +521,28 @@ impl Ad4mMcpHandler {
             }
         };
 
-        let subject_class: SubjectClassOption = match serde_json::from_value(json!({
-            "className": class_name
-        })) {
-            Ok(sc) => sc,
-            Err(e) => return format!("Error: {}", e),
-        };
-
         let (mut perspective, agent_context) =
             match self.get_writable_perspective(perspective_id).await {
                 Ok(p) => p,
                 Err(e) => return e,
             };
 
-        match perspective
-            .create_subject(
-                subject_class,
-                expression_address.clone(),
-                initial_values,
-                None,
-                &agent_context,
-            )
-            .await
+        let properties = match initial_values {
+            Some(serde_json::Value::Object(values)) => Some(values),
+            _ => None,
+        };
+        match crate::perspectives::instances::create(
+            &mut perspective,
+            &agent_context,
+            crate::perspectives::instances::InstanceCreate {
+                class_name: class_name.to_string(),
+                properties,
+                base_uri: Some(expression_address.clone()),
+                parent: None,
+                batch_id: None,
+            },
+        )
+        .await
         {
             Ok(_) => {
                 // If parent is provided, add as child
@@ -592,7 +591,7 @@ impl Ad4mMcpHandler {
                     .unwrap_or_else(|e| format!("Error: {}", e))
                 }
             }
-            Err(e) => format!("Error creating subject: {}", e),
+            Err(e) => format!("Error creating subject: {:#}", e.into_anyhow()),
         }
     }
 

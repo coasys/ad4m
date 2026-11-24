@@ -89,17 +89,12 @@ impl Ad4mMcpHandler {
         )
         .await
         {
-            Ok(removed) => {
-                let mut result = json!({
-                    "success": true,
-                    "class_name": removed.class_name,
-                    "deleted": removed.base_uri,
-                });
-                if let Some(links_removed) = removed.links_removed {
-                    result["links_removed"] = json!(links_removed);
-                }
-                pretty(&result)
-            }
+            Ok(removed) => pretty(&json!({
+                "success": true,
+                "class_name": removed.class_name,
+                "deleted": removed.base_uri,
+                "links_removed": removed.links_removed,
+            })),
             Err(e) => remove_error(&e),
         }
     }

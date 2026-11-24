@@ -21,9 +21,7 @@ import type { PerspectiveQueryLinksParams } from "../generated/api/PerspectiveQu
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 import type { FlowFiredEntry } from "../generated/api/FlowFiredEntry";
 import type {
-    CollectionItemAdded, CollectionItemRemoved, InstanceAddToCollection, InstanceCreate,
-    InstanceCreated, InstanceRemove, InstanceRemoveFromCollection, InstanceRemoved,
-    InstanceUpdate, InstanceUpdated, RegisterResult, ShapeJson, ShapeSummary,
+    MutateOp, PerspectiveMutateResult, RegisterResult, Returns, ShapeJson, ShapeSummary,
 } from "../generated/api";
 import type { AddAutoProcessorConfig, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 // FlowInstance.ts owns the flow-proposal result types so they sit next to the
@@ -579,44 +577,22 @@ export class PerspectiveClient {
     }
 
     /**
-     * Validated writes (`perspective.instance*`): the executor checks each against the class's
-     * SHACL shape — each property's type, which are required, which take a single value, `sh:in`
-     * — before writing anything. A refused write rejects with an `RpcError` whose `data` is an
-     * `InstanceError` and stages nothing for that call; a shape violation is status 422 with
-     * `data.kind === 'validation'` and `data.errors` naming each property.
+     * Validated writes (`perspective.mutate`): an ordered list of create, update and delete
+     * ops. The executor checks each against the class's SHACL shape (each property's type,
+     * which are required, which take a single value, `sh:in`) and applies all of them or
+     * none. A later op sees what an earlier op of the same call wrote. A refused call rejects
+     * with an `RpcError` whose `data` is an `InstanceError` plus the `opIndex` of the failing
+     * op, and stages nothing; a shape violation is status 422 with `data.kind === 'validation'`.
      *
-     * With `batchId` the write is staged into that open batch and lands on its commit; the
-     * link reads a write does (collection membership, the remove cascade) see the batch's own
-     * staged work, but an instance created in the same batch is not found — instance existence
-     * reads committed state only, so a create followed by an update, remove or
-     * `instanceAddToCollection` of the new instance in one batch fails `notFound`; put a new
-     * instance's initial collection items on the create itself. A failure that is not a
-     * refusal — a store error mid-write, `failed` / `partiallyRemoved` — can leave part of the
-     * write staged in the batch: discard it ({@link discardBatch}) instead of committing
-     * it to keep the calls that succeeded.
+     * With `batch` the ops are staged into that open batch and land on its commit; a refused
+     * call leaves the batch as it was.
      */
-    async instanceCreate(uuid: string, body: InstanceCreate): Promise<InstanceCreated> {
-        return this.#wrote(uuid, this.#apiClient.call('perspective.instanceCreate', { uuid, ...body }))
-    }
-
-    /** Sets the given single-valued properties; the others stay. See {@link instanceCreate}. */
-    async instanceUpdate(uuid: string, body: InstanceUpdate): Promise<InstanceUpdated> {
-        return this.#wrote(uuid, this.#apiClient.call('perspective.instanceUpdate', { uuid, ...body }))
-    }
-
-    /** Removes the instance and every link to and from it. See {@link instanceCreate}. */
-    async instanceRemove(uuid: string, body: InstanceRemove): Promise<InstanceRemoved> {
-        return this.#wrote(uuid, this.#apiClient.call('perspective.instanceRemove', { uuid, ...body }))
-    }
-
-    /** Adds an item to a collection (a no-op when it is a member). See {@link instanceCreate}. */
-    async instanceAddToCollection(uuid: string, body: InstanceAddToCollection): Promise<CollectionItemAdded> {
-        return this.#wrote(uuid, this.#apiClient.call('perspective.instanceAddToCollection', { uuid, ...body }))
-    }
-
-    /** Removes an item's membership link from a collection. See {@link instanceCreate}. */
-    async instanceRemoveFromCollection(uuid: string, body: InstanceRemoveFromCollection): Promise<CollectionItemRemoved> {
-        return this.#wrote(uuid, this.#apiClient.call('perspective.instanceRemoveFromCollection', { uuid, ...body }))
+    async mutate(
+        uuid: string,
+        ops: MutateOp[],
+        options: { batch?: string, returns?: Returns } = {},
+    ): Promise<PerspectiveMutateResult> {
+        return this.#wrote(uuid, this.#apiClient.call('perspective.mutate', { uuid, ops, ...options }))
     }
 
     async getSubjectData(uuid: string, subjectClass: string, expressionAddress: string): Promise<string> {

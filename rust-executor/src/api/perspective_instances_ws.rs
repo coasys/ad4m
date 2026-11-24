@@ -1,86 +1,64 @@
-//! Validated instance writes over the WS RPC: `perspective.instanceCreate`, `.instanceUpdate`,
-//! `.instanceRemove`, `.instanceAddToCollection`, `.instanceRemoveFromCollection`.
+//! `perspective.mutate`: validated model writes over the WS RPC. One call takes an ordered list
+//! of typed ops (`create`, `update`, `delete`) and writes them in one batch with one commit.
 //!
-//! Each calls the same function as the MCP tool of the same job
-//! ([`crate::perspectives::instances`]): the write is checked against the class's SHACL shape
-//! before anything is written — each property's type, which are required, which take a single
-//! value, and `sh:in` (not arbitrary `minCount`/`maxCount` bounds). Same guard as
-//! `perspective.createSubject`: `perspective:UPDATE` on the perspective, which the caller's
-//! agent must own (`Guard::perspective`). The agent that writes is `ctx.acts_as()`.
+//! The ops run through [`crate::perspectives::instances`], the same functions as the MCP
+//! `instance_*` tools: each op's write is checked against the class's SHACL shape before it is
+//! written (each property's type, which are required, which take a single value, and `sh:in`; not
+//! arbitrary `minCount`/`maxCount` bounds). Guard: `perspective:UPDATE` on the perspective, which
+//! the caller's agent must own (`Guard::perspective`). The agent that writes is `ctx.acts_as()`.
+//! A managed agent without credits is refused before anything is written; each op that lands
+//! reserves one link write.
+//!
+//! A later op sees the earlier ops of the call: it finds an instance an earlier op created and
+//! not one an earlier op removed, so create-then-update, create-then-add-to-collection and
+//! create-then-delete of a new id work in one call.
+//!
+//! All or none. Without `batch` the ops stage into a batch of their own, committed at the end;
+//! if any op is refused or fails, the batch is discarded and nothing is written. With `batch`
+//! the ops stage into that open batch, which the caller commits (`perspective.commitBatch`); if
+//! any op is refused or fails, the batch is put back as the call found it. Calls into one batch
+//! run one at a time.
 //!
 //! A refusal is a `WsRpcError` whose `data` is the [`InstanceError`] (camelCase, tagged by
-//! `kind`); see [`instance_error`] for the codes. A validation failure is 422 with
-//! `data = { kind: "validation", className, errors: ValidationError[] }`; each error names the
-//! `property`, the `problem` (`{ kind, … }`), `expectedType`, `cardinality` (`{ min, max }`),
-//! `allowedValues` (`sh:in`), `received` and, for a collection item, its index (`item`).
+//! `kind`) plus `opIndex`, the index of the op that failed (absent when the call failed, not an
+//! op: an unknown `batch`); see [`instance_error`] for the codes. A validation failure is 422
+//! with `data = { kind: "validation", className, errors: ValidationError[], opIndex }`; each
+//! error names the `property`, the `problem` (`{ kind, ... }`), `expectedType`, `cardinality`
+//! (`{ min, max }`), `allowedValues` (`sh:in`), `received` and, for a collection item, its index
+//! (`item`).
 //!
-//! Batches and partial failure: with `batchId` the write is staged into that open batch and
-//! lands on its commit, and the link reads a write does of the state it manages (collection
-//! membership, the remove cascade) see the batch's own staged work. Existence reads still see
-//! committed state only: an instance created in the same batch is not found, so
-//! create-then-update / -remove of a new instance in one batch fails `notFound`.
-//! A *refused* call (a 422 or another 4xx) stages nothing — validation runs before any link
-//! write. A failure that is not a refusal — a store error mid-write, `failed` or
-//! `partiallyRemoved` — can leave part of the write staged in the caller's batch: discard it
-//! (`perspective.discardBatch`) instead of committing it to keep the calls that succeeded.
-//! Without a batch, a remove's cascade may have deleted some links already; `removed` counts
-//! deleted links with no batch, staged ones with one.
+//! `returns: { kind: "rows" }` also returns each created or updated instance as a read shows it
+//! after the commit; it needs a call without `batch`.
 
-use serde::Deserialize;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::sync::Arc;
 use ts_rs::TS;
 
 use crate::agent::capabilities::perspective_update_capability;
 use crate::perspectives::instances::{
-    self, CollectionItemAdded, CollectionItemRemoved, InstanceAddToCollection, InstanceCreate,
-    InstanceCreated, InstanceError, InstanceRemove, InstanceRemoveFromCollection, InstanceRemoved,
-    InstanceUpdate, InstanceUpdated, ValidationProblem,
+    self, fetch_instance, InstanceError, MutateError, MutateOp, PerspectiveMutateResult, Returns,
+    ValidationProblem,
 };
 use crate::types::RequestContext;
 
 use super::guards::Guard;
-use super::perspectives_ws::guarded_perspective;
+use super::perspectives_ws::{
+    check_credits, guarded_perspective, reserve_credits, DEFAULT_LINK_WRITE,
+};
 use super::ws_handler::{HandlerMap, WsRpcError};
 
-#[derive(Deserialize, TS)]
-#[ts(export)]
-pub struct PerspectiveInstanceCreateParams {
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export, optional_fields)]
+pub struct PerspectiveMutateParams {
     pub uuid: String,
-    #[serde(flatten)]
-    pub body: InstanceCreate,
-}
-
-#[derive(Deserialize, TS)]
-#[ts(export)]
-pub struct PerspectiveInstanceUpdateParams {
-    pub uuid: String,
-    #[serde(flatten)]
-    pub body: InstanceUpdate,
-}
-
-#[derive(Deserialize, TS)]
-#[ts(export)]
-pub struct PerspectiveInstanceRemoveParams {
-    pub uuid: String,
-    #[serde(flatten)]
-    pub body: InstanceRemove,
-}
-
-#[derive(Deserialize, TS)]
-#[ts(export)]
-pub struct PerspectiveInstanceAddToCollectionParams {
-    pub uuid: String,
-    #[serde(flatten)]
-    pub body: InstanceAddToCollection,
-}
-
-#[derive(Deserialize, TS)]
-#[ts(export)]
-pub struct PerspectiveInstanceRemoveFromCollectionParams {
-    pub uuid: String,
-    #[serde(flatten)]
-    pub body: InstanceRemoveFromCollection,
+    pub ops: Vec<MutateOp>,
+    /// An open batch (`perspective.createBatch`) to stage the ops into; they land on its commit.
+    /// Absent: the call commits its own batch.
+    pub batch: Option<String>,
+    /// Default `ids`.
+    pub returns: Option<Returns>,
 }
 
 /// The RPC error for a refused or failed write: the code, a one-line message, and the
@@ -132,6 +110,22 @@ pub(crate) fn instance_error(error: InstanceError) -> WsRpcError {
             format!("'{value}' is not a usable {field}: instance ids must be absolute URIs"),
         ),
         InstanceError::EmptyProperties => (400, "properties is empty".to_string()),
+        InstanceError::ParentClassUnresolved {
+            parent,
+            relation,
+            candidates,
+        } => (
+            400,
+            format!(
+                "cannot tell which class of '{parent}' holds '{relation}' (found: {}): name it \
+                 with `model`",
+                if candidates.is_empty() {
+                    "none".to_string()
+                } else {
+                    candidates.join(", ")
+                }
+            ),
+        ),
         InstanceError::StoredAsExpressions {
             collection,
             item_uri,
@@ -195,90 +189,77 @@ fn problem_kind(problem: &ValidationProblem) -> String {
         .unwrap_or_default()
 }
 
-async fn instance_create(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let body: PerspectiveInstanceCreateParams = serde_json::from_value(params.clone())
-        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-    let mut perspective = guarded_perspective(&params).await?;
-    let created = instances::create(&mut perspective, &ctx.acts_as(), body.body)
-        .await
-        .map_err(instance_error)?;
-    Ok(serde_json::to_value(created)?)
+/// [`instance_error`] for the op that failed: its message names the op and its `data` carries
+/// `opIndex`.
+fn mutate_error(failure: MutateError) -> WsRpcError {
+    let mut error = instance_error(failure.error);
+    if let Some(index) = failure.op_index {
+        error.message = format!("op {index}: {}", error.message);
+        if let Some(Value::Object(data)) = error.data.as_mut() {
+            data.insert("opIndex".to_string(), json!(index));
+        }
+    }
+    error
 }
 
-async fn instance_update(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let body: PerspectiveInstanceUpdateParams = serde_json::from_value(params.clone())
+async fn mutate(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_credits(ctx.user_did())?;
+    let body: PerspectiveMutateParams = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let rows = match &body.returns {
+        Some(Returns::Rows { properties }) => Some(properties.clone()),
+        _ => None,
+    };
+    if rows.is_some() && body.batch.is_some() {
+        return Err(WsRpcError::bad_request(
+            "returns rows needs a call without batch: a caller's batch is not committed yet",
+        ));
+    }
     let mut perspective = guarded_perspective(&params).await?;
-    let updated = instances::update(&mut perspective, &ctx.acts_as(), body.body)
+    let done = instances::mutate(&mut perspective, &ctx.acts_as(), body.ops, body.batch)
         .await
-        .map_err(instance_error)?;
-    Ok(serde_json::to_value(updated)?)
-}
+        .map_err(mutate_error)?;
 
-async fn instance_remove(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let body: PerspectiveInstanceRemoveParams = serde_json::from_value(params.clone())
-        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-    let mut perspective = guarded_perspective(&params).await?;
-    let removed = instances::remove(&mut perspective, &ctx.acts_as(), body.body)
-        .await
-        .map_err(instance_error)?;
-    Ok(serde_json::to_value(removed)?)
-}
+    if let Err(e) = reserve_credits(ctx.user_did(), done.len() as f64 * DEFAULT_LINK_WRITE) {
+        // The ops are committed or staged already: a missed deduction is accounting drift to
+        // see in the log, not a reason to fail the call.
+        log::warn!("credit deduction failed (mutate already written): {}", e);
+    }
 
-async fn instance_add_to_collection(
-    params: Value,
-    ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
-    let body: PerspectiveInstanceAddToCollectionParams = serde_json::from_value(params.clone())
-        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-    let mut perspective = guarded_perspective(&params).await?;
-    let added = instances::add_to_collection(&mut perspective, &ctx.acts_as(), body.body)
-        .await
-        .map_err(instance_error)?;
-    Ok(serde_json::to_value(added)?)
-}
-
-async fn instance_remove_from_collection(
-    params: Value,
-    ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
-    let body: PerspectiveInstanceRemoveFromCollectionParams =
-        serde_json::from_value(params.clone())
-            .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-    let mut perspective = guarded_perspective(&params).await?;
-    let removed = instances::remove_from_collection(&mut perspective, &ctx.acts_as(), body.body)
-        .await
-        .map_err(instance_error)?;
-    Ok(serde_json::to_value(removed)?)
+    let ids = done.iter().map(|op| op.id.clone()).collect();
+    let rows = match rows {
+        None => None,
+        Some(properties) => {
+            let mut out = Vec::with_capacity(done.len());
+            for op in &done {
+                if op.deleted {
+                    out.push(None);
+                    continue;
+                }
+                let instance = fetch_instance(&perspective, &op.class_name, &op.id)
+                    .await
+                    .map_err(|e| {
+                        WsRpcError::internal(format!(
+                            "The write committed, but reading {} back failed: {e}",
+                            op.id
+                        ))
+                    })?;
+                out.push(instance.map(|instance| match (&properties, instance) {
+                    (Some(wanted), Value::Object(mut fields)) => {
+                        fields.retain(|key, _| key == "id" || wanted.contains(key));
+                        Value::Object(fields)
+                    }
+                    (_, instance) => instance,
+                }));
+            }
+            Some(out)
+        }
+    };
+    Ok(serde_json::to_value(PerspectiveMutateResult { ids, rows })?)
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    // The guard of `perspective.createSubject` and the other perspective writes.
-    let update = || Guard::perspective(perspective_update_capability);
-
-    map.method::<PerspectiveInstanceCreateParams, InstanceCreated>(
-        "perspective.instanceCreate",
-        instance_create,
-    )
-    .guard(update());
-    map.method::<PerspectiveInstanceUpdateParams, InstanceUpdated>(
-        "perspective.instanceUpdate",
-        instance_update,
-    )
-    .guard(update());
-    map.method::<PerspectiveInstanceRemoveParams, InstanceRemoved>(
-        "perspective.instanceRemove",
-        instance_remove,
-    )
-    .guard(update());
-    map.method::<PerspectiveInstanceAddToCollectionParams, CollectionItemAdded>(
-        "perspective.instanceAddToCollection",
-        instance_add_to_collection,
-    )
-    .guard(update());
-    map.method::<PerspectiveInstanceRemoveFromCollectionParams, CollectionItemRemoved>(
-        "perspective.instanceRemoveFromCollection",
-        instance_remove_from_collection,
-    )
-    .guard(update());
+    // The guard of the other perspective writes.
+    map.method::<PerspectiveMutateParams, PerspectiveMutateResult>("perspective.mutate", mutate)
+        .guard(Guard::perspective(perspective_update_capability));
 }

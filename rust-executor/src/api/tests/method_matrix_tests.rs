@@ -600,24 +600,8 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "subjectClass": "C", "expressionAddress": "e" }),
     ),
     (
-        "perspective.instanceCreate",
-        || json!({ "className": "C", "properties": {} }),
-    ),
-    (
-        "perspective.instanceUpdate",
-        || json!({ "className": "C", "baseUri": "ad4m://e", "properties": { "p": 1 } }),
-    ),
-    (
-        "perspective.instanceRemove",
-        || json!({ "className": "C", "baseUri": "ad4m://e" }),
-    ),
-    (
-        "perspective.instanceAddToCollection",
-        || json!({ "className": "C", "baseUri": "ad4m://e", "collection": "c", "itemUri": "ad4m://i" }),
-    ),
-    (
-        "perspective.instanceRemoveFromCollection",
-        || json!({ "className": "C", "baseUri": "ad4m://e", "collection": "c", "itemUri": "ad4m://i" }),
+        "perspective.mutate",
+        || json!({ "ops": [{ "op": "delete", "class": "C", "id": "ad4m://e" }] }),
     ),
     ("perspective.commitBatch", || json!({ "batchId": "b" })),
     ("perspective.discardBatch", || json!({ "batchId": "b" })),

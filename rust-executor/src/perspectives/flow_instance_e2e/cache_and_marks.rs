@@ -624,7 +624,7 @@ async fn a_client_minted_instance_is_seeded_for_its_minter() {
     let flow_uri = f.flow_uri.clone();
     let ctx = f.ctx.clone();
     f.perspective
-        .create_subject(
+        .create_subject_raw(
             SubjectClassOption {
                 class_name: Some("FlowInstance".to_string()),
                 query: None,

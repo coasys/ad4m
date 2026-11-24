@@ -1,15 +1,16 @@
 # perspectives/instances/ — agent guide
 
 The validated instance writes: the one implementation behind the MCP `instance_*` write tools
-(`mcp/tools/instances/`) and the `perspective.instance*` RPC methods
-(`api/perspective_instances_ws.rs`). TS `Ad4mModel` is to call the RPC methods (A3b).
+(`mcp/tools/instances/`) and the `perspective.mutate` RPC method
+(`api/perspective_instances_ws.rs`).
 
 | File | Role |
 |---|---|
 | `write.rs` | `create`, `update`, `remove`, `add_to_collection`, `remove_from_collection`; their params (`Instance*`, camelCase, also the RPC bodies) and results |
+| `mutate.rs` | `mutate`: an ordered list of `MutateOp` (create, update with `set` / `add` / `remove`, delete) run as one all-or-nothing call over the `write.rs` functions; `ParentRef`, `Returns`, `PerspectiveMutateResult`, `MutateError` (the failing op's index and its `InstanceError`) |
 | `validate.rs` | `validate_properties` / `coerce_scalar`: types, cardinality, required, `sh:in`; `ValidationError` (typed: `ValidationProblem`, `Cardinality`, `allowedValues`) |
 | `error.rs` | `InstanceError` (tagged by `kind`, the RPC error's `data`), `WriteStep`, `CascadeStep` |
-| `mod.rs` | `PropView` over a `ModelShape`, class resolution, instance ids, `fetch_instance`, `check_setters`, `property_target`, the remove cascade |
+| `mod.rs` | `PropView` over a `ModelShape`, class resolution, instance ids, `fetch_instance`, `check_setters`, `property_target`, the remove cascade, `Pending` |
 
 Entry points take `(&mut PerspectiveInstance, &AgentContext, params)`; the agent is the
 caller's `acts_as()`.
@@ -33,8 +34,36 @@ Invariants:
   that flags the `committed`/`staged` presences — `addLinkExpression` can restage a
   stored expression, so both can hold); removal drops the staged copies
   (`cancel_batch_addition`) and stages the committed copy's (`remove_link`). Instance
-  existence (`fetch_instance`, `require_instance`) still reads committed state: a
-  create+update/-remove/collection-write of a new instance in one batch fails `notFound`.
+  existence (`fetch_instance`, `require_instance`) reads committed state, overlaid by `Pending`
+  (the ids this `mutate` call created or removed) when the call passes one. `Pending` lives
+  for one call: an instance an earlier call staged into the caller's batch is not found, and
+  the single writes (`create`, `update`, ...) called alone pass none.
+- `mutate` applies all ops or none. Its own batch is discarded on failure. A caller's batch is
+  snapshotted first (`snapshot_batch`) and restored on failure (`restore_batch`), under
+  `PerspectiveInstance::mutate_mutex` so two calls into one batch do not interleave. The
+  failing op's index travels with the error (`MutateError`) and the RPC puts it in the
+  message and in `data.opIndex`.
+
+Write rules (one set, for the MCP tools, `perspective.mutate` and the old `createSubject` /
+`updateSubject` / `removeSubject` RPCs, whose handlers call these functions):
+- Create: a property must be declared by the class (`unknownProperty` otherwise). `null` or
+  `""` writes nothing. An array on a relation writes one link per member, and for an
+  ordered relation the ordering entries its strategy needs (`PerspectiveInstance::order_appended`,
+  the engine's `apply_collection_ordering`); a create with a `Relation` parent does the same
+  for the parent's relation.
+- Update: `null` or `""` clears a property (a required one is `missingRequired`); an array on a
+  relation sets its members (adds the missing, removes the extra, keeps the ordering
+  entries). `add_to_collection` / `remove_from_collection` (`add` / `remove` of an update) are
+  incremental; an `add` to an ordered relation writes its ordering entry.
+- `ParentRef::Relation.model` is optional: without it the class is the one of the parent
+  instance that declares the relation (`ParentClassUnresolved` unless exactly one does).
+- Delete: run the class's destructor if it has a non-empty one; else follow each record class
+  through an abstract class, or remove the class's own declared predicates; then remove every
+  link that targets the instance (`remove_incoming_links_of`). `links_removed` counts both.
+- `PerspectiveInstance::{create,update,remove}_subject_raw` are the class-side half, called
+  by these functions after validation and by the executor's own hard-wired classes
+  (auto processor, flows, interpretation overlay), which write executor-owned shapes.
+  User-facing code never calls them.
 
 Do not: add MCP- or RPC-specific wording, or read the token: take the `AgentContext`.
 Known wart: still calls `crate::mcp::shacl` for class names, predicates and link status.

@@ -4,4 +4,4 @@ import type { ReadOnlyReason } from "./ReadOnlyReason";
 /**
  * What is wrong with a property.
  */
-export type ValidationProblem = { "kind": "unknownProperty", class: string, available: Array<string>, } | { "kind": "unknownCollection", class: string, available: Array<string>, } | { "kind": "readOnly", reason: ReadOnlyReason, } | { "kind": "collectionNotSettable" } | { "kind": "notACollection" } | { "kind": "arrayForScalar", length: number, } | { "kind": "null" } | { "kind": "notAReference", targetClass: string, } | { "kind": "wrongType" } | { "kind": "notAllowed" } | { "kind": "missingRequired" };
+export type ValidationProblem = { "kind": "unknownProperty", class: string, available: Array<string>, } | { "kind": "unknownCollection", class: string, available: Array<string>, } | { "kind": "readOnly", reason: ReadOnlyReason, } | { "kind": "notACollection" } | { "kind": "arrayForScalar", length: number, } | { "kind": "null" } | { "kind": "notAReference", targetClass: string, } | { "kind": "wrongType" } | { "kind": "notAllowed" } | { "kind": "missingRequired" };

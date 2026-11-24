@@ -118,7 +118,7 @@ async fn create(
     base: &str,
     props: Value,
 ) -> Result<(), AnyError> {
-    p.create_subject(class(name), base.into(), Some(props), None, ctx)
+    p.create_subject_raw(class(name), base.into(), Some(props), None, ctx)
         .await
 }
 
@@ -129,7 +129,7 @@ async fn update(
     base: &str,
     values: Value,
 ) -> Result<(), AnyError> {
-    p.update_subject(class(name), base.into(), values, None, ctx)
+    p.update_subject_raw(class(name), base.into(), values, None, ctx)
         .await
 }
 
@@ -217,7 +217,7 @@ async fn a_setter_two_classes_share_runs_once() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_delete_through_an_abstract_class_runs_each_destructor() {
     let (mut p, ctx) = dispatch_setup().await;
-    p.remove_subject(class("TextContent"), "ad4m://m1".into(), None, &ctx)
+    p.remove_subject_raw(class("TextContent"), "ad4m://m1".into(), None, &ctx)
         .await
         .unwrap();
     let classes = p.subject_classes_of(&["ad4m://m1".to_string()]).unwrap();
@@ -241,7 +241,7 @@ async fn writes_through_an_abstract_class_that_cannot_dispatch_are_refused() {
     let text = json!({"text": "x"});
     let updated = update(&mut p, &ctx, "TextContent", "ad4m://t1", text).await;
     let deleted = p
-        .remove_subject(class("TextContent"), "ad4m://t1".into(), None, &ctx)
+        .remove_subject_raw(class("TextContent"), "ad4m://t1".into(), None, &ctx)
         .await;
     for err in [updated.unwrap_err(), deleted.unwrap_err()] {
         let err = err.to_string();
@@ -725,7 +725,7 @@ async fn the_builtin_text_content_is_read_by_its_uri() {
     // name the class aliases to `TextContent`; never to the built-in's
     // predicate.
     perspective
-        .update_subject(
+        .update_subject_raw(
             SubjectClassOption {
                 class_name: Some(TEXT_CONTENT_URI.into()),
                 query: None,
@@ -744,7 +744,7 @@ async fn the_builtin_text_content_is_read_by_its_uri() {
     assert_eq!(links_on(&perspective, "ad4m://message/b", "ad4m://text"), 0);
     // A delete through it runs the record's own destructor.
     perspective
-        .remove_subject(
+        .remove_subject_raw(
             SubjectClassOption {
                 class_name: Some(TEXT_CONTENT_URI.into()),
                 query: None,
@@ -1050,7 +1050,7 @@ async fn an_empty_value_clears_the_property_on_update_subject() {
 async fn an_empty_value_clears_a_value_staged_in_the_same_batch() {
     let (mut p, ctx) = dispatch_setup().await;
     let batch = p.create_batch().await;
-    p.update_subject(
+    p.update_subject_raw(
         class("Task"),
         "ad4m://t1".into(),
         json!({"owner": "staged"}),
@@ -1059,7 +1059,7 @@ async fn an_empty_value_clears_a_value_staged_in_the_same_batch() {
     )
     .await
     .unwrap();
-    p.update_subject(
+    p.update_subject_raw(
         class("Task"),
         "ad4m://t1".into(),
         json!({"owner": ""}),

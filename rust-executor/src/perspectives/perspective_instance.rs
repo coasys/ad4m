@@ -684,6 +684,9 @@ pub struct PerspectiveInstance {
     /// Model query runs in flight, shared by identical calls (see `runner.rs`).
     runs: runner::Runs,
     batch_store: Arc<RwLock<HashMap<String, TimestampedBatch>>>,
+    /// Serialises `perspective.mutate` calls into a caller's batch: a call that fails puts the
+    /// batch back as it found it, which would drop the staged work of a call running beside it.
+    pub(crate) mutate_mutex: Arc<Mutex<()>>,
     // Fallback sync tracking for ensure_public_links_are_shared
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
     fallback_sync_interval: Arc<Mutex<Duration>>,
@@ -833,6 +836,7 @@ impl PerspectiveInstance {
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
             runs: runner::Runs::default(),
             batch_store: Arc::new(RwLock::new(HashMap::new())),
+            mutate_mutex: Arc::new(Mutex::new(())),
             last_successful_fallback_sync: Arc::new(Mutex::new(None)),
             fallback_sync_interval: Arc::new(Mutex::new(Duration::from_secs(30))),
             sparql_store: Arc::new(
@@ -3729,8 +3733,36 @@ impl PerspectiveInstance {
         out
     }
 
+    /// Write the ordering entry for `added` members just appended to `source`'s `predicate`
+    /// collection, whose members before the append were `members` (target, timestamp). A
+    /// collection whose class declares no ordering gets nothing. The members keep their order
+    /// and the new ones follow, so this is `apply_collection_ordering` for an append.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn order_appended(
+        &mut self,
+        source: &str,
+        predicate: &str,
+        members: &[(String, String)],
+        added: &[String],
+        status: LinkStatus,
+        batch_id: Option<String>,
+        context: &AgentContext,
+    ) -> Result<(), AnyError> {
+        let mut desired: Vec<String> = members.iter().map(|(target, _)| target.clone()).collect();
+        for target in added {
+            if !desired.contains(target) {
+                desired.push(target.clone());
+            }
+        }
+        self.apply_collection_ordering(
+            source, predicate, members, &desired, true, status, batch_id, context,
+        )
+        .await
+    }
+
     /// Write the ordering entries that turn the collection's current order into
-    /// the desired one.
+    /// the desired one. With `appended`, `desired` only names the members to put after the
+    /// current order.
     ///
     /// Additive only: entries are never removed, and a removal writes nothing at
     /// all — dropping the data link is the whole deletion, because the ordering
@@ -3742,6 +3774,7 @@ impl PerspectiveInstance {
         predicate: &str,
         current_members: &[(String, String)],
         desired: &[String],
+        appended: bool,
         status: LinkStatus,
         batch_id: Option<String>,
         context: &AgentContext,
@@ -3799,6 +3832,22 @@ impl PerspectiveInstance {
             // that was unordered until its SHACL said otherwise.
             strategy.generate_full(desired, predicate, &agent_did, now_ms)
         } else {
+            // An append keeps the order the entries give the members now (not the order the
+            // links were listed in) and puts the members that are new after it.
+            let appended_order: Vec<String>;
+            let desired = if appended {
+                let mut order = strategy.reconstruct(current_members, &current_entries);
+                let new: Vec<String> = desired
+                    .iter()
+                    .filter(|t| !order.contains(t))
+                    .cloned()
+                    .collect();
+                order.extend(new);
+                appended_order = order;
+                appended_order.as_slice()
+            } else {
+                desired
+            };
             strategy
                 .diff(
                     &current_entries,
@@ -5285,6 +5334,7 @@ impl PerspectiveInstance {
                             pred,
                             &current_members,
                             &desired,
+                            false,
                             status,
                             batch_id.clone(),
                             context,
@@ -5576,7 +5626,10 @@ impl PerspectiveInstance {
     ///     value (a scalar property may legitimately hold a JSON blob).
     ///
     /// Properties with no declared setter are skipped with a warning.
-    pub async fn create_subject(
+    ///
+    /// The class-side half of a create, behind `instances::create`: it runs after that
+    /// function has validated the values. Call [`Self::create_subject`] instead.
+    pub(crate) async fn create_subject_raw(
         &mut self,
         subject_class: SubjectClassOption,
         expression_address: String,
@@ -5753,8 +5806,11 @@ impl PerspectiveInstance {
     /// (rename, fill a missing field) rather than mint a duplicate.
     ///
     /// Properties with no declared setter are skipped, exactly as in
-    /// `create_subject`. An empty/absent value set is a no-op.
-    pub async fn update_subject(
+    /// `create_subject_raw`. An empty/absent value set is a no-op.
+    ///
+    /// The class-side half of an update, behind `instances::update`: it runs after that
+    /// function has validated the values. Call [`Self::update_subject`] instead.
+    pub(crate) async fn update_subject_raw(
         &mut self,
         subject_class: SubjectClassOption,
         expression_address: String,
@@ -8570,7 +8626,7 @@ mod tests {
             .expect("register the shape");
 
         perspective
-            .create_subject(
+            .create_subject_raw(
                 SubjectClassOption {
                     class_name: Some("Memo".to_string()),
                     query: None,
@@ -8634,7 +8690,7 @@ mod tests {
         let ctx = AgentContext::main_agent();
 
         perspective
-            .create_subject(
+            .create_subject_raw(
                 SubjectClassOption {
                     class_name: Some("Item".to_string()),
                     query: None,
@@ -8688,7 +8744,7 @@ mod tests {
         // update_subject appends further collection elements through the
         // same expansion.
         perspective
-            .update_subject(
+            .update_subject_raw(
                 SubjectClassOption {
                     class_name: Some("Item".to_string()),
                     query: None,
@@ -8774,7 +8830,7 @@ mod tests {
         // 1. Initial value only: the `t://state` link comes from the
         //    constructor action, which the SHACL never marked local.
         perspective
-            .create_subject(
+            .create_subject_raw(
                 SubjectClassOption {
                     class_name: Some("Cache".to_string()),
                     query: None,
@@ -8808,7 +8864,7 @@ mod tests {
         //    command. Same property, same instance — must be local as well,
         //    or one property ends up with two statuses depending on the call.
         perspective
-            .create_subject(
+            .create_subject_raw(
                 SubjectClassOption {
                     class_name: Some("Cache".to_string()),
                     query: None,
@@ -8835,7 +8891,7 @@ mod tests {
 
         // 3. A later setter write on an existing instance.
         perspective
-            .update_subject(
+            .update_subject_raw(
                 SubjectClassOption {
                     class_name: Some("Cache".to_string()),
                     query: None,
@@ -8893,7 +8949,7 @@ mod tests {
             .expect("register the shape");
 
         perspective
-            .create_subject(
+            .create_subject_raw(
                 SubjectClassOption {
                     class_name: Some("Flow".to_string()),
                     query: None,
@@ -8934,7 +8990,7 @@ mod tests {
     //     };
 
     //     // Create subject in batch
-    //     perspective.create_subject(
+    //     perspective.create_subject_raw(
     //         subject_class,
     //         "test://expression1".to_string(),
     //         None,

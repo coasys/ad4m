@@ -97,12 +97,6 @@ fn problem_text(e: &shared::ValidationError) -> String {
             }
         ),
         ValidationProblem::ReadOnly { reason } => format!("read-only: {}", read_only_text(*reason)),
-        ValidationProblem::CollectionNotSettable => "is a collection — instance_update only sets \
-                                                     single-valued properties; use \
-                                                     instance_add_to_collection / \
-                                                     instance_remove_from_collection to change \
-                                                     its items"
-            .to_string(),
         ValidationProblem::NotACollection => "is a single-valued property, not a collection — use \
                                               instance_update to set it"
             .to_string(),
@@ -110,7 +104,7 @@ fn problem_text(e: &shared::ValidationError) -> String {
             format!("expects a single value but received an array of {length} — pass one value")
         }
         ValidationProblem::Null => {
-            "null is not a value — omit the property instead of passing null".to_string()
+            "a collection item cannot be null — leave it out of the list".to_string()
         }
         ValidationProblem::NotAReference { target_class } => format!(
             "expects the URI of an existing {target_class} instance (as returned by \

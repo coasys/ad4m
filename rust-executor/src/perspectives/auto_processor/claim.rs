@@ -165,7 +165,7 @@ pub async fn write_claim(
     let node = claim_node(processor, key, claimant);
     let batch = perspective.create_batch().await;
     perspective
-        .create_subject(
+        .create_subject_raw(
             SubjectClassOption {
                 class_name: Some(PROCESSING_CLAIM_CLASS.to_string()),
                 query: None,
