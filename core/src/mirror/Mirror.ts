@@ -130,7 +130,7 @@ export class Mirror {
      * `lagged` and after a reconnect. After the last handle is disposed it stays open
      * `keepAliveMs` (default 30 s), so a handle opened again answers at once.
      */
-    live<T>(spec: { perspective: string; method: string; params: unknown; keepAliveMs?: number; open: () => LiveSubscription<any>; project: (raw: any) => T }): LiveQuery<T> {
+    live<T>(spec: { perspective: string; method: string; params: unknown; keepAliveMs?: number; open: () => LiveSubscription; project: (raw: any) => T }): LiveQuery<T> {
         const key = keyOf(spec)
         let shared = this.#lives.get(key)
         if (!shared?.usable) {

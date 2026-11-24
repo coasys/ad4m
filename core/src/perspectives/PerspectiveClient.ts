@@ -184,7 +184,8 @@ export class PerspectiveClient {
      * A live query handle on the client's mirror. Handles with one perspective, query and
      * parameters share one executor subscription (see {@link LiveQuery}); `open` runs only
      * for the first, and keeps the raw result. Each handle builds its data from that result
-     * with its own `project`.
+     * with its own `project` (see `LiveView`); a `project` that throws fails the handle's
+     * `first` before it had data, and keeps the handle's old data after.
      */
     liveQuery<T>(uuid: string, query: LiveQueryText, project: (raw: any) => T, options: LiveOptions = {}): LiveQuery<T> {
         return this.#apiClient.mirror.live<T>({
@@ -192,10 +193,9 @@ export class PerspectiveClient {
             method: 'perspective.subscribe',
             params: subscribeWire(query),
             keepAliveMs: options.keepAliveMs,
-            open: () => new LiveSubscription<any>(
+            open: () => new LiveSubscription(
                 this, uuid,
                 signal => this.subscribe(uuid, query, { signal, timeoutMs: options.timeoutMs }),
-                raw => raw,
             ),
             project,
         })

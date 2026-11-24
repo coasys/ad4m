@@ -188,7 +188,9 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
   `LiveQuery` view (own `first`, own projection, own listeners; `dispose()` releases only that
   view). The subscription holds the executor's raw result; each view applies its own `project`
   (model hydration) to it, so views with one key and different projections share one executor
-  subscription. A view's `first` is the current result when the view opens. After
+  subscription. A `project` that throws fails only its view: before the view had data its
+  status is `error` and its `first` rejects; after, the view keeps its old data and logs
+  'Live query result could not be read:'. A view's `first` is the current result when the view opens. After
   the last view is released the subscription stays open `keepAliveMs` (default 30000,
   `LiveOptions`), then is disposed; a view in the grace answers at once with no request.
   `LiveSubscription` resyncs itself on `lagged` and reconnect. The mirror marks the live

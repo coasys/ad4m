@@ -249,6 +249,37 @@ describe('live entries of the mirror', () => {
         expect(calls('perspective.subscribe')).toBe(1)
     })
 
+    it('a projection that throws on the first result fails only its own view', async () => {
+        const { client, calls } = setup()
+        const broken = client.liveQuery('p1', model, () => { throw new Error('cannot project') })
+        const working = client.liveQuery('p1', model, project)
+        await expect(broken.first).rejects.toThrow('cannot project')
+        expect(broken.getSnapshot()).toMatchObject({ status: 'error', reopening: false })
+        expect(await working.first).toEqual(['a'])
+        expect(working.getSnapshot()).toMatchObject({ status: 'ready', data: ['a'] })
+        expect(calls('perspective.subscribe')).toBe(1)
+    })
+
+    it('a projection that throws on a later result keeps the view\'s old data', async () => {
+        const { client, push, subscriptionId } = setup()
+        const logged = jest.spyOn(console, 'error').mockImplementation(() => {})
+        try {
+            const strict = client.liveQuery('p1', model, (raw: any) => {
+                if (raw.instances.some((i: any) => i.id === 'bad')) throw new Error('cannot project')
+                return project(raw)
+            })
+            const lenient = client.liveQuery('p1', model, project)
+            expect(await strict.first).toEqual(['a'])
+            await lenient.first
+            push({ subscriptionId: subscriptionId(), revision: 1, ids: ['a', 'bad'], upsert: [{ id: 'bad' }], totalCount: 2 })
+            expect(strict.getSnapshot()).toMatchObject({ status: 'ready', data: ['a'] })
+            expect(logged).toHaveBeenCalledWith('Live query result could not be read:', expect.any(Error))
+            expect(lenient.getSnapshot().data).toEqual(['a', 'bad'])
+        } finally {
+            logged.mockRestore()
+        }
+    })
+
     describe('one-shot reads', () => {
         it('a model query with the key of a ready live query answers from it, with no request', async () => {
             const { client, calls } = setup()

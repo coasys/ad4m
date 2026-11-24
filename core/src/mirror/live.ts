@@ -6,7 +6,7 @@ import type { Unsubscribe } from './Entry'
  * and the handles held on it. Each handle shapes the raw result with its own projection.
  */
 export class SharedLive {
-    readonly subscription: LiveSubscription<any>
+    readonly subscription: LiveSubscription
     readonly perspective: string
     #views = 0
     // `changes` when the result may be old: a write of this client settled, or the socket was lost.
@@ -17,7 +17,7 @@ export class SharedLive {
     #end: () => void
 
     /** `end` runs once the grace after the last handle is over: the mirror forgets the entry. */
-    constructor(subscription: LiveSubscription<any>, perspective: string, end: () => void) {
+    constructor(subscription: LiveSubscription, perspective: string, end: () => void) {
         this.subscription = subscription
         this.perspective = perspective
         this.#end = end
@@ -91,7 +91,7 @@ export class SharedLive {
  */
 class LiveView<T> implements LiveQuery<T> {
     readonly first: Promise<T>
-    #subscription: LiveSubscription<any>
+    #subscription: LiveSubscription
     #project: (raw: any) => T
     #release: () => void
     #disposed = false
@@ -100,7 +100,7 @@ class LiveView<T> implements LiveQuery<T> {
     // The subscription's snapshot this handle's last one was made from, so the same one stays the same object.
     #last?: { from: Snapshot<any>; to: Snapshot<T> }
 
-    constructor(subscription: LiveSubscription<any>, project: (raw: any) => T, release: () => void) {
+    constructor(subscription: LiveSubscription, project: (raw: any) => T, release: () => void) {
         this.#subscription = subscription
         this.#project = project
         this.#release = release

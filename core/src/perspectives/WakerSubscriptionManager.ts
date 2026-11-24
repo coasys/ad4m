@@ -509,11 +509,10 @@ export class WakerSubscriptionManager {
   /** Open a live query over `query`: a model query (JSON) when `className` is set, SPARQL otherwise. */
   private openLive(uuid: string, query: string, className?: string | string[]): LiveQuery<any> {
     const client = this.perspectiveClient;
-    return new LiveSubscription<any>(
+    return new LiveSubscription(
       client,
       uuid,
       (signal) => client.subscribe(uuid, className === undefined ? { sparql: query } : { className, queryJson: query }, { signal }),
-      (raw) => raw,
     );
   }
 

@@ -163,14 +163,13 @@ export interface LiveQuery<T> {
  * a resync, a re-open or an update that leaves the result as it was emits
  * nothing, as long as the status and `reopening` are unchanged too. Call `dispose()` when done.
  */
-export class LiveSubscription<T> {
-    /** The first result; rejects when the first open fails or the handle is
-     *  disposed before it arrives. */
-    readonly first: Promise<T>
+export class LiveSubscription {
+    /** The first result (the executor's raw one); rejects when the first open
+     *  fails or the handle is disposed before it arrives. */
+    readonly first: Promise<any>
     #client: PerspectiveClient
     #uuid: string
     #open: (signal: AbortSignal) => Promise<Subscribed>
-    #project: (raw: any) => T
     #id?: string
     #revision = 0
     #result: any
@@ -178,7 +177,7 @@ export class LiveSubscription<T> {
     #changes = 0
     // The stable form of `#result`, to tell a change from a repeat.
     #key?: string
-    #snapshot: Snapshot<T> = { status: 'loading', reopening: false, initial: false }
+    #snapshot: Snapshot<any> = { status: 'loading', reopening: false, initial: false }
     #disposed = false
     #generation = 0
     // Updates that arrive while a subscribe or resync reply is outstanding.
@@ -189,19 +188,18 @@ export class LiveSubscription<T> {
     #opening?: AbortController
     #retryTimer?: ReturnType<typeof setTimeout>
     #reopening = false
-    #listeners = new Set<(snapshot: Snapshot<T>) => void>()
+    #listeners = new Set<(snapshot: Snapshot<any>) => void>()
     #statusListeners = new Set<(status: LiveQueryStatus) => void>()
-    #resolveFirst!: (data: T) => void
+    #resolveFirst!: (data: any) => void
     #rejectFirst!: (error: Error) => void
 
     /** `open` subscribes on the executor; aborting its signal cancels the call.
-     *  `project` builds the data from a raw result. The query opens at once. */
-    constructor(client: PerspectiveClient, uuid: string, open: (signal: AbortSignal) => Promise<Subscribed>, project: (raw: any) => T) {
+     *  The query opens at once. */
+    constructor(client: PerspectiveClient, uuid: string, open: (signal: AbortSignal) => Promise<Subscribed>) {
         this.#client = client
         this.#uuid = uuid
         this.#open = open
-        this.#project = project
-        this.first = new Promise<T>((resolve, reject) => {
+        this.first = new Promise<any>((resolve, reject) => {
             this.#resolveFirst = resolve
             this.#rejectFirst = reject
         })
@@ -226,7 +224,7 @@ export class LiveSubscription<T> {
 
     /** The current snapshot: the same object until the result, the status or
      *  `reopening` changes. */
-    readonly getSnapshot = (): Snapshot<T> => this.#snapshot
+    readonly getSnapshot = (): Snapshot<any> => this.#snapshot
 
     /** How many results the query has had (an update, a resync, a re-open each give one). */
     get changes(): number {
@@ -247,7 +245,7 @@ export class LiveSubscription<T> {
     /** Call `fn` with the current snapshot at once when the query is no longer
      *  loading, then with each change. Returns a remover. A disposed handle
      *  calls nobody and keeps nothing. */
-    readonly subscribe = (fn: (snapshot: Snapshot<T>) => void): Unsubscribe => {
+    readonly subscribe = (fn: (snapshot: Snapshot<any>) => void): Unsubscribe => {
         if (this.#disposed) return () => {}
         this.#listeners.add(fn)
         if (this.#snapshot.status !== 'loading') this.#call(fn)
@@ -349,7 +347,7 @@ export class LiveSubscription<T> {
         }
     }
 
-    #call(fn: (snapshot: Snapshot<T>) => void) {
+    #call(fn: (snapshot: Snapshot<any>) => void) {
         try {
             fn(this.#snapshot)
         } catch (e) {
@@ -372,7 +370,7 @@ export class LiveSubscription<T> {
         const prev = this.#snapshot
         const same = prev.status === 'ready' && key === this.#key
         if (same && prev.reopening === this.#reopening) return
-        const data = same ? prev.data! : this.#project(raw)
+        const data = same ? prev.data! : raw
         this.#key = key
         this.#snapshot = {
             status: 'ready',
@@ -392,22 +390,6 @@ export class LiveSubscription<T> {
         this.#notify()
     }
 
-    /** Show `raw`. Before the first result a failure to project it fails the
-     *  open; after it, the result is skipped. */
-    #showOrSkip(raw: any) {
-        try {
-            this.#show(raw)
-        } catch (e) {
-            if (this.#snapshot.status === 'loading') throw e
-            console.error('Live query result could not be read:', e)
-            // Keep the old data, but let the snapshot agree with the status.
-            if (this.#snapshot.reopening !== this.#reopening) {
-                this.#snapshot = { ...this.#snapshot, reopening: this.#reopening }
-                this.#notify()
-            }
-        }
-    }
-
     /** Take `result` at `revision`, then apply the updates buffered meanwhile. */
     #replace(revision: number, result: any) {
         if (this.#disposed) return
@@ -416,7 +398,7 @@ export class LiveSubscription<T> {
         this.#changes++
         const buffered = this.#buffer ?? []
         this.#buffer = null
-        this.#showOrSkip(result)
+        this.#show(result)
         // A listener may have disposed the handle: nothing more is applied.
         for (const update of buffered) this.#receive(update)
     }
@@ -446,7 +428,7 @@ export class LiveSubscription<T> {
         this.#revision = update.revision
         this.#result = result
         this.#changes++
-        this.#showOrSkip(result)
+        this.#show(result)
     }
 
     #resync() {
