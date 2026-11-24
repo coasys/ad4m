@@ -312,6 +312,10 @@ pub(crate) fn build_interpretation_input_showing(
 ///
 /// Pure — called by [`build_interpretation_input`]; returns `""` when
 /// `existing` is empty so the caller can omit the key entirely.
+///
+/// One line is [`outline_line`]. The existing-row budget counts that line
+/// (at depth 0) with the row, so the outline cannot grow the prompt past
+/// the budget.
 fn render_existing_outline(existing: &ExistingInstances, shapes: &[ModelShape]) -> String {
     if existing.is_empty() {
         return String::new();
@@ -390,13 +394,7 @@ fn render_existing_outline(existing: &ExistingInstances, shapes: &[ModelShape]) 
             return;
         }
         let node = &nodes[id];
-        lines.push(format!(
-            "{}- [{}] {} ({})",
-            "  ".repeat(depth),
-            node.class,
-            node.title.split_whitespace().collect::<Vec<_>>().join(" "),
-            id
-        ));
+        lines.push(outline_line(depth, &node.class, &node.title, id));
         on_stack.insert(id);
         if let Some(kids) = children.get(id) {
             for kid in kids {
@@ -439,6 +437,13 @@ fn render_existing_outline(existing: &ExistingInstances, shapes: &[ModelShape]) 
         );
     }
     lines.join("\n")
+}
+
+/// One outline row: `- [Class] title (id)`, indented two spaces per nesting
+/// level. Whitespace in the title collapses onto the line.
+pub(crate) fn outline_line(depth: usize, class: &str, title: &str, id: &str) -> String {
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    format!("{}- [{class}] {title} ({id})", "  ".repeat(depth))
 }
 
 /// One `existing` entry as the prompt shows it: `{id, title, class}`, plus

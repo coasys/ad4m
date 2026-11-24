@@ -28,7 +28,9 @@
 
 use super::class_label;
 use super::dedup::{cosine_similarity, embed_via_ai_service};
-use super::prompt::{build_interpretation_input_showing, existing_entry_json, ExistingShown};
+use super::prompt::{
+    build_interpretation_input_showing, existing_entry_json, outline_line, ExistingShown,
+};
 use super::types::{ExistingInstances, InstanceContext, ProposedInstance, TranscriptTurn};
 use crate::ai_service::{estimate_task_prompt_tokens, estimate_token_count};
 use crate::perspectives::flow_context::FlowContext;
@@ -276,6 +278,15 @@ fn fill_stages<'a>(
     }
 }
 
+/// Tokens of one depth-0 outline line inside the prompt's JSON string,
+/// plus one token for the `"outline"` key (paid once for the block).
+fn outline_line_tokens(class: &str, title: &str, id: &str) -> usize {
+    let line = outline_line(0, class, title, id);
+    let escaped = serde_json::to_string(&format!("{line}\n")).expect("outline line");
+    let inner = &escaped[1..escaped.len() - 1];
+    estimate_token_count(inner) + 1
+}
+
 /// Pick the rows of `existing` that fit in `budget_tokens`, stage by stage
 /// (see [`fill_stages`]). A stage takes its rows in order and leaves out a
 /// row that does not fit in its share, then goes on with the next row, so
@@ -338,11 +349,17 @@ pub(crate) fn select_existing(
                     ..r.clone()
                 })
                 .collect();
-            // Each row costs its JSON plus the comma between rows.
-            let cost: usize = shown_rows
+            // Each row costs its JSON plus the comma between rows, and the
+            // outline line the same row adds. The outline is one line per
+            // instance (the first class's title), not per class row. The
+            // extra token on that line pays for the `"outline"` key.
+            let mut cost: usize = shown_rows
                 .iter()
                 .map(|r| estimate_token_count(&existing_entry_json(r).to_string()) + 1)
                 .sum();
+            if let Some(first) = shown_rows.first() {
+                cost += outline_line_tokens(&first.class, &first.title, &shown_id);
+            }
             if used + cost > cap {
                 continue;
             }
@@ -891,10 +908,15 @@ mod tests {
 
     /// The token cost of one row as the prompt shows it, plus its comma.
     fn row_cost(view: &PromptExisting, shown_id: &str) -> usize {
-        view.shown[shown_id]
+        let rows = &view.shown[shown_id];
+        let json: usize = rows
             .iter()
             .map(|r| estimate_token_count(&existing_entry_json(r).to_string()) + 1)
-            .sum()
+            .sum();
+        let line = rows
+            .first()
+            .map(|r| outline_line_tokens(&r.class, &r.title, shown_id));
+        json + line.unwrap_or(0)
     }
 
     #[test]
