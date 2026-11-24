@@ -1,4 +1,6 @@
 import { PerspectiveProxy } from './PerspectiveProxy';
+import { PerspectiveClient } from './PerspectiveClient';
+import { Mirror } from '../mirror/Mirror';
 import { Link, LinkExpression } from '../links/Links';
 import { LinkQuery } from './LinkQuery';
 import { Literal } from '../Literal';
@@ -15,23 +17,25 @@ function createProxy(client: any): PerspectiveProxy {
 describe('perspective.liveSparql', () => {
   function liveClient(subscribe: jest.Mock) {
     const reconnects = new Set<() => void>();
-    const client = {
+    // The real client over a bare mirror: it opens and shares live queries; its calls are the fakes below.
+    const client = Object.assign(new PerspectiveClient('http://localhost:0', undefined, { mirror: new Mirror() } as any), {
       subscribe,
-      onQueryUpdate: () => () => {},
+      onQueryUpdate: (_cb: any) => () => {},
       onReconnect: (cb: () => void) => { reconnects.add(cb); return () => reconnects.delete(cb); },
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
-    } as any;
+    }) as any;
     return { client, reconnects };
   }
 
   it('opens through perspective.subscribe and resolves `first` with the rows, marked initial', async () => {
     const { client } = liveClient(jest.fn().mockResolvedValue({ subscriptionId: 'sub-1', result: [{ s: 'a' }], revision: 0 }));
-    const live = createProxy(client).liveSparql('SELECT * WHERE { ?s ?p ?o }');
+    const live = createProxy(client).liveSparql('SELECT * WHERE { ?s ?p ?o }', { keepAliveMs: 0 });
     await expect(live.first).resolves.toEqual([{ s: 'a' }]);
     expect(live.getSnapshot()).toMatchObject({ status: 'ready', data: [{ s: 'a' }], initial: true });
     expect(client.subscribe).toHaveBeenCalledWith(
       'test-uuid', { sparql: 'SELECT * WHERE { ?s ?p ?o }' }, { signal: expect.any(AbortSignal), timeoutMs: undefined });
     live.dispose();
+    await new Promise(r => setTimeout(r, 10));
     expect(client.disposeQuerySubscription).toHaveBeenCalledWith('test-uuid', 'sub-1');
   });
 

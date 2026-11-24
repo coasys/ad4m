@@ -143,6 +143,19 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
   the IndexedDB tier, keyed `origin|acting DID|key` (nothing is stored while the
   DID is unknown; Node has none). A value loaded from it is shown `stale` and
   read again once per session. `markAllStale()` leaves `immutable` caches alone.
+- The Mirror registers an entry's events itself: the spec's `on` map (event name to
+  `(event, entry) => void`) is registered once, when the Mirror creates the entry.
+- Live queries (`live` kind, `core/src/mirror/live.ts`). `mirror.live` keeps one
+  `LiveSubscription` per perspective + RPC + canonical params; each caller gets its own
+  `LiveQuery` view (own `first`, listeners; `dispose()` releases only that view). After
+  the last view is released the subscription stays open `keepAliveMs` (default 30000,
+  `LiveOptions`), then is disposed; a view in the grace answers at once with no request.
+  `LiveSubscription` resyncs itself on `lagged` and reconnect, the mirror does not.
+  `PerspectiveClient.modelQuery` / `querySparql` answer from a ready live handle with the
+  same key (no `after` cursor). After an own write (`mirror.wrote`) they ask the executor
+  until an update changes the result, because the executor sends updates 250 ms or more
+  after the write's reply. A live SPARQL result is a multiset: row order can differ from a
+  fresh query with no `ORDER BY`. The Waker keeps its own unshared subscription.
 - The hooks (`ad4m-hooks` react and vue `useMe`, `useAgent`, `usePerspectives`) subscribe to these
   `Live` views; they keep no state of their own.
 - A test that reuses one client across tests must not expect a fresh read:

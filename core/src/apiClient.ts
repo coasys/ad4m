@@ -202,7 +202,7 @@ export class ApiClient {
      */
     readonly mirror = new Mirror(() => {
         try { return new URL(this.baseUrl).origin } catch { return this.baseUrl }
-    })
+    }, (name, handler) => this.on(name, handler))
 
     getBaseUrl(): string { return this.baseUrl }
     getToken(): string | undefined { return this.token }

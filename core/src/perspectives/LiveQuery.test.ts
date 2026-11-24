@@ -1,4 +1,4 @@
-import { applyUpdate, LiveQuery, LiveQueryStatus, QueryLagged, QueryUpdate, reopenDelay, Subscribed } from './LiveQuery';
+import { applyUpdate, LiveSubscription, LiveQueryStatus, QueryLagged, QueryUpdate, reopenDelay, Subscribed } from './LiveQuery';
 
 describe('applyUpdate', () => {
     it('keys model results by instance id and takes the new order', () => {
@@ -54,10 +54,10 @@ const tick = () => new Promise(r => setTimeout(r, 0));
 
 /** A live query over the fake client; the result is the raw rows. */
 function open(client: any, openCall: (signal: AbortSignal) => Promise<Subscribed>) {
-    return new LiveQuery<any[]>(client, 'p', openCall, (raw: any) => raw);
+    return new LiveSubscription<any[]>(client, 'p', openCall, (raw: any) => raw);
 }
 
-describe('LiveQuery', () => {
+describe('LiveSubscription', () => {
     it('opens on the first result, marked initial, and marks later changes not initial', async () => {
         const { client, update } = fakeClient();
         const live = open(client, async () => ({ subscriptionId: 's1', result: [1], revision: 0 }));
@@ -219,7 +219,7 @@ describe('LiveQuery', () => {
     it('resyncs instead of applying an update it cannot resolve', async () => {
         const { client, send } = fakeClient();
         client.resyncSubscription.mockResolvedValue({ revision: 1, result: { instances: [{ id: 'x' }], totalCount: 1 } });
-        const live = new LiveQuery<any>(client as any, 'p', async () => ({ subscriptionId: 's1', result: { instances: [], totalCount: 0 }, revision: 0 }), (raw: any) => raw);
+        const live = new LiveSubscription<any>(client as any, 'p', async () => ({ subscriptionId: 's1', result: { instances: [], totalCount: 0 }, revision: 0 }), (raw: any) => raw);
         await live.first;
 
         send({ subscriptionId: 's1', revision: 1, ids: ['x'], upsert: [], totalCount: 1 });
@@ -490,7 +490,7 @@ describe('LiveQuery', () => {
                 .mockResolvedValueOnce({ subscriptionId: 's1', result: ['a'], revision: 0 })
                 .mockRejectedValueOnce(new Error('Perspective p not found'))
                 .mockResolvedValueOnce({ subscriptionId: 's2', result: ['bad'], revision: 0 });
-            const live = new LiveQuery<any[]>(client as any, 'p', openCall, (raw: any) => {
+            const live = new LiveSubscription<any[]>(client as any, 'p', openCall, (raw: any) => {
                 if (raw[0] === 'bad') throw new Error('cannot project');
                 return raw;
             });

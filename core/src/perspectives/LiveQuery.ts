@@ -1,3 +1,4 @@
+import { canonical } from "../mirror/Entry";
 import type { PerspectiveClient } from "./PerspectiveClient";
 
 /** Reply to `perspective.subscribe`. */
@@ -109,20 +110,49 @@ export type SparqlRows = any[]
 export interface LiveOptions {
     /** Timeout in ms of the call that opens the query (default 30 s). */
     timeoutMs?: number
+    /** How long the executor subscription stays open after the last handle on it
+     *  is disposed, so that a handle opened again within that time answers at
+     *  once (default 30 s, {@link DEFAULT_KEEP_ALIVE_MS}). The last handle's value counts. */
+    keepAliveMs?: number
 }
 
-/** The same JSON with object keys sorted, so equal results compare equal
- *  whatever order the executor wrote their keys in. */
-function stableKey(value: unknown): string {
-    return JSON.stringify(value, (_, v) => {
-        if (v === null || typeof v !== 'object' || Array.isArray(v)) return v
-        return Object.fromEntries(Object.keys(v).sort().map(k => [k, v[k]]))
-    })
+/** Default {@link LiveOptions.keepAliveMs}. */
+export const DEFAULT_KEEP_ALIVE_MS = 30_000
+
+/**
+ * A live query as its owner holds it, opened by `Model.query()` or
+ * `perspective.liveSparql()`. Handles with the same perspective, query and
+ * parameters on one client share one executor subscription (a
+ * {@link LiveSubscription}); each handle has its own listeners, and `dispose()`
+ * releases only that handle. The subscription ends `keepAliveMs` after the last
+ * handle is disposed.
+ *
+ * The snapshot changes only when the result, the status or `reopening` does.
+ * `initial` is `true` only for a handle opened on the result the subscription
+ * first had: a handle that joins a subscription already open gets `false`.
+ */
+export interface LiveQuery<T> {
+    /** The first result; rejects when the first open fails or this handle is
+     *  disposed before it arrives. */
+    readonly first: Promise<T>
+    /** The current snapshot: the same object until the result, the status or
+     *  `reopening` changes. */
+    readonly getSnapshot: () => Snapshot<T>
+    /** Call `fn` with the current snapshot at once when the query is no longer
+     *  loading, then with each change. Returns a remover. A disposed handle
+     *  calls nobody and keeps nothing. */
+    readonly subscribe: (fn: (snapshot: Snapshot<T>) => void) => Unsubscribe
+    /** Call `listener` on each failed re-open and when a re-open succeeds
+     *  after one failed. Returns a remover. */
+    onStatus(listener: (status: LiveQueryStatus) => void): Unsubscribe
+    /** Release this handle: drop its listeners and reject its `first` if no
+     *  result came. Calling it again does nothing. */
+    dispose(): void
 }
 
 /**
- * One live query on the executor, opened by `Model.query()` or
- * `perspective.liveSparql()`.
+ * One live query subscription on the executor, shared by the {@link LiveQuery}
+ * handles of one client (see `Mirror.live`).
  *
  * It holds the last result, applies each update to it, calls
  * `resyncSubscription` when a revision is missing, and opens a new
@@ -135,7 +165,7 @@ function stableKey(value: unknown): string {
  * a resync, a re-open or an update that leaves the result as it was emits
  * nothing, as long as the status and `reopening` are unchanged too. Call `dispose()` when done.
  */
-export class LiveQuery<T> {
+export class LiveSubscription<T> {
     /** The first result; rejects when the first open fails or the handle is
      *  disposed before it arrives. */
     readonly first: Promise<T>
@@ -146,6 +176,8 @@ export class LiveQuery<T> {
     #id?: string
     #revision = 0
     #result: any
+    // How often `#result` was replaced: a one-shot read tells with it whether an update came after a write.
+    #changes = 0
     // The stable form of `#result`, to tell a change from a repeat.
     #key?: string
     #snapshot: Snapshot<T> = { status: 'loading', reopening: false, initial: false }
@@ -197,6 +229,22 @@ export class LiveQuery<T> {
     /** The current snapshot: the same object until the result, the status or
      *  `reopening` changes. */
     readonly getSnapshot = (): Snapshot<T> => this.#snapshot
+
+    /** How many results the query has had (an update, a resync, a re-open each give one). */
+    get changes(): number {
+        return this.#changes
+    }
+
+    /** The raw result as the executor wrote it, while the query is `ready` and
+     *  live (not re-opening, not resyncing): what a one-shot read of the same query would
+     *  answer. `changes` counts the results the query has had. Shared, not copied:
+     *  the caller must not change `result`. */
+    liveResult(): { result: any; changes: number } | undefined {
+        const { status, reopening } = this.#snapshot
+        return status === 'ready' && !reopening && !this.#disposed && !this.#buffer
+            ? { result: this.#result, changes: this.#changes }
+            : undefined
+    }
 
     /** Call `fn` with the current snapshot at once when the query is no longer
      *  loading, then with each change. Returns a remover. A disposed handle
@@ -322,7 +370,7 @@ export class LiveQuery<T> {
     /** Make `raw` the current result. Nothing changes, and nobody hears of it,
      *  when it equals the last one and `reopening` is as it was. */
     #show(raw: any) {
-        const key = stableKey(raw)
+        const key = canonical(raw)
         const prev = this.#snapshot
         const same = prev.status === 'ready' && key === this.#key
         if (same && prev.reopening === this.#reopening) return
@@ -367,6 +415,7 @@ export class LiveQuery<T> {
         if (this.#disposed) return
         this.#revision = revision
         this.#result = result
+        this.#changes++
         const buffered = this.#buffer ?? []
         this.#buffer = null
         this.#showOrSkip(result)
@@ -398,6 +447,7 @@ export class LiveQuery<T> {
         }
         this.#revision = update.revision
         this.#result = result
+        this.#changes++
         this.#showOrSkip(result)
     }
 

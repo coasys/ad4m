@@ -125,19 +125,15 @@ export class AgentClient {
 
   /** The one `agent.status` entry of this client's mirror; it hears `agent-status-changed`. */
   #statusEntry() {
-    this.#apiClient.on('agent-status-changed', this.#onStatusChanged);
     return this.#apiClient.mirror.entry<AgentStatus>({
       scope: 'agent',
       kind: 'pushed',
       method: 'agent.status',
       params: {},
       load: async () => new AgentStatus(await this.#apiClient.call('agent.status', {})),
+      on: { 'agent-status-changed': (event, entry) => entry.push(new AgentStatus(event.agent)) },
     });
   }
-
-  #onStatusChanged = (event: { agent: object }): void => {
-    this.#statusEntry().push(new AgentStatus(event.agent));
-  };
 
   /** Keeps the status the executor returned from a call that changes it. */
   #keepStatus(wire: object): AgentStatus {
@@ -386,7 +382,6 @@ export class AgentClient {
 
   /** The one `hosting.info` entry of this client's mirror; it hears `hosting-user-info-changed`. */
   #hostingEntry() {
-    this.#apiClient.on('hosting-user-info-changed', this.#onHostingChanged);
     return this.#apiClient.mirror.entry<HostingUserInfo>({
       scope: 'agent',
       kind: 'pushed',
@@ -403,21 +398,19 @@ export class AgentClient {
           !!info.freeAccess,
         );
       },
+      // An operator's client hears the events of every user, so only an event for the user
+      // this entry holds replaces it; any other event says the entry may be old.
+      on: {
+        'hosting-user-info-changed': (event: HostingUserInfoData, entry) => {
+          if (entry.getSnapshot().value?.email === event.email) {
+            entry.push(new HostingUserInfo(event.email, event.remainingCredits, event.hotWalletAddress || undefined, event.freeAccess));
+          } else {
+            entry.invalidate();
+          }
+        },
+      },
     });
   }
-
-  /**
-   * An operator's client hears the events of every user, so only an event for the user
-   * this entry holds replaces it; any other event says the entry may be old.
-   */
-  #onHostingChanged = (event: HostingUserInfoData): void => {
-    const entry = this.#hostingEntry();
-    if (entry.getSnapshot().value?.email === event.email) {
-      entry.push(new HostingUserInfo(event.email, event.remainingCredits, event.hotWalletAddress || undefined, event.freeAccess));
-    } else {
-      entry.invalidate();
-    }
-  };
 
   async computeLog(since?: string, limit?: number, userEmail?: string): Promise<ComputeLogEntry[]> {
     return this.#apiClient.call('runtime.computeLog', { since, limit, userEmail });

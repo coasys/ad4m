@@ -953,7 +953,7 @@ describe('PerspectiveClient', () => {
     test('a live query applies updates and resyncs on a revision gap', async () => {
         const freshClient = newClient();
         const subscription = await freshClient.perspective.byUUID('uuid-1')
-            .then(p => p!.liveSparql('SELECT ?s WHERE { ?s ?p ?o }'));
+            .then(p => p!.liveSparql('SELECT ?s WHERE { ?s ?p ?o }', { keepAliveMs: 0 }));
         expect(await subscription.first).toEqual([{ s: 'a' }]);
         const results: unknown[] = [];
         subscription.subscribe(snapshot => results.push(snapshot.data));

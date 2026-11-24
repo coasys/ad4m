@@ -151,3 +151,22 @@ describe('Mirror entry transitions', () => {
         expect(mirror.entry({ ...spec, scope: { perspective: 'p1' }, params: { x: 2, y: 2 } })).not.toBe(a)
     })
 })
+
+describe('Mirror entry events', () => {
+    it('registers each event of an entry spec once, whatever the number of reads, and hands the handler the entry', () => {
+        const handlers: Record<string, (event: any) => void> = {}
+        const listen = jest.fn((name: string, handler: (event: any) => void) => { handlers[name] = handler })
+        const mirror = new Mirror(() => '', listen as any)
+        const spec = (): any => ({
+            scope: 'agent', kind: 'pushed', method: 'agent.status', params: {}, load: async () => 'loaded',
+            on: { 'agent-status-changed': (event: { agent: string }, entry: any) => entry.push(event.agent) },
+        })
+        const entry = mirror.entry<string>(spec())
+        mirror.entry<string>(spec())
+        mirror.entry<string>(spec())
+        expect(listen).toHaveBeenCalledTimes(1)
+
+        handlers['agent-status-changed']({ agent: 'pushed' })
+        expect(entry.getSnapshot()).toMatchObject({ state: 'fresh', value: 'pushed' })
+    })
+})

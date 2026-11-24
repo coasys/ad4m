@@ -15,7 +15,7 @@ import { forgetPerspective, keepPerspective, perspectiveList } from "./perspecti
 import type { Live } from "../mirror/Mirror";
 import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
-import type { QueryLagged, QueryUpdate, Subscribed } from "./LiveQuery";
+import { LiveSubscription, type LiveOptions, type LiveQuery, type QueryLagged, type QueryUpdate, type Subscribed } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
 import type { AgentMessage } from "../generated/api/AgentMessage";
 import type { AgentReply } from "../generated/api/AgentReply";
@@ -41,6 +41,15 @@ import type {
 /** The wire form of a model query's classes: `class_name` for one, `class_names` for a union. */
 function classParams(className: string | string[]): { class_name: string } | { class_names: string[] } {
     return Array.isArray(className) ? { class_names: className } : { class_name: className }
+}
+
+type LiveQueryText = { sparql: string } | { className: string | string[], queryJson: string }
+
+/** What a live query sends to open, besides the perspective and the subscription id: its key's params. */
+function subscribeWire(query: LiveQueryText) {
+    return 'sparql' in query
+        ? { sparql: query.sparql }
+        : { model: { ...(Array.isArray(query.className) ? { classNames: query.className } : { className: query.className }), queryJson: query.queryJson } }
 }
 
 /** A new live query's id (a UUID v4). The client mints it, so it can end the
@@ -152,6 +161,8 @@ export class PerspectiveClient {
      * answered before the write (see `#wrote`).
      */
     async querySparql<T = any>(uuid: string, query: string, options?: CallOptions): Promise<T> {
+        const live = this.#liveAnswer(uuid, { sparql: query })
+        if (live) return live.result as T
         if (options) return JSON.parse(await this.#apiClient.call('perspective.querySparql', { uuid, engine: 'sparql', query }, options)) as T
         const key = `${uuid}\n${this.#writeGeneration.get(uuid) ?? 0}\n${query}`
         let reply = this.#sparqlInFlight.get(key)
@@ -174,7 +185,39 @@ export class PerspectiveClient {
             return await write
         } finally {
             this.#writeGeneration.set(uuid, (this.#writeGeneration.get(uuid) ?? 0) + 1)
+            this.#apiClient.mirror.wrote({ perspective: uuid })
         }
+    }
+
+    /**
+     * A live query handle on the client's mirror. Handles with one perspective, query and
+     * parameters share one executor subscription (see {@link LiveQuery}); `open` runs only
+     * for the first. `project` builds a handle's data from a raw result.
+     */
+    liveQuery<T>(uuid: string, query: LiveQueryText, project: (raw: any) => T, options: LiveOptions = {}): LiveQuery<T> {
+        return this.#apiClient.mirror.live<T>({
+            scope: { perspective: uuid },
+            method: 'perspective.subscribe',
+            params: subscribeWire(query),
+            keepAliveMs: options.keepAliveMs,
+            open: () => new LiveSubscription<T>(
+                this, uuid,
+                signal => this.subscribe(uuid, query, { signal, timeoutMs: options.timeoutMs }),
+                project,
+            ),
+        })
+    }
+
+    /**
+     * The result of an open live query with this text, while it is ready and live: what a
+     * one-shot read of the same question answers, so it needs no request. The one-shot's
+     * params are the live query's: a one-shot with a cursor (`after`) differs in its
+     * `queryJson`, so it is no match.
+     */
+    #liveAnswer(uuid: string, query: LiveQueryText): { result: any } | undefined {
+        return this.#apiClient.mirror.liveResult({
+            scope: { perspective: uuid }, method: 'perspective.subscribe', params: subscribeWire(query),
+        })
     }
 
     /** Open a live query: a SPARQL query, or a model query over one class or
@@ -182,13 +225,11 @@ export class PerspectiveClient {
      *  `options.signal` cancels the call, and the executor stops computing the first result. */
     async subscribe(
         uuid: string,
-        query: { sparql: string } | { className: string | string[], queryJson: string },
+        query: LiveQueryText,
         options?: CallOptions,
     ): Promise<Subscribed> {
         const subscriptionId = mintSubscriptionId()
-        const wire = 'sparql' in query
-            ? { sparql: query.sparql }
-            : { model: { ...(Array.isArray(query.className) ? { classNames: query.className } : { className: query.className }), queryJson: query.queryJson } }
+        const wire = subscribeWire(query)
         return this.#released(uuid, subscriptionId, this.#apiClient.call(
             'perspective.subscribe', { uuid, subscriptionId, ...wire }, options,
         ))
@@ -230,6 +271,8 @@ export class PerspectiveClient {
 
     /** `className` may name several classes: one query over their union (#1238). */
     async modelQuery(uuid: string, className: string | string[], queryJson: string, options?: CallOptions): Promise<any> {
+        const live = this.#liveAnswer(uuid, { className, queryJson })
+        if (live) return live.result
         const resultJson = await this.#apiClient.call(
             'perspective.modelQuery', { uuid, ...classParams(className), query_json: queryJson }, options
         )

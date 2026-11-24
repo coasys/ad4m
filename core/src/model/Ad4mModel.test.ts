@@ -2,6 +2,8 @@ import { Ad4mModel } from "./Ad4mModel";
 import { isIncludeProjection } from "./types";
 import { Model, Property, Optional, ReadOnly, HasMany, HasOne, Flag } from "./decorators";
 import { path } from "../shacl/builders";
+import { PerspectiveClient } from "../perspectives/PerspectiveClient";
+import { Mirror } from "../mirror/Mirror";
 
 describe("Ad4mModel.getModelMetadata()", () => {
   it("should extract basic model metadata with className", () => {
@@ -1316,7 +1318,8 @@ function liveHarness(initial: any = { instances: [], totalCount: 0 }) {
   let listener: ((update: any) => void) | null = null;
   let revision = 0;
   const reconnectListeners = new Set<() => void>();
-  const client = {
+  // The real client over a bare mirror: it opens and shares live queries; its calls are the fakes below.
+  const client = Object.assign(new PerspectiveClient("http://localhost:0", undefined, { mirror: new Mirror() } as any), {
     subscribe: jest.fn().mockImplementation(async () => {
       opens++;
       revision = 0;
@@ -1332,7 +1335,7 @@ function liveHarness(initial: any = { instances: [], totalCount: 0 }) {
     }),
     disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     resyncSubscription: jest.fn(),
-  };
+  });
   const perspective = {
     uuid: "test-uuid",
     client,
@@ -1479,7 +1482,7 @@ describe("Model.query (live)", () => {
 
   it("delivers nothing after dispose", async () => {
     const { client, perspective, push } = liveHarness();
-    const live = testModel("LiveDispose").query(perspective);
+    const live = testModel("LiveDispose").query(perspective, {}, { keepAliveMs: 0 });
     await live.first;
     const callback = jest.fn();
     live.subscribe(callback);
@@ -1487,6 +1490,7 @@ describe("Model.query (live)", () => {
 
     live.dispose();
     push({ result: { instances: [{ id: "late" }], totalCount: 1 } });
+    await settle();
 
     expect(callback).not.toHaveBeenCalled();
     expect(client.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-1");
@@ -1598,11 +1602,12 @@ describe("live queries never send a cursor (P8)", () => {
 describe("Model.query reconnect", () => {
   it("re-opens after a reconnect", async () => {
     const h = liveHarness();
-    const live = testModel("ReconnectLive").query(h.perspective);
+    const live = testModel("ReconnectLive").query(h.perspective, {}, { keepAliveMs: 0 });
     await live.first;
     await h.reconnect();
     expect(h.opens()).toBe(2);
     live.dispose();
+    await settle();
     expect(h.client.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-2");
   });
 
@@ -1637,9 +1642,10 @@ describe("Model.query reconnect", () => {
 
   it("a disposed live query does not re-open", async () => {
     const h = liveHarness();
-    const live = testModel("ReconnectDisposed").query(h.perspective);
+    const live = testModel("ReconnectDisposed").query(h.perspective, {}, { keepAliveMs: 0 });
     await live.first;
     live.dispose();
+    await settle();
     await h.reconnect();
     expect(h.opens()).toBe(1);
   });
@@ -3448,14 +3454,16 @@ describe("Model.query ownership", () => {
   it("a failed open ends no other live query's subscription", async () => {
     const h = liveHarness();
     h.client.subscribe.mockRejectedValueOnce(new Error("refused"));
-    const failing = testModel("OwnershipFail").query(h.perspective);
-    const working = testModel("OwnershipFail").query(h.perspective);
+    // Two queries with one key share a subscription, so these differ.
+    const failing = testModel("OwnershipFail").query(h.perspective, { limit: 1 });
+    const working = testModel("OwnershipFail").query(h.perspective, { limit: 2 }, { keepAliveMs: 0 });
 
     await expect(failing.first).rejects.toThrow("refused");
     await working.first;
 
     expect(h.client.disposeQuerySubscription).not.toHaveBeenCalledWith("test-uuid", "sub-1");
     working.dispose();
+    await settle();
     expect(h.client.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-1");
   });
 
@@ -3464,14 +3472,14 @@ describe("Model.query ownership", () => {
     let resolveOpen!: (v: any) => void;
     h.client.subscribe.mockImplementationOnce(() => new Promise(resolve => { resolveOpen = resolve; }));
     const callback = jest.fn();
-    const live = testModel("OwnershipEarly").query(h.perspective);
+    const live = testModel("OwnershipEarly").query(h.perspective, {}, { keepAliveMs: 0 });
     live.subscribe(callback);
 
     live.dispose();
     resolveOpen({ subscriptionId: "sub-p", revision: 0, result: { instances: [], totalCount: 0 } });
 
     await expect(live.first).rejects.toThrow();
-    await new Promise(resolve => setImmediate(resolve));
+    await settle();
     expect(h.client.disposeQuerySubscription).toHaveBeenCalledTimes(1);
     expect(h.client.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-p");
     expect(() => live.dispose()).not.toThrow();
@@ -3480,11 +3488,12 @@ describe("Model.query ownership", () => {
 
   it("dispose() ends the subscription once, however often it is called", async () => {
     const h = liveHarness();
-    const live = testModel("OwnershipOnce").query(h.perspective);
+    const live = testModel("OwnershipOnce").query(h.perspective, {}, { keepAliveMs: 0 });
     await live.first;
 
     live.dispose();
     live.dispose();
+    await settle();
 
     expect(h.client.disposeQuerySubscription).toHaveBeenCalledTimes(1);
     expect(h.client.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-1");

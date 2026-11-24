@@ -10,19 +10,27 @@ import { PerspectiveHandle } from './PerspectiveHandle'
  * do not change them.
  */
 export function perspectiveList(apiClient: ApiClient): Entry<PerspectiveHandle[]> {
-    listen(apiClient)
     return apiClient.mirror.entry<PerspectiveHandle[]>({
         scope: 'agent',
         kind: 'pushed',
         method: 'perspective.all',
         params: {},
         load: async () => (await apiClient.call('perspective.all', {})).map(PerspectiveHandle.fromWire),
+        on: {
+            'perspective-added': ({ perspective }, entry) => keep(entry, PerspectiveHandle.fromWire(perspective)),
+            'perspective-updated': ({ perspective }, entry) => keep(entry, PerspectiveHandle.fromWire(perspective)),
+            'perspective-removed': ({ perspectiveUuid }, entry) => forget(entry, perspectiveUuid),
+        },
     })
 }
 
 /** Keeps a handle the executor returned from an own write: added, or replacing the one of its uuid. */
 export function keepPerspective(apiClient: ApiClient, handle: PerspectiveHandle): void {
-    change(apiClient, (list) => {
+    keep(perspectiveList(apiClient), handle)
+}
+
+function keep(entry: Entry<PerspectiveHandle[]>, handle: PerspectiveHandle): void {
+    change(entry, (list) => {
         const at = list.findIndex((h) => h.uuid === handle.uuid)
         return at < 0 ? [...list, handle] : list.map((h, i) => (i === at ? handle : h))
     })
@@ -30,7 +38,11 @@ export function keepPerspective(apiClient: ApiClient, handle: PerspectiveHandle)
 
 /** Drops a perspective an own write removed. */
 export function forgetPerspective(apiClient: ApiClient, uuid: string): void {
-    change(apiClient, (list) => list.filter((h) => h.uuid !== uuid))
+    forget(perspectiveList(apiClient), uuid)
+}
+
+function forget(entry: Entry<PerspectiveHandle[]>, uuid: string): void {
+    change(entry, (list) => list.filter((h) => h.uuid !== uuid))
 }
 
 /**
@@ -38,20 +50,8 @@ export function forgetPerspective(apiClient: ApiClient, uuid: string): void {
  * reconnect made stale) the change has no sound base: the entry is invalidated, so a
  * read in flight is not kept and the next read asks.
  */
-function change(apiClient: ApiClient, apply: (list: PerspectiveHandle[]) => PerspectiveHandle[]): void {
-    const entry = perspectiveList(apiClient)
+function change(entry: Entry<PerspectiveHandle[]>, apply: (list: PerspectiveHandle[]) => PerspectiveHandle[]): void {
     const { state, value } = entry.getSnapshot()
     if (state === 'fresh' && value) entry.push(apply(value))
     else entry.invalidate()
-}
-
-const listening = new WeakMap<ApiClient, true>()
-
-/** Subscribes the client to the three events, once. */
-function listen(apiClient: ApiClient): void {
-    if (listening.has(apiClient)) return
-    listening.set(apiClient, true)
-    apiClient.on('perspective-added', ({ perspective }) => keepPerspective(apiClient, PerspectiveHandle.fromWire(perspective)))
-    apiClient.on('perspective-updated', ({ perspective }) => keepPerspective(apiClient, PerspectiveHandle.fromWire(perspective)))
-    apiClient.on('perspective-removed', ({ perspectiveUuid }) => forgetPerspective(apiClient, perspectiveUuid))
 }
