@@ -4,7 +4,9 @@
 use super::*;
 use crate::agent::signatures::TestSigner;
 use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+use crate::perspectives::model_query::types::AutoAccept;
 use crate::perspectives::perspective_instance::SubjectClassOption;
+use crate::perspectives::shacl_parser::AUTO_ACCEPT_PREDICATE;
 use crate::types::{LinkExpression, PerspectiveDiff};
 use std::collections::BTreeSet;
 
@@ -118,6 +120,124 @@ async fn register_twice_writes_no_link() {
     assert_eq!(second.generation, first.generation);
     assert_eq!(probe::count(), 0, "zero own-link reads on the repeat");
     assert_eq!(all_links(&perspective), before, "links and timestamps stay");
+}
+
+/// Lal on #1710: registering `auto_accept` is one link on the shape node.
+/// The same shape again writes nothing. A new mode replaces that link.
+/// Dropping the field removes it, and the class reads as never.
+#[tokio::test]
+async fn auto_accept_registration_replaces_the_one_rule_link() {
+    let (mut perspective, _, ctx) = setup_perspective_no_llm(&[]).await;
+    let shape_node = "ns://NoteShape";
+    let mut shape = note();
+    shape.auto_accept = Some(AutoAccept::Always);
+
+    let first = perspective
+        .register_shapes(vec![shape.clone()], &ctx)
+        .await
+        .unwrap();
+    assert_eq!(first.written, vec!["ns://Note".to_string()]);
+    assert!(first.unchanged.is_empty());
+    assert_eq!(
+        count(
+            &perspective,
+            shape_node,
+            AUTO_ACCEPT_PREDICATE,
+            "literal:string:always"
+        ),
+        1
+    );
+    assert_eq!(
+        perspective.get_shape("Note").unwrap().auto_accept,
+        Some(AutoAccept::Always)
+    );
+
+    let second = perspective
+        .register_shapes(vec![shape.clone()], &ctx)
+        .await
+        .unwrap();
+    assert_eq!(second.unchanged, vec!["ns://Note".to_string()]);
+    assert!(second.written.is_empty());
+    assert_eq!(
+        count(
+            &perspective,
+            shape_node,
+            AUTO_ACCEPT_PREDICATE,
+            "literal:string:always"
+        ),
+        1
+    );
+
+    shape.auto_accept = Some(AutoAccept::WhenPlaced);
+    let third = perspective
+        .register_shapes(vec![shape.clone()], &ctx)
+        .await
+        .unwrap();
+    assert_eq!(third.written, vec!["ns://Note".to_string()]);
+    assert!(third.unchanged.is_empty());
+    assert_eq!(
+        count(
+            &perspective,
+            shape_node,
+            AUTO_ACCEPT_PREDICATE,
+            "literal:string:when_placed"
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &perspective,
+            shape_node,
+            AUTO_ACCEPT_PREDICATE,
+            "literal:string:always"
+        ),
+        0
+    );
+    assert_eq!(
+        perspective.get_shape("Note").unwrap().auto_accept,
+        Some(AutoAccept::WhenPlaced)
+    );
+
+    shape.auto_accept = None;
+    let fourth = perspective
+        .register_shapes(vec![shape], &ctx)
+        .await
+        .unwrap();
+    assert_eq!(fourth.written, vec!["ns://Note".to_string()]);
+    assert!(fourth.unchanged.is_empty());
+    assert_eq!(
+        count(
+            &perspective,
+            shape_node,
+            AUTO_ACCEPT_PREDICATE,
+            "literal:string:when_placed"
+        ),
+        0
+    );
+    assert_eq!(
+        count(
+            &perspective,
+            shape_node,
+            AUTO_ACCEPT_PREDICATE,
+            "literal:string:always"
+        ),
+        0
+    );
+    assert_eq!(
+        count(
+            &perspective,
+            shape_node,
+            AUTO_ACCEPT_PREDICATE,
+            "literal:string:never"
+        ),
+        0
+    );
+    assert!(perspective.shapes(Some(vec!["Note".into()])).unwrap()[0]
+        .shape
+        .auto_accept
+        .is_none());
+    // Absent is the never policy: `rule_of` reads `None` as `AutoAccept::Never`.
+    assert!(perspective.get_shape("Note").unwrap().auto_accept.is_none());
 }
 
 #[tokio::test]
