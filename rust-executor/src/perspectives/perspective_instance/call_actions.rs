@@ -286,7 +286,7 @@ impl PerspectiveInstance {
         }
         let mut answers = Vec::with_capacity(calls.len());
         for run in calls {
-            let answer = self.execute_call(run).await?;
+            let answer = self.execute_call(run, context).await?;
             let (lang, _) = LanguageController::parse_expr_url(&run.source)
                 .map_err(|e| anyhow!("call action source {:?}: {e}", run.source))?;
             if let Some(why) = &answer.malformed {
@@ -306,12 +306,15 @@ impl PerspectiveInstance {
     /// One call: `run.name` on `run.source` with `run.params` as the
     /// single JSON object argument. Returns what the language answered
     /// (`parse_call_result`).
-    async fn execute_call(&self, run: &CallRun) -> Result<CallAnswer, AnyError> {
-        // `expression_interact` takes no agent context, so the call runs
-        // as the executor's main agent: whatever the language signs or
-        // writes during it (zome calls, its own links) is the main agent's.
-        // That is why `check_call_caller` lets only the main agent make
-        // one, until ad4m#1775 passes the caller's context through.
+    async fn execute_call(
+        &self,
+        run: &CallRun,
+        context: &AgentContext,
+    ) -> Result<CallAnswer, AnyError> {
+        // The call runs as `context` (#1775): what the language signs or
+        // writes during it (zome calls, its own links) is that agent's.
+        // `check_call_caller` still lets only the main agent make a call
+        // here, until the run-as-caller PR drops that gate.
         let result = LanguageController::global_instance()
             .expression_interact(
                 &run.source,
@@ -319,6 +322,7 @@ impl PerspectiveInstance {
                     name: run.name.clone(),
                     parameters_stringified: Value::Object(run.params.clone()).to_string(),
                 },
+                context,
             )
             .await
             .map_err(|e| anyhow!("{e}"))?;
