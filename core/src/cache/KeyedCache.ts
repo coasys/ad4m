@@ -162,8 +162,9 @@ export class KeyedCache<V> {
         }
         const tell = (current: () => boolean) => {
             for (const [key, seen] of told) this.#notify(key, seen);
-            // A reset or refusal made while the callbacks ran takes the reads back.
-            if (current()) for (const key of again) this.#read(key, this.#loader(key)).catch(() => {});
+            // A reset or refusal made meanwhile takes the reads back: asked before each read, as the
+            // subscriber a read tells may make one.
+            for (const key of again) if (current()) this.#read(key, this.#loader(key)).catch(() => {});
         };
         if (deferred) deferred.push(tell);
         else tell(() => true);

@@ -404,6 +404,24 @@ describe('Mirror: a reset or refusal during a drain', () => {
         expect(cLoad).not.toHaveBeenCalled()
     })
 
+    it.each([
+        ['reset', (mirror: Mirror) => mirror.reset()],
+        ['refusal', (mirror: Mirror) => mirror.refuse()],
+    ])('a %s by the subscriber of one watched cache key stops the read of the next', async (_, act) => {
+        const mirror = new Mirror(() => '', () => {}, () => null)
+        const loadMany = jest.fn(async (keys: string[]) => keys)
+        const cache = mirror.cache<string>({ method: 'c', options: () => ({ loadMany }) })
+        await cache.getMany(['k1', 'k2'])
+        let acted = false
+        cache.live('k1').subscribe((s) => { if (s.state === 'loading' && !acted) { acted = true; act(mirror) } })
+        cache.live('k2').subscribe(() => {})
+        loadMany.mockClear()
+        mirror.markAllStale()
+        await new Promise((r) => setTimeout(r, 0))
+        expect(acted).toBe(true)
+        expect(loadMany.mock.calls.flat(2)).not.toContain('k2')
+    })
+
     it('with no reset in between, the drain still reads each watched value once', async () => {
         const { aLoad, bLoad, cLoad } = await twoWatched(() => {})
         expect(aLoad).toHaveBeenCalledTimes(1)
