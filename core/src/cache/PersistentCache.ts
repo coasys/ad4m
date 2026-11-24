@@ -18,7 +18,8 @@ export interface PersistentCache<T = unknown> {
   get(key: string): Promise<T | undefined>;
   put(key: string, value: T): Promise<void>;
   delete(key: string): Promise<void>;
-  clear(): Promise<void>;
+  /** Deletes every key, or only those that start with `prefix`. */
+  clear(prefix?: string): Promise<void>;
 }
 
 // ── IndexedDB Implementation ─────────────────────────────────────────
@@ -97,13 +98,14 @@ export class IDBCache<T = unknown> implements PersistentCache<T> {
     }
   }
 
-  async clear(): Promise<void> {
+  async clear(prefix?: string): Promise<void> {
     try {
       const db = await this.#open();
       return new Promise<void>((resolve) => {
         const tx = db.transaction(this.#storeName, 'readwrite');
         const store = tx.objectStore(this.#storeName);
-        store.clear();
+        if (prefix === undefined) store.clear();
+        else store.delete(IDBKeyRange.bound(prefix, prefix + '￿'));
         tx.oncomplete = () => resolve();
         tx.onerror = () => resolve();
       });
@@ -119,7 +121,7 @@ export class NullCache<T = unknown> implements PersistentCache<T> {
   async get(_key: string): Promise<T | undefined> { return undefined; }
   async put(_key: string, _value: T): Promise<void> {}
   async delete(_key: string): Promise<void> {}
-  async clear(): Promise<void> {}
+  async clear(_prefix?: string): Promise<void> {}
 }
 
 // ── Factory ──────────────────────────────────────────────────────────

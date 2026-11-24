@@ -1,5 +1,6 @@
 import { callSafely } from './notifyListeners'
 import { Mirror } from './mirror/Mirror'
+import { agentStatusEntry } from './agent/statusEntry'
 import { LONG_METHODS, OPENS_METHODS, READ_METHODS } from './generated/api/RpcMethods'
 import type { RpcMethod, RpcMethods } from './generated/api/RpcMethods'
 import type { EventMap, EventName } from './generated/api/Events'
@@ -202,7 +203,7 @@ export class ApiClient {
      */
     readonly mirror = new Mirror(() => {
         try { return new URL(this.baseUrl).origin } catch { return this.baseUrl }
-    }, (name, handler) => this.on(name, handler))
+    }, (name, handler) => this.on(name, handler), () => agentStatusEntry(this).getSnapshot().value?.did || null)
 
     getBaseUrl(): string { return this.baseUrl }
     getToken(): string | undefined { return this.token }

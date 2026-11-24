@@ -3,7 +3,7 @@ import type { Entry } from '../mirror/Entry'
 import { PerspectiveHandle } from './PerspectiveHandle'
 
 /**
- * The one `perspective.all` entry of a client's mirror, `pushed`: the executor's
+ * The one `perspective.all` entry of a client's mirror, pushed: the executor's
  * `perspective-added`, `perspective-updated` and `perspective-removed` events change
  * the list, and so do the handles an own write returns ({@link keepPerspective},
  * {@link forgetPerspective}), so a reader never asks again. The handles are shared:
@@ -12,7 +12,6 @@ import { PerspectiveHandle } from './PerspectiveHandle'
 export function perspectiveList(apiClient: ApiClient): Entry<PerspectiveHandle[]> {
     return apiClient.mirror.entry<PerspectiveHandle[]>({
         scope: 'agent',
-        kind: 'pushed',
         method: 'perspective.all',
         params: {},
         load: async () => (await apiClient.call('perspective.all', {})).map(PerspectiveHandle.fromWire),

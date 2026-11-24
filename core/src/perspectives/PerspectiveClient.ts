@@ -7,7 +7,7 @@ import {
     linkExpressionInputToWire, linkExpressionToWire, linkMutationsToWire,
 } from "../links/Links";
 import { NeighbourhoodClient } from "../neighbourhood/NeighbourhoodClient";
-import { NeighbourhoodProxy, type SessionOwners } from "../neighbourhood/NeighbourhoodProxy";
+import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
 import { PerspectiveHandle } from "./PerspectiveHandle";
@@ -67,12 +67,8 @@ export class PerspectiveClient {
     #apiClient: ApiClient
     #expressionClient?: ExpressionClient
     #neighbourhoodClient?: NeighbourhoodClient
-    #sessionOwners?: SessionOwners
     #neighbourhoodProxies = new Map<string, NeighbourhoodProxy>()
     #aiClient?: AIClient
-    #sparqlInFlight = new Map<string, Promise<string>>()
-    /** Per perspective, how many writes through this client have settled; part of the in-flight key. */
-    #writeGeneration = new Map<string, number>()
 
     constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token)
@@ -84,11 +80,6 @@ export class PerspectiveClient {
 
     setNeighbourhoodClient(client: NeighbourhoodClient) {
         this.#neighbourhoodClient = client
-    }
-
-    /** The agent and runtime clients a neighbourhood's call sessions read the DID and SFU status from. */
-    setSessionOwners(owners: SessionOwners) {
-        this.#sessionOwners = owners
     }
 
     setAIClient(client: AIClient) {
@@ -155,36 +146,34 @@ export class PerspectiveClient {
 
     /**
      * Concurrent identical calls (same perspective and query, no `options`)
-     * share one RPC. Each caller parses its own copy of the reply, and a call
-     * made after the shared one settled makes a new RPC. So does a call made
-     * after a write through this client settled: the shared RPC may have been
-     * answered before the write (see `#wrote`).
+     * share one RPC, through the mirror's one-shot layer (`Mirror.oneShot`). Each caller
+     * parses its own copy of the reply, and a call made after the shared one settled makes
+     * a new RPC. So does a call made after a write through this client settled: the shared
+     * RPC may have been answered before the write (see `#wrote`).
      */
     async querySparql<T = any>(uuid: string, query: string, options?: CallOptions): Promise<T> {
         const live = this.#liveAnswer(uuid, { sparql: query })
         if (live) return live.result as T
-        if (options) return JSON.parse(await this.#apiClient.call('perspective.querySparql', { uuid, engine: 'sparql', query }, options)) as T
-        const key = `${uuid}\n${this.#writeGeneration.get(uuid) ?? 0}\n${query}`
-        let reply = this.#sparqlInFlight.get(key)
-        if (!reply) {
-            reply = this.#apiClient.call('perspective.querySparql', { uuid, engine: 'sparql', query })
-                .finally(() => this.#sparqlInFlight.delete(key))
-            this.#sparqlInFlight.set(key, reply)
-        }
-        return JSON.parse(await reply) as T
+        const params = { uuid, engine: 'sparql' as const, query }
+        if (options) return JSON.parse(await this.#apiClient.call('perspective.querySparql', params, options)) as T
+        return JSON.parse(await this.#apiClient.mirror.oneShot({
+            scope: { perspective: uuid },
+            method: 'perspective.querySparql',
+            params,
+            request: () => this.#apiClient.call('perspective.querySparql', params),
+        })) as T
     }
 
     /**
-     * Await a write to `uuid`, then start a new write generation for it
-     * (also when the write failed: it may still have changed the perspective).
-     * Calls of {@link querySparql} already waiting keep sharing their RPC; an
-     * identical call started from now on makes its own.
+     * Await a write to `uuid`, then tell the mirror (`Mirror.wrote`) a write settled, also
+     * when it failed: it may still have changed the perspective. One-shot calls already
+     * waiting keep sharing their RPC; an identical call started from now on makes its own,
+     * and the live queries of the perspective answer no one-shot until an update arrives.
      */
     async #wrote<T>(uuid: string, write: Promise<T>): Promise<T> {
         try {
             return await write
         } finally {
-            this.#writeGeneration.set(uuid, (this.#writeGeneration.get(uuid) ?? 0) + 1)
             this.#apiClient.mirror.wrote({ perspective: uuid })
         }
     }
@@ -273,10 +262,14 @@ export class PerspectiveClient {
     async modelQuery(uuid: string, className: string | string[], queryJson: string, options?: CallOptions): Promise<any> {
         const live = this.#liveAnswer(uuid, { className, queryJson })
         if (live) return live.result
-        const resultJson = await this.#apiClient.call(
-            'perspective.modelQuery', { uuid, ...classParams(className), query_json: queryJson }, options
-        )
-        return JSON.parse(resultJson)
+        const params = { uuid, ...classParams(className), query_json: queryJson }
+        if (options) return JSON.parse(await this.#apiClient.call('perspective.modelQuery', params, options))
+        return JSON.parse(await this.#apiClient.mirror.oneShot({
+            scope: { perspective: uuid },
+            method: 'perspective.modelQuery',
+            params,
+            request: () => this.#apiClient.call('perspective.modelQuery', params),
+        }))
     }
 
     async subjectClassesOf(uuid: string, uris: string[]): Promise<Record<string, string[]>> {
@@ -709,7 +702,7 @@ export class PerspectiveClient {
     getNeighbourhoodProxy(uuid: string): NeighbourhoodProxy {
         let proxy = this.#neighbourhoodProxies.get(uuid)
         if (!proxy) {
-            proxy = new NeighbourhoodProxy(this.#neighbourhoodClient!, uuid, this.#sessionOwners!)
+            proxy = new NeighbourhoodProxy(this.#neighbourhoodClient!, uuid, this.#apiClient)
             this.#neighbourhoodProxies.set(uuid, proxy)
         }
         return proxy

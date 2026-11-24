@@ -1,8 +1,5 @@
-/** Where a value belongs: the executor, the calling agent, one perspective or one neighbourhood. */
-export type Scope = 'executor' | 'agent' | { perspective: string } | { neighbourhood: string }
-
-/** What keeps an entry fresh. */
-export type Kind = 'pushed' | 'live' | 'fixed' | 'immutable' | 'declared'
+/** Where a value belongs: the executor, the calling agent or one perspective. */
+export type Scope = 'executor' | 'agent' | { perspective: string }
 
 export type State = 'unknown' | 'loading' | 'fresh' | 'stale' | 'error'
 
@@ -39,74 +36,50 @@ export function canonical(value: unknown): string {
             : v) ?? 'undefined'
 }
 
-/** What a cache of entries adds to the plain rules of an {@link Entry}. */
-export interface EntryOptions<T> {
-    /** `false`: the answer reaches its readers but is not kept (a value that is not found). Default: kept. */
-    keep?(value: T): boolean
-    /** How long a value stays fresh. Default: until the executor says it changed. */
-    maxAgeMs?(): number
-    /** The entry took `value` (an answer, a push or a seed): the cache's own bookkeeping. */
-    kept?(value: T): void
-}
-
 /**
  * One data point the executor owns. The transitions follow the mirror's state diagram:
  * a read of an `unknown`, `stale` or `error` entry sends one request (`loading`); the answer
  * makes it `fresh`; a pushed value replaces it; an invalidation, a reconnect or a lag marker
  * makes it `stale`. An answer is kept only when nothing changed the entry since its request
  * went out, so one sent before a reconnect reaches its readers once and is dropped.
+ * A failure is never kept. The rules of a keyed store (age, size limits, a persistent tier)
+ * are not here: see `KeyedCache`.
  */
 export class Entry<T> implements Live<T> {
-    readonly kind: Kind
     #load: () => Promise<T>
-    #opts: EntryOptions<T>
     #state: State = 'unknown'
     #value: T | undefined
     #error: unknown
     #values = 0
-    #ts = 0
     /** Counts what changed the entry from outside a read: a push, an invalidation. */
     #version = 0
     #inflight: Promise<T> | null = null
     #listeners = new Set<(snapshot: Snapshot<T>) => void>()
     #snapshot: Snapshot<T>
 
-    constructor(kind: Kind, load: () => Promise<T>, opts: EntryOptions<T> = {}) {
-        this.kind = kind
+    constructor(load: () => Promise<T>) {
         this.#load = load
-        this.#opts = opts
         this.#snapshot = this.#makeSnapshot()
     }
 
-    get hasListeners(): boolean {
-        return this.#listeners.size > 0
-    }
-
     getSnapshot(): Snapshot<T> {
-        this.#expire()
         return this.#snapshot
     }
 
     subscribe(fn: (snapshot: Snapshot<T>) => void): Unsubscribe {
         this.#listeners.add(fn)
-        this.#expire()
         if (this.#state !== 'fresh' && this.#state !== 'loading') this.#refetch()
         return () => { this.#listeners.delete(fn) }
     }
 
-    /** `load` replaces the entry's own request function for this read only (a batched read). */
-    read(load: () => Promise<T> = this.#load): Promise<T> {
-        this.#expire()
+    read(): Promise<T> {
         if (this.#state === 'fresh') return Promise.resolve(this.#value as T)
         if (this.#inflight) return this.#inflight
         const version = this.#version
         this.#set('loading')
-        const request = load().then(
+        const request = this.#load().then(
             (value) => {
-                if (version === this.#version) {
-                    if (this.#opts.keep && !this.#opts.keep(value)) this.#set(this.#values > 0 ? 'stale' : 'unknown')
-                    else this.#accept(value)
-                }
+                if (version === this.#version) this.#accept(value)
                 return value
             },
             (error) => {
@@ -130,18 +103,6 @@ export class Entry<T> implements Live<T> {
         this.#accept(value)
     }
 
-    /** A value that may be old (from a persistent store): shown, read again by the next read. */
-    seed(value: T): void {
-        this.#version++
-        this.#inflight = null
-        this.#value = value
-        this.#values++
-        this.#ts = Date.now()
-        this.#error = undefined
-        this.#opts.kept?.(value)
-        this.#set('stale')
-    }
-
     /** The executor changed the value without giving it, or the connection lost events: stale. */
     invalidate(): void {
         this.#version++
@@ -151,35 +112,15 @@ export class Entry<T> implements Live<T> {
         if (this.#listeners.size > 0) this.#refetch()
     }
 
-    /** Forgets the value: `unknown`; a read in flight is not kept. Subscribers hear of it and do not load. */
-    reset(): void {
-        this.#version++
-        this.#inflight = null
-        this.#value = undefined
-        this.#values = 0
-        this.#error = undefined
-        this.#set('unknown')
-    }
-
     #accept(value: T): void {
-        const same = this.#listeners.size > 0 && this.#values > 0 && canonical(value) === canonical(this.#value)
         // An equal value stays the same object: subscribers compare snapshots by identity.
+        const same = this.#listeners.size > 0 && this.#values > 0 && canonical(value) === canonical(this.#value)
         if (!same) {
             this.#value = value
             this.#values++
         }
-        this.#ts = Date.now()
         this.#error = undefined
-        this.#opts.kept?.(same ? this.#value as T : value)
         if (!same || this.#state !== 'fresh') this.#set('fresh')
-    }
-
-    /** A value older than `maxAgeMs` is stale; no one is told, the next read loads. */
-    #expire(): void {
-        if (this.#state === 'fresh' && Date.now() - this.#ts >= (this.#opts.maxAgeMs?.() ?? Infinity)) {
-            this.#state = 'stale'
-            this.#snapshot = this.#makeSnapshot()
-        }
     }
 
     #refetch(): void {

@@ -1,16 +1,15 @@
-import { canonical, Entry, type Kind, type Scope } from './Entry'
+import { canonical, Entry, type Scope } from './Entry'
 import type { EventMap, EventName } from '../generated/api/Events'
 import { KeyedCache, type KeyedCacheOptions } from '../cache/KeyedCache'
 import type { LiveQuery, LiveSubscription } from '../perspectives/LiveQuery'
 import { SharedLive } from './live'
 import { createPersistentCache, NullCache, type PersistentCache } from '../cache/PersistentCache'
 
-export type { Kind, Live, Scope, Snapshot, State, Unsubscribe } from './Entry'
+export type { Live, Scope, Snapshot, State, Unsubscribe } from './Entry'
 
 /** What names one entry, and how it loads. */
 export interface EntrySpec<T> {
     scope: Scope
-    kind: Kind
     /** The RPC the entry reads, e.g. `agent.status`. */
     method: string
     params: unknown
@@ -28,38 +27,54 @@ export interface EntrySpec<T> {
  */
 export class Mirror {
     #entries = new Map<string, Entry<unknown>>()
-    #caches = new Map<string, { kind: Kind; cache: KeyedCache<any> }>()
+    #caches = new Map<string, { staleOnReconnect: boolean; cache: KeyedCache<any> }>()
     #lives = new Map<string, SharedLive<any>>()
+    #flights = new Map<string, Promise<any>>()
+    /** Per scope, how many writes of this client have settled (see {@link wrote}). */
+    #writes = new Map<string, number>()
     #origin: () => string
     #listen: <K extends EventName>(name: K, handler: (event: EventMap[K]) => void) => unknown
-
-    /**
-     * The DID this client acts as, for the persistent tier's keys; `null` while unknown, and
-     * then nothing is read from or written to that tier. `AgentClient` sets it.
-     */
-    actingDid: () => Promise<string | null> = async () => null
+    #actingDid: () => string | null
 
     /**
      * `origin` names the executor: persisted values are keyed by it, the acting DID and the key.
-     * `listen` registers an executor event handler (`ApiClient.on`), for the `on` of an entry spec.
+     * `listen` registers an executor event handler (`ApiClient.on`), for the `on` of an entry
+     * or cache spec. `actingDid` is the DID this client acts as, as far as the client already
+     * knows it (it never sends a request for it): `null` while unknown, and then nothing is
+     * read from or written to the persistent tier.
      */
     constructor(
-        origin: () => string = () => '',
-        listen: <K extends EventName>(name: K, handler: (event: EventMap[K]) => void) => unknown = () => {},
+        origin: () => string,
+        listen: <K extends EventName>(name: K, handler: (event: EventMap[K]) => void) => unknown,
+        actingDid: () => string | null,
     ) {
         this.#origin = origin
         this.#listen = listen
+        this.#actingDid = actingDid
     }
 
     /**
-     * The {@link KeyedCache} for one RPC kind: the store of its `immutable` or `declared`
-     * values, owned by this mirror, so two clients share nothing. The first call's options stay.
+     * The {@link KeyedCache} for one RPC: the store of its keyed values, owned by this
+     * mirror, so two clients share nothing. The first call's spec stays; its `on` handlers
+     * are registered once, with the cache to `set`, `delete` or `markStale`.
+     * A reconnect or a `lagged` marker makes the cache stale (see {@link markAllStale}),
+     * unless `staleOnReconnect` is `false`: for values no event ever corrects, which only
+     * their own age expires.
      */
-    cache<V>(spec: { method: string; kind: 'immutable' | 'declared'; options: () => KeyedCacheOptions<V> }): KeyedCache<V> {
+    cache<V>(spec: {
+        method: string
+        staleOnReconnect?: boolean
+        options: () => KeyedCacheOptions<V>
+        on?: { [K in EventName]?: (event: EventMap[K], cache: KeyedCache<V>) => void }
+    }): KeyedCache<V> {
         let held = this.#caches.get(spec.method)
         if (!held) {
-            held = { kind: spec.kind, cache: new KeyedCache<V>(spec.options(), spec.kind) }
+            const created = new KeyedCache<V>(spec.options())
+            held = { staleOnReconnect: spec.staleOnReconnect !== false, cache: created }
             this.#caches.set(spec.method, held)
+            for (const [name, handler] of Object.entries(spec.on ?? {}) as [EventName, (event: any, cache: KeyedCache<V>) => void][]) {
+                this.#listen(name, (event) => handler(event, created))
+            }
         }
         return held.cache as KeyedCache<V>
     }
@@ -67,20 +82,22 @@ export class Mirror {
     /**
      * A persistent store (IndexedDB in browsers) whose keys are the executor's origin, the
      * acting DID and the key: a second user of one browser profile reads none of the first's
-     * values. Without an IndexedDB, or while the DID is unknown, it keeps nothing.
+     * values, and `clear()` removes only this client's own. Without an IndexedDB, or while
+     * the DID is unknown, it keeps nothing and reads nothing.
      */
     persistent<T>(dbName: string, storeName: string): PersistentCache<T> {
         const inner = createPersistentCache<T>(dbName, storeName)
         if (inner instanceof NullCache) return inner
-        const scoped = async (key: string) => {
-            const did = await this.actingDid().catch(() => null)
-            return did ? `${this.#origin()}|${did}|${key}` : null
+        const prefix = () => {
+            const did = this.#actingDid()
+            return did ? `${this.#origin()}|${did}|` : null
         }
+        const scoped = (key: string) => { const p = prefix(); return p && p + key }
         return {
-            get: async (key) => { const k = await scoped(key); return k ? inner.get(k) : undefined },
-            put: async (key, value) => { const k = await scoped(key); if (k) await inner.put(k, value) },
-            delete: async (key) => { const k = await scoped(key); if (k) await inner.delete(k) },
-            clear: () => inner.clear(),
+            get: async (key) => { const k = scoped(key); return k ? inner.get(k) : undefined },
+            put: async (key, value) => { const k = scoped(key); if (k) await inner.put(k, value) },
+            delete: async (key) => { const k = scoped(key); if (k) await inner.delete(k) },
+            clear: async () => { const p = prefix(); if (p) await inner.clear(p) },
         }
     }
 
@@ -89,7 +106,7 @@ export class Mirror {
         const key = keyOf(spec)
         let entry = this.#entries.get(key)
         if (!entry) {
-            const created = new Entry<T>(spec.kind, spec.load)
+            const created = new Entry<T>(spec.load)
             entry = created as Entry<unknown>
             this.#entries.set(key, entry)
             for (const [name, handler] of Object.entries(spec.on ?? {}) as [EventName, (event: any, entry: Entry<T>) => void][]) {
@@ -131,21 +148,41 @@ export class Mirror {
     /**
      * A write of this client to `scope` settled. The `live` entries of that scope answer no
      * one-shot read until an update changes their result: the executor sends it after the
-     * write's reply, so what they hold may not include the write yet.
+     * write's reply, so what they hold may not include the write yet. The cost: a write that
+     * does not change a query's result sends every later one-shot of that query to the
+     * executor, until an update changes the result. It also starts a new generation for
+     * {@link oneShot}: a call made after the write does not join a request that went out before it.
      */
     wrote(scope: Scope): void {
         const name = scopeOf(scope)
+        this.#writes.set(name, (this.#writes.get(name) ?? 0) + 1)
         for (const shared of this.#lives.values()) if (shared.scope === name) shared.wrote()
     }
 
     /**
      * The socket reconnected or the executor said it dropped events: whatever was pushed
      * meanwhile is lost, so every entry is stale, and those with subscribers load again.
-     * `immutable` values never change, so they stay.
+     * A cache with `staleOnReconnect: false` stays.
      */
     markAllStale(): void {
         for (const entry of this.#entries.values()) entry.invalidate()
-        for (const { kind, cache } of this.#caches.values()) if (kind !== 'immutable') cache.markStale()
+        for (const { staleOnReconnect, cache } of this.#caches.values()) if (staleOnReconnect) cache.markStale()
+    }
+
+    /**
+     * One request for identical one-shot reads: while one is in flight, a call with the same
+     * scope, RPC name and params (and no write of this client to the scope settled since it
+     * went out) gets its promise. The caller reads its own copy of the reply. Nothing is kept
+     * after it settles.
+     */
+    oneShot<T>(spec: { scope: Scope; method: string; params: unknown; request: () => Promise<T> }): Promise<T> {
+        const key = `${keyOf(spec)}|${this.#writes.get(scopeOf(spec.scope)) ?? 0}`
+        let reply = this.#flights.get(key)
+        if (!reply) {
+            reply = spec.request().finally(() => this.#flights.delete(key))
+            this.#flights.set(key, reply)
+        }
+        return reply
     }
 }
 

@@ -14,28 +14,24 @@ import type {
     SfuQualityPreference,
     SfuRoomInfo,
     SfuSessionReplaced,
-    SfuStatus,
 } from "./SfuTypes";
 import { createSession, type Session, type SessionCreateOptions } from "./Session";
 import { createTelepresenceChannel } from "./MeshManager";
 import { defaultDeviceId } from "./SfuManager";
-
-/** The two values a call session needs from the client's agent and runtime. */
-export interface SessionOwners {
-    agent: { did(): Promise<string | null> }
-    runtime: { sfuStatus(): Promise<SfuStatus> }
-}
+import type { ApiClient } from "../apiClient";
+import { agentDid as readAgentDid } from "../agent/statusEntry";
+import { sfuStatusEntry } from "../runtime/sfuStatus";
 
 export class NeighbourhoodProxy {
     #client: NeighbourhoodClient
     #pID: string
-    #owners: SessionOwners
+    #apiClient: ApiClient
     #sessions: Session[] = []
 
-    constructor(client: NeighbourhoodClient, pID: string, owners: SessionOwners) {
+    constructor(client: NeighbourhoodClient, pID: string, apiClient: ApiClient) {
         this.#client = client
         this.#pID = pID
-        this.#owners = owners
+        this.#apiClient = apiClient
     }
 
     // ── Telepresence ────────────────────────────────────────────────────
@@ -129,9 +125,9 @@ export class NeighbourhoodProxy {
      */
     async createSession(roomName: string, options?: SessionCreateOptions): Promise<Session> {
         const [agentDid, sfuStatus] = await Promise.all([
-            this.#owners.agent.did(),
+            readAgentDid(this.#apiClient),
             // Non-fatal: a session works without the SFU status.
-            this.#owners.runtime.sfuStatus().catch((): undefined => undefined),
+            sfuStatusEntry(this.#apiClient).read().catch((): undefined => undefined),
         ])
         if (!agentDid) {
             throw new Error("Cannot create a call session: the executor reports no agent DID")

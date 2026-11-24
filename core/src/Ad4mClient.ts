@@ -52,7 +52,6 @@ export class Ad4mClient {
         this.#perspectiveClient.setNeighbourhoodClient(this.#neighbourhoodClient)
         this.#perspectiveClient.setAIClient(this.#aiClient)
         this.#runtimeClient = new RuntimeClient(baseUrl, token, this.#apiClient)
-        this.#perspectiveClient.setSessionOwners({ agent: this.#agentClient, runtime: this.#runtimeClient })
         this.#identityClient = new IdentityClient(baseUrl, token, this.#apiClient)
 
         // Register with AD4M DevTools if the bridge is installed (e.g. browser extension)

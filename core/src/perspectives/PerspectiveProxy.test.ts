@@ -18,7 +18,7 @@ describe('perspective.liveSparql', () => {
   function liveClient(subscribe: jest.Mock) {
     const reconnects = new Set<() => void>();
     // The real client over a bare mirror: it opens and shares live queries; its calls are the fakes below.
-    const client = Object.assign(new PerspectiveClient('http://localhost:0', undefined, { mirror: new Mirror() } as any), {
+    const client = Object.assign(new PerspectiveClient('http://localhost:0', undefined, { mirror: new Mirror(() => '', () => {}, () => null) } as any), {
       subscribe,
       onQueryUpdate: (_cb: any) => () => {},
       onReconnect: (cb: () => void) => { reconnects.add(cb); return () => reconnects.delete(cb); },

@@ -7,7 +7,7 @@ import { DEFAULT_KEEP_ALIVE_MS, type QueryLagged, type QueryUpdate } from '../pe
  * requests the executor would have got.
  */
 function setup() {
-    const mirror = new Mirror()
+    const mirror = new Mirror(() => '', () => {}, () => null)
     const listeners = new Set<(u: QueryUpdate | QueryLagged) => void>()
     const reconnects = new Set<() => void>()
     const call = jest.fn(async (type: string, params: any): Promise<any> => {

@@ -1,5 +1,5 @@
 import type { PersistentCache } from "./PersistentCache";
-import { Entry, type Kind, type Live } from "../mirror/Entry";
+import { canonical, type Live, type Snapshot, type State } from "../mirror/Entry";
 
 /** What a {@link KeyedCache} writes to its persistent store. */
 export interface StoredEntry<V> {
@@ -44,30 +44,53 @@ interface Loaded<V> {
     stored: boolean;
 }
 
+/** A value the cache holds; only found values are held. */
+interface Slot<V> {
+    value: V;
+    ts: number;
+    /** Shown, but read again by the next read. */
+    stale: boolean;
+    /** Length of the value's JSON, when the cache has memory limits. */
+    size: number;
+    /** Values this key has held: 1 for the first. */
+    count: number;
+}
+
+/** A read in flight; `valid` goes false when something changed the key since it went out. */
+interface Flight<V> {
+    valid: boolean;
+    promise: Promise<V | null>;
+}
+
 /**
- * Keyed read cache shared by profile and expression lookups; the {@link Mirror}
- * owns one per RPC kind. Each key is an {@link Entry} (the mirror's states, keep rule
- * and views); this class adds what is specific to a keyed store: concurrent reads of one
- * key share one request, misses of one tick go out in one `loadMany` call (except a `get()`
- * miss when the options have `load`), `maxAgeMs`, memory limits and the persistent tier.
- * A `null` (not found) is returned but not kept, and neither is a failure.
+ * Keyed read cache shared by profile and expression lookups; the {@link Mirror} owns one
+ * per RPC. It holds the rules of a keyed store, around plain values:
+ * - concurrent reads of one key share one request, and the misses of one tick go out in
+ *   one `loadMany` call (except a `get()` miss when the options have `load`);
+ * - `maxAgeMs`: a value older than that is stale, nobody is told, the next read loads;
+ * - `limits`: the oldest values go first;
+ * - the persistent tier (`persistent`, `persistentMaxAgeMs`, `persistentStale`);
+ * - a `null` (not found) is returned but not kept, and neither is a failure;
+ * - an answer is kept only when nothing changed the key since its request went out
+ *   (`set`, `delete`, `clear`, `markStale`): then it reaches its readers once and is dropped.
+ * {@link live} gives a view on one key with the mirror's states, built from what the cache
+ * holds: the cache is the state machine, there is no second copy per key.
  */
 export class KeyedCache<V> {
     #opts: KeyedCacheOptions<V>;
-    #kind: Kind;
-    #entries = new Map<string, Entry<V | null>>();
-    /** Keys that hold a value, oldest first, with the size of its JSON. */
-    #sizes = new Map<string, number>();
+    /** Held values, oldest first. */
+    #slots = new Map<string, Slot<V>>();
     #bytes = 0;
+    #flights = new Map<string, Flight<V>>();
+    #errors = new Map<string, unknown>();
+    #listeners = new Map<string, Set<(snapshot: Snapshot<V | null>) => void>>();
+    #snapshots = new Map<string, Snapshot<V | null>>();
     #batch: { keys: string[]; done: Promise<Map<string, Loaded<V | Error>>> } | null = null;
     /** Keys whose stored value was already used this session (see `persistentStale`). */
     #storedUsed = new Set<string>();
-    /** Keys whose value just came from the persistent store, so it is not written back. */
-    #fromStore = new Set<string>();
 
-    constructor(opts: KeyedCacheOptions<V>, kind: 'immutable' | 'declared' = 'immutable') {
+    constructor(opts: KeyedCacheOptions<V>) {
         this.#opts = opts;
-        this.#kind = kind;
     }
 
     get(key: string): Promise<V | null> {
@@ -80,8 +103,8 @@ export class KeyedCache<V> {
 
     /** Stores a value known to be current; a read in flight for the key is not kept. */
     set(key: string, value: V): void {
-        this.#fromStore.delete(key);
-        this.#entry(key).push(value);
+        this.#cancel(key);
+        this.#keep(key, value, false, false);
     }
 
     /** Forgets a key in memory and in the persistent store. */
@@ -92,7 +115,7 @@ export class KeyedCache<V> {
 
     /** Forgets every key in memory, and in the persistent store when `persistent` is set. */
     clear(persistent = false): void {
-        for (const key of [...this.#entries.keys()]) this.#drop(key);
+        for (const key of new Set([...this.#slots.keys(), ...this.#flights.keys(), ...this.#errors.keys()])) this.#drop(key);
         if (persistent) this.#opts.persistent?.clear(); // fire-and-forget
     }
 
@@ -102,100 +125,177 @@ export class KeyedCache<V> {
      * are read again at once, the misses of this tick in one call.
      */
     markStale(): void {
-        for (const entry of [...this.#entries.values()]) entry.invalidate();
+        const again: string[] = [];
+        const keys = new Set([...this.#slots.keys(), ...this.#flights.keys(), ...this.#errors.keys()]);
+        for (const key of keys) {
+            this.#cancel(key);
+            this.#errors.delete(key);
+            const slot = this.#slots.get(key);
+            if (slot) slot.stale = true;
+            if (this.#listeners.get(key)?.size) again.push(key);
+            else this.#notify(key);
+        }
+        for (const key of again) this.#read(key, this.#loader(key)).catch(() => {});
     }
 
     /** A view on one key: `getSnapshot`, `subscribe`, `read`. A subscriber to a key that is not fresh makes it load. */
     live(key: string): Live<V | null> {
         return {
-            getSnapshot: () => this.#entry(key).getSnapshot(),
-            subscribe: (fn) => this.#entry(key).subscribe(fn),
+            getSnapshot: () => this.#snapshot(key),
+            subscribe: (fn) => {
+                let listeners = this.#listeners.get(key);
+                if (!listeners) this.#listeners.set(key, listeners = new Set());
+                listeners.add(fn);
+                const { state } = this.#snapshot(key);
+                if (state !== 'fresh' && state !== 'loading') this.#read(key, this.#loader(key)).catch(() => {});
+                return () => {
+                    listeners!.delete(fn);
+                    if (listeners!.size === 0 && this.#listeners.get(key) === listeners) this.#listeners.delete(key);
+                };
+            },
             read: () => this.get(key),
         };
     }
 
-    #entry(key: string): Entry<V | null> {
-        let entry = this.#entries.get(key);
-        if (!entry) {
-            entry = new Entry<V | null>(this.#kind, this.#loader(key), {
-                keep: value => value !== null,
-                maxAgeMs: () => this.#opts.maxAgeMs?.(key) ?? Infinity,
-                kept: value => this.#kept(key, value as V),
-            });
-            this.#entries.set(key, entry);
-        }
-        return entry;
-    }
-
-    /** How the entry of `key` reads itself: alone with `load`, else with the tick's batch. */
-    #loader(key: string): () => Promise<V | null> {
+    /** How a key reads itself: alone with `load`, else with the tick's batch. */
+    #loader(key: string): () => Promise<Loaded<V>> {
         const load = this.#opts.load;
-        return load ? () => this.#loadOne(key, load) : () => this.#enqueue(key);
+        return load ? () => this.#loadAlone(key, load) : () => this.#enqueue(key);
     }
 
-    #read(key: string, load: () => Promise<V | null>): Promise<V | null> {
-        const reading = this.#entry(key).read(load);
-        const prune = () => this.#prune(key);
-        reading.then(prune, () => {});
-        return reading;
+    /** The value held, if it is fresh: not stale and not older than `maxAgeMs`. */
+    #fresh(key: string): Slot<V> | undefined {
+        const slot = this.#slots.get(key);
+        if (!slot || slot.stale) return undefined;
+        return Date.now() - slot.ts < (this.#opts.maxAgeMs?.(key) ?? Infinity) ? slot : undefined;
     }
 
-    /** An entry with nothing to show and no subscriber is not worth keeping. */
-    #prune(key: string): void {
-        const entry = this.#entries.get(key);
-        if (entry && !entry.hasListeners && entry.getSnapshot().state === 'unknown') this.#entries.delete(key);
+    #read(key: string, load: () => Promise<Loaded<V>>): Promise<V | null> {
+        const fresh = this.#fresh(key);
+        if (fresh) return Promise.resolve(fresh.value);
+        const held = this.#flights.get(key);
+        if (held) return held.promise;
+        const flight = { valid: true } as Flight<V>;
+        const finish = (): boolean => {
+            if (!flight.valid) return false;
+            if (this.#flights.get(key) === flight) this.#flights.delete(key);
+            return true;
+        };
+        flight.promise = load().then(
+            (loaded) => {
+                if (finish()) {
+                    if (loaded.value === null) {
+                        this.#notify(key);
+                    } else {
+                        const stored = loaded.stored;
+                        const stale = stored && !!this.#opts.persistentStale;
+                        this.#keep(key, loaded.value, stored, stale);
+                        // The stored value is shown now, the source read once in the background.
+                        if (stale) this.#read(key, this.#loader(key)).catch(() => {});
+                    }
+                }
+                return loaded.value;
+            },
+            (error) => {
+                if (finish()) {
+                    this.#errors.set(key, error);
+                    this.#notify(key);
+                }
+                throw error;
+            },
+        );
+        this.#flights.set(key, flight);
+        this.#notify(key);
+        return flight.promise;
     }
 
-    /** Forgets the value of a key and its place in the memory limits. */
+    /** Whatever was read for `key` so far is no longer to be kept. */
+    #cancel(key: string): void {
+        const flight = this.#flights.get(key);
+        if (flight) flight.valid = false;
+        this.#flights.delete(key);
+    }
+
+    /** Forgets the value of a key and its place in the memory limits. Subscribers hear of it and do not load. */
     #drop(key: string): void {
+        this.#cancel(key);
+        this.#errors.delete(key);
         this.#forget(key);
-        this.#fromStore.delete(key);
-        this.#entries.get(key)?.reset();
-        this.#prune(key);
+        this.#snapshots.delete(key);
+        this.#notify(key);
     }
 
     #forget(key: string): void {
-        this.#bytes -= this.#sizes.get(key) ?? 0;
-        this.#sizes.delete(key);
-    }
-
-    /** The entry took a value: write it to the persistent store (unless it came from there) and apply the limits. */
-    #kept(key: string, value: V): void {
-        if (!this.#fromStore.delete(key)) this.#opts.persistent?.put(key, { value, ts: Date.now() }); // fire-and-forget
-        const limits = this.#opts.limits?.();
-        const size = limits ? JSON.stringify(value).length : 0;
-        this.#forget(key);
-        if (limits) {
-            for (const oldest of this.#sizes.keys()) {
-                if (this.#sizes.size < limits.entries && this.#bytes + size <= limits.bytes) break;
-                this.#drop(oldest);
-            }
-        }
-        this.#sizes.set(key, size);
-        this.#bytes += size;
+        this.#bytes -= this.#slots.get(key)?.size ?? 0;
+        this.#slots.delete(key);
     }
 
     /**
-     * What a read answers with. A value from the persistent store is not written back; when
-     * `persistentStale` it is shown stale and the key is read once from the source.
+     * Holds a value: writes it to the persistent store (unless it came from there), applies
+     * the limits and tells the key's subscribers. An equal value stays the same object
+     * while someone subscribes: they compare snapshots by identity.
      */
-    #take(key: string, { value, stored }: Loaded<V>): V | null {
-        const entry = this.#entries.get(key);
-        // A set(), delete(), clear() or markStale() since the read started wins over its result.
-        if (!entry || entry.getSnapshot().state !== 'loading') return value;
-        if (stored && value !== null) {
-            this.#fromStore.add(key);
-            if (this.#opts.persistentStale) {
-                entry.seed(value);
-                entry.read().catch(() => {});
+    #keep(key: string, value: V, stored: boolean, stale: boolean): void {
+        const limits = this.#opts.limits?.();
+        const listening = (this.#listeners.get(key)?.size ?? 0) > 0;
+        const text = limits || listening ? canonical(value) : undefined;
+        const prev = this.#slots.get(key);
+        const same = listening && !!prev && text === canonical(prev.value);
+        this.#errors.delete(key);
+        if (!stored) this.#opts.persistent?.put(key, { value, ts: Date.now() }); // fire-and-forget
+        const size = limits ? text!.length : 0;
+        this.#forget(key);
+        if (limits) {
+            for (const oldest of [...this.#slots.keys()]) {
+                if (this.#slots.size < limits.entries && this.#bytes + size <= limits.bytes) break;
+                this.#evict(oldest);
             }
-        } else {
-            this.#fromStore.delete(key);
         }
-        return value;
+        this.#slots.set(key, {
+            value: same ? prev!.value : value,
+            ts: Date.now(),
+            stale,
+            size,
+            count: (prev?.count ?? 0) + (same ? 0 : 1),
+        });
+        this.#bytes += size;
+        this.#notify(key);
     }
 
-    #enqueue(key: string): Promise<V | null> {
+    /** The memory limits took a value out; the persistent store keeps it. */
+    #evict(key: string): void {
+        this.#cancel(key);
+        this.#forget(key);
+        this.#snapshots.delete(key);
+        this.#notify(key);
+    }
+
+    #snapshot(key: string): Snapshot<V | null> {
+        const slot = this.#slots.get(key);
+        const state: State = this.#flights.has(key) ? 'loading'
+            : this.#errors.has(key) ? 'error'
+            : slot ? (this.#fresh(key) ? 'fresh' : 'stale')
+            : 'unknown';
+        const next: Snapshot<V | null> = { state, value: slot?.value, error: this.#errors.get(key), initial: slot?.count === 1 };
+        const prev = this.#snapshots.get(key);
+        if (prev && prev.state === next.state && prev.value === next.value && prev.error === next.error && prev.initial === next.initial) return prev;
+        this.#snapshots.set(key, next);
+        return next;
+    }
+
+    /** Tells the key's subscribers when its snapshot changed. */
+    #notify(key: string): void {
+        const listeners = this.#listeners.get(key);
+        if (!listeners?.size) return;
+        const prev = this.#snapshots.get(key);
+        const next = this.#snapshot(key);
+        if (next === prev) return;
+        for (const fn of [...listeners]) {
+            try { fn(next); } catch (e) { console.error('Error in mirror subscriber:', e); }
+        }
+    }
+
+    #enqueue(key: string): Promise<Loaded<V>> {
         if (!this.#batch) {
             const keys: string[] = [];
             const done = Promise.resolve().then(() => {
@@ -208,12 +308,12 @@ export class KeyedCache<V> {
         return this.#batch.done.then(loaded => {
             const entry = loaded.get(key)!;
             if (entry.value instanceof Error) throw entry.value;
-            return this.#take(key, entry as Loaded<V>);
+            return entry as Loaded<V>;
         });
     }
 
-    async #loadOne(key: string, load: (key: string) => Promise<V | null>): Promise<V | null> {
-        return this.#take(key, (await this.#stored(key)) ?? { value: await load(key), stored: false });
+    async #loadAlone(key: string, load: (key: string) => Promise<V | null>): Promise<Loaded<V>> {
+        return (await this.#stored(key)) ?? { value: await load(key), stored: false };
     }
 
     async #loadBatch(keys: string[]): Promise<Map<string, Loaded<V | Error>>> {

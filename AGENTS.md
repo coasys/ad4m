@@ -104,48 +104,55 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
 - An answer is kept only if nothing changed the entry since its request went
   out: one sent before a reconnect reaches its readers once and is dropped. A
   failure is never kept.
-- Kinds (`pushed | live | fixed | immutable | declared`) say what keeps an
-  entry fresh. Built so far: `agent.status` (`pushed`: `agent-status-changed`
+- What keeps an entry fresh is written in its spec, not in a kind: the events
+  it listens to (`on`), whether a reconnect makes it stale, an age limit. Built so far:
+  `agent.status` (pushed: `agent-status-changed`
   and the results of `agent.unlock/lock/generate/import`; read through
   `client.agent.status()` and `client.agent.did()`, a status with no DID is not
-  kept) and `sfu.status` (`fixed`: `client.runtime.sfuStatus()`; a failure
+  kept) and `sfu.status` (fixed for an executor process: `client.runtime.sfuStatus()`; a failure
   is not kept). `NeighbourhoodProxy.createSession` reads both together;
   `PerspectiveClient.getNeighbourhoodProxy(uuid)` returns one proxy per uuid.
 - Profiles and expressions. The own agent (`agent.get`, read through
-  `client.agent.me()` / `client.agent.live.me()`) is `pushed`: `agent-updated`
+  `client.agent.me()` / `client.agent.live.me()`) is pushed: `agent-updated`
   for the own DID and the result of `updatePublicPerspective` /
   `updateDirectMessageLanguage` (read-your-writes) replace it. Other agents
   (`agent.byDIDs`, `client.agent.byDID(did)` / `live.byDID(did)`) are
-  `declared`: fresh for `AgentClient.REMOTE_AGENT_TTL_MS` (5 min), replaced at
-  once by `agent-updated`, stale after a reconnect or `lagged`. Expressions
-  (`expression.get`) are `immutable`: LRU-bounded (200 entries, 5 MB), kept
-  through a reconnect and `lagged`, dropped only by `clearCache()` or an
-  `interact`.
+  keyed: fresh for `AgentClient.REMOTE_AGENT_TTL_MS` (5 min), replaced at
+  once by `agent-updated`, stale after a reconnect or `lagged`; bounded to
+  `MAX_MEM_ENTRIES` (200) and `MAX_MEM_BYTES` (5 MB) in memory. Expressions
+  (`expression.get`) are keyed too, with `staleOnReconnect: false`: bounded to
+  200 entries / 5 MB, fresh for `ExpressionClient.EXPRESSION_TTL_MS` (5 min) in
+  memory and in the persistent tier, kept through a reconnect and `lagged`,
+  dropped by that age, `clearCache()` or an `interact`.
 - The perspective list (`perspective.all`, `client.perspective.all()` /
-  `client.perspective.live.all()`) is `pushed`: `perspective-added`,
+  `client.perspective.live.all()`) is pushed: `perspective-added`,
   `-updated` and `-removed` change it, and so do the handles an own write
   returns (`add`, `update`, `remove`, `neighbourhood.joinFromUrl`), with no
   read. An event or write on a list that is not fresh makes it stale instead
   (no sound base to patch). The hosting account (`hosting.info`,
   `client.agent.hostingUserInfo()` / `client.agent.live.hostingUserInfo()`) is
-  `pushed`: `hosting-user-info-changed` for its own email replaces it, an event
+  pushed: `hosting-user-info-changed` for its own email replaces it, an event
   for another email (an operator hears every user's) and `setHotWalletAddress`
   make it stale. `connect` reads it, so it no longer polls. `agent.getApps` is
   not mirrored: `apps-changed` is sent only when a grant is minted and carries
   one app; `removeApp` and `revokeToken` send nothing, so no push source says
   when the list is stale.
-- `immutable` and `declared` values live in a `KeyedCache` the mirror owns, one
-  per RPC name (`mirror.cache({method, kind, options})`; the first call's
-  options win), so two clients share nothing. Each key is an `Entry` (the one
-  state machine); the cache adds only tick batching through `loadMany`, the
-  `maxAgeMs` rule, the LRU limits and the persistent tier. The batching (50 `byDID` misses in one tick = one `agent.byDIDs`; a failed batch
-  retries per key; a failure is never kept). `mirror.persistent(db, store)` is
-  the IndexedDB tier, keyed `origin|acting DID|key` (nothing is stored while the
-  DID is unknown; Node has none). A value loaded from it is shown `stale` and
-  read again once per session. `markAllStale()` leaves `immutable` caches alone.
+- Keyed values (profiles, expressions) live in a `KeyedCache` the mirror owns, one
+  per RPC name (`mirror.cache({method, staleOnReconnect?, options, on?})`; the first
+  call's spec wins), so two clients share nothing. It has its own per-key state (same
+  states and rules as `Entry`) and adds tick batching through `loadMany` (50 `byDID`
+  misses in one tick = one `agent.byDIDs`; a failed batch retries per key; a failure is
+  never kept), `maxAgeMs`, the memory limits and the persistent tier.
+  `mirror.persistent(db, store)` is the IndexedDB tier, keyed `origin|acting DID|key`; the DID
+  is the one the client already knows (the status entry, never a request), so a cold read
+  waits on nothing, and while it is unknown nothing is stored or read (Node has none).
+  `clear()` removes only the `origin|DID|` prefix of this client. A profile loaded from the
+  tier is shown `stale` and read again once per session (`persistentStale`); an expression
+  is used as fresh while younger than `persistentMaxAgeMs`. `markAllStale()` skips caches
+  with `staleOnReconnect: false`.
 - The Mirror registers an entry's events itself: the spec's `on` map (event name to
   `(event, entry) => void`) is registered once, when the Mirror creates the entry.
-- Live queries (`live` kind, `core/src/mirror/live.ts`). `mirror.live` keeps one
+- Live queries (`core/src/mirror/live.ts`). `mirror.live` keeps one
   `LiveSubscription` per perspective + RPC + canonical params; each caller gets its own
   `LiveQuery` view (own `first`, listeners; `dispose()` releases only that view). After
   the last view is released the subscription stays open `keepAliveMs` (default 30000,
@@ -156,6 +163,12 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
   until an update changes the result, because the executor sends updates 250 ms or more
   after the write's reply. A live SPARQL result is a multiset: row order can differ from a
   fresh query with no `ORDER BY`. The Waker keeps its own unshared subscription.
+  The write counter lives in `Mirror.wrote(scope)` only. Its cost: a write that does not
+  change a query's result sends every later one-shot of that query to the executor until
+  an update changes the result. The same counter keys `mirror.oneShot`: identical
+  one-shot requests (scope, RPC, canonical params, no `options`) in flight share one
+  request, and a call made after a write does not join one sent before it. Nothing is kept
+  after it settles.
 - The hooks (`ad4m-hooks` react and vue `useMe`, `useAgent`, `usePerspectives`) subscribe to these
   `Live` views; they keep no state of their own.
 - A test that reuses one client across tests must not expect a fresh read:

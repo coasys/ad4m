@@ -4,11 +4,8 @@ import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 
 const signal = new PerspectiveExpression("did:test:alice", "2026-01-01T00:00:00Z", new Perspective(), { key: "key", signature: "sig" });
 
-// Signal handlers do not touch the owners; sessions are tested in clientMirror.test.ts.
-const owners = {
-  agent: { did: async () => "did:test:me" },
-  runtime: { sfuStatus: async () => { throw new Error("no sfu"); } },
-};
+// Signal handlers do not touch the client; sessions are tested in clientMirror.test.ts.
+const owners = {} as any;
 
 // Mock ApiClient's on() to avoid real WebSocket connections
 jest.mock('../apiClient', () => {

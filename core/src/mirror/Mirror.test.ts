@@ -8,9 +8,9 @@ function loader<T>() {
 }
 
 function setup<T>() {
-    const mirror = new Mirror()
+    const mirror = new Mirror(() => '', () => {}, () => null)
     const { load, asks } = loader<T>()
-    const entry = mirror.entry<T>({ scope: 'agent', kind: 'pushed', method: 'agent.status', params: {}, load })
+    const entry = mirror.entry<T>({ scope: 'agent', method: 'agent.status', params: {}, load })
     return { mirror, entry, load, asks }
 }
 
@@ -99,10 +99,10 @@ describe('Mirror entry transitions', () => {
     })
 
     it('markAllStale: an entry without subscribers waits for a read; one with subscribers refetches', async () => {
-        const mirror = new Mirror()
+        const mirror = new Mirror(() => '', () => {}, () => null)
         const make = (method: string) => {
             const { load, asks } = loader<string>()
-            return { entry: mirror.entry<string>({ scope: 'executor', kind: 'fixed', method, params: {}, load }), load, asks }
+            return { entry: mirror.entry<string>({ scope: 'executor', method, params: {}, load }), load, asks }
         }
         const quiet = make('a')
         const watched = make('b')
@@ -143,8 +143,8 @@ describe('Mirror entry transitions', () => {
     })
 
     it('one key is one entry; another scope or params is another', () => {
-        const mirror = new Mirror()
-        const spec = { kind: 'pushed' as const, method: 'm', load: async () => 1 }
+        const mirror = new Mirror(() => '', () => {}, () => null)
+        const spec = { method: 'm', load: async () => 1 }
         const a = mirror.entry({ ...spec, scope: { perspective: 'p1' }, params: { x: 1, y: 2 } })
         expect(mirror.entry({ ...spec, scope: { perspective: 'p1' }, params: { y: 2, x: 1 } })).toBe(a)
         expect(mirror.entry({ ...spec, scope: { perspective: 'p2' }, params: { x: 1, y: 2 } })).not.toBe(a)
@@ -156,9 +156,9 @@ describe('Mirror entry events', () => {
     it('registers each event of an entry spec once, whatever the number of reads, and hands the handler the entry', () => {
         const handlers: Record<string, (event: any) => void> = {}
         const listen = jest.fn((name: string, handler: (event: any) => void) => { handlers[name] = handler })
-        const mirror = new Mirror(() => '', listen as any)
+        const mirror = new Mirror(() => '', listen as any, () => null)
         const spec = (): any => ({
-            scope: 'agent', kind: 'pushed', method: 'agent.status', params: {}, load: async () => 'loaded',
+            scope: 'agent', method: 'agent.status', params: {}, load: async () => 'loaded',
             on: { 'agent-status-changed': (event: { agent: string }, entry: any) => entry.push(event.agent) },
         })
         const entry = mirror.entry<string>(spec())
@@ -168,5 +168,48 @@ describe('Mirror entry events', () => {
 
         handlers['agent-status-changed']({ agent: 'pushed' })
         expect(entry.getSnapshot()).toMatchObject({ state: 'fresh', value: 'pushed' })
+    })
+})
+
+describe('Mirror.oneShot', () => {
+    const spec = (mirror: Mirror, request: () => Promise<string>, params: unknown = { q: 1 }) =>
+        mirror.oneShot({ scope: { perspective: 'p' }, method: 'perspective.querySparql', params, request })
+
+    it('identical concurrent calls share one request; nothing is kept after it settles', async () => {
+        const mirror = new Mirror(() => '', () => {}, () => null)
+        const { load, asks } = loader<string>()
+        const a = spec(mirror, load)
+        const b = spec(mirror, load, { q: 1 })
+        expect(load).toHaveBeenCalledTimes(1)
+        asks[0].resolve('r')
+        expect(await Promise.all([a, b])).toEqual(['r', 'r'])
+        const c = spec(mirror, load)
+        expect(load).toHaveBeenCalledTimes(2)
+        asks[1].resolve('r2')
+        expect(await c).toBe('r2')
+    })
+
+    it('different params do not share', async () => {
+        const mirror = new Mirror(() => '', () => {}, () => null)
+        const { load, asks } = loader<string>()
+        const a = spec(mirror, load, { q: 1 })
+        const b = spec(mirror, load, { q: 2 })
+        expect(load).toHaveBeenCalledTimes(2)
+        asks[0].resolve('a'); asks[1].resolve('b')
+        expect(await Promise.all([a, b])).toEqual(['a', 'b'])
+    })
+
+    it('a call after a settled write does not join a request sent before it', async () => {
+        const mirror = new Mirror(() => '', () => {}, () => null)
+        const { load, asks } = loader<string>()
+        const before = spec(mirror, load)
+        mirror.wrote({ perspective: 'p' })
+        const after = spec(mirror, load)
+        expect(load).toHaveBeenCalledTimes(2)
+        const again = spec(mirror, load)
+        expect(load).toHaveBeenCalledTimes(2)
+        asks[0].resolve('old'); asks[1].resolve('new')
+        expect(await before).toBe('old')
+        expect(await Promise.all([after, again])).toEqual(['new', 'new'])
     })
 })

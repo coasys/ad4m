@@ -14,14 +14,21 @@ export class ExpressionClient {
     static MAX_MEM_ENTRIES = 200;
     /** Maximum total size (in bytes of JSON) of the expressions kept in memory. */
     static MAX_MEM_BYTES = 5 * 1024 * 1024; // 5 MB
+    /**
+     * TTL of every cached expression, in memory and in the persistent cache
+     * (ms). A language may change what a URL returns, and no event tells the
+     * client, so a cached expression expires instead of staying stale.
+     */
+    static EXPRESSION_TTL_MS = 5 * 60_000; // 5 minutes
 
     constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token)
     }
 
     /**
-     * The expressions of this client's mirror: an `immutable` cache of `expression.get`,
-     * which a reconnect leaves alone. A `get` miss is its own `expression.get`, so it waits
+     * The expressions of this client's mirror: a cache of `expression.get`, each value
+     * fresh for EXPRESSION_TTL_MS. A reconnect leaves it alone: no event ever corrects
+     * an expression, only its age expires it. A `get` miss is its own `expression.get`, so it waits
      * for no slower expression and has its own call timeout. The misses of the `getMany`
      * calls made in one tick go out in `expression.getMany` calls of at most
      * MAX_URLS_PER_CALL URLs, which answer per URL what `expression.get` would.
@@ -29,13 +36,15 @@ export class ExpressionClient {
     #expressions(): KeyedCache<ExpressionRendered> {
         return this.#apiClient.mirror.cache<ExpressionRendered>({
             method: 'expression.get',
-            kind: 'immutable',
+            staleOnReconnect: false,
             options: () => ({
                 load: (url) => this.#apiClient.call('expression.get', { url }),
                 loadMany: async (urls) => (await this.#apiClient.call('expression.getMany', { urls })).map(entry =>
                     entry && 'code' in entry ? new RpcError(entry.code, entry.message) : entry as ExpressionRendered | null),
                 maxBatch: MAX_URLS_PER_CALL,
                 persistent: this.#apiClient.mirror.persistent<StoredEntry<ExpressionRendered>>('ad4m-expression-cache', 'expressions'),
+                maxAgeMs: () => ExpressionClient.EXPRESSION_TTL_MS,
+                persistentMaxAgeMs: () => ExpressionClient.EXPRESSION_TTL_MS,
                 limits: () => ({ entries: ExpressionClient.MAX_MEM_ENTRIES, bytes: ExpressionClient.MAX_MEM_BYTES }),
             }),
         });

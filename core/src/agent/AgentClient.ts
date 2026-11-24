@@ -10,6 +10,7 @@ import {
 } from "./Agent";
 import { HostingUserInfo, PaymentRequestResult, ComputeLogEntry } from "../runtime/RuntimeTypes";
 import { AgentStatus } from "./AgentStatus";
+import { agentDid, agentStatusEntry } from "./statusEntry";
 import type { Live } from "../mirror/Mirror";
 import { AGENT_KIND } from "./AgentKind";
 import { LinkMutations, LinkExpression, LinkInput, linkEqual } from "../links/Links";
@@ -43,10 +44,13 @@ export class AgentClient {
    * executor shows up when the entry expires.
    */
   static REMOTE_AGENT_TTL_MS = 5 * 60_000; // 5 minutes
+  /** Most other agents' profiles kept in memory. */
+  static MAX_MEM_ENTRIES = 200;
+  /** Most bytes (of JSON) of the profiles kept in memory. */
+  static MAX_MEM_BYTES = 5 * 1024 * 1024; // 5 MB
 
   constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
     this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token);
-    this.#apiClient.mirror.actingDid = () => this.did();
   }
 
   /**
@@ -60,30 +64,37 @@ export class AgentClient {
 
   /** The one `agent.get` entry of this client's mirror. */
   #meEntry() {
-    this.#listen();
     return this.#apiClient.mirror.entry<Agent>({
       scope: 'agent',
-      kind: 'pushed',
       method: 'agent.get',
       params: {},
       load: async () => toAgent(await this.#apiClient.call('agent.get', {})) as Agent,
+      on: {
+        'agent-updated': (event, entry) => {
+          const agent = Agent.fromWire(event.agent);
+          if (agent.did && agent.did === this.#ownDid()) entry.push(agent);
+        },
+      },
     });
   }
 
   /**
-   * The profiles of other agents: the mirror's `declared` cache of `agent.byDIDs`. Concurrent
-   * misses go out in one call; stored profiles are shown stale and read once per session.
+   * The profiles of other agents: the mirror's cache of `agent.byDIDs`, fresh for
+   * {@link AgentClient.REMOTE_AGENT_TTL_MS}, replaced at once by `agent-updated`, at most
+   * {@link AgentClient.MAX_MEM_ENTRIES} / {@link AgentClient.MAX_MEM_BYTES} in memory.
+   * Concurrent misses go out in one call; stored profiles are shown stale and read once per session.
    */
   #agents(): KeyedCache<Agent> {
     return this.#apiClient.mirror.cache<Agent>({
       method: 'agent.byDIDs',
-      kind: 'declared',
+      on: { 'agent-updated': (event, cache) => { const agent = Agent.fromWire(event.agent); if (agent.did) cache.set(agent.did, agent); } },
       options: () => ({
         loadMany: (dids) => this.#loadAgents(dids),
         maxBatch: MAX_DIDS_PER_CALL,
         persistent: this.#apiClient.mirror.persistent<StoredEntry<Agent>>('ad4m-agent-cache', 'agents'),
         persistentStale: true,
         maxAgeMs: () => AgentClient.REMOTE_AGENT_TTL_MS,
+        limits: () => ({ entries: AgentClient.MAX_MEM_ENTRIES, bytes: AgentClient.MAX_MEM_BYTES }),
       }),
     });
   }
@@ -103,9 +114,7 @@ export class AgentClient {
    * A status with no DID is not kept: the next call asks again.
    */
   async did(): Promise<string | null> {
-    const did = (await this.status()).did || null;
-    if (!did) this.#statusEntry().invalidate();
-    return did;
+    return agentDid(this.#apiClient);
   }
 
   /** Views on the client's mirror entries: subscribe for changes, or read. */
@@ -117,22 +126,11 @@ export class AgentClient {
     /** The hosting account of this client's user; {@link hostingUserInfo} reads it. */
     hostingUserInfo: (): Live<HostingUserInfo> => this.#hostingEntry(),
     /** The agent with this DID, `null` while unknown; {@link byDID} reads it. */
-    byDID: (did: string): Live<Agent | null> => {
-      this.#listen();
-      return this.#agents().live(did);
-    },
+    byDID: (did: string): Live<Agent | null> => this.#agents().live(did),
   };
 
-  /** The one `agent.status` entry of this client's mirror; it hears `agent-status-changed`. */
   #statusEntry() {
-    return this.#apiClient.mirror.entry<AgentStatus>({
-      scope: 'agent',
-      kind: 'pushed',
-      method: 'agent.status',
-      params: {},
-      load: async () => new AgentStatus(await this.#apiClient.call('agent.status', {})),
-      on: { 'agent-status-changed': (event, entry) => entry.push(new AgentStatus(event.agent)) },
-    });
+    return agentStatusEntry(this.#apiClient);
   }
 
   /** Keeps the status the executor returned from a call that changes it. */
@@ -170,8 +168,6 @@ export class AgentClient {
    * for any DIDs share one `agent.byDIDs` request.
    */
   async byDID(did: string): Promise<Agent> {
-    // agent-updated events refresh cached entries before their TTL runs out.
-    this.#listen();
     return this.#agents().get(did) as Promise<Agent>;
   }
 
@@ -195,7 +191,6 @@ export class AgentClient {
   #cacheAgent(agent: Agent | null, own = false): void {
     if (!agent?.did) return;
     this.#agents().set(agent.did, agent);
-    this.#listen();
     if (own || agent.did === this.#ownDid()) this.#meEntry().push(agent);
   }
 
@@ -281,15 +276,6 @@ export class AgentClient {
   async entanglementProofPreFlight(deviceKey: string, deviceKeyType: string): Promise<EntanglementProof> {
     return this.#apiClient.call('agent.entanglementProofPreflight', { deviceKey, deviceKeyType });
   }
-
-  /** Keeps cached agents fresh; registering again changes nothing. */
-  #listen(): void {
-    this.#apiClient.on('agent-updated', this.#onAgentUpdated);
-  }
-
-  #onAgentUpdated = (event: { agent: AgentData }): void => {
-    this.#cacheAgent(Agent.fromWire(event.agent));
-  };
 
   /**
    * Asks the executor for a capability token. `agent` names the agent the token will act
@@ -384,7 +370,6 @@ export class AgentClient {
   #hostingEntry() {
     return this.#apiClient.mirror.entry<HostingUserInfo>({
       scope: 'agent',
-      kind: 'pushed',
       method: 'hosting.info',
       params: {},
       load: async () => {

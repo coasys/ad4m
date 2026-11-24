@@ -5,6 +5,7 @@ import type { HostRate, LogFilter, LogTail, RuntimeConfig, SetConfigResult, Unyt
 import { LanguageMeta } from "../language/LanguageMeta"
 import type { SfuStatus } from "../generated/api/SfuStatus"
 import type { Live } from "../mirror/Mirror"
+import { sfuStatusEntry } from "./sfuStatus"
 
 export class RuntimeClient {
     #apiClient: ApiClient
@@ -30,13 +31,7 @@ export class RuntimeClient {
     /** Views on the client's mirror entries: subscribe for changes, or read. */
     readonly live = {
         /** The SFU status; {@link sfuStatus} reads it. */
-        sfuStatus: (): Live<SfuStatus> => this.#apiClient.mirror.entry<SfuStatus>({
-            scope: 'executor',
-            kind: 'fixed',
-            method: 'sfu.status',
-            params: {},
-            load: () => this.#apiClient.call('sfu.status', {}),
-        }),
+        sfuStatus: (): Live<SfuStatus> => sfuStatusEntry(this.#apiClient),
     }
 
     async tlsDomain(): Promise<string | null> {

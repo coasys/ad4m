@@ -1319,7 +1319,7 @@ function liveHarness(initial: any = { instances: [], totalCount: 0 }) {
   let revision = 0;
   const reconnectListeners = new Set<() => void>();
   // The real client over a bare mirror: it opens and shares live queries; its calls are the fakes below.
-  const client = Object.assign(new PerspectiveClient("http://localhost:0", undefined, { mirror: new Mirror() } as any), {
+  const client = Object.assign(new PerspectiveClient("http://localhost:0", undefined, { mirror: new Mirror(() => '', () => {}, () => null) } as any), {
     subscribe: jest.fn().mockImplementation(async () => {
       opens++;
       revision = 0;
