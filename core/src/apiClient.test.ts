@@ -1697,6 +1697,29 @@ describe('ApiClient when the executor refuses the token', () => {
         expect(authFailed).toHaveBeenCalledTimes(1)
     })
 
+    it('a call made by a subscriber told of a 401 reply fails with 401 at once and writes no frame', async () => {
+        open()
+        socket(0).open()
+        const status = client.mirror.entry({ method: 'agent.status', load: () => call('agent.status') })
+        const first = status.read()
+        await Promise.resolve()
+        socket(0).reply({ id: socket(0).sent.find((m) => m.type === 'agent.status')!.id, result: { isUnlocked: true } })
+        await first
+        const pending = call('agent.get')
+        pending.catch(() => {})
+        const reads: Promise<unknown>[] = []
+        status.subscribe((s) => { if (s.state === 'stale') reads.push(call('agent.me')) })
+        const written = () => socket(0).sent.length
+        const before = written()
+        socket(0).reply({ id: socket(0).sent.find((m) => m.type === 'agent.get')!.id, error: { code: 401, message: REASON } })
+        expect(reads).toHaveLength(1)
+        let outcome: unknown = 'pending'
+        reads[0].then(() => { outcome = 'resolved' }, (e) => { outcome = e })
+        for (let i = 0; i < 5; i++) await Promise.resolve()
+        expect(outcome).toMatchObject({ name: 'RpcError', status: 401, body: REASON })
+        expect(written()).toBe(before)
+    })
+
     it('still reconnects after an ordinary close, with 503 for an unsent write', async () => {
         open()
         socket(0).open()

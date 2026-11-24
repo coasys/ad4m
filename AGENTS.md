@@ -114,7 +114,12 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
   socket is back. A read the app started before `closeAll()` and that a keyed
   cache had only queued (the tick's batch) can still dial once after it. A refused
   token (`Mirror.refuse`) also makes the expression cache stale and blocks its
-  persistent tier, so after it every read fails with 401. Until the
+  persistent tier, so after it every read fails with 401: a cache the mirror creates
+  after the refusal is refused from the start, and a call made while the refusal
+  notifies (`_authFailed` is set while the socket is still open) rejects with 401
+  without a frame. `markAllStale` and `refuse` mark every entry, cache key and live
+  result before they tell any subscriber (two phases), so a subscriber told first
+  cannot read another value still shown as fresh. Until the
   1008 close arrives, a client whose token was revoked still answers from its
   stored values.
 - An answer is kept only if nothing changed the entry since its request went

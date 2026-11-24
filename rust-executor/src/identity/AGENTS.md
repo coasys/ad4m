@@ -216,6 +216,15 @@ the offer's state).
   `identity.status` still shows the binding with `revoked`. `did` stays the device `did:key` (and
   `agent.status().didDocument` the device's did:key document; `identity.resolve` serves the
   person's).
+- **The main agent's `agent-status-changed` follows its identity.** The status computes
+  `identity` on read, so clients that keep the status (the SDK's mirror) need a push when it
+  changes. `KelCache` has one change listener (`set_change_listener`), called with the SCID
+  where the cache takes state: events appended (`ingest_locked`, `start_log`), an accepted head
+  that changed, `reset`. Every refresh, publish, claim and resolver path goes through them. The
+  listener (`service::change_listener`) spawns `main_status_after_log_change`: when the main
+  agent is bound to that SCID, `publish_main_status` publishes the status if its identity
+  differs from the one the last event carried (`main_identity`). The bind publishes through the
+  same helper, always. A change by time alone (a key's expiry) fires no cache change and no event.
 - **An agent that speaks for a person publishes the person's profile** under the `did:scid`
   (`person.rs`, `identityPutAgent`), on the first binding (`record_agent_if_listed`: a claim
   spent, or `publish` of a log listing the key; main agent or managed user) and on every

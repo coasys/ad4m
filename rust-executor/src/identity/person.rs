@@ -256,6 +256,7 @@ mod tests {
                 cache,
                 store_url: None,
                 store_keys_source: crate::identity::StoreSource::Config,
+                main_identity: Default::default(),
             };
             World {
                 service,

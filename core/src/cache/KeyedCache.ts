@@ -138,10 +138,13 @@ export class KeyedCache<V> {
     /**
      * The executor may have changed anything: every held value is stale (still shown, read
      * again by the next read), and a read in flight is not kept. Keys with subscribers
-     * are read again at once, the misses of this tick in one call.
+     * are read again at once, the misses of this tick in one call. Every key is marked before
+     * any subscriber is told, so none can read a value that is about to be stale. With
+     * `deferred`, the telling and the reads wait until the caller runs what was pushed there.
      */
-    markStale(refetch = true): void {
+    markStale(refetch = true, deferred?: (() => void)[]): void {
         const again: string[] = [];
+        const told: string[] = [];
         const keys = new Set([...this.#slots.keys(), ...this.#flights.keys(), ...this.#errors.keys(), ...this.#missing]);
         for (const key of keys) {
             this.#cancel(key);
@@ -152,9 +155,14 @@ export class KeyedCache<V> {
             const slot = this.#slots.get(key);
             if (slot) slot.stale = true;
             if (refetch && this.#listeners.get(key)?.size) again.push(key);
-            else this.#notify(key);
+            else told.push(key);
         }
-        for (const key of again) this.#read(key, this.#loader(key)).catch(() => {});
+        const tell = () => {
+            for (const key of told) this.#notify(key);
+            for (const key of again) this.#read(key, this.#loader(key)).catch(() => {});
+        };
+        if (deferred) deferred.push(tell);
+        else tell();
     }
 
     /**
@@ -162,9 +170,9 @@ export class KeyedCache<V> {
      * as current, whatever `staleOnReconnect` says), and the persistent tier is not read, so
      * the next read reaches the source and fails there.
      */
-    refuse(): void {
+    refuse(deferred?: (() => void)[]): void {
         this.#refused = true;
-        this.markStale(false);
+        this.markStale(false, deferred);
     }
 
     /** A socket opened: each watched key that is not fresh and not loading reads once, the misses of this tick in one call. */

@@ -29,6 +29,8 @@ export class Mirror {
     #caches = new Map<string, { staleOnReconnect: boolean; cache: KeyedCache<any> }>()
     #lives = new Map<string, SharedLive>()
     #flights = new Map<string, Promise<any>>()
+    /** The executor refused the client's token (see {@link refuse}); no later cache escapes it. */
+    #refused = false
     /** Per perspective, how many writes of this client have settled (see {@link wrote}). */
     #writes = new Map<string, number>()
     #origin: () => string
@@ -71,6 +73,8 @@ export class Mirror {
         let held = this.#caches.get(spec.method)
         if (!held) {
             const created = new KeyedCache<V>(spec.options())
+            // A client whose token was refused before this cache existed gets a refused one.
+            if (this.#refused) created.refuse()
             held = { staleOnReconnect: spec.staleOnReconnect !== false, cache: created }
             this.#caches.set(spec.method, held)
             for (const [name, handler] of Object.entries(spec.on ?? {}) as [EventName, (event: any, cache: KeyedCache<V>) => void][]) {
@@ -174,19 +178,30 @@ export class Mirror {
     markAllStale(refetch = true): void {
         // The live results first: a subscriber told of the loss may read at once.
         for (const shared of this.#lives.values()) shared.stale()
-        for (const entry of this.#entries.values()) entry.invalidate(refetch)
-        for (const { staleOnReconnect, cache } of this.#caches.values()) if (staleOnReconnect) cache.markStale(refetch)
+        // Two phases: every value is marked before any subscriber is told, or one told first
+        // could read another that is still fresh.
+        const tell: (() => void)[] = []
+        for (const entry of this.#entries.values()) entry.invalidate(refetch, tell)
+        for (const { staleOnReconnect, cache } of this.#caches.values()) if (staleOnReconnect) cache.markStale(refetch, tell)
+        for (const run of tell) run()
     }
 
     /**
      * The executor refused the client's token, and no reconnect comes: every value is stale
      * and sends no request, the expression cache included (a refusal ends its reuse), and no
      * persistent tier is read, so every later read reaches the refusal. Snapshots keep the
-     * last value for display.
+     * last value for display. Every value is marked before any subscriber is told, and a
+     * cache created after the refusal is refused from the start.
      */
     refuse(): void {
-        this.markAllStale(false)
-        for (const { cache } of this.#caches.values()) cache.refuse()
+        this.#refused = true
+        // As `markAllStale`: every value is marked before any subscriber is told. The caches
+        // staying fresh through a reconnect (the expressions) are refused too.
+        const tell: (() => void)[] = []
+        for (const shared of this.#lives.values()) shared.stale()
+        for (const entry of this.#entries.values()) entry.invalidate(false, tell)
+        for (const { cache } of this.#caches.values()) cache.refuse(tell)
+        for (const run of tell) run()
     }
 
     /** A socket opened: every stale value with a subscriber loads once. Fresh values and those loading stay. */

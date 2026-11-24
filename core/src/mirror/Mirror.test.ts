@@ -294,3 +294,52 @@ describe('Mirror entry review round', () => {
         await expect(before).rejects.toThrow('Client closed')
     })
 })
+
+describe('Mirror.refuse', () => {
+    const refused = () => Object.assign(new Error('refused'), { status: 401 })
+
+    it('a cache created after the refusal is refused too: its persistent tier is not read', async () => {
+        const mirror = new Mirror(() => '', () => {}, () => null)
+        mirror.refuse()
+        const stored = { value: 'from store', ts: Date.now() }
+        const persistent = { get: jest.fn(async () => stored), put: jest.fn(async () => {}), delete: jest.fn(async () => {}), clear: jest.fn(async () => {}) }
+        const load = jest.fn(async () => { throw refused() })
+        const cache = mirror.cache<string>({ method: 'agent.byDIDs', options: () => ({ loadMany: async () => [], load, persistent }) })
+        await expect(cache.get('k')).rejects.toMatchObject({ status: 401 })
+        expect(persistent.get).not.toHaveBeenCalled()
+    })
+
+    it('no value reads as fresh while the refusal notifies: a subscriber reading another entry or a cache key reaches the source', async () => {
+        const mirror = new Mirror(() => '', () => {}, () => null)
+        const a = mirror.entry<string>({ method: 'a', load: async () => 'a' })
+        const bLoad = jest.fn(async () => { if (bLoad.mock.calls.length > 1) throw refused(); return 'b' })
+        const b = mirror.entry<string>({ method: 'b', load: bLoad })
+        const cLoad = jest.fn(async () => { if (cLoad.mock.calls.length > 1) throw refused(); return 'c' })
+        const cache = mirror.cache<string>({ method: 'c', options: () => ({ loadMany: async () => [], load: cLoad }) })
+        await a.read()
+        await b.read()
+        await cache.get('k')
+        b.subscribe(() => {})
+        const reads: Promise<unknown>[] = []
+        a.subscribe((s) => {
+            if (s.state === 'stale') reads.push(b.read(), cache.get('k'))
+        })
+        mirror.refuse()
+        expect(reads).toHaveLength(2)
+        await expect(reads[0]).rejects.toMatchObject({ status: 401 })
+        await expect(reads[1]).rejects.toMatchObject({ status: 401 })
+    })
+
+    it('a socket loss marks every entry stale before any subscriber is told', async () => {
+        const mirror = new Mirror(() => '', () => {}, () => null)
+        const load = jest.fn(async () => 'x')
+        const a = mirror.entry<string>({ method: 'a', load })
+        const b = mirror.entry<string>({ method: 'b', load })
+        await a.read()
+        await b.read()
+        const seen: string[] = []
+        a.subscribe(() => seen.push(b.getSnapshot().state))
+        mirror.markAllStale(false)
+        expect(seen).toEqual(['stale'])
+    })
+})

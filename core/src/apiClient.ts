@@ -272,8 +272,9 @@ export class ApiClient {
     }
 
     private _ensureWs(): void {
-        if (this._ws) return
+        // Before the socket is reused: a refusal's first notifications run while the refused socket is still open.
         if (this._authFailed !== null) throw new RpcError(401, this._authFailed)
+        if (this._ws) return
         this._listenForNetworkChanges()
         // A dial ends any wait for one: a call or subscriber that dials during the backoff
         // leaves no timer behind to swallow the retry after this socket's own drop.
