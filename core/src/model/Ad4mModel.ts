@@ -460,8 +460,11 @@ function opFields(op: MutateOp): string[] {
 /** A write's hold on the fields it carries (see `claimFields`): `undo` when it was not written, `done` when it was. */
 type WriteClaim = { undo: () => void; done: () => void };
 
-/** One write of one field: what the field held before it, and whether the write is in the store. */
-type FieldClaim = { owner: object; had: boolean; before: unknown; settled: boolean };
+/**
+ * One write of one field: what the field held before it (`unsaved`: the instance
+ * was not in the store then), and whether the write is in the store.
+ */
+type FieldClaim = { owner: object; had: boolean; before: unknown; unsaved: boolean; settled: boolean };
 
 /**
  * The writes of each instance field, oldest first, back to the oldest one not
@@ -1819,9 +1822,9 @@ export class Ad4mModel {
   /**
    * Records one write of `fields` on top of the writes of them not settled yet.
    * Its `undo` takes the write out: when no later write of a field is held, the
-   * snapshot goes back to what the field held before (with no `before`, a
-   * create, the instance is unsaved again); otherwise the next write starts from
-   * that value instead, so whichever undo comes last restores what the store
+   * snapshot goes back to what the field held before (when that was before a
+   * create, the instance is unsaved again once no field is left); otherwise the
+   * next write starts from that value instead, so whichever undo comes last restores what the store
    * holds, in any order. Its `done` marks it written; the written writes at the
    * bottom are dropped, as nothing older can hand them a value.
    *
@@ -1842,7 +1845,7 @@ export class Ad4mModel {
     for (const field of fields) {
       const held = claims.get(field) ?? [];
       claims.set(field, held);
-      held.push({ owner, had: !!before && field in before, before: before?.[field], settled: false });
+      held.push({ owner, had: !!before && field in before, before: before?.[field], unsaved: !before, settled: false });
     }
     const each = (fn: (field: string, held: FieldClaim[], at: number) => void) => {
       for (const field of fields) {
@@ -1858,19 +1861,23 @@ export class Ad4mModel {
     return {
       undo: () => {
         const snapshot = this._snapshot;
+        let unsaved = false;
         each((field, held, at) => {
           const [claim] = held.splice(at, 1);
           const later = held[at];
           if (later) {
             later.had = claim.had;
             later.before = claim.before;
+            later.unsaved = claim.unsaved;
           } else if (snapshot) {
             if (claim.had) snapshot[field] = claim.before;
             else delete snapshot[field];
+            unsaved ||= claim.unsaved;
           }
           drop(field, held);
         });
-        if (snapshot && !before && Object.keys(snapshot).length === 0) this._snapshot = null;
+        // The last field of a create taken back: the instance is not in the store.
+        if (snapshot && unsaved && Object.keys(snapshot).length === 0) this._snapshot = null;
       },
       done: () =>
         each((field, held, at) => {

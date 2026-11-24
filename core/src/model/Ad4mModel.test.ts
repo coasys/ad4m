@@ -4070,6 +4070,35 @@ describe("Ad4mModel.transaction()", () => {
     expect(note.changedFields()).toEqual(["title"]);
   });
 
+  it("a failed create, then a failed save of the same instance outside the transaction, leaves it unsaved", async () => {
+    const { perspective } = makePerspective();
+    const card = new TxCard(perspective, "tx://c9");
+    jest.spyOn(card as any, "getData").mockResolvedValue(card);
+    let refuse!: (e: Error) => void;
+    perspective.mutate.mockImplementationOnce(() => new Promise((_, reject) => (refuse = reject)));
+
+    let outside!: Promise<void>;
+    await expect(
+      Ad4mModel.transaction(perspective, async (tx) => {
+        card.title = "one";
+        await card.save(tx.batchId);
+        card.title = "two";
+        outside = card.save(undefined, { readBack: false });
+        await new Promise((r) => setTimeout(r, 0));
+        throw new Error("callback failed");
+      }),
+    ).rejects.toThrow("callback failed");
+    refuse(new Error("refused"));
+    await expect(outside).rejects.toThrow("refused");
+
+    // Nothing was written: the next save creates.
+    await card.save();
+    expect(perspective.mutate).toHaveBeenLastCalledWith(
+      [{ op: "create", class: "tx://TxCard", id: "tx://c9", values: { title: "two" } }],
+      {},
+    );
+  });
+
   it("a flush that succeeds keeps the snapshot: a later save updates", async () => {
     const { perspective } = makePerspective();
     const card = new TxCard(perspective, "tx://c1");
