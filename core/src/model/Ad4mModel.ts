@@ -1824,6 +1824,16 @@ export class Ad4mModel {
    * that value instead, so whichever undo comes last restores what the store
    * holds, in any order. Its `done` marks it written; the written writes at the
    * bottom are dropped, as nothing older can hand them a value.
+   *
+   * Example: the store and the snapshot hold `title` "O". Write A sets "A"
+   * (claim: before "O"), then write B sets "B" (claim: before "A"); neither is
+   * written yet, so the snapshot shows "B".
+   * - Undo B, then A: B is the top claim, so the snapshot goes back to "A"; A is
+   *   then the top claim, so it goes back to "O".
+   * - Undo A, then B: a later claim (B) is held, so A leaves the snapshot alone
+   *   and B's before becomes "O"; B, now the top claim, restores "O".
+   * - Undo A, B written: B's before becomes "O", but B's `done` drops it: the
+   *   snapshot keeps "B", which the store holds.
    */
   private claimFields(fields: string[], before: Record<string, any> | null): WriteClaim {
     const claims = fieldClaims.get(this) ?? new Map<string, FieldClaim[]>();
