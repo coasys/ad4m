@@ -186,7 +186,7 @@ export class Mirror {
         for (const shared of this.#lives.values()) shared.stale()
         // Two phases: every value is marked before any subscriber is told, or one told first
         // could read another that is still fresh.
-        const tell: ((refetch: boolean) => void)[] = []
+        const tell: ((current: () => boolean) => void)[] = []
         for (const entry of this.#entries.values()) entry.invalidate(refetch, tell)
         for (const { staleOnReconnect, cache } of this.#caches.values()) if (staleOnReconnect) cache.markStale(refetch, tell)
         this.#drain(tell)
@@ -194,12 +194,14 @@ export class Mirror {
 
     /**
      * Tells the subscribers of what was marked, one callback after the other. A subscriber may
-     * reset the mirror or refuse its token meanwhile (`resets` changes): the reads the drain
-     * queued then do not start, as a reset or a refusal sends no request. Every subscriber still hears.
+     * reset the mirror or refuse its token meanwhile (`resets` changes): each callback asks right
+     * before its read, so no read starts after it, the read of the entry whose subscriber did it
+     * included, as a reset or a refusal sends no request. Every subscriber still hears.
      */
-    #drain(tell: ((refetch: boolean) => void)[]): void {
+    #drain(tell: ((current: () => boolean) => void)[]): void {
         const resets = this.#resets
-        for (const run of tell) run(resets === this.#resets)
+        const current = () => resets === this.#resets
+        for (const run of tell) run(current)
     }
 
     /** How many times the mirror was reset or refused: a caller that notifies subscribers can tell whether one of them reset it. */
@@ -220,7 +222,7 @@ export class Mirror {
         this.#resets++
         // As `markAllStale`: every value is marked before any subscriber is told. The caches
         // staying fresh through a reconnect (the expressions) are refused too.
-        const tell: ((refetch: boolean) => void)[] = []
+        const tell: ((current: () => boolean) => void)[] = []
         for (const shared of this.#lives.values()) shared.stale()
         for (const entry of this.#entries.values()) entry.invalidate(false, tell)
         for (const { cache } of this.#caches.values()) cache.refuse(tell)

@@ -143,7 +143,7 @@ export class KeyedCache<V> {
      * With `deferred`, the telling and the reads wait until the caller runs what was pushed
      * there; the caller passes whether to start the reads.
      */
-    markStale(refetch = true, deferred?: ((refetch: boolean) => void)[]): void {
+    markStale(refetch = true, deferred?: ((current: () => boolean) => void)[]): void {
         const again: string[] = [];
         // With the snapshot each key's subscribers last saw: a subscriber told earlier may read
         // the key and store its stale snapshot before the key's own subscribers hear of it.
@@ -160,13 +160,13 @@ export class KeyedCache<V> {
             if (refetch && this.#listeners.get(key)?.size) again.push(key);
             else told.push([key, this.#snapshots.get(key) ?? (UNKNOWN as Snapshot<V | null>)]);
         }
-        const tell = (go: boolean) => {
+        const tell = (current: () => boolean) => {
             for (const [key, seen] of told) this.#notify(key, seen);
             // A reset or refusal made while the callbacks ran takes the reads back.
-            if (go) for (const key of again) this.#read(key, this.#loader(key)).catch(() => {});
+            if (current()) for (const key of again) this.#read(key, this.#loader(key)).catch(() => {});
         };
         if (deferred) deferred.push(tell);
-        else tell(true);
+        else tell(() => true);
     }
 
     /**
@@ -174,7 +174,7 @@ export class KeyedCache<V> {
      * as current, whatever `staleOnReconnect` says), and the persistent tier is not read, so
      * the next read reaches the source and fails there.
      */
-    refuse(deferred?: ((refetch: boolean) => void)[]): void {
+    refuse(deferred?: ((current: () => boolean) => void)[]): void {
         this.#refused = true;
         this.markStale(false, deferred);
     }
@@ -254,6 +254,8 @@ export class KeyedCache<V> {
                     }
                     this.#prune(key);
                 }
+                // A refusal came while the stored value was on its way (it cancelled this flight): the read reaches the source.
+                if (loaded.stored && this.#refused) return this.#read(key, this.#loader(key));
                 return loaded.value;
             },
             (error) => {

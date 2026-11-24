@@ -114,23 +114,23 @@ export class Entry<T> implements Live<T> {
      * {@link reloadWatched}). With `deferred`, the entry is stale at once but its subscribers are
      * told, and the read starts, only when the caller runs what was pushed there: a caller that
      * invalidates many entries marks them all before any subscriber can read one. The caller
-     * of `deferred` says whether the read still goes out (`refetch` is a wish: a reset or a
-     * refusal made while the callbacks ran takes it back).
+     * of `deferred` passes a check, asked right before the read: a reset or a refusal made
+     * while the callbacks ran, this entry's own subscribers included, takes the read back.
      */
-    invalidate(refetch = true, deferred?: ((refetch: boolean) => void)[]): void {
+    invalidate(refetch = true, deferred?: ((current: () => boolean) => void)[]): void {
         this.#version++
         this.#inflight = null
         if (this.#state === 'unknown' || this.#state === 'stale') return
         this.#state = 'stale'
         const snapshot = this.#snapshot = this.#makeSnapshot()
-        const tell = (go: boolean) => {
+        const tell = (current: () => boolean) => {
             // A subscriber told before us may have read or pushed: its snapshot is the newer one.
             if (this.#snapshot !== snapshot) return
             this.#tell()
-            if (refetch && go && this.#listeners.size > 0 && this.#state === 'stale') this.#refetch()
+            if (refetch && current() && this.#listeners.size > 0 && this.#state === 'stale') this.#refetch()
         }
         if (deferred) deferred.push(tell)
-        else tell(true)
+        else tell(() => true)
     }
 
     /** A socket opened: an entry with subscribers that is not fresh (stale, or failed while there was no socket) reads once; a fresh or loading one does not. */

@@ -396,4 +396,14 @@ describe('KeyedCache review round', () => {
         expect(await read).toBe('loaded:k');
         expect(load).toHaveBeenCalledTimes(1);
     });
+
+    test('a refusal by a subscriber told of one stored value sends the other reads of its tick to the source', async () => {
+        const store = new MapStore<string>();
+        store.entries.set('a', { value: 'stored a', ts: Date.now() });
+        store.entries.set('b', { value: 'stored b', ts: Date.now() });
+        const cache = new KeyedCache<string>({ loadMany: async keys => keys.map(k => `loaded:${k}`), persistent: store });
+        cache.live('a').subscribe(s => { if (s.value === 'stored a') cache.refuse(); });
+        const b = cache.get('b');
+        expect(await b).toBe('loaded:b');
+    });
 });
