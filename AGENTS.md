@@ -65,6 +65,25 @@ it in older docs.
   gets no event until it sends `events.watch` naming it, so a raw-WebSocket test
   client must send the watch and wait for its reply before it triggers the
   event (see `tests/js/helpers/sfu/events.ts`).
+- **Tests wait for a signal, never for time.** Do not put a fixed sleep before
+  an assertion or before the action that a test triggers. A sleep costs its
+  whole length on every run, and on a slow CI machine it can still be too
+  short. Wait for the signal that the state is ready instead:
+  - an event, a callback, or the reply of the call that set the state up
+    (the `events.watch` reply; a subscribe reply, because the executor
+    registers the subscription before it computes the first result);
+  - when no signal exists, a poll of the condition at a short interval (about
+    100 ms or less). A timeout is only the bound at which the test fails;
+  - to prove that something did not happen, a sentinel: after the action,
+    cause an event on the same channel that must arrive, wait for it, then
+    check that the other event did not arrive. This holds only where that
+    channel keeps the order of its events;
+  - for code that waits on time itself (a deadline, a debounce, a stale
+    bound), a test override for that duration, a paused tokio clock
+    (`#[tokio::test(start_paused = true)]`) or fake timers (`jest.useFakeTimers`, `vi.useFakeTimers`).
+    Do not pause the tokio clock in a test that talks to a real language
+    runtime thread: that thread has its own clock, and the test's clock
+    advances while it waits on the thread.
 - `connect/` tests (vitest + happy-dom) fail under Node 26 (`localStorage.clear`
   undefined); run them under Node 24.
 

@@ -858,27 +858,6 @@ describe('PerspectiveClient', () => {
         expect(ws.rpc.slice(2).map(c => c.type)).toEqual(['events.watch', 'perspective.snapshot']);
     });
 
-    test('watchApplied() settles only after the events.watch reply', async () => {
-        const watchReply = MOCK_RESPONSES['events.watch'];
-        let acceptWatch!: (ok: boolean) => void;
-        MOCK_RESPONSES['events.watch'] = () => new Promise<boolean>(r => { acceptWatch = r; });
-        const api = new ApiClient('http://127.0.0.1:12000', 'test-token');
-        clients.push({ close: () => api.closeAll() });
-        try {
-            api.on('link-added', () => {}, { perspective: 'A' });
-            let settled = false;
-            const waiting = api.watchApplied().then(() => { settled = true; });
-            await new Promise(r => setTimeout(r, 20));
-            expect(lastOf(MockWebSocket.instances).rpc.map(c => c.type)).toEqual(['events.watch']);
-            expect(settled).toBe(false);
-
-            acceptWatch(true);
-            await waiting;
-        } finally {
-            MOCK_RESPONSES['events.watch'] = watchReply;
-        }
-    });
-
     test('a failed events.watch is sent again, a bounded number of times', async () => {
         jest.useFakeTimers();
         const watchReply = MOCK_RESPONSES['events.watch'];
@@ -927,7 +906,8 @@ describe('PerspectiveClient', () => {
         const syncState = jest.fn();
         freshClient.on('sync-state-change', ({ state }) => syncState(state), { perspective: 'A' });
         const signal = jest.fn();
-        await freshClient.neighbourhood.addSignalHandler('A', signal);
+        freshClient.neighbourhood.addSignalHandler('A', signal);
+        await freshClient.perspective.snapshotByUUID('A');
         const ws = lastOf(MockWebSocket.instances);
         expect(lastOf(ws.rpc.filter(c => c.type === 'events.watch')).params)
             .toEqual({ 'signal': ['A'], 'sync-state-change': ['A'] });

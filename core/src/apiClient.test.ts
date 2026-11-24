@@ -1619,41 +1619,38 @@ describe('ApiClient when the executor refuses the token', () => {
         expect(TestSocket.instances).toHaveLength(1)
     })
 
-    it('rejects a waiting watchApplied() with 401 when the socket closes 1008 before it opens', async () => {
-        open()
-        const applied = client.watchApplied()
-        socket(0).drop(1008, REASON)
-        await expect(applied).rejects.toMatchObject({ name: 'RpcError', status: 401, body: REASON })
-    })
-
-    it('rejects a waiting watchApplied() with the reason when the socket closes 1013 before it opens', async () => {
-        const LOCKED = 'Executor is locked: ask the operator to unlock it, then reconnect'
-        open()
-        const applied = client.watchApplied()
-        socket(0).drop(1013, LOCKED)
-        await expect(applied).rejects.toMatchObject({ name: 'RpcError', status: 503, body: LOCKED })
-        expect(authFailed).not.toHaveBeenCalled()
-    })
-
     it('fails every later call with 401 without opening a socket', async () => {
         open()
         socket(0).drop(1008, REASON)
         open()
         await expect(call('agent.get')).rejects.toMatchObject({ status: 401, body: REASON })
-        await expect(client.watchApplied()).rejects.toMatchObject({ status: 401 })
         jest.advanceTimersByTime(60_000)
         expect(TestSocket.instances).toHaveLength(1)
     })
 
-    it('rejects watchApplied() with 401 when the executor refuses events.watch on an open socket', async () => {
+    it('fails auth when the executor refuses events.watch with 401', async () => {
         open()
         jest.runAllTicks() // fake timers hold the queued watch flush
         socket(0).open()
         const watch = socket(0).sent.find((m) => m.type === 'events.watch')!
-        const applied = client.watchApplied()
         socket(0).reply({ id: watch.id, error: { code: 401, message: REASON } })
-        await expect(applied).rejects.toMatchObject({ name: 'RpcError', status: 401, body: REASON })
+        await Promise.resolve()
         expect(authFailed).toHaveBeenCalledTimes(1)
+    })
+
+    it('sends the watch again when events.watch fails otherwise', async () => {
+        open()
+        jest.runAllTicks() // fake timers hold the queued watch flush
+        socket(0).open()
+        const watches = () => socket(0).sent.filter((m) => m.type === 'events.watch')
+        const errors = jest.spyOn(console, 'error').mockImplementation(() => {})
+        socket(0).reply({ id: watches()[0].id, error: { code: 500, message: 'store busy' } })
+        await Promise.resolve()
+        jest.advanceTimersByTime(60_000)
+        jest.runAllTicks()
+        expect(watches()).toHaveLength(2)
+        expect(authFailed).not.toHaveBeenCalled()
+        errors.mockRestore()
     })
 
     it('fails every pending call on a 401 reply and stops once the executor closes the socket', async () => {
