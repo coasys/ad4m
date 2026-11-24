@@ -1323,6 +1323,42 @@ describe('WakerSubscriptionManager', () => {
     expect(wakes[0][0].attachments).toEqual([]);
   });
 
+  describe('a file lookup the executor never answers', () => {
+    beforeEach(() => { jest.useFakeTimers(); });
+    afterEach(() => { jest.useRealTimers(); });
+
+    it('wakes within the shared budget with no attachments, for every message of the batch', async () => {
+      const delivers: Record<string, (result: any) => Promise<void>> = {};
+      const client = {
+        querySparql: () => Promise.reject(new Error('the waker resolves containment through Container')),
+        modelQuery: (_uuid: string, className: string) =>
+          className === 'ad4m://FileContent'
+            ? new Promise(() => {})
+            : Promise.resolve({ instances: [], totalCount: 0 }),
+      };
+      const wakes: any[] = [];
+      const manager = new WakerSubscriptionManager({
+        perspectiveClient: client,
+        logger: noopLogger(),
+        QuerySubscriptionProxy: answeringProxyClass(delivers, []),
+        debounceMs: 10,
+        retryPendingMs: 60_000,
+        onWake: (_sub, _result, mentions) => { wakes.push(mentions); },
+      });
+      await manager.subscribe({ ...sub, id: 'mention-parents' });
+      void deliverTo(delivers, result(named('test://one'), named('test://two')));
+      await jest.advanceTimersByTimeAsync(1999);
+      expect(wakes).toHaveLength(0);
+      await jest.advanceTimersByTimeAsync(100);
+      manager.disposeAll();
+      expect(wakes).toHaveLength(1);
+      expect(wakes[0].map((m: any) => [m.address, m.attachments])).toEqual([
+        ['test://one', []],
+        ['test://two', []],
+      ]);
+    });
+  });
+
   it('bounds the walk by ancestorDepth, and never reports the mention itself', async () => {
     const holders = {
       'test://message': ['test://a'],

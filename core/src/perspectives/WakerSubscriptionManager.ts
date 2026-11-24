@@ -67,6 +67,11 @@ const FILE_CONTENT = "ad4m://FileContent";
 
 /** How many attached files a mention reports; a message holding more is cut here. */
 const MAX_ATTACHMENTS = 20;
+/**
+ * How long a wake waits for its messages' file lookups, shared by all of them. Files are
+ * enrichment: a lookup that misses this gives `[]`, and the wake goes out without it.
+ */
+const ATTACHMENT_BUDGET_MS = 2000;
 
 /** A letter, combining mark, digit or underscore: what a term must not touch. */
 const WORD_CHAR = "[\\p{L}\\p{M}\\p{N}_]";
@@ -751,6 +756,15 @@ export class WakerSubscriptionManager {
           `[waker] ${sub.id}: ${newMessages.length} new message(s) out of ${rows.length} total`,
         );
 
+        // The file lookups start together and share one short budget: a stalled executor must
+        // not hold the wake for its call timeout per message, nor for a message with no files.
+        let budgetTimer: ReturnType<typeof setTimeout> | undefined;
+        const budget = new Promise<MentionAttachment[]>((resolve) => {
+          budgetTimer = setTimeout(() => resolve([]), ATTACHMENT_BUDGET_MS);
+        });
+        const files = new Map<string, Promise<MentionAttachment[]>>(
+          newMessages.map((addr) => [addr, Promise.race([this.attachmentsOf(sub, addr), budget])]),
+        );
         // Resolve parents, and the chain above them, per new message
         const mentions: MentionMessage[] = [];
         for (const msgAddr of newMessages) {
@@ -761,7 +775,7 @@ export class WakerSubscriptionManager {
             `[waker] ${sub.id}: message ${msgAddr} has ${parents.length} parent(s): ${parents.join(", ")}` +
               (ancestors.length ? `; ancestors: ${ancestors.join(", ")}` : ""),
           );
-          const attachments = await this.attachmentsOf(sub, msgAddr);
+          const attachments = await files.get(msgAddr)!;
           mentions.push({
             address: msgAddr,
             parents,
@@ -770,6 +784,7 @@ export class WakerSubscriptionManager {
             ...provenance.get(msgAddr)!,
           });
         }
+        clearTimeout(budgetTimer);
         // Released, or replaced under the same id, during the lookups: the state under `sub.id`
         // is no longer this subscription's, so write nothing and wake for nothing.
         if (this.isStale(sub.id, token)) return;
