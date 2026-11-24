@@ -4041,6 +4041,35 @@ describe("Ad4mModel.transaction()", () => {
     expect(item.changedFields()).toEqual(["tags"]);
   });
 
+  it("a save outside a failed transaction that fails after it restores what the store holds", async () => {
+    const { perspective } = makePerspective();
+    const note = new TxNote(perspective, "tx://n3");
+    jest.spyOn(note as any, "getData").mockResolvedValue(note);
+    note.title = "A";
+    await note.save();
+    let refuse!: (e: Error) => void;
+    perspective.mutate.mockImplementationOnce(() => new Promise((_, reject) => (refuse = reject)));
+
+    let outside!: Promise<void>;
+    await expect(
+      Ad4mModel.transaction(perspective, async (tx) => {
+        note.title = "B";
+        await note.save(tx.batchId);
+        // Outside the transaction, and still pending when the transaction fails.
+        note.title = "C";
+        outside = note.save(undefined, { readBack: false });
+        await new Promise((r) => setTimeout(r, 0));
+        throw new Error("callback failed");
+      }),
+    ).rejects.toThrow("callback failed");
+    refuse(new Error("refused"));
+    await expect(outside).rejects.toThrow("refused");
+
+    // The store holds "A": setting "B" is a change.
+    note.title = "B";
+    expect(note.changedFields()).toEqual(["title"]);
+  });
+
   it("a flush that succeeds keeps the snapshot: a later save updates", async () => {
     const { perspective } = makePerspective();
     const card = new TxCard(perspective, "tx://c1");

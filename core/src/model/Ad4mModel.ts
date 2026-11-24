@@ -424,7 +424,7 @@ function jsonToModelInstance<T extends Ad4mModel>(
  * instance an earlier one created. When the call or the callback fails,
  * the undos run, so no instance looks saved that was not.
  */
-const transactionOps = new Map<string, { perspective: PerspectiveProxy; ops: MutateOp[]; undo: (() => void)[] }>();
+const transactionOps = new Map<string, { perspective: PerspectiveProxy; ops: MutateOp[]; undo: (() => void)[]; done: (() => void)[] }>();
 
 /**
  * Writes `ops` as one `perspective.mutate` call: into the open batch `batchId`
@@ -432,7 +432,7 @@ const transactionOps = new Map<string, { perspective: PerspectiveProxy; ops: Mut
  * batch they are queued instead; the transaction sends them, and runs `undo`
  * if they are never written.
  */
-async function writeOps(perspective: PerspectiveProxy, ops: MutateOp[], batchId?: string, undo?: () => void): Promise<void> {
+async function writeOps(perspective: PerspectiveProxy, ops: MutateOp[], batchId?: string, claim?: WriteClaim): Promise<void> {
   const queued = batchId ? transactionOps.get(batchId) : undefined;
   if (queued) {
     if (queued.perspective.uuid !== perspective.uuid) {
@@ -441,10 +441,14 @@ async function writeOps(perspective: PerspectiveProxy, ops: MutateOp[], batchId?
       );
     }
     queued.ops.push(...ops);
-    if (undo) queued.undo.push(undo);
+    if (claim) {
+      queued.undo.push(claim.undo);
+      queued.done.push(claim.done);
+    }
     return;
   }
   await perspective.mutate(ops, batchId ? { batch: batchId } : {});
+  claim?.done();
 }
 
 /** The fields an update op writes. */
@@ -453,12 +457,18 @@ function opFields(op: MutateOp): string[] {
   return [...new Set([...Object.keys(set ?? {}), ...Object.keys(add ?? {}), ...Object.keys(remove ?? {})])];
 }
 
+/** A write's hold on the fields it carries (see `claimFields`): `undo` when it was not written, `done` when it was. */
+type WriteClaim = { undo: () => void; done: () => void };
+
+/** One write of one field: what the field held before it, and whether the write is in the store. */
+type FieldClaim = { owner: object; had: boolean; before: unknown; settled: boolean };
+
 /**
- * Which write last carried each field of an instance (see `claimFields`): a
- * transaction's undo restores only the fields no later write carried. A value
- * cannot tell: a later write may store the same value again.
+ * The writes of each instance field, oldest first, back to the oldest one not
+ * settled (see `claimFields`). A value cannot tell an undo what to restore: a
+ * later write may store the same value again, or still fail itself.
  */
-const fieldOwners = new WeakMap<object, Map<string, object>>();
+const fieldClaims = new WeakMap<object, Map<string, FieldClaim[]>>();
 
 /** The parent of the create that `Model.create()` is writing, by instance (see `persist`). */
 const createParents = new WeakMap<object, ParentRef>();
@@ -1797,41 +1807,66 @@ export class Ad4mModel {
     // changed while the call is pending stays dirty for the next save.
     this.takeSnapshot();
     const fields = op.op === "create" ? Object.keys(this._snapshot!) : opFields(op);
-    const undo = this.claimFields(fields, before);
+    const claim = this.claimFields(fields, before);
     try {
-      await writeOps(this._perspective, [op], batchId, undo);
+      await writeOps(this._perspective, [op], batchId, claim);
     } catch (e) {
-      undo();
+      claim.undo();
       throw e;
     }
   }
 
   /**
-   * Marks `fields` as carried by one write, and returns its undo: each field no
-   * later write carried goes back to what `before` held, and the field's claim
-   * goes back to the write before this one, so a transaction's undos, run in
-   * reverse, unwind a chain of writes of one field. A later write has set its own
-   * value, which matches the store; fields the write did not carry are never
-   * touched. With no `before` (a create) the instance is unsaved again.
+   * Records one write of `fields` on top of the writes of them not settled yet.
+   * Its `undo` takes the write out: when no later write of a field is held, the
+   * snapshot goes back to what the field held before (with no `before`, a
+   * create, the instance is unsaved again); otherwise the next write starts from
+   * that value instead, so whichever undo comes last restores what the store
+   * holds, in any order. Its `done` marks it written; the written writes at the
+   * bottom are dropped, as nothing older can hand them a value.
    */
-  private claimFields(fields: string[], before: Record<string, any> | null): () => void {
-    const owners = fieldOwners.get(this) ?? new Map<string, object>();
-    fieldOwners.set(this, owners);
+  private claimFields(fields: string[], before: Record<string, any> | null): WriteClaim {
+    const claims = fieldClaims.get(this) ?? new Map<string, FieldClaim[]>();
+    fieldClaims.set(this, claims);
     const owner = {};
-    const previous = new Map(fields.map((field) => [field, owners.get(field)]));
-    for (const field of fields) owners.set(field, owner);
-    return () => {
-      const snapshot = this._snapshot;
-      if (!snapshot) return;
+    for (const field of fields) {
+      const held = claims.get(field) ?? [];
+      claims.set(field, held);
+      held.push({ owner, had: !!before && field in before, before: before?.[field], settled: false });
+    }
+    const each = (fn: (field: string, held: FieldClaim[], at: number) => void) => {
       for (const field of fields) {
-        if (owners.get(field) !== owner) continue;
-        const prior = previous.get(field);
-        if (prior) owners.set(field, prior);
-        else owners.delete(field);
-        if (before && field in before) snapshot[field] = before[field];
-        else delete snapshot[field];
+        const held = claims.get(field);
+        const at = held ? held.findIndex((c) => c.owner === owner) : -1;
+        if (held && at >= 0) fn(field, held, at);
       }
-      if (!before && Object.keys(snapshot).length === 0) this._snapshot = null;
+    };
+    const drop = (field: string, held: FieldClaim[]) => {
+      while (held[0]?.settled) held.shift();
+      if (held.length === 0) claims.delete(field);
+    };
+    return {
+      undo: () => {
+        const snapshot = this._snapshot;
+        each((field, held, at) => {
+          const [claim] = held.splice(at, 1);
+          const later = held[at];
+          if (later) {
+            later.had = claim.had;
+            later.before = claim.before;
+          } else if (snapshot) {
+            if (claim.had) snapshot[field] = claim.before;
+            else delete snapshot[field];
+          }
+          drop(field, held);
+        });
+        if (snapshot && !before && Object.keys(snapshot).length === 0) this._snapshot = null;
+      },
+      done: () =>
+        each((field, held, at) => {
+          held[at].settled = true;
+          drop(field, held);
+        }),
     };
   }
 
@@ -2382,7 +2417,7 @@ export class Ad4mModel {
     fn: (tx: { batchId: string }) => Promise<R>,
   ): Promise<R> {
     const batchId = await perspective.createBatch();
-    const queue = { perspective, ops: [] as MutateOp[], undo: [] as (() => void)[] };
+    const queue = { perspective, ops: [] as MutateOp[], undo: [] as (() => void)[], done: [] as (() => void)[] };
     transactionOps.set(batchId, queue);
     try {
       const result = await fn({ batchId });
@@ -2391,6 +2426,7 @@ export class Ad4mModel {
       transactionOps.delete(batchId);
       if (queue.ops.length > 0) await perspective.mutate(queue.ops, { batch: batchId });
       await perspective.commitBatch(batchId);
+      for (const done of queue.done) done();
       return result;
     } catch (e) {
       // Nothing was written: the instances saved in the callback are unsaved again.
