@@ -276,8 +276,12 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         expect(bStatus.keyId).to.equal("d2");
         expect(bStatus.revoked).to.equal(2);
         // The binding stays, but B's key no longer speaks for the person: agent.status (and
-        // agent.get, which reads the same check) names no identity.
-        expect((await b.client.agent.status()).identity).to.be.null;
+        // agent.get, which reads the same check) names no identity. The client keeps the status
+        // until the executor's agent-status-changed reaches it, which can come after the reply.
+        await pollUntil(async () => (await b.client.agent.status()).identity === null, {
+            timeoutMs: 10000,
+            label: "B's agent.status to name no identity",
+        });
         expect((await a.client.agent.status()).identity).to.equal(did);
         const devices = await a.client.identity.devices();
         expect(devices.find((d) => d.keyId === "d2")!.revokedSeq).to.equal(2);
