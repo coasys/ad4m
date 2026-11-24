@@ -105,7 +105,7 @@ async fn fixture() -> Fixture {
     let mut uuids = Vec::new();
     for _ in 0..2 {
         let (perspective, _shapes, _ctx) = setup_perspective_no_llm(&[("Note", NOTE_SDNA)]).await;
-        let uuid = perspective.persisted.lock().await.uuid.clone();
+        let uuid = perspective.persisted.load().uuid.clone();
         register_perspective(uuid.clone(), perspective);
         uuids.push(uuid);
     }
