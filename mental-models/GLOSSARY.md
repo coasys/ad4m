@@ -36,7 +36,7 @@ This file defines each term that ADAM uses in its own way, once, in alphabetical
 
 **Alias** (`LanguageController::language_aliases`): One of the names `did`, `lang`, `neighbourhood` and `perspective`, each of which stands for the address of a system language. Example: "`did://<did>` is an expression URL with the alias `did`." [Language addresses](languages/expressions/addresses.md)
 
-**App grant** (`generate_capability_token`, `grants::mint`): The grant that an app gets when the owner of an agent approves the app's capability request. The app holds it as a JWT. Example: "The app grant lets the app read `perspective` on `*`." [App grants](agents/access/app-grants.md) — not: cap token
+**App grant** (`generate_capability_token`, `grants::mint`): The grant that an app gets when the owner of an agent approves the app's capability request. The app holds it as a JWT. Example: "The app grant lets the app read `perspective` on `*`." [App grants](agents/access/app-grants.md)
 
 **Auto-processor** (`AutoProcessorConfig`, `auto_processor_supervisor`): An instance in a perspective that makes the executor run interpretation on new messages in a scope, with no caller. Example: "The auto-processor runs interpretation on each new message in the channel." [Auto-processor](perspectives/social-dna/interpretation/auto-processor.md)
 
@@ -196,7 +196,7 @@ This file defines each term that ADAM uses in its own way, once, in alphabetical
 
 **Revision** (`Language::current_revision`): The ID of the current state of a link language, such as a diff-entry hash in p-diff-sync or the XOR of the active link hashes on a link server. Example: "Two link-server rooms with the same links have the same revision." [Link languages](languages/link-languages/README.md)
 
-**RPC API** (`rust-executor/src/api/ws_rpc.rs`, `HandlerMap`): The executor's WebSocket at `/api/v1/ws`, which carries method calls, events and live-query updates. Example: "The SDK calls `perspective.get` over the RPC API." [RPC API](agents/interfaces/rpc-api.md) — not: GraphQL API
+**RPC API** (`rust-executor/src/api/ws_rpc.rs`, `HandlerMap`): The executor's WebSocket at `/api/v1/ws`, which carries method calls, events and live-query updates. Example: "The SDK calls `perspective.get` over the RPC API." [RPC API](agents/interfaces/rpc-api.md)
 
 **Runtime service** (`RuntimeService`, `rust-executor/src/runtime_service/`, `runtime.*` RPC, `known_link_languages` table): The executor service that holds the bootstrap seed and the lists of trusted agents, known link languages and friends. Its `runtime.*` calls also cover notifications, export, import and quit. Example: "The runtime service lists the trusted agents." [Executor services](agents/executor/services/README.md)
 
