@@ -4011,6 +4011,36 @@ describe("Ad4mModel.transaction()", () => {
     expect(item.changedFields().sort()).toEqual(["tags", "title"]);
   });
 
+  it("a failed transaction keeps a field that saves outside it wrote back to the transaction's value", async () => {
+    @Model({ name: "TxTaggedAgain" })
+    class TxTaggedAgain extends Ad4mModel {
+      @HasMany({ through: "tx://tag" })
+      tags: string[] = [];
+    }
+    const { perspective } = makePerspective();
+    const item = new TxTaggedAgain(perspective, "tx://t2");
+    jest.spyOn(item as any, "getData").mockResolvedValue(item);
+    item.tags = ["tx://a"];
+    await item.save();
+
+    await expect(
+      Ad4mModel.transaction(perspective, async (tx) => {
+        item.tags = ["tx://b"];
+        await item.save(tx.batchId);
+        // Outside the transaction: the store ends at the transaction's value.
+        item.tags = ["tx://c"];
+        await item.save(undefined, { readBack: false });
+        item.tags = ["tx://b"];
+        await item.save(undefined, { readBack: false });
+        throw new Error("callback failed");
+      }),
+    ).rejects.toThrow("callback failed");
+
+    // The store holds ["b"]: setting ["a"] again is a change.
+    item.tags = ["tx://a"];
+    expect(item.changedFields()).toEqual(["tags"]);
+  });
+
   it("a flush that succeeds keeps the snapshot: a later save updates", async () => {
     const { perspective } = makePerspective();
     const card = new TxCard(perspective, "tx://c1");

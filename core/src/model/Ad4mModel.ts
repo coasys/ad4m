@@ -453,11 +453,12 @@ function opFields(op: MutateOp): string[] {
   return [...new Set([...Object.keys(set ?? {}), ...Object.keys(add ?? {}), ...Object.keys(remove ?? {})])];
 }
 
-/** One snapshot value equals another: arrays element by element, in order. */
-function sameValue(a: unknown, b: unknown): boolean {
-  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((v, i) => v === b[i]);
-  return a === b;
-}
+/**
+ * Which write last carried each field of an instance (see `claimFields`): a
+ * transaction's undo restores only the fields no later write carried. A value
+ * cannot tell: a later write may store the same value again.
+ */
+const fieldOwners = new WeakMap<object, Map<string, object>>();
 
 /** The parent of the create that `Model.create()` is writing, by instance (see `persist`). */
 const createParents = new WeakMap<object, ParentRef>();
@@ -1796,8 +1797,7 @@ export class Ad4mModel {
     // changed while the call is pending stays dirty for the next save.
     this.takeSnapshot();
     const fields = op.op === "create" ? Object.keys(this._snapshot!) : opFields(op);
-    const written = this._snapshot!;
-    const undo = this.undoOf(fields, Object.fromEntries(fields.map((field) => [field, written[field]])), before);
+    const undo = this.claimFields(fields, before);
     try {
       await writeOps(this._perspective, [op], batchId, undo);
     } catch (e) {
@@ -1807,19 +1807,27 @@ export class Ad4mModel {
   }
 
   /**
-   * The undo of one write of `fields`: each field whose snapshot value still equals the
-   * one this write took (`written`; arrays element by element, as a later snapshot copies
-   * them) goes back to what `before` held. A later write
-   * of the field has set its own value, which matches the store, and fields the
-   * write did not carry are never touched. With no `before` (a create) the
-   * instance is unsaved again.
+   * Marks `fields` as carried by one write, and returns its undo: each field no
+   * later write carried goes back to what `before` held, and the field's claim
+   * goes back to the write before this one, so a transaction's undos, run in
+   * reverse, unwind a chain of writes of one field. A later write has set its own
+   * value, which matches the store; fields the write did not carry are never
+   * touched. With no `before` (a create) the instance is unsaved again.
    */
-  private undoOf(fields: string[], written: Record<string, any>, before: Record<string, any> | null): () => void {
+  private claimFields(fields: string[], before: Record<string, any> | null): () => void {
+    const owners = fieldOwners.get(this) ?? new Map<string, object>();
+    fieldOwners.set(this, owners);
+    const owner = {};
+    const previous = new Map(fields.map((field) => [field, owners.get(field)]));
+    for (const field of fields) owners.set(field, owner);
     return () => {
       const snapshot = this._snapshot;
       if (!snapshot) return;
       for (const field of fields) {
-        if (!sameValue(snapshot[field], written[field])) continue;
+        if (owners.get(field) !== owner) continue;
+        const prior = previous.get(field);
+        if (prior) owners.set(field, prior);
+        else owners.delete(field);
         if (before && field in before) snapshot[field] = before[field];
         else delete snapshot[field];
       }
