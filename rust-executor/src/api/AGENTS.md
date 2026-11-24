@@ -473,19 +473,20 @@ them against those two guards.
   (`Session::is_authenticated`: not anonymous) get a stream. The stream ends at the first event
   the session may receive after `Session::check()` fails. `audience_matrix_tests` in
   `events_ws.rs` pins who receives each audience; a new topic or audience adds its cases there.
-- The operator has no view of other agents' events: it receives what the main agent receives,
-  plus `Operator` events (what only the operator may read).
+- The operator receives what the main agent receives, plus `Operator` events (what only the
+  operator may read), plus the perspective list events of every perspective (below). It
+  receives no other agent's link, state or query events.
 - Audiences. Every per-perspective topic reads its recipients from one helper,
   `perspectives::event_recipients`: the owners, or the main agent for an unowned perspective
   (or one whose owner list is empty), read when the event is published. No per-perspective event
-  goes to `Everyone`. Each goes out once, to all recipients (`perspectives::publish_to_owners`),
-  and no payload names an `owner`: `perspective-added/-updated/-removed`, `sync-state-change`,
-  `link-added/-removed/-updated`. The rule: whoever `perspective.all` lists a perspective to must
-  hear the list events of that perspective. `perspective.all` lists every perspective to the
-  operator, so the three list topics go out as `Audience::DidsAndOperator(recipients)`
-  (`perspectives::publish_list_event`), because an SDK client mirrors that list and refreshes it from
-  those events. Link, state and every other per-perspective event stay on `Dids`: they go to the
-  perspective's owners, not to everyone who can list it. `query-subscription-update`
+  goes to `Everyone`, and no payload names an `owner`. Each goes out once, to all recipients.
+  `sync-state-change` and `link-added/-removed/-updated` go to the owners only
+  (`perspectives::publish_to_owners`, `Audience::Dids`). The list events
+  `perspective-added/-updated/-removed` follow another rule: whoever `perspective.all` lists a
+  perspective to must hear its list events, because an SDK client mirrors that list and
+  refreshes it from those events. `perspective.all` lists every perspective to the operator, so
+  the list events go out as `Audience::DidsAndOperator(recipients)`
+  (`perspectives::publish_list_event`). `query-subscription-update`
   (`PerspectiveInstance::send_delta_update`, which reads the recipients when it publishes)
   goes only to the subscriber (`SubscribedQuery::subscriber`, the main agent for `None`) when it
   is one of them: the query ran as the subscriber, so a co-owner must not get its results.
