@@ -18,7 +18,7 @@ import { fileURLToPath } from "url";
 import { ChildProcess, execSync } from "child_process";
 import { Ad4mClient, ExpressionProof, Link, LinkExpression, Perspective } from "@coasys/ad4m";
 import {
-    baseUrl, executorBinary, executorDataPath, pollUntil, quitExecutor, spawnExecutor, startExecutor,
+    assertAbsentBySentinel, baseUrl, executorBinary, executorDataPath, pollUntil, quitExecutor, spawnExecutor, startExecutor,
 } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { buildIdentityTools, ClaimCommand, Holder, IdentityStore } from "../helpers/identity";
@@ -383,7 +383,20 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         expect(meta["coasys:fork"]).to.be.undefined;
         expect(resolved.didDocumentMetadata.versionId).to.equal("2");
         expect(meta["coasys:skipped"]!.some((s) => /the store is behind/.test(s.reason))).to.equal(true);
-        await new Promise((r) => setTimeout(r, 1000));
+        // A fork event is published by a task spawned before the call that found the
+        // fork answers, on A's own events socket. A perspective added afterwards
+        // (sentinel) is announced on that socket after it, so once that announcement is
+        // here, a fork event would be too.
+        const added: any[] = [];
+        const stopAdded = a.client.on("perspective-added", (event) => added.push(event));
+        const sentinel = await a.client.perspective.add("identity-fork-sentinel");
+        await assertAbsentBySentinel(
+            () => added.some((e) => e.perspectiveUuid === sentinel.uuid),
+            () => forks.length > 0,
+            { timeoutMs: 10_000, label: "identity-fork after the store is restored behind A" },
+        );
+        stopAdded();
+        await a.client.perspective.remove(sentinel.uuid);
         expect(forks).to.have.length(0);
         const status = await a.client.identity.status();
         expect(status.fork).to.be.null;

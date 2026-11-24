@@ -28,6 +28,7 @@ import {
   SHACLFlow,
 } from "@coasys/ad4m";
 import { startAgent, waitUntil } from "../../helpers/index.js";
+import { assertAbsentBySentinel } from "../../utils/utils.js";
 import { getSharedAgent } from "./hooks.js";
 import { baseUrl, wipePerspective } from "../../utils/utils.js";
 import { TestComment, TestPost, TestReaction, TestTag, TestChannel } from "./models.js";
@@ -185,6 +186,12 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
 
   it("dispose() stops further callback invocations", async () => {
     let callCount = 0;
+    // A second, live subscription (the sentinel) on the same posts.
+    const sentinelBuilder = TestPost.query(perspective);
+    let sentinelPosts = 0;
+    await sentinelBuilder.subscribe((r) => {
+      sentinelPosts = r.length;
+    });
     const builder = TestPost.query(perspective);
     await builder.subscribe(() => {
       callCount++;
@@ -195,14 +202,30 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
     const countAfterInitial = callCount;
     builder.dispose();
 
-    const post = new TestPost(perspective);
-    post.title = "Post After Dispose";
-    post.body = "";
-    await post.save();
-
-    // Give it a moment to fire — it should not
-    await new Promise((r) => setTimeout(r, 600));
-    expect(callCount).to.equal(countAfterInitial);
+    // Two saves after the dispose. The disposed subscription's stray callback
+    // would come from a different subscription than the sentinel's, and one pass
+    // sends its updates to the subscriptions in no fixed order, so the sentinel
+    // seeing the first post proves nothing about it. A second save is handled by a
+    // later pass (passes run one after another, each sending everything before the
+    // next starts) over the same socket: once the sentinel has seen the second
+    // post, every update the first caused has been delivered.
+    const before = (await TestPost.query(perspective).get()).length;
+    for (const [i, title] of ["Post After Dispose", "Second Post After Dispose"].entries()) {
+      const post = new TestPost(perspective);
+      post.title = title;
+      post.body = "";
+      await post.save();
+      if (i === 0) {
+        await waitUntil(() => sentinelPosts >= before + 1, 15_000, "sentinel sees the first post after dispose");
+      } else {
+        await assertAbsentBySentinel(
+          () => sentinelPosts >= before + 2,
+          () => callCount !== countAfterInitial,
+          { timeoutMs: 15_000, label: "callback after dispose" },
+        );
+      }
+    }
+    sentinelBuilder.dispose();
   });
 
   // ── 5. countSubscribe() returns correct count ─────────────────────────────
@@ -396,10 +419,17 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
     const post = await TestPost.create(perspective, { title: "Wrong Chan", body: "" });
     await channelB.addPosts(post.id);
 
-    await new Promise((r) => setTimeout(r, 1000));
+    // A post added to channel A afterwards is the sentinel: it must fire this same
+    // subscription, whose callbacks arrive in order, so one for channel B's post
+    // would come first.
+    const own = await TestPost.create(perspective, { title: "Right Chan", body: "" });
+    await channelA.addPosts(own.id);
+    await assertAbsentBySentinel(
+      () => all.some((r) => r.some((p) => p.id === own.id)),
+      () => all.some((r) => r.some((p) => p.id === post.id)) || all.length > countAfterInitial + 1,
+      { timeoutMs: 15_000, label: "callback for a child of another parent" },
+    );
     builder.dispose();
-
-    expect(all.length).to.equal(countAfterInitial);
   });
 
   // ── 8. writes on related records (#1237) ──────────────────────────────────

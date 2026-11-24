@@ -461,7 +461,7 @@ export function sleep(ms: number) {
  * Replaces the `await sleep(N); expect(x)` pattern: the test completes as
  * soon as the condition holds and only fails after a bounded timeout.
  * Only for POSITIVE conditions: an absence check ("X does not happen") passes
- * on the first tick. Use `assertStaysFalse` after a positive barrier for those.
+ * on the first tick. Use `assertAbsentBySentinel` for those.
  *
  * The predicate may be sync or async. Exceptions from it are treated as
  * "not yet true"; the last one is reported in the timeout message.
@@ -505,39 +505,36 @@ export async function stopChildProcess(child: ChildProcess, graceMs = 5000): Pro
 }
 
 /**
- * Actively polls a predicate for `waitMs` and fails as soon as it becomes true.
- * Use this for negative assertions ("X should NOT happen"), and run it after a
- * positive barrier or with a window at least as long as the latency of the
- * thing that must not happen.
+ * Proves an event did NOT happen without waiting a fixed window.
  *
- * A predicate that throws counts as "not evaluable", not as false: if it never
- * evaluated successfully during the window, this fails with the last error, so
- * a broken predicate cannot pass the check vacuously.
+ * Do the action that must not produce `unexpected`, then a second action on the
+ * SAME ordered channel (same subscription, same perspective, same socket) that
+ * must produce `sentinel`, then call this. It polls until `sentinel()` is true
+ * (`timeoutMs` is only the failure bound) and fails if `unexpected()` is true
+ * by then. Events on one channel arrive in order, so an unexpected event could
+ * only have come before the sentinel's. `sentinel` is read before `unexpected`
+ * in each tick, so everything delivered ahead of it is already visible.
+ *
+ * Across executors it holds only for one author's commits, which a link
+ * language applies by ancestry: the sentinel must be a later commit by the
+ * same agent. Two authors' links have no delivery order between them.
+ * Exceptions from either predicate propagate.
  */
-export async function assertStaysFalse(
-    predicate: () => boolean | Promise<boolean>,
-    opts: { waitMs?: number; intervalMs?: number; label?: string } = {},
+export async function assertAbsentBySentinel(
+    sentinel: () => boolean | Promise<boolean>,
+    unexpected: () => boolean | Promise<boolean>,
+    opts: { timeoutMs?: number; intervalMs?: number; label?: string } = {},
 ): Promise<void> {
-    const { waitMs = 1000, intervalMs = 100, label = "condition" } = opts;
-    const deadline = Date.now() + waitMs;
-    let evaluations = 0;
-    let lastError: unknown;
-    while (Date.now() < deadline) {
-        let value: boolean;
-        try {
-            value = await predicate();
-            evaluations++;
-        } catch (err) {
-            lastError = err;
-            await sleep(intervalMs);
-            continue;
+    const { timeoutMs = 15000, intervalMs = 50, label = "unexpected event" } = opts;
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+        const sentinelSeen = await sentinel();
+        if (await unexpected()) throw new Error(`assertAbsentBySentinel failed: ${label} happened`);
+        if (sentinelSeen) return;
+        if (Date.now() >= deadline) {
+            throw new Error(`assertAbsentBySentinel: sentinel not seen within ${timeoutMs}ms (checking: ${label})`);
         }
-        if (value) throw new Error(`assertStaysFalse failed: ${label} became true`);
         await sleep(intervalMs);
-    }
-    if (evaluations === 0) {
-        const detail = lastError instanceof Error ? lastError.message : String(lastError);
-        throw new Error(`assertStaysFalse: ${label} never evaluated in ${waitMs}ms (last error: ${detail})`);
     }
 }
 

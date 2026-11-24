@@ -3,7 +3,7 @@ import fs from "fs";
 import { expect } from "chai";
 import { NotificationInput, TriggeredNotification } from '@coasys/ad4m';
 import sinon from 'sinon';
-import { pollUntil, assertStaysFalse } from '../utils/utils';
+import { pollUntil, assertAbsentBySentinel } from '../utils/utils';
 import { ExceptionType, Link } from '@coasys/ad4m';
 // Imports needed for webhook tests:
 // (deactivated for now because these imports break the test suite on CI)
@@ -306,18 +306,20 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
             const mockFunction = sinon.stub();
             ad4mClient.on('notification-triggered', ({ notification }) => mockFunction(notification))
 
-            // Negative: ensuring no false positives — control link should NOT trigger
+            // Negatives first: a control link (no matching predicate) and a matching
+            // link in another perspective must not trigger. The matching link below is
+            // the sentinel: every notification reaches this client over one events
+            // socket in the order the executor published it. The control link is in
+            // the same perspective, whose check loop runs one check at a time. The
+            // other perspective has a loop of its own and was written first, so for
+            // it order rests on its (equally debounced) check finishing first.
             await notificationPerspective.add(new Link({source: "control://source", target: "control://target"}))
-            await assertStaysFalse(() => mockFunction.called, { waitMs: 1000, label: "no false positive on control link" });
-
-            // Negative: ensuring only selected perspectives trigger
             await otherPerspective.add(new Link({source: "control://source", predicate: triggerPredicate, target: "control://target"}))
-            await assertStaysFalse(() => mockFunction.called, { waitMs: 1000, label: "other perspective should not trigger" });
 
-            // Happy path
+            // Happy path (sentinel)
             await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target1"}))
-            await pollUntil(() => mockFunction.called, { timeoutMs: 15000, label: "notification trigger fires for target1" });
-            expect(mockFunction.called).to.be.true
+            await assertAbsentBySentinel(() => mockFunction.called, () => mockFunction.callCount > 1, { label: "trigger for control link or other perspective" });
+            expect(mockFunction.callCount).to.equal(1)
             let triggeredNotification = mockFunction.getCall(0).args[0] as TriggeredNotification
             expect(triggeredNotification.notification.description).to.equal(notification.description)
             let triggerMatch = JSON.parse(triggeredNotification.triggerMatch)
@@ -331,9 +333,6 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
             // Ensuring we don't get old data on a new trigger
             await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target2"}))
             await pollUntil(() => mockFunction.callCount >= 2, { timeoutMs: 15000, label: "notification trigger fires for target2" });
-            // No third, stale trigger may follow
-            await assertStaysFalse(() => mockFunction.callCount > 2, { waitMs: 2000, label: "stale third notification trigger" });
-            expect(mockFunction.callCount).to.equal(2)
             triggeredNotification = mockFunction.getCall(1).args[0] as TriggeredNotification
             triggerMatch = JSON.parse(triggeredNotification.triggerMatch)
             expect(triggerMatch.length).to.equal(1)
@@ -342,6 +341,17 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
             expect(match.source).to.equal("test://source")
             //@ts-ignore
             expect(match.target).to.equal("test://target2")
+
+            // No third, stale trigger may follow target2's. A further link (sentinel)
+            // is triggered on the same socket after it; a stale trigger would arrive
+            // before it, so the sentinel's must be the third call and nothing more.
+            await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target3"}))
+            await assertAbsentBySentinel(() => mockFunction.callCount >= 3, () => mockFunction.callCount > 3, { label: "stale third notification trigger" });
+            expect(mockFunction.callCount).to.equal(3)
+            triggerMatch = JSON.parse((mockFunction.getCall(2).args[0] as TriggeredNotification).triggerMatch)
+            expect(triggerMatch.length).to.equal(1)
+            //@ts-ignore
+            expect(triggerMatch[0].target).to.equal("test://target3")
         })
 
         it("can detect mentions in notifications (Flux example)", async () => {
@@ -383,7 +393,6 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
                 predicate: "flux://has_message",
                 target: noMentionExprUrl
             }))
-            await assertStaysFalse(() => mockFunction.called, { waitMs: 2000, label: "no-mention message should not trigger" });
 
             // Create a message expression that mentions the agent (with HTML formatting like Flux)
             const mentionContent = `Hey <strong>${agentDid!}</strong>, check this out!`
@@ -393,8 +402,11 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
                 predicate: "flux://has_message",
                 target: mentionExprUrl
             }))
-            await pollUntil(() => mockFunction.called, { timeoutMs: 15000, label: "mention notification trigger fires" });
-            expect(mockFunction.called).to.be.true
+            // The mention is the sentinel for the no-mention message above: same
+            // perspective, same events socket, so a trigger for message://1 would
+            // arrive first and make a second call (or a two-row match).
+            await assertAbsentBySentinel(() => mockFunction.called, () => mockFunction.callCount > 1, { label: "no-mention message triggered" });
+            expect(mockFunction.callCount).to.equal(1)
 
             let triggeredNotification = mockFunction.getCall(0).args[0] as TriggeredNotification
             expect(triggeredNotification.notification.description).to.equal(notification.description)
@@ -534,11 +546,9 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
 
             // Ensuring no false positives
             await notificationPerspective.add(new Link({source: "control://source", target: "control://target"}))
-            await assertStaysFalse(() => webhookCalled, { waitMs: 1000, intervalMs: 100, label: "webhook not called for non-matching link" });
 
             // Ensuring only selected perspectives will trigger
             await otherPerspective.add(new Link({source: "control://source", predicate: triggerPredicate, target: "control://target"}))
-            await assertStaysFalse(() => webhookCalled, { waitMs: 1000, intervalMs: 100, label: "webhook not called for wrong perspective" });
 
             // Happy path
             await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target1"}))

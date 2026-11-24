@@ -35,7 +35,7 @@ import { expect } from "chai";
 import { Ad4mClient, FlowInstance, LinkQuery, PerspectiveProxy, SHACLFlow } from "@coasys/ad4m";
 import { startAgent, waitUntil } from "../../helpers/index.js";
 import type { AgentHandle } from "../../helpers/executor.js";
-import { baseUrl } from "../../utils/utils.js";
+import { assertAbsentBySentinel, baseUrl } from "../../utils/utils.js";
 
 /** Ready → Done, guard-free, settled by one vote. */
 function makeFlow(): SHACLFlow {
@@ -145,17 +145,26 @@ describe("flow replica state — flowStates, flowFired, flow-state-changed", fun
     expect(await adminP.flowStates()).to.deep.equal([]);
     expect(await adminP.flowFired([inst.uri])).to.deep.equal([{ instance: inst.uri, fired: [] }]);
 
-    // And it never saw Alice's event. Give a misdelivery time to arrive.
-    await new Promise((r) => setTimeout(r, 1500));
-    expect(
-      adminEvents.filter((e) => e.perspectiveUuid === aliceP.uuid),
-      "Alice's event reaches Alice's sockets only",
-    ).to.deep.equal([]);
+    // And it never saw Alice's event. The admin agent settling a flow in a
+    // perspective of its own (sentinel) is published after Alice's event,
+    // which was delivered above, and the admin socket gets its events in the
+    // order they were published, so a misdelivered Alice event would be there
+    // before the sentinel's.
+    const adminOwnP = await admin.perspective.add("replica-state-admin-sentinel");
+    await adminOwnP.addFlow("ReplicaStateFlow", makeFlow());
+    const adminInst = await FlowInstance.start(adminOwnP, "ReplicaStateFlow", "replica-state://task/admin");
+    await adminInst.proposeTransition("Done");
+    await assertAbsentBySentinel(
+      () => adminEvents.some((e) => e.perspectiveUuid === adminOwnP.uuid),
+      () => adminEvents.some((e) => e.perspectiveUuid === aliceP.uuid),
+      { timeoutMs: 10_000, label: "Alice's flow-state-changed on the admin socket" },
+    );
     expect(aliceEvents, "and exactly once").to.have.lengthOf(1);
 
     release();
     releaseAdmin();
     await alice.perspective.remove(aliceP.uuid);
+    await admin.perspective.remove(adminOwnP.uuid);
   });
 
   // An agent's first pass over an instance with history is a catch-up: it

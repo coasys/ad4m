@@ -1,6 +1,6 @@
 import { PerspectiveExpression, Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle } from "@coasys/ad4m";
 import { TestContext } from './test-context'
-import { assertStaysFalse, pollUntil, sleep } from "../utils/utils";
+import { assertAbsentBySentinel, pollUntil, sleep } from "../utils/utils";
 import { LinkLangConfig, publishLinkLanguage } from "../utils/linkLangConfig";
 import { expect } from "chai";
 
@@ -193,8 +193,18 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 expect(refusal, "Bob's removeLink must fail").to.not.be.null
                 expect(String(refusal?.message ?? refusal)).to.contain("is monotonic")
 
-                // Give a removal that did get committed time to reach Alice.
-                await sleep(10000)
+                // A removal that did get committed would reach Alice before a link Bob
+                // commits after it: both are commits on Bob's own chain of link
+                // diffs, which a peer applies by ancestry (and the server-link
+                // language serves as one ordered log), so Alice cannot have Bob's
+                // later link without the earlier commit. Bob's genuine link is the
+                // sentinel.
+                await bob.perspective.addLink(bobP.uuid, {source: 'ad4m://proposal-1176-barrier', predicate: 'ad4m://acceptedBy', target: aliceDid})
+                await assertAbsentBySentinel(
+                    async () => (await alice.perspective.queryLinks(aliceP.uuid, new LinkQuery({source: 'ad4m://proposal-1176-barrier'}))).length >= 1,
+                    async () => (await alice.perspective.queryLinks(aliceP.uuid, query)).length < 1,
+                    { timeoutMs: 60000, label: "Bob's refused removal reached Alice" },
+                )
                 const aliceLinks = await alice.perspective.queryLinks(aliceP.uuid, query)
                 expect(aliceLinks.length, "Alice still holds her vote").to.be.equal(1)
                 const bobAfter = await bob.perspective.queryLinks(bobP.uuid, query)
@@ -218,18 +228,12 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 // Positive barrier: a shared link Alice adds AFTER the local one.
                 // Alice's diffs are committed and delivered in order, so once Bob
                 // sees the barrier, a wrongly-shared local link would have
-                // arrived too. The short window afterwards covers a link that
-                // lands in a later sync tick than the barrier.
+                // arrived too.
                 await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://barrier', target: 'test://barrier'})
                 await pollUntil(async () => {
                     const links = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://barrier'}));
                     return links.length >= 1;
                 }, { timeoutMs: 60000, label: "bob receives alice's shared barrier link" });
-
-                await assertStaysFalse(async () => {
-                    const links = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}));
-                    return links.length > 0;
-                }, { waitMs: 3000, label: "local link should NOT propagate to Bob" });
 
                 const bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                 expect(bobLinks.length).to.be.equal(0)

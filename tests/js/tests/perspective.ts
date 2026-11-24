@@ -2,7 +2,7 @@ import { Ad4mClient, Ad4mModel, HasMany, Link, LinkQuery, Literal, MentionMessag
 import { TestContext } from './test-context'
 import { expect } from "chai";
 import * as sinon from "sinon";
-import { pollUntil, sleep } from "../utils/utils";
+import { assertAbsentBySentinel, pollUntil, sleep } from "../utils/utils";
 
 /** A note that takes part in TextContent and Mentioning, as an app's message would. */
 @Model({ name: "WakerNote", implements: [TextContent, Mentioning] })
@@ -455,9 +455,12 @@ export default function perspectiveTests(testContext: TestContext) {
                 const added: any[] = []
                 const removed: any[] = []
                 const updated: { oldLink: any, newLink: any }[] = []
+                const sentinelSource = `${source}-sentinel`
+                let sentinelSeen = false
                 const unsubscribe = [
                     ad4mClient.on('link-added', ({ link }) => { if (link.data.source === source) added.push(link) }, { perspective: p.uuid }),
                     ad4mClient.on('link-removed', ({ link }) => { if (link.data.source === source) removed.push(link) }, { perspective: p.uuid }),
+                    ad4mClient.on('link-added', ({ link }) => { if (link.data.source === sentinelSource) sentinelSeen = true }, { perspective: p.uuid }),
                     ad4mClient.on('link-updated', ({ oldLink, newLink }) => {
                         if (oldLink.data.source === source || newLink.data.source === source) updated.push({ oldLink, newLink })
                     }, { perspective: p.uuid }),
@@ -473,9 +476,14 @@ export default function perspectiveTests(testContext: TestContext) {
                     })
 
                     await pollUntil(() => updated.length >= 1, { timeoutMs: 5000, label: 'link-updated for the batched update' })
-                    // Give any stray link-added / link-removed (the old
-                    // removal + addition shape) time to arrive.
-                    await sleep(1000)
+                    // A stray link-added / link-removed (the old removal + addition
+                    // shape) would come before a link added after the update: all
+                    // three events are of this perspective, on this one events socket,
+                    // in the order the executor published them.
+                    await p.add(new Link({ source: sentinelSource, predicate: 'test://predicate', target: 'test://sentinel' }), status)
+                    await assertAbsentBySentinel(() => sentinelSeen, () => added.length > 0 || removed.length > 0, {
+                        timeoutMs: 5000, label: 'stray link-added / link-removed for the batched update',
+                    })
 
                     const stored = await p.get(new LinkQuery({ source }))
                     return { added, removed, updated, stored, oldTarget, newTarget }
