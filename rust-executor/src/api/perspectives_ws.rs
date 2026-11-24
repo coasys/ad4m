@@ -122,7 +122,7 @@ pub(crate) async fn get_perspective_with_access(
     let perspective = get_perspective_or_404(uuid).await?;
 
     if !ctx.is_operator() {
-        let handle = perspective.persisted.lock().await.clone();
+        let handle = perspective.persisted.snapshot();
         if !ctx.session.is_authenticated()
             || !can_access_perspective_with_did(ctx.user_did(), &handle)
         {
@@ -274,7 +274,7 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
     if ctx.is_operator() {
         let mut handles: Vec<PerspectiveHandle> = Vec::new();
         for p in all {
-            handles.push(p.persisted.lock().await.clone());
+            handles.push(p.persisted.snapshot());
         }
         return Ok(serde_json::to_value(handles)?);
     }
@@ -285,7 +285,7 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
     let readable = pointers_covered(&ctx.session.capabilities(), PERSPECTIVE, READ);
     let mut filtered: Vec<PerspectiveHandle> = Vec::new();
     for p in all {
-        let handle = p.persisted.lock().await.clone();
+        let handle = p.persisted.snapshot();
         if can_access_perspective_with_did(ctx.user_did(), &handle)
             && readable
                 .as_ref()
@@ -311,7 +311,7 @@ async fn get_perspective_handler(
     _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
     let perspective = guarded_perspective(&params).await?;
-    let handle = perspective.persisted.lock().await.clone();
+    let handle = perspective.persisted.snapshot();
     Ok(serde_json::to_value(handle)?)
 }
 
@@ -784,6 +784,7 @@ async fn subscribe(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     match (body.model, body.sparql) {
         (Some(model), None) => {
             let classes = classes_of(model.class_name, model.class_names)?;
+            crate::call_diag::model::query(&body.uuid, classes.names(), &model.query_json);
             // A subscription re-runs one query; cursor paging is `modelQuery`'s.
             if model_query_sends_cursor(&model.query_json) {
                 return Err(WsRpcError::bad_request(
@@ -887,6 +888,7 @@ async fn subscribed(
             message: "Request cancelled by client".to_string(),
         });
     }
+    crate::call_diag::model::results(&result);
     Ok(serde_json::to_value(PerspectiveSubscribed {
         subscription_id,
         result: result_json(&result),
@@ -1084,6 +1086,11 @@ async fn subject_classes_of_handler(
 async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let classes = query_classes(&params)?;
     let query_json = params.require_str("query_json")?;
+    crate::call_diag::model::query(
+        &crate::api::guards::UUID_PARAM.require(&params)?,
+        classes.names(),
+        &query_json,
+    );
 
     let perspective = guarded_perspective(&params).await?;
 
@@ -1094,7 +1101,10 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
         .model_query_classes_stopped(&gate.stop(), &classes, &query_json)
         .await
     {
-        Ok(json) => Ok(Value::String(json)),
+        Ok(json) => {
+            crate::call_diag::model::results(&json);
+            Ok(Value::String(json))
+        }
         Err(e) => Err(query_eval_error_ws(e)),
     }
 }

@@ -212,7 +212,9 @@ async fn owned_by_alice(
     uuid: &str,
 ) -> crate::perspectives::perspective_instance::PerspectiveInstance {
     let inst = crate::perspectives::get_perspective(uuid).unwrap();
-    inst.persisted.lock().await.owners = Some(vec![DID.to_string()]);
+    inst.persisted
+        .update(|h| h.owners = Some(vec![DID.to_string()]))
+        .await;
     inst
 }
 
@@ -498,7 +500,10 @@ async fn query_updates_of_a_co_owned_perspective_reach_only_the_subscriber() {
     let bob_did = "did:key:bob";
     let p = registered_perspective(&[]).await;
     let perspective = crate::perspectives::get_perspective(&p.0).unwrap();
-    perspective.persisted.lock().await.owners = Some(vec![DID.into(), bob_did.into()]);
+    perspective
+        .persisted
+        .update(|h| h.owners = Some(vec![DID.into(), bob_did.into()]))
+        .await;
     let mut sockets = [Socket::open().await, Socket::open_as(bob_did).await];
 
     for (subscriber, first) in [(DID, true), (bob_did, false)] {

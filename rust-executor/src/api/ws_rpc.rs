@@ -70,6 +70,13 @@ pub async fn ws_rpc(
     headers: axum::http::HeaderMap,
     connect: Option<PeerExtension>,
 ) -> impl IntoResponse {
+    let origin = crate::call_diag::model::bounded(
+        headers
+            .get("origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-"),
+        512,
+    );
     let token = query.token.unwrap_or_default();
     let remote = match connect {
         Some(axum::extract::Extension(axum::extract::ConnectInfo(peer))) => {
@@ -79,7 +86,7 @@ pub async fn ws_rpc(
         None => "-".to_string(),
     };
     match connection_context(&token, &state.admin_credential, reach) {
-        Ok(ctx) => ws.on_upgrade(move |socket| handle_ws(socket, handler_map, ctx, remote)),
+        Ok(ctx) => ws.on_upgrade(move |socket| handle_ws(socket, handler_map, ctx, remote, origin)),
         Err(e) => {
             let code = e.close_code();
             ws.on_upgrade(move |socket| close_refused(socket, code, e.to_string()))
@@ -317,11 +324,13 @@ async fn handle_ws(
     handler_map: Arc<HandlerMap>,
     ctx: Arc<RequestContext>,
     remote: String,
+    origin: String,
 ) {
     let opened = Instant::now();
     crate::call_diag!(
         log::Level::Debug,
         "ws.open",
+        "origin" => origin,
         "did" => caller_label(&ctx),
         "conn" => ctx.connection_id.clone().unwrap_or_default(),
         "ip" => remote,
@@ -334,7 +343,8 @@ async fn handle_ws(
     let (ws_sink, ws_stream) = socket.split();
     let (tx, rx) = mpsc::unbounded_channel::<String>();
 
-    let conn = Connection::new(handler_map, ctx.clone(), tx);
+    let mut conn = Connection::new(handler_map, ctx.clone(), tx);
+    conn.origin = origin;
     let stats = conn.stats.clone();
     // An anonymous socket (no token, for example on an executor that has an admin credential)
     // gets no events: a stream that never yields. The stream carries the updates of the live
@@ -633,6 +643,8 @@ type EventStream = std::pin::Pin<Box<dyn futures::Stream<Item = String> + Send>>
 
 /// Per-connection state: what the reader needs to answer a message.
 pub(crate) struct Connection {
+    /// Bounded Origin header: evidence, never authentication.
+    origin: String,
     handler_map: Arc<HandlerMap>,
     /// Carries the session that every request checks again.
     ctx: Arc<RequestContext>,
@@ -692,6 +704,7 @@ impl Connection {
         let session_over = ctx.session.ended();
         let closed = session_over.child_token();
         Self {
+            origin: "-".into(),
             handler_map,
             ctx,
             session_over,
@@ -837,6 +850,7 @@ impl Connection {
         let refused = super::identity_ws::duplicate_member_refusal(&msg_type, text);
         let handler_map = self.handler_map.clone();
         let base_ctx = self.ctx.clone();
+        let origin = self.origin.clone();
         let inflight = self.inflight.clone();
         let session_over = self.session_over.clone();
         let tx = tx.clone();
@@ -884,7 +898,8 @@ impl Connection {
             // A socket that merely closed does not fire `drop_token`:
             // `ctx_token` still stops the call's eval, and the call ends
             // with it.
-            let response = tokio::select! {
+            let (response, model_fields) = crate::call_diag::model::collect(async {
+                tokio::select! {
                 biased;
                 _ = drop_token.cancelled() => {
                     if session_over.is_cancelled() {
@@ -932,7 +947,8 @@ impl Connection {
                         Err(e) => json!({"id": id, "error": e.to_wire()}),
                     }
                 }
-            };
+                }
+            }).await;
             // Clean up the registry entry BEFORE sending the response —
             // otherwise a late `request.cancel` arriving between the send
             // and the remove would find the token, cancel it, and report
@@ -943,24 +959,50 @@ impl Connection {
             let response = response.to_string();
             let done = Instant::now();
             let total = done.saturating_duration_since(received);
-            if total > SLOW_RPC {
+            if let Some(reason) = rpc_trigger(total, response.len()) {
                 let (queued_ms, handler_ms, total_ms) =
                     rpc_timing(received, handler_started.get().copied(), done);
-                crate::call_diag!(
-                    log::Level::Warn,
-                    "rpc.slow",
-                    "method" => msg_type,
-                    "did" => caller_label(&base_ctx),
-                    "conn" => base_ctx.connection_id.clone().unwrap_or_default(),
-                    "queued_ms" => queued_ms,
-                    "handler_ms" => handler_ms,
-                    "total_ms" => total_ms,
-                    "response_bytes" => response.len(),
-                    "outcome" => outcome(&response),
-                );
+                let mut fields = vec![
+                    ("method", msg_type), ("did", caller_label(&base_ctx)),
+                    ("conn", base_ctx.connection_id.clone().unwrap_or_default()),
+                    ("origin", origin), ("reason", reason.to_string()),
+                    ("kind", if opens_live_query { "initial" } else { "response" }.into()),
+                    ("queued_ms", queued_ms.to_string()), ("handler_ms", handler_ms.to_string()),
+                    ("total_ms", total_ms.to_string()), ("response_bytes", response.len().to_string()),
+                    ("outcome", outcome(&response)),
+                ];
+                fields.extend(model_fields);
+                crate::call_diag::emit(log::Level::Warn, module_path!(), "rpc.slow", &fields);
             }
             let _ = tx.send(response);
         });
+    }
+}
+
+/// Strict thresholds: exactly 1 MB or 2 s alone do not trigger.
+fn rpc_trigger(total: Duration, bytes: usize) -> Option<&'static str> {
+    match (total > SLOW_RPC, bytes > 1_000_000) {
+        (true, true) => Some("slow,size"),
+        (true, false) => Some("slow"),
+        (false, true) => Some("size"),
+        (false, false) => None,
+    }
+}
+#[cfg(test)]
+mod size_trigger_tests {
+    use super::*;
+    #[test]
+    fn strict_size_and_latency_thresholds() {
+        assert_eq!(rpc_trigger(SLOW_RPC, 1_000_000), None);
+        assert_eq!(rpc_trigger(Duration::ZERO, 1_000_001), Some("size"));
+        assert_eq!(
+            rpc_trigger(SLOW_RPC + Duration::from_nanos(1), 0),
+            Some("slow")
+        );
+        assert_eq!(
+            rpc_trigger(SLOW_RPC + Duration::from_nanos(1), 1_000_001),
+            Some("slow,size")
+        );
     }
 }
 
@@ -995,8 +1037,27 @@ where
 {
     let tx_events = conn.tx.clone();
     let event_session_over = conn.session_over.clone();
+    let event_ctx = conn.ctx.clone();
+    let event_origin = conn.origin.clone();
     let event_task = tokio::spawn(async move {
         while let Some(msg) = events.next().await {
+            if rpc_trigger(Duration::ZERO, msg.len()).is_some() {
+                // Inspect routing metadata only, never update payloads.
+                if let Ok(value) = serde_json::from_str::<Value>(&msg) {
+                    if value["type"] == "query-subscription-update" {
+                        crate::call_diag!(log::Level::Warn, "rpc.slow",
+                            "reason" => "size", "kind" => "update",
+                            "method" => "query-subscription-update",
+                            "did" => caller_label(&event_ctx),
+                            "conn" => event_ctx.connection_id.as_deref().unwrap_or_default(),
+                            "origin" => event_origin,
+                            "perspective" => crate::call_diag::model::bounded(value["uuid"].as_str().unwrap_or("-"), 128),
+                            "subscription" => crate::call_diag::model::bounded(value["subscriptionId"].as_str().unwrap_or("-"), 64),
+                            "response_bytes" => msg.len(),
+                        );
+                    }
+                }
+            }
             if tx_events.send(msg).is_err() {
                 return;
             }
