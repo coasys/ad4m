@@ -109,7 +109,9 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
   open (`ApiClient._onOpen`, a reused client's first open included) then calls
   `Mirror.reloadWatched()`: each value with a subscriber that is stale or failed (a read
   made while the socket was down ends in `error`) loads once; fresh values and reads in
-  flight are left alone. So a watched value never dials a
+  flight are left alone. A reset (`closeAll()`)
+  or a refusal that a subscriber makes while the loss is announced stops the reads the
+  announcement had queued, and `_onClose` then asks for no reconnect. So a watched value never dials a
   socket by itself, and a reconnect reads each watched value once, after the
   socket is back. A read the app started before `closeAll()` and that a keyed
   cache had only queued (the tick's batch) can still dial once after it. A refused
@@ -157,7 +159,10 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
   `client.agent.me()` / `client.agent.live.me()`) is pushed: `agent-updated`
   for the own DID (while the own DID is not known yet, the event only makes the entry
   stale: a read in flight is used once and not kept) and the result of `updatePublicPerspective` /
-  `updateDirectMessageLanguage` (read-your-writes) replace it. Other agents
+  `updateDirectMessageLanguage` (read-your-writes) replace it; a write's reply is dropped when
+  an event or an invalidation changed the entry since the write went out. `agent-status-changed`
+  with another `identity` makes the held agent stale, and an agent pushed when the entry is not
+  fresh (it carries no identity) makes it stale instead of keeping a revoked one. Other agents
   (`agent.byDIDs`, `client.agent.byDID(did)` / `live.byDID(did)`) are
   keyed: fresh for `AgentClient.REMOTE_AGENT_TTL_MS` (5 min), replaced at
   once by `agent-updated`, stale after a reconnect or `lagged`; bounded to
@@ -171,7 +176,9 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
   `-updated` and `-removed` change it, and so do the handles an own write
   returns (`add`, `update`, `remove`, `neighbourhood.joinFromUrl`), with no
   read. An event or write on a list that is not fresh makes it stale instead
-  (no sound base to patch). The hosting account (`hosting.info`,
+  (no sound base to patch). An own `update` compares the list's handle before and after the
+  call; with no fresh list before it, the reply is not applied and the list is made stale
+  (a perspective removed meanwhile does not come back). The hosting account (`hosting.info`,
   `client.agent.hostingUserInfo()` / `client.agent.live.hostingUserInfo()`) is
   pushed: `hosting-user-info-changed` for its own email replaces it, an event
   for another email (an operator hears every user's) and `setHotWalletAddress`
@@ -188,7 +195,8 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
   never kept), `maxAgeMs`, the memory limits and the persistent tier. The limits never
   evict a key a view is subscribed to (its view would go blank): while views hold them,
   watched keys may take a cache past its limits.
-  `mirror.persistent(db, store)` is the IndexedDB tier, keyed `origin|acting DID|key`; the DID
+  `mirror.persistent(db, store)` is the IndexedDB tier, keyed `origin|acting DID|key`, where the
+  origin includes the executor's path (two executors on one host share nothing); the DID
   is the one the client already knows (the status entry, never a request), so a cold read
   waits on nothing, and while it is unknown nothing is stored or read (Node has none).
   `clear()` removes only the `origin|DID|` prefix of this client. A profile loaded from the
@@ -223,8 +231,13 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
   same key (no `after` cursor). After an own write (`mirror.wrote`) they ask the executor
   until an update changes the result, because the executor sends updates 250 ms or more
   after the write's reply. A write made while a result is on its way (a resync, an open) also
-  keeps them closed past the updates already buffered behind it: those came before the write.
-  While a resync's result and its buffered updates are applied, the result answers nothing. A live SPARQL result is a multiset: row order can differ from a
+  keeps them closed past the updates already buffered behind it: those came before the write,
+  so the updates replayed behind a resync's result do not count in `changes`. A loss notice
+  (`stale()`) never lowers a write's barrier. A view that opens after a write whose update has
+  not come does not join the pooled subscription (its result may be from before the write, so
+  its `first` would be old): the mirror opens a new one, and its first result is that view's
+  `initial` one; the old one ends at once if no view holds it. While a resync's result and its
+  buffered updates are applied, the result answers nothing. A live SPARQL result is a multiset: row order can differ from a
   fresh query with no `ORDER BY`. The Waker keeps its own unshared subscription.
   The write counter lives in `Mirror.wrote(scope)` only. Its cost: a write that does not
   change a query's result sends every later one-shot of that query to the executor until

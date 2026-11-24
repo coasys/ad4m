@@ -61,6 +61,11 @@ export class Entry<T> implements Live<T> {
         return this.#snapshot
     }
 
+    /** Changes whenever a push or an invalidation makes an answer on its way old: a write's reply applies only if it is still what it was when the write went out. */
+    get version(): number {
+        return this.#version
+    }
+
     subscribe(fn: (snapshot: Snapshot<T>) => void): Unsubscribe {
         this.#listeners.add(fn)
         if (this.#state !== 'fresh' && this.#state !== 'loading') this.#refetch()
@@ -108,22 +113,24 @@ export class Entry<T> implements Live<T> {
      * With subscribers it reads again at once, unless `refetch` is false (no socket: see
      * {@link reloadWatched}). With `deferred`, the entry is stale at once but its subscribers are
      * told, and the read starts, only when the caller runs what was pushed there: a caller that
-     * invalidates many entries marks them all before any subscriber can read one.
+     * invalidates many entries marks them all before any subscriber can read one. The caller
+     * of `deferred` says whether the read still goes out (`refetch` is a wish: a reset or a
+     * refusal made while the callbacks ran takes it back).
      */
-    invalidate(refetch = true, deferred?: (() => void)[]): void {
+    invalidate(refetch = true, deferred?: ((refetch: boolean) => void)[]): void {
         this.#version++
         this.#inflight = null
         if (this.#state === 'unknown' || this.#state === 'stale') return
         this.#state = 'stale'
         const snapshot = this.#snapshot = this.#makeSnapshot()
-        const tell = () => {
+        const tell = (go: boolean) => {
             // A subscriber told before us may have read or pushed: its snapshot is the newer one.
             if (this.#snapshot !== snapshot) return
             this.#tell()
-            if (refetch && this.#listeners.size > 0 && this.#state === 'stale') this.#refetch()
+            if (refetch && go && this.#listeners.size > 0 && this.#state === 'stale') this.#refetch()
         }
         if (deferred) deferred.push(tell)
-        else tell()
+        else tell(true)
     }
 
     /** A socket opened: an entry with subscribers that is not fresh (stale, or failed while there was no socket) reads once; a fresh or loading one does not. */

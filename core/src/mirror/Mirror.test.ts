@@ -358,3 +358,50 @@ describe('Mirror.refuse', () => {
         expect(seen).toEqual(['stale'])
     })
 })
+
+describe('Mirror: a reset or refusal during a drain', () => {
+    // A and B are watched and fresh; the subscriber of A, told first, resets the mirror.
+    async function twoWatched(act: (mirror: Mirror) => void) {
+        const mirror = new Mirror(() => '', () => {}, () => null)
+        const bLoad = jest.fn(async () => 'b')
+        const a = mirror.entry<string>({ method: 'a', load: async () => 'a' })
+        const b = mirror.entry<string>({ method: 'b', load: bLoad })
+        const cLoad = jest.fn(async (key: string) => key)
+        const cache = mirror.cache<string>({ method: 'c', options: () => ({ loadMany: async (keys) => keys, load: cLoad }) })
+        await a.read()
+        await b.read()
+        await cache.get('k')
+        const heard: string[] = []
+        b.subscribe((s) => heard.push(s.state))
+        cache.live('k').subscribe((s) => heard.push(`k:${s.state}`))
+        let acted = false
+        a.subscribe((s) => { if (s.state === 'stale' && !acted) { acted = true; act(mirror) } })
+        bLoad.mockClear()
+        cLoad.mockClear()
+        mirror.markAllStale()
+        await Promise.resolve()
+        return { bLoad, cLoad, heard, b, cache }
+    }
+
+    it('a reset by a subscriber of the drain stops the reads the drain had queued, and the other subscribers still hear of the loss', async () => {
+        const { bLoad, cLoad, heard, b, cache } = await twoWatched((mirror) => mirror.reset())
+        expect(bLoad).not.toHaveBeenCalled()
+        expect(cLoad).not.toHaveBeenCalled()
+        // Each subscriber hears once; the order between a value and a cache key is not part of the rule.
+        expect([...heard].sort()).toEqual(['k:stale', 'stale'])
+        expect(b.getSnapshot().state).toBe('stale')
+        expect(cache.live('k').getSnapshot().state).toBe('stale')
+    })
+
+    it('a refusal by a subscriber of the drain stops the reads the drain had queued', async () => {
+        const { bLoad, cLoad } = await twoWatched((mirror) => mirror.refuse())
+        expect(bLoad).not.toHaveBeenCalled()
+        expect(cLoad).not.toHaveBeenCalled()
+    })
+
+    it('with no reset in between, the drain still reads each watched value once', async () => {
+        const { bLoad, cLoad } = await twoWatched(() => {})
+        expect(bLoad).toHaveBeenCalledTimes(1)
+        expect(cLoad).toHaveBeenCalledTimes(1)
+    })
+})

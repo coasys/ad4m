@@ -31,6 +31,8 @@ export class Mirror {
     #flights = new Map<string, Promise<any>>()
     /** The executor refused the client's token (see {@link refuse}); no later cache escapes it. */
     #refused = false
+    /** Counts the resets and refusals: a drain that sees it change knows the mirror was reset under it. */
+    #resets = 0
     /** Per perspective, how many writes of this client have settled (see {@link wrote}). */
     #writes = new Map<string, number>()
     #origin: () => string
@@ -137,7 +139,9 @@ export class Mirror {
     live<T>(spec: { perspective: string; method: string; params: unknown; keepAliveMs?: number; open: () => LiveSubscription; project: (raw: any) => T }): LiveQuery<T> {
         const key = keyOf(spec)
         let shared = this.#lives.get(key)
-        if (!shared?.usable) {
+        // A subscription a write of this client waits on is not joined: its result may be the one from before the write.
+        if (!shared?.joinable) {
+            if (shared?.idle) shared.close()
             const created: SharedLive = new SharedLive(spec.open(), spec.perspective, () => {
                 if (this.#lives.get(key) === created) this.#lives.delete(key)
             })
@@ -171,40 +175,59 @@ export class Mirror {
 
     /**
      * The socket was lost or reconnected, or the executor said it dropped events: whatever
-     * was pushed meanwhile is lost, so every entry is stale, and those with subscribers load
-     * again. A cache with `staleOnReconnect: false` stays. The live results answer no
-     * one-shot read until their resync delivers a result; their snapshots keep the last value.
+     * was pushed meanwhile is lost, so every entry is stale and its read in flight is dropped.
+     * With `refetch`, those with subscribers load again; without it (no socket) nothing is
+     * sent. A cache with `staleOnReconnect: false` stays. The live results answer no one-shot
+     * read until their resync delivers a result; their snapshots keep the last value.
+     * Two phases: every value is marked first, then the subscribers are told (see `#drain`).
      */
     markAllStale(refetch = true): void {
         // The live results first: a subscriber told of the loss may read at once.
         for (const shared of this.#lives.values()) shared.stale()
         // Two phases: every value is marked before any subscriber is told, or one told first
         // could read another that is still fresh.
-        const tell: (() => void)[] = []
+        const tell: ((refetch: boolean) => void)[] = []
         for (const entry of this.#entries.values()) entry.invalidate(refetch, tell)
         for (const { staleOnReconnect, cache } of this.#caches.values()) if (staleOnReconnect) cache.markStale(refetch, tell)
-        for (const run of tell) run()
+        this.#drain(tell)
+    }
+
+    /**
+     * Tells the subscribers of what was marked, one callback after the other. A subscriber may
+     * reset the mirror or refuse its token meanwhile (`resets` changes): the reads the drain
+     * queued then do not start, as a reset or a refusal sends no request. Every subscriber still hears.
+     */
+    #drain(tell: ((refetch: boolean) => void)[]): void {
+        const resets = this.#resets
+        for (const run of tell) run(resets === this.#resets)
+    }
+
+    /** How many times the mirror was reset or refused: a caller that notifies subscribers can tell whether one of them reset it. */
+    get resets(): number {
+        return this.#resets
     }
 
     /**
      * The executor refused the client's token, and no reconnect comes: every value is stale
      * and sends no request, the expression cache included (a refusal ends its reuse), and no
      * persistent tier is read, so every later read reaches the refusal. Snapshots keep the
-     * last value for display. Every value is marked before any subscriber is told, and a
-     * cache created after the refusal is refused from the start.
+     * last value for display. It sets `#refused` (a cache created later is refused from the
+     * start) and counts as a reset: a subscriber told of it that resets or refuses again
+     * stops the reads the drain queued, and every subscriber still hears.
      */
     refuse(): void {
         this.#refused = true
+        this.#resets++
         // As `markAllStale`: every value is marked before any subscriber is told. The caches
         // staying fresh through a reconnect (the expressions) are refused too.
-        const tell: (() => void)[] = []
+        const tell: ((refetch: boolean) => void)[] = []
         for (const shared of this.#lives.values()) shared.stale()
         for (const entry of this.#entries.values()) entry.invalidate(false, tell)
         for (const { cache } of this.#caches.values()) cache.refuse(tell)
-        for (const run of tell) run()
+        this.#drain(tell)
     }
 
-    /** A socket opened: every stale value with a subscriber loads once. Fresh values and those loading stay. */
+    /** A socket opened: every stale or failed value with a subscriber loads once. Fresh values and reads in flight stay. */
     reloadWatched(): void {
         for (const entry of this.#entries.values()) entry.reloadWatched()
         for (const { staleOnReconnect, cache } of this.#caches.values()) if (staleOnReconnect) cache.reloadWatched()
@@ -214,13 +237,16 @@ export class Mirror {
      * The client closed its socket and handlers and may be used again: every value is stale
      * (except the keyed caches with `staleOnReconnect: false`, the expressions, which only their age expires),
      * the pooled live subscriptions end (their executor side died with the socket), and the
-     * events the entries and caches listen to are registered again.
+     * events the entries and caches listen to are registered again. It counts as a reset and
+     * sends no request: `markAllStale(false)` also drops every read in flight. A subscriber told of
+     * it that resets again stops the reads the drain queued.
      */
     reset(): void {
         for (const shared of this.#lives.values()) shared.close()
         this.#lives.clear()
         // The calls in flight are about to be rejected: a one-shot made now sends its own request.
         this.#flights.clear()
+        this.#resets++
         this.markAllStale(false)
         for (const [name, handler] of this.#registrations) this.#listen(name, handler)
     }

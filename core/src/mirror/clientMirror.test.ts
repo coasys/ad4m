@@ -370,3 +370,14 @@ describe('watched values: no request without a socket, one read when it opens', 
         expect(profile.getSnapshot().state).toBe('fresh')
     })
 })
+
+describe('a socket loss and a closeAll', () => {
+    it('a subscriber that closes the client while the loss is announced leaves no reconnect behind', async () => {
+        await ad4m.agent.status()
+        ad4m.agent.live.status().subscribe((snapshot) => { if (snapshot.state === 'stale') ad4m.close() })
+        Sock.instances[0].drop()
+        const dialled = Sock.instances.length
+        await jest.advanceTimersByTimeAsync(60_000)
+        expect(Sock.instances.length).toBe(dialled)
+    })
+})

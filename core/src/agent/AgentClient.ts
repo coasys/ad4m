@@ -52,11 +52,16 @@ function revivingAgents(store: PersistentCache<StoredEntry<Agent>>): PersistentC
 
 /**
  * Replaces the own agent an entry holds. `agent.get` gives the identity the device key speaks
- * for; a profile update or an `agent-updated` event carries none, so the one held stays.
+ * for; a profile update or an `agent-updated` event carries none, so only a fresh held agent can
+ * say it. When the entry is not fresh (a revocation or a loss made it stale, nothing was read yet)
+ * the identity is not known: the entry is invalidated and the next read asks.
  */
 function pushAgent(entry: Entry<Agent>, agent: Agent): void {
-  const held = entry.getSnapshot().value;
-  if (agent.identity === undefined && held?.did === agent.did && held.identity !== undefined) agent.identity = held.identity;
+  if (agent.identity === undefined) {
+    const { state, value } = entry.getSnapshot();
+    if (state !== 'fresh' || !value) return entry.invalidate();
+    agent.identity = value.identity;
+  }
   entry.push(agent);
 }
 
@@ -99,6 +104,11 @@ export class AgentClient {
       method: 'agent.get',
       load: async () => toAgent(await this.#apiClient.call('agent.get', {})) as Agent,
       on: {
+        // The identity the device key speaks for is in the status too: when it moved (a revocation), the held one is old.
+        'agent-status-changed': (event, entry) => {
+          const held = entry.getSnapshot().value;
+          if (held && (held.identity ?? null) !== (event.agent.identity ?? null)) entry.invalidate();
+        },
         'agent-updated': (event, entry) => {
           const own = this.#ownDid();
           // Cold: the event cannot be matched to the own agent yet. Whatever the entry
@@ -227,11 +237,15 @@ export class AgentClient {
     }
   }
 
-  /** Keeps an agent the executor just gave: its profile entry, and the own entry when it is the own agent. */
-  #cacheAgent(agent: Agent | null, own = false): void {
-    if (!agent?.did) return;
+  /**
+   * Keeps the agent an own profile write returned: its profile entry and the own entry, unless
+   * an event or an invalidation changed the own entry since the write went out (`since` is its
+   * version then): what came is newer than the reply, which the executor may have computed earlier.
+   */
+  #cacheAgent(agent: Agent | null, since: number): void {
+    if (!agent?.did || this.#meEntry().version !== since) return;
     this.#agents().set(agent.did, agent);
-    if (own || agent.did === this.#ownDid()) pushAgent(this.#meEntry(), agent);
+    pushAgent(this.#meEntry(), agent);
   }
 
   /** The own DID as far as the mirror knows it, without a request. */
@@ -249,10 +263,11 @@ export class AgentClient {
         proof: { key: proof.key, signature: proof.signature, valid: proof.valid, invalid: proof.invalid },
       })),
     };
+    const since = this.#meEntry().version;
     const agent = toAgent(await this.#apiClient.call('agent.updateProfile', { publicPerspective }));
 
     // Read-your-writes: me() and byDID() answer with the result without waiting for the agent-updated event.
-    this.#cacheAgent(agent, true);
+    this.#cacheAgent(agent, since);
 
     return agent;
   }
@@ -294,9 +309,10 @@ export class AgentClient {
   }
 
   async updateDirectMessageLanguage(directMessageLanguage: string): Promise<Agent> {
+    const since = this.#meEntry().version;
     const agent = toAgent(await this.#apiClient.call('agent.updateProfile', { dmLanguage: directMessageLanguage }));
 
-    this.#cacheAgent(agent, true);
+    this.#cacheAgent(agent, since);
 
     return agent;
   }

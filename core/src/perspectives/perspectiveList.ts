@@ -21,19 +21,25 @@ export function perspectiveList(apiClient: ApiClient): Entry<PerspectiveHandle[]
     })
 }
 
-/** The handle the list holds for a uuid, if it is fresh: what an own write compares against. */
-export function heldPerspective(apiClient: ApiClient, uuid: string): PerspectiveHandle | undefined {
+/**
+ * The handle the list holds for a uuid, what an own write compares against: `null` when the
+ * list is fresh and has none, `undefined` when the list is not fresh (no baseline).
+ */
+export function heldPerspective(apiClient: ApiClient, uuid: string): PerspectiveHandle | null | undefined {
     const { state, value } = perspectiveList(apiClient).getSnapshot()
-    return state === 'fresh' ? value?.find((h) => h.uuid === uuid) : undefined
+    return state === 'fresh' && value ? (value.find((h) => h.uuid === uuid) ?? null) : undefined
 }
 
 /**
- * Keeps the handle an own update returned, unless an event replaced the handle in the list
+ * Keeps the handle an own update returned, unless an event changed the list's entry for it
  * since the call went out (`was` is what {@link heldPerspective} gave then): the event is
- * newer than the reply, which the executor may have computed before another update.
+ * newer than the reply, which the executor may have computed before another update. With no
+ * baseline (`was` undefined) the list cannot tell an unchanged handle from a removed one: it
+ * is invalidated and the next read asks.
  */
-export function keepUpdatedPerspective(apiClient: ApiClient, handle: PerspectiveHandle, was: PerspectiveHandle | undefined): void {
-    if (heldPerspective(apiClient, handle.uuid) === was) keepPerspective(apiClient, handle)
+export function keepUpdatedPerspective(apiClient: ApiClient, handle: PerspectiveHandle, was: PerspectiveHandle | null | undefined): void {
+    if (was === undefined) perspectiveList(apiClient).invalidate()
+    else if (heldPerspective(apiClient, handle.uuid) === was) keepPerspective(apiClient, handle)
 }
 
 /** Keeps a handle the executor returned from an own write: added, or replacing the one of its uuid. */

@@ -383,4 +383,17 @@ describe('KeyedCache review round', () => {
         store.entries.set('stored', { value: 'from store', ts: Date.now() });
         expect(await cache.get('stored')).toBe('loaded:stored');
     });
+
+    test('a refusal while the persistent tier is being read discards what it returns: the read reaches the source', async () => {
+        const held = deferred<StoredEntry<string> | undefined>();
+        const store = new MapStore<string>();
+        store.get = () => held.promise;
+        const load = jest.fn(async (key: string) => `loaded:${key}`);
+        const cache = new KeyedCache<string>({ loadMany: async keys => keys, load, persistent: store });
+        const read = cache.get('k');
+        cache.refuse();
+        held.resolve({ value: 'from store', ts: Date.now() });
+        expect(await read).toBe('loaded:k');
+        expect(load).toHaveBeenCalledTimes(1);
+    });
 });

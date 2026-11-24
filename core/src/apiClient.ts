@@ -202,7 +202,8 @@ export class ApiClient {
      * stale. Two clients share nothing.
      */
     readonly mirror = new Mirror(() => {
-        try { return new URL(this.baseUrl).origin } catch { return this.baseUrl }
+        // The path is part of the executor's address, as in the socket URL: two executors on one host differ by it.
+        try { const url = new URL(this.baseUrl); return url.origin + url.pathname.replace(/\/+$/, '') } catch { return this.baseUrl.replace(/\/+$/, '') }
     }, (name, handler) => this._addHandler(name, handler), () => agentStatusEntry(this).getSnapshot().value?.did || null)
 
     getBaseUrl(): string { return this.baseUrl }
@@ -526,7 +527,10 @@ export class ApiClient {
         if (this._liveWs === ws) {
             this._liveWs = null
             // No socket to read from: the watched values reload when the next one opens.
+            const resets = this.mirror.resets
             this.mirror.markAllStale(false)
+            // A subscriber told of the loss closed the client: that close ends this operation, no reconnect follows.
+            if (resets !== this.mirror.resets) return
         }
         for (const pending of this._pendingCalls.values()) {
             if (!pending.sent && ++pending.failedConnects < MAX_CONNECT_ATTEMPTS) continue

@@ -12,6 +12,9 @@ export class SharedLive {
     // A result may be old until `changes` passes this: a write of this client settled, or the socket
     // was lost. Until then it answers no one-shot read.
     #barrier?: number
+    // The `changes` a write of this client waits for: a handle may join only past it. The socket's loss
+    // moves `#barrier` but not this, since a lost socket sends no request that a joining handle could wait on.
+    #written?: number
     #timer?: ReturnType<typeof setTimeout>
     #ended = false
     #end: () => void
@@ -39,7 +42,21 @@ export class SharedLive {
      * came before the write, so they do not count.
      */
     wrote(): void {
-        this.#barrier = this.subscription.changes + this.subscription.pending
+        this.#barrier = this.#written = this.subscription.changes + this.subscription.pending
+    }
+
+    /**
+     * Whether a handle may join this subscription: it is usable and no write of this client is
+     * waiting for its update. A handle that joined before it would take the result computed
+     * before the write as its first one.
+     */
+    get joinable(): boolean {
+        return this.usable && (this.#written === undefined || this.subscription.changes > this.#written)
+    }
+
+    /** No handle holds the subscription. */
+    get idle(): boolean {
+        return this.#views === 0
     }
 
     /**
@@ -48,7 +65,8 @@ export class SharedLive {
      * resync (the next result) arrives.
      */
     stale(): void {
-        this.#barrier = this.subscription.changes
+        // A write's barrier is not lowered: the result after the loss may still be one computed before the write.
+        this.#barrier = Math.max(this.#barrier ?? 0, this.subscription.changes)
     }
 
     /** A subscription whose first open failed disposed itself: nobody can use it again. */

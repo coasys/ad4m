@@ -137,12 +137,13 @@ export class KeyedCache<V> {
 
     /**
      * The executor may have changed anything: every held value is stale (still shown, read
-     * again by the next read), and a read in flight is not kept. Keys with subscribers
-     * are read again at once, the misses of this tick in one call. Every key is marked before
-     * any subscriber is told, so none can read a value that is about to be stale. With
-     * `deferred`, the telling and the reads wait until the caller runs what was pushed there.
+     * again by the next read), and a read in flight is not kept. With `refetch`, keys with
+     * subscribers are read again at once, the misses of this tick in one call. Every key is
+     * marked before any subscriber is told, so none can read a value that is about to be stale.
+     * With `deferred`, the telling and the reads wait until the caller runs what was pushed
+     * there; the caller passes whether to start the reads.
      */
-    markStale(refetch = true, deferred?: (() => void)[]): void {
+    markStale(refetch = true, deferred?: ((refetch: boolean) => void)[]): void {
         const again: string[] = [];
         // With the snapshot each key's subscribers last saw: a subscriber told earlier may read
         // the key and store its stale snapshot before the key's own subscribers hear of it.
@@ -159,12 +160,13 @@ export class KeyedCache<V> {
             if (refetch && this.#listeners.get(key)?.size) again.push(key);
             else told.push([key, this.#snapshots.get(key) ?? (UNKNOWN as Snapshot<V | null>)]);
         }
-        const tell = () => {
+        const tell = (go: boolean) => {
             for (const [key, seen] of told) this.#notify(key, seen);
-            for (const key of again) this.#read(key, this.#loader(key)).catch(() => {});
+            // A reset or refusal made while the callbacks ran takes the reads back.
+            if (go) for (const key of again) this.#read(key, this.#loader(key)).catch(() => {});
         };
         if (deferred) deferred.push(tell);
-        else tell();
+        else tell(true);
     }
 
     /**
@@ -172,7 +174,7 @@ export class KeyedCache<V> {
      * as current, whatever `staleOnReconnect` says), and the persistent tier is not read, so
      * the next read reaches the source and fails there.
      */
-    refuse(deferred?: (() => void)[]): void {
+    refuse(deferred?: ((refetch: boolean) => void)[]): void {
         this.#refused = true;
         this.markStale(false, deferred);
     }
@@ -432,6 +434,8 @@ export class KeyedCache<V> {
             this.#storedUsed.add(key);
         }
         const entry = await this.#opts.persistent?.get(key);
+        // A refusal while the tier was read: what it returned is not served.
+        if (this.#refused) return null;
         // An entry without `value` was written in an older format: a miss.
         if (entry?.value == null || !(Date.now() - (entry.ts ?? 0) < (this.#opts.persistentMaxAgeMs?.() ?? Infinity))) return null;
         return { value: entry.value, stored: true, ts: entry.ts };

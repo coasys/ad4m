@@ -115,6 +115,23 @@ describe('perspective.all, a pushed entry', () => {
         expect(asks('perspective.all')).toBe(1)
     })
 
+    it('the reply of an own update, sent while the list was not fresh, does not bring back a perspective removed meanwhile', async () => {
+        const before = Sock.handle
+        let release!: () => void
+        Sock.handle = (msg, sock) => msg.type === 'perspective.update'
+            ? new Promise((resolve) => { release = () => resolve(handle(msg.params.uuid, msg.params.name)) })
+            : before(msg, sock)
+        // no list was read yet: the update has no baseline
+        const write = ad4m.perspective.update('a', 'mine')
+        await settle()
+        emit({ type: 'perspective-removed', perspectiveUuid: 'a', uuid: 'a' })
+        stored = [handle('b')]
+        expect(await names(ad4m)).toEqual(['b:b'])
+        release()
+        await write
+        expect(await names(ad4m)).toEqual(['b:b'])
+    })
+
     it('a write before the first read does not make the list wrong', async () => {
         await ad4m.perspective.add('mine')
         stored = [handle('a'), handle('b'), handle('c', 'mine')]
@@ -189,6 +206,58 @@ describe('agent.get, a pushed entry', () => {
         expect((await ad4m.agent.me()).identity).toBe('did:scid:coasys:1:abc')
         await ad4m.agent.updatePublicPerspective({ links: [] })
         expect((await ad4m.agent.me()).identity).toBe('did:scid:coasys:1:abc')
+        expect(asks('agent.get')).toBe(1)
+    })
+
+    const statusWire = (identity: string | null) => ({ did: 'did:test:me', didDocument: null, error: null, isInitialized: true, isUnlocked: true, identity })
+
+    it('agent-status-changed with another identity makes the held agent stale, and a later agent-updated does not bring the old identity back', async () => {
+        let identity: string | undefined = 'did:scid:coasys:1:abc'
+        const before = Sock.handle
+        Sock.handle = (msg, sock) => msg.type === 'agent.get' ? wire(identity) : before(msg, sock)
+        expect((await ad4m.agent.me()).identity).toBe('did:scid:coasys:1:abc')
+        // The same identity changes nothing.
+        emit({ type: 'agent-status-changed', agent: statusWire('did:scid:coasys:1:abc') })
+        expect((await ad4m.agent.me()).identity).toBe('did:scid:coasys:1:abc')
+        expect(asks('agent.get')).toBe(1)
+        // A revocation: the identity is gone, and an agent-updated that carries none comes before the next read.
+        identity = undefined
+        emit({ type: 'agent-status-changed', agent: statusWire(null) })
+        emit({ type: 'agent-updated', agent: wire() })
+        expect((await ad4m.agent.me()).identity).toBeUndefined()
+        expect(asks('agent.get')).toBe(2)
+    })
+
+    it('the reply of an own profile write does not overwrite a newer agent-updated event that arrived before it', async () => {
+        const before = Sock.handle
+        let release!: () => void
+        Sock.handle = (msg, sock) => {
+            if (msg.type === 'agent.get') return { ...wire(), directMessageLanguage: 'p0' }
+            // byDID is a keyed read: the dropped reply left nothing in its cache, so it asks the executor, whose latest is p2.
+            if (msg.type === 'agent.byDIDs') return [{ ...wire(), directMessageLanguage: 'p2' }]
+            if (msg.type === 'agent.updateProfile') return new Promise((resolve) => { release = () => resolve({ ...wire(), directMessageLanguage: 'p1' }) })
+            return before(msg, sock)
+        }
+        await ad4m.agent.me()
+        const write = ad4m.agent.updateDirectMessageLanguage('p1')
+        await settle()
+        emit({ type: 'agent-updated', agent: { ...wire(), directMessageLanguage: 'p2' } })
+        release()
+        await write
+        expect((await ad4m.agent.me()).directMessageLanguage).toBe('p2')
+        expect((await ad4m.agent.byDID('did:test:me'))?.directMessageLanguage).toBe('p2')
+    })
+
+    it('an uncontested profile write reply still updates me()', async () => {
+        const before = Sock.handle
+        Sock.handle = (msg, sock) => {
+            if (msg.type === 'agent.get') return { ...wire(), directMessageLanguage: 'p0' }
+            if (msg.type === 'agent.updateProfile') return { ...wire(), directMessageLanguage: 'p1' }
+            return before(msg, sock)
+        }
+        await ad4m.agent.me()
+        await ad4m.agent.updateDirectMessageLanguage('p1')
+        expect((await ad4m.agent.me()).directMessageLanguage).toBe('p1')
         expect(asks('agent.get')).toBe(1)
     })
 })

@@ -10,6 +10,9 @@ import { LinkQuery } from '../perspectives/LinkQuery';
 import { ExpressionClient } from '../expression/ExpressionClient';
 import { KeyedCache } from '../cache/KeyedCache';
 import { Mirror } from './Mirror';
+import { ApiClient } from '../apiClient';
+import { agentStatusEntry } from '../agent/statusEntry';
+import { AgentStatus } from '../agent/AgentStatus';
 
 // An in-memory IndexedDB: one map per database and store name, shared by every client.
 const databases = new Map<string, Map<string, unknown>>();
@@ -387,5 +390,26 @@ describe('KeyedCache views', () => {
 
         expect(await first).toBe('v1');
         expect(await cache.get('k')).toBe('v2');
+    });
+});
+
+describe('the persistent scope of a client', () => {
+    async function keysWritten(baseUrl: string): Promise<string[]> {
+        const api = new ApiClient(baseUrl);
+        agentStatusEntry(api).push(new AgentStatus({ did: 'did:test:scope' }));
+        const store = api.mirror.persistent<string>('scope-db', 'scope-store');
+        const db = databases.get('scope-db/scope-store');
+        db?.clear();
+        await store.put('k', 'v');
+        return [...databases.get('scope-db/scope-store')!.keys()];
+    }
+
+    test('names the executor by origin and path, so two executors on one host share nothing, and a trailing slash does not matter', async () => {
+        const [one] = await keysWritten('http://host:1/one');
+        const [two] = await keysWritten('http://host:1/two');
+        const [slash] = await keysWritten('http://host:1/one/');
+        expect(one).not.toBe(two);
+        expect(slash).toBe(one);
+        expect(await keysWritten('http://host:1')).toEqual(['http://host:1|did:test:scope|k']);
     });
 });

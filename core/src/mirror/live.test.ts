@@ -477,3 +477,88 @@ describe('live results around a loss, a resync and a write', () => {
         expect(answer.instances.map((i: any) => i.id)).toEqual(['a', 'b', 'c'])
     })
 })
+
+describe('the barrier of a write', () => {
+    beforeEach(() => jest.useFakeTimers())
+    afterEach(() => jest.useRealTimers())
+
+    /** An open subscription whose resync the test answers by hand. */
+    async function resyncing() {
+        const s = setup()
+        const live = s.client.liveQuery('p1', model, project)
+        await live.first
+        const impl = s.call.getMockImplementation()!
+        let resolveResync!: (v: any) => void
+        s.call.mockImplementation((type: string, params: any) => type === 'perspective.resyncSubscription'
+            ? new Promise((resolve) => { resolveResync = resolve })
+            : impl(type, params))
+        const resync = () => resolveResync({ revision: 5, result: { instances: [{ id: 'a' }], totalCount: 1 } })
+        return { ...s, live, resync }
+    }
+    const update = (s: { push: (u: any) => void; subscriptionId: () => string }, revision: number, ids: string[]) =>
+        s.push({ subscriptionId: s.subscriptionId(), revision, ids, upsert: ids.map((id) => ({ id })), totalCount: ids.length })
+
+    it('an update that arrives after the write, but was computed before it, does not open the result (it is buffered behind the resync)', async () => {
+        const s = await resyncing()
+        s.push({ lagged: true })
+        await s.client.addLinks('p1', [])
+        update(s, 6, ['a', 'b'])
+        s.resync()
+        await flush()
+        expect(s.live.getSnapshot().data).toEqual(['a', 'b'])
+        await s.client.modelQuery('p1', model.className, model.queryJson)
+        expect(s.calls('perspective.modelQuery')).toBe(1)
+        // an update applied live after all of it opens it
+        update(s, 7, ['a', 'b', 'c'])
+        await s.client.modelQuery('p1', model.className, model.queryJson)
+        expect(s.calls('perspective.modelQuery')).toBe(1)
+    })
+
+    it('a second loss notice during the resync does not lower the barrier of the write', async () => {
+        const s = await resyncing()
+        s.push({ lagged: true })
+        await s.client.addLinks('p1', [])
+        s.mirror.markAllStale(false)
+        s.resync()
+        await flush()
+        await s.client.modelQuery('p1', model.className, model.queryJson)
+        expect(s.calls('perspective.modelQuery')).toBe(1)
+    })
+
+    it('a handle opened after a write whose update has not come does not take the old result: it subscribes anew, and that result is its initial one', async () => {
+        const { client, call, calls } = setup()
+        const first = client.liveQuery('p1', model, project)
+        expect(await first.first).toEqual(['a'])
+        await client.addLinks('p1', [])
+        first.dispose()
+        const impl = call.getMockImplementation()!
+        call.mockImplementation(async (type: string, params: any) => type === 'perspective.subscribe'
+            ? { subscriptionId: params.subscriptionId, revision: 0, result: { instances: [{ id: 'a' }, { id: 'new' }], totalCount: 2 } }
+            : impl(type, params))
+        const joined = client.liveQuery('p1', model, project)
+        expect(await joined.first).toEqual(['a', 'new'])
+        expect(joined.getSnapshot().initial).toBe(true)
+        expect(calls('perspective.subscribe')).toBe(2)
+    })
+
+    it('a handle opened after the update that followed the write shares the open subscription', async () => {
+        const s = setup()
+        const first = s.client.liveQuery('p1', model, project)
+        await first.first
+        await s.client.addLinks('p1', [])
+        s.push({ subscriptionId: s.subscriptionId(), revision: 1, ids: ['a', 'b'], upsert: [{ id: 'b' }], totalCount: 2 })
+        const joined = s.client.liveQuery('p1', model, project)
+        expect(await joined.first).toEqual(['a', 'b'])
+        expect(s.calls('perspective.subscribe')).toBe(1)
+    })
+
+    it('a handle opened after the socket was lost shares the open subscription: no request without a socket', async () => {
+        const s = setup()
+        const first = s.client.liveQuery('p1', model, project)
+        await first.first
+        s.mirror.markAllStale(false)
+        const joined = s.client.liveQuery('p1', model, project)
+        expect(await joined.first).toEqual(['a'])
+        expect(s.calls('perspective.subscribe')).toBe(1)
+    })
+})

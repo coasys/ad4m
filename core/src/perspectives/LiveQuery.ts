@@ -230,7 +230,9 @@ export class LiveSubscription {
      *  `reopening` changes. */
     readonly getSnapshot = (): Snapshot<any> => this.#snapshot
 
-    /** How many results the query has had (an update, a resync, a re-open each give one). */
+    /** How many results the query has had: an update, a resync, a re-open each give one. The
+     *  updates buffered behind a resync's result and replayed with it do not count: they were
+     *  computed before that reply, or at its revision. */
     get changes(): number {
         return this.#changes
     }
@@ -246,11 +248,11 @@ export class LiveSubscription {
             : undefined
     }
 
-    /** How many results are on their way, as an upper bound: the one a resync, open or
-     *  re-open will deliver and the updates buffered behind it. 0 while the result is live. */
+    /** How many results are on their way, as a bound a write's barrier uses: 1 while a resync,
+     *  open or re-open is outstanding (its result, with the updates buffered behind it, counts as
+     *  one in `changes`: see `changes`), 0 while the result is live. */
     get pending(): number {
-        if (this.#buffer) return 1 + this.#buffer.length
-        return this.liveResult() ? 0 : 1
+        return this.#buffer ? 1 : (this.liveResult() ? 0 : 1)
     }
 
     /** Call `fn` with the current snapshot at once when the query is no longer
@@ -443,7 +445,8 @@ export class LiveSubscription {
         }
         this.#revision = update.revision
         this.#result = result
-        this.#changes++
+        // An update replayed behind a resync result was computed before the result that came with the resync's reply or earlier: it says nothing about a write made after.
+        if (!this.#replaying) this.#changes++
         this.#show(result)
     }
 
