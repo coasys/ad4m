@@ -330,6 +330,21 @@ describe('Mirror.refuse', () => {
         await expect(reads[1]).rejects.toMatchObject({ status: 401 })
     })
 
+    it('a cache key read by a subscriber told earlier still tells its own subscribers on the refusal', async () => {
+        const mirror = new Mirror(() => '', () => {}, () => null)
+        const a = mirror.entry<string>({ method: 'a', load: async () => 'a' })
+        const cache = mirror.cache<string>({ method: 'c', options: () => ({ loadMany: async () => [], load: async () => 'c' }) })
+        await a.read()
+        await cache.get('k')
+        const view = cache.live('k')
+        const heard: string[] = []
+        view.subscribe((s) => heard.push(s.state))
+        heard.length = 0
+        a.subscribe(() => view.getSnapshot())
+        mirror.refuse()
+        expect(heard).toEqual(['stale'])
+    })
+
     it('a socket loss marks every entry stale before any subscriber is told', async () => {
         const mirror = new Mirror(() => '', () => {}, () => null)
         const load = jest.fn(async () => 'x')

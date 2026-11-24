@@ -144,7 +144,9 @@ export class KeyedCache<V> {
      */
     markStale(refetch = true, deferred?: (() => void)[]): void {
         const again: string[] = [];
-        const told: string[] = [];
+        // With the snapshot each key's subscribers last saw: a subscriber told earlier may read
+        // the key and store its stale snapshot before the key's own subscribers hear of it.
+        const told: [string, Snapshot<V | null>][] = [];
         const keys = new Set([...this.#slots.keys(), ...this.#flights.keys(), ...this.#errors.keys(), ...this.#missing]);
         for (const key of keys) {
             this.#cancel(key);
@@ -155,10 +157,10 @@ export class KeyedCache<V> {
             const slot = this.#slots.get(key);
             if (slot) slot.stale = true;
             if (refetch && this.#listeners.get(key)?.size) again.push(key);
-            else told.push(key);
+            else told.push([key, this.#snapshots.get(key) ?? (UNKNOWN as Snapshot<V | null>)]);
         }
         const tell = () => {
-            for (const key of told) this.#notify(key);
+            for (const [key, seen] of told) this.#notify(key, seen);
             for (const key of again) this.#read(key, this.#loader(key)).catch(() => {});
         };
         if (deferred) deferred.push(tell);
@@ -374,11 +376,10 @@ export class KeyedCache<V> {
         return next;
     }
 
-    /** Tells the key's subscribers when its snapshot changed. */
-    #notify(key: string): void {
+    /** Tells the key's subscribers when its snapshot changed from `prev`, the one they last saw. */
+    #notify(key: string, prev: Snapshot<V | null> = this.#snapshots.get(key) ?? (UNKNOWN as Snapshot<V | null>)): void {
         const listeners = this.#listeners.get(key);
         if (!listeners?.size) return;
-        const prev = this.#snapshots.get(key) ?? UNKNOWN;
         const next = this.#snapshot(key);
         if (next === prev) return;
         for (const fn of [...listeners]) {
