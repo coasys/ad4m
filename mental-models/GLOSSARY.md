@@ -152,6 +152,8 @@ This file defines each term that ADAM uses in its own way, once, in alphabetical
 
 **Main agent** (`AgentContext::Main`, wallet key `main`): Agent #0 of an executor, which `agent.generate` creates and the operator owns. Example: "The operator acts as the main agent." [Operator and main agent](agents/access/operator-and-main-agent.md)
 
+**Main key** (wallet key `main`, `KEY_NAME_MAIN`): The wallet key of the main agent, which the operator's passphrase unlocks. It is not the master key of an identity in `ad4m-identity-client`, which is a different key that never reaches an executor. Example: "`agent.generate` writes the main key to the wallet." [Wallet and keys](agents/identity/wallet-and-keys.md)
+
 **Managed agent** (`AgentContext::Managed { did }`): An agent other than the main agent that the executor hosts for a user account in multi-user mode. Identifiers and RPC text keep "managed user". Example: "Each signed-up user gets a managed agent." [Managed agents](agents/executor/managed-agents.md) — not: hosted agent
 
 **Method guard** (`Guard` in `api/guards.rs`): The rule that each RPC method registers for who may call it. Dispatch checks the method's capability, then this rule, before the handler runs. The word "guard" alone means this. Example: "The method guard `Owns` checks that the session's agent owns the perspective." [Access checks](agents/access/checks.md)

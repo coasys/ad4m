@@ -100,6 +100,29 @@ it in older docs.
     Do not pause the tokio clock in a test that talks to a real language
     runtime thread: that thread has its own clock, and the test's clock
     advances while it waits on the thread.
+- **A change ships the test that proves it.** A PR that adds or changes behaviour
+  adds a test that fails without the change, and the test asserts the result,
+  not only that the code ran. Reviewers ask for this more than for any other rule.
+- **A test fails when it cannot run.** A missing precondition (a fixture, a
+  built binary, a service the test needs) is a failure, not a skip. The only
+  skips are machine capabilities that CI provides by setting a flag, as
+  `SFU_BROWSERS_REQUIRED=1` does; with the flag set, the test fails instead.
+- **Reuse before you write.** Use the existing type, helper or function for the
+  same job; do not add a second one beside it. When the existing one does not
+  fit, change it.
+- **New code goes in the module that owns the concept.** Do not add a helper in
+  the caller's file when a module for that concept exists.
+- **Remove what the change leaves behind.** Delete the dead branch, the
+  unused helper and the duplicate path in the same PR.
+- **Docs move with the code.** A PR that changes behaviour, a name or a path
+  updates every doc and code comment that states it, in the same PR.
+- **Code comments do not cite PRs or issues.** A comment says why the code is
+  the way it is; the PR number lives in the commit and in `git blame`. A
+  workaround is the exception: it names the issue that will remove it.
+- **Split a file past about 1,000 lines** into parts along the concepts it
+  holds, in a PR of its own when the split is large.
+- **Commit only the change.** No review-reply notes, scratch files, logs or
+  local planning files. Design docs go to `planning/` (rule above).
 - `connect/` tests (vitest + happy-dom) fail under Node 26 (`localStorage.clear`
   undefined); run them under Node 24.
 
