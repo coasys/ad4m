@@ -1,3 +1,4 @@
+use crate::agent::AgentContext;
 use ::futures::Future;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
@@ -15,7 +16,6 @@ use std::env::current_dir;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
 use tokio::sync::Mutex as TokioMutex;
 use url::Url;
 
@@ -44,10 +44,11 @@ use self::futures::{EventLoopFuture, SmartGlobalVariableFuture};
 pub struct JsCore {
     worker: Arc<TokioMutex<MainWorker>>,
     loaded_modules: Arc<TokioMutex<HashSet<String>>>,
+    /// Event-loop errors a call's future found while driving the loop, for
+    /// the loop's owner to report: an event-loop error belongs to the
+    /// isolate, not to the call whose poll surfaced it (`futures.rs`).
+    event_loop_errors: futures::EventLoopErrors,
 }
-
-// Dummy LanguageController placeholder — use a real type if available
-pub type LanguageController = ();
 
 /// Per-language-instance runtime state.
 /// Stored in a thread-local and accessed by Deno ops via languages_extension.rs.
@@ -55,7 +56,6 @@ pub type LanguageController = ();
 pub struct IsolateState {
     pub agent_did: Option<String>,
     pub agent_signing_key_id: Option<String>,
-    pub language_controller_ref: Arc<StdMutex<Option<LanguageController>>>,
     /// Language context — set by the runtime before calling init()
     pub language_storage_directory: Option<String>,
     pub language_address: Option<String>,
@@ -67,7 +67,6 @@ impl IsolateState {
         Self {
             agent_did: None,
             agent_signing_key_id: None,
-            language_controller_ref: Arc::new(StdMutex::new(None)),
             language_storage_directory: None,
             language_address: None,
             language_settings: None,
@@ -169,6 +168,10 @@ impl JsCore {
         worker_options: WorkerOptions,
         permissions: PermissionsContainer,
     ) -> Self {
+        // In tests, start V8 with the process's flags before the worker can start it without
+        // them: a test that sets them after that aborts the process (`!IsFrozen()`).
+        #[cfg(test)]
+        crate::test_utils::init_v8_platform();
         let fs = Arc::new(RealFs);
 
         let worker = MainWorker::bootstrap_from_options(
@@ -208,6 +211,7 @@ impl JsCore {
             #[allow(clippy::arc_with_non_send_sync)]
             worker: Arc::new(TokioMutex::new(worker)),
             loaded_modules: Arc::new(TokioMutex::new(HashSet::new())),
+            event_loop_errors: Default::default(),
         }
     }
 
@@ -244,12 +248,31 @@ impl JsCore {
         Ok(())
     }
 
-    /// Load an ES module from source code directly (no file I/O).
-    /// The module is registered under a synthetic URL so it can be evaluated.
+    /// Loads an ES module from source code (no file I/O), registered under the
+    /// synthetic URL `specifier`, and evaluates it as `agent`. A module loaded
+    /// before is not evaluated again.
+    ///
+    /// `__ad4mEnterCallAgent` takes the agent's token (`agent_extension`,
+    /// registered under `call_id`) into the isolate's async context the way
+    /// `__ad4mRunCall` does (`agent_extension.js`); `mod_evaluate` runs the
+    /// module's top-level code under it — deno_core carries the ambient
+    /// continuation-preserved embedder data into the evaluation and every
+    /// continuation it creates — and `__ad4mLeaveCallAgent` restores the
+    /// context. The evaluation is driven by `with_event_loop_promise`, so an
+    /// error the loop reports — a top-level throw, or a top-level await that
+    /// can never settle — ends this load, not whatever call happened to be
+    /// driving the loop.
+    ///
+    /// A stalled top-level await leaves the pending evaluation behind: deno
+    /// reports it on every `poll_event_loop` while the loop is otherwise
+    /// idle, and nothing retracts it. The caller is expected to end the
+    /// isolate on this error (a failed load drops the runtime).
     pub async fn load_module_from_source(
         &self,
         specifier: &str,
         source: String,
+        call_id: u64,
+        agent: AgentContext,
     ) -> Result<(), AnyError> {
         let mut worker = self.worker.lock().await;
         let mut loaded_modules = self.loaded_modules.lock().await;
@@ -264,12 +287,31 @@ impl JsCore {
             .load_side_es_module_from_code(&url, source)
             .await?;
         loaded_modules.insert(specifier.to_string());
-        let evaluate_fut = worker.js_runtime.mod_evaluate(module_id);
-        worker
+
+        agent_extension::register_call_agent(call_id, agent);
+        let entered = worker.execute_script(
+            "js_core",
+            format!("globalThis.__ad4mEnterCallAgent({call_id})").into(),
+        );
+        // The token is taken out on entry; drop it if entry failed.
+        agent_extension::forget_call_agent(call_id);
+        entered.map_err(|e| anyhow!("Failed to enter the call's agent: {}", e))?;
+        // `mod_evaluate` calls `module.evaluate` synchronously, under the
+        // async context the isolate holds now, before the token is left.
+        let evaluate = worker.js_runtime.mod_evaluate(module_id);
+        let leave = worker.execute_script(
+            "js_core",
+            deno_core::FastString::from_static("globalThis.__ad4mLeaveCallAgent()"),
+        );
+        let evaluated = worker
             .js_runtime
-            .with_event_loop_future(evaluate_fut, PollEventLoopOptions::default())
-            .await?;
-        Ok(())
+            .with_event_loop_promise(evaluate, PollEventLoopOptions::default())
+            .await;
+        match (evaluated, leave) {
+            (Err(e), _) => Err(e.into()),
+            (Ok(_), Err(e)) => Err(anyhow!("Failed to restore the async context: {}", e)),
+            (Ok(_), Ok(_)) => Ok(()),
+        }
     }
 
     /// Initialize a language-specific runtime by executing the minimal bootstrap module.
@@ -301,7 +343,7 @@ impl JsCore {
     }
 
     pub(crate) fn event_loop(&self) -> EventLoopFuture {
-        EventLoopFuture::new(self.worker.clone())
+        EventLoopFuture::new(self.worker.clone(), self.event_loop_errors.clone())
     }
 
     async fn execute_async_smart(
@@ -345,6 +387,7 @@ impl JsCore {
 
         Ok(SmartGlobalVariableFuture::new(
             self.worker.clone(),
+            self.event_loop_errors.clone(),
             resolve_fut,
         ))
     }

@@ -1,12 +1,15 @@
 use crate::perspectives::model_query::types::AutoAccept;
 use crate::types::Link;
-use deno_core::error::AnyError;
+use anyhow::Error;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use ts_rs::TS;
 
 mod role_gate_keys;
 
 /// AD4M Action - represents a link operation (e.g., addLink, removeLink, setSingleTarget)
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, TS)]
+#[ts(export, rename = "ShapeAction", optional_fields)]
 pub struct AD4MAction {
     pub action: String,
     pub source: String,
@@ -16,8 +19,10 @@ pub struct AD4MAction {
     pub local: Option<bool>,
 }
 
-/// SHACL Shape structure (from TypeScript)
-#[derive(Debug, Deserialize, Serialize)]
+/// A class's shape: the JSON `perspective.registerShapes` takes and
+/// `perspective.shapes` answers (`SHACLShape.toJSON()` in the SDK).
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, TS)]
+#[ts(export, rename = "ShapeJson", optional_fields)]
 pub struct SHACLShape {
     /// The shape's own URI (`SHACLShape.nodeShapeUri` in the SDK). Defaults
     /// to `{namespace}{ClassName}Shape`.
@@ -40,13 +45,16 @@ pub struct SHACLShape {
     pub auto_accept: Option<AutoAccept>,
     /// Constructor actions for creating instances
     #[serde(default)]
+    #[ts(as = "Option<Vec<AD4MAction>>")]
     pub constructor_actions: Vec<AD4MAction>,
     /// Destructor actions for removing instances
     #[serde(default)]
+    #[ts(as = "Option<Vec<AD4MAction>>")]
     pub destructor_actions: Vec<AD4MAction>,
     /// Parent shape URIs (model inheritance). Emitted as one `sh://node`
     /// link per parent on the shape node.
     #[serde(default)]
+    #[ts(as = "Option<Vec<String>>")]
     pub parent_shapes: Vec<String>,
     /// An abstract class (#1435): queried as the union of every concrete
     /// class that has its property names, never created, never chosen when a
@@ -57,6 +65,7 @@ pub struct SHACLShape {
         rename = "abstract",
         skip_serializing_if = "std::ops::Not::not"
     )]
+    #[ts(as = "Option<bool>")]
     pub is_abstract: bool,
 }
 
@@ -74,7 +83,8 @@ pub const ALIAS_PREDICATE: &str = "ad4m://alias";
 
 /// A single structured conformance condition for relation filtering.
 /// DB-agnostic representation that can be translated to any query language.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, TS)]
+#[ts(export, rename = "ShapeConformanceCondition", optional_fields)]
 pub struct ConformanceCondition {
     /// Type of check: "flag" (predicate + value) or "required" (predicate exists)
     #[serde(rename = "type")]
@@ -87,9 +97,11 @@ pub struct ConformanceCondition {
 }
 
 /// SHACL Property Shape structure
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, TS)]
+#[ts(export, rename = "PropertyShapeJson", optional_fields)]
 pub struct PropertyShape {
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Natural-language hint describing this property's meaning, injected into the
     /// interpretation prompt / generated tool schema as semantic guidance for the LLM.
@@ -99,7 +111,7 @@ pub struct PropertyShape {
     /// Marks this property as the class's dedup identity (the "title-like"
     /// interpretation key). Emitted as an `ad4m://identity` link on the
     /// property node when `Some(true)`. No identity declared ⇒ no dedup.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<bool>,
     /// CRDT ordering strategy for a collection relation, from
     /// `@HasMany({ ordering: { strategy } })`. Emitted as an `ad4m://ordering`
@@ -109,26 +121,37 @@ pub struct PropertyShape {
     /// ordering entries and hydration never reorders.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ordering: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub datatype: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local: Option<bool>,
     /// Sole selector of storage mode. `None` → deterministic typed
     /// literal (fast POS-index path, the default). `Some("literal")` →
     /// signed envelope on the built-in literal language. `Some(<addr>)`
     /// → expression on that custom language. Stored as `ad4m://resolveLanguage`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolve_language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collection: Option<bool>,
     /// Setter action for single-valued properties
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<AD4MAction>>")]
     pub setter: Vec<AD4MAction>,
     /// Adder action for collection properties
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<AD4MAction>>")]
     pub adder: Vec<AD4MAction>,
     /// Remover action for collection properties
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<AD4MAction>>")]
     pub remover: Vec<AD4MAction>,
     /// Pre-computed getter expression for reading this relation/property.
     /// For relations with a target model, this encodes conformance filtering.
@@ -136,6 +159,7 @@ pub struct PropertyShape {
     pub getter: Option<String>,
     /// Structured conformance conditions (DB-agnostic).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<ConformanceCondition>>")]
     pub conformance_conditions: Vec<ConformanceCondition>,
     /// Target SHACL node shape URI (sh:class). When present, linked nodes
     /// must conform to this shape, enabling typed construction.
@@ -146,6 +170,10 @@ pub struct PropertyShape {
     /// and scalar-vs-collection rendering.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relation_kind: Option<String>,
+    /// The relation is read `polymorphic: true` unless a query says otherwise
+    /// (`ad4m://polymorphic`); the executor applies it at every include depth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polymorphic: Option<bool>,
     /// Bare target class name for a relation property — used by the executor
     /// to look up the target shape through its in-memory cache.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -156,7 +184,7 @@ pub struct PropertyShape {
     pub where_filter: Option<serde_json::Value>,
     /// Predicate IRI lookup for `where_filter` keys (property name → predicate).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub where_predicates: Option<std::collections::HashMap<String, String>>,
+    pub where_predicates: Option<BTreeMap<String, String>>,
     /// Whether conformance/type filtering is enabled for this relation.
     /// Omitted (defaulting to true) when not explicitly disabled.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -183,7 +211,7 @@ pub struct PropertyShape {
     /// abstract class (#1435), keyed by the abstract class's name:
     /// `{ "TextContent": "text" }`. Emitted as one [`ALIAS_PREDICATE`] link.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub alias: Option<std::collections::BTreeMap<String, String>>,
+    pub alias: Option<BTreeMap<String, String>>,
 }
 
 // ============================================================================
@@ -551,7 +579,7 @@ fn transition_uri(namespace: &str, flow_name: &str, transition: &FlowTransition)
 }
 
 /// Parse Flow JSON to RDF links
-pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>, AnyError> {
+pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>, Error> {
     let flow: SHACLFlow = serde_json::from_str(flow_json)
         .map_err(|e| anyhow::anyhow!("Failed to parse Flow JSON: {}", e))?;
 
@@ -960,7 +988,7 @@ pub const CONSENSUS_RULE_PREDICATE: &str = "ad4m://consensusRule";
 /// when it is read.
 pub fn check_consensus_rule_links<'a>(
     links: impl IntoIterator<Item = &'a Link>,
-) -> Result<(), AnyError> {
+) -> Result<(), Error> {
     for link in links {
         if link.predicate.as_deref() != Some(CONSENSUS_RULE_PREDICATE) {
             continue;
@@ -1263,7 +1291,7 @@ fn decode_string_array(target: &str, predicate: &str) -> Option<Vec<String>> {
 /// Same policy as the TS reader and as [`load_flow_instances`] — a
 /// stale / hand-mangled flow definition on-graph shouldn't poison every
 /// Model C extraction pass on the perspective until it's manually cleaned.
-pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow, AnyError> {
+pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow, Error> {
     // Expected format: `{namespace}{Name}Flow` — same rule as the TS side.
     let without_suffix = flow_uri
         .strip_suffix("Flow")
@@ -1617,7 +1645,7 @@ fn property_name(prop: &PropertyShape) -> String {
 ///   class, both would answer to it.
 /// - Two properties of one class cannot take the same alias for the same
 ///   abstract class.
-fn refuse_abstract_misuse(shape: &SHACLShape, class_name: &str) -> Result<(), AnyError> {
+fn refuse_abstract_misuse(shape: &SHACLShape, class_name: &str) -> Result<(), Error> {
     if shape.is_abstract && shape.properties.is_empty() {
         return Err(anyhow::anyhow!(
             "Abstract class '{class_name}' declares no property and no relation: it would \
@@ -1664,10 +1692,17 @@ fn refuse_abstract_misuse(shape: &SHACLShape, class_name: &str) -> Result<(), An
 }
 
 /// Parse SHACL JSON to RDF links (Option 3: Named Property Shapes)
-pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Link>, AnyError> {
-    let mut shape: SHACLShape = serde_json::from_str(shacl_json)
+pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Link>, Error> {
+    let shape: SHACLShape = serde_json::from_str(shacl_json)
         .map_err(|e| anyhow::anyhow!("Failed to parse SHACL JSON: {}", e))?;
+    shape_links(shape, class_name)
+}
 
+/// The links that store `shape` as class `class_name`: the two index links
+/// on the target class (`rdf://type ad4m://SubjectClass`, `ad4m://shape`),
+/// the shape node and one node per property. Every JSON value is written as
+/// [`canonical_json`], so one shape always gives the same links.
+pub fn shape_links(mut shape: SHACLShape, class_name: &str) -> Result<Vec<Link>, Error> {
     // Before a single link is generated: a property-shape `local: true` is a
     // declaration about the property, not about whichever actions happen to
     // have been authored with the flag copied in. Push it into the actions so
@@ -1728,12 +1763,25 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
 
     refuse_abstract_misuse(&shape, class_name)?;
 
+    // Each property is stored on its own node, `{namespace}{class}.{name}`:
+    // two properties with one name would write onto one node.
+    let mut seen = std::collections::BTreeSet::new();
+    for name in shape.properties.iter().map(property_name) {
+        if !seen.insert(name.clone()) {
+            return Err(anyhow::anyhow!(
+                "Class '{class_name}' declares property '{name}' twice: give each property \
+                 its own name."
+            ));
+        }
+    }
+
     let mut links = Vec::new();
 
     // Extract namespace from target_class (e.g., "recipe://Recipe" -> "recipe://")
     let namespace = extract_namespace(&shape.target_class)?;
-    // Shape actions are found by the `{ClassName}Shape` suffix
-    // (`get_shape_actions_from_shacl`), so a given URI must keep it.
+    // A given shape URI keeps the `{ClassName}Shape` form of the default.
+    // Readers find the shape through the class's `ad4m://shape` link
+    // (`model_query::shape::find_class`), never by this suffix.
     let shape_suffix = format!("{}Shape", class_name);
     let shape_uri = match shape.node_shape_uri.take() {
         Some(uri) if !uri.ends_with(&shape_suffix) => {
@@ -1748,25 +1796,8 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
         None => format!("{}{}", namespace, shape_suffix),
     };
 
-    // Create name mapping for class lookup (needed by isSubjectInstance)
-    let name_mapping = format!("literal:string:shacl://{}", class_name);
-
-    links.push(Link {
-        source: "ad4m://self".to_string(),
-        predicate: Some("ad4m://has_shacl".to_string()),
-        target: name_mapping.clone(),
-    });
-
-    links.push(Link {
-        source: name_mapping,
-        predicate: Some("ad4m://shacl_shape_uri".to_string()),
-        target: shape_uri.clone(),
-    });
-
-    // Class definition links
-    // Note: The ad4m://has_subject_class link is created by add_sdna(), not here,
-    // to avoid duplication since add_sdna() always creates that link
-
+    // The class index: the class is found by its type link, its shape by
+    // `ad4m://shape`.
     links.push(Link {
         source: shape.target_class.clone(),
         predicate: Some("rdf://type".to_string()),
@@ -1833,24 +1864,16 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
         ("ad4m://constructor", &shape.constructor_actions),
         ("ad4m://destructor", &shape.destructor_actions),
     ] {
-        let json = serde_json::to_string(actions).unwrap_or_else(|_| "[]".to_string());
         links.push(Link {
             source: shape_uri.clone(),
             predicate: Some(predicate.to_string()),
-            target: format!("literal:string:{}", json),
+            target: format!("literal:string:{}", canonical_json(actions)),
         });
     }
 
     // Property shape links (Option 3: Named Property Shapes)
     for prop in shape.properties.iter() {
-        // Use name field if provided, otherwise extract from path
-        let prop_name = prop
-            .name
-            .as_ref()
-            .map(|n| n.clone())
-            .unwrap_or_else(|| extract_local_name(&prop.path));
-
-        let prop_shape_uri = format!("{}{}.{}", namespace, class_name, prop_name);
+        let prop_shape_uri = format!("{}{}.{}", namespace, class_name, property_name(prop));
 
         links.push(Link {
             source: shape_uri.clone(),
@@ -1887,11 +1910,13 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
         }
 
         if let Some(alias) = prop.alias.as_ref().filter(|a| !a.is_empty()) {
-            let json = serde_json::to_string(alias).unwrap_or_else(|_| "{}".to_string());
             links.push(Link {
                 source: prop_shape_uri.clone(),
                 predicate: Some(ALIAS_PREDICATE.to_string()),
-                target: format!("literal:string:{}", urlencoding::encode(&json)),
+                target: format!(
+                    "literal:string:{}",
+                    urlencoding::encode(&canonical_json(alias))
+                ),
             });
         }
 
@@ -1982,34 +2007,18 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
         }
 
         // Property-level actions (setter, adder, remover)
-        if !prop.setter.is_empty() {
-            let setter_json =
-                serde_json::to_string(&prop.setter).unwrap_or_else(|_| "[]".to_string());
-            links.push(Link {
-                source: prop_shape_uri.clone(),
-                predicate: Some("ad4m://setter".to_string()),
-                target: format!("literal:string:{}", setter_json),
-            });
-        }
-
-        if !prop.adder.is_empty() {
-            let adder_json =
-                serde_json::to_string(&prop.adder).unwrap_or_else(|_| "[]".to_string());
-            links.push(Link {
-                source: prop_shape_uri.clone(),
-                predicate: Some("ad4m://adder".to_string()),
-                target: format!("literal:string:{}", adder_json),
-            });
-        }
-
-        if !prop.remover.is_empty() {
-            let remover_json =
-                serde_json::to_string(&prop.remover).unwrap_or_else(|_| "[]".to_string());
-            links.push(Link {
-                source: prop_shape_uri.clone(),
-                predicate: Some("ad4m://remover".to_string()),
-                target: format!("literal:string:{}", remover_json),
-            });
+        for (predicate, actions) in [
+            ("ad4m://setter", &prop.setter),
+            ("ad4m://adder", &prop.adder),
+            ("ad4m://remover", &prop.remover),
+        ] {
+            if !actions.is_empty() {
+                links.push(Link {
+                    source: prop_shape_uri.clone(),
+                    predicate: Some(predicate.to_string()),
+                    target: format!("literal:string:{}", canonical_json(actions)),
+                });
+            }
         }
 
         // sh:class — target SHACL node shape URI for typed relation resolution
@@ -2032,12 +2041,13 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
 
         // Structured conformance conditions for DB-agnostic type filtering
         if !prop.conformance_conditions.is_empty() {
-            let conditions_json = serde_json::to_string(&prop.conformance_conditions)
-                .unwrap_or_else(|_| "[]".to_string());
             links.push(Link {
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://conformanceConditions".to_string()),
-                target: format!("literal:string:{}", conditions_json),
+                target: format!(
+                    "literal:string:{}",
+                    canonical_json(&prop.conformance_conditions)
+                ),
             });
         }
 
@@ -2047,6 +2057,14 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://relationKind".to_string()),
                 target: format!("literal:string:{}", kind),
+            });
+        }
+
+        if let Some(polymorphic) = prop.polymorphic {
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("ad4m://polymorphic".to_string()),
+                target: format!("literal:{}", polymorphic),
             });
         }
 
@@ -2061,26 +2079,20 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
 
         // Post-getter where-clause filter for relations.
         if let Some(where_filter) = &prop.where_filter {
-            let filter_json =
-                serde_json::to_string(where_filter).unwrap_or_else(|_| "{}".to_string());
             links.push(Link {
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://whereFilter".to_string()),
-                target: format!("literal:string:{}", filter_json),
+                target: format!("literal:string:{}", canonical_json(where_filter)),
             });
         }
 
         // Predicate IRI lookup for where_filter keys.
-        if let Some(where_predicates) = &prop.where_predicates {
-            if !where_predicates.is_empty() {
-                let map_json =
-                    serde_json::to_string(where_predicates).unwrap_or_else(|_| "{}".to_string());
-                links.push(Link {
-                    source: prop_shape_uri.clone(),
-                    predicate: Some("ad4m://wherePredicates".to_string()),
-                    target: format!("literal:string:{}", map_json),
-                });
-            }
+        if let Some(where_predicates) = prop.where_predicates.as_ref().filter(|m| !m.is_empty()) {
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("ad4m://wherePredicates".to_string()),
+                target: format!("literal:string:{}", canonical_json(where_predicates)),
+            });
         }
 
         // Conformance/type filtering enable flag (only emitted when false).
@@ -2108,22 +2120,21 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
         }
 
         if let Some(transform) = &prop.transform {
-            let json_str = serde_json::to_string(transform).unwrap_or_default();
             links.push(Link {
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://transform".to_string()),
-                target: format!("literal:string:{}", json_str),
+                target: format!("literal:string:{}", canonical_json(transform)),
             });
         }
 
-        if let Some(in_values) = prop.in_values.as_ref().filter(|v| !v.is_empty()) {
+        // `sh:in` is stored even when the list is empty: an empty list is a
+        // deny-all constraint, not the absence of one, so dropping it would
+        // silently widen "allows nothing" to "allows anything".
+        if let Some(in_values) = prop.in_values.as_ref() {
             links.push(Link {
                 source: prop_shape_uri.clone(),
                 predicate: Some("sh://in".to_string()),
-                target: format!(
-                    "literal:string:{}",
-                    serde_json::to_string(in_values).unwrap_or_default()
-                ),
+                target: format!("literal:string:{}", canonical_json(in_values)),
             });
         }
 
@@ -2153,7 +2164,7 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
 }
 /// Extract namespace from URI (e.g., "recipe://Recipe" -> "recipe://")
 /// Matches TypeScript SHACLShape.ts extractNamespace() behavior
-pub fn extract_namespace(uri: &str) -> Result<String, AnyError> {
+pub fn extract_namespace(uri: &str) -> Result<String, Error> {
     // Handle protocol-style URIs (://ending) - for AD4M-style URIs like "recipe://Recipe"
     // We want just the scheme + "://" part
     if let Some(scheme_pos) = uri.find("://") {
@@ -2217,6 +2228,320 @@ fn extract_local_name(uri: &str) -> String {
             }
         }
     }
+}
+
+/// The name a class is registered under: the local name of its target
+/// class (`recipe://Recipe` → `Recipe`).
+pub fn class_name_of(target_class: &str) -> String {
+    extract_local_name(target_class)
+}
+
+/// JSON with every object's keys sorted by UTF-16 code units (the RFC 8785
+/// order), so equal values always give equal bytes, whatever order a map was
+/// built in. The string is written here, key by key: it does not depend on
+/// the iteration order of `serde_json::Map` (sorted without serde_json's
+/// `preserve_order`, insertion order with it). The SDK's `canonicalJson`
+/// (`core/src/shacl/SHACLShape.ts`) writes the same bytes.
+pub fn canonical_json<T: Serialize + ?Sized>(value: &T) -> String {
+    fn write(value: &serde_json::Value, out: &mut String) {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut entries: Vec<(&String, &serde_json::Value)> = map.iter().collect();
+                entries.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
+                out.push('{');
+                for (i, (key, item)) in entries.into_iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&serde_json::Value::String(key.clone()).to_string());
+                    out.push(':');
+                    write(item, out);
+                }
+                out.push('}');
+            }
+            serde_json::Value::Array(items) => {
+                out.push('[');
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    write(item, out);
+                }
+                out.push(']');
+            }
+            scalar => out.push_str(&scalar.to_string()),
+        }
+    }
+    let Ok(value) = serde_json::to_value(value) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    write(&value, &mut out);
+    out
+}
+
+pub const SUBJECT_CLASS: &str = "ad4m://SubjectClass";
+pub const SHAPE_PREDICATE: &str = "ad4m://shape";
+
+/// The node of a class's shape a link sits on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeNode {
+    /// The target class: `rdf://type ad4m://SubjectClass` and `ad4m://shape`.
+    Class,
+    /// The node shape.
+    Shape,
+    /// A property shape.
+    Property,
+}
+
+const SHAPE_NODE_PREDICATES: [&str; 8] = [
+    "sh://targetClass",
+    "sh://node",
+    "sh://property",
+    "ad4m://interpretation_hint",
+    ABSTRACT_PREDICATE,
+    AUTO_ACCEPT_PREDICATE,
+    "ad4m://constructor",
+    "ad4m://destructor",
+];
+
+const PROPERTY_NODE_PREDICATES: [&str; 30] = [
+    "sh://path",
+    "ad4m://interpretation_hint",
+    ALIAS_PREDICATE,
+    "ad4m://identity",
+    "ad4m://ordering",
+    "sh://datatype",
+    "sh://minCount",
+    "sh://maxCount",
+    "ad4m://writable",
+    "ad4m://resolveLanguage",
+    "sh://nodeKind",
+    "ad4m://local",
+    "ad4m://setter",
+    "ad4m://adder",
+    "ad4m://remover",
+    "sh://class",
+    "ad4m://getter",
+    "ad4m://conformanceConditions",
+    "ad4m://relationKind",
+    "ad4m://polymorphic",
+    "ad4m://targetClassName",
+    "ad4m://whereFilter",
+    "ad4m://wherePredicates",
+    "ad4m://filter",
+    "sh://hasValue",
+    "ad4m://transform",
+    "sh://in",
+    "sh://pattern",
+    "sh://minInclusive",
+    "sh://maxInclusive",
+];
+
+/// Whether a link on `node` is one [`shape_links`] writes: a class's own
+/// link. Registration replaces own links and keeps every other link on
+/// the same nodes (annotations other apps put there).
+pub fn is_own_link(node: ShapeNode, predicate: &str, target: &str) -> bool {
+    match (node, predicate) {
+        (ShapeNode::Class, "rdf://type") => target == SUBJECT_CLASS,
+        (ShapeNode::Class, p) => p == SHAPE_PREDICATE,
+        (ShapeNode::Shape, "rdf://type") => target == "sh://NodeShape",
+        (ShapeNode::Shape, p) => SHAPE_NODE_PREDICATES.contains(&p),
+        (ShapeNode::Property, "rdf://type") => {
+            target == "sh://PropertyShape" || target == "ad4m://CollectionShape"
+        }
+        (ShapeNode::Property, p) => PROPERTY_NODE_PREDICATES.contains(&p),
+    }
+}
+
+/// The value a `literal:` target carries: `literal:string:` bodies
+/// percent-decoded, `literal:number:`/`literal:boolean:` and bare
+/// `literal:` bodies as written, an `^^xsd:` suffix dropped. Any other
+/// target (a URI) is its own value.
+fn literal_value(target: &str) -> String {
+    let Some(body) = target.strip_prefix("literal:") else {
+        return target.to_string();
+    };
+    if let Some(rest) = body.strip_prefix("string:") {
+        return percent_encoding::percent_decode_str(rest)
+            .decode_utf8()
+            .map(|s| s.into_owned())
+            .unwrap_or_else(|_| rest.to_string());
+    }
+    let body = body
+        .strip_prefix("number:")
+        .or_else(|| body.strip_prefix("boolean:"))
+        .unwrap_or(body);
+    body.split_once("^^xsd:")
+        .map_or(body, |(value, _)| value)
+        .to_string()
+}
+
+/// The shape a class reads while it has more than one `ad4m://shape` link
+/// (briefly, while a moved shape syncs): the least URI. Every reader of a
+/// class's shape (`shape_from_links` for the registry, `model_query::shape::
+/// find_class` for queries and writes) picks with this.
+pub fn current_shape_uri<'a>(shape_uris: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    shape_uris.into_iter().min()
+}
+
+/// The name of the property whose shape node is `node`, in the class
+/// `target_class`: the node URI after `{namespace}{ClassName}.`, else after
+/// its last `.`.
+pub fn property_node_name(target_class: &str, node: &str) -> String {
+    let prefix = format!(
+        "{}{}.",
+        extract_namespace(target_class).unwrap_or_default(),
+        class_name_of(target_class)
+    );
+    node.strip_prefix(&prefix)
+        .or_else(|| node.rsplit_once('.').map(|(_, name)| name))
+        .unwrap_or(node)
+        .to_string()
+}
+
+/// Rebuild a class's shape from its own links (any spelling the store reads
+/// back). `None` when the class has no `ad4m://shape` link.
+///
+/// The result is the shape in normal form: every property named, properties
+/// sorted by name, `node_kind` without the `sh://` prefix, `collection` set
+/// only when true. Registering it writes the links it was read from.
+pub fn shape_from_links(target_class: &str, links: &[Link]) -> Option<SHACLShape> {
+    let mut values: BTreeMap<(&str, &str), Vec<&str>> = BTreeMap::new();
+    for link in links {
+        if let Some(predicate) = link.predicate.as_deref() {
+            values
+                .entry((link.source.as_str(), predicate))
+                .or_default()
+                .push(link.target.as_str());
+        }
+    }
+    for targets in values.values_mut() {
+        targets.sort_unstable();
+        targets.dedup();
+    }
+    let all = |source: &str, predicate: &str| -> Vec<String> {
+        values
+            .get(&(source, predicate))
+            .map(|t| t.iter().map(|t| t.to_string()).collect())
+            .unwrap_or_default()
+    };
+    let first = |source: &str, predicate: &str| -> Option<String> {
+        values
+            .get(&(source, predicate))
+            .and_then(|t| t.first())
+            .map(|t| t.to_string())
+    };
+    let text = |source: &str, predicate: &str| first(source, predicate).map(|t| literal_value(&t));
+    let flag = |source: &str, predicate: &str| text(source, predicate).map(|v| v == "true");
+    fn json<T: serde::de::DeserializeOwned>(raw: Option<String>) -> Option<T> {
+        raw.and_then(|raw| serde_json::from_str(&raw).ok())
+    }
+
+    let shape_uri = current_shape_uri(
+        values
+            .get(&(target_class, SHAPE_PREDICATE))
+            .into_iter()
+            .flatten()
+            .copied(),
+    )?
+    .to_string();
+
+    let mut properties: Vec<PropertyShape> = all(&shape_uri, "sh://property")
+        .into_iter()
+        .filter_map(|node| {
+            let path = first(&node, "sh://path")?;
+            let name = property_node_name(target_class, &node);
+            let has_value = first(&node, "sh://hasValue").map(|v| {
+                if v.starts_with("literal:string:") {
+                    literal_value(&v)
+                } else {
+                    v
+                }
+            });
+            Some(PropertyShape {
+                path,
+                name: Some(name),
+                interpretation_hint: text(&node, "ad4m://interpretation_hint"),
+                identity: flag(&node, "ad4m://identity").filter(|v| *v),
+                ordering: text(&node, "ad4m://ordering"),
+                datatype: first(&node, "sh://datatype"),
+                min_count: text(&node, "sh://minCount").and_then(|v| v.parse().ok()),
+                max_count: text(&node, "sh://maxCount").and_then(|v| v.parse().ok()),
+                writable: flag(&node, "ad4m://writable"),
+                local: flag(&node, "ad4m://local"),
+                resolve_language: text(&node, "ad4m://resolveLanguage"),
+                node_kind: first(&node, "sh://nodeKind")
+                    .map(|k| k.strip_prefix("sh://").map(str::to_string).unwrap_or(k)),
+                collection: all(&node, "rdf://type")
+                    .iter()
+                    .any(|t| t == "ad4m://CollectionShape")
+                    .then_some(true),
+                setter: json(text(&node, "ad4m://setter")).unwrap_or_default(),
+                adder: json(text(&node, "ad4m://adder")).unwrap_or_default(),
+                remover: json(text(&node, "ad4m://remover")).unwrap_or_default(),
+                getter: text(&node, "ad4m://getter"),
+                conformance_conditions: json(text(&node, "ad4m://conformanceConditions"))
+                    .unwrap_or_default(),
+                class: first(&node, "sh://class"),
+                relation_kind: text(&node, "ad4m://relationKind"),
+                polymorphic: flag(&node, "ad4m://polymorphic"),
+                target_class_name: text(&node, "ad4m://targetClassName"),
+                where_filter: json(text(&node, "ad4m://whereFilter")),
+                where_predicates: json(text(&node, "ad4m://wherePredicates")),
+                filter: flag(&node, "ad4m://filter"),
+                has_value,
+                transform: json(text(&node, "ad4m://transform")),
+                in_values: json(text(&node, "sh://in")),
+                pattern: text(&node, "sh://pattern"),
+                min_inclusive: text(&node, "sh://minInclusive").and_then(|v| v.parse().ok()),
+                max_inclusive: text(&node, "sh://maxInclusive").and_then(|v| v.parse().ok()),
+                alias: json(text(&node, ALIAS_PREDICATE)),
+            })
+        })
+        .collect();
+    properties.sort_by(|a, b| a.name.cmp(&b.name));
+
+    // Same rule as `load_shape`: one known value is the rule; none, an
+    // unknown value, or several different values read as no rule (a person
+    // decides). `text` would keep whichever link the map returned first.
+    let auto_accept = {
+        let mut values: Vec<String> = all(&shape_uri, AUTO_ACCEPT_PREDICATE)
+            .iter()
+            .map(|t| literal_value(t))
+            .collect();
+        values.sort();
+        values.dedup();
+        match values.as_slice() {
+            [] => None,
+            [one] => AutoAccept::parse(one).or_else(|| {
+                log::warn!(
+                    "SHACL shape '{target_class}': unknown auto_accept value '{one}', \
+                     treating it as 'never'"
+                );
+                None
+            }),
+            several => {
+                log::warn!(
+                    "SHACL shape '{target_class}': conflicting auto_accept values {several:?}, \
+                     treating them as 'never'"
+                );
+                None
+            }
+        }
+    };
+
+    Some(SHACLShape {
+        target_class: target_class.to_string(),
+        properties,
+        interpretation_hint: text(&shape_uri, "ad4m://interpretation_hint"),
+        auto_accept,
+        constructor_actions: json(text(&shape_uri, "ad4m://constructor")).unwrap_or_default(),
+        destructor_actions: json(text(&shape_uri, "ad4m://destructor")).unwrap_or_default(),
+        parent_shapes: all(&shape_uri, "sh://node"),
+        is_abstract: flag(&shape_uri, ABSTRACT_PREDICATE).unwrap_or(false),
+        node_shape_uri: Some(shape_uri),
+    })
 }
 
 #[cfg(test)]
@@ -2542,11 +2867,6 @@ mod tests {
                     && l.target == target
             })
         };
-        assert!(has(
-            "literal:string:shacl://Dog",
-            "ad4m://shacl_shape_uri",
-            "shapes://DogShape"
-        ));
         assert!(has("zoo://Dog", "ad4m://shape", "shapes://DogShape"));
         assert!(has("shapes://DogShape", "sh://targetClass", "zoo://Dog"));
         assert!(has("shapes://DogShape", "sh://property", "zoo://Dog.name"));
@@ -2600,6 +2920,172 @@ mod tests {
         }
     }
 
+    /// A shape with every map-valued field, its maps' keys sorted, or
+    /// `reversed`.
+    fn rich_shape(reversed: bool) -> SHACLShape {
+        let (filter, predicates, transform, label, alias) = if reversed {
+            (
+                r#"{"b":1,"a":{"y":2,"x":1}}"#,
+                r#"{"b":"ns://b","a":"ns://a"}"#,
+                r#"{"op":"x","arg":1}"#,
+                r#"{"value":"a","label":"A"}"#,
+                r#"{"Z":"t","A":"t"}"#,
+            )
+        } else {
+            (
+                r#"{"a":{"x":1,"y":2},"b":1}"#,
+                r#"{"a":"ns://a","b":"ns://b"}"#,
+                r#"{"arg":1,"op":"x"}"#,
+                r#"{"label":"A","value":"a"}"#,
+                r#"{"A":"t","Z":"t"}"#,
+            )
+        };
+        let json = format!(
+            r#"{{
+              "target_class": "ns://Thing",
+              "interpretation_hint": "a thing",
+              "parent_shapes": ["ns://BaseShape"],
+              "constructor_actions": [{{"action":"addLink","source":"this","predicate":"ns://kind","target":"ns://thing","local":true}}],
+              "destructor_actions": [{{"action":"removeLink","source":"this","predicate":"ns://kind","target":"*"}}],
+              "properties": [
+                {{"path":"ns://kind","name":"kind","has_value":"ns://thing","min_count":1,"max_count":1}},
+                {{"path":"ns://title","name":"title","datatype":"xsd:string","max_count":1,"writable":true,
+                  "identity":true,"interpretation_hint":"the title","pattern":"^.+$","in":[{label}],"alias":{alias},
+                  "setter":[{{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}}]}},
+                {{"path":"ns://tags","name":"tags","collection":true,"relation_kind":"hasMany",
+                  "target_class_name":"Tag","class":"ns://TagShape","ordering":"lww",
+                  "where_filter":{filter},"where_predicates":{predicates},"transform":{transform},
+                  "adder":[{{"action":"addLink","source":"this","predicate":"ns://tags","target":"value"}}],
+                  "remover":[{{"action":"removeLink","source":"this","predicate":"ns://tags","target":"value"}}]}}
+              ]
+            }}"#
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn canonical_json_sorts_keys_by_utf16_code_units() {
+        let value = serde_json::json!({"b": 1, "a": [{"d": 1, "c": 2}]});
+        assert_eq!(canonical_json(&value), r#"{"a":[{"c":2,"d":1}],"b":1}"#);
+        // U+1F600 is a surrogate pair (0xD83D ...): before U+FB01 in UTF-16,
+        // after it by code point.
+        let mut map = serde_json::Map::new();
+        map.insert("\u{FB01}".into(), 1.into());
+        map.insert("\u{1F600}".into(), 2.into());
+        assert_eq!(canonical_json(&map), "{\"\u{1F600}\":2,\"\u{FB01}\":1}");
+    }
+
+    /// The same object and the same expected string as the SDK's
+    /// `canonicalJson` test in `core/src/shacl/SHACLShape.test.ts`: the two
+    /// write identical bytes. Integer-like keys sort as text (a JS object
+    /// would put them first), uppercase before lowercase, and the non-BMP
+    /// key sorts by its UTF-16 surrogate (0xD83D) before U+FF61. Keys are
+    /// inserted in reverse of the expected order at every level, so the
+    /// result does not lean on the map's iteration order.
+    #[test]
+    fn canonical_json_matches_the_sdk_byte_for_byte() {
+        let mut inner = serde_json::Map::new();
+        inner.insert("z".into(), serde_json::json!([{"y": 1, "x": 2}]));
+        inner.insert("10".into(), true.into());
+        let mut map = serde_json::Map::new();
+        map.insert("\u{FF61}".into(), serde_json::Value::Null);
+        map.insert("\u{1F600}".into(), "e\"\n".into());
+        map.insert("a".into(), inner.into());
+        map.insert("B".into(), 3.into());
+        map.insert("2".into(), 2.into());
+        map.insert("10".into(), 1.into());
+        assert_eq!(
+            canonical_json(&map),
+            "{\"10\":1,\"2\":2,\"B\":3,\"a\":{\"10\":true,\"z\":[{\"x\":2,\"y\":1}]},\"\u{1F600}\":\"e\\\"\\n\",\"\u{FF61}\":null}"
+        );
+    }
+
+    #[test]
+    fn shape_links_are_byte_identical_whatever_the_key_order() {
+        let links = shape_links(rich_shape(false), "Thing").unwrap();
+        assert_eq!(links, shape_links(rich_shape(true), "Thing").unwrap());
+        let filter = links
+            .iter()
+            .find(|l| l.target.contains(r#""a":{"x":1,"y":2}"#))
+            .map(|l| l.target.clone());
+        assert_eq!(
+            filter.as_deref(),
+            Some(r#"literal:string:{"a":{"x":1,"y":2},"b":1}"#)
+        );
+    }
+
+    #[test]
+    fn shape_links_refuses_a_property_name_given_twice() {
+        let err = parse_shacl_to_links(
+            r#"{"target_class": "ns://Note", "properties": [
+                {"path": "ns://title", "name": "title"},
+                {"path": "ns://heading", "name": "title"}
+            ]}"#,
+            "Note",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("declares property 'title' twice"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn every_link_shape_links_writes_is_an_own_link() {
+        let links = shape_links(rich_shape(false), "Thing").unwrap();
+        for link in &links {
+            let node = match link.source.as_str() {
+                "ns://Thing" => ShapeNode::Class,
+                "ns://ThingShape" => ShapeNode::Shape,
+                _ => ShapeNode::Property,
+            };
+            assert!(
+                is_own_link(node, link.predicate.as_deref().unwrap(), &link.target),
+                "{link:?}"
+            );
+        }
+        assert!(!is_own_link(
+            ShapeNode::Class,
+            "app://label",
+            "literal:string:x"
+        ));
+        assert!(!is_own_link(ShapeNode::Class, "rdf://type", "app://Other"));
+    }
+
+    #[test]
+    fn shape_from_links_reads_back_what_shape_links_writes() {
+        let links = shape_links(rich_shape(true), "Thing").unwrap();
+        let read = shape_from_links("ns://Thing", &links).unwrap();
+        // The read shape writes the same links (properties in name order).
+        let set = |links: Vec<Link>| -> std::collections::BTreeSet<(String, String, String)> {
+            links
+                .into_iter()
+                .map(|l| (l.source, l.predicate.unwrap_or_default(), l.target))
+                .collect()
+        };
+        assert_eq!(
+            set(shape_links(read.clone(), "Thing").unwrap()),
+            set(links.clone())
+        );
+        assert_eq!(read.node_shape_uri.as_deref(), Some("ns://ThingShape"));
+        assert_eq!(read.parent_shapes, vec!["ns://BaseShape".to_string()]);
+        assert_eq!(
+            read.constructor_actions,
+            rich_shape(false).constructor_actions
+        );
+        let tags = read
+            .properties
+            .iter()
+            .find(|p| p.name.as_deref() == Some("tags"))
+            .unwrap();
+        assert_eq!(
+            tags.where_filter,
+            Some(serde_json::json!({"a": {"x": 1, "y": 2}, "b": 1}))
+        );
+        assert_eq!(tags.ordering.as_deref(), Some("lww"));
+        assert!(shape_from_links("ns://Other", &links).is_none());
+    }
+
     #[test]
     fn test_parse_shacl_basic() {
         let shacl_json = r#"{
@@ -2619,11 +3105,11 @@ mod tests {
 
         let links = parse_shacl_to_links(shacl_json, "Recipe").unwrap();
 
-        // Should have: class definition (4) + property shape (7) = 11 links minimum
-        // Note: ad4m://has_subject_class link is NOT created here - it's created by add_sdna()
+        // Should have: class index (2) + shape node (2) + property shape (7) = 11 links minimum
         assert!(links.len() >= 11);
 
-        // Check for key links (note: ad4m://self -> literal:string:Recipe is NOT here)
+        // Check for key links. Nothing is indexed on ad4m://self.
+        assert!(!links.iter().any(|l| l.source == "ad4m://self"));
         assert!(links.iter().any(|l| l.source == "recipe://RecipeShape"
             && l.predicate == Some("sh://targetClass".to_string())));
         assert!(links

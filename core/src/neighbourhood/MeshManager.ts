@@ -105,6 +105,12 @@ export type CallBody =
     | { kind: "reset" }
     /** Application data, relayed over signalling because the mesh has no server. SDK-only. */
     | { kind: "data"; label: string; data: string; binary: boolean }
+    /**
+     * The sender is still in the call: sent to all on a timer by the session
+     * (`MeshManager.beat`), reported as the `beat` event. Not persisted. An SDK
+     * from before it parses it to nothing and drops it without a word.
+     */
+    | { kind: "beat" }
 
 export interface CallEnvelope extends CallGenerations {
     v: number
@@ -155,6 +161,8 @@ export function parseCallMessage(payload: unknown): CallMessage | null {
     }
 
     if (msg.kind === "reset") return { ...envelope, kind: "reset" }
+
+    if (msg.kind === "beat") return { ...envelope, kind: "beat" }
 
     if (msg.kind === "data") {
         const { label, data, binary } = msg as { label?: unknown; data?: unknown; binary?: unknown }
@@ -361,6 +369,8 @@ export type MeshEvent =
     | "peer-state"
     /** `(did, { rung, attempts })` — a repair was attempted on this pair. */
     | "peer-recovery"
+    /** `(did)` — a peer of this call beat ({@link MeshManager.beat}), listed in the roster or not. */
+    | "beat"
     | "error"
 
 export type MeshEventCallback = (...args: any[]) => void
@@ -392,10 +402,6 @@ export interface MeshManagerOptions {
     /** Called after a network change (see `ApiClient.onNetworkChange`): every
      *  pair restarts ICE then, rather than waiting for each to notice. */
     onNetworkChange?: (callback: () => void) => () => void
-    /** Called when a pair goes disconnected: checks the socket the signals
-     *  go over now (see `ApiClient.checkConnection`). A dead one is redialled
-     *  and `onNetworkChange` restarts every pair. */
-    checkConnection?: () => void
 }
 
 /** Public STUN, and no TURN. Two servers, because ICE queries them in parallel. */
@@ -560,7 +566,6 @@ export class MeshManager {
     private renegotiationRepairs: Map<string, number> = new Map()
     private onNetworkChange: MeshManagerOptions["onNetworkChange"]
     private unwatchNetwork: (() => void) | null = null
-    private checkConnection: MeshManagerOptions["checkConnection"]
 
     constructor(options: MeshManagerOptions) {
         this.channel = options.channel
@@ -577,7 +582,6 @@ export class MeshManager {
         this.now = options.now ?? (() => Date.now())
         this.sweepMs = options.sweepMs ?? SWEEP_INTERVAL_MS
         this.onNetworkChange = options.onNetworkChange
-        this.checkConnection = options.checkConnection
     }
 
     // ── Events ──────────────────────────────────────────────────────
@@ -654,6 +658,12 @@ export class MeshManager {
             // transport cannot make a bystander negotiate. Data goes to all.
             const to = (payload as { to?: unknown }).to
             if (typeof to === "string" && to !== TARGET_ALL && to !== this.selfId) return
+
+            // Liveness, not signalling: reported for any sender, never held.
+            if (message.kind === "beat") {
+                this.emit("beat", from)
+                return
+            }
 
             // Only peers the roster placed in the call. Without this, anyone on
             // the channel could open a connection by sending an offer.
@@ -829,6 +839,16 @@ export class MeshManager {
      */
     sendData(label: string, data: string, binary: boolean = false): void {
         this.publish({ v: CALL_PROTOCOL_VERSION, call: this.callId, to: TARGET_ALL, kind: "data", label, data, binary })
+    }
+
+    /**
+     * Tell every peer of the call that this one is still in it. Through
+     * {@link publish}, so a beat's publish result is counted like any other
+     * send. Nothing once the mesh has left.
+     */
+    beat(): void {
+        if (this.closed) return
+        this.publish({ v: CALL_PROTOCOL_VERSION, call: this.callId, to: TARGET_ALL, kind: "beat" })
     }
 
     subscribeDataChannel(callback: (msg: SfuDataMessage) => void): () => void {
@@ -1018,7 +1038,6 @@ export class MeshManager {
             }
             if (state === "disconnected" && !slot.disconnectedAt) {
                 slot.disconnectedAt = this.now()
-                this.checkConnection?.()
             }
             if (state === "connected" || state === "failed") slot.disconnectedAt = 0
             this.emit("peer-state", peerId, state)

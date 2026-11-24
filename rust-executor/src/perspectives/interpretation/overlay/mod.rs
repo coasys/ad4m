@@ -58,6 +58,7 @@ pub(crate) use auto_accept::{auto_accept_pass, op_classes_of};
 pub use classes::InterpretationRunCursor;
 pub(crate) use classes::{
     ensure_interpretation_overlay_classes, mint_interpretation_run, InterpretationRunMeta,
+    INTERPRETATION_OVERLAY, INTERPRETATION_RUN,
 };
 use gate::{gate_update, inferred_snapshot};
 use write::write_overlay;
@@ -123,6 +124,35 @@ pub(super) struct OverlayWrite {
     pub inferred: BTreeMap<String, serde_json::Value>,
 }
 
+/// Mint one `InterpretationRun` and commit that batch. A mint or commit
+/// failure discards the batch. `commit_error` is the sentence in front of
+/// the commit error.
+pub(crate) async fn mint_and_commit_interpretation_run(
+    perspective: &mut PerspectiveInstance,
+    meta: &InterpretationRunMeta,
+    cursor: Option<&InterpretationRunCursor>,
+    context: &AgentContext,
+    commit_error: &str,
+) -> anyhow::Result<String> {
+    ensure_interpretation_overlay_classes(perspective, context).await?;
+    let batch_id = perspective.create_batch().await;
+    let run_uri =
+        match mint_interpretation_run(perspective, meta, cursor, Some(batch_id.clone()), context)
+            .await
+        {
+            Ok(uri) => uri,
+            Err(error) => {
+                let _ = perspective.discard_batch(&batch_id).await;
+                return Err(error);
+            }
+        };
+    if let Err(error) = perspective.commit_batch(batch_id.clone(), context).await {
+        let _ = perspective.discard_batch(&batch_id).await;
+        return Err(anyhow::anyhow!("{commit_error}: {error:#}"));
+    }
+    Ok(run_uri)
+}
+
 /// Plan + apply the provenance overlay for a fully-planned set of real ops, and
 /// apply the (possibly gated) real ops themselves. This is the single tail-step
 /// [`crate::perspectives::interpretation::run_interpretation`] runs after
@@ -148,7 +178,6 @@ pub(crate) async fn apply_with_overlay(
 ) -> anyhow::Result<Vec<String>> {
     if ops.is_empty() {
         if cursor.is_some() {
-            ensure_interpretation_overlay_classes(perspective, context).await?;
             let mut meta = InterpretationRunMeta::from_task(task, run_id, ran_at);
             if let Some(d) = debug {
                 meta.debug_prompt = Some(d.prompt.clone());
@@ -165,35 +194,14 @@ pub(crate) async fn apply_with_overlay(
             // dup'd because Bob's cursor at process time saw only one of
             // Alice's sources). Batch the whole mint so it lands atomically
             // as a single revision.
-            let batch_id = perspective.create_batch().await;
-            match mint_interpretation_run(
+            mint_and_commit_interpretation_run(
                 perspective,
                 &meta,
                 cursor,
-                Some(batch_id.clone()),
                 context,
+                "plan_interpretation_ops_resolved: empty-ops fast-path commit_batch failed",
             )
-            .await
-            {
-                Ok(_) => {
-                    perspective
-                        .commit_batch(batch_id.clone(), context)
-                        .await
-                        .map_err(|e| {
-                            // commit_batch already tries to drop the batch on
-                            // failure; belt-and-suspenders here too.
-                            let _ = perspective.discard_batch(&batch_id);
-                            anyhow::anyhow!(
-                                "plan_interpretation_ops_resolved: empty-ops fast-path \
-                                 commit_batch failed: {e:#}"
-                            )
-                        })?;
-                }
-                Err(e) => {
-                    let _ = perspective.discard_batch(&batch_id).await;
-                    return Err(e);
-                }
-            }
+            .await?;
         }
         return Ok(Vec::new());
     }

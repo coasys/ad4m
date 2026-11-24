@@ -1,7 +1,7 @@
 import {ApiClient, CallOptions } from '../apiClient'
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import { RuntimeInfo, SentMessage, NotificationInput, NotificationUpdate, Notification, ImportResult, UserStatistics } from "./RuntimeTypes"
-import type { HostRate, UnytVersionInfo } from "../generated/api"
+import type { HostRate, LogFilter, LogTail, RuntimeConfig, SetConfigResult, UnytVersionInfo } from "../generated/api"
 import { LanguageMeta } from "../language/LanguageMeta"
 
 export class RuntimeClient {
@@ -19,8 +19,47 @@ export class RuntimeClient {
         return this.#apiClient.call('runtime.tlsDomain', {})
     }
 
+    /** Stops the executor (exit 0). Only the operator on the executor's machine. */
     async quit(): Promise<Boolean> {
         return this.#apiClient.call('runtime.quit', {})
+    }
+
+    /** Answers, then the executor exits 75 and its supervisor starts it again. */
+    async restart(): Promise<boolean> {
+        return this.#apiClient.call('runtime.restart', {})
+    }
+
+    /** The newest lines (at most 2000) of the executor's log file (`--log-dir`). */
+    async logTail(lines: number): Promise<LogTail> {
+        return this.#apiClient.call('runtime.logTail', { lines })
+    }
+
+    /**
+     * Logs `filter` (directives like `ws_rpc=debug,sfu=debug`) over the executor's startup
+     * filter for `ttlSeconds` (default 1800, at most 14400), then the startup filter is back by
+     * itself. A directive name matches whole module path segments of a log target; targets it
+     * does not name keep their level. An empty filter reverts at once. Only the operator.
+     */
+    async setLogFilter(filter: string, ttlSeconds?: number): Promise<LogFilter> {
+        return this.#apiClient.call('runtime.setLogFilter', ttlSeconds === undefined ? { filter } : { filter, ttlSeconds })
+    }
+
+    /** The executor's startup log filter, the override in force and when it reverts. Only the operator. */
+    async logFilter(): Promise<LogFilter> {
+        return this.#apiClient.call('runtime.logFilter', {})
+    }
+
+    /** The executor's config file: its values, every key with its class, and whether a write waits for a restart. */
+    async config(): Promise<RuntimeConfig> {
+        return this.#apiClient.call('runtime.config', {})
+    }
+
+    /**
+     * Writes keys to the executor's config file (`--config`); they take effect at the next
+     * start. A `machine` key from a caller off the executor's machine is refused `local-only`.
+     */
+    async setConfig(set?: Record<string, unknown>, unset?: string[]): Promise<SetConfigResult> {
+        return this.#apiClient.call('runtime.setConfig', { set, unset })
     }
 
     async openLink(url: string): Promise<Boolean> {

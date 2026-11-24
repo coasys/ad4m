@@ -6,7 +6,7 @@
 //! query to generate correct conformance patterns and hydrate results.
 //!
 //! Production resolution is always [`load_shape`] — reads SHACL triples
-//! that were written by `addSdna()` into the perspective's link store.
+//! that `registerShapes` wrote into the perspective's link store.
 //! The result is memoized by `PerspectiveInstance::shape_cache` so each
 //! class is parsed at most once per process lifetime.
 //!
@@ -16,9 +16,11 @@
 
 use super::types::{AutoAccept, ModelShape, ShapeProperty, ShapeRelation, WhereCondition};
 use super::utils::escape_sparql_string;
-use crate::perspectives::shacl_parser::AUTO_ACCEPT_PREDICATE;
-use crate::perspectives::sparql_store::SparqlStore;
-use deno_core::anyhow::{anyhow, Error};
+use crate::perspectives::shacl_parser::{
+    class_name_of, current_shape_uri, AUTO_ACCEPT_PREDICATE, SHAPE_PREDICATE, SUBJECT_CLASS,
+};
+use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
+use anyhow::Error;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
@@ -34,7 +36,7 @@ impl std::fmt::Display for MissingShape {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "No SHACL shape stored for class '{}'. Call ensureSubjectClasses / addSdna first.",
+            "No SHACL shape stored for class '{}'. Register it with perspective.registerShapes first.",
             self.class_name
         )
     }
@@ -52,6 +54,75 @@ pub(crate) fn load_shape_from_store(
     load_shape(store, class_name)
 }
 
+/// A registered class and the shape node it reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClassShape {
+    pub(crate) target_class: String,
+    pub(crate) shape_uri: String,
+}
+
+/// The class registered under `class_name` (or with that target class IRI)
+/// and its current shape. A class's name is `class_name_of` its target class
+/// IRI; its shape is the one `current_shape_uri` picks, as the registry
+/// (`PerspectiveInstance::shapes`) reads it. An IRI finds exactly its class.
+/// Two classes may share a name (`a://Task`, `b://Task`): the bare name reads
+/// the least target class IRI, never whichever the store yields first.
+pub(crate) fn find_class(
+    store: &SparqlStore,
+    class_name: &str,
+) -> Result<Option<ClassShape>, Error> {
+    Ok(find_in(&class_index(store)?, class_name))
+}
+
+/// Every registered class with each shape it points to, as
+/// (target class, shape URI) pairs.
+fn class_index(store: &SparqlStore) -> Result<Vec<(String, String)>, Error> {
+    // The triples themselves, as the rest of `load_shape` reads them.
+    let rows: Vec<Value> = serde_json::from_str(&store.query(
+        &EvalStop::none(),
+        &format!(
+            "SELECT ?class ?shape WHERE {{ ?class <rdf://type> <{SUBJECT_CLASS}> . \
+         ?class <{SHAPE_PREDICATE}> ?shape . }}"
+        ),
+    )?)?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            Some((
+                row["class"].as_str()?.to_string(),
+                row["shape"].as_str()?.to_string(),
+            ))
+        })
+        .collect())
+}
+
+/// [`find_class`] over a [`class_index`].
+fn find_in(index: &[(String, String)], class_name: &str) -> Option<ClassShape> {
+    let mut shapes: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (target_class, shape_uri) in index {
+        if target_class == class_name || class_name_of(target_class) == class_name {
+            shapes.entry(target_class).or_default().push(shape_uri);
+        }
+    }
+    shapes.into_iter().next().and_then(|(target_class, uris)| {
+        current_shape_uri(uris).map(|shape_uri| ClassShape {
+            target_class: target_class.to_string(),
+            shape_uri: shape_uri.to_string(),
+        })
+    })
+}
+
+/// The class a relation's `sh:class` names: the class that holds that shape
+/// URI (shape URIs belong to one class), or the class of that IRI.
+fn class_of_shape(index: &[(String, String)], uri: &str) -> Option<String> {
+    index
+        .iter()
+        .filter(|(class, shape)| shape == uri || class == uri)
+        .map(|(class, _)| class)
+        .min()
+        .cloned()
+}
+
 /// Load a model shape from the SHACL links stored in the Oxigraph store.
 ///
 /// The SHACL links follow this pattern (set up by `parse_shacl_to_links`):
@@ -64,39 +135,17 @@ pub(crate) fn load_shape_from_store(
 /// - `<namespace://ClassName.propName> ad4m://targetClassName literal:string:Ingredient`
 /// - etc.
 pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelShape, Error> {
-    let safe_name = escape_sparql_string(class_name);
-    // Step 1: Find the shape URI and target class via SPARQL
-    // Use exact suffix matching (/{name} or #{name}) to avoid "Recipe" matching "MyRecipe"
-    let hash_suffix = format!("#{safe_name}");
-    let query = format!(
-        r#"
-        SELECT ?shapeUri ?targetClass WHERE {{
-            ?targetClass <rdf://type> <ad4m://SubjectClass> .
-            ?targetClass <ad4m://shape> ?shapeUri .
-            FILTER(STRENDS(STR(?targetClass), "/{safe_name}") || STRENDS(STR(?targetClass), "{hash_suffix}") || STR(?targetClass) = "{safe_name}")
-        }}
-        LIMIT 1
-        "#
-    );
-
-    let result_json = store.query(&query)?;
-    let results: Vec<Value> = serde_json::from_str(&result_json)?;
-
-    if results.is_empty() {
+    let index = class_index(store)?;
+    let Some(ClassShape {
+        target_class,
+        shape_uri,
+    }) = find_in(&index, class_name)
+    else {
         return Err(MissingShape {
             class_name: class_name.to_string(),
         }
         .into());
-    }
-
-    let shape_uri = results[0]["shapeUri"]
-        .as_str()
-        .ok_or_else(|| anyhow!("Missing shapeUri in SHACL query result"))?
-        .to_string();
-    let target_class = results[0]["targetClass"]
-        .as_str()
-        .ok_or_else(|| anyhow!("Missing targetClass in SHACL query result"))?
-        .to_string();
+    };
 
     // Step 2: Load all property shapes for this shape.  Fetches every
     // predicate the SHACL writer emits in one batched SELECT.  Using
@@ -108,9 +157,10 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             ?datatype ?minCount ?maxCount
             ?resolveLanguage ?writable ?local
             ?getter ?hasValue ?className
-            ?relationKind ?targetClassName
+            ?relationKind ?targetClassName ?polymorphic
             ?whereFilter ?wherePredicates ?filterEnabled
             ?transform ?interpretationHint ?identity ?ordering
+            ?inValues
         WHERE {{
             <{shape_uri}> <sh://property> ?propUri .
             ?propUri <sh://path> ?path .
@@ -129,15 +179,17 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             OPTIONAL {{ ?propUri <sh://class> ?className . }}
             OPTIONAL {{ ?propUri <ad4m://relationKind> ?relationKind . }}
             OPTIONAL {{ ?propUri <ad4m://targetClassName> ?targetClassName . }}
+            OPTIONAL {{ ?propUri <ad4m://polymorphic> ?polymorphic . }}
             OPTIONAL {{ ?propUri <ad4m://whereFilter> ?whereFilter . }}
             OPTIONAL {{ ?propUri <ad4m://wherePredicates> ?wherePredicates . }}
             OPTIONAL {{ ?propUri <ad4m://filter> ?filterEnabled . }}
             OPTIONAL {{ ?propUri <ad4m://transform> ?transform . }}
+            OPTIONAL {{ ?propUri <sh://in> ?inValues . }}
         }}
         "#
     );
 
-    let props_json = store.query(&props_query)?;
+    let props_json = store.query(&EvalStop::none(), &props_query)?;
     let prop_results: Vec<Value> = serde_json::from_str(&props_json)?;
 
     // Property shapes can fan into multiple rows because their `rdf://type`
@@ -187,6 +239,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         let target_class_name = first["targetClassName"]
             .as_str()
             .map(decode_literal_string_target);
+        let polymorphic = parse_bool_literal_target(first["polymorphic"].as_str()).unwrap_or(false);
         let where_filter = parse_where_filter_literal(first["whereFilter"].as_str());
         let where_predicates = parse_where_predicates_literal(first["wherePredicates"].as_str());
         let filter_enabled = parse_bool_literal_target(first["filterEnabled"].as_str());
@@ -197,6 +250,9 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         let interpretation_hint = first["interpretationHint"]
             .as_str()
             .map(decode_literal_string_target);
+        let in_values = first["inValues"]
+            .as_str()
+            .and_then(|raw| parse_in_values_literal(raw, prop_uri, class_name));
         // Identity marker: the `ad4m://identity` literal decodes to "true"
         // only when the SDNA explicitly declared this property the dedup key.
         let identity = first["identity"]
@@ -273,7 +329,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         let initial_value = if is_flag {
             has_value.clone()
         } else {
-            initial_value_from_constructor(store, &target_class, &path)
+            initial_value_from_constructor(store, &shape_uri, &path)
         };
 
         // Suppress writable-derived metadata: when explicitly false the
@@ -309,11 +365,18 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 transform: transform.clone(),
                 interpretation_hint: interpretation_hint.clone(),
                 identity,
+                in_values: in_values.clone(),
                 ordering: ordering.clone(),
                 local: is_local,
             });
 
+            let target_class = target_class_uri
+                .as_deref()
+                .and_then(|uri| class_of_shape(&index, uri));
             let resolved_target_class_name = target_class_name.clone().unwrap_or_else(|| {
+                if let Some(class) = &target_class {
+                    return class_name_of(class);
+                }
                 target_class_uri
                     .as_deref()
                     .map(extract_class_local_name)
@@ -333,6 +396,8 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 max_count: max_count.map(|m| m as usize),
                 target_class_name: resolved_target_class_name,
                 target_class_uri: target_class_uri.clone().unwrap_or_default(),
+                target_class: target_class.unwrap_or_default(),
+                polymorphic,
             });
         } else {
             properties.push(ShapeProperty {
@@ -352,6 +417,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 transform,
                 interpretation_hint,
                 identity,
+                in_values,
                 ordering: ordering.clone(),
                 local: is_local,
             });
@@ -368,7 +434,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         "#
     );
     let class_hint = store
-        .query(&class_hint_query)
+        .query(&EvalStop::none(), &class_hint_query)
         .ok()
         .and_then(|json| serde_json::from_str::<Vec<Value>>(&json).ok())
         .and_then(|rows| {
@@ -388,7 +454,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         "#
     );
     let auto_accept_values: Vec<String> = store
-        .query(&auto_accept_query)
+        .query(&EvalStop::none(), &auto_accept_query)
         .ok()
         .and_then(|json| serde_json::from_str::<Vec<Value>>(&json).ok())
         .unwrap_or_default()
@@ -413,26 +479,12 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
 /// `predicate` matches `predicate`.
 fn initial_value_from_constructor(
     store: &SparqlStore,
-    target_class: &str,
+    shape_uri: &str,
     predicate: &str,
 ) -> Option<String> {
-    // The constructor link is anchored to the shape URI, not the target
-    // class.  Resolve the shape URI from the target class so we can
-    // query for its constructor.
-    let safe_tc = escape_sparql_string(target_class);
-    let shape_query = format!(
-        r#"
-        SELECT ?shapeUri WHERE {{
-            <{safe_tc}> <ad4m://shape> ?shapeUri .
-        }}
-        LIMIT 1
-        "#
-    );
-    let shape_result_json = store.query(&shape_query).ok()?;
-    let shape_rows: Vec<Value> = serde_json::from_str(&shape_result_json).ok()?;
-    let shape_uri = shape_rows.first()?["shapeUri"].as_str()?.to_string();
-
-    let safe_shape = escape_sparql_string(&shape_uri);
+    // The constructor link is anchored to the shape the class reads
+    // (`find_class`), not the target class.
+    let safe_shape = escape_sparql_string(shape_uri);
     let ctor_query = format!(
         r#"
         SELECT ?ctor WHERE {{
@@ -441,7 +493,7 @@ fn initial_value_from_constructor(
         LIMIT 1
         "#
     );
-    let ctor_result_json = store.query(&ctor_query).ok()?;
+    let ctor_result_json = store.query(&EvalStop::none(), &ctor_query).ok()?;
     let ctor_rows: Vec<Value> = serde_json::from_str(&ctor_result_json).ok()?;
     let ctor_literal = ctor_rows.first()?["ctor"].as_str()?.to_string();
 
@@ -527,6 +579,34 @@ pub(crate) fn decode_literal_string_target(raw: &str) -> String {
     urlencoding::decode(trimmed)
         .map(|s| s.into_owned())
         .unwrap_or_else(|_| trimmed.to_string())
+}
+
+/// Test-only count of `sh://in` parse warnings: the malformed-target test
+/// cannot rely on `log::set_logger` (a prior test's `try_init` may already
+/// own the global logger), so the count lives next to the `log::warn!`.
+#[cfg(test)]
+pub(crate) static IN_VALUES_WARN_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Decode the `sh://in` literal into the allowed-values list.  The target
+/// must hold a JSON array (`[{value, label?}, …]` or bare values); anything
+/// else is dropped with one warning rather than failing the whole shape —
+/// a malformed `sh:in` leaves the property unconstrained, not unreadable.
+fn parse_in_values_literal(raw: &str, prop_uri: &str, class_name: &str) -> Option<Vec<Value>> {
+    let json_str = decode_literal_string_target(raw);
+    match serde_json::from_str::<Vec<Value>>(&json_str) {
+        Ok(values) => Some(values),
+        Err(e) => {
+            #[cfg(test)]
+            IN_VALUES_WARN_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            log::warn!(
+                "SHACL shape for class '{class_name}': property '{prop_uri}' has a \
+                 sh://in target that is not a JSON array ('{raw}'): {e} — ignoring \
+                 the allowed-values constraint"
+            );
+            None
+        }
+    }
 }
 
 /// Decode a `literal:...` target into its raw value, preserving URI
@@ -631,8 +711,8 @@ pub(crate) fn parse_where_filter(val: &Value) -> Option<BTreeMap<String, WhereCo
 #[cfg(test)]
 pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<ModelShape, Error> {
     use super::types::TransformExpression;
-    let meta: Value =
-        serde_json::from_str(json).map_err(|e| anyhow!("Failed to parse shape JSON: {}", e))?;
+    let meta: Value = serde_json::from_str(json)
+        .map_err(|e| anyhow::anyhow!("Failed to parse shape JSON: {}", e))?;
 
     let target_class = meta["className"].as_str().unwrap_or(class_name).to_string();
 
@@ -657,11 +737,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                 .get("transform")
                 .map(|v| {
                     serde_json::from_value::<TransformExpression>(v.clone()).map_err(|e| {
-                        deno_core::anyhow::anyhow!(
-                            "Failed to parse transform for property '{}': {}",
-                            name,
-                            e
-                        )
+                        anyhow::anyhow!("Failed to parse transform for property '{}': {}", name, e)
                     })
                 })
                 .transpose()?;
@@ -683,6 +759,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                 transform,
                 interpretation_hint: None,
                 identity: false,
+                in_values: None,
                 ordering: None,
                 local: prop_meta["local"].as_bool().unwrap_or(false),
             });
@@ -735,6 +812,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                 transform: None,
                 interpretation_hint: None,
                 identity: false,
+                in_values: None,
                 ordering: ordering.clone(),
                 local: rel_meta["local"].as_bool().unwrap_or(false),
             });
@@ -766,6 +844,11 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                     max_count,
                     target_class_name,
                     target_class_uri,
+                    target_class: target_shape["targetClass"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
+                    polymorphic: rel_meta["polymorphic"].as_bool().unwrap_or(false),
                 });
             }
         }
@@ -938,5 +1021,95 @@ mod tests {
         let parsed = parse_where_predicates_literal(Some(&literal)).unwrap();
         assert_eq!(parsed.get("status").unwrap(), "todo://status");
         assert_eq!(parsed.get("priority").unwrap(), "todo://priority");
+    }
+
+    /// The minimal SHACL links of a `Task` class with one `status` string
+    /// property, plus `extra` links on the property shape — for hand-written
+    /// `sh://in` targets the writer would never emit (malformed payloads).
+    fn store_with_status_prop(extra: &[(&str, &str, &str)]) -> SparqlStore {
+        use crate::agent::signatures::TestSigner;
+        use crate::types::{Link, LinkExpression, LinkStatus};
+        let store = SparqlStore::new(None).unwrap();
+        let mut links = vec![
+            ("todo://Task", "rdf://type", "ad4m://SubjectClass"),
+            ("todo://Task", "ad4m://shape", "todo://TaskShape"),
+            ("todo://TaskShape", "sh://property", "todo://Task.status"),
+            ("todo://Task.status", "sh://path", "todo://status"),
+            ("todo://Task.status", "rdf://type", "sh://PropertyShape"),
+            ("todo://Task.status", "sh://datatype", "xsd://string"),
+        ];
+        links.extend_from_slice(extra);
+        let signer = TestSigner::generate();
+        for (source, predicate, target) in links {
+            let signed = signer.sign(Link {
+                source: source.to_string(),
+                predicate: Some(predicate.to_string()),
+                target: target.to_string(),
+            });
+            let mut le = LinkExpression::from(signed);
+            // The store refuses status-less inserts.
+            le.status = Some(LinkStatus::Shared);
+            store.add_link(&le).unwrap();
+        }
+        store
+    }
+
+    fn status_prop(shape: &ModelShape) -> &ShapeProperty {
+        shape
+            .properties
+            .iter()
+            .find(|p| p.name == "status")
+            .expect("status property")
+    }
+
+    /// `sh://in` decodes through the real store round trip: object entries
+    /// keep `value`/`label`, bare strings and numbers stay as they are, in
+    /// declared order.
+    #[test]
+    fn in_values_decode_object_bare_and_number_entries() {
+        let payload = serde_json::to_string(&json!([
+            {"value": "todo", "label": "Todo"},
+            {"value": "doing"},
+            "done",
+            3
+        ]))
+        .unwrap();
+        let in_target = format!("literal:string:{payload}");
+        let store = store_with_status_prop(&[("todo://Task.status", "sh://in", &in_target)]);
+        let shape = load_shape(&store, "Task").unwrap();
+        assert_eq!(
+            json!(status_prop(&shape).in_values.as_ref()),
+            json!([{"value": "todo", "label": "Todo"}, {"value": "doing"}, "done", 3]),
+        );
+    }
+
+    /// `in: []` is a constraint that allows nothing — it must round-trip as
+    /// `Some([])`, not collapse into `None` (which would mean unconstrained).
+    #[test]
+    fn empty_in_list_stays_an_empty_constraint() {
+        let store =
+            store_with_status_prop(&[("todo://Task.status", "sh://in", "literal:string:[]")]);
+        let shape = load_shape(&store, "Task").unwrap();
+        assert_eq!(
+            status_prop(&shape).in_values,
+            Some(Vec::new()),
+            "an explicit empty list is present-and-empty"
+        );
+    }
+
+    /// A malformed `sh://in` target drops the constraint with exactly one
+    /// warning — the class stays readable and the property is unconstrained.
+    #[test]
+    fn malformed_in_target_warns_once_and_leaves_property_unconstrained() {
+        let before = IN_VALUES_WARN_COUNT.load(std::sync::atomic::Ordering::SeqCst);
+        let store = store_with_status_prop(&[(
+            "todo://Task.status",
+            "sh://in",
+            "literal:string:not-a-json-array",
+        )]);
+        let shape = load_shape(&store, "Task").expect("class stays readable");
+        assert_eq!(status_prop(&shape).in_values, None);
+        let warned = IN_VALUES_WARN_COUNT.load(std::sync::atomic::Ordering::SeqCst) - before;
+        assert_eq!(warned, 1, "exactly one warning per malformed property");
     }
 }

@@ -641,7 +641,6 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
     modelQuery: jest.fn(),
     infer: jest.fn(),
     uuid: 'test-perspective-uuid',
-    stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue('Recipe')
   } as any;
 
   beforeEach(() => {
@@ -775,6 +774,108 @@ describe("Ad4mModel query methods (modelQuery integration)", () => {
     expect(page.pageSize).toBe(10);
     expect(page.pageNumber).toBe(1);
   });
+
+  describe("cursor pages (P8)", () => {
+    const sentQuery = (call = 0) => JSON.parse(mockPerspective.modelQuery.mock.calls[call][1]);
+
+    it("Ad4mModel.page() asks for the first page with an empty cursor and no offset", async () => {
+      mockPerspective.modelQuery.mockResolvedValue({
+        instances: [{ id: "literal:recipe1", name: "Pasta" }],
+        nextCursor: "c1",
+      });
+
+      const page = await Recipe.page(mockPerspective, 10);
+
+      expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
+      const q = sentQuery();
+      expect(q.after).toBe("");
+      expect(q.limit).toBe(10);
+      expect(q.offset).toBeUndefined();
+      expect(q.count).toBeUndefined();
+      expect(page.results).toHaveLength(1);
+      expect(page.nextCursor).toBe("c1");
+      expect(page.pageSize).toBe(10);
+    });
+
+    it("Ad4mModel.page() continues from the cursor it is given and keeps the query", async () => {
+      mockPerspective.modelQuery.mockResolvedValue({ instances: [] });
+
+      const page = await Recipe.page(mockPerspective, 5, "c1", {
+        where: { name: "Pasta" },
+        order: { createdAt: "DESC" },
+      });
+
+      const q = sentQuery();
+      expect(q.after).toBe("c1");
+      expect(q.limit).toBe(5);
+      expect(q.where).toEqual({ name: "Pasta" });
+      expect(q.order).toEqual([["createdAt", "DESC"]]);
+      expect(page.nextCursor).toBeUndefined();
+    });
+
+    it("Ad4mModel.page() asks for no count: a cursor page returns no total", async () => {
+      mockPerspective.modelQuery.mockResolvedValue({ instances: [] });
+
+      await Recipe.page(mockPerspective, 5, "c1", { count: true } as any);
+
+      const q = sentQuery();
+      expect(q.after).toBe("c1");
+      expect(q.count).toBeUndefined();
+    });
+
+    it("ModelQueryBuilder.page() sends the cursor instead of an offset", async () => {
+      mockPerspective.modelQuery.mockResolvedValue({ instances: [], nextCursor: "c2" });
+
+      const page = await Recipe.query(mockPerspective)
+        .where({ rating: { gt: 3 } })
+        .offset(30)
+        .page(10, "c1");
+
+      const q = sentQuery();
+      expect(q.after).toBe("c1");
+      expect(q.limit).toBe(10);
+      expect(q.offset).toBeUndefined();
+      expect(page.nextCursor).toBe("c2");
+    });
+
+    it("paginate() pages by offset and drops a cursor from the starting query", async () => {
+      mockPerspective.modelQuery.mockResolvedValue({ instances: [], totalCount: 0 });
+
+      await Recipe.paginate(mockPerspective, 10, 3, { after: "c1" } as any);
+
+      const q = sentQuery();
+      expect(q.after).toBeUndefined();
+      expect(q.offset).toBe(20);
+    });
+
+    it("count() drops a cursor from the query", async () => {
+      mockPerspective.modelQuery.mockResolvedValue({ instances: [], totalCount: 7 });
+
+      const count = await Recipe.count(mockPerspective, { after: "c1" } as any);
+
+      const q = sentQuery();
+      expect(q.after).toBeUndefined();
+      expect(q.limit).toBe(0);
+      expect(q.count).toBe(true);
+      expect(count).toBe(7);
+
+      // The builder's count() drops it too — a seeded cursor counts the same scope.
+      const viaBuilder = await Recipe.query(mockPerspective, { after: "c1" } as any).count();
+      const q2 = sentQuery(1);
+      expect(q2.after).toBeUndefined();
+      expect(q2.limit).toBe(0);
+      expect(viaBuilder).toBe(7);
+    });
+
+    it("findAll forwards `after` and executeModelQuery returns nextCursor", async () => {
+      mockPerspective.modelQuery.mockResolvedValue({ instances: [], nextCursor: "c3" });
+
+      const { nextCursor } = await (Recipe as any).executeModelQuery(mockPerspective, { after: "", limit: 2 });
+
+      expect(sentQuery().after).toBe("");
+      expect(nextCursor).toBe("c3");
+    });
+  });
 });
 
 describe("Ad4mModel.count() with advanced where conditions", () => {
@@ -797,7 +898,6 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     modelQuery: jest.fn(),
     infer: jest.fn(),
     uuid: 'test-perspective-uuid',
-    stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue('Recipe')
   } as any;
 
   beforeEach(() => {
@@ -1340,6 +1440,135 @@ describe("ModelQueryBuilder subscribe callback timing", () => {
   });
 });
 
+describe("totalCount is asked for only by the readers of it (P3)", () => {
+  const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+  @Model({ name: "CountedThing" })
+  class CountedThing extends Ad4mModel {
+    @Flag({ through: "test://type", value: "test://counted" })
+    type: string = "test://counted";
+    @Property({ through: "test://name" })
+    name: string = "";
+  }
+
+  function perspective() {
+    const client = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: "count-sub",
+        revision: 0,
+        result: { instances: [], totalCount: 4 },
+      }),
+      onQueryUpdate: jest.fn(() => () => {}),
+      onReconnect: jest.fn(() => () => {}),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+    return {
+      uuid: "count-uuid",
+      client,
+      modelQuery: jest.fn().mockResolvedValue({ instances: [], totalCount: 4 }),
+      modelSubscribe: jest.fn((className: string, queryJson: string) =>
+        client.modelSubscribe("count-uuid", className, queryJson),
+      ),
+    } as any;
+  }
+  const sentQuery = (fn: jest.Mock) => JSON.parse(fn.mock.calls[0][1]);
+
+  it("findAll() and get() send no count", async () => {
+    const p = perspective();
+    await CountedThing.findAll(p, { limit: 5 });
+    expect(sentQuery(p.modelQuery)).not.toHaveProperty("count");
+    const q = perspective();
+    await CountedThing.query(q).limit(5).get();
+    expect(sentQuery(q.modelQuery)).not.toHaveProperty("count");
+  });
+
+  it("findAllAndCount(), count() and the builder's count() send count: true", async () => {
+    for (const run of [
+      (p: any) => CountedThing.findAllAndCount(p, { limit: 5 }),
+      (p: any) => CountedThing.count(p),
+      (p: any) => CountedThing.query(p).count(),
+    ]) {
+      const p = perspective();
+      await run(p);
+      expect(sentQuery(p.modelQuery).count).toBe(true);
+    }
+  });
+
+  it("countSubscribe() opens its subscription with count: true", async () => {
+    const p = perspective();
+    const builder = CountedThing.query(p);
+    expect(await builder.countSubscribe(() => {})).toBe(4);
+    expect(sentQuery(p.modelSubscribe)).toMatchObject({ limit: 0, count: true });
+    builder.dispose();
+  });
+});
+
+describe("subscriptions never send a cursor (P8)", () => {
+  const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+  @Model({ name: "CursorlessThing" })
+  class CursorlessThing extends Ad4mModel {
+    @Flag({ through: "test://type", value: "test://cursorless" })
+    type: string = "test://cursorless";
+    @Property({ through: "test://name" })
+    name: string = "";
+  }
+
+  function perspective() {
+    const client = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: "cursorless-sub",
+        revision: 0,
+        result: { instances: [], totalCount: 0 },
+      }),
+      onQueryUpdate: jest.fn(() => () => {}),
+      onReconnect: jest.fn(() => () => {}),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+    return {
+      uuid: "cursorless-uuid",
+      client,
+      modelQuery: jest.fn().mockResolvedValue({ instances: [], totalCount: 0 }),
+      modelSubscribe: jest.fn((className: string, queryJson: string) =>
+        client.modelSubscribe("cursorless-uuid", className, queryJson),
+      ),
+    } as any;
+  }
+  const sentQueries = (fn: jest.Mock) => fn.mock.calls.map((c: any[]) => JSON.parse(c[1]));
+  const withCursor = { limit: 5, after: "c1" };
+
+  it("subscribe() drops the query's `after`", async () => {
+    const p = perspective();
+    const builder = CursorlessThing.query(p, withCursor);
+    await builder.subscribe(() => {});
+    expect(sentQueries(p.modelSubscribe)).toHaveLength(1);
+    expect(sentQueries(p.modelSubscribe)[0]).not.toHaveProperty("after");
+    expect(sentQueries(p.modelSubscribe)[0].limit).toBe(5);
+    builder.dispose();
+  });
+
+  it("countSubscribe() drops the query's `after`", async () => {
+    const p = perspective();
+    const builder = CursorlessThing.query(p, withCursor);
+    await builder.countSubscribe(() => {});
+    expect(sentQueries(p.modelSubscribe)[0]).not.toHaveProperty("after");
+    builder.dispose();
+  });
+
+  it("paginateSubscribe() subscribes to its offset page without `after`", async () => {
+    const p = perspective();
+    const builder = CursorlessThing.query(p, withCursor);
+    await builder.paginateSubscribe(10, 2, () => {});
+    // The subscription is the page itself: no separate page read.
+    const [sub] = sentQueries(p.modelSubscribe);
+    expect(sub).not.toHaveProperty("after");
+    expect(sub.offset).toBe(10);
+    expect(sub.limit).toBe(10);
+    expect(sentQueries(p.modelQuery)).toHaveLength(0);
+    builder.dispose();
+  });
+});
+
 describe("ModelQueryBuilder paginateSubscribe", () => {
   // The subscription is the paged query itself (PERF-11). Since #1237 the
   // executor re-runs a paged subscription when a record outside the page
@@ -1521,6 +1750,51 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
       errorSpy.mockRestore();
     }
   });
+
+  it("paginateSubscribe() rejects a first answer without totalCount and ends its subscription", async () => {
+    const { mockClient, mockPerspective } = buildMocks({ instances: [] });
+    const builder = testModel("PaginateNoCount").query(mockPerspective);
+
+    await expect(builder.paginateSubscribe(10, 1, () => {})).rejects.toThrow(/totalCount/);
+
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "paginate-sub");
+    // The failed call left nothing for the builder to end.
+    builder.dispose();
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+  });
+
+  it("countSubscribe() rejects a first answer without totalCount and ends its subscription", async () => {
+    const { mockClient, mockPerspective } = buildMocks({ instances: [] });
+    const builder = testModel("CountNoCount").query(mockPerspective);
+
+    await expect(builder.countSubscribe(() => {})).rejects.toThrow(/totalCount/);
+
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "paginate-sub");
+    builder.dispose();
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+  });
+
+  it("countSubscribe() skips a pushed update without totalCount and keeps delivering", async () => {
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { mockPerspective, push } = buildMocks({ instances: [], totalCount: 1 });
+      const counts: number[] = [];
+      const builder = testModel("CountPushNoCount").query(mockPerspective);
+      expect(await builder.countSubscribe(c => counts.push(c))).toBe(1);
+
+      // The push runs the client's update dispatch: it must not throw.
+      expect(() => push({ result: { instances: [] } })).not.toThrow();
+      expect(counts).toEqual([]);
+      push({ result: { instances: [], totalCount: 2 } });
+      await settle();
+
+      expect(counts).toEqual([2]);
+      expect(errorSpy.mock.calls.some(args => args[0] === "Count subscription error:")).toBe(true);
+      builder.dispose();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
 });
 
 // ============================================================================
@@ -1622,50 +1896,7 @@ describe("ModelQueryBuilder reconnect", () => {
 // Performance Optimisation Tests
 // ============================================================================
 
-import { getCachedResult, setCachedResult, clearQueryCache, queryCacheSize } from "./query-cache";
 import { getPropertiesMetadata, getRelationsMetadata, getMemoizedSHACL } from "./decorators";
-
-describe("QueryCache", () => {
-  beforeEach(() => clearQueryCache());
-
-  it("should return undefined for cache miss", () => {
-    expect(getCachedResult("uuid1", "SELECT ?s WHERE {}")).toBeUndefined();
-  });
-
-  it("should return cached result within TTL", () => {
-    const result = [{ s: "test" }];
-    setCachedResult("uuid1", "SELECT ?s WHERE {}", result);
-    expect(getCachedResult("uuid1", "SELECT ?s WHERE {}")).toBe(result);
-  });
-
-  it("should expire after TTL", async () => {
-    setCachedResult("uuid1", "SELECT ?s WHERE {}", [{ s: "test" }], 50);
-    await new Promise(r => setTimeout(r, 60));
-    expect(getCachedResult("uuid1", "SELECT ?s WHERE {}")).toBeUndefined();
-  });
-
-  it("should cache independently per perspective", () => {
-    setCachedResult("uuid1", "SELECT ?s WHERE {}", "result1");
-    setCachedResult("uuid2", "SELECT ?s WHERE {}", "result2");
-    expect(getCachedResult("uuid1", "SELECT ?s WHERE {}")).toBe("result1");
-    expect(getCachedResult("uuid2", "SELECT ?s WHERE {}")).toBe("result2");
-  });
-
-  it("should cache independently per query", () => {
-    setCachedResult("uuid1", "query1", "r1");
-    setCachedResult("uuid1", "query2", "r2");
-    expect(getCachedResult("uuid1", "query1")).toBe("r1");
-    expect(getCachedResult("uuid1", "query2")).toBe("r2");
-  });
-
-  it("should clear all entries", () => {
-    setCachedResult("uuid1", "q1", "r1");
-    setCachedResult("uuid2", "q2", "r2");
-    expect(queryCacheSize()).toBe(2);
-    clearQueryCache();
-    expect(queryCacheSize()).toBe(0);
-  });
-});
 
 describe("SHACL Memoisation", () => {
   it("should memoise generateSHACL() per class", () => {
@@ -1907,7 +2138,6 @@ describe("deepQuery — getter evaluation", () => {
     }),
     get: jest.fn().mockResolvedValue([]),
     getExpression: jest.fn().mockResolvedValue(null),
-    stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue("DeepQueryTestMessage"),
   };
 
   beforeEach(() => {
@@ -1954,7 +2184,7 @@ describe("deepQuery — getter evaluation", () => {
       // Should make exactly 1 RPC call via perspective.evaluateGetters
       expect(mockPerspective.evaluateGetters).toHaveBeenCalledTimes(1);
       const [className, instanceIds, propertyNames] = mockPerspective.evaluateGetters.mock.calls[0];
-      expect(className).toBe("DeepQueryTestMessage");
+      expect(className).toBe("flux://DeepQueryTestMessage");
       expect(instanceIds).toEqual(["flux://msg-0", "flux://msg-1"]);
       expect(propertyNames).toEqual(["replyingTo"]);
       // No querySparql calls — all done in-process
@@ -1968,7 +2198,7 @@ describe("deepQuery — getter evaluation", () => {
 
       expect(mockPerspective.evaluateGetters).toHaveBeenCalledTimes(1);
       const [className, instanceIds, propertyNames] = mockPerspective.evaluateGetters.mock.calls[0];
-      expect(className).toBe("DeepQueryTestMessage");
+      expect(className).toBe("flux://DeepQueryTestMessage");
       expect(instanceIds).toEqual(["flux://msg-0", "flux://msg-1"]);
       expect(propertyNames).toBeUndefined();
     });
@@ -2168,6 +2398,19 @@ describe("Ad4mModel.fromSHACL()", () => {
     expect(typeof (Cls as any).generateSHACL).toBe("function");
   });
 
+  it("keeps the shape's target class: the namespace is everything before the local name", () => {
+    for (const [targetClass, name] of [
+      ["urn:isbn:Book", "Book"],
+      ["a://Note", "Note"],
+      ["http://x.org/ns#Thing", "Thing"],
+      ["a://b/c/Thing", "Thing"],
+    ]) {
+      const Cls = Ad4mModel.fromSHACL(makeShape(targetClass, []), name);
+      expect(Cls.getTargetClass()).toBe(targetClass);
+      expect(Cls.getClassName()).toBe(name);
+    }
+  });
+
   it("handles shapes with no properties", () => {
     const shape = makeShape("flux://Empty", []);
     const Cls = Ad4mModel.fromSHACL(shape, "Empty");
@@ -2209,7 +2452,6 @@ describe("IncludeProjection type guard and key splitting", () => {
     modelQuery: jest.fn(),
     infer: jest.fn(),
     uuid: "test-perspective-uuid",
-    stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue("Post"),
   } as any;
 
   beforeEach(() => {
@@ -2328,7 +2570,7 @@ describe("IncludeProjection type guard and key splitting", () => {
     const qi = JSON.parse(queryJson);
 
     // targetClassName drives the executor's cache lookup for the target shape.
-    expect(qi.projections?.$signalCount?.targetClassName).toBe("Signal");
+    expect(qi.projections?.$signalCount?.targetClassName).toBe("signal://Signal");
   });
 
   it("leaves targetClassName absent when relation has no target decorator", async () => {
@@ -2384,7 +2626,7 @@ describe("IncludeProjection type guard and key splitting", () => {
     expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
     expect(posts.include).toBeUndefined();
     // Read against the relation's target, so it is tagged as a top-level one would be.
-    expect(posts.projections.$signalCount.targetClassName).toBe("Signal");
+    expect(posts.projections.$signalCount.targetClassName).toBe("signal://Signal");
   });
 
   it("keeps the nested relations beside the projections it moves", async () => {
@@ -2414,7 +2656,7 @@ describe("IncludeProjection type guard and key splitting", () => {
     expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
     expect(posts.include).toBeUndefined();
     // Tagged against Post, the class two relations down.
-    expect(posts.projections.$signalCount.targetClassName).toBe("Signal");
+    expect(posts.projections.$signalCount.targetClassName).toBe("signal://Signal");
   });
 
   it("leaves a projection untagged under a polymorphic relation that declares a target", async () => {
@@ -2639,9 +2881,6 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
       createSubject: jest.fn().mockResolvedValue(undefined),
       createBatch: jest.fn().mockResolvedValue("batch-generated"),
       commitBatch: jest.fn().mockResolvedValue(undefined),
-      stringOrTemplateObjectToSubjectClassName: jest
-        .fn()
-        .mockResolvedValue("TestRelationship"),
       uuid: "test-perspective-uuid",
     }) as any;
 
@@ -2873,8 +3112,8 @@ describe("Polymorphic relations", () => {
         {
           id: "we://c/1",
           children: [
-            { id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" },
-            { id: "we://i/1", __subjectClass: "PolyImageBlock", src: "cat.png" },
+            { id: "we://t/1", __subjectClass: "we://PolyTextBlock", text: "hello" },
+            { id: "we://i/1", __subjectClass: "we://PolyImageBlock", src: "cat.png" },
           ],
         },
       ],
@@ -2892,16 +3131,37 @@ describe("Polymorphic relations", () => {
     expect(collection.children[1].src).toBe("cat.png");
   });
 
-  it("maps a child to its class by the name the class itself declares", () => {
-    // The mapping is derived from `@Model({ name })`, not restated beside the
-    // class list — the two cannot drift apart because there is only one of them.
-    expect((PolyTextBlock as any).className).toBe("PolyTextBlock");
+  it("snapshots each included child, so it is clean and save() updates it", () => {
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [{ id: "we://t/1", __subjectClass: "we://PolyTextBlock", text: "hello" }],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    expect(collection.isDirty()).toBe(false);
+    expect(collection.children[0].isDirty()).toBe(false);
+    collection.children[0].text = "changed";
+    expect(collection.children[0].changedFields()).toEqual(["text"]);
+  });
+
+  it("maps a child to its class by the target class IRI the class itself declares", () => {
+    // The mapping is derived from the class's own target class, not restated
+    // beside the class list — the two cannot drift apart because there is only
+    // one of them. By IRI, so two classes of one name stay apart.
+    expect((PolyTextBlock as any).getTargetClass()).toBe("we://PolyTextBlock");
 
     const raw = {
       instances: [
         {
           id: "we://c/1",
-          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+          children: [{ id: "we://t/1", __subjectClass: "we://PolyTextBlock", text: "hello" }],
         },
       ],
     };
@@ -2925,8 +3185,8 @@ describe("Polymorphic relations", () => {
           children: [
             {
               id: "we://b/1",
-              __subjectClass: "PolyTextBlock",
-              __subjectClasses: ["PolyTextBlock", "PolyBookmark"],
+              __subjectClass: "we://PolyTextBlock",
+              __subjectClasses: ["we://PolyTextBlock", "we://PolyBookmark"],
               text: "hello",
             },
           ],
@@ -2940,7 +3200,7 @@ describe("Polymorphic relations", () => {
 
     const child = collection.children[0];
     expect(child).toBeInstanceOf(PolyTextBlock);
-    expect(child.__subjectClasses).toEqual(["PolyTextBlock", "PolyBookmark"]);
+    expect(child.__subjectClasses).toEqual(["we://PolyTextBlock", "we://PolyBookmark"]);
   });
 
   it("leaves children as data when no instantiateAs is given", () => {
@@ -2954,7 +3214,7 @@ describe("Polymorphic relations", () => {
       instances: [
         {
           id: "we://c/1",
-          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+          children: [{ id: "we://t/1", __subjectClass: "we://PolyTextBlock", text: "hello" }],
         },
       ],
     };
@@ -2966,7 +3226,7 @@ describe("Polymorphic relations", () => {
     // Still correct data, just untyped — the concrete class name is present for
     // a caller that wants to do its own dispatch.
     expect(collection.children[0].text).toBe("hello");
-    expect(collection.children[0].__subjectClass).toBe("PolyTextBlock");
+    expect(collection.children[0].__subjectClass).toBe("we://PolyTextBlock");
   });
 
   it("keeps a child whose class is not listed, rather than dropping it", () => {
@@ -2980,8 +3240,8 @@ describe("Polymorphic relations", () => {
         {
           id: "we://c/1",
           children: [
-            { id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" },
-            { id: "we://k/1", __subjectClass: "PolyTaskBlock", done: true },
+            { id: "we://t/1", __subjectClass: "we://PolyTextBlock", text: "hello" },
+            { id: "we://k/1", __subjectClass: "we://PolyTaskBlock", done: true },
           ],
         },
       ],
@@ -2994,7 +3254,7 @@ describe("Polymorphic relations", () => {
     expect(collection.children).toHaveLength(2);
     expect(collection.children[0]).toBeInstanceOf(PolyTextBlock);
     expect(collection.children[1].done).toBe(true);
-    expect(collection.children[1].__subjectClass).toBe("PolyTaskBlock");
+    expect(collection.children[1].__subjectClass).toBe("we://PolyTaskBlock");
   });
 
   it("does not construct an unlisted child as the relation's declared target", () => {
@@ -3024,8 +3284,8 @@ describe("Polymorphic relations", () => {
         {
           id: "we://c/1",
           children: [
-            { id: "we://k/1", __subjectClass: "PolyTaskBlock", done: true },
-            { id: "we://b/1", __subjectClass: "PolyBaseBlock", base: "declared" },
+            { id: "we://k/1", __subjectClass: "we://PolyTaskBlock", done: true },
+            { id: "we://b/1", __subjectClass: "we://PolyBaseBlock", base: "declared" },
           ],
         },
       ],
@@ -3039,7 +3299,7 @@ describe("Polymorphic relations", () => {
     expect(unlisted).toBeDefined();
     expect(unlisted).not.toBeInstanceOf(PolyBaseBlock);
     expect(unlisted.done).toBe(true);
-    expect(unlisted.__subjectClass).toBe("PolyTaskBlock");
+    expect(unlisted.__subjectClass).toBe("we://PolyTaskBlock");
     // The declared target is still right when it is the class the executor named.
     expect(declared).toBeInstanceOf(PolyBaseBlock);
     expect(declared.base).toBe("declared");
@@ -3066,8 +3326,8 @@ describe("Polymorphic relations", () => {
         {
           id: "we://c/1",
           children: [
-            { id: "we://k/1", __subjectClass: "PolyTaskBlock", done: true },
-            { id: "we://b/1", __subjectClass: "PolyBaseOnlyBlock", base: "declared" },
+            { id: "we://k/1", __subjectClass: "we://PolyTaskBlock", done: true },
+            { id: "we://b/1", __subjectClass: "we://PolyBaseOnlyBlock", base: "declared" },
           ],
         },
       ],
@@ -3080,7 +3340,7 @@ describe("Polymorphic relations", () => {
     const [unlisted, declared] = collection.children;
     expect(unlisted).not.toBeInstanceOf(PolyBaseOnlyBlock);
     expect(unlisted.done).toBe(true);
-    expect(unlisted.__subjectClass).toBe("PolyTaskBlock");
+    expect(unlisted.__subjectClass).toBe("we://PolyTaskBlock");
     expect(declared).toBeInstanceOf(PolyBaseOnlyBlock);
     expect(declared.base).toBe("declared");
   });
@@ -3107,7 +3367,7 @@ describe("Polymorphic relations", () => {
       instances: [
         {
           id: "we://c/1",
-          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+          children: [{ id: "we://t/1", __subjectClass: "we://PolyTextBlock", text: "hello" }],
         },
       ],
     };
@@ -3129,7 +3389,7 @@ describe("Polymorphic relations", () => {
 
     expect(JSON.parse(queryJson).include.children).toEqual({
       polymorphic: true,
-      preferClasses: ["PolyTextBlock", "PolyImageBlock"],
+      preferClasses: ["we://PolyTextBlock", "we://PolyImageBlock"],
     });
   });
 
@@ -3144,17 +3404,17 @@ describe("Polymorphic relations", () => {
     // Declaration order is the preference order — a target conforming to two of
     // them is read as whichever was named first.
     expect(JSON.parse(queryJson).include.children.preferClasses).toEqual([
-      "PolyTextBlock",
-      "PolyImageBlock",
+      "we://PolyTextBlock",
+      "we://PolyImageBlock",
     ]);
   });
 
   it("lets an explicit preference at the call site win over the declaration", () => {
     const { queryJson } = (PolyCollection as any).prepareModelQueryParams({
-      include: { children: { preferClasses: ["PolyBookmark"] } },
+      include: { children: { preferClasses: ["we://PolyBookmark"] } },
     });
 
-    expect(JSON.parse(queryJson).include.children.preferClasses).toEqual(["PolyBookmark"]);
+    expect(JSON.parse(queryJson).include.children.preferClasses).toEqual(["we://PolyBookmark"]);
   });
 
   it("sends no preference for a polymorphic relation that names no classes", () => {
@@ -3199,7 +3459,7 @@ describe("Polymorphic relations", () => {
     const include = JSON.parse(queryJson).include;
     expect(include.sections.include.children).toEqual({
       polymorphic: true,
-      preferClasses: ["PolyTextBlock", "PolyImageBlock"],
+      preferClasses: ["we://PolyTextBlock", "we://PolyImageBlock"],
     });
   });
 
@@ -3563,14 +3823,14 @@ describe("Ad4mModel.findAllOf / queryOf (one query over several classes, #1238)"
 
   const rows = {
     instances: [
-      { id: "u://t1", status: "open", __subjectClass: "UnionTaskU", __subjectClasses: ["UnionTaskU"] },
-      { id: "u://n1", body: "hi", __subjectClass: "UnionNoteU", __subjectClasses: ["UnionNoteU"] },
-      { id: "u://x", __subjectClass: "Other", __subjectClasses: ["Other"] },
+      { id: "u://t1", status: "open", __subjectClass: "u://UnionTaskU", __subjectClasses: ["u://UnionTaskU"] },
+      { id: "u://n1", body: "hi", __subjectClass: "u://UnionNoteU", __subjectClasses: ["u://UnionNoteU"] },
+      { id: "u://x", __subjectClass: "o://Other", __subjectClasses: ["o://Other"] },
     ],
     totalCount: 7,
   };
 
-  it("sends every class name and builds each row as its own class", async () => {
+  it("sends every class's target class IRI and builds each row as its own class", async () => {
     const perspective = { modelQuery: jest.fn().mockResolvedValue(rows), uuid: "p" } as any;
     const results = await Ad4mModel.findAllOf(perspective, [UnionTaskU, UnionNoteU], {
       where: { status: "open" },
@@ -3580,7 +3840,7 @@ describe("Ad4mModel.findAllOf / queryOf (one query over several classes, #1238)"
     });
 
     const [classNames, queryJson] = perspective.modelQuery.mock.calls[0];
-    expect(classNames).toEqual(["UnionTaskU", "UnionNoteU"]);
+    expect(classNames).toEqual(["u://UnionTaskU", "u://UnionNoteU"]);
     const sent = JSON.parse(queryJson);
     expect(sent.where).toEqual({ status: "open" });
     expect(sent.order).toEqual([["status", "DESC"]]);
@@ -3650,5 +3910,858 @@ describe("Ad4mModel.findAllOf / queryOf (one query over several classes, #1238)"
         parent: { id: "u://board", model: UnionBoardU },
       }),
     ).toThrow(/different predicates/);
+  });
+});
+
+describe("save() on an instance pushed by a subscription", () => {
+  @Model({ name: "PushedTask" })
+  class PushedTask extends Ad4mModel {
+    @Flag({ through: "push://kind", value: "push://task" })
+    kind: string = "";
+    @Property({ through: "push://title" })
+    title: string = "";
+  }
+
+  @Model({ name: "PushedNote" })
+  class PushedNote extends Ad4mModel {
+    @Flag({ through: "push://kind", value: "push://note" })
+    kind: string = "";
+    @Property({ through: "push://body" })
+    body: string = "";
+  }
+
+  const makePerspective = (initial: any[]) => {
+    let push: (result: any) => void = () => {};
+    const client = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: "sub-push",
+        revision: 0,
+        result: { instances: initial, totalCount: initial.length },
+      }),
+      onQueryUpdate: jest.fn((cb: any) => {
+        push = updatesFor("sub-push", cb);
+        return () => {};
+      }),
+      onReconnect: jest.fn(() => () => {}),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+    const perspective = {
+      uuid: "test-uuid",
+      client,
+      modelSubscribe: (className: any, queryJson: string) =>
+        client.modelSubscribe("test-uuid", className, queryJson),
+      executeAction: jest.fn().mockResolvedValue(undefined),
+      createSubject: jest.fn().mockResolvedValue(undefined),
+      createBatch: jest.fn().mockResolvedValue("batch-1"),
+      commitBatch: jest.fn().mockResolvedValue(undefined),
+      stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue("PushedTask"),
+    } as any;
+    return { perspective, push: (instances: any[]) => push({ instances, totalCount: instances.length }) };
+  };
+
+  /** The value each executeAction call wrote. */
+  const written = (perspective: any) =>
+    perspective.executeAction.mock.calls.map((call: any[]) => call[2]?.[0]?.value);
+
+  it("updates the instance rather than creating a second one", async () => {
+    const { perspective, push } = makePerspective([{ id: "push://t1", kind: "push://task", title: "v1" }]);
+    let pushed: PushedTask[] = [];
+    await PushedTask.query(perspective).subscribe((results) => { pushed = results; });
+
+    // The record changes elsewhere; the subscription pushes the new state.
+    push([{ id: "push://t1", kind: "push://task", title: "v2" }]);
+    expect(pushed).toHaveLength(1);
+
+    const task = pushed[0];
+    expect(task.isDirty()).toBe(false);
+    task.title = "v3";
+    expect(task.changedFields()).toEqual(["title"]);
+    await task.save("batch-1");
+
+    expect(perspective.createSubject).not.toHaveBeenCalled();
+    expect(written(perspective)).toEqual(["literal:string:v3"]);
+  });
+
+  it("updates an instance pushed to a queryOf() subscription", async () => {
+    const { perspective, push } = makePerspective([]);
+    let pushed: Ad4mModel[] = [];
+    await Ad4mModel.queryOf(perspective, [PushedTask, PushedNote]).subscribe((results) => { pushed = results; });
+
+    push([
+      { id: "push://t1", kind: "push://task", title: "v2", __subjectClass: "push://PushedTask" },
+      { id: "push://n1", kind: "push://note", body: "b", __subjectClass: "push://PushedNote" },
+    ]);
+    const note = pushed[1] as PushedNote;
+    expect(note).toBeInstanceOf(PushedNote);
+    note.body = "b2";
+    await note.save("batch-1");
+
+    expect(perspective.createSubject).not.toHaveBeenCalled();
+    expect(written(perspective)).toEqual(["literal:string:b2"]);
+  });
+});
+
+describe("includeAll", () => {
+  const { BelongsToOne, BelongsToMany } = require("./decorators");
+
+  @Model({ name: "IncAllItem" })
+  class IncAllItem extends Ad4mModel {
+    @Property({ through: "inc://name" })
+    name: string = "";
+  }
+
+  @Model({ name: "IncAllList" })
+  class IncAllList extends Ad4mModel {
+    @Property({ through: "inc://title" })
+    title: string = "";
+    @HasMany(() => IncAllItem, { through: "inc://item" })
+    items: string[] = [];
+    @HasOne(() => IncAllItem, { through: "inc://pinned" })
+    pinned: string = "";
+    @BelongsToOne(() => IncAllList, { through: "inc://sublist" })
+    owner: string = "";
+    @BelongsToMany(() => IncAllList, { through: "inc://linked" })
+    linkedFrom: string[] = [];
+  }
+
+  @Model({ name: "IncAllOther" })
+  class IncAllOther extends Ad4mModel {
+    @Property({ through: "inc://other" })
+    other: string = "";
+  }
+
+  const row = {
+    id: "inc://l1",
+    title: "groceries",
+    items: [{ id: "inc://i1", name: "milk" }],
+    pinned: { id: "inc://i2", name: "eggs" },
+    owner: "inc://parent",
+    linkedFrom: ["inc://l0"],
+    __subjectClass: "inc://IncAllList",
+  };
+  const perspectiveReturning = (instances: any[]) =>
+    ({ uuid: "p", modelQuery: jest.fn().mockResolvedValue({ instances, totalCount: instances.length }) }) as any;
+  const sentInclude = (perspective: any) => JSON.parse(perspective.modelQuery.mock.calls[0][1]).include;
+
+  it("asks for the forward relations only", () => {
+    const { queryJson } = (IncAllList as any).prepareModelQueryParams({ includeAll: true });
+    expect(Object.keys(JSON.parse(queryJson).include).sort()).toEqual(["items", "pinned"]);
+  });
+
+  it("hydrates the forward relations and leaves belongs-to ones as ids", async () => {
+    const perspective = perspectiveReturning([row]);
+    const [list] = await IncAllList.findAll(perspective, { includeAll: true });
+
+    expect(Object.keys(sentInclude(perspective)).sort()).toEqual(["items", "pinned"]);
+    expect(list.items[0]).toBeInstanceOf(IncAllItem);
+    expect(list.pinned).toBeInstanceOf(IncAllItem);
+    expect(list.owner).toBe("inc://parent");
+    expect(list.linkedFrom).toEqual(["inc://l0"]);
+  });
+
+  it("keeps an explicit include entry over the expansion", () => {
+    const { queryJson } = (IncAllList as any).prepareModelQueryParams({
+      includeAll: true,
+      include: { owner: true, items: false },
+    });
+    expect(JSON.parse(queryJson).include).toEqual({ items: false, pinned: true, owner: true });
+  });
+
+  it("hydrates the forward relations of a subscription result", async () => {
+    const client = {
+      modelSubscribe: jest.fn().mockResolvedValue({ subscriptionId: "s", revision: 0, result: { instances: [row], totalCount: 1 } }),
+      onQueryUpdate: jest.fn(() => () => {}),
+      onReconnect: jest.fn(() => () => {}),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+    const perspective = {
+      uuid: "p",
+      client,
+      modelSubscribe: (className: any, queryJson: string) => client.modelSubscribe("p", className, queryJson),
+    } as any;
+    const builder = IncAllList.query(perspective, { includeAll: true });
+    const [list] = await builder.subscribe(() => {});
+    builder.dispose();
+
+    expect(Object.keys(JSON.parse(client.modelSubscribe.mock.calls[0][2]).include).sort()).toEqual(["items", "pinned"]);
+    expect(list.items[0]).toBeInstanceOf(IncAllItem);
+    expect(list.owner).toBe("inc://parent");
+  });
+
+  it("applies to each class of a findAllOf() union", async () => {
+    const perspective = perspectiveReturning([row, { id: "inc://o1", other: "x", __subjectClass: "inc://IncAllOther" }]);
+    const [list, other] = await Ad4mModel.findAllOf(perspective, [IncAllList, IncAllOther], { includeAll: true });
+
+    expect(Object.keys(sentInclude(perspective)).sort()).toEqual(["items", "pinned"]);
+    expect((list as IncAllList).items[0]).toBeInstanceOf(IncAllItem);
+    expect((list as IncAllList).owner).toBe("inc://parent");
+    expect(other).toBeInstanceOf(IncAllOther);
+  });
+});
+
+describe("Ad4mModel.transaction()", () => {
+  /** A perspective that tracks which batches are still open. */
+  const makePerspective = () => {
+    const open = new Set<string>();
+    let next = 0;
+    const perspective = {
+      createBatch: jest.fn(async () => { const id = `batch-${++next}`; open.add(id); return id; }),
+      commitBatch: jest.fn(async (id: string) => { open.delete(id); return {}; }),
+      discardBatch: jest.fn(async (id: string) => open.delete(id)),
+    } as any;
+    return { perspective, open };
+  };
+
+  it("commits the batch and returns the callback's value", async () => {
+    const { perspective, open } = makePerspective();
+    const result = await Ad4mModel.transaction(perspective, async (tx) => tx.batchId);
+    expect(result).toBe("batch-1");
+    expect(perspective.commitBatch).toHaveBeenCalledWith("batch-1");
+    expect(perspective.discardBatch).not.toHaveBeenCalled();
+    expect(open.size).toBe(0);
+  });
+
+  it("discards the batch and rethrows when the callback throws", async () => {
+    const { perspective, open } = makePerspective();
+    const failure = new Error("callback failed");
+    await expect(
+      Ad4mModel.transaction(perspective, async () => { throw failure; }),
+    ).rejects.toBe(failure);
+    expect(perspective.discardBatch).toHaveBeenCalledWith("batch-1");
+    expect(perspective.commitBatch).not.toHaveBeenCalled();
+    expect(open.size).toBe(0);
+  });
+
+  it("rethrows the callback's error when the discard fails too", async () => {
+    const { perspective } = makePerspective();
+    perspective.discardBatch.mockRejectedValue(new Error("socket closed"));
+    const failure = new Error("callback failed");
+    await expect(
+      Ad4mModel.transaction(perspective, async () => { throw failure; }),
+    ).rejects.toBe(failure);
+  });
+
+  it("discards the batch and rethrows when the commit fails", async () => {
+    const { perspective, open } = makePerspective();
+    const failure = new Error("commit failed");
+    perspective.commitBatch.mockRejectedValue(failure);
+    await expect(Ad4mModel.transaction(perspective, async () => "done")).rejects.toBe(failure);
+    expect(perspective.discardBatch).toHaveBeenCalledWith("batch-1");
+    expect(open.size).toBe(0);
+  });
+});
+
+describe("delete() and incoming links", () => {
+  @Model({ name: "DelTarget" })
+  class DelTarget extends Ad4mModel {
+    @Flag({ through: "del://kind", value: "del://target" })
+    kind: string = "";
+  }
+
+  @Model({ name: "DelOwner" })
+  class DelOwner extends Ad4mModel {
+    @HasMany({ through: "del://has_target", target: () => DelTarget })
+    targets: string[] = [];
+  }
+
+  // A different model whose relation names no target class.
+  @Model({ name: "DelOther" })
+  class DelOther extends Ad4mModel {
+    @HasMany({ through: "del://mentions" })
+    mentions: string[] = [];
+  }
+
+  // A polymorphic container (no single target class), like a block tree's
+  // parent -> child relation.
+  @Model({ name: "DelContainer" })
+  class DelContainer extends Ad4mModel {
+    @HasMany({ through: "del://child", polymorphic: true })
+    children: string[] = [];
+  }
+
+  // An all-optional model: delete() removes its own outgoing links itself.
+  @Model({ name: "DelOptional" })
+  class DelOptional extends Ad4mModel {
+    @Property({ through: "del://note" })
+    note?: string;
+  }
+
+  const ownerLink = { author: "a", timestamp: "1", data: { source: "del://owner", predicate: "del://has_target", target: "del://t1" } };
+  const otherLink = { author: "b", timestamp: "2", data: { source: "del://other", predicate: "del://mentions", target: "del://t1" } };
+  const childLink = { author: "c", timestamp: "3", data: { source: "del://container", predicate: "del://child", target: "del://t1" } };
+  const incoming = [ownerLink, otherLink, childLink];
+
+  // No getAllShacl: the cascade must not depend on registered shapes.
+  const makePerspective = () => ({
+    removeSubject: jest.fn(async () => {}),
+    get: jest.fn(async (q: any) => (q.target === "del://t1" ? incoming : [])),
+    removeLinks: jest.fn(async () => []),
+  }) as any;
+
+  it("removes every incoming link (other models, polymorphic relations) in the delete's batch", async () => {
+    // The declared models are only there to make the links realistic.
+    expect([DelOwner, DelOther, DelContainer].every((M) => M.generateSHACL())).toBe(true);
+    const perspective = makePerspective();
+    await new DelTarget(perspective, "del://t1").delete("batch-1");
+
+    expect(perspective.removeSubject).toHaveBeenCalledWith(expect.anything(), "del://t1", "batch-1");
+    expect(perspective.get).toHaveBeenCalledWith(expect.objectContaining({ target: "del://t1" }));
+    expect(perspective.removeLinks).toHaveBeenCalledTimes(1);
+    expect(perspective.removeLinks).toHaveBeenCalledWith(incoming, "batch-1");
+  });
+
+  it("rejects when removing the incoming links fails", async () => {
+    const perspective = makePerspective();
+    const failure = new Error("remove failed");
+    perspective.removeLinks.mockRejectedValue(failure);
+    await expect(new DelTarget(perspective, "del://t1").delete()).rejects.toBe(failure);
+  });
+
+  it("rejects when reading the incoming links fails", async () => {
+    const perspective = makePerspective();
+    const failure = new Error("read failed");
+    perspective.get.mockRejectedValue(failure);
+    await expect(new DelTarget(perspective, "del://t1").delete()).rejects.toBe(failure);
+  });
+
+  it("rejects when removing an all-optional model's own links fails", async () => {
+    const own = { author: "a", timestamp: "1", data: { source: "del://t1", predicate: "del://note", target: "literal://string:x" } };
+    const perspective = makePerspective();
+    perspective.get.mockImplementation(async (q: any) => (q.source === "del://t1" ? [own] : []));
+    const failure = new Error("remove failed");
+    perspective.removeLinks.mockRejectedValue(failure);
+    await expect(new DelOptional(perspective, "del://t1").delete()).rejects.toBe(failure);
+    expect(perspective.removeLinks).toHaveBeenCalledWith([own], undefined);
+  });
+});
+
+describe("save() create path and its own batch", () => {
+  @Model({ name: "SaveBatchCard" })
+  class SaveBatchCard extends Ad4mModel {
+    @Flag({ through: "sb://kind", value: "sb://card" })
+    kind: string = "";
+  }
+
+  it("discards the batch it opened and rethrows when createSubject fails", async () => {
+    const failure = new Error("createSubject failed");
+    const perspective = {
+      uuid: "p",
+      createBatch: jest.fn(async () => "batch-1"),
+      commitBatch: jest.fn(async () => ({})),
+      discardBatch: jest.fn(async () => true),
+      stringOrTemplateObjectToSubjectClassName: jest.fn(async () => "SaveBatchCard"),
+      createSubject: jest.fn(async () => { throw failure; }),
+    } as any;
+
+    await expect(new SaveBatchCard(perspective).save()).rejects.toBe(failure);
+    expect(perspective.discardBatch).toHaveBeenCalledWith("batch-1");
+    expect(perspective.commitBatch).not.toHaveBeenCalled();
+  });
+
+  it("updates on a retried save() when the re-read after a committed create fails", async () => {
+    const perspective = {
+      uuid: "p",
+      createBatch: jest.fn(async () => "batch-1"),
+      commitBatch: jest.fn(async () => ({})),
+      discardBatch: jest.fn(async () => true),
+      stringOrTemplateObjectToSubjectClassName: jest.fn(async () => "SaveBatchCard"),
+      createSubject: jest.fn(async () => {}),
+    } as any;
+    const card = new SaveBatchCard(perspective);
+    const reread = new Error("read failed");
+    jest.spyOn(card as any, "getData").mockRejectedValueOnce(reread).mockResolvedValue(card);
+    jest.spyOn(card as any, "innerUpdate").mockResolvedValue(undefined);
+
+    await expect(card.save()).rejects.toBe(reread);
+    await card.save();
+
+    // The retry took the update path: the record was created once.
+    expect(perspective.createSubject).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves a caller's batch open when createSubject fails", async () => {
+    const failure = new Error("createSubject failed");
+    const perspective = {
+      uuid: "p",
+      createBatch: jest.fn(async () => "own"),
+      discardBatch: jest.fn(async () => true),
+      stringOrTemplateObjectToSubjectClassName: jest.fn(async () => "SaveBatchCard"),
+      createSubject: jest.fn(async () => { throw failure; }),
+    } as any;
+
+    await expect(new SaveBatchCard(perspective).save("caller-batch")).rejects.toBe(failure);
+    expect(perspective.createBatch).not.toHaveBeenCalled();
+    expect(perspective.discardBatch).not.toHaveBeenCalled();
+  });
+
+  it("create() in a caller's batch refuses a parent scope that is not one instance before it writes", async () => {
+    const perspective = {
+      uuid: "p",
+      createBatch: jest.fn(async () => "own"),
+      stringOrTemplateObjectToSubjectClassName: jest.fn(async () => "SaveBatchCard"),
+      createSubject: jest.fn(async () => true),
+    } as any;
+    const traverse = { ids: ["ad4m://a", "ad4m://b"] } as any;
+
+    await expect(
+      SaveBatchCard.create(perspective, {}, { parent: traverse, batchId: "caller-batch" }),
+    ).rejects.toThrow(/traverse scope/);
+    expect(perspective.createSubject).not.toHaveBeenCalled();
+  });
+
+  it("create() in a caller's batch refuses a parent model with no relation to it before it writes", async () => {
+    @Model({ name: "UnrelatedParent" })
+    class UnrelatedParent extends Ad4mModel {}
+    const perspective = {
+      uuid: "p",
+      createBatch: jest.fn(async () => "own"),
+      stringOrTemplateObjectToSubjectClassName: jest.fn(async () => "SaveBatchCard"),
+      createSubject: jest.fn(async () => true),
+    } as any;
+
+    await expect(
+      SaveBatchCard.create(perspective, {}, { parent: { model: UnrelatedParent, id: "ad4m://p" }, batchId: "caller-batch" }),
+    ).rejects.toThrow();
+    expect(perspective.createSubject).not.toHaveBeenCalled();
+  });
+
+  it("create() with a parent discards the batch it opened and rethrows when the parent link fails", async () => {
+    const failure = new Error("add failed");
+    const perspective = {
+      uuid: "p",
+      createBatch: jest.fn(async () => "batch-1"),
+      commitBatch: jest.fn(async () => ({})),
+      discardBatch: jest.fn(async () => true),
+      stringOrTemplateObjectToSubjectClassName: jest.fn(async () => "SaveBatchCard"),
+      createSubject: jest.fn(async () => {}),
+      add: jest.fn(async () => { throw failure; }),
+    } as any;
+
+    await expect(
+      SaveBatchCard.create(perspective, {}, { parent: { id: "sb://parent", predicate: "sb://child" } }),
+    ).rejects.toBe(failure);
+    expect(perspective.add).toHaveBeenCalledWith(expect.objectContaining({ source: "sb://parent", predicate: "sb://child" }), "shared", "batch-1");
+    expect(perspective.discardBatch).toHaveBeenCalledWith("batch-1");
+    expect(perspective.commitBatch).not.toHaveBeenCalled();
+  });
+
+  it("create() with a parent keeps the create's error when the discard fails too", async () => {
+    const failure = new Error("createSubject failed");
+    const perspective = {
+      uuid: "p",
+      createBatch: jest.fn(async () => "batch-1"),
+      commitBatch: jest.fn(async () => ({})),
+      discardBatch: jest.fn(async () => { throw new Error("discard failed"); }),
+      stringOrTemplateObjectToSubjectClassName: jest.fn(async () => "SaveBatchCard"),
+      createSubject: jest.fn(async () => { throw failure; }),
+      add: jest.fn(async () => {}),
+    } as any;
+
+    await expect(
+      SaveBatchCard.create(perspective, {}, { parent: { id: "sb://parent", predicate: "sb://child" } }),
+    ).rejects.toBe(failure);
+    expect(perspective.discardBatch).toHaveBeenCalledWith("batch-1");
+    expect(perspective.add).not.toHaveBeenCalled();
+  });
+
+  // create() returns what it wrote and reads nothing after the commit, unless
+  // asked for the row with `returns: 'row'`.
+  describe("create() returns", () => {
+    @Model({ name: "ReadBackCard" })
+    class ReadBackCard extends Ad4mModel {
+      @Flag({ through: "rb://kind", value: "rb://card" })
+      kind: string = "";
+      @Property({ through: "rb://title" })
+      title: string = "";
+    }
+
+    const reread = new Error("read failed");
+    const makePerspective = () => ({
+      uuid: "p",
+      createBatch: jest.fn(async () => "batch-1"),
+      commitBatch: jest.fn(async () => ({})),
+      discardBatch: jest.fn(async () => true),
+      stringOrTemplateObjectToSubjectClassName: jest.fn(async () => "ReadBackCard"),
+      createSubject: jest.fn(async () => {}),
+      executeAction: jest.fn(async () => {}),
+      setSingleTarget: jest.fn(async () => {}),
+      add: jest.fn(async () => {}),
+      modelQuery: jest.fn(async () => { throw reread; }),
+    }) as any;
+
+    it("sends no read after the commit by default", async () => {
+      const perspective = makePerspective();
+
+      const card = await ReadBackCard.create(perspective, { title: "written" });
+
+      expect(perspective.commitBatch).toHaveBeenCalledWith("batch-1");
+      expect(perspective.modelQuery).not.toHaveBeenCalled();
+      expect(card.id).toBeTruthy();
+      expect(card.title).toBe("written");
+      expect((card as any).author).toBeUndefined();
+      expect((card as any).createdAt).toBeUndefined();
+    });
+
+    it("reads the row after the commit with returns: 'row', and fills author and createdAt", async () => {
+      const perspective = makePerspective();
+      perspective.modelQuery.mockImplementation(async () => ({
+        instances: [{ id: "rb://row", author: "did:key:alice", createdAt: 1700000000000, title: "stored" }],
+        totalCount: 1,
+      }));
+      perspective.createSubject.mockImplementation(async (instance: any) => { instance._baseExpression = "rb://row"; });
+
+      const card = await ReadBackCard.create(perspective, { title: "written" }, { returns: "row" });
+
+      expect(perspective.commitBatch.mock.invocationCallOrder[0])
+        .toBeLessThan(perspective.modelQuery.mock.invocationCallOrder[0]);
+      expect(card.author).toBe("did:key:alice");
+      expect(card.createdAt).toBe(1700000000000);
+      expect(card.title).toBe("stored");
+    });
+
+    it("rejects with the read error when returns: 'row' cannot read, naming the created id", async () => {
+      const perspective = makePerspective();
+
+      const err = await ReadBackCard.create(perspective, { title: "written" }, { returns: "row" }).catch((e) => e);
+
+      expect(perspective.commitBatch).toHaveBeenCalledWith("batch-1");
+      expect(err.message).toMatch(/was created, but reading it back failed/);
+      expect(err.cause).toBe(reread);
+    });
+
+    it("refuses returns: 'row' in a caller's batch before it writes", async () => {
+      const perspective = makePerspective();
+
+      await expect(
+        ReadBackCard.create(perspective, { title: "written" }, { returns: "row", batchId: "caller-batch" }),
+      ).rejects.toThrow(/returns: 'row'.*batchId/);
+      expect(perspective.createSubject).not.toHaveBeenCalled();
+    });
+
+    it("then save() updates: the snapshot is set, no second create", async () => {
+      const perspective = makePerspective();
+      perspective.stringOrTemplateObjectToSubjectClassName.mockResolvedValue("ReadBackCard");
+      perspective.updateSubject = jest.fn(async () => {});
+
+      const card = await ReadBackCard.create(perspective, { title: "written" });
+      perspective.createSubject.mockClear();
+      card.title = "changed";
+      jest.spyOn(card as any, "getData").mockResolvedValue(card);
+      jest.spyOn(card as any, "innerUpdate").mockResolvedValue(undefined);
+      await card.save();
+
+      expect(perspective.createSubject).not.toHaveBeenCalled();
+      expect((card as any).innerUpdate).toHaveBeenCalled();
+    });
+
+    it("writes the parent link in the create's own batch, and reads nothing", async () => {
+      const perspective = makePerspective();
+
+      await ReadBackCard.create(
+        perspective, { title: "written" }, { parent: { id: "rb://parent", predicate: "rb://child" } },
+      );
+
+      expect(perspective.add).toHaveBeenCalledWith(
+        expect.objectContaining({ source: "rb://parent", predicate: "rb://child" }), "shared", "batch-1");
+      expect(perspective.commitBatch).toHaveBeenCalledWith("batch-1");
+      expect(perspective.modelQuery).not.toHaveBeenCalled();
+    });
+
+    it("discards its batch when a write fails", async () => {
+      const perspective = makePerspective();
+      const failure = new Error("createSubject failed");
+      perspective.createSubject.mockRejectedValue(failure);
+
+      await expect(ReadBackCard.create(perspective, { title: "written" })).rejects.toBe(failure);
+      expect(perspective.discardBatch).toHaveBeenCalledWith("batch-1");
+      expect(perspective.commitBatch).not.toHaveBeenCalled();
+    });
+
+    it("still rejects when the commit fails, and does not read", async () => {
+      const perspective = makePerspective();
+      const failure = new Error("commit failed");
+      perspective.commitBatch.mockRejectedValue(failure);
+
+      await expect(ReadBackCard.create(perspective, { title: "written" })).rejects.toBe(failure);
+      expect(perspective.modelQuery).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe("get() and update() on a missing instance", () => {
+  @Model({ name: "MissCard" })
+  class MissCard extends Ad4mModel {
+    @Flag({ through: "miss://kind", value: "miss://card" })
+    kind: string = "";
+    @Property({ through: "miss://title" })
+    title: string = "";
+  }
+
+  const makePerspective = (instances: any[]) => ({
+    uuid: "p",
+    modelQuery: jest.fn().mockResolvedValue({ instances, totalCount: instances.length }),
+    createBatch: jest.fn(async () => "batch-1"),
+    commitBatch: jest.fn(async () => ({})),
+    createSubject: jest.fn(async () => {}),
+    executeAction: jest.fn(async () => {}),
+    setSingleTarget: jest.fn(async () => {}),
+    add: jest.fn(async () => {}),
+  }) as any;
+
+  it("get() returns the hydrated instance when it exists", async () => {
+    const perspective = makePerspective([{ id: "miss://1", kind: "miss://card", title: "found" }]);
+    const card = new MissCard(perspective, "miss://1");
+    const result = await card.get();
+    expect(result).toBe(card);
+    expect(card.title).toBe("found");
+  });
+
+  it("get() returns null for a missing instance", async () => {
+    const perspective = makePerspective([]);
+    expect(await new MissCard(perspective, "miss://none").get()).toBeNull();
+  });
+
+  it("get() rejects when the read fails", async () => {
+    const perspective = makePerspective([]);
+    const failure = new Error("query failed");
+    perspective.modelQuery.mockRejectedValue(failure);
+    await expect(new MissCard(perspective, "miss://1").get()).rejects.toBe(failure);
+  });
+
+  it("update() rejects for a missing ID and writes nothing", async () => {
+    const perspective = makePerspective([]);
+    await expect(MissCard.update(perspective, "miss://none", { title: "x" })).rejects.toThrow(/not found/);
+    for (const write of ["createBatch", "createSubject", "executeAction", "setSingleTarget", "add"]) {
+      expect(perspective[write]).not.toHaveBeenCalled();
+    }
+  });
+
+  it("save() re-snapshots an instance that reads back as missing after the write", async () => {
+    @Model({ name: "MissOptional" })
+    class MissOptional extends Ad4mModel {
+      @Property({ through: "miss://note" })
+      note?: string;
+    }
+    // An all-optional model: the re-read after the update finds no row.
+    const perspective = makePerspective([]);
+    perspective.modelQuery
+      .mockResolvedValueOnce({ instances: [{ id: "miss://o1", note: "old" }], totalCount: 1 })
+      .mockResolvedValue({ instances: [], totalCount: 0 });
+    const note = new MissOptional(perspective, "miss://o1");
+    await note.get();
+
+    note.note = "new";
+    await note.save();
+
+    expect(perspective.executeAction).toHaveBeenCalledTimes(1);
+    expect(note.isDirty()).toBe(false);
+  });
+});
+
+describe("querying by class name (overrideModelClassName)", () => {
+  @Model({ name: "ByNameCard" })
+  class ByNameCard extends Ad4mModel {
+    @Flag({ through: "byname://kind", value: "byname://card" })
+    kind: string = "";
+    @Property({ through: "byname://title" })
+    title: string = "";
+  }
+
+  @Model({ name: "ByNameNote" })
+  class ByNameNote extends Ad4mModel {
+    @Property({ through: "byname://body" })
+    body: string = "";
+  }
+
+  const rows = [
+    { id: "byname://c1", kind: "byname://card", title: "one" },
+    { id: "byname://c2", kind: "byname://card", title: "two" },
+  ];
+  const makePerspective = () => {
+    const client = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: "s", revision: 0, result: { instances: rows, totalCount: rows.length },
+      }),
+      onQueryUpdate: jest.fn(() => () => {}),
+      onReconnect: jest.fn(() => () => {}),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+    return {
+      uuid: "p",
+      client,
+      modelQuery: jest.fn().mockResolvedValue({ instances: rows, totalCount: rows.length }),
+      modelSubscribe: (className: any, queryJson: string) => client.modelSubscribe("p", className, queryJson),
+    } as any;
+  };
+  const data = (results: any[]) => results.map((r) => ({ id: r.id, title: r.title }));
+  const query = { where: { title: "one" }, order: { title: "ASC" as const }, limit: 5 };
+
+  it("get() sends the same query and returns the same rows as a query by class", async () => {
+    const byClass = makePerspective();
+    const byName = makePerspective();
+    const viaClass = await ByNameCard.query(byClass, query).get();
+    const viaName = await Ad4mModel.query(byName, query).overrideModelClassName("ByNameCard").get();
+
+    // The class name travels as given; the class query names it by its target
+    // class IRI. The executor reads both as the same class (a bare name reads
+    // the least IRI), so the query body is identical.
+    expect(byName.modelQuery.mock.calls[0][0]).toBe("ByNameCard");
+    expect(byName.modelQuery.mock.calls[0][1]).toBe(byClass.modelQuery.mock.calls[0][1]);
+    expect(data(viaName)).toEqual(data(viaClass));
+  });
+
+  it("count() and subscribe() work by class name", async () => {
+    const perspective = makePerspective();
+    const builder = Ad4mModel.query(perspective).overrideModelClassName("ByNameCard");
+    await expect(builder.count()).resolves.toBe(2);
+    const results = await builder.subscribe(() => {});
+    builder.dispose();
+
+    expect(perspective.client.modelSubscribe.mock.calls[0][1]).toBe("ByNameCard");
+    expect(data(results)).toEqual(data(rows));
+  });
+
+  it("throws on a queryOf() builder instead of dropping the union", () => {
+    const perspective = makePerspective();
+    expect(() => Ad4mModel.queryOf(perspective, [ByNameCard, ByNameNote]).overrideModelClassName("ByNameCard"))
+      .toThrow(/queryOf\(\)/);
+    expect(perspective.modelQuery).not.toHaveBeenCalled();
+  });
+
+  it("rejects includeAll with a clear error (the client does not know the named model's relations)", async () => {
+    const perspective = makePerspective();
+    await expect(
+      Ad4mModel.query(perspective, { includeAll: true }).overrideModelClassName("ByNameCard").get(),
+    ).rejects.toThrow(/includeAll needs a decorated model class/);
+    expect(perspective.modelQuery).not.toHaveBeenCalled();
+  });
+});
+
+import { valueToLiteralIri } from "./query-sparql";
+
+describe("Model writes: one executeAction call per write (P4)", () => {
+  @Model({ name: "P4Card" })
+  class P4Card extends Ad4mModel {
+    @Optional({ through: "p4://title" })
+    title?: string;
+
+    @Optional({ through: "p4://note", local: true })
+    note?: string;
+
+    @Optional({ through: "p4://rank" })
+    rank?: number;
+
+    @HasMany({ through: "p4://tag" })
+    tags: string[] = [];
+
+    @HasMany({ through: "p4://link" })
+    links: string[] = [];
+  }
+
+  const makePerspective = () =>
+    ({
+      executeAction: jest.fn().mockResolvedValue(undefined),
+      uuid: "test-perspective-uuid",
+    }) as any;
+
+  /**
+   * The links each `executeAction` call writes, resolved as the executor's
+   * `execute_commands` resolves them: one left-to-right pass, longest
+   * parameter name first; `this` is the instance; `collectionSetter` takes
+   * every parameter of its call as a member.
+   */
+  const resolved = (perspective: any) =>
+    perspective.executeAction.mock.calls.flatMap(([commands, expression, parameters]: any[]) => {
+      const names = [...(parameters ?? [])].sort((a: any, b: any) => b.name.length - a.name.length);
+      const sub = (input?: string) => {
+        if (input == null) return input;
+        let out = "";
+        for (let i = 0; i < input.length;) {
+          const p = names.find((p: any) => p.name && input.startsWith(p.name, i));
+          if (p) { out += p.value; i += p.name.length; } else { out += input[i]; i += 1; }
+        }
+        return out;
+      };
+      const self = (s?: string) => (s === "this" ? expression : s);
+      return commands.map((c: any) => ({
+        action: c.action,
+        source: self(sub(c.source)),
+        predicate: self(sub(c.predicate)),
+        target: c.action === "collectionSetter" ? (parameters ?? []).map((p: any) => p.value) : sub(c.target),
+        local: !!c.local,
+      }));
+    });
+
+  const edited = (perspective: any) => {
+    const card = new P4Card(perspective, "p4://card/1") as any;
+    card.takeSnapshot();
+    card.title = "Hello";
+    card.note = "private";
+    card.rank = 3;
+    return card;
+  };
+
+  it("an update of three scalar fields makes one call with each field's link and status", async () => {
+    const perspective = makePerspective();
+    await edited(perspective).save("batch-1");
+
+    expect(perspective.executeAction).toHaveBeenCalledTimes(1);
+    expect(perspective.executeAction.mock.calls[0][3]).toBe("batch-1");
+    expect(resolved(perspective)).toEqual([
+      { action: "setSingleTarget", source: "p4://card/1", predicate: "p4://title", target: "literal:string:Hello", local: false },
+      { action: "setSingleTarget", source: "p4://card/1", predicate: "p4://note", target: "literal:string:private", local: true },
+      { action: "setSingleTarget", source: "p4://card/1", predicate: "p4://rank", target: valueToLiteralIri(3), local: false },
+    ]);
+  });
+
+  it("adder and remover values join the scalar writes; each collection set is a call of its own", async () => {
+    const perspective = makePerspective();
+    // No snapshot: every field is written, in field order (tags, links, then the scalars).
+    const card = new P4Card(perspective, "p4://card/1") as any;
+    card.tags = { action: "adder", value: ["t1", "t2"] };
+    card.links = ["l1", "l2"];
+    card.title = "Hello";
+    card.note = "private";
+    card.rank = 3;
+    await card.innerUpdate(true, "batch-1");
+
+    // tags (two adds) in one call; links (collectionSetter) alone; the three scalars in one.
+    expect(perspective.executeAction).toHaveBeenCalledTimes(3);
+    expect(resolved(perspective)).toEqual([
+      { action: "addLink", source: "p4://card/1", predicate: "p4://tag", target: "t1", local: false },
+      { action: "addLink", source: "p4://card/1", predicate: "p4://tag", target: "t2", local: false },
+      { action: "collectionSetter", source: "p4://card/1", predicate: "p4://link", target: ["l1", "l2"], local: false },
+      { action: "setSingleTarget", source: "p4://card/1", predicate: "p4://title", target: "literal:string:Hello", local: false },
+      { action: "setSingleTarget", source: "p4://card/1", predicate: "p4://note", target: "literal:string:private", local: true },
+      { action: "setSingleTarget", source: "p4://card/1", predicate: "p4://rank", target: valueToLiteralIri(3), local: false },
+    ]);
+  });
+
+  it("a long run of writes is split into calls of at most 200 writes, in order", async () => {
+    const perspective = makePerspective();
+    const card = new P4Card(perspective, "p4://card/1") as any;
+    const tags = Array.from({ length: 450 }, (_, i) => `t${i}`);
+    card.tags = { action: "adder", value: tags };
+    await card.innerUpdate(true, "batch-1");
+
+    const tagCalls = perspective.executeAction.mock.calls.filter(([commands]: any[]) => commands[0].action === "addLink");
+    expect(tagCalls.map((call: any[]) => call[2].length)).toEqual([200, 200, 50]);
+    const added = resolved(perspective).filter((c: any) => c.action === "addLink");
+    expect(added.map((c: any) => c.target)).toEqual(tags);
+  });
+
+  it("a single write is sent as before, with its `value` parameter", async () => {
+    const perspective = makePerspective();
+    const card = new P4Card(perspective, "p4://card/1") as any;
+    card.takeSnapshot();
+    card.title = "Only";
+    await card.save("batch-1");
+
+    expect(perspective.executeAction.mock.calls).toEqual([[
+      [{ action: "setSingleTarget", source: "this", predicate: "p4://title", target: "value" }],
+      "p4://card/1",
+      [{ name: "value", value: "literal:string:Only" }],
+      "batch-1",
+    ]]);
   });
 });

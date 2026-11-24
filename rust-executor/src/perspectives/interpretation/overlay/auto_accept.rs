@@ -61,6 +61,7 @@ use crate::perspectives::interpretation::{replace_link, InterpretationOp};
 use crate::perspectives::model_query::types::{AutoAccept, ModelShape};
 use crate::perspectives::model_query::utils::parse_literal_value;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::perspectives::shacl_parser::class_name_of;
 use crate::types::{DecoratedLinkExpression, LinkQuery};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -207,6 +208,15 @@ async fn mark_auto_accepted(
     .await
 }
 
+/// `subject_classes_of` answers with each class's local name
+/// (`class_name_of`). The overlay class is registered under
+/// [`INTERP_OVERLAY_CLASS`] (`ad4m://InterpretationOverlay`), so a match on
+/// either spelling drops it. It is the executor's own bookkeeping and
+/// declares no auto-accept rule.
+fn is_overlay_class_name(name: &str) -> bool {
+    name == INTERP_OVERLAY_CLASS || name == class_name_of(INTERP_OVERLAY_CLASS)
+}
+
 /// Auto-accept the eligible inferred items among `bases` (the pass's touched
 /// bases), right after `apply_with_overlay` and before flow spawning, so a
 /// flow's `requires` reads accepted values.
@@ -276,7 +286,7 @@ pub(crate) async fn auto_accept_pass(
             Some(class) => vec![class],
             None => resolved
                 .get(base)
-                .map(|all| all.iter().filter(|c| *c != INTERP_OVERLAY_CLASS).collect())
+                .map(|all| all.iter().filter(|c| !is_overlay_class_name(c)).collect())
                 .unwrap_or_default(),
         };
         let mut shapes = Vec::with_capacity(classes.len());

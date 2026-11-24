@@ -1,8 +1,8 @@
-//! Runtime compiler from OpenAI tool definitions (JSON-Schema `parameters`)
-//! to a kalosm [`ArcParser`] that *constrains local-model decoding* to a
-//! well-formed tool call.
+//! Tool calls as text: the fallback for a model that does not take tools as definitions
+//! (an OpenAI-shaped endpoint without `nativeTools`, or a server that ignores `tools`).
 //!
-//! The target convention is Hermes / Qwen2.5-Instruct style:
+//! The tools are rendered into the system prompt in the Hermes / Qwen2.5-Instruct
+//! convention, and the calls are read back out of the text the model writes:
 //!
 //! ```text
 //! <tool_call>
@@ -10,51 +10,18 @@
 //! </tool_call>
 //! ```
 //!
-//! Parallel calls repeat the block separated by newlines.
+//! Parallel calls repeat the block separated by newlines. [`extract_tool_calls`] recovers
+//! what the model wrote, also from the fenced and bare-JSON forms models fall back to.
 //!
-//! ## What is and isn't constrained
-//!
-//! * `tool_choice: "required"` / a named function → we return a parser that
-//!   forces the model to emit one (or, for `required` + `parallel`, several)
-//!   syntactically valid tool call(s).  This is the guarantee: the emitted
-//!   `arguments` are always JSON that matches the declared schema shape.
-//! * `tool_choice: "auto"` / `"none"` → we return `None`.  The model
-//!   generates freely and any `<tool_call>` blocks it chooses to emit are
-//!   recovered afterwards with [`extract_tool_calls`].  Constraining
-//!   arbitrary prose is not expressible with the available parser
-//!   primitives (there is no "any free text" parser — `StringParser` only
-//!   matches a quoted JSON string), and forcing prose through one would
-//!   corrupt normal answers.
-//!
-//! ## Grammar construction
-//!
-//! Every schema node compiles to a uniform `ArcParser<()>` (output type
-//! erased to `()` via `map_output`, then boxed).  Uniformity is what lets
-//! the compiler recurse over arbitrary nested schemas and fold N
-//! alternatives with `.or(..)` without the combinator tuple types
-//! exploding.  We only care that the *text* is on-grammar; the structured
-//! value is recovered separately by `serde_json` in [`extract_tool_calls`].
-//!
-//! Only the JSON-Schema keywords that shape the value are read
-//! (`type`, `properties`, `items`, `enum`); everything else (`minLength`,
-//! `description`, `additionalProperties`, …) is ignored, which is the
-//! "strip unsupported keywords" behaviour by construction.
+//! A model that must call a tool (`tool_choice: "required"` or a named function) is held
+//! to it by its server: [`ToolCallConstraint::schema`] is a JSON schema of the call(s),
+//! sent as a decoding constraint (`ChatRequest::json_schema`), which llama-server, vLLM,
+//! Ollama and OpenAI decode against. What comes back is checked against the same rules
+//! ([`ToolCallConstraint::check`]) whatever answered, since a server may not constrain.
 
-use std::borrow::Cow;
-
-use kalosm::language::{
-    ArcParser, FloatParser, IntegerParser, LiteralParser, ParserExt, SeparatedParser, StringParser,
-};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use super::types::ToolDef;
-
-/// Upper bound on a constrained JSON string value (characters).
-const MAX_STRING_LEN: usize = 8192;
-/// Upper bound on items in a constrained JSON array.
-const MAX_ARRAY_ITEMS: usize = 64;
-/// Upper bound on parallel tool calls in one turn.
-const MAX_PARALLEL_CALLS: usize = 8;
 
 // ---------------------------------------------------------------------------
 // tool_choice
@@ -64,7 +31,7 @@ const MAX_PARALLEL_CALLS: usize = 8;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolChoice {
     /// Model decides whether to call a tool (OpenAI default when tools are
-    /// present).  Not hard-constrained.
+    /// present).
     Auto,
     /// Tools must not be called.
     None,
@@ -99,6 +66,254 @@ pub fn parse_tool_choice(value: &Option<Value>, has_tools: bool) -> ToolChoice {
             .map(|name| ToolChoice::Named(name.to_string()))
             .unwrap_or(ToolChoice::Auto),
         Some(_) => ToolChoice::Auto,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Decoding constraint (`tool_choice: "required"` or a named function)
+// ---------------------------------------------------------------------------
+
+/// Most calls one constrained turn may make (`required` with parallel calls).
+pub const MAX_PARALLEL_CALLS: usize = 8;
+
+/// What `tool_choice: "required"` or a named function demands of a reply on the text path:
+/// at least one call and at most [`Self::max_calls`], each to one of the allowed tools,
+/// with arguments of that tool's schema.
+///
+/// The model's server gets it as a JSON schema ([`Self::schema`]), so a server that decodes
+/// against a schema can only produce `{"tool_calls": [{"name": …, "arguments": {…}}, …]}`,
+/// a shape [`extract_tool_calls`] reads. Only the keywords that shape a value are kept from
+/// a tool's parameters (`type`, `properties`, `required`, `items`, `enum`, `const`,
+/// `anyOf`/`oneOf`): every server's schema support covers them, and the rest (`format`,
+/// `pattern`, bounds, `$ref`) is what one server or another refuses.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolCallConstraint {
+    /// Each allowed tool's name and the shape of its arguments.
+    tools: Vec<(String, Value)>,
+    max_calls: usize,
+}
+
+impl ToolCallConstraint {
+    /// The constraint of `choice` over `tools`. `None` for `auto` and `none`, which generate
+    /// freely, and for a named function that is not among `tools`. A named function, or
+    /// `parallel_tool_calls: false`, allows exactly one call; `required` with parallel calls
+    /// allows 1 to [`MAX_PARALLEL_CALLS`].
+    pub fn for_choice(tools: &[ToolDef], choice: &ToolChoice, parallel: bool) -> Option<Self> {
+        let selected: Vec<&ToolDef> = match choice {
+            ToolChoice::Required => tools.iter().collect(),
+            ToolChoice::Named(name) => tools.iter().filter(|t| &t.function.name == name).collect(),
+            ToolChoice::Auto | ToolChoice::None => return None,
+        };
+        if selected.is_empty() {
+            return None;
+        }
+        let max_calls = if parallel && *choice == ToolChoice::Required {
+            MAX_PARALLEL_CALLS
+        } else {
+            1
+        };
+        Some(Self {
+            tools: selected
+                .iter()
+                .map(|tool| {
+                    let name = tool.function.name.clone();
+                    (name, arguments_shape(tool.function.parameters.as_ref()))
+                })
+                .collect(),
+            max_calls,
+        })
+    }
+
+    /// How many calls one reply may make.
+    pub fn max_calls(&self) -> usize {
+        self.max_calls
+    }
+
+    /// The JSON schema of a reply that keeps to this constraint. Its root is an object,
+    /// which every server takes (OpenAI refuses another root).
+    pub fn schema(&self) -> Value {
+        let mut calls: Vec<Value> = self
+            .tools
+            .iter()
+            .map(|(name, arguments)| {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "enum": [name] },
+                        "arguments": arguments,
+                    },
+                    "required": ["name", "arguments"],
+                })
+            })
+            .collect();
+        let call = if calls.len() == 1 {
+            calls.remove(0)
+        } else {
+            json!({ "anyOf": calls })
+        };
+        json!({
+            "type": "object",
+            "properties": {
+                "tool_calls": {
+                    "type": "array",
+                    "items": call,
+                    "minItems": 1,
+                    "maxItems": self.max_calls,
+                },
+            },
+            "required": ["tool_calls"],
+        })
+    }
+
+    /// The calls of a reply, if it keeps to this constraint: at least one, each to an
+    /// allowed tool with arguments of its schema. Beyond [`Self::max_calls`] only the first
+    /// are kept (a `parallel_tool_calls: false` turn keeps its first call). `Err` says why
+    /// the reply does not keep to it; it quotes no argument value the model wrote.
+    pub fn check(
+        &self,
+        mut calls: Vec<ExtractedToolCall>,
+    ) -> Result<Vec<ExtractedToolCall>, String> {
+        if calls.is_empty() {
+            return Err("the reply makes no tool call".to_string());
+        }
+        calls.truncate(self.max_calls);
+        for call in &calls {
+            let Some((_, shape)) = self.tools.iter().find(|(name, _)| *name == call.name) else {
+                return Err(format!(
+                    "the reply calls {:?}, which is not an allowed tool",
+                    call.name
+                ));
+            };
+            let arguments: Value = serde_json::from_str(&call.arguments)
+                .map_err(|_| format!("the arguments of {:?} are not JSON", call.name))?;
+            conforms(&arguments, shape, "arguments")
+                .map_err(|reason| format!("{}: {reason}", call.name))?;
+        }
+        Ok(calls)
+    }
+}
+
+/// The shape of a tool's arguments: its parameters' shape keywords, an object at the root.
+fn arguments_shape(parameters: Option<&Value>) -> Value {
+    let mut shape = parameters.map(shape_of).unwrap_or_else(|| json!({}));
+    if let Some(object) = shape.as_object_mut() {
+        object
+            .entry("type")
+            .or_insert_with(|| Value::String("object".to_string()));
+    }
+    shape
+}
+
+/// `schema` with only the keywords that shape a value, recursively. `oneOf` becomes
+/// `anyOf`: a value of tool arguments rarely matches two alternatives, and `anyOf` is what
+/// every server's schema support has.
+fn shape_of(schema: &Value) -> Value {
+    let Some(node) = schema.as_object() else {
+        return json!({});
+    };
+    let mut out = serde_json::Map::new();
+    for key in ["type", "enum", "const"] {
+        if let Some(value) = node.get(key) {
+            out.insert(key.to_string(), value.clone());
+        }
+    }
+    if let Some(required) = node.get("required").filter(|r| r.is_array()) {
+        out.insert("required".to_string(), required.clone());
+    }
+    if let Some(properties) = node.get("properties").and_then(Value::as_object) {
+        let properties = properties
+            .iter()
+            .map(|(key, property)| (key.clone(), shape_of(property)))
+            .collect();
+        out.insert("properties".to_string(), Value::Object(properties));
+    }
+    if let Some(items) = node.get("items").filter(|items| items.is_object()) {
+        out.insert("items".to_string(), shape_of(items));
+    }
+    let alternatives = node
+        .get("anyOf")
+        .or_else(|| node.get("oneOf"))
+        .and_then(Value::as_array);
+    if let Some(alternatives) = alternatives {
+        out.insert(
+            "anyOf".to_string(),
+            Value::Array(alternatives.iter().map(shape_of).collect()),
+        );
+    }
+    Value::Object(out)
+}
+
+/// Whether `value` has the shape `shape` describes ([`shape_of`]'s keywords). `Err` names
+/// the first place it does not, by its path from `path`.
+fn conforms(value: &Value, shape: &Value, path: &str) -> Result<(), String> {
+    if let Some(allowed) = shape.get("enum").and_then(Value::as_array) {
+        if !allowed.contains(value) {
+            return Err(format!("{path} is not one of its allowed values"));
+        }
+    }
+    if let Some(expected) = shape.get("const") {
+        if value != expected {
+            return Err(format!("{path} is not its one allowed value"));
+        }
+    }
+    let type_matches = match shape.get("type") {
+        Some(Value::String(kind)) => has_type(value, kind),
+        Some(Value::Array(kinds)) => kinds
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|kind| has_type(value, kind)),
+        _ => true,
+    };
+    if !type_matches {
+        return Err(format!("{path} is not of type {}", shape["type"]));
+    }
+    if let Some(alternatives) = shape.get("anyOf").and_then(Value::as_array) {
+        let any = alternatives
+            .iter()
+            .any(|alternative| conforms(value, alternative, path).is_ok());
+        if !alternatives.is_empty() && !any {
+            return Err(format!("{path} matches none of its alternatives"));
+        }
+    }
+    if let Some(object) = value.as_object() {
+        if let Some(required) = shape.get("required").and_then(Value::as_array) {
+            if let Some(key) = required
+                .iter()
+                .filter_map(Value::as_str)
+                .find(|key| !object.contains_key(*key))
+            {
+                return Err(format!("{path}.{key} is missing"));
+            }
+        }
+        if let Some(properties) = shape.get("properties").and_then(Value::as_object) {
+            for (key, property) in properties {
+                if let Some(field) = object.get(key) {
+                    conforms(field, property, &format!("{path}.{key}"))?;
+                }
+            }
+        }
+    }
+    if let (Some(items), Some(array)) = (shape.get("items"), value.as_array()) {
+        for (index, item) in array.iter().enumerate() {
+            conforms(item, items, &format!("{path}[{index}]"))?;
+        }
+    }
+    Ok(())
+}
+
+fn has_type(value: &Value, kind: &str) -> bool {
+    match kind {
+        "string" => value.is_string(),
+        "integer" => {
+            value.is_i64() || value.is_u64() || value.as_f64().is_some_and(|f| f.fract() == 0.0)
+        }
+        "number" => value.is_number(),
+        "boolean" => value.is_boolean(),
+        "null" => value.is_null(),
+        "array" => value.is_array(),
+        "object" => value.is_object(),
+        // A type this check does not know: the server's decoding is the only judge.
+        _ => true,
     }
 }
 
@@ -175,241 +390,6 @@ pub fn render_tool_response_block(content: &str, id: Option<&str>) -> String {
         }
         None => format!("<tool_response>\n{content}\n</tool_response>"),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Grammar compiler
-// ---------------------------------------------------------------------------
-
-/// Build a decoding constraint for the given tools + choice, or `None` when
-/// the mode should generate freely (`auto` / `none`).
-pub fn build_tool_call_parser(
-    tools: &[ToolDef],
-    choice: &ToolChoice,
-    parallel: bool,
-) -> Option<ArcParser<()>> {
-    let selected: Vec<&ToolDef> = match choice {
-        ToolChoice::Required => tools.iter().collect(),
-        ToolChoice::Named(name) => tools.iter().filter(|t| &t.function.name == name).collect(),
-        ToolChoice::Auto | ToolChoice::None => return None,
-    };
-    if selected.is_empty() {
-        return None;
-    }
-
-    let one = or_all(
-        selected
-            .iter()
-            .map(|tool| single_tool_call_parser(tool))
-            .collect(),
-    );
-
-    // Parallel handling is currently gated on `Required` only. This is a
-    // known OpenAI-spec parity gap for `tool_choice: {name: "foo"}` +
-    // `parallel_tool_calls: true` (Lal's PR #911 review,
-    // tool_grammar.rs:162) — named + parallel is silently downgraded to a
-    // single call. Attempted fix (2026-08-25) to run every `parallel=true`
-    // choice through `SeparatedParser<one, "\n", 1..=MAX>` broke the
-    // existing named-single-call test because kalosm's SeparatedParser
-    // doesn't reach a `Finished` state after a single item (it remains
-    // Incomplete pending a potential separator + more items). Making the
-    // grammar `one.or(SeparatedParser<one, "\n", 2..=MAX>)` would fix that
-    // but requires cloning `one`, which — for a chain of many tools built
-    // via `or_all` — either duplicates the whole parser graph or needs a
-    // wrap-in-Arc refactor of `single_tool_call_parser`. Deferred to a
-    // follow-up rather than restructuring the parser chain in this review
-    // pass; named-parallel is a rare shape in practice (Required+parallel
-    // is what real callers use for burst extraction).
-    let parser = if parallel && matches!(choice, ToolChoice::Required) {
-        SeparatedParser::new(one, LiteralParser::new("\n"), 1..=MAX_PARALLEL_CALLS)
-            .map_output(|_| ())
-            .boxed()
-    } else {
-        one
-    };
-
-    Some(parser)
-}
-
-/// `<tool_call>\n{"name": "<fn>", "arguments": <args>}\n</tool_call>`
-fn single_tool_call_parser(tool: &ToolDef) -> ArcParser<()> {
-    let empty = Value::Object(serde_json::Map::new());
-    let params = tool.function.parameters.as_ref().unwrap_or(&empty);
-    let args = object_parser(params);
-
-    let prefix = lit(format!(
-        "<tool_call>\n{{\"name\": {}, \"arguments\": ",
-        json_string_literal(&tool.function.name)
-    ));
-    let suffix = lit("}\n</tool_call>");
-
-    seq2(seq2(prefix, args), suffix)
-}
-
-/// Compile a JSON-Schema object node into an object parser.
-///
-/// Emits ALL declared properties in schema order, whether required or
-/// optional. Rationale (Lal's PR #911 review, tool_grammar.rs:198): the
-/// earlier "only emit `required[]` members" filter dropped optional
-/// properties from the grammar entirely, so a schema like
-/// `{required: ["title"], properties: {title, hint, base, status}}`
-/// produced a parser that ONLY accepted `{"title": "..."}` — the LLM
-/// couldn't include `hint`, `base`, or `status` even when it had good
-/// data for them, because the grammar rejected those tokens partway
-/// through decoding. For tools where every property is optional
-/// (e.g. `query_links` with `source`/`target`/`predicate`), the parser
-/// collapsed to `{}` and the LLM couldn't filter anything.
-///
-/// Trade-off: the model is now forced to emit values for optional
-/// properties too. In practice small models handle this by producing
-/// empty strings or short defaults, which is a far smaller cost than
-/// losing the ability to express optional args at all.
-///
-/// A follow-up could support true "optional slots" (each optional
-/// property either present or absent) via an `opt()` combinator, but
-/// that's a real grammar-authoring exercise; the always-emit approach
-/// matches pre-2026-08-24 behaviour and unblocks the harness path.
-///
-/// Objects with no declared properties compile to the empty object `{}`.
-fn object_parser(schema: &Value) -> ArcParser<()> {
-    match schema.get("properties").and_then(Value::as_object) {
-        Some(props) if !props.is_empty() => {
-            let mut parts = props.iter().map(|(key, prop)| {
-                seq2(
-                    lit(format!("{}: ", json_string_literal(key))),
-                    value_parser(prop),
-                )
-            });
-            let mut body = parts.next().expect("props non-empty");
-            for part in parts {
-                body = seq2(seq2(body, lit(", ")), part);
-            }
-            seq2(seq2(lit("{"), body), lit("}"))
-        }
-        _ => lit("{}"),
-    }
-}
-
-/// Compile a JSON-Schema value node into a value parser.
-fn value_parser(schema: &Value) -> ArcParser<()> {
-    // Enumerations may omit `type`; a value must be one of the literals.
-    if let Some(values) = schema.get("enum").and_then(Value::as_array) {
-        let literals: Vec<ArcParser<()>> = values
-            .iter()
-            .map(|v| lit(serde_json::to_string(v).unwrap_or_else(|_| "null".to_string())))
-            .collect();
-        if !literals.is_empty() {
-            return or_all(literals);
-        }
-    }
-
-    // `type` may be a string or an array of strings (union); take the first.
-    let ty = match schema.get("type") {
-        Some(Value::String(s)) => Some(s.as_str()),
-        Some(Value::Array(a)) => a.iter().find_map(Value::as_str),
-        _ => None,
-    };
-
-    // Integer/number bounds NOT enforced at grammar level.
-    // Lal's PR #911 review, tool_grammar.rs:253, flagged that
-    // IntegerParser::new(i128::MIN..=i128::MAX) / FloatParser::new(f64::MIN
-    // ..=f64::MAX) ignore schema `minimum`/`maximum`/`multipleOf`. Attempted
-    // fix (2026-08-25) reading bounds into the parser range failed the
-    // "above max must be rejected" test — kalosm's IntegerParser range
-    // parameter is advisory for the parse-time state machine, not a strict
-    // rejection filter (over-range digits still parse as `Finished`).
-    // Enforcing bounds needs a post-parse wrapper that ArcParser doesn't
-    // expose today. Deferred to a follow-up; the harness's tool description
-    // carries the bound as a documented constraint the LLM should respect.
-    match ty {
-        Some("string") => string_value_parser(),
-        Some("integer") => IntegerParser::new(i128::MIN..=i128::MAX)
-            .map_output(|_| ())
-            .boxed(),
-        Some("number") => FloatParser::new(f64::MIN..=f64::MAX)
-            .map_output(|_| ())
-            .boxed(),
-        Some("boolean") => bool_parser(),
-        Some("null") => lit("null"),
-        Some("array") => array_parser(schema),
-        Some("object") => object_parser(schema),
-        // Unknown / missing type → permissive scalar.
-        _ => any_value_parser(),
-    }
-}
-
-/// `[]`  OR  `[` item (", " item)* `]`
-fn array_parser(schema: &Value) -> ArcParser<()> {
-    let item = match schema.get("items") {
-        Some(items) => value_parser(items),
-        None => any_value_parser(),
-    };
-    let non_empty = seq2(
-        seq2(
-            lit("["),
-            SeparatedParser::new(item, LiteralParser::new(", "), 1..=MAX_ARRAY_ITEMS)
-                .map_output(|_| ())
-                .boxed(),
-        ),
-        lit("]"),
-    );
-    lit("[]").or(non_empty).boxed()
-}
-
-/// A permissive scalar (string | number | boolean | null) for schema nodes
-/// with no usable `type`.
-fn any_value_parser() -> ArcParser<()> {
-    or_all(vec![
-        string_value_parser(),
-        FloatParser::new(f64::MIN..=f64::MAX)
-            .map_output(|_| ())
-            .boxed(),
-        bool_parser(),
-        lit("null"),
-    ])
-}
-
-fn string_value_parser() -> ArcParser<()> {
-    StringParser::new(0..=MAX_STRING_LEN)
-        .map_output(|_| ())
-        .boxed()
-}
-
-fn bool_parser() -> ArcParser<()> {
-    lit("true").or(lit("false")).boxed()
-}
-
-// -- uniform ArcParser<()> combinator helpers ------------------------------
-
-/// A literal, boxed to the uniform `ArcParser<()>` type.
-fn lit(text: impl Into<Cow<'static, str>>) -> ArcParser<()> {
-    LiteralParser::new(text).boxed()
-}
-
-/// `a` then `b`, output erased to `()`.
-fn seq2(a: ArcParser<()>, b: ArcParser<()>) -> ArcParser<()> {
-    a.then(b).map_output(|_| ()).boxed()
-}
-
-/// Fold a non-empty list of alternatives into a single `either` parser.
-/// (An empty list degrades to a parser that matches the empty string, but
-/// callers never pass one.)
-fn or_all(parsers: Vec<ArcParser<()>>) -> ArcParser<()> {
-    let mut iter = parsers.into_iter();
-    let mut acc = match iter.next() {
-        Some(first) => first,
-        None => return lit(""),
-    };
-    for parser in iter {
-        acc = acc.or(parser).boxed();
-    }
-    acc
-}
-
-/// JSON-encode `s` as a quoted string literal (including the surrounding
-/// quotes and any necessary escaping).
-fn json_string_literal(s: &str) -> String {
-    serde_json::to_string(s).unwrap_or_else(|_| format!("\"{}\"", s.replace('"', "\\\"")))
 }
 
 // ---------------------------------------------------------------------------
@@ -573,25 +553,14 @@ fn value_to_call(value: &Value) -> Option<ExtractedToolCall> {
 }
 
 // ---------------------------------------------------------------------------
-// Tests (no model required — pure grammar / parsing)
+// Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::openai_compat::types::FunctionDef;
-    use kalosm::language::{CreateParserState, ParseStatus, Parser};
     use serde_json::json;
-
-    /// Feed the whole input to the parser and report whether it reaches a
-    /// `Finished` state (i.e. the string is accepted by the grammar).
-    fn accepts(parser: &ArcParser<()>, input: &str) -> bool {
-        let state = parser.create_parser_state();
-        matches!(
-            parser.parse(&state, input.as_bytes()),
-            Ok(ParseStatus::Finished { .. })
-        )
-    }
 
     fn tool(name: &str, parameters: Value) -> ToolDef {
         ToolDef {
@@ -602,199 +571,6 @@ mod tests {
                 parameters: Some(parameters),
             },
         }
-    }
-
-    fn obj(schema: Value) -> ArcParser<()> {
-        object_parser(&schema)
-    }
-
-    #[test]
-    fn string_property_accepts_valid_rejects_wrong_type() {
-        let p = obj(json!({
-            "type": "object",
-            "properties": { "location": { "type": "string" } }
-        }));
-        assert!(accepts(&p, r#"{"location": "NYC"}"#));
-        // number where a string is required
-        assert!(!accepts(&p, r#"{"location": 5}"#));
-        // undeclared extra property
-        assert!(!accepts(&p, r#"{"location": "NYC", "x": "y"}"#));
-    }
-
-    #[test]
-    fn integer_property() {
-        let p = obj(json!({
-            "type": "object",
-            "properties": { "n": { "type": "integer" } }
-        }));
-        assert!(accepts(&p, r#"{"n": 42}"#));
-        assert!(accepts(&p, r#"{"n": -7}"#));
-        assert!(!accepts(&p, r#"{"n": "x"}"#));
-    }
-
-    #[test]
-    fn enum_property() {
-        let p = obj(json!({
-            "type": "object",
-            "properties": { "unit": { "type": "string", "enum": ["celsius", "fahrenheit"] } }
-        }));
-        assert!(accepts(&p, r#"{"unit": "celsius"}"#));
-        assert!(accepts(&p, r#"{"unit": "fahrenheit"}"#));
-        assert!(!accepts(&p, r#"{"unit": "kelvin"}"#));
-    }
-
-    #[test]
-    fn boolean_property() {
-        let p = obj(json!({
-            "type": "object",
-            "properties": { "b": { "type": "boolean" } }
-        }));
-        assert!(accepts(&p, r#"{"b": true}"#));
-        assert!(accepts(&p, r#"{"b": false}"#));
-        assert!(!accepts(&p, r#"{"b": 1}"#));
-    }
-
-    #[test]
-    fn array_property_including_empty() {
-        let p = obj(json!({
-            "type": "object",
-            "properties": { "xs": { "type": "array", "items": { "type": "integer" } } }
-        }));
-        assert!(accepts(&p, r#"{"xs": [1, 2, 3]}"#));
-        assert!(accepts(&p, r#"{"xs": []}"#));
-        assert!(accepts(&p, r#"{"xs": [7]}"#));
-        assert!(!accepts(&p, r#"{"xs": [1, "a"]}"#));
-    }
-
-    #[test]
-    fn nested_object_property() {
-        let p = obj(json!({
-            "type": "object",
-            "properties": {
-                "loc": {
-                    "type": "object",
-                    "properties": { "city": { "type": "string" } }
-                }
-            }
-        }));
-        assert!(accepts(&p, r#"{"loc": {"city": "NYC"}}"#));
-        assert!(!accepts(&p, r#"{"loc": {"city": 5}}"#));
-    }
-
-    #[test]
-    fn empty_parameters_compiles_to_empty_object() {
-        let p = obj(json!({ "type": "object" }));
-        assert!(accepts(&p, "{}"));
-        assert!(!accepts(&p, r#"{"x": 1}"#));
-    }
-
-    #[test]
-    fn object_parser_emits_all_properties_ignoring_required_array() {
-        // Regression: earlier the parser filtered to `required[]` and dropped
-        // optional properties entirely — meaning a schema like this produced
-        // a grammar that ONLY accepted `{"title": ...}` and rejected any
-        // attempt to include `hint` or `base`. That defeated the purpose of
-        // declaring optional properties (the LLM couldn't emit them even when
-        // it had good data). Fixed 2026-08-24: emit all declared properties
-        // (Lal's PR #911 review, tool_grammar.rs:198). Trade-off: the LLM
-        // must produce a value for each optional field too; small models
-        // handle this with empty strings or short defaults, which is a far
-        // smaller cost than being unable to express optional args at all.
-        let p = obj(json!({
-            "type": "object",
-            "properties": {
-                "title": { "type": "string" },
-                "hint": { "type": "string" },
-                "base": { "type": "string" }
-            },
-            "required": ["title"]
-        }));
-        // Full object with all properties: accepted (was rejected before).
-        assert!(accepts(&p, r#"{"title": "x", "hint": "y", "base": "z"}"#));
-        // Missing an "optional" property: rejected (they're all emitted now).
-        assert!(!accepts(&p, r#"{"title": "buy milk"}"#));
-        // Missing required: still rejected.
-        assert!(!accepts(&p, "{}"));
-    }
-
-    #[test]
-    fn object_parser_no_required_emits_all_properties() {
-        // Same shape as above but without `required[]` at all — the parser
-        // must behave identically because `required` is ignored.
-        let p = obj(json!({
-            "type": "object",
-            "properties": {
-                "a": { "type": "string" },
-                "b": { "type": "integer" }
-            }
-        }));
-        assert!(accepts(&p, r#"{"a": "x", "b": 1}"#));
-        assert!(!accepts(&p, r#"{"a": "x"}"#));
-    }
-
-    #[test]
-    fn object_parser_empty_required_still_emits_all_properties() {
-        // `required: []` used to collapse the grammar to `{}`; that was part
-        // of the same "drop optionals" bug. Now `required` is ignored, so a
-        // present-but-empty `required[]` behaves the same as an absent one.
-        let p = obj(json!({
-            "type": "object",
-            "properties": { "x": { "type": "string" } },
-            "required": []
-        }));
-        assert!(accepts(&p, r#"{"x": "y"}"#));
-        assert!(!accepts(&p, "{}"));
-    }
-
-    #[test]
-    fn required_tool_call_parser_matches_hermes_block() {
-        let weather = tool(
-            "get_weather",
-            json!({
-                "type": "object",
-                "properties": { "location": { "type": "string" } }
-            }),
-        );
-        let parser = build_tool_call_parser(&[weather], &ToolChoice::Required, false)
-            .expect("required ⇒ Some(parser)");
-
-        assert!(accepts(
-            &parser,
-            "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"NYC\"}}\n</tool_call>"
-        ));
-        // wrong function name
-        assert!(!accepts(
-            &parser,
-            "<tool_call>\n{\"name\": \"other\", \"arguments\": {\"location\": \"NYC\"}}\n</tool_call>"
-        ));
-        // malformed arguments (number for a string field)
-        assert!(!accepts(
-            &parser,
-            "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": 5}}\n</tool_call>"
-        ));
-    }
-
-    #[test]
-    fn named_choice_restricts_to_one_tool() {
-        let a = tool("alpha", json!({ "type": "object", "properties": {} }));
-        let b = tool("beta", json!({ "type": "object", "properties": {} }));
-        let parser = build_tool_call_parser(&[a, b], &ToolChoice::Named("alpha".to_string()), true)
-            .expect("named ⇒ Some(parser)");
-        assert!(accepts(
-            &parser,
-            "<tool_call>\n{\"name\": \"alpha\", \"arguments\": {}}\n</tool_call>"
-        ));
-        assert!(!accepts(
-            &parser,
-            "<tool_call>\n{\"name\": \"beta\", \"arguments\": {}}\n</tool_call>"
-        ));
-    }
-
-    #[test]
-    fn auto_and_none_are_unconstrained() {
-        let weather = tool("get_weather", json!({ "type": "object", "properties": {} }));
-        assert!(build_tool_call_parser(&[weather.clone()], &ToolChoice::Auto, true).is_none());
-        assert!(build_tool_call_parser(&[weather], &ToolChoice::None, true).is_none());
     }
 
     #[test]
@@ -1030,5 +806,218 @@ mod tests {
         assert!(prompt.contains("</tools>"));
         assert!(prompt.contains("get_weather"));
         assert!(prompt.contains("<tool_call>"));
+    }
+
+    fn weather_and_time() -> Vec<ToolDef> {
+        vec![
+            tool(
+                "get_weather",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string", "description": "a city", "minLength": 1 },
+                        "unit": { "type": "string", "enum": ["C", "F"] },
+                        "days": { "type": "integer", "minimum": 1 },
+                        "tags": { "type": "array", "items": { "type": "string" } },
+                    },
+                    "required": ["city"],
+                    "additionalProperties": false,
+                }),
+            ),
+            tool("get_time", json!({ "type": "object", "properties": {} })),
+        ]
+    }
+
+    fn call(name: &str, arguments: Value) -> ExtractedToolCall {
+        ExtractedToolCall {
+            name: name.to_string(),
+            arguments: arguments.to_string(),
+        }
+    }
+
+    #[test]
+    fn auto_none_and_an_unknown_named_function_are_unconstrained() {
+        let tools = weather_and_time();
+        for choice in [
+            ToolChoice::Auto,
+            ToolChoice::None,
+            ToolChoice::Named("nope".into()),
+        ] {
+            assert_eq!(ToolCallConstraint::for_choice(&tools, &choice, true), None);
+        }
+    }
+
+    #[test]
+    fn required_allows_any_tool_and_parallel_calls_up_to_the_cap() {
+        let tools = weather_and_time();
+        let parallel = ToolCallConstraint::for_choice(&tools, &ToolChoice::Required, true).unwrap();
+        assert_eq!(parallel.max_calls(), MAX_PARALLEL_CALLS);
+        let schema = parallel.schema();
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["required"], json!(["tool_calls"]));
+        let calls = &schema["properties"]["tool_calls"];
+        assert_eq!(calls["minItems"], 1);
+        assert_eq!(calls["maxItems"], MAX_PARALLEL_CALLS);
+        let alternatives = calls["items"]["anyOf"].as_array().unwrap();
+        let names: Vec<&Value> = alternatives
+            .iter()
+            .map(|alt| &alt["properties"]["name"]["enum"][0])
+            .collect();
+        assert_eq!(names, vec!["get_weather", "get_time"]);
+
+        let single = ToolCallConstraint::for_choice(&tools, &ToolChoice::Required, false).unwrap();
+        assert_eq!(single.max_calls(), 1);
+        assert_eq!(single.schema()["properties"]["tool_calls"]["maxItems"], 1);
+    }
+
+    #[test]
+    fn a_named_function_allows_that_one_call_even_with_parallel_calls() {
+        let constraint = ToolCallConstraint::for_choice(
+            &weather_and_time(),
+            &ToolChoice::Named("get_weather".into()),
+            true,
+        )
+        .unwrap();
+        assert_eq!(constraint.max_calls(), 1);
+        let item = &constraint.schema()["properties"]["tool_calls"]["items"];
+        assert!(item.get("anyOf").is_none(), "{item}");
+        assert_eq!(item["properties"]["name"]["enum"], json!(["get_weather"]));
+        assert_eq!(item["required"], json!(["name", "arguments"]));
+    }
+
+    #[test]
+    fn the_arguments_keep_only_the_keywords_that_shape_a_value() {
+        let constraint = ToolCallConstraint::for_choice(
+            &weather_and_time(),
+            &ToolChoice::Named("get_weather".into()),
+            false,
+        )
+        .unwrap();
+        let arguments =
+            &constraint.schema()["properties"]["tool_calls"]["items"]["properties"]["arguments"];
+        assert_eq!(
+            arguments,
+            &json!({
+                "type": "object",
+                "properties": {
+                    "city": { "type": "string" },
+                    "unit": { "type": "string", "enum": ["C", "F"] },
+                    "days": { "type": "integer" },
+                    "tags": { "type": "array", "items": { "type": "string" } },
+                },
+                "required": ["city"],
+            })
+        );
+
+        let no_parameters = ToolDef {
+            kind: "function".into(),
+            function: FunctionDef {
+                name: "ping".into(),
+                description: None,
+                parameters: None,
+            },
+        };
+        let ping =
+            ToolCallConstraint::for_choice(&[no_parameters], &ToolChoice::Required, false).unwrap();
+        assert_eq!(
+            ping.schema()["properties"]["tool_calls"]["items"]["properties"]["arguments"],
+            json!({ "type": "object" })
+        );
+    }
+
+    #[test]
+    fn a_reply_keeping_to_the_constraint_passes_with_its_calls() {
+        let constraint =
+            ToolCallConstraint::for_choice(&weather_and_time(), &ToolChoice::Required, true)
+                .unwrap();
+        let calls = vec![
+            call(
+                "get_weather",
+                json!({ "city": "Oslo", "unit": "C", "days": 2.0 }),
+            ),
+            call("get_time", json!({})),
+        ];
+        assert_eq!(constraint.check(calls.clone()), Ok(calls));
+
+        // What a constrained server writes reads back through `extract_tool_calls`.
+        let reply = r#"{"tool_calls":[{"name":"get_time","arguments":{}}]}"#;
+        assert_eq!(
+            constraint.check(extract_tool_calls(reply)),
+            Ok(vec![call("get_time", json!({}))])
+        );
+    }
+
+    #[test]
+    fn a_reply_breaking_the_constraint_says_how() {
+        let constraint = ToolCallConstraint::for_choice(
+            &weather_and_time(),
+            &ToolChoice::Named("get_weather".into()),
+            true,
+        )
+        .unwrap();
+        let refused = |calls: Vec<ExtractedToolCall>| constraint.check(calls).unwrap_err();
+
+        assert!(refused(vec![]).contains("no tool call"));
+        assert!(refused(vec![call("get_time", json!({}))]).contains("not an allowed tool"));
+        assert!(refused(vec![call("get_weather", json!({}))]).contains("arguments.city is missing"));
+        assert!(refused(vec![call("get_weather", json!({ "city": 3 }))])
+            .contains("arguments.city is not of type \"string\""));
+        assert!(refused(vec![call(
+            "get_weather",
+            json!({ "city": "Oslo", "unit": "K" })
+        )])
+        .contains("arguments.unit is not one of its allowed values"));
+        assert!(refused(vec![call(
+            "get_weather",
+            json!({ "city": "Oslo", "days": 1.5 })
+        )])
+        .contains("arguments.days is not of type \"integer\""));
+        assert!(refused(vec![call(
+            "get_weather",
+            json!({ "city": "Oslo", "tags": ["a", 1] })
+        )])
+        .contains("arguments.tags[1]"));
+        let not_json = ExtractedToolCall {
+            name: "get_weather".into(),
+            arguments: "{city".into(),
+        };
+        assert!(refused(vec![not_json]).contains("not JSON"));
+    }
+
+    #[test]
+    fn one_call_allowed_keeps_the_first_of_several() {
+        let constraint =
+            ToolCallConstraint::for_choice(&weather_and_time(), &ToolChoice::Required, false)
+                .unwrap();
+        let first = call("get_time", json!({}));
+        let checked = constraint
+            .check(vec![
+                first.clone(),
+                call("get_weather", json!({ "city": "Oslo" })),
+            ])
+            .unwrap();
+        assert_eq!(checked, vec![first]);
+    }
+
+    #[test]
+    fn any_of_and_one_of_alternatives_are_checked() {
+        let tools = vec![tool(
+            "set",
+            json!({
+                "type": "object",
+                "properties": {
+                    "value": { "oneOf": [{ "type": "string" }, { "type": "integer" }] },
+                },
+            }),
+        )];
+        let constraint =
+            ToolCallConstraint::for_choice(&tools, &ToolChoice::Required, false).unwrap();
+        assert!(constraint
+            .check(vec![call("set", json!({ "value": 4 }))])
+            .is_ok());
+        assert!(constraint
+            .check(vec![call("set", json!({ "value": true }))])
+            .unwrap_err()
+            .contains("none of its alternatives"));
     }
 }

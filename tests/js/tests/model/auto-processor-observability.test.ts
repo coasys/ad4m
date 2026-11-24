@@ -15,10 +15,10 @@
  * perspective-scoped `auto-processor-neighbourhood-state` stream (`claimed`
  * → `finished`), which #903 rides.
  *
- * Requires a reachable LLM (Ollama over the OpenAI-compatible API). Endpoint
- * + model env-overridable to match the Rust e2e suite:
- *   INTERPRETATION_E2E_BASE_URL (default http://localhost:11434/v1)
- *   INTERPRETATION_E2E_MODEL    (default gemma3:12b)
+ * Requires staging's llama-server. Endpoint + model env-overridable to match
+ * the Rust e2e suite (`addE2eLlm`):
+ *   INTERPRETATION_E2E_BASE_URL (default http://127.0.0.1:12460/v1)
+ *   INTERPRETATION_E2E_MODEL    (default qwen3.8-27b-ud-q4_k_m)
  *
  * Run (from tests/js, executor built + `pnpm run prepare-test` once):
  *   pnpm ts-mocha -p tsconfig.json --timeout 1200000 --exit \
@@ -37,11 +37,8 @@ import type {
   AutoProcessorNeighbourhoodStateEvent,
   AutoProcessorStep,
 } from "@coasys/ad4m";
-import { startAgent, waitUntil } from "../../helpers/index.js";
+import { addE2eLlm, E2E_BASE_URL, E2E_MODEL, E2E_PASS_TIMEOUT_MS, startAgent, waitUntil } from "../../helpers/index.js";
 import { ConversationSubgroup } from "./auto-processor-models.js";
-
-const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
-const MODEL = process.env.INTERPRETATION_E2E_MODEL || "gemma3:12b";
 
 // Same scope query the other WS auto-processor tests use — reifier carries
 // author + timestamp, `?timestamp` is what makes a turn identifiable to the
@@ -58,14 +55,14 @@ const SUBGROUP_CLASS = "ns://ConversationSubgroup";
 
 // LLM E2E gate — this suite drives the executor's real LLM path. Skipped by
 // default (unset `LLM_E2E`); the nightly `llm-e2e` workflow on `dev` runs it
-// against Marvin's Ollama. Run locally with `LLM_E2E=1`, or the umbrella
+// against the host's llama-server. Run locally with `LLM_E2E=1`, or the umbrella
 // `./scripts/run-llm-e2e.sh` at the repo root.
 const describeIfLLM: Mocha.SuiteFunction = (process.env.LLM_E2E === "1"
   ? describe
   : (describe.skip as unknown as Mocha.SuiteFunction));
 
 describeIfLLM("AutoProcessor observability — events + debug output (PR #903)", function () {
-  this.timeout(900_000);
+  this.timeout(1_800_000);
 
   let ad4m: Ad4mClient;
   let stopAgent: (() => Promise<void>) | null = null;
@@ -79,21 +76,20 @@ describeIfLLM("AutoProcessor observability — events + debug output (PR #903)",
   let nbEvents: AutoProcessorNeighbourhoodStateEvent[];
 
   before(async function () {
-    // LLM availability gate — this suite needs a reachable OpenAI-compatible
-    // endpoint at BASE_URL hosting MODEL. Skip cleanly on runners without it
-    // (mirrors the gate in run-interpretation-harness.test.ts).
+    // LLM availability gate — this suite needs llama-server listing the model.
+    // Skip cleanly on runners without it.
     try {
-      const probe = await fetch(BASE_URL.replace(/\/v1\/?$/, "") + "/v1/models", {
+      const probe = await fetch(E2E_BASE_URL.replace(/\/v1\/?$/, "") + "/v1/models", {
         signal: AbortSignal.timeout(3000),
       });
       if (!probe.ok) throw new Error(`probe ${probe.status}`);
       const body = (await probe.json()) as { data?: Array<{ id?: string }> };
       const ids = (body.data ?? []).map((m) => m.id).filter((id): id is string => !!id);
-      if (!ids.includes(MODEL)) {
-        throw new Error(`model ${MODEL} not present in /v1/models (have: ${ids.join(", ") || "none"})`);
+      if (!ids.includes(E2E_MODEL)) {
+        throw new Error(`model ${E2E_MODEL} not present in /v1/models (have: ${ids.join(", ") || "none"})`);
       }
     } catch (e) {
-      console.log(`Skipping auto-processor observability e2e — LLM endpoint ${BASE_URL} unreachable: ${(e as Error).message}`);
+      console.log(`Skipping auto-processor observability e2e — LLM endpoint ${E2E_BASE_URL} unreachable: ${(e as Error).message}`);
       this.skip();
     }
 
@@ -101,11 +97,7 @@ describeIfLLM("AutoProcessor observability — events + debug output (PR #903)",
     ad4m = agent.client;
     stopAgent = agent.stop;
 
-    const modelId = await ad4m.ai.addModel({
-      name: "interpretation-llm",
-      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OPEN_AI" },
-      modelType: "LLM",
-    } as any);
+    const modelId = await addE2eLlm(ad4m, "interpretation-llm");
     await ad4m.ai.setDefaultModel("LLM", modelId);
   });
 
@@ -160,7 +152,7 @@ describeIfLLM("AutoProcessor observability — events + debug output (PR #903)",
     await say("Right, the payments queue has no way to replay what got dropped last time.");
     await waitUntil(
       () => events.some((e) => e.step === "processed"),
-      600_000,
+      E2E_PASS_TIMEOUT_MS,
       "a `processed` step signal from the pass",
     );
   }

@@ -11,18 +11,33 @@
 //! copy of either:
 //!
 //! ```text
-//!  classes ──▶ 1. per class: execute_model_query_inner (scope + where, no paging)
-//!                      │      rows hydrated as that class
+//!  classes ──▶ 1. per class: select_ids (scope + where, no paging): each id
+//!                      │      and its sort value, nothing hydrated; a class
+//!                      │      whose where/order the store cannot answer runs
+//!                      │      execute_model_query_inner and reads its rows
 //!                      ▼
-//!              2. subject_classes_of(union ids) ──▶ choose() one requested class
-//!                      │      among those whose step-1 query returned the record;
-//!                      │      a record answered by two classes is kept once
+//!              2. count; a record one class returned is read as it, one several
+//!                      │      returned goes to subject_class_iris_of ──▶ choose()
+//!                      │      among those classes; each record is kept once
 //!                      ▼
-//!              3. sort once (nulls last, then id), count, limit/offset once
+//!              3. sort once (nulls last, then id), limit/offset once
 //!                      ▼
 //!              4. per chosen class: hydrate the page's ids with the caller's
 //!                 include / projections / links / getters / properties
 //! ```
+//!
+//! Only the page is hydrated (PERF-29): a union read costs ids for every
+//! record and rows for the page, as a single-class page does. Every sort value
+//! step 1 reads is the value the record's hydrated row carries, whichever way
+//! its class answers, so the order is the one hydrating every row would give.
+//! Creation time (`timestamp`, `createdAt`, and the default order) is the
+//! earliest link hydration reads ([`SortKey::CreatedAt`]), not the conformance
+//! link a paged single-class read sorts on.
+//!
+//! Membership comes from step 1, as on a paged single-class read: under an
+//! order on a property, a record that passes `where` but hydrates to no row
+//! (all its links withheld from hydration) counts in `totalCount` and leaves
+//! its page one row short.
 //!
 //! Semantics, as decided on the issue
 //! (<https://github.com/coasys/ad4m/issues/1238#issuecomment-6081266040>):
@@ -32,22 +47,25 @@
 //!   classes is kept when any of its readings passes, and is read as one that
 //!   does.
 //! - `order` sorts rows without the value last in both directions, then by id,
-//!   the rule the store's `ORDER BY` applies to a single class.
+//!   the rule the store's `ORDER BY` applies to a single class. It may name
+//!   `__subjectClass` / `__subjectClasses`, which sort on the values below.
 //! - `limit` / `offset` apply once over the union; `totalCount` is the union
 //!   after `where`.
-//! - Every row carries `__subjectClass` (the class it was hydrated as) and
-//!   `__subjectClasses` (every class it conforms to), as polymorphic members do.
+//! - Every row carries `__subjectClass` (the class it was hydrated as: the key
+//!   it was asked for by) and `__subjectClasses` (every class it conforms to,
+//!   by target class IRI), as polymorphic members do.
 
 use super::filtering::{compare_values, extract_sort_value};
 use super::projection::resolve_projections;
-use super::query::{execute_model_query_inner, walk_order, with_walk};
+use super::query::{execute_model_query_inner, select_ids, walk_order, with_walk};
 use super::relations::{choose, SUBJECT_CLASSES_KEY, SUBJECT_CLASS_KEY};
 use super::types::{
-    ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, Scope, ShapeResolver,
-    WhereCondition,
+    ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, ProjectionInput, Scope,
+    ShapeResolver, SortKey, WhereCondition,
 };
-use crate::perspectives::sparql_store::SparqlStore;
-use deno_core::anyhow::{anyhow, Error};
+use crate::perspectives::shacl_parser::class_name_of;
+use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
+use anyhow::{anyhow, Error};
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -57,7 +75,7 @@ use std::sync::Arc;
 ///
 /// A one-element union is still a union: its rows carry `__subjectClass`, which
 /// a single-class query's rows do not.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum QueryClasses {
     One(String),
     Union(Vec<String>),
@@ -103,7 +121,15 @@ fn effective_order(query: &ModelQueryInput) -> Vec<(String, OrderDirection)> {
     }
 }
 
-/// Order rows of several classes against each other.
+/// One record of the union before it is hydrated: its id, the class it is read
+/// as, and its value for each order key, in the order's order.
+struct Member {
+    id: String,
+    class: String,
+    keys: Vec<Value>,
+}
+
+/// Order records of several classes against each other.
 ///
 /// Not [`super::filtering::sort_instances`]: that reverses the whole
 /// comparison for `DESC`, nulls included, so a row without the value comes
@@ -112,17 +138,17 @@ fn effective_order(query: &ModelQueryInput) -> Vec<(String, OrderDirection)> {
 /// In a union "no value" is the common case — a class that does not declare
 /// the key — so the union follows the store, and a union page orders rows the
 /// way a single-class page does.
-fn sort_union(rows: &mut [Value], order: &[(String, OrderDirection)]) {
-    rows.sort_by(|a, b| {
-        for (key, dir) in order {
-            let av = extract_sort_value(a, key);
-            let bv = extract_sort_value(b, key);
+fn sort_union(members: &mut [Member], order: &[(String, OrderDirection)]) {
+    members.sort_by(|a, b| {
+        for (i, (_, dir)) in order.iter().enumerate() {
+            let av = a.keys.get(i).unwrap_or(&Value::Null);
+            let bv = b.keys.get(i).unwrap_or(&Value::Null);
             let cmp = match (av.is_null(), bv.is_null()) {
                 (true, true) => Ordering::Equal,
                 (true, false) => Ordering::Greater,
                 (false, true) => Ordering::Less,
                 (false, false) => {
-                    let c = compare_values(&av, &bv);
+                    let c = compare_values(av, bv);
                     if *dir == OrderDirection::DESC {
                         c.reverse()
                     } else {
@@ -134,11 +160,166 @@ fn sort_union(rows: &mut [Value], order: &[(String, OrderDirection)]) {
                 return cmp;
             }
         }
-        a["id"]
-            .as_str()
-            .unwrap_or("")
-            .cmp(b["id"].as_str().unwrap_or(""))
+        a.id.cmp(&b.id)
     });
+}
+
+/// A row's `__subjectClasses`: every class the record conforms to, or the
+/// class it is read as when classification did not answer for it.
+fn subject_classes_value(classified: Option<&Vec<String>>, chosen: &str) -> Value {
+    let all = classified
+        .cloned()
+        .unwrap_or_else(|| vec![chosen.to_string()]);
+    Value::Array(all.into_iter().map(Value::String).collect())
+}
+
+/// Where a class's value for one order key comes from when the class's id
+/// phase answers it, so the record is not hydrated to be sorted.
+enum KeySource {
+    /// Creation time: `?_first_ts` of [`SortKey::CreatedAt`], the earliest
+    /// link hydration reads, so the `timestamp` the class's rows carry.
+    CreatedAt,
+    /// A scalar property, as `?_sort_str`: the lexical value `parse_literal`
+    /// reads, which [`compare_values`] orders as it orders the hydrated one.
+    Property(String),
+    /// The record's id.
+    Id,
+    /// `__subjectClass` or `__subjectClasses`: set once the record's class is
+    /// chosen, as the union sets them on the row.
+    Chosen,
+    /// A key this class's rows never carry: null on every record.
+    Absent,
+}
+
+/// The id phase's source for `key` on `shape`, or `None` when only the
+/// hydrated row has the value the union sorts on: `updatedAt` and `author`
+/// (link metadata the id phase does not bind), a `$` projection count, and a
+/// property whose hydrated value is not its stored literal (a collection, a
+/// flag, a relation, a getter, a transform, a reverse or local property, or one
+/// a language other than `literal` resolves).
+fn key_source(shape: &ModelShape, key: &str) -> Option<KeySource> {
+    match key {
+        "timestamp" | "createdAt" => return Some(KeySource::CreatedAt),
+        "id" | "baseExpression" => return Some(KeySource::Id),
+        SUBJECT_CLASS_KEY | SUBJECT_CLASSES_KEY => return Some(KeySource::Chosen),
+        "updatedAt" | "author" => return None,
+        _ if key.starts_with('$') => return None,
+        _ => {}
+    }
+    match shape.properties.iter().find(|p| p.name == key) {
+        None if shape.include_relations.iter().all(|r| r.name != key) => Some(KeySource::Absent),
+        Some(p)
+            if !p.is_collection
+                && !p.is_flag
+                && !p.is_scalar_relation
+                && !p.local
+                && !p.predicate.is_empty()
+                && p.getter.is_none()
+                && p.transform.is_none()
+                && p.direction.as_deref() != Some("reverse")
+                && matches!(p.resolve_language.as_deref(), None | Some("literal")) =>
+        {
+            Some(KeySource::Property(p.predicate.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// A class's records in scope that pass `where`, each with its value for every
+/// key of `order`, from the class's id phase: nothing is hydrated. `None` when
+/// the id phase cannot answer — a `where` matched after hydration, or an order
+/// needing a value only the hydrated row has, or two the store sorts on
+/// differently (it binds one sort value per query).
+async fn members_from_ids(
+    stop: &EvalStop,
+    store: &SparqlStore,
+    shape: &ModelShape,
+    select: &ModelQueryInput,
+    resolver: &dyn ShapeResolver,
+    order: &[(String, OrderDirection)],
+) -> Result<Option<Vec<(String, Vec<Value>)>>, Error> {
+    let Some(sources) = order
+        .iter()
+        .map(|(key, _)| key_source(shape, key))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Ok(None);
+    };
+    let mut predicates = sources.iter().filter_map(|s| match s {
+        KeySource::Property(p) => Some(p),
+        _ => None,
+    });
+    let sort_key = match predicates.next() {
+        Some(p) if predicates.all(|q| q == p) => {
+            if sources.iter().any(|s| matches!(s, KeySource::CreatedAt)) {
+                return Ok(None);
+            }
+            SortKey::Property(p.clone())
+        }
+        Some(_) => return Ok(None),
+        None => SortKey::CreatedAt,
+    };
+    let Some(rows) = select_ids(stop, store, shape, select, resolver, sort_key).await? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        rows.into_iter()
+            .filter_map(|row| {
+                let id = row["source"].as_str()?.to_string();
+                let keys = sources
+                    .iter()
+                    .map(|source| match source {
+                        KeySource::CreatedAt => row["_first_ts"].clone(),
+                        KeySource::Property(_) => row["_sort_str"].clone(),
+                        KeySource::Id => Value::String(id.clone()),
+                        KeySource::Chosen | KeySource::Absent => Value::Null,
+                    })
+                    .collect();
+                Some((id, keys))
+            })
+            .collect(),
+    ))
+}
+
+/// [`members_from_ids`] for a class whose id phase cannot answer: its rows
+/// hydrated as that class (with the projections an order key names), and each
+/// key read off the row.
+async fn members_from_rows(
+    stop: &EvalStop,
+    store: &SparqlStore,
+    shape: &ModelShape,
+    select: &ModelQueryInput,
+    resolver: &dyn ShapeResolver,
+    order: &[(String, OrderDirection)],
+    sort_projections: Option<&HashMap<String, ProjectionInput>>,
+) -> Result<Vec<(String, Vec<Value>)>, Error> {
+    let mut result = execute_model_query_inner(stop, store, shape, select, resolver, 0).await?;
+    if let Some(projs) = sort_projections.filter(|p| !p.is_empty()) {
+        resolve_projections(
+            stop,
+            store,
+            &mut result.instances,
+            projs,
+            shape,
+            resolver,
+            0,
+            select.link_status.as_ref(),
+            select.include_unverified,
+        )
+        .await?;
+    }
+    Ok(result
+        .instances
+        .iter()
+        .filter_map(|row| {
+            let id = row["id"].as_str()?.to_string();
+            let keys = order
+                .iter()
+                .map(|(key, _)| extract_sort_value(row, key))
+                .collect();
+            Some((id, keys))
+        })
+        .collect())
 }
 
 /// Refuse what has no single meaning over several classes.
@@ -153,6 +334,24 @@ fn refuse_unanswerable(classes: &[String], query: &ModelQueryInput) -> Result<()
 /// abstract class (#1435) checks these before it resolves its classes, so
 /// whether it is refused does not depend on what happens to be installed.
 pub(crate) fn refuse_union_reads(query: &ModelQueryInput) -> Result<(), Error> {
+    // The keyset is one class's `(first timestamp, id)` order in the store;
+    // the union sorts and pages its rows in the executor. An abstract class
+    // is read as a union of the classes it resolves to, so it is refused too.
+    if query.after.is_some() {
+        return Err(anyhow!(
+            "classNames / abstract class: `after` cursors are not supported over several \
+             classes. Page the union with `limit`/`offset`, or query one class at a time."
+        ));
+    }
+    // An `include` cursor is refused here too: the selection query clears
+    // `include`, and an empty page never reaches the per-class fetch that
+    // refuses it (query.rs), so whether it errored would depend on the rows.
+    if super::cursor::include_sends_cursor(query) {
+        return Err(anyhow!(
+            "classNames / abstract class: `after` cursors page a top-level query only. \
+             An `include` sub-query takes `limit`/`offset`."
+        ));
+    }
     // A per-anchor limit and a walk pick their rows inside the store, once per
     // class, so `limitPerAnchor: 5` would keep five per anchor *per class*.
     if let Some(Scope::Traverse {
@@ -186,7 +385,8 @@ pub(crate) fn refuse_union_reads(query: &ModelQueryInput) -> Result<(), Error> {
 
 /// Execute one model query over several classes.
 ///
-/// `classes` are bare class names, each resolved through `resolver`; a missing
+/// `classes` are class IRIs or names, each resolved through `resolver`; a
+/// row's `__subjectClass` is the key it was asked for by. A missing
 /// shape surfaces as the resolver's error, so the caller's shape-wait loop
 /// treats it exactly as it treats a single class.
 pub async fn execute_union_query(
@@ -195,7 +395,15 @@ pub async fn execute_union_query(
     query: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
 ) -> Result<ModelQueryResult, Error> {
-    execute_union_query_with_views(store, classes, query, resolver, &HashMap::new()).await
+    execute_union_query_with_views(
+        &EvalStop::none(),
+        store,
+        classes,
+        query,
+        resolver,
+        &HashMap::new(),
+    )
+    .await
 }
 
 /// [`execute_union_query`], reading each class in `views` through its view
@@ -203,6 +411,7 @@ pub async fn execute_union_query(
 /// carry the abstract class's names. Records an `include` reaches are read
 /// through `resolver`, as their own class.
 pub async fn execute_union_query_with_views(
+    stop: &EvalStop,
     store: &SparqlStore,
     classes: &[String],
     query: &ModelQueryInput,
@@ -212,7 +421,7 @@ pub async fn execute_union_query_with_views(
     refuse_unanswerable(classes, query)?;
     // A walk is made once for the union, not once per class: every class
     // reads the same reached nodes, and their order is the walk's.
-    let walked_query = with_walk(store, query)?;
+    let walked_query = with_walk(stop, store, query)?;
     let query = walked_query.as_ref().unwrap_or(query);
     let walk_order = walk_order(query);
     let shape_of = |class: &str| match views.get(class) {
@@ -237,8 +446,12 @@ pub async fn execute_union_query_with_views(
             .collect()
     });
 
-    // 1. Each class's rows in scope that pass `where`, hydrated as that class.
-    //    No paging and no order: both apply to the union, not to a member.
+    // 1. Each class's records in scope that pass `where`, with their value for
+    //    each order key: from the class's id phase, so nothing is hydrated, or,
+    //    for a class whose `where` or order the store cannot answer, from its
+    //    rows hydrated as that class. No paging and no order: both apply to
+    //    the union, not to a member. A containment walk with no order sorts on
+    //    the walk, so no key is read.
     let select = ModelQueryInput {
         include: None,
         projections: None,
@@ -253,142 +466,173 @@ pub async fn execute_union_query_with_views(
         deep_query: Some(false),
         ..query.clone()
     };
-    let mut rows_by_class: HashMap<String, HashMap<String, Value>> = HashMap::new();
-    // Every id in the order it was first seen, for a stable classification call.
+    let sort_keys: &[(String, OrderDirection)] = if walk_order.is_some() { &[] } else { &order };
+    let mut keys_by_class: HashMap<String, HashMap<String, Vec<Value>>> = HashMap::new();
+    // Every id in the order it was first seen.
     let mut all_ids: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for class in &requested {
         let shape = shape_of(class)?;
-        let mut result =
-            execute_model_query_inner(store, shape.as_ref(), &select, resolver, 0).await?;
-        if let Some(projs) = sort_projections.as_ref().filter(|p| !p.is_empty()) {
-            resolve_projections(
-                store,
-                &mut result.instances,
-                projs,
-                shape.as_ref(),
-                resolver,
-                0,
-                query.link_status.as_ref(),
-                query.include_unverified,
-            )
-            .await?;
-        }
-        let mut rows = HashMap::new();
-        for row in result.instances {
-            let Some(id) = row["id"].as_str().map(str::to_string) else {
-                continue;
+        let members =
+            match members_from_ids(stop, store, shape.as_ref(), &select, resolver, sort_keys)
+                .await?
+            {
+                Some(members) => members,
+                None => {
+                    members_from_rows(
+                        stop,
+                        store,
+                        shape.as_ref(),
+                        &select,
+                        resolver,
+                        sort_keys,
+                        sort_projections.as_ref(),
+                    )
+                    .await?
+                }
             };
+        let mut keyed = HashMap::new();
+        for (id, keys) in members {
             if seen.insert(id.clone()) {
                 all_ids.push(id.clone());
             }
-            rows.insert(id, row);
+            keyed.insert(id, keys);
         }
-        rows_by_class.insert(class.clone(), rows);
+        keys_by_class.insert(class.clone(), keyed);
     }
-
-    // 2. One row per record, as the class chosen for it. The choice is the
-    //    polymorphic include's (`choose`), restricted to the requested classes
-    //    whose step-1 query returned the record: `preferClasses` first, then
-    //    the most specific of them. Step 1 already answered "does it pass as
-    //    this class, under this read's `where` and link filters", so a record
-    //    is kept whenever one of its readings passes — the answer a per-class
-    //    query gives — and a reading the read cannot see (a Local or
-    //    unverified flag under a shared read) can never be the one chosen.
-    let classified =
-        crate::perspectives::subject_classes_of::subject_classes_of(store, resolver, &all_ids)?;
-    let preferred = query.prefer_classes.as_deref().unwrap_or(&[]);
-    let mut union: Vec<Value> = Vec::new();
-    let mut chosen_by_id: HashMap<String, String> = HashMap::new();
-    for id in &all_ids {
-        let conforms: Vec<String> = classified
-            .get(id)
-            .map(|all| {
-                all.iter()
-                    .filter(|c| {
-                        requested.contains(c)
-                            && rows_by_class.get(*c).is_some_and(|r| r.contains_key(id))
-                    })
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
-        // Classification is structural and skips a class with no required
-        // triples; the store's conformance query still answers for it. Such a
-        // record falls back to the first requested class that returned it.
-        let chosen = match choose(&conforms, preferred) {
-            Some(c) => c.clone(),
-            None => match requested
-                .iter()
-                .find(|c| rows_by_class.get(*c).is_some_and(|r| r.contains_key(id)))
-            {
-                Some(c) => c.clone(),
-                None => continue,
-            },
-        };
-        let Some(mut row) = rows_by_class
-            .get_mut(&chosen)
-            .and_then(|rows| rows.remove(id))
-        else {
-            continue;
-        };
-        let all = classified
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| vec![chosen.clone()]);
-        if let Some(obj) = row.as_object_mut() {
-            obj.insert(SUBJECT_CLASS_KEY.to_string(), Value::String(chosen.clone()));
-            obj.insert(
-                SUBJECT_CLASSES_KEY.to_string(),
-                Value::Array(all.into_iter().map(Value::String).collect()),
-            );
-        }
-        chosen_by_id.insert(id.clone(), chosen);
-        union.push(row);
-    }
-
-    // 3. Order, count and cut the page once, over the union. A containment
-    //    walk with no order keeps the walk's: nearest first.
-    match &walk_order {
-        Some(positions) => union.sort_by_key(|row| {
-            row["id"]
-                .as_str()
-                .and_then(|id| positions.get(id))
-                .copied()
-                .unwrap_or(usize::MAX)
-        }),
-        None => sort_union(&mut union, &order),
-    }
-    let total_count = union.len();
+    // The union after `where`: each record once, however many classes return it.
+    let total_count = query.count.unwrap_or(false).then_some(all_ids.len());
     if query.limit == Some(0) {
         return Ok(ModelQueryResult {
             instances: vec![],
             total_count,
+            next_cursor: None,
         });
     }
-    let page: Vec<String> = union
+    // The requested classes whose step-1 query returned each record.
+    let readers_by_id: Vec<Vec<&String>> = all_ids
         .iter()
+        .map(|id| {
+            requested
+                .iter()
+                .filter(|c| keys_by_class.get(*c).is_some_and(|k| k.contains_key(id)))
+                .collect()
+        })
+        .collect();
+    // An order on `__subjectClasses` sorts on every record's classes, so all
+    // are classified before the page is cut, as the hydrated union did.
+    let order_on_classes = sort_keys.iter().any(|(k, _)| k == SUBJECT_CLASSES_KEY);
+
+    // 2. One reading per record. The choice is the polymorphic include's
+    //    (`choose`), restricted to the requested classes whose step-1 query
+    //    returned the record: `preferClasses` first, then the most specific of
+    //    them. Step 1 already answered "does it pass as this class, under this
+    //    read's `where` and link filters", so a record is kept whenever one of
+    //    its readings passes — the answer a per-class query gives — and a
+    //    reading the read cannot see (a Local or unverified flag under a shared
+    //    read) can never be the one chosen. A record one class returned is read
+    //    as that class without asking; only records several returned are
+    //    classified before the page is cut, since their reading decides their
+    //    sort value.
+    let shared: Vec<String> = all_ids
+        .iter()
+        .zip(&readers_by_id)
+        .filter(|(_, readers)| order_on_classes || readers.len() > 1)
+        .map(|(id, _)| id.clone())
+        .collect();
+    let mut classified: HashMap<String, Vec<String>> = if shared.is_empty() {
+        HashMap::new()
+    } else {
+        crate::perspectives::subject_classes_of::subject_class_iris_of(
+            stop, store, resolver, &shared,
+        )?
+    };
+    let preferred = query.prefer_classes.as_deref().unwrap_or(&[]);
+    let mut union: Vec<Member> = Vec::with_capacity(all_ids.len());
+    for (id, readers) in all_ids.iter().zip(&readers_by_id) {
+        let Some(first) = readers.first() else {
+            continue;
+        };
+        let chosen = if readers.len() == 1 {
+            (*first).clone()
+        } else {
+            // Classified by class IRI; a requested key (an IRI or a name) is a
+            // reading of the record when one of its classes is that IRI or has
+            // that name.
+            let mut conforms: Vec<String> = Vec::new();
+            for class in classified.get(id).into_iter().flatten() {
+                for key in readers {
+                    if (*key == class || **key == class_name_of(class)) && !conforms.contains(key) {
+                        conforms.push((*key).clone());
+                    }
+                }
+            }
+            // Classification is structural and skips a class with no required
+            // triples; the store's conformance query still answers for it. Such
+            // a record falls back to the first requested class that returned it.
+            choose(&conforms, preferred)
+                .cloned()
+                .unwrap_or_else(|| (*first).clone())
+        };
+        let mut keys = keys_by_class
+            .get(&chosen)
+            .and_then(|k| k.get(id))
+            .cloned()
+            .unwrap_or_default();
+        // The keys the union itself sets on the row, as it will set them.
+        for ((key, _), value) in sort_keys.iter().zip(keys.iter_mut()) {
+            if key == SUBJECT_CLASS_KEY {
+                *value = Value::String(chosen.clone());
+            } else if key == SUBJECT_CLASSES_KEY {
+                *value = subject_classes_value(classified.get(id), &chosen);
+            }
+        }
+        union.push(Member {
+            id: id.clone(),
+            class: chosen,
+            keys,
+        });
+    }
+
+    // 3. Order and cut the page once, over the union. A containment walk with
+    //    no order keeps the walk's: nearest first.
+    match &walk_order {
+        Some(positions) => {
+            union.sort_by_key(|m| positions.get(&m.id).copied().unwrap_or(usize::MAX))
+        }
+        None => sort_union(&mut union, &order),
+    }
+    let page: Vec<Member> = union
+        .into_iter()
         .skip(query.offset.unwrap_or(0))
         .take(query.limit.unwrap_or(usize::MAX))
-        .filter_map(|r| r["id"].as_str().map(str::to_string))
         .collect();
-    let mut tags: HashMap<String, Value> = HashMap::new();
-    for row in &union {
-        if let Some(id) = row["id"].as_str() {
-            tags.insert(id.to_string(), row[SUBJECT_CLASSES_KEY].clone());
-        }
+    // Every class each page record conforms to, for `__subjectClasses`.
+    let shared: HashSet<String> = shared.into_iter().collect();
+    let unclassified: Vec<String> = page
+        .iter()
+        .filter(|m| !shared.contains(&m.id))
+        .map(|m| m.id.clone())
+        .collect();
+    if !unclassified.is_empty() {
+        classified.extend(
+            crate::perspectives::subject_classes_of::subject_class_iris_of(
+                stop,
+                store,
+                resolver,
+                &unclassified,
+            )?,
+        );
     }
 
     // 4. Hydrate the page as the caller asked, one query per chosen class.
     //    `where` and the scope were answered in step 1; the id list replaces them.
     let mut page_by_class: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for id in &page {
-        if let Some(class) = chosen_by_id.get(id) {
-            page_by_class
-                .entry(class.clone())
-                .or_default()
-                .push(id.clone());
-        }
+    for member in &page {
+        page_by_class
+            .entry(member.class.clone())
+            .or_default()
+            .push(member.id.clone());
     }
     let mut hydrated: HashMap<String, Value> = HashMap::new();
     for (class, ids) in page_by_class {
@@ -402,10 +646,12 @@ pub async fn execute_union_query_with_views(
             order: None,
             limit: None,
             offset: None,
+            after: None,
             count: None,
             ..query.clone()
         };
-        let result = execute_model_query_inner(store, shape.as_ref(), &fetch, resolver, 0).await?;
+        let result =
+            execute_model_query_inner(stop, store, shape.as_ref(), &fetch, resolver, 0).await?;
         for mut row in result.instances {
             let Some(id) = row["id"].as_str().map(str::to_string) else {
                 continue;
@@ -414,7 +660,7 @@ pub async fn execute_union_query_with_views(
                 obj.insert(SUBJECT_CLASS_KEY.to_string(), Value::String(class.clone()));
                 obj.insert(
                     SUBJECT_CLASSES_KEY.to_string(),
-                    tags.get(&id).cloned().unwrap_or(Value::Null),
+                    subject_classes_value(classified.get(&id), &class),
                 );
             }
             hydrated.insert(id, row);
@@ -422,8 +668,9 @@ pub async fn execute_union_query_with_views(
     }
 
     Ok(ModelQueryResult {
-        instances: page.iter().filter_map(|id| hydrated.remove(id)).collect(),
+        instances: page.iter().filter_map(|m| hydrated.remove(&m.id)).collect(),
         total_count,
+        next_cursor: None,
     })
 }
 

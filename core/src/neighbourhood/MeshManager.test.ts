@@ -362,7 +362,6 @@ interface MeshOptions extends ChannelOptions {
     /** What `join` is handed. An empty stream unless a test says otherwise. */
     localStream?: MediaStream
     onNetworkChange?: (callback: () => void) => () => void
-    checkConnection?: () => void
 }
 
 /** Every mesh a test made, so each is left afterwards and no timer or listener outlives its test. */
@@ -387,7 +386,6 @@ async function makeMesh(bus: InMemoryBus, selfId: string, callId: string, option
         iceServers: options.iceServers,
         now: options.now,
         onNetworkChange: options.onNetworkChange,
-        checkConnection: options.checkConnection,
         // No timer: every test drives `tick()` itself, so a sweep never fires
         // between an act and its assertion. The interval has its own test.
         sweepMs: 0,
@@ -515,6 +513,11 @@ describe("parseCallMessage", () => {
             binary: false,
         }
         expect(parseCallMessage(data)).toEqual(data)
+    })
+
+    it("accepts a beat", () => {
+        const beat = { v: CALL_PROTOCOL_VERSION, call: "room:x", kind: "beat" as const }
+        expect(parseCallMessage({ ...beat, to: "*" })).toEqual(beat)
     })
 
     it("coerces missing binary flag to false", () => {
@@ -1594,21 +1597,6 @@ describe("recovering a pair that did not connect", () => {
         expect(alice.recoveries.at(-1)).toMatchObject({ rung: "ice-restart", attempts: 1 })
     })
 
-    it("checks the executor socket when a pair goes disconnected", async () => {
-        // The signals of every rung go over that socket; a dead one is found in
-        // seconds, and its reconnect restarts every pair through onNetworkChange.
-        const checkConnection = jest.fn()
-        const alice = await makeMesh(bus, "did:alice", CALL_ID, { checkConnection })
-        const bob = await makeMesh(bus, "did:bob", CALL_ID)
-        for (const m of [alice, bob]) m.mesh.setRoster(["did:alice", "did:bob"])
-        await settleAll()
-        alice.live().setConnectionState("connected")
-        expect(checkConnection).not.toHaveBeenCalled()
-
-        alice.live().setConnectionState("disconnected")
-        expect(checkConnection).toHaveBeenCalledTimes(1)
-    })
-
     it("rebuilds the pair, and says so, once the cheaper rungs have not worked", async () => {
         const clock = makeClock()
         const alice = await makeMesh(bus, "did:alice", CALL_ID, { now: clock.now })
@@ -2316,6 +2304,58 @@ describe("what a call is told about its own connections", () => {
 })
 
 // ── Signalling before the roster ────────────────────────────────────
+
+describe("beats", () => {
+    let bus: InMemoryBus
+
+    beforeEach(() => {
+        bus = new InMemoryBus()
+    })
+
+    it("sends a beat to every peer, which reports it from its sender whether the roster lists it or not", async () => {
+        const alice = await makeMesh(bus, "did:alice#laptop", CALL_ID)
+        const bob = await makeMesh(bus, "did:bob#phone", CALL_ID)
+        const heard: string[] = []
+        bob.mesh.on("beat", (peer: string) => heard.push(peer))
+
+        alice.mesh.beat()
+        await settle()
+        expect(alice.sent[alice.sent.length - 1]).toEqual({ v: CALL_PROTOCOL_VERSION, call: CALL_ID, to: "*", kind: "beat" })
+        expect(heard).toEqual(["did:alice#laptop"])
+
+        bob.mesh.setRoster(["did:alice#laptop", "did:bob#phone"])
+        alice.mesh.beat()
+        await settle()
+        expect(heard).toEqual(["did:alice#laptop", "did:alice#laptop"])
+        expect(bob.errors).toEqual([])
+    })
+
+    it("holds no beat for a peer the roster does not list: it is not signalling", async () => {
+        const alice = await makeMesh(bus, "did:alice", CALL_ID)
+        const bob = await makeMesh(bus, "did:bob", CALL_ID)
+        for (let n = 0; n < 5; n += 1) alice.mesh.beat()
+        await settle()
+        expect((bob.mesh as unknown as { pending: Map<string, unknown[]> }).pending.size).toBe(0)
+    })
+
+    it("reports no beat of another call", async () => {
+        const alice = await makeMesh(bus, "did:alice", "call:other")
+        const bob = await makeMesh(bus, "did:bob", CALL_ID)
+        const heard: string[] = []
+        bob.mesh.on("beat", (peer: string) => heard.push(peer))
+        alice.mesh.beat()
+        await settle()
+        expect(heard).toEqual([])
+    })
+
+    it("sends no beat once it has left", async () => {
+        const alice = await makeMesh(bus, "did:alice", CALL_ID)
+        await alice.mesh.leave()
+        const sent = alice.sent.length
+        alice.mesh.beat()
+        expect(alice.sent.length).toBe(sent)
+    })
+})
 
 describe("signalling that arrives before the roster", () => {
     /**

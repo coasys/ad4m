@@ -504,6 +504,7 @@ mod tests {
             class: "Intention".to_string(),
             properties: std::collections::BTreeMap::new(),
             parents: std::collections::BTreeMap::new(),
+            updated_at: String::new(),
         }]);
         let ops = plan_interpretation_ops_with_context(&shapes, &proposed, "soa://ext/", &known);
         assert_eq!(ops.len(), 2);
@@ -581,6 +582,7 @@ mod tests {
             class: "Task".to_string(),
             properties: std::collections::BTreeMap::new(),
             parents: std::collections::BTreeMap::new(),
+            updated_at: String::new(),
         }]);
         // …but the LLM emits an Intention pointing at the Task's id.
         let raw = r#"[
@@ -876,6 +878,7 @@ mod tests {
             class: "Task".to_string(),
             properties: std::collections::BTreeMap::new(),
             parents: std::collections::BTreeMap::new(),
+            updated_at: String::new(),
         }]);
         let ops = plan_interpretation_ops_with_context(&[shape], &proposed, "soa://ext/", &known);
 
@@ -939,6 +942,7 @@ mod tests {
             class: "Task".to_string(),
             properties: std::collections::BTreeMap::new(),
             parents: std::collections::BTreeMap::new(),
+            updated_at: String::new(),
         }]);
         let ops = plan_interpretation_ops_resolved(
             &[shape],
@@ -997,6 +1001,7 @@ mod tests {
                 class: "Task".to_string(),
                 properties: std::collections::BTreeMap::new(),
                 parents: std::collections::BTreeMap::new(),
+                updated_at: String::new(),
             },
             InstanceContext {
                 id: parent.clone(),
@@ -1004,6 +1009,7 @@ mod tests {
                 class: "Task".to_string(),
                 properties: std::collections::BTreeMap::new(),
                 parents: std::collections::BTreeMap::new(),
+                updated_at: String::new(),
             },
         ]);
         let proposed = vec![proposal(
@@ -1072,6 +1078,7 @@ mod tests {
                     class: "Task".to_string(),
                     properties: std::collections::BTreeMap::new(),
                     parents: std::collections::BTreeMap::new(),
+                    updated_at: String::new(),
                 })
                 .collect(),
         );

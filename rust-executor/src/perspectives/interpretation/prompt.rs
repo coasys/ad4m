@@ -1,5 +1,6 @@
 use super::{
-    class_label, instances_by_class, relation_predicates, ExistingInstances, TranscriptTurn,
+    class_label, instances_by_class, relation_predicates, ExistingInstances, InstanceContext,
+    TranscriptTurn,
 };
 use crate::perspectives::flow_context::{render_consensus_rule, ContentionStatus, FlowContext};
 use crate::perspectives::model_query::types::ModelShape;
@@ -79,6 +80,61 @@ pub fn build_interpretation_input(
     existing: &ExistingInstances,
     active_flows: &[FlowContext],
     speaker_names: &HashMap<String, String>,
+) -> String {
+    build_interpretation_input_showing(
+        shapes,
+        transcript,
+        existing,
+        active_flows,
+        speaker_names,
+        None,
+    )
+}
+
+/// How many existing instances a budgeted prompt shows, and whether the pass
+/// checks its output against the instances the prompt leaves out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExistingShown {
+    /// Distinct instances the prompt shows. An instance in two classes is in
+    /// two `existing` arrays and counts once.
+    pub shown: usize,
+    /// Distinct instances in the full existing set.
+    pub total: usize,
+    /// Whether the pass dedups its output against the full set. The
+    /// single-shot path always does; the harness path only with
+    /// `dedup_on_drain` (the auto-processor), not on the WS-RPC call.
+    pub unshown_checked: bool,
+}
+
+/// The `existing_shown` line: how many of the existing instances the prompt
+/// shows, and whether the ones it does not show are checked for duplicates.
+pub(crate) fn existing_shown_line(counts: &ExistingShown) -> String {
+    let ExistingShown { shown, total, .. } = counts;
+    if counts.unshown_checked {
+        format!(
+            "`existing` shows {shown} of {total} instances. Instances that are not shown are \
+             still checked for duplicates."
+        )
+    } else {
+        format!(
+            "`existing` shows {shown} of {total} instances. Instances that are not shown are \
+             not checked for duplicates: query the class before you create an instance that \
+             may already exist."
+        )
+    }
+}
+
+/// [`build_interpretation_input`] for an `existing` set that is a budgeted
+/// part of the full one (`existing_budget`). When `counts` says some
+/// instances are left out, the prompt gets an `existing_shown` line
+/// ([`existing_shown_line`]) that says so.
+pub(crate) fn build_interpretation_input_showing(
+    shapes: &[ModelShape],
+    transcript: &[TranscriptTurn],
+    existing: &ExistingInstances,
+    active_flows: &[FlowContext],
+    speaker_names: &HashMap<String, String>,
+    counts: Option<ExistingShown>,
 ) -> String {
     // Group the id-keyed source by class once for the per-class `existing`
     // blocks below (deterministically ordered — see `instances_by_class`).
@@ -168,43 +224,7 @@ pub fn build_interpretation_input(
             let name = name.as_str();
             let existing_json: Vec<serde_json::Value> = existing_by_class
                 .get(name)
-                .map(|rows| {
-                    rows.iter()
-                        .map(|r| {
-                            // `properties` is the current secondary-scalar
-                            // state (e.g. rolling `summary` on a
-                            // ConversationSubgroup). Rendered only when
-                            // present so the prompt stays compact for
-                            // identity-only classes.
-                            let mut entry = serde_json::Map::new();
-                            entry.insert("id".into(), serde_json::json!(r.id));
-                            entry.insert("title".into(), serde_json::json!(r.title));
-                            entry.insert("class".into(), serde_json::json!(r.class));
-                            if !r.properties.is_empty() {
-                                let props: serde_json::Map<String, serde_json::Value> = r
-                                    .properties
-                                    .iter()
-                                    .map(|(k, v)| (k.clone(), serde_json::json!(v)))
-                                    .collect();
-                                entry.insert("properties".into(), serde_json::Value::Object(props));
-                            }
-                            // `parents` is the relation-name → target-id map of
-                            // the class's parent relations (forward `hasOne`)
-                            // that carry a value — the row-level view of the
-                            // same placement data the top-level `outline`
-                            // renders as a tree.
-                            if !r.parents.is_empty() {
-                                let parents: serde_json::Map<String, serde_json::Value> = r
-                                    .parents
-                                    .iter()
-                                    .map(|(k, v)| (k.clone(), serde_json::json!(v)))
-                                    .collect();
-                                entry.insert("parents".into(), serde_json::Value::Object(parents));
-                            }
-                            serde_json::Value::Object(entry)
-                        })
-                        .collect()
-                })
+                .map(|rows| rows.iter().map(|r| existing_entry_json(r)).collect())
                 .unwrap_or_default();
             // `"hint"` is the prompt-facing key (short, cheap in tokens and what
             // the system prompt + few-shot examples reference); its value is the
@@ -259,6 +279,9 @@ pub fn build_interpretation_input(
     let outline = render_existing_outline(existing, shapes);
     if !outline.is_empty() {
         out["outline"] = serde_json::json!(outline);
+    }
+    if let Some(counts) = counts.filter(|c| c.shown < c.total) {
+        out["existing_shown"] = serde_json::json!(existing_shown_line(&counts));
     }
     if !active_flows.is_empty() {
         out["active_flows"] = serde_json::Value::Array(
@@ -418,6 +441,39 @@ fn render_existing_outline(existing: &ExistingInstances, shapes: &[ModelShape]) 
     lines.join("\n")
 }
 
+/// One `existing` entry as the prompt shows it: `{id, title, class}`, plus
+/// `properties` when the instance has secondary scalars, plus `parents`
+/// (relation name → target id) when a forward `hasOne` is set. Also what
+/// the `existing` budget counts a row's tokens from (`existing_budget`).
+pub(crate) fn existing_entry_json(r: &InstanceContext) -> serde_json::Value {
+    // `properties` is the current secondary-scalar state (e.g. rolling
+    // `summary` on a ConversationSubgroup). Rendered only when present so
+    // the prompt stays compact for identity-only classes.
+    let mut entry = serde_json::Map::new();
+    entry.insert("id".into(), serde_json::json!(r.id));
+    entry.insert("title".into(), serde_json::json!(r.title));
+    entry.insert("class".into(), serde_json::json!(r.class));
+    if !r.properties.is_empty() {
+        let props: serde_json::Map<String, serde_json::Value> = r
+            .properties
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::json!(v)))
+            .collect();
+        entry.insert("properties".into(), serde_json::Value::Object(props));
+    }
+    // `parents` is the row-level view of the same placement data the
+    // top-level `outline` renders as a tree.
+    if !r.parents.is_empty() {
+        let parents: serde_json::Map<String, serde_json::Value> = r
+            .parents
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::json!(v)))
+            .collect();
+        entry.insert("parents".into(), serde_json::Value::Object(parents));
+    }
+    serde_json::Value::Object(entry)
+}
+
 /// Render one live [`FlowContext`] as the JSON object the LLM sees under
 /// `active_flows[]`. Pure. Shape:
 /// ```json
@@ -546,8 +602,10 @@ You receive a JSON object with these fields:
     `hint` describing when to instantiate it, a list of `fields` (each with a
     `name`, optional `hint`, and `required` flag), a `relations` list of
     forward instance-reference slots (each with a `name`, `targetClass`,
-    `cardinality`, and optional `hint`), and an `existing` array of instances already present in
-    the graph for that class. Each existing entry is `{id, title, class}`, and
+    `cardinality`, and optional `hint`), and an `existing` array with instances already in
+    the graph for that class. `existing` can be a partial view: when the graph holds
+    more instances than the prompt has room for, it shows only some of them, and
+    `existing_shown` says how many. Each existing entry is `{id, title, class}`, and
     may also carry a `properties` object holding the instance's current
     secondary-scalar values (e.g. a rolling summary), and a `parents` object
     (`relation name → target id`) naming the items it is attached to.
@@ -561,6 +619,11 @@ You receive a JSON object with these fields:
     parent relation points to. Read it BEFORE choosing relation targets: it
     shows where existing items sit in the hierarchy, so new items attach to
     the right parent instead of drifting to a top level or the wrong branch.
+  - `existing_shown` (OPTIONAL — present only when `existing` leaves
+    instances out): how many distinct instances the `existing` arrays show
+    (an instance in two classes counts once), and whether the engine checks
+    your output against the instances that are not shown. An instance that
+    is not shown still exists.
   - `transcript`: an array of turns `{speaker, text}` and, when known,
     `timestamp` (the source link's RFC3339 time). Use `speaker` for identity
     reasoning. When two different participants share the same display name,
@@ -923,44 +986,12 @@ pub(crate) fn register_interpretation_task_for_model(
     Ok((task, true))
 }
 
-/// Return a ready-to-prompt interpretation task: register the DB row if absent
-/// (via [`register_interpretation_task`]) AND ensure it is spawned into its LLM
-/// worker, so the caller can immediately `AIService::prompt` it.
-///
-/// The spawn is what makes this async and AIService-dependent. `register_...`
-/// only writes the DB row; a freshly-registered task is invisible to the worker
-/// until the next `set_default_model`/restart `load()` sweep, so its first
-/// `prompt` would fail with "Task not spawned". We spawn it here, but only when
-/// this call actually minted the row — a pre-existing row is already spawned
-/// (boot-time `load()` sweep, or the call that first created it), so re-spawning
-/// would force a redundant local-model warmup on every interpretation run.
-pub async fn ensure_interpretation_task() -> anyhow::Result<AITask> {
-    ensure_interpretation_task_for_model(None).await
-}
-
-/// Per-model variant of [`ensure_interpretation_task`]: register the row for
-/// `model_id` if absent (via [`register_interpretation_task_for_model`]) AND
-/// ensure it is spawned into its LLM worker, so the caller can immediately
-/// `AIService::prompt` it. `None` targets the shared-default row. Spawns only on
-/// the call that minted the row (a pre-existing row is already spawned), avoiding
-/// a redundant local-model warmup on every interpretation run.
-pub async fn ensure_interpretation_task_for_model(
-    model_id: Option<&str>,
-) -> anyhow::Result<AITask> {
-    let (task, created) = register_interpretation_task_for_model(model_id)?;
-    if created {
-        crate::ai_service::AIService::global_instance()
-            .await
-            .map_err(|e| anyhow::anyhow!("ensure_interpretation_task: AIService not ready: {e:#}"))?
-            .spawn_registered_task(task.clone())
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "ensure_interpretation_task: failed to spawn interpretation task: {e:#}"
-                )
-            })?;
-    }
-    Ok(task)
+/// A ready-to-prompt interpretation task for `model_id`: the DB row, registered if absent
+/// (via [`register_interpretation_task_for_model`]). `None` targets the shared-default
+/// row. `AIService::prompt` reads the task from the database, so a row is all a prompt
+/// needs.
+pub fn ensure_interpretation_task_for_model(model_id: Option<&str>) -> anyhow::Result<AITask> {
+    Ok(register_interpretation_task_for_model(model_id)?.0)
 }
 
 #[cfg(test)]
@@ -1059,6 +1090,7 @@ mod tests {
             class: "Task".to_string(),
             properties: BTreeMap::new(),
             parents: BTreeMap::new(),
+            updated_at: String::new(),
         }]);
         let input = build_interpretation_input(
             &shapes,
@@ -1124,6 +1156,7 @@ mod tests {
             class: "ConversationSubgroup".to_string(),
             properties,
             parents: BTreeMap::new(),
+            updated_at: String::new(),
         }]);
         let input = build_interpretation_input(
             &shapes,
@@ -1905,6 +1938,8 @@ mod tests {
                         max_count: Some(1),
                         target_class_name: "Chapter".to_string(),
                         target_class_uri: "ns://ChapterShape".to_string(),
+                        target_class: String::new(),
+                        polymorphic: false,
                     },
                 )
                 .collect(),
@@ -1923,6 +1958,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
                 .collect(),
+            updated_at: String::new(),
         }
     }
 

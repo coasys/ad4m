@@ -337,6 +337,7 @@ async fn a_closed_socket_ends_its_subscriptions_without_waiting_for_calls() {
                     let (id, _, _) = crate::perspectives::get_perspective(&uuid)
                         .unwrap()
                         .subscribe_and_query(
+                            &crate::perspectives::sparql_store::EvalStop::none(),
                             QUERY.into(),
                             uuid::Uuid::new_v4().to_string(),
                             ctx.connection_id.clone().unwrap(),
@@ -736,4 +737,55 @@ async fn a_live_query_open_cancelled_while_it_waits_never_starts() {
             .is_err(),
         "the call cancelled while it waited started"
     );
+}
+
+/// An RPC slower than 2 s gives exactly one `rpc.slow` warning, with the method, the
+/// connection and where its time went (queued before the handler, in the handler); a fast
+/// one gives none.
+#[tokio::test]
+async fn a_slow_rpc_logs_one_warning_with_its_timings() {
+    use crate::call_diag::capture;
+    let mut handlers = HandlerMap::new();
+    handlers
+        .method::<Value, bool>("test.slowCall", |_, _| async {
+            tokio::time::sleep(Duration::from_millis(2100)).await;
+            Ok(json!(true))
+        })
+        .guard(crate::api::guards::Guard::Open);
+    handlers
+        .method::<Value, bool>("test.fastCall", |_, _| async { Ok(json!(true)) })
+        .guard(crate::api::guards::Guard::Open);
+    let mut socket = Socket::open_with_handlers(handlers).await;
+    let conn = format!("conn={}", socket.connection_id);
+
+    socket.send(json!({ "id": "fast", "type": "test.fastCall" }));
+    socket.send(json!({ "id": "slow", "type": "test.slowCall" }));
+    assert_eq!(socket.reply("fast").await["result"], true);
+    assert_eq!(socket.reply("slow").await["result"], true);
+
+    assert!(capture::lines("rpc.slow", &[&conn, "method=test.fastCall"]).is_empty());
+    let lines = capture::lines("rpc.slow", &[&conn]);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let slow = &lines[0];
+    assert_eq!(slow.level, log::Level::Warn);
+    assert_eq!(slow.target, "rust_executor::api::ws_rpc");
+    capture::assert_format(&slow.line);
+    let field = |key| capture::field(&slow.line, key).unwrap_or_else(|| panic!("no {key}"));
+    assert_eq!(field("method"), "test.slowCall");
+    assert_eq!(field("did"), "admin");
+    assert_eq!(field("outcome"), "ok");
+    let handler_ms: u64 = field("handler_ms").parse().unwrap();
+    let queued_ms: u64 = field("queued_ms").parse().unwrap();
+    let total_ms: u64 = field("total_ms").parse().unwrap();
+    assert!(handler_ms >= 2100, "{}", slow.line);
+    assert!(queued_ms < 1000, "{}", slow.line);
+    assert!(total_ms >= handler_ms, "{}", slow.line);
+    assert_eq!(
+        field("response_bytes"),
+        json!({"id": "slow", "result": true})
+            .to_string()
+            .len()
+            .to_string()
+    );
+    socket.close().await;
 }

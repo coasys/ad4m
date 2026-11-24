@@ -48,6 +48,7 @@ use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::{
     ModelQuery, ModelQueryCount, PropertyCondition, SHACLFlow,
 };
+use crate::perspectives::sparql_store::EvalStop;
 use crate::types::LinkExpression;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
@@ -908,6 +909,14 @@ pub trait RequiresQueryable: Send + Sync {
     ) -> Option<&crate::perspectives::flow_instance::verify::memo::VerdictMemo> {
         None
     }
+
+    /// The target class IRI `class` reads here (a bare name: the least IRI
+    /// of that name), or `None` when no registered class reads it. A
+    /// `producedByFlow` gate matches a committed output's class through it.
+    /// The default knows no class, so a gate compares classes as written.
+    fn class_iri(&self, _class: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Does a link target name this DID? Accepts the raw DID (the flow's own
@@ -946,7 +955,12 @@ impl RequiresQueryable for PerspectiveInstance {
     /// candidates only. One reader of F's receipts for every consumer, so the
     /// role gate cannot drift from `flowValidOutputs`.
     async fn flow_receipts(&self, flow_uri: &str) -> anyhow::Result<Vec<FlowReceipt>> {
-        crate::perspectives::flow_instance::produced::load_flow_receipts(self, flow_uri).await
+        crate::perspectives::flow_instance::produced::load_flow_receipts(
+            &EvalStop::none(),
+            self,
+            flow_uri,
+        )
+        .await
     }
 
     fn receipt_verdict_memo(
@@ -956,7 +970,11 @@ impl RequiresQueryable for PerspectiveInstance {
     }
 
     async fn flow_catalogue(&self) -> anyhow::Result<HashMap<String, SHACLFlow>> {
-        load_shacl_flows(self).await
+        load_shacl_flows(&EvalStop::none(), self).await
+    }
+
+    fn class_iri(&self, class: &str) -> Option<String> {
+        self.get_shape(class).ok().map(|s| s.target_class.clone())
     }
 }
 
@@ -1250,7 +1268,7 @@ pub async fn run_engine_proposal_pass(
         return Vec::new();
     }
     let loaded = async {
-        let mut flows_by_uri = load_shacl_flows(perspective).await?;
+        let mut flows_by_uri = load_shacl_flows(&EvalStop::none(), perspective).await?;
         crate::perspectives::flow_context::retain_selected_flows(&mut flows_by_uri, flow_filter);
         let records = load_flow_instances(perspective, subjects).await?;
         let acting_did = crate::agent::did_for_context(context)?;

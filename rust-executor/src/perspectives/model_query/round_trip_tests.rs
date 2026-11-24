@@ -28,25 +28,10 @@ fn make_link_for_round_trip(signer: &TestSigner, link: Link) -> LinkExpression {
 fn round_trip(class_name: &str, shacl_json: &str) -> ModelShape {
     let store = SparqlStore::new(None).unwrap();
     let signer = TestSigner::generate();
+    // The links include the class index (`rdf://type`, `ad4m://shape`)
+    // `load_shape` starts from.
     let links = parse_shacl_to_links(shacl_json, class_name).expect("parse SHACL");
-    // The shape <ad4m://shape> URI link is normally emitted by add_sdna_inner;
-    // synthesize the SubjectClass-pointing-at-shape pair load_shape relies on.
-    let target_class_uri = format!("ns://{class_name}");
-    let shape_uri = format!("ns://{class_name}Shape");
-    let mut all_links = vec![
-        Link {
-            source: target_class_uri.clone(),
-            predicate: Some("rdf://type".to_string()),
-            target: "ad4m://SubjectClass".to_string(),
-        },
-        Link {
-            source: target_class_uri.clone(),
-            predicate: Some("ad4m://shape".to_string()),
-            target: shape_uri.clone(),
-        },
-    ];
-    all_links.extend(links);
-    for link in all_links {
+    for link in links {
         store
             .add_link(&make_link_for_round_trip(&signer, link))
             .unwrap();
@@ -72,6 +57,40 @@ fn round_trip_preserves_basic_property() {
     assert!(!name.is_collection, "name should be scalar");
     assert_eq!(name.datatype.as_deref(), Some("xsd://string"));
     assert_eq!(name.resolve_language.as_deref(), Some("literal"));
+}
+
+/// A relation's declared `polymorphic` survives JSON -> `ad4m://polymorphic`
+/// link -> `load_shape`, and a relation that does not declare it emits no link.
+#[test]
+fn round_trip_preserves_declared_polymorphic() {
+    let shacl_json = r#"{
+        "target_class": "ns://Placement",
+        "properties": [
+            { "path": "ns://node", "name": "node", "node_kind": "IRI",
+              "relation_kind": "hasOne", "target_class_name": "", "polymorphic": true },
+            { "path": "ns://plain", "name": "plain", "node_kind": "IRI",
+              "relation_kind": "hasOne", "target_class_name": "" }
+        ]
+    }"#;
+    let links = parse_shacl_to_links(shacl_json, "Placement").expect("parse SHACL");
+    let poly: Vec<_> = links
+        .iter()
+        .filter(|l| l.predicate.as_deref() == Some("ad4m://polymorphic"))
+        .collect();
+    assert_eq!(poly.len(), 1, "only the declaring relation emits it");
+    assert!(poly[0].source.ends_with("Placement.node"));
+    assert_eq!(poly[0].target, "literal:true");
+
+    let shape = round_trip("Placement", shacl_json);
+    let rel = |name: &str| {
+        shape
+            .include_relations
+            .iter()
+            .find(|r| r.name == name)
+            .unwrap_or_else(|| panic!("relation {name}"))
+    };
+    assert!(rel("node").polymorphic);
+    assert!(!rel("plain").polymorphic);
 }
 
 #[test]

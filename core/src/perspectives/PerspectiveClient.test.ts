@@ -1,5 +1,6 @@
 import { PerspectiveClient } from "./PerspectiveClient"
 import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle"
+import { PerspectiveProxy } from "./PerspectiveProxy"
 import { RpcError } from "../apiClient"
 import { LinkQuery } from "./LinkQuery"
 
@@ -195,6 +196,13 @@ describe('PerspectiveClient RPC operations', () => {
     // signal propagates through the SDK layer instead of being silently
     // dropped.
 
+    it('discardBatch calls perspective.discardBatch and returns its answer', async () => {
+        mockCall.mockResolvedValue(true)
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        await expect(client.discardBatch('uuid-b', 'batch-1')).resolves.toBe(true)
+        expect(mockCall).toHaveBeenCalledWith('perspective.discardBatch', { uuid: 'uuid-b', batchId: 'batch-1' })
+    })
+
     it('querySparql forwards options to apiClient.call', async () => {
         mockCall.mockResolvedValue(JSON.stringify([]))
         const client = new PerspectiveClient('http://localhost:12000', 'token')
@@ -244,68 +252,289 @@ describe('PerspectiveClient RPC operations', () => {
     })
 })
 
-/**
- * Unit tests for PerspectiveProxy utility functions.
- */
+describe('PerspectiveProxy.querySparql shares in-flight calls', () => {
+    const QUERY = 'SELECT ?s WHERE { ?s ?p ?o }'
 
-describe('PerspectiveProxy getClassShape sh:in URI-decoding', () => {
-    // This tests the sh:in parsing logic in getClassShape() which was fixed
-    // to URI-decode values from the Rust executor's SPARQL results
-
-    function parseShInValue(raw: string): Array<{ value: string; label?: string }> | undefined {
-        // Reproduce the exact parsing logic from PerspectiveProxy.getClassShape()
-        try {
-            if (raw.startsWith('literal:string:')) {
-                raw = decodeURIComponent(raw.substring('literal:string:'.length));
-            }
-            return JSON.parse(raw);
-        } catch { return undefined; }
+    function sparqlCalls() {
+        return mockCall.mock.calls.filter(([method]) => method === 'perspective.querySparql').length
     }
 
-    it('parses plain JSON sh:in values', () => {
-        const result = parseShInValue('[{"value":"a"},{"value":"b","label":"B"}]');
-        expect(result).toEqual([
-            { value: 'a' },
-            { value: 'b', label: 'B' },
-        ]);
-    });
+    function makeProxy(client = new PerspectiveClient('http://localhost:12000', 'token'), uuid = 'uuid-s') {
+        return new PerspectiveProxy(makeHandle(uuid, 'S'), client)
+    }
 
-    it('strips literal:string: prefix and parses', () => {
-        const result = parseShInValue('literal:string:[{"value":"x"},{"value":"y"}]');
-        expect(result).toEqual([
-            { value: 'x' },
-            { value: 'y' },
-        ]);
-    });
+    beforeEach(() => {
+        mockCall.mockReset().mockResolvedValue(JSON.stringify([{ s: 'a' }]))
+        mockOn.mockReset().mockReturnValue(() => {})
+    })
 
-    it('URI-decodes encoded sh:in values from Rust executor', () => {
-        // Rust executor may URI-encode the JSON when returning SPARQL results
-        const encoded = 'literal:string:' + encodeURIComponent('[{"value":"hello world"},{"value":"a&b"}]');
-        const result = parseShInValue(encoded);
-        expect(result).toEqual([
-            { value: 'hello world' },
-            { value: 'a&b' },
-        ]);
-    });
+    it('two concurrent identical calls make one RPC and return equal results', async () => {
+        const proxy = makeProxy()
+        const [a, b] = await Promise.all([proxy.querySparql(QUERY), proxy.querySparql(QUERY)])
+        expect(sparqlCalls()).toBe(1)
+        expect(a).toEqual([{ s: 'a' }])
+        expect(b).toEqual(a)
+    })
 
-    it('handles double-encoded brackets and quotes', () => {
-        const encoded = 'literal:string:%5B%7B%22value%22%3A%22active%22%7D%2C%7B%22value%22%3A%22inactive%22%7D%5D';
-        const result = parseShInValue(encoded);
-        expect(result).toEqual([
-            { value: 'active' },
-            { value: 'inactive' },
-        ]);
-    });
+    it('shares across proxies of the same perspective on one client', async () => {
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        await Promise.all([makeProxy(client).querySparql(QUERY), makeProxy(client).querySparql(QUERY)])
+        expect(sparqlCalls()).toBe(1)
+    })
 
-    it('returns undefined for malformed JSON', () => {
-        const result = parseShInValue('literal:string:not-json');
-        expect(result).toBeUndefined();
-    });
+    it('gives each caller its own result object', async () => {
+        const proxy = makeProxy()
+        const [a, b] = await Promise.all([proxy.querySparql(QUERY), proxy.querySparql(QUERY)])
+        expect(a).not.toBe(b)
+        a[0].s = 'changed'
+        expect(b).toEqual([{ s: 'a' }])
+    })
 
-    it('handles already-decoded values without prefix', () => {
-        const result = parseShInValue('[{"value":"test"}]');
-        expect(result).toEqual([{ value: 'test' }]);
-    });
+    it('a call after the first settled makes a new RPC and sees the new result', async () => {
+        const proxy = makeProxy()
+        await proxy.querySparql(QUERY)
+        mockCall.mockResolvedValue(JSON.stringify([{ s: 'b' }]))
+        expect(await proxy.querySparql(QUERY)).toEqual([{ s: 'b' }])
+        expect(sparqlCalls()).toBe(2)
+    })
+
+    it('does not share between perspectives, queries or clients', async () => {
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        await Promise.all([
+            makeProxy(client, 'p1').querySparql(QUERY),
+            makeProxy(client, 'p2').querySparql(QUERY),
+            makeProxy(client, 'p1').querySparql(QUERY + ' LIMIT 1'),
+            makeProxy(undefined, 'p1').querySparql(QUERY),
+        ])
+        expect(sparqlCalls()).toBe(4)
+    })
+
+    it('a failed call rejects every sharer, and the next call retries', async () => {
+        const proxy = makeProxy()
+        mockCall.mockRejectedValueOnce(new Error('boom'))
+        const results = await Promise.allSettled([proxy.querySparql(QUERY), proxy.querySparql(QUERY)])
+        expect(results.map(r => r.status)).toEqual(['rejected', 'rejected'])
+        expect(await proxy.querySparql(QUERY)).toEqual([{ s: 'a' }])
+        expect(sparqlCalls()).toBe(2)
+    })
+
+    it('a call with an AbortSignal makes its own RPC, so aborting it cannot fail another caller', async () => {
+        const proxy = makeProxy()
+        const controller = new AbortController()
+        await Promise.all([proxy.querySparql(QUERY), proxy.querySparql(QUERY, { signal: controller.signal })])
+        expect(sparqlCalls()).toBe(2)
+    })
+
+    // A query sent before a write answers with the state before it, so the
+    // same query started after `await proxy.add(...)` must not join it.
+    function executorAnsweringAtSendTime() {
+        let rows = [{ s: 'old' }]
+        const pending: Array<() => void> = []
+        mockCall.mockImplementation((method: string) => {
+            if (method === 'perspective.querySparql') {
+                const answer = JSON.stringify(rows)
+                return new Promise(resolve => pending.push(() => resolve(answer)))
+            }
+            rows = [{ s: 'old' }, { s: 'new' }]
+            const added = { author: 'did:test', timestamp: '2026-01-01T00:00:00Z', data: { source: 'a', target: 'new' }, proof: { key: 'k', signature: 's' } }
+            const replies: Record<string, unknown> = {
+                'perspective.addLinks': [added],
+                'perspective.removeLinks': [added],
+                'perspective.linkMutations': { additions: [added], removals: [] },
+                'perspective.commitBatch': { additions: [added], removals: [] },
+                'perspective.registerShapes': { unchanged: [], written: ['test://C'], generation: 1 },
+                'perspective.rejectFlowProposal': { retractedLinks: 1 },
+            }
+            return Promise.resolve(method in replies ? replies[method] : added)
+        })
+        return { settleQueries: () => pending.splice(0).forEach(resolve => resolve()) }
+    }
+
+    it('a call started after a write makes its own RPC and reads the write back', async () => {
+        const executor = executorAnsweringAtSendTime()
+        const proxy = makeProxy()
+        const before = proxy.querySparql(QUERY)
+        await proxy.add({ source: 'a', target: 'new' })
+        const after = proxy.querySparql(QUERY)
+        executor.settleQueries()
+        expect(await before).toEqual([{ s: 'old' }])
+        expect(await after).toEqual([{ s: 'old' }, { s: 'new' }])
+        expect(sparqlCalls()).toBe(2)
+    })
+
+    it('calls waiting before a write keep sharing their RPC', async () => {
+        const executor = executorAnsweringAtSendTime()
+        const proxy = makeProxy()
+        const first = proxy.querySparql(QUERY)
+        const second = proxy.querySparql(QUERY)
+        await proxy.add({ source: 'a', target: 'new' })
+        executor.settleQueries()
+        expect(await first).toEqual([{ s: 'old' }])
+        expect(await second).toEqual([{ s: 'old' }])
+        expect(sparqlCalls()).toBe(1)
+    })
+
+    it('a write to another perspective does not split the sharing', async () => {
+        const executor = executorAnsweringAtSendTime()
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        const first = makeProxy(client, 'p1').querySparql(QUERY)
+        await makeProxy(client, 'p2').add({ source: 'a', target: 'new' })
+        const second = makeProxy(client, 'p1').querySparql(QUERY)
+        executor.settleQueries()
+        await Promise.all([first, second])
+        expect(sparqlCalls()).toBe(1)
+    })
+
+    it('every write path of the client starts a new generation', async () => {
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        const link = { source: 'a', target: 'new' }
+        const stored = { author: 'did:test', timestamp: '2026-01-01T00:00:00Z', data: link, proof: { key: 'k', signature: 's' } } as any
+        const writes: Array<() => Promise<unknown>> = [
+            () => client.addLink('u', link),
+            () => client.addLinks('u', [link]),
+            () => client.removeLinks('u', [stored]),
+            () => client.linkMutations('u', { additions: [link], removals: [] }),
+            () => client.addLinkExpression('u', stored),
+            () => client.updateLink('u', stored, link),
+            () => client.removeLink('u', stored),
+            () => client.executeCommands('u', '[]', 'expr', '[]'),
+            () => client.createSubject('u', 'C', 'expr'),
+            () => client.updateSubject('u', 'C', 'expr', '{}'),
+            () => client.removeSubject('u', 'C', 'expr'),
+            () => client.commitBatch('u', 'b'),
+            // Executor methods whose handlers write links themselves (shape
+            // links, overlays, flow proposals, votes, fired marks, receipts,
+            // processor configs).
+            () => client.registerShapes('u', [{ target_class: 'app://C', properties: [] }]),
+            () => client.runInterpretation('u', [], 'base://'),
+            () => client.runInterpretationWithHarness('u', [], 'base://', 5),
+            () => client.runAgent('u', [], { writeTools: ['add_link'] }),
+            () => client.addAutoProcessor('u', { processorId: 'p' } as any),
+            () => client.removeAutoProcessor('u', 'p'),
+            () => client.acceptInterpretation('u', 'base://1'),
+            () => client.rejectInterpretation('u', 'base://1'),
+            () => client.proposeFlowTransition('u', 'flow://1', 'done'),
+            () => client.acceptFlowProposal('u', 'proposal://1'),
+            () => client.rejectFlowProposal('u', 'proposal://1'),
+            () => client.mintFlowReceipt('u', 'flow://1'),
+            // The validated instance writes.
+            () => client.instanceCreate('u', { className: 'C', properties: {} } as any),
+            () => client.instanceUpdate('u', { className: 'C', baseUri: 'expr', properties: {} } as any),
+            () => client.instanceRemove('u', { className: 'C', baseUri: 'expr' } as any),
+            () => client.instanceAddToCollection('u', { className: 'C', baseUri: 'expr', collection: 'c', itemUri: 'i' } as any),
+            () => client.instanceRemoveFromCollection('u', { className: 'C', baseUri: 'expr', collection: 'c', itemUri: 'i' } as any),
+        ]
+        for (const write of writes) {
+            const executor = executorAnsweringAtSendTime()
+            mockCall.mockClear()
+            const before = client.querySparql('u', QUERY)
+            await write()
+            const after = client.querySparql('u', QUERY)
+            executor.settleQueries()
+            expect([write.toString(), await after]).toEqual([write.toString(), [{ s: 'old' }, { s: 'new' }]])
+            await before
+            expect([write.toString(), sparqlCalls()]).toEqual([write.toString(), 2])
+        }
+    })
+
+    it('a write that fails still starts a new generation', async () => {
+        const executor = executorAnsweringAtSendTime()
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        const before = client.querySparql('u', QUERY)
+        // The executor may have written part of it before failing.
+        mockCall.mockImplementationOnce(() => Promise.reject(new Error('write failed')))
+        await expect(client.addLinks('u', [{ source: 'a', target: 'new' }])).rejects.toThrow('write failed')
+        const after = client.querySparql('u', QUERY)
+        executor.settleQueries()
+        await Promise.all([before, after])
+        expect(sparqlCalls()).toBe(2)
+    })
+
+    it('the generation moves when the write settles, not when it starts', async () => {
+        let rows = [{ s: 'old' }]
+        const pendingQueries: Array<() => void> = []
+        let settleWrite = () => {}
+        const added = { author: 'did:test', timestamp: '2026-01-01T00:00:00Z', data: { source: 'a', target: 'new' }, proof: { key: 'k', signature: 's' } }
+        mockCall.mockImplementation((method: string) => {
+            if (method === 'perspective.querySparql') {
+                const answer = JSON.stringify(rows)
+                return new Promise(resolve => pendingQueries.push(() => resolve(answer)))
+            }
+            return new Promise(resolve => {
+                settleWrite = () => { rows = [{ s: 'old' }, { s: 'new' }]; resolve([added]) }
+            })
+        })
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        const write = client.addLinks('u', [{ source: 'a', target: 'new' }])
+        // Sent while the write is still running: may answer before it lands.
+        const during = client.querySparql('u', QUERY)
+        settleWrite()
+        await write
+        const after = client.querySparql('u', QUERY)
+        pendingQueries.splice(0).forEach(resolve => resolve())
+        expect(await during).toEqual([{ s: 'old' }])
+        expect(await after).toEqual([{ s: 'old' }, { s: 'new' }])
+        expect(sparqlCalls()).toBe(2)
+    })
+
+    it('a read-only agent session keeps the sharing', async () => {
+        const executor = executorAnsweringAtSendTime()
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        const first = client.querySparql('u', QUERY)
+        await client.runAgent('u', [])
+        const second = client.querySparql('u', QUERY)
+        executor.settleQueries()
+        await Promise.all([first, second])
+        expect(sparqlCalls()).toBe(1)
+    })
+})
+
+describe('PerspectiveProxy.shapes reads shapes in one RPC', () => {
+    const summary = (name: string) => ({
+        name,
+        hash: `hash-${name}`,
+        shape: { node_shape_uri: `app://${name}Shape`, target_class: `app://${name}`, properties: [] },
+    })
+
+    beforeEach(() => {
+        mockCall.mockReset()
+        mockOn.mockReset().mockReturnValue(() => {})
+    })
+
+    function proxy() {
+        return new PerspectiveProxy(makeHandle('uuid-shacl', 'S'), new PerspectiveClient('http://localhost:12000', 'token'))
+    }
+
+    it('shapes() makes one perspective.shapes RPC with no name filter', async () => {
+        mockCall.mockResolvedValue([summary('A'), summary('B')])
+        const shapes = await proxy().shapes()
+        expect(mockCall.mock.calls).toEqual([['perspective.shapes', { uuid: 'uuid-shacl', names: undefined }]])
+        expect(shapes.map(s => [s.name, s.shape.targetClass, s.hash])).toEqual([['A', 'app://A', 'hash-A'], ['B', 'app://B', 'hash-B']])
+    })
+
+    it('shapes(names) sends the names in the same single RPC', async () => {
+        mockCall.mockResolvedValue([summary('B')])
+        const shapes = await proxy().shapes(['B', 'Missing'])
+        expect(mockCall.mock.calls).toEqual([['perspective.shapes', { uuid: 'uuid-shacl', names: ['B', 'Missing'] }]])
+        expect(shapes.map(s => s.name)).toEqual(['B'])
+    })
+})
+
+describe('PerspectiveProxy.flowFired reads many instances in one RPC (P9)', () => {
+    beforeEach(() => {
+        mockCall.mockReset()
+        mockOn.mockReset().mockReturnValue(() => {})
+    })
+
+    it('the fired marks of 20 runs take one perspective.flowFired RPC', async () => {
+        const runs = Array.from({ length: 20 }, (_, i) => `flow://run/${i}`)
+        const entries = runs.map((instance, i) => ({ instance, fired: i % 2 ? [`${instance}/p`] : [] }))
+        mockCall.mockResolvedValue(entries)
+        const proxy = new PerspectiveProxy(makeHandle('uuid-flow', 'F'), new PerspectiveClient('http://localhost:12000', 'token'))
+
+        expect(await proxy.flowFired(runs)).toEqual(entries)
+        expect(mockCall.mock.calls).toEqual([['perspective.flowFired', { uuid: 'uuid-flow', instances: runs }]])
+    })
 })
 
 describe('PerspectiveClient builds SDK classes from wire data', () => {
@@ -376,18 +605,6 @@ describe('PerspectiveClient builds SDK classes from wire data', () => {
 
         expect(mockCall.mock.calls[0][1].link).not.toHaveProperty('status')
         expect(link.status).toBe('SHARED')
-    })
-
-    it('addSdna narrows the single/batch result union', async () => {
-        const client = new PerspectiveClient('http://localhost:12000', 'token')
-        mockCall.mockResolvedValueOnce(true)
-        expect(await client.addSdna('u', 'n', 'code', 'subject_class')).toBe(true)
-        mockCall.mockResolvedValueOnce([true, false])
-        expect(await client.addSdna('u', 'n', 'code', 'subject_class')).toBe(false)
-        mockCall.mockResolvedValueOnce(true)
-        expect(await client.addSdnaBatch('u', [{ name: 'n', sdnaType: 'flow' }])).toEqual([true])
-        mockCall.mockResolvedValueOnce([true, false])
-        expect(await client.addSdnaBatch('u', [{ name: 'n', sdnaType: 'flow' }])).toEqual([true, false])
     })
 
     it('interpretationOverlays narrows kind to create | update', async () => {

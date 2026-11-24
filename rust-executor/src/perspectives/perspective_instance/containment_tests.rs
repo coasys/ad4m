@@ -146,7 +146,7 @@ async fn the_edge_set_is_has_child_plus_each_aliased_predicate() {
         described,
         vec![
             (HAS_CHILD.to_string(), None),
-            ("we://child".to_string(), Some("Block".to_string())),
+            ("we://child".to_string(), Some("ns://Block".to_string())),
         ]
     );
     // Cached until the installed shapes change.
@@ -385,6 +385,7 @@ impl Sub {
         let rx = crate::pubsub::get_global_pubsub().await.subscribe_events();
         let (id, _, initial) = p
             .model_subscribe_and_query(
+                &crate::perspectives::sparql_store::EvalStop::none(),
                 QueryClasses::One(class.into()),
                 q.to_string(),
                 uuid::Uuid::new_v4().to_string(),
@@ -443,17 +444,9 @@ async fn a_containment_subscription_follows_new_edges_and_removals() {
     let parent = "ad4m://later-a-block";
     create(&mut p, &ctx, "Message", "ad4m://m3").await;
     let (mut sub, initial) = Sub::open(&p, "Message", json!({"parent": {"id": parent}})).await;
-    assert!(initial.contains("\"totalCount\":0"), "{initial}");
+    assert!(initial.contains("\"instances\":[]"), "{initial}");
 
-    p.add_sdna(
-        "Block".into(),
-        String::new(),
-        SdnaType::SubjectClass,
-        Some(BLOCK_SDNA.into()),
-        &ctx,
-    )
-    .await
-    .unwrap();
+    p.register_shape_json(BLOCK_SDNA, &ctx).await.unwrap();
     sub.pass(
         &p,
         &[("ns://BlockShape", "sh://property", "ns://Block.blocks")],
@@ -492,7 +485,8 @@ async fn a_containment_subscription_follows_new_edges_and_removals() {
         .await
         .expect("a removed containment link re-runs the subscription");
     assert!(
-        !update.contains("ad4m://m4") && update.contains("\"totalCount\":0"),
+        // An update carries the ids in the result and the rows that changed.
+        !update.contains("ad4m://m4") && update.contains("\"ids\":[]"),
         "{update}"
     );
 }
@@ -728,10 +722,27 @@ async fn a_containment_walk_follows_every_edge_nearest_first() {
         .await
         .unwrap_err();
     assert!(refused.to_string().contains("levels"), "{refused}");
+    // A transitive walk with no `order` is ordered by the walk, not by
+    // timestamp, so a keyset cursor on it would page the wrong order: it is
+    // refused.
+    let refused = p
+        .model_query_classes(
+            &QueryClasses::One("Block".into()),
+            &json!({
+                "parent": {"ids": [m], "direction": "in", "transitive": true},
+                "after": "",
+                "limit": 1
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("`after`"), "{refused}");
 }
 
 /// The rows and `totalCount` of a query over `classes`.
-async fn query_page(p: &PerspectiveInstance, classes: &str, q: Value) -> (Vec<String>, u64) {
+async fn query_page(p: &PerspectiveInstance, classes: &str, mut q: Value) -> (Vec<String>, u64) {
+    q["count"] = json!(true);
     let json = p
         .model_query_classes(&QueryClasses::One(classes.into()), &q.to_string())
         .await
@@ -1001,7 +1012,7 @@ async fn a_containment_step_in_sees_a_holder_become_a_container() {
         json!({"parent": {"ids": [m], "direction": "in"}}),
     )
     .await;
-    assert!(initial.contains("\"totalCount\":0"), "{initial}");
+    assert!(initial.contains("\"instances\":[]"), "{initial}");
 
     // A Block elsewhere: holds no anchor, re-runs nothing.
     let other = "ad4m://other/r";

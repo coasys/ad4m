@@ -36,7 +36,7 @@ export * from "./model";
 export * from "./neighbourhood/Neighbourhood";
 export * from "./neighbourhood/NeighbourhoodProxy";
 export * from "./neighbourhood/SfuTypes";
-export type { SfuNeighbourhoodApi } from "./neighbourhood/SfuManager";
+export type { SfuNeighbourhoodApi, SfuCallEnded } from "./neighbourhood/SfuManager";
 export type { Session, SessionTopology, SessionState, SessionEvent, SessionEventCallback, SessionCreateOptions } from "./neighbourhood/Session";
 export { MeshManager, createTelepresenceChannel, parseCallMessage, CALL_PROTOCOL_VERSION, DEFAULT_ICE_SERVERS } from "./neighbourhood/MeshManager";
 export type { SignallingChannel, TelepresenceProxy, MeshManagerOptions, MeshEvent, MeshEventCallback, MeshParticipant, RecoveryRung, CallBody, CallMessage, CallEnvelope, CallGenerations } from "./neighbourhood/MeshManager";
@@ -48,7 +48,9 @@ export * from "./ai/AIClient"
 export * from "./identity/IdentityClient"
 export * from "./ai/Tasks"
 export * from "./runtime/RuntimeTypes"
-export { Model as AIModel, ModelApi, TokenizerSource, LocalModel, ModelType, ModelApiInput, TokenizerSourceInput, LocalModelInput, ModelInput, VoiceActivityParamsInput } from "./ai/AITypes"
+// `Model` is the model decorator: the AI model is `AIModel`.
+export type { Model as AIModel } from "./ai/AITypes"
+export * from "./ai/recommendedModels"
 export * from './shacl/SHACLShape'
 export { SHACLFlow, FlowState, FlowTransition, LinkPattern, ModelQuery, PropertyCondition, ConsensusRule } from './shacl/SHACLFlow'
 export * from './shacl/NodeExpression'

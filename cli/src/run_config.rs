@@ -11,6 +11,7 @@ use clap::builder::{BoolValueParser, PathBufValueParser, StringValueParser, Type
 use clap::error::ErrorKind;
 use clap::parser::ValueSource;
 use clap::value_parser;
+use rust_executor::ai_service::local::hardware::Backend;
 use rust_executor::config_file::{ExecutorConfigFile, ExecutorSecrets, REDACTED};
 use rust_executor::Ad4mConfig;
 use std::path::PathBuf;
@@ -246,6 +247,31 @@ pub struct RunArgs {
     /// Useful for test harnesses that need targeted process cleanup.
     #[arg(long, env = "AD4M_PID_FILE", value_parser = non_empty(StringValueParser::new()))]
     pub pid_file: Option<String>,
+    /// Stop gracefully (exit 0) when stdin reaches its end. A supervisor holds the pipe open
+    /// and never writes; when the supervisor ends, the pipe closes and the executor stops.
+    #[arg(
+        long,
+        action,
+        env = "AD4M_WATCH_STDIN",
+        value_parser = non_empty(BoolValueParser::new())
+    )]
+    pub watch_stdin: Option<bool>,
+    /// Serve the custody channel: the desktop app's custody service, which keeps the master key,
+    /// reads the main agent's device keys and takes a master key sent to this computer (opened
+    /// from the executor's inbox and passed on, never stored), with the admin credential on a
+    /// loopback listener. Refused together with multi-user mode (exit 78).
+    #[arg(
+        long,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        env = "AD4M_CUSTODY_CHANNEL",
+        value_parser = non_empty(BoolValueParser::new())
+    )]
+    pub custody_channel: Option<bool>,
+    /// Write the executor's log to rotated files in this folder (`executor-0.log` is this
+    /// run; five runs kept). Default: stdout.
+    #[arg(long, env = "AD4M_LOG_DIR", value_parser = non_empty(StringValueParser::new()))]
+    pub log_dir: Option<String>,
     /// Shut down once the process that started the executor is gone, however it ended
     /// (SIGKILLed, crashed, exited without stopping the executor). For launchers and test
     /// harnesses. Linux and macOS only; no effect on Windows. Default: false
@@ -285,10 +311,11 @@ pub struct RunArgs {
         value_parser = non_empty(StringValueParser::new())
     )]
     pub sfu_cascade_peers: Option<Vec<String>>,
-    /// IP address the SFU media server binds its UDP socket to. Default:
-    /// 127.0.0.1, so calls reach only this machine; with `--localhost false`,
-    /// the machine's outbound interface. Set it (e.g. a LAN address) to choose
-    /// which interface accepts media from other machines.
+    /// IP address the SFU media server binds its UDP socket to, and the only
+    /// one it offers. Default: 127.0.0.1 and the LAN address (the default
+    /// route's interface, detected again at each call), both offered, so
+    /// browsers that skip loopback (Firefox) and other machines on the LAN
+    /// reach the media. `127.0.0.1` keeps media on this machine.
     #[arg(long, env = "AD4M_SFU_BIND_ADDR", value_parser = non_empty(StringValueParser::new()))]
     pub sfu_bind_addr: Option<String>,
     /// STUN server (`host:port`) the SFU asks once at startup for its public
@@ -348,6 +375,35 @@ pub struct RunArgs {
         value_parser = non_empty(BoolValueParser::new())
     )]
     pub identity_allow_private_src: Option<bool>,
+    /// The per-user store of local AI runtimes and models. Default:
+    /// `~/.local/share/ad4m/local-ai` (Linux), `~/Library/Application
+    /// Support/ad4m/local-ai` (macOS), `%LOCALAPPDATA%\ad4m\local-ai` (Windows).
+    #[arg(long, env = "AD4M_LOCAL_AI_DIR", value_parser = non_empty(StringValueParser::new()))]
+    pub local_ai_dir: Option<String>,
+    /// Start the installed local AI runtimes with the executor. Default: true. It never
+    /// installs or downloads anything: install with `ad4m-executor local-ai install` or
+    /// `ai.localInstall`.
+    #[arg(
+        long,
+        action,
+        env = "AD4M_LOCAL_AI_AUTOSTART",
+        value_parser = non_empty(BoolValueParser::new())
+    )]
+    pub local_ai_autostart: Option<bool>,
+    /// The device local AI runs its models on: cpu, cuda, metal, vulkan or rocm. Default:
+    /// the best one detected.
+    #[arg(
+        long,
+        env = "AD4M_LOCAL_AI_DEVICE",
+        value_parser = non_empty(parse_local_ai_device)
+    )]
+    pub local_ai_device: Option<Backend>,
+}
+
+/// A `local_ai_device` value: the names the config file takes.
+fn parse_local_ai_device(value: &str) -> Result<Backend, String> {
+    serde_json::from_value(serde_json::Value::String(value.to_string()))
+        .map_err(|_| format!("`{value}` is not a device: cpu, cuda, metal, vulkan or rocm"))
 }
 
 /// Only the literal `true` enables the insecure mode; the usual "off"
@@ -395,6 +451,7 @@ impl RunArgs {
         overlay(&mut file.sfu_udp_port, &self.sfu_udp_port);
         overlay(&mut file.sfu_public_addr, &self.sfu_public_addr);
         overlay(&mut file.sfu_stun_server, &self.sfu_stun_server);
+        overlay(&mut file.log_dir, &self.log_dir);
         if self.identity_store_url.is_some()
             || self.identity_store_keys.is_some()
             || self.identity_allow_private_src.is_some()
@@ -407,6 +464,9 @@ impl RunArgs {
                 &self.identity_allow_private_src,
             );
         }
+        overlay(&mut file.local_ai_dir, &self.local_ai_dir);
+        overlay(&mut file.local_ai_autostart, &self.local_ai_autostart);
+        overlay(&mut file.local_ai_device, &self.local_ai_device);
         overlay(
             &mut file.auto_permit_cap_requests,
             &self.auto_permit_cap_requests,
@@ -451,11 +511,47 @@ impl RunArgs {
         Ok(file)
     }
 
+    /// The config file's keys that a flag or an `AD4M_*` variable overrides at this start: a
+    /// write to the file (`runtime.setConfig`) would not take effect while the override stays.
+    fn pinned_keys(&self) -> Vec<String> {
+        let tls =
+            self.tls_cert_file.is_some() || self.tls_key_file.is_some() || self.tls_port.is_some();
+        let identity = self.identity_store_url.is_some()
+            || self.identity_store_keys.is_some()
+            || self.identity_allow_private_src.is_some();
+        [
+            ("app_data_path", self.app_data_path.is_some()),
+            ("port", self.port.is_some()),
+            ("hc_admin_port", self.hc_admin_port.is_some()),
+            ("hc_app_port", self.hc_app_port.is_some()),
+            ("localhost", self.localhost.is_some()),
+            ("run_dapp_server", self.run_dapp_server.is_some()),
+            ("mcp_enabled", self.enable_mcp.is_some()),
+            ("mcp_port", self.mcp_port.is_some()),
+            ("sfu_bind_addr", self.sfu_bind_addr.is_some()),
+            ("sfu_udp_port", self.sfu_udp_port.is_some()),
+            ("sfu_public_addr", self.sfu_public_addr.is_some()),
+            ("sfu_stun_server", self.sfu_stun_server.is_some()),
+            ("identity", identity),
+            (
+                "auto_permit_cap_requests",
+                self.auto_permit_cap_requests.is_some(),
+            ),
+            ("multi_user_config", self.enable_multi_user.is_some() || tls),
+            ("log_dir", self.log_dir.is_some()),
+        ]
+        .into_iter()
+        .filter(|(_, pinned)| *pinned)
+        .map(|(key, _)| key.to_string())
+        .collect()
+    }
+
     /// Resolves the settings `run` starts with. `env` looks up a variable
     /// (`std::env::var` outside tests) for the secrets; clap has already
     /// read the `AD4M_<FLAG>` ones.
     pub fn resolve(self, env: impl Fn(&str) -> Option<String>) -> Result<ResolvedRun> {
         let file = self.merged_file()?;
+        let pinned = self.pinned_keys();
         let mut secrets =
             ExecutorSecrets::from_env(env, &file).context("cannot read the executor's secrets")?;
         // A flag beats the environment, as for every other setting.
@@ -464,6 +560,11 @@ impl RunArgs {
         }
 
         let mut config = file.to_ad4m_config(&secrets)?;
+        let merged = serde_json::to_value(&file)?;
+        config.config_overrides = pinned
+            .iter()
+            .filter_map(|key| Some((key.clone(), merged.get(key)?.clone())))
+            .collect();
         config.network_bootstrap_seed = self.network_bootstrap_seed;
         config.language_language_only = self.language_language_only;
         config.hc_use_bootstrap = self.hc_use_bootstrap;
@@ -478,7 +579,16 @@ impl RunArgs {
         config.log_holochain_metrics = self.log_holochain_metrics;
         config.dynamic_class_tools = self.dynamic_class_tools;
         config.pid_file = self.pid_file;
+        config.watch_stdin = self.watch_stdin;
+        config.custody_channel = self.custody_channel;
         config.exit_with_parent = self.exit_with_parent;
+        config.config_file = self.config.clone();
+        config.pinned_config_keys = pinned;
+        rust_executor::config::refuse_custody_channel_with_multi_user(
+            config.custody_channel == Some(true),
+            config.enable_multi_user == Some(true),
+        )
+        .map_err(anyhow::Error::msg)?;
         config.insecure_no_admin_credential = Some(self.insecure_no_admin_credential);
         config.sfu_local_did = self.sfu_local_did;
         config.sfu_max_participants_per_node = self.sfu_max_participants_per_node;
@@ -582,6 +692,77 @@ pub(crate) mod tests {
         let path = dir.join("executor-config.json");
         std::fs::write(&path, json).unwrap();
         path.to_string_lossy().into_owned()
+    }
+
+    /// The run contract's flags reach the executor: `--watch-stdin true`, `--custody-channel`,
+    /// `--log-dir`, the config file's path, and the keys a flag or variable pins, with the
+    /// values they pin.
+    #[test]
+    fn the_run_contract_flags_reach_the_executor() {
+        let _env = lock_env();
+        let dir = scratch_dir("run-contract");
+        let config = write_config(&dir, r#"{"mcp_port": 3001, "port": 12000}"#);
+        let resolved = resolve(
+            &[
+                "--config",
+                &config,
+                "--watch-stdin",
+                "true",
+                "--custody-channel",
+                "--log-dir",
+                "/data/adam/logs",
+                "--port",
+                "12100",
+                "--admin-credential",
+                "secret",
+            ],
+            &[("AD4M_MCP_PORT", "3002")],
+        )
+        .unwrap()
+        .config;
+        assert_eq!(resolved.watch_stdin, Some(true));
+        assert_eq!(resolved.custody_channel, Some(true));
+        assert_eq!(resolved.log_dir.as_deref(), Some("/data/adam/logs"));
+        assert_eq!(resolved.config_file.as_deref(), Some(Path::new(&config)));
+        let mut pinned = resolved.pinned_config_keys.clone();
+        pinned.sort();
+        assert_eq!(pinned, vec!["log_dir", "mcp_port", "port"]);
+        // What they lay over the file, for `runtime.setConfig` to check a write with.
+        assert_eq!(
+            serde_json::Value::Object(resolved.config_overrides),
+            serde_json::json!({"log_dir": "/data/adam/logs", "mcp_port": 3002, "port": 12100})
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The custody channel never runs with multi-user mode: `run` refuses the pair, from flags
+    /// or from the config file.
+    #[test]
+    fn the_custody_channel_with_multi_user_mode_is_refused() {
+        let _env = lock_env();
+        let flags = resolve(
+            &["--custody-channel", "--enable-multi-user", "true"],
+            &[("AD4M_ADMIN_CREDENTIAL", "secret")],
+        )
+        .err()
+        .expect("refused");
+        assert_eq!(
+            flags.to_string(),
+            rust_executor::config::CUSTODY_CHANNEL_WITH_MULTI_USER_ERROR
+        );
+        let dir = scratch_dir("custody-multi-user");
+        let config = write_config(&dir, r#"{"multi_user_config": {"enabled": true}}"#);
+        assert!(resolve(
+            &["--config", &config, "--custody-channel"],
+            &[("AD4M_ADMIN_CREDENTIAL", "secret")]
+        )
+        .is_err());
+        assert!(resolve(
+            &["--config", &config],
+            &[("AD4M_ADMIN_CREDENTIAL", "secret")]
+        )
+        .is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[cfg(unix)]
@@ -768,6 +949,34 @@ pub(crate) mod tests {
             "true",
             "false",
         ),
+        (
+            "/log_dir",
+            "AD4M_LOG_DIR",
+            "--log-dir",
+            "/b/logs",
+            "/c/logs",
+        ),
+        (
+            "/local_ai_dir",
+            "AD4M_LOCAL_AI_DIR",
+            "--local-ai-dir",
+            "/store-b",
+            "/store-c",
+        ),
+        (
+            "/local_ai_autostart",
+            "AD4M_LOCAL_AI_AUTOSTART",
+            "--local-ai-autostart",
+            "false",
+            "true",
+        ),
+        (
+            "/local_ai_device",
+            "AD4M_LOCAL_AI_DEVICE",
+            "--local-ai-device",
+            "vulkan",
+            "cpu",
+        ),
     ];
 
     /// For every row of [`OVERRIDABLE`]: the variable alone, the flag alone,
@@ -809,6 +1018,14 @@ pub(crate) mod tests {
                 store_keys: Some(vec!["z6MkA".into()]),
                 allow_private_src: Some(false),
             }),
+            log_dir: Some("/a/logs".into()),
+            local_ai_dir: Some("/store-a".into()),
+            local_ai_autostart: Some(true),
+            local_ai_device: Some(Backend::Cuda),
+            // File-only keys with no variable or flag, so unset here.
+            ai_endpoints: None,
+            ai_models: None,
+            ai_defaults: None,
         };
         let file_json = serde_json::to_value(&file).unwrap();
         let config = write_config(&dir, &file_json.to_string());
@@ -1040,7 +1257,11 @@ pub(crate) mod tests {
         assert_eq!(json["smtpConfig"]["password"], REDACTED);
         assert_eq!(json["unlockPassphrase"], REDACTED);
         assert_eq!(json["smtpConfig"]["host"], "smtp.example");
-        assert!(format!("{:?}", resolved.config).find("secret").is_none());
+        // The config names its file, whose folder name holds "secret": check the values.
+        let debug = format!("{:?}", resolved.config);
+        for secret in ["smtp-secret", "admin-secret", "unlock-secret"] {
+            assert!(!debug.contains(secret), "{debug}");
+        }
 
         // A flag beats AD4M_ADMIN_CREDENTIAL_FILE.
         let resolved = resolve(
@@ -1125,7 +1346,7 @@ pub(crate) mod tests {
             checked += 1;
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-        assert_eq!(checked, 43, "every flag of run has a variable");
+        assert_eq!(checked, 49, "every flag of run has a variable");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

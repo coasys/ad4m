@@ -1,10 +1,9 @@
 import { Ad4mModel } from "./Ad4mModel";
 import { HasMany, Model, Property } from "./decorators";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
-import { clearQueryCache } from "./query-cache";
 
 // Every RPC that save() and delete() send, counted on a client double that
-// keeps the registered classes' SHACL links like the executor does.
+// keeps the registered classes' shapes like the executor does.
 
 @Model({ name: "RoundTripNote" })
 class RoundTripNote extends Ad4mModel {
@@ -34,6 +33,21 @@ class RoundTripCall extends Ad4mModel {
   attachments: string[] = [];
 }
 
+@Model({ name: "RoundTripOptional" })
+class RoundTripOptional extends Ad4mModel {
+  @Property({ through: "rt://note" })
+  note: string = "";
+
+  @Property({ through: "rt://rank" })
+  rank: string = "";
+}
+
+@Model({ name: "RoundTripRequired" })
+class RoundTripRequired extends Ad4mModel {
+  @Property({ through: "rt://title", required: true })
+  title: string = "";
+}
+
 // Two relations over one predicate.
 @Model({ name: "RoundTripShared" })
 class RoundTripShared extends Ad4mModel {
@@ -53,20 +67,26 @@ const link = (source: string, predicate: string, target: string) => ({
   data: { source, predicate, target },
 });
 
-/** The SHACL links the executor stores for `classes`, with the class marker
- *  it adds (`shacl_parser.rs`). */
+/** The links the executor stores for `classes`: the class index link and
+ *  the shape (`shacl_parser::shape_links`). */
 function shaclLinks(classes: any[]) {
   return classes.flatMap((cls) => {
     const { shape } = cls.generateSHACL();
     return [
       link(shape.targetClass, "rdf://type", "ad4m://SubjectClass"),
+      link(shape.targetClass, "ad4m://shape", shape.nodeShapeUri),
       ...shape.toLinks().map((l: any) => link(l.source, l.predicate, l.target)),
     ];
   });
 }
 
-function countingProxy(registered: any[], rttMs = 0) {
-  const store = shaclLinks(registered);
+function countingProxy(registered: any[], rttMs = 0, stored: any[] = []) {
+  const store = [...shaclLinks(registered), ...stored];
+  const summaries = registered.map((cls) => ({
+    name: cls.getClassName(),
+    shape: cls.generateSHACL().shape.toJSON(),
+    hash: cls.getClassName(),
+  }));
   const calls: string[] = [];
   const sent: any[][] = [];
   const answers: Record<string, (...args: any[]) => any> = {
@@ -77,6 +97,8 @@ function countingProxy(registered: any[], rttMs = 0) {
           (!q.predicate || l.data.predicate === q.predicate) &&
           (!q.target || l.data.target === q.target),
       ),
+    shapes: (_uuid: string, names?: string[]) =>
+      summaries.filter((s) => !names || names.includes(s.name)),
     createBatch: () => "batch-1",
     commitBatch: () => ({ additions: [], removals: [] }),
     createSubject: () => true,
@@ -113,8 +135,6 @@ async function createNote(proxy: PerspectiveProxy) {
 }
 
 describe("RPCs per write", () => {
-  beforeEach(() => clearQueryCache());
-
   it("create of a decorated model sends no class-list lookup", async () => {
     const { proxy, calls } = countingProxy([RoundTripNote]);
     await createNote(proxy);
@@ -136,13 +156,22 @@ describe("RPCs per write", () => {
   it("Model.create sends no setter for an empty relation", async () => {
     const { proxy, calls } = countingProxy([RoundTripCall]);
     await RoundTripCall.create(proxy, { title: "standup" });
+    expect(calls).toEqual(["createBatch", "createSubject", "commitBatch"]);
+  });
+
+  it("Model.create with returns: 'row' reads once after the commit", async () => {
+    const { proxy, calls } = countingProxy([RoundTripCall]);
+    // This fake's query finds no row, so the create rejects: a row that
+    // cannot be read is an error, not a silent half-filled instance.
+    await expect(RoundTripCall.create(proxy, { title: "standup" }, { returns: "row" }))
+      .rejects.toThrow(/was created, but reading it back failed/);
     expect(calls).toEqual(["createBatch", "createSubject", "commitBatch", "modelQuery"]);
   });
 
   it("create still writes a non-empty relation, and only that one", async () => {
     const { proxy, calls, sent } = countingProxy([RoundTripCall]);
     await RoundTripCall.create(proxy, { title: "standup", tags: ["rt://tag/a", "rt://tag/b"] });
-    expect(calls).toEqual(["createBatch", "createSubject", "executeCommands", "commitBatch", "modelQuery"]);
+    expect(calls).toEqual(["createBatch", "createSubject", "executeCommands", "commitBatch"]);
     const [tags] = commandsSent(sent);
     expect(tags).toContain("rt://tag");
     expect(tags).toContain("rt://tag/a");
@@ -187,6 +216,36 @@ describe("RPCs per write", () => {
     expect(commands[1]).toContain("collectionSetter");
   });
 
+  it("create still clears an empty relation whose predicate an adder envelope in the same save wrote to", async () => {
+    // `tags` writes through `{action: 'adder'}` before `labels` (same predicate)
+    // is reached, so `labels: []` has links to clear.
+    const { proxy, sent } = countingProxy([RoundTripShared]);
+    const shared = new RoundTripShared(proxy);
+    shared.title = "standup";
+    shared.tags = { action: "adder", value: ["rt://tag/a"] } as any;
+    shared.labels = [];
+    await shared.save();
+    expect(commandsSent(sent).some((c) => c.includes("collectionSetter") && c.includes("rt://tag"))).toBe(true);
+  });
+
+  it("create still clears an empty relation whose predicate a scalar relation write in the same save wrote to", async () => {
+    // A scalar on `tags` is written as a one-member relation before `labels`
+    // (same predicate) is reached, so `labels: []` has a link to clear. The
+    // scalar's own write is a collectionSetter on rt://tag too, so look for
+    // the clear: the one with no values.
+    const { proxy, sent } = countingProxy([RoundTripShared]);
+    const shared = new RoundTripShared(proxy);
+    shared.title = "standup";
+    shared.tags = "rt://tag/a" as any;
+    shared.labels = [];
+    await shared.save();
+    const clears = sent.filter(
+      ([method, , commands, , params]) =>
+        method === "executeCommands" && commands.includes("collectionSetter") && commands.includes("rt://tag") && params === "[]",
+    );
+    expect(clears).toHaveLength(1);
+  });
+
   it("update of an existing record with [] still clears the relation", async () => {
     const { proxy, calls, sent } = countingProxy([RoundTripCall]);
     const call = new RoundTripCall(proxy, "rt://call/1");
@@ -204,14 +263,12 @@ describe("RPCs per write", () => {
     const { proxy, calls } = countingProxy([RoundTripNote]);
     const note = new RoundTripNote(proxy, "rt://note/1");
     await note.delete();
-    // abstract markers, destructor, the destructor's commands, incoming links
-    expect(calls).toEqual(["queryLinks", "queryLinks", "executeCommands", "queryLinks"]);
+    // the executor runs the destructor, then incoming links
+    expect(calls).toEqual(["removeSubject", "queryLinks"]);
   });
 });
 
-describe("class name a write resolves", () => {
-  beforeEach(() => clearQueryCache());
-
+describe("class a write addresses", () => {
   @Model({ name: "RoundTripDerivedNote" })
   class RoundTripDerivedNote extends RoundTripNote {
     @Property({ through: "rt://body" })
@@ -221,70 +278,71 @@ describe("class name a write resolves", () => {
   const createdAs = (sent: any[][]) => JSON.parse(sent.find((c) => c[0] === "createSubject")![2]).className;
 
   async function resolve(registered: any[], subject: any) {
-    const { proxy } = countingProxy(registered);
-    return proxy.stringOrTemplateObjectToSubjectClassName(subject);
+    const { proxy, sent } = countingProxy(registered);
+    await proxy.createSubject(subject, "rt://note/1");
+    return createdAs(sent);
   }
 
-  it("is the decorated name of an instance and of its class", async () => {
-    expect(await resolve([RoundTripNote], new RoundTripNote(undefined as any))).toBe("RoundTripNote");
-    expect(await resolve([RoundTripNote], RoundTripNote)).toBe("RoundTripNote");
+  it("is the target class IRI of an instance and of its class", async () => {
+    expect(await resolve([RoundTripNote], new RoundTripNote(undefined as any))).toBe("rt://RoundTripNote");
+    expect(await resolve([RoundTripNote], RoundTripNote)).toBe("rt://RoundTripNote");
   });
 
   it("is the base class for a base instance when a derived class has its properties too", async () => {
     const both = [RoundTripDerivedNote, RoundTripNote];
-    expect(await resolve(both, new RoundTripNote(undefined as any))).toBe("RoundTripNote");
-    expect(await resolve(both, new RoundTripDerivedNote(undefined as any))).toBe("RoundTripDerivedNote");
+    expect(await resolve(both, new RoundTripNote(undefined as any))).toBe("rt://RoundTripNote");
+    expect(await resolve(both, new RoundTripDerivedNote(undefined as any))).toBe("rt://RoundTripDerivedNote");
   });
 
-  it("is the decorated name even when the class is not registered and another class has its properties", async () => {
+  it("is the target class IRI even when the class is not registered and another class has its properties", async () => {
     const { proxy, calls } = countingProxy([]);
     const byProperties = jest.spyOn(proxy as any, "findClassByProperties").mockResolvedValue("RoundTripTwin" as never);
-    expect(await proxy.stringOrTemplateObjectToSubjectClassName(new RoundTripNote(undefined as any))).toBe("RoundTripNote");
+    await proxy.createSubject(new RoundTripNote(undefined as any), "rt://note/1");
     expect(byProperties).not.toHaveBeenCalled();
-    expect(calls).toEqual([]);
+    expect(calls).toEqual(["createSubject"]);
   });
 
   it("is a template's own className", async () => {
     expect(await resolve([RoundTripNote], { className: "RoundTripNote" })).toBe("RoundTripNote");
   });
 
-  it("is the abstract name for an abstract class", async () => {
-    expect(await resolve([RoundTripReadable], RoundTripReadable)).toBe("RoundTripReadable");
+  it("is the abstract class's IRI for an abstract class", async () => {
+    expect(await resolve([RoundTripReadable], RoundTripReadable)).toBe("rt://RoundTripReadable");
   });
 
   it("is a string as given", async () => {
     expect(await resolve([], "Anything")).toBe("Anything");
   });
 
-  it("matches an undecorated object by its properties", async () => {
-    const { proxy, calls } = countingProxy([RoundTripNote]);
-    const byProperties = jest.spyOn(proxy as any, "findClassByProperties").mockResolvedValue("RoundTripNote" as never);
-    expect(await proxy.stringOrTemplateObjectToSubjectClassName({ title: "" })).toBe("RoundTripNote");
-    expect(byProperties).toHaveBeenCalled();
-    expect(calls).toEqual([]);
+  it("matches an undecorated object by its properties in one shapes read", async () => {
+    const { proxy, calls, sent } = countingProxy([RoundTripCall, RoundTripNote]);
+    await proxy.createSubject({ title: "" }, "rt://note/1");
+    // Both classes have `title`; the first in the registry's order wins.
+    expect(createdAs(sent)).toBe("RoundTripCall");
+    expect(calls).toEqual(["shapes", "createSubject"]);
   });
 
-  it("creates the record under the model's name", async () => {
+  it("creates the record under the model's target class IRI", async () => {
     const { proxy, sent } = countingProxy([RoundTripNote]);
     await createNote(proxy);
-    expect(createdAs(sent)).toBe("RoundTripNote");
+    expect(createdAs(sent)).toBe("rt://RoundTripNote");
   });
 
-  it("deletes an abstract-class record through the executor under the abstract name", async () => {
+  it("deletes an abstract-class record through the executor under the abstract class's IRI", async () => {
     const { proxy, calls, sent } = countingProxy([RoundTripReadable]);
     await new RoundTripReadable(proxy, "rt://note/1").delete();
     expect(sent.find((c) => c[0] === "removeSubject")).toEqual(
-      ["removeSubject", "rt-uuid", "RoundTripReadable", "rt://note/1", undefined],
+      ["removeSubject", "rt-uuid", "rt://RoundTripReadable", "rt://note/1", undefined],
     );
-    // abstract markers, removeSubject, incoming links
-    expect(calls).toEqual(["queryLinks", "removeSubject", "queryLinks"]);
+    // removeSubject, incoming links
+    expect(calls).toEqual(["removeSubject", "queryLinks"]);
   });
 
-  it("createSubject with a decorated instance sends its name in one RPC", async () => {
+  it("createSubject with a decorated instance sends its target class IRI in one RPC", async () => {
     const { proxy, calls, sent } = countingProxy([RoundTripNote]);
     await proxy.createSubject(new RoundTripNote(undefined as any), "rt://note/2");
     expect(calls).toEqual(["createSubject"]);
-    expect(createdAs(sent)).toBe("RoundTripNote");
+    expect(createdAs(sent)).toBe("rt://RoundTripNote");
   });
 });
 
@@ -301,7 +359,6 @@ const rtt = Number(process.env.SDK_RTT_MS || 0);
     const ms: number[] = [];
     let rpcs = 0;
     for (let i = 0; i < runs; i++) {
-      clearQueryCache();
       const { proxy, calls } = countingProxy([RoundTripNote, RoundTripReadable, RoundTripCall], rtt);
       const start = performance.now();
       await write(proxy);
@@ -320,5 +377,109 @@ const rtt = Number(process.env.SDK_RTT_MS || 0);
       "createSubject(decorated instance)": await time((p) => p.createSubject(new RoundTripNote(undefined as any), "rt://n")),
     };
     console.log(`RTT ${rtt} ms, ${runs} runs\n` + Object.entries(rows).map(([k, v]) => `${k}: ${v}`).join("\n"));
+  });
+});
+
+describe("an empty value clears a property", () => {
+  const noteLink = link("rt://opt/1", "rt://note", "literal://string:old");
+  const clear = { action: "removeLink", source: "this", predicate: "rt://note", target: "*" };
+  const writes = (sent: any[][]) => sent.filter((c) => c[0] === "executeCommands");
+  const existing = async (proxy: PerspectiveProxy, note: string | null | undefined) => {
+    const opt = new RoundTripOptional(proxy, "rt://opt/1");
+    opt.note = "old";
+    (opt as any).takeSnapshot();
+    (opt as any).note = note;
+    return opt;
+  };
+
+  it.each([[""], [null]])("update with %p sends a removeLink of every link on the property, in the caller's batch", async (empty) => {
+    const { proxy, sent } = countingProxy([RoundTripOptional], 0, [noteLink]);
+    const opt = await existing(proxy, empty as any);
+    await opt.save("batch-1");
+    expect(sent.map((c) => c[0])).toEqual(["executeCommands"]);
+    expect(JSON.parse(sent[0][2])).toEqual([clear]);
+    expect(sent[0][3]).toBe("rt://opt/1");
+    expect(JSON.parse(sent[0][4])).toEqual([]);
+    expect(sent[0][5]).toBe("batch-1");
+  });
+
+  it.each([[""], [null]])("Model.create with %p stores no link", async (empty) => {
+    const { proxy, calls, sent } = countingProxy([RoundTripOptional]);
+    await RoundTripOptional.create(proxy, { note: empty as any, rank: "1" });
+    const createSubject = sent.find((c) => c[0] === "createSubject")!;
+    expect(JSON.stringify(createSubject)).not.toContain("note");
+    expect(JSON.stringify(createSubject)).toContain("rank");
+    expect(writes(sent)).toHaveLength(0);
+  });
+
+  it("an absent value writes nothing", async () => {
+    const { proxy, calls } = countingProxy([RoundTripOptional], 0, [noteLink]);
+    const opt = await existing(proxy, undefined);
+    await opt.save("batch-1");
+    expect(calls).toEqual([]);
+  });
+
+  it("a property already cleared, set to '' again, sends the removeLink and reads nothing", async () => {
+    const { proxy, calls } = countingProxy([RoundTripOptional]);
+    const opt = await existing(proxy, "");
+    await opt.save("batch-1");
+    expect(calls).toEqual(["executeCommands"]);
+  });
+
+  it.each([[""], [null]])("update with %p on a required property throws and writes nothing", async (empty) => {
+    const titleLink = link("rt://req/1", "rt://title", "literal://string:old");
+    const { proxy, calls } = countingProxy([RoundTripRequired], 0, [titleLink]);
+    const req = new RoundTripRequired(proxy, "rt://req/1");
+    req.title = "old";
+    (req as any).takeSnapshot();
+    (req as any).title = empty;
+    await expect(req.save("batch-1")).rejects.toThrow('Property "title" is required and cannot be cleared');
+    expect(calls).toEqual([]);
+  });
+
+  describe("on a class built by fromSHACL", () => {
+    // Decorator -> SHACL -> fromSHACL: the shape's minCount 1 must come back as required.
+    const fromShape = (cls: any) => Ad4mModel.fromSHACL(cls.generateSHACL().shape, cls.getClassName());
+
+    it("a scalar with minCount 1 is required, and one without is not (seen in the shape it generates back)", () => {
+      const minCount = (cls: any) => fromShape(cls).generateSHACL().shape.properties.find((p: any) => p.name).minCount;
+      expect(minCount(RoundTripRequired)).toBe(1);
+      expect(minCount(RoundTripOptional)).toBeUndefined();
+    });
+
+    it.each([[""], [null]])("update with %p on a required scalar throws and sends nothing", async (empty) => {
+      const Req = fromShape(RoundTripRequired) as any;
+      const titleLink = link("rt://req/1", "rt://title", "literal://string:old");
+      const { proxy, calls } = countingProxy([Req], 0, [titleLink]);
+      const req = new Req(proxy, "rt://req/1");
+      req.title = "old";
+      (req as any).takeSnapshot();
+      req.title = empty;
+      await expect(req.save("batch-1")).rejects.toThrow('Property "title" is required and cannot be cleared');
+      expect(calls).toEqual([]);
+    });
+
+    it.each([[""], [null]])("update with %p on a scalar without minCount still clears", async (empty) => {
+      const Opt = fromShape(RoundTripOptional) as any;
+      const { proxy, sent } = countingProxy([Opt], 0, [noteLink]);
+      const opt = new Opt(proxy, "rt://opt/1");
+      opt.note = "old";
+      (opt as any).takeSnapshot();
+      opt.note = empty;
+      await opt.save("batch-1");
+      expect(JSON.parse(sent[0][2])).toEqual([clear]);
+    });
+  });
+
+  it("update clears one property and sets another in one batch", async () => {
+    const { proxy, calls, sent } = countingProxy([RoundTripOptional], 0, [noteLink]);
+    const opt = await existing(proxy, "");
+    opt.rank = "2";
+    await opt.save("batch-1");
+    expect(calls).toEqual(["executeCommands"]);
+    const commands = JSON.parse(sent[0][2]);
+    expect(commands).toHaveLength(2);
+    expect(commands[0]).toEqual(clear);
+    expect(commands[1]).toMatchObject({ action: "setSingleTarget", predicate: "rt://rank" });
   });
 });

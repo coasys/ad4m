@@ -77,6 +77,7 @@ async fn a_model_subscriber_keeps_its_updates_when_another_disposes() {
 
     let (id1, _, _) = perspective
         .model_subscribe_and_query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             "Task".into(),
             query_json.into(),
             uuid::Uuid::new_v4().to_string(),
@@ -87,6 +88,7 @@ async fn a_model_subscriber_keeps_its_updates_when_another_disposes() {
         .expect("first model subscribe");
     let (id2, _, _) = perspective
         .model_subscribe_and_query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             "Task".into(),
             query_json.into(),
             uuid::Uuid::new_v4().to_string(),
@@ -145,6 +147,7 @@ async fn a_query_subscriber_keeps_its_updates_when_another_connection_disposes()
 
     let (id1, _, _) = perspective
         .subscribe_and_query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             query.clone(),
             uuid::Uuid::new_v4().to_string(),
             "a".into(),
@@ -154,6 +157,7 @@ async fn a_query_subscriber_keeps_its_updates_when_another_connection_disposes()
         .expect("first subscribe");
     let (id2, _, _) = perspective
         .subscribe_and_query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             query.clone(),
             uuid::Uuid::new_v4().to_string(),
             "b".into(),
@@ -216,6 +220,7 @@ async fn a_rerun_update_reaches_only_its_subscriber() {
 
     let (id_u, _, _) = perspective
         .subscribe_and_query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             query.clone(),
             uuid::Uuid::new_v4().to_string(),
             "u-connection".into(),
@@ -225,6 +230,7 @@ async fn a_rerun_update_reaches_only_its_subscriber() {
         .expect("U subscribes");
     let (id_v, _, _) = perspective
         .subscribe_and_query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             query.clone(),
             uuid::Uuid::new_v4().to_string(),
             "v-connection".into(),
@@ -314,8 +320,9 @@ async fn union_model_subscription_reruns_on_an_edit_to_either_class() {
         crate::perspectives::model_query::QueryClasses::union(vec!["Task".into(), "Note".into()]);
     let (id, _, initial) = perspective
         .model_subscribe_and_query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             classes,
-            r#"{"includeUnverified":true}"#.into(),
+            r#"{"includeUnverified":true,"count":true}"#.into(),
             uuid::Uuid::new_v4().to_string(),
             "c".into(),
             None,
@@ -385,6 +392,7 @@ async fn union_model_subscription_ignores_a_write_outside_its_classes() {
         crate::perspectives::model_query::QueryClasses::union(vec!["Task".into(), "Note".into()]);
     let (id, _, _) = perspective
         .model_subscribe_and_query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             classes,
             r#"{"includeUnverified":true}"#.into(),
             uuid::Uuid::new_v4().to_string(),
@@ -443,6 +451,7 @@ async fn union_model_subscriptions_answer_the_same_regardless_of_class_order() {
     let query_json = r#"{"includeUnverified":true}"#;
     let (a, _, result_a) = perspective
         .model_subscribe_and_query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             QueryClasses::union(vec!["Task".into(), "Note".into()]),
             query_json.into(),
             uuid::Uuid::new_v4().to_string(),
@@ -453,6 +462,7 @@ async fn union_model_subscriptions_answer_the_same_regardless_of_class_order() {
         .expect("first union subscribe");
     let (b, _, result_b) = perspective
         .model_subscribe_and_query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             QueryClasses::union(vec!["Note".into(), "Task".into(), "Note".into()]),
             query_json.into(),
             uuid::Uuid::new_v4().to_string(),
@@ -463,6 +473,47 @@ async fn union_model_subscriptions_answer_the_same_regardless_of_class_order() {
         .expect("second union subscribe");
     assert_ne!(a, b, "each subscriber gets its own subscription");
     assert_eq!(result_a, result_b, "equal unions answer the same");
+}
+
+/// A model subscription re-runs one query on every matching write. With a
+/// cursor it would re-run the same page forever, so `after` is refused before
+/// anything is registered, while `"after": null` reads as no cursor.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_model_subscription_refuses_a_cursor() {
+    let (perspective, _shapes, _ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+    for query_json in [
+        r#"{"limit":5,"after":""}"#,
+        r#"{"limit":5,"after":"c1"}"#,
+        r#"{"after":""}"#,
+    ] {
+        let err = perspective
+            .model_subscribe_and_query(
+                &crate::perspectives::sparql_store::EvalStop::none(),
+                "Task".into(),
+                query_json.into(),
+                uuid::Uuid::new_v4().to_string(),
+                "c".into(),
+                None,
+            )
+            .await
+            .expect_err(query_json);
+        assert_eq!(err.to_string(), MODEL_SUBSCRIPTION_CURSOR_UNSUPPORTED);
+    }
+    assert!(
+        perspective.subscribed_queries.lock().await.is_empty(),
+        "a refused subscription registers nothing"
+    );
+    perspective
+        .model_subscribe_and_query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            "Task".into(),
+            r#"{"limit":5,"after":null}"#.into(),
+            uuid::Uuid::new_v4().to_string(),
+            "c".into(),
+            None,
+        )
+        .await
+        .expect("a null cursor is no cursor");
 }
 
 /// A client that gives up on a slow subscribe and tries again leaves the earlier
@@ -480,6 +531,7 @@ async fn identical_subscriptions_share_one_evaluation_per_pass() {
     for connection in ["c", "c", "c", "d"] {
         let (id, _, _) = perspective
             .model_subscribe_and_query(
+                &crate::perspectives::sparql_store::EvalStop::none(),
                 "Task".into(),
                 query_json.into(),
                 uuid::Uuid::new_v4().to_string(),
@@ -492,6 +544,7 @@ async fn identical_subscriptions_share_one_evaluation_per_pass() {
     }
     let (other, _, _) = perspective
         .model_subscribe_and_query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
             "Task".into(),
             other_json.into(),
             uuid::Uuid::new_v4().to_string(),

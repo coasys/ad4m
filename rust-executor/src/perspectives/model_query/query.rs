@@ -7,6 +7,7 @@
 //! target-class shapes (themselves cached).
 
 use super::containment::{contains_patterns, has_child_only, ContainmentEdge};
+use super::cursor::{refuse_unsupported_cursor, KeysetCursor};
 use super::eval_transform::eval_transform;
 use super::filtering::{matches_where, sort_instances};
 use super::getters::evaluate_getters;
@@ -27,8 +28,8 @@ use super::types::{
     ScopeDirection, ShapeResolver, SortKey, SparqlPagination, WhereCondition,
 };
 use super::utils::{validate_iri, values_or_str_filter, MAX_INCLUDE_DEPTH};
-use crate::perspectives::sparql_store::SparqlStore;
-use deno_core::anyhow::Error;
+use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
+use anyhow::Error;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -63,6 +64,7 @@ fn walk_roots(query: &ModelQueryInput) -> Option<(Vec<String>, String, ScopeDire
 /// new node turns up. `Out` follows `start -> node`, `In` follows
 /// `node -> start`. As with `+`, a start on a cycle reaches itself.
 pub(super) fn guarded_reach(
+    stop: &EvalStop,
     store: &SparqlStore,
     starts: &[String],
     edges: &[ContainmentEdge],
@@ -92,7 +94,7 @@ pub(super) fn guarded_reach(
             "SELECT DISTINCT ?s ?o WHERE {{\n{step}\n    {} }}",
             values_or_str_filter("s", &nodes)
         );
-        let rows: Vec<Value> = serde_json::from_str(&store.query(&sparql)?)?;
+        let rows: Vec<Value> = serde_json::from_str(&store.query(stop, &sparql)?)?;
         let mut steps: Vec<(String, String)> = rows
             .iter()
             .filter_map(|row| {
@@ -124,6 +126,7 @@ pub(super) fn guarded_reach(
 /// traversal over one predicate with an open guard and no bound is left to
 /// the `+` path.
 pub(super) fn with_walk(
+    stop: &EvalStop,
     store: &SparqlStore,
     query: &ModelQueryInput,
 ) -> Result<Option<ModelQueryInput>, Error> {
@@ -163,7 +166,7 @@ pub(super) fn with_walk(
         .filter(|id| validate_iri(id).is_ok())
         .cloned()
         .collect();
-    let pairs = guarded_reach(store, &anchors, &edges, *direction, guard, *max_depth)?;
+    let pairs = guarded_reach(stop, store, &anchors, &edges, *direction, guard, *max_depth)?;
     Ok(Some(ModelQueryInput {
         walked: Some(pairs),
         ..query.clone()
@@ -191,6 +194,72 @@ pub(super) fn walk_order(query: &ModelQueryInput) -> Option<HashMap<String, usiz
         positions.entry(node.clone()).or_insert(next);
     }
     Some(positions)
+}
+
+/// Whether the store can sort by `query`'s whole `order`, so that a window or a
+/// per-anchor limit cut in the store keeps the rows the caller asked for.
+///
+/// A single order key is pushable to SPARQL when it is:
+///   - a reifier-timestamp synonym (`timestamp`/`createdAt`/`updatedAt`),
+///   - a scalar property on the entry shape,
+///   - a `$`-prefixed projection count key whose `from` relation exists, or
+///   - a dotted relation-property path (`relName.propName`) where the
+///     relation exists in the shape's include_relations and the named
+///     property exists as a scalar on the target shape.
+///
+/// Anything else (or more than one key) falls back to the post-hydration
+/// Rust sort. No `order` is pushable: the store sorts by timestamp.
+pub(super) fn order_fully_pushable(
+    query_input: &ModelQueryInput,
+    shape: &ModelShape,
+    resolver: &dyn ShapeResolver,
+) -> bool {
+    match &query_input.order {
+        None => true,
+        Some(order) => {
+            order.len() == 1 && {
+                let name = &order[0].0;
+                if name == "timestamp" || name == "createdAt" || name == "updatedAt" {
+                    true
+                } else if shape
+                    .properties
+                    .iter()
+                    .any(|p| p.name == *name && !p.is_collection && !p.predicate.is_empty())
+                {
+                    true
+                } else if name.starts_with('$') {
+                    query_input
+                        .projections
+                        .as_ref()
+                        .and_then(|projs| projs.get(name.as_str()))
+                        .map(|proj| {
+                            proj.count
+                                && shape
+                                    .properties
+                                    .iter()
+                                    .any(|p| p.name == proj.from && !p.predicate.is_empty())
+                        })
+                        .unwrap_or(false)
+                } else if let Some(dot_pos) = name.find('.') {
+                    let rel_name = &name[..dot_pos];
+                    let prop_name = &name[dot_pos + 1..];
+                    shape
+                        .include_relations
+                        .iter()
+                        .find(|r| r.name == rel_name && !r.predicate.is_empty())
+                        .and_then(|rel| resolver.get_shape(rel.target()).ok())
+                        .map(|target_shape| {
+                            target_shape.properties.iter().any(|p| {
+                                p.name == prop_name && !p.is_collection && !p.predicate.is_empty()
+                            })
+                        })
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
+            }
+        }
+    }
 }
 
 /// Keep the first `n` rows of each anchor, discarding the rest.
@@ -241,6 +310,7 @@ fn slice_per_anchor(rows: &mut Vec<Value>, n: usize) {
 /// A node already seen is not walked again, so a cycle terminates rather than looping.
 #[allow(clippy::too_many_arguments)]
 async fn walk_levels(
+    stop: &EvalStop,
     store: &SparqlStore,
     shape: &ModelShape,
     query_input: &ModelQueryInput,
@@ -289,7 +359,7 @@ async fn walk_levels(
             break;
         };
 
-        let json = store.query_async(&pagination_subquery).await?;
+        let json = store.query_async(stop, &pagination_subquery).await?;
         let rows: Vec<Value> = serde_json::from_str(&json)?;
 
         // Slicing and de-duplication are one pass, not two, because a node that is not going to be
@@ -381,37 +451,29 @@ pub async fn execute_model_query(
     query_input: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
 ) -> Result<ModelQueryResult, Error> {
-    execute_model_query_inner(store, shape, query_input, resolver, 0).await
+    execute_model_query_inner(&EvalStop::none(), store, shape, query_input, resolver, 0).await
 }
 
-/// Inner implementation with recursion depth tracking.
-///
-/// The `depth` parameter prevents infinite cycles when resolving nested
-/// `include` relations (e.g. A includes B which includes A).  If depth
-/// exceeds [`MAX_INCLUDE_DEPTH`], an empty result is returned.
-pub(super) async fn execute_model_query_inner(
+/// [`execute_model_query`] under `stop` — every SPARQL evaluation the query
+/// makes (page, hydration, walk, include) checks its token and ends when the
+/// gate fires, reporting why.
+pub async fn execute_model_query_stopped(
+    stop: &EvalStop,
     store: &SparqlStore,
     shape: &ModelShape,
     query_input: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
-    depth: u8,
 ) -> Result<ModelQueryResult, Error> {
-    if depth > MAX_INCLUDE_DEPTH {
-        log::warn!(
-            "Include resolution depth {} exceeded for class '{}'; returning empty",
-            MAX_INCLUDE_DEPTH,
-            shape.target_class
-        );
-        return Ok(ModelQueryResult {
-            instances: vec![],
-            total_count: 0,
-        });
-    }
+    execute_model_query_inner(stop, store, shape, query_input, resolver, 0).await
+}
 
-    // The scope's documentation promises these combinations are mutually
-    // exclusive; honouring only one of them silently would be a wrong answer
-    // that looks like a right one, so they are refused up front — the same
-    // treatment a transitive projection gives a reifier filter.
+/// Refuse a scope that combines options with no single meaning.
+///
+/// The scope's documentation promises these combinations are mutually
+/// exclusive; honouring only one of them silently would be a wrong answer
+/// that looks like a right one, so they are refused up front — the same
+/// treatment a transitive projection gives a reifier filter.
+fn refuse_unanswerable_scope(query_input: &ModelQueryInput) -> Result<(), Error> {
     if let Some(Scope::Traverse {
         transitive,
         limit_per_anchor,
@@ -464,12 +526,89 @@ pub(super) async fn execute_model_query_inner(
             ));
         }
     }
+    Ok(())
+}
+
+/// The id phase of [`execute_model_query_inner`] on its own: every record in
+/// scope that passes `where`, as the rows of the two-phase plan's first query
+/// with no window — `?source` and the binding `sort_key` sorts on
+/// (`?_first_ts` for [`SortKey::Timestamp`] and [`SortKey::CreatedAt`],
+/// `?_sort_num` / `?_sort_str` for
+/// [`SortKey::Property`]). Nothing is hydrated. A union over several classes
+/// pages on these and hydrates only its page.
+///
+/// `None` when the store cannot answer the read on its own: a `where` that is
+/// matched after hydration, or a scope that slices per anchor (whose rows are
+/// one per anchor). Those need the full pipeline.
+pub(super) async fn select_ids(
+    stop: &EvalStop,
+    store: &SparqlStore,
+    shape: &ModelShape,
+    query_input: &ModelQueryInput,
+    resolver: &dyn ShapeResolver,
+    sort_key: SortKey,
+) -> Result<Option<Vec<Value>>, Error> {
+    refuse_unanswerable_scope(query_input)?;
+    let walked_input = with_walk(stop, store, query_input)?;
+    let query_input = walked_input.as_ref().unwrap_or(query_input);
+    refuse_unanswerable_link_author(query_input, shape, resolver)?;
+    if per_anchor_limit(query_input).is_some()
+        || level_limits(query_input).is_some()
+        || !all_where_pushable(query_input, shape, Some(resolver))
+    {
+        return Ok(None);
+    }
+    let pagination = SparqlPagination {
+        sort_key,
+        direction: OrderDirection::ASC,
+        offset: None,
+        limit: None,
+        keyset: None,
+    };
+    let InstanceQueryPlan::TwoPhase {
+        pagination_subquery,
+        ..
+    } = build_instance_sparql(shape, query_input, Some(&pagination), Some(resolver))
+    else {
+        return Ok(None);
+    };
+    let rows_json = store.query_async(stop, &pagination_subquery).await?;
+    Ok(Some(serde_json::from_str(&rows_json)?))
+}
+
+/// Inner implementation with recursion depth tracking.
+///
+/// The `depth` parameter prevents infinite cycles when resolving nested
+/// `include` relations (e.g. A includes B which includes A).  If depth
+/// exceeds [`MAX_INCLUDE_DEPTH`], an empty result is returned.
+pub(super) async fn execute_model_query_inner(
+    stop: &EvalStop,
+    store: &SparqlStore,
+    shape: &ModelShape,
+    query_input: &ModelQueryInput,
+    resolver: &dyn ShapeResolver,
+    depth: u8,
+) -> Result<ModelQueryResult, Error> {
+    if depth > MAX_INCLUDE_DEPTH {
+        log::warn!(
+            "Include resolution depth {} exceeded for class '{}'; returning empty",
+            MAX_INCLUDE_DEPTH,
+            shape.target_class
+        );
+        return Ok(ModelQueryResult {
+            instances: vec![],
+            total_count: query_input.count.unwrap_or(false).then_some(0),
+            next_cursor: None,
+        });
+    }
+
+    refuse_unanswerable_scope(query_input)?;
 
     // A transitive scope over containment, bounded by `maxDepth`, or under a
     // guard that restricts links is walked here and handed to the builder as
     // pairs (see `ModelQueryInput::walked`), so the rows, the page and the
     // count all read the same walk.
-    let walked_input = with_walk(store, query_input)?;
+    let walked_input = with_walk(stop, store, query_input)?;
     let query_input = walked_input.as_ref().unwrap_or(query_input);
     let walk_order = walk_order(query_input);
 
@@ -493,7 +632,28 @@ pub(super) async fn execute_model_query_inner(
     // full pipeline was just taught not to report; leaving it here would mean the same walk answers
     // two different figures depending on whether the caller asked for rows alongside it, and
     // `count()` in TypeScript is exactly `limit: 0`. A walk has to be walked to be counted.
+    let wants_count = query_input.count.unwrap_or(false);
     let is_count_only = query_input.limit == Some(0);
+    // The count-only returns below answer before the page pipeline — and its
+    // cursor refusals — runs, so the `after` checks have to come first: a
+    // count-only query has no page a cursor can point into, and an `include`
+    // cursor would be dropped the way it would be on any other early answer.
+    // `refuse_unsupported_cursor` holds every `after` rule that needs no
+    // shape (`model_query_classes_within` runs it ahead of its own empty
+    // answers) and returns the decoded cursor the keyset block below pages
+    // from; what is still refused there needs the shape.
+    let cursor = if depth == 0 {
+        refuse_unsupported_cursor(query_input)?
+    } else {
+        None
+    };
+    if is_count_only && !wants_count {
+        return Ok(ModelQueryResult {
+            instances: vec![],
+            total_count: None,
+            next_cursor: None,
+        });
+    }
     let count_only_can_skip_the_walk = !matches!(
         query_input.parent,
         Some(Scope::Traverse {
@@ -506,7 +666,7 @@ pub(super) async fn execute_model_query_inner(
         && all_where_pushable(query_input, shape, Some(resolver))
     {
         if let Some(sparql) = build_count_sparql(shape, query_input, Some(resolver)) {
-            let result_json = store.query(&sparql)?;
+            let result_json = store.query(stop, &sparql)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
             let count = results
                 .first()
@@ -519,72 +679,14 @@ pub(super) async fn execute_model_query_inner(
                 .unwrap_or(0);
             return Ok(ModelQueryResult {
                 instances: vec![],
-                total_count: count,
+                total_count: Some(count),
+                next_cursor: None,
             });
         }
     }
 
     // Full pipeline.
-    //
-    // A single order key is pushable to SPARQL when it is:
-    //   - a reifier-timestamp synonym (`timestamp`/`createdAt`/`updatedAt`),
-    //   - a scalar property on the entry shape,
-    //   - a `$`-prefixed projection count key whose `from` relation exists, or
-    //   - a dotted relation-property path (`relName.propName`) where the
-    //     relation exists in the shape's include_relations and the named
-    //     property exists as a scalar on the target shape.
-    // Anything else (or more than one key) falls back to the post-hydration
-    // Rust sort.
-    let order_fully_pushable = {
-        match &query_input.order {
-            None => true,
-            Some(order) => {
-                order.len() == 1 && {
-                    let name = &order[0].0;
-                    if name == "timestamp" || name == "createdAt" || name == "updatedAt" {
-                        true
-                    } else if shape
-                        .properties
-                        .iter()
-                        .any(|p| p.name == *name && !p.is_collection && !p.predicate.is_empty())
-                    {
-                        true
-                    } else if name.starts_with('$') {
-                        query_input
-                            .projections
-                            .as_ref()
-                            .and_then(|projs| projs.get(name.as_str()))
-                            .map(|proj| {
-                                proj.count
-                                    && shape
-                                        .properties
-                                        .iter()
-                                        .any(|p| p.name == proj.from && !p.predicate.is_empty())
-                            })
-                            .unwrap_or(false)
-                    } else if let Some(dot_pos) = name.find('.') {
-                        let rel_name = &name[..dot_pos];
-                        let prop_name = &name[dot_pos + 1..];
-                        shape
-                            .include_relations
-                            .iter()
-                            .find(|r| r.name == rel_name && !r.predicate.is_empty())
-                            .and_then(|rel| resolver.get_shape(&rel.target_class_name).ok())
-                            .map(|target_shape| {
-                                target_shape.properties.iter().any(|p| {
-                                    p.name == prop_name
-                                        && !p.is_collection
-                                        && !p.predicate.is_empty()
-                                })
-                            })
-                            .unwrap_or(false)
-                    } else {
-                        false
-                    }
-                }
-            }
-        }
-    };
+    let order_fully_pushable = order_fully_pushable(query_input, shape, resolver);
     let can_push_pagination =
         all_where_pushable(query_input, shape, Some(resolver)) && order_fully_pushable;
 
@@ -641,12 +743,40 @@ pub(super) async fn execute_model_query_inner(
     // taken one of its parent's places. That is the same trade `limit_per_anchor` has always made,
     // and the alternative — fetching a level whole to filter it — is what the limit exists to avoid.
     let scope_needs_phases = anchor_limit.is_some() || walk.is_some();
+
+    // Keyset cursor (`after`), top-level queries only: `Some(None)` = first
+    // page in cursor mode, `Some(Some(c))` = continue after `c`. Only the
+    // timestamp order, fully in the store, with a `limit` and without a
+    // non-zero `offset`; see `cursor.rs`. A containment walk with no order is
+    // ordered by the walk, not by timestamp, so it takes no cursor either.
+    // Anything else that sends `after` is refused: a missing `nextCursor`
+    // would read as the last page.
+    let keyset: Option<Option<KeysetCursor>> = match query_input.after.as_deref() {
+        Some(_) if depth == 0 => {
+            // The rules that read only the query ran above; what remains
+            // needs the shape: the page's `where` and `order` must be ones
+            // the store can evaluate, or a `limit` cut in the store would
+            // not be the page the caller asked for.
+            if !can_push_pagination {
+                return Err(Error::msg(
+                    "`after` cursors need the timestamp order (no `order`, or one of \
+                     timestamp/createdAt/updatedAt), a `limit`, a `where` the store can \
+                     evaluate, no non-zero `offset`, and no per-anchor limit or `levels`. \
+                     Page any other query with `offset`.",
+                ));
+            }
+            Some(cursor)
+        }
+        _ => None,
+    };
+
     // A containment walk with no order keeps the walk's order, which the
     // store cannot sort by: it is applied below, with the window, after
     // hydration.
     let sparql_pagination = if walk_order.is_some() {
         None
     } else if scope_needs_phases
+        || keyset.is_some()
         || (can_push_pagination && (query_input.limit.is_some() || query_input.offset.is_some()))
     {
         let direction = query_input
@@ -691,22 +821,19 @@ pub(super) async fn execute_model_query_inner(
                         .iter()
                         .find(|r| r.name == rel_name && !r.predicate.is_empty())
                         .and_then(|rel| {
-                            resolver
-                                .get_shape(&rel.target_class_name)
-                                .ok()
-                                .and_then(|ts| {
-                                    ts.properties
-                                        .iter()
-                                        .find(|p| {
-                                            p.name == prop_name
-                                                && !p.is_collection
-                                                && !p.predicate.is_empty()
-                                        })
-                                        .map(|p| SortKey::RelationProperty {
-                                            rel_pred: rel.predicate.clone(),
-                                            prop_pred: p.predicate.clone(),
-                                        })
-                                })
+                            resolver.get_shape(rel.target()).ok().and_then(|ts| {
+                                ts.properties
+                                    .iter()
+                                    .find(|p| {
+                                        p.name == prop_name
+                                            && !p.is_collection
+                                            && !p.predicate.is_empty()
+                                    })
+                                    .map(|p| SortKey::RelationProperty {
+                                        rel_pred: rel.predicate.clone(),
+                                        prop_pred: p.predicate.clone(),
+                                    })
+                            })
                         })
                         .unwrap_or(SortKey::Timestamp)
                 } else {
@@ -724,6 +851,7 @@ pub(super) async fn execute_model_query_inner(
                 None
             },
             limit: if push_window { query_input.limit } else { None },
+            keyset: keyset.clone(),
         })
     } else {
         None
@@ -746,10 +874,12 @@ pub(super) async fn execute_model_query_inner(
     // Captures the source IRI order returned by the phase-1 pagination subquery
     // so we can restore it after hydration (which uses BTreeMap, alphabetical order).
     let mut pagination_source_order: Option<Vec<String>> = None;
+    // Cursor mode: size of the id page and its last `(first timestamp, id)`.
+    let mut page_tail: Option<(usize, Option<(String, String)>)> = None;
 
     let raw_results: Vec<Value> = match query_plan {
         InstanceQueryPlan::Single(sparql) => {
-            let result_json = store.query_async(&sparql).await?;
+            let result_json = store.query_async(stop, &sparql).await?;
             serde_json::from_str(&result_json)?
         }
         InstanceQueryPlan::TwoPhase {
@@ -762,6 +892,7 @@ pub(super) async fn execute_model_query_inner(
             let ordered_ids: Vec<String> = match (&walk, walk_roots(query_input)) {
                 (Some(levels), Some((roots, predicate, direction))) => {
                     walk_levels(
+                        stop,
                         store,
                         shape,
                         query_input,
@@ -777,10 +908,19 @@ pub(super) async fn execute_model_query_inner(
                     .await?
                 }
                 _ => {
-                    let page_json = store.query_async(&pagination_subquery).await?;
+                    let page_json = store.query_async(stop, &pagination_subquery).await?;
                     let mut page_results: Vec<Value> = serde_json::from_str(&page_json)?;
                     if let Some(n) = anchor_limit {
                         slice_per_anchor(&mut page_results, n);
+                    }
+                    if keyset.is_some() {
+                        let last = page_results.last().and_then(|r| {
+                            Some((
+                                r["_first_ts"].as_str()?.to_string(),
+                                r["source"].as_str()?.to_string(),
+                            ))
+                        });
+                        page_tail = Some((page_results.len(), last));
                     }
                     page_results
                         .iter()
@@ -816,7 +956,7 @@ pub(super) async fn execute_model_query_inner(
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
 {link_status}{proof_valid}{local_status}}}"#
                     );
-                    let result_json = store.query_async(&property_sparql).await?;
+                    let result_json = store.query_async(stop, &property_sparql).await?;
                     serde_json::from_str(&result_json)?
                 }
             }
@@ -875,6 +1015,7 @@ pub(super) async fn execute_model_query_inner(
         .map(|p| (p.name.clone(), p.predicate.clone(), p.is_scalar_relation))
         .partition(|(name, _, _)| read_before_window.contains(name));
     resolve_reverse_relations(
+        stop,
         store,
         &mut instances,
         &reverse_before_window,
@@ -912,20 +1053,28 @@ pub(super) async fn execute_model_query_inner(
     // drops rows (no post-hydration filter, no per-anchor slice), and the id phase groups by
     // `?source` over the same scope patterns the COUNT's `DISTINCT ?source` reads, so its page
     // length (not the hydrated instances) is the figure the COUNT would extend.
-    let page_total = if window_pushed {
+    //
+    // A page after a cursor is the exception: the rows before the cursor are skipped by the keyset,
+    // not by an `offset` the page could add back, so a short page there tells only how many rows
+    // follow the cursor. Such a page takes the COUNT; a first cursor page (`after: ""`) starts at
+    // the beginning, like offset 0, and keeps the shortcut.
+    let after_a_cursor = matches!(keyset, Some(Some(_)));
+    let page_total = if window_pushed && !after_a_cursor {
         pagination_source_order.as_ref().and_then(|page| {
             total_from_short_page(query_input.offset, query_input.limit, page.len())
         })
     } else {
         None
     };
-    let total_count = if walk.is_some() {
-        instances.len()
+    let total_count = if !wants_count {
+        None
+    } else if walk.is_some() {
+        Some(instances.len())
     } else if let Some(total) = page_total {
-        total
+        Some(total)
     } else if sparql_pagination.is_some() {
         if let Some(count_sparql) = build_count_sparql(shape, query_input, Some(resolver)) {
-            let result_json = store.query(&count_sparql)?;
+            let result_json = store.query(stop, &count_sparql)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
             results
                 .first()
@@ -935,12 +1084,12 @@ pub(super) async fn execute_model_query_inner(
                         .and_then(|s| s.parse::<usize>().ok())
                         .or_else(|| r["cnt"].as_u64().map(|n| n as usize))
                 })
-                .unwrap_or(instances.len())
+                .or(Some(instances.len()))
         } else {
-            instances.len()
+            Some(instances.len())
         }
     } else {
-        instances.len()
+        Some(instances.len())
     };
 
     // Apply ordering and pagination
@@ -992,6 +1141,18 @@ pub(super) async fn execute_model_query_inner(
         }
     };
 
+    // A full page may have a successor; a short one is the last.
+    let next_cursor = match (&keyset, query_input.limit, page_tail) {
+        (Some(_), Some(limit), Some((len, Some((ts, id))))) if limit > 0 && len >= limit => {
+            let direction = sparql_pagination
+                .as_ref()
+                .map(|pg| pg.direction)
+                .unwrap_or(OrderDirection::ASC);
+            Some(KeysetCursor::new(ts, id, direction).encode())
+        }
+        _ => None,
+    };
+
     // The language-backed values the filter and sort did not read, for the page only, and of
     // those only what the query hands back: the strip below drops the rest.
     resolve_language_transforms(shape, &mut paginated, |name| {
@@ -1001,6 +1162,7 @@ pub(super) async fn execute_model_query_inner(
 
     // The reverse relations the filter and sort did not read, for the page only.
     resolve_reverse_relations(
+        stop,
         store,
         &mut paginated,
         &reverse_on_page,
@@ -1013,6 +1175,7 @@ pub(super) async fn execute_model_query_inner(
     if !paginated.is_empty() {
         let deep_query = query_input.deep_query.unwrap_or(true);
         evaluate_getters(
+            stop,
             store,
             &mut paginated,
             shape,
@@ -1027,6 +1190,7 @@ pub(super) async fn execute_model_query_inner(
     if let Some(ref include) = query_input.include {
         if !paginated.is_empty() && !shape.include_relations.is_empty() {
             resolve_includes_recursive(
+                stop,
                 store,
                 &mut paginated,
                 include,
@@ -1052,6 +1216,7 @@ pub(super) async fn execute_model_query_inner(
 
     // After `filter_properties`, so a `properties` selection cannot strip it.
     attach_links(
+        stop,
         store,
         shape,
         &link_keys,
@@ -1064,6 +1229,7 @@ pub(super) async fn execute_model_query_inner(
     // Attach projection results
     if let Some(ref projections) = query_input.projections {
         resolve_projections(
+            stop,
             store,
             &mut final_instances,
             projections,
@@ -1079,6 +1245,7 @@ pub(super) async fn execute_model_query_inner(
     Ok(ModelQueryResult {
         instances: final_instances,
         total_count,
+        next_cursor,
     })
 }
 

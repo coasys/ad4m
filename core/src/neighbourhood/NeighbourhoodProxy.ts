@@ -4,6 +4,7 @@ import { Perspective, PerspectiveExpression, PerspectiveUnsignedInput } from "..
 import { NeighbourhoodClient } from "./NeighbourhoodClient";
 import type {
     CallSessionInfo,
+    SfuAnswerResult,
     SfuCallRenegotiationOffer,
     SfuCascadeStatus,
     SfuConfig,
@@ -78,12 +79,17 @@ export class NeighbourhoodProxy {
         return await this.#client.sendSignalU(this.#pID, remoteAgentDid, payload)
     }
 
-    /** Broadcast a signed signal to all agents in the neighbourhood. */
+    /**
+     * Broadcast a signed signal to all agents in the neighbourhood. The
+     * sender's own agent gets it too (its other clients hear it), so a handler
+     * that must not act on its own messages drops them by author or device;
+     * `loopback` adds a second copy for the sender's executor.
+     */
     async sendBroadcast(payload: Perspective, loopback: boolean = false): Promise<boolean> {
         return await this.#client.sendBroadcast(this.#pID, payload, loopback)
     }
 
-    /** Broadcast an unsigned signal to all agents in the neighbourhood. */
+    /** Broadcast an unsigned signal to all agents in the neighbourhood; delivered as {@link sendBroadcast}. */
     async sendBroadcastU(payload: PerspectiveUnsignedInput, loopback: boolean = false): Promise<boolean> {
         return await this.#client.sendBroadcastU(this.#pID, payload, loopback)
     }
@@ -233,9 +239,10 @@ export class NeighbourhoodProxy {
         neighbourhoodUrl: string,
         roomName: string,
         participantId: string,
+        offerId: string,
         sdpAnswer: string,
-    ): Promise<boolean> {
-        return await this.#client.sfuCallAnswerServerOffer(neighbourhoodUrl, roomName, participantId, sdpAnswer)
+    ): Promise<SfuAnswerResult> {
+        return await this.#client.sfuCallAnswerServerOffer(neighbourhoodUrl, roomName, participantId, offerId, sdpAnswer)
     }
 
     /**

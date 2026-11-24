@@ -1,5 +1,5 @@
 import { Ad4mClient } from './Ad4mClient';
-import { ApiClient } from './apiClient';
+import { ApiClient, RpcError } from './apiClient';
 import { Perspective } from './perspectives/Perspective';
 import { LinkQuery } from './perspectives/LinkQuery';
 import type { EventMap, EventName } from './generated/api/Events';
@@ -34,6 +34,9 @@ const originalWebSocket = (global as any).WebSocket;
 
 type RpcHandler = unknown | ((params: Record<string, unknown>) => unknown);
 
+/** A handler result under this key is sent as the reply's `error` member instead of `result`. */
+const RPC_ERROR = '__rpcError';
+
 const MOCK_RESPONSES: Record<string, RpcHandler> = {
     // ── Agent ──
     'agent.get': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm', identity: 'did:scid:coasys:1:QmTest' },
@@ -43,6 +46,8 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'identity.claimOffer': (p: Record<string, unknown>) => ({ did: 'did:scid:coasys:1:QmTest', offerId: 'offer', matchCode: 'R7K Q2M', kind: 'node', expires: 1, echo: p }),
     'identity.log': (p: Record<string, unknown>) => ({ did: p.did, events: [], head: null, fork: null }),
     'identity.devices': [],
+    'identity.rekey': { sign: 'did:key:z6MkNew', enc: 'z6LSNew' },
+    'identity.custodyStatus': { sign: 'did:key:z6MkTest', enc: 'z6LSTest' },
     'identity.resolve': (p: Record<string, unknown>) => ({
         didDocument: { '@context': ['https://www.w3.org/ns/did/v1'], id: p.didUrl, controller: p.didUrl, verificationMethod: [], authentication: [], assertionMethod: [], keyAgreement: [], capabilityInvocation: [] },
         didDocumentMetadata: { versionId: '2', deactivated: false },
@@ -52,7 +57,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'agent.lock': { did: 'did:test:123', isInitialized: true, isUnlocked: false },
     'agent.unlock': { did: 'did:test:123', isInitialized: true, isUnlocked: true },
     'agent.import': { did: 'did:test:imported', isInitialized: true, isUnlocked: true },
-    'agent.byDid': (p: Record<string, unknown>) => ({ did: p.did, perspective: new Perspective() }),
+    'agent.byDIDs': (p: Record<string, unknown>) => (p.dids as string[]).map(did => ({ did, perspective: new Perspective() })),
     'agent.updateProfile': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm' },
     'agent.sign': 'signed-message-data',
     'agent.isLocked': false,
@@ -113,9 +118,30 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'perspective.removeLink': true,
     'perspective.queryProlog': JSON.stringify([{ X: 'test' }]),
     'perspective.querySparql': JSON.stringify([{ id: '1' }]),
-    'perspective.addSdna': true,
+    'perspective.registerShapes': { unchanged: [], written: ['test://TestClass'], generation: 1 },
     'perspective.executeCommands': true,
     'perspective.createSubject': true,
+    // A `colour` property is refused as the executor refuses an unknown property: 422 with the
+    // InstanceError as data.
+    'perspective.instanceCreate': (p: Record<string, unknown>) =>
+        (p.properties as Record<string, unknown> | undefined)?.colour !== undefined
+            ? { [RPC_ERROR]: {
+                code: 422,
+                message: "Validation failed for class 'Task': colour (unknownProperty)",
+                data: { kind: 'validation', className: 'Task', errors: [{
+                    property: 'colour', problem: { kind: 'unknownProperty', class: 'Task', available: ['title'] },
+                    expectedType: null, cardinality: null, allowedValues: null, received: 'red', item: null,
+                }] },
+            } }
+            : { className: p.className, baseUri: 'ad4m://obj/new', propertiesSet: Object.keys(p.properties as object), collectionsSet: [], parent: null },
+    'perspective.instanceUpdate': (p: Record<string, unknown>) =>
+        ({ className: p.className, baseUri: p.baseUri, updatedProperties: Object.keys(p.properties as object) }),
+    'perspective.instanceRemove': (p: Record<string, unknown>) =>
+        ({ className: p.className, baseUri: p.baseUri, linksRemoved: 3 }),
+    'perspective.instanceAddToCollection': (p: Record<string, unknown>) =>
+        ({ className: p.className, baseUri: p.baseUri, collection: p.collection, itemUri: p.itemUri, linksAdded: 1, alreadyMember: false }),
+    'perspective.instanceRemoveFromCollection': (p: Record<string, unknown>) =>
+        ({ className: p.className, baseUri: p.baseUri, collection: p.collection, itemUri: p.itemUri, linksRemoved: 1 }),
     'perspective.getSubjectData': '{"name":"test"}',
     'perspective.createBatch': 'batch-id-1',
     'perspective.commitBatch': { additions: [], removals: [] },
@@ -173,10 +199,10 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
         };
     },
     'expression.getMany': (p: Record<string, unknown>) => {
-        // Return one result per URL (aligned by index), matching real API behavior
+        // One entry per URL, in order: what `expression.get` answers for it.
         const urls = (p.urls || []) as string[];
-        return urls.map((url: string) => ({
-            author: 'did:test:1', timestamp: '2023-01-01', data: { type: 'test' },
+        return urls.map(() => ({
+            author: 'did:test:123', timestamp: '2024-01-01', data: '{"content":"hello"}',
             language: { address: 'lang://test' }, proof: { valid: true },
         }));
     },
@@ -211,6 +237,12 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'runtime.addHcAgentInfos': true,
     'runtime.networkMetrics': 'metrics-data',
     'runtime.restartHolochain': true,
+    'runtime.restart': true,
+    'runtime.logTail': (p: Record<string, unknown>) => ({ lines: [`asked ${p.lines}`] }),
+    'runtime.setLogFilter': (p: Record<string, unknown>) => ({ startupFilter: 'rust_executor=info', overrideFilter: p.filter, revertsAt: '2026-11-20T01:00:00+00:00' }),
+    'runtime.logFilter': { startupFilter: 'rust_executor=info', overrideFilter: null, revertsAt: null },
+    'runtime.config': { values: { mcp_port: 3001 }, keys: [{ key: 'mcp_port', class: 'restart' }, { key: 'port', class: 'machine', pinned: 'config' }], restartPending: false, file: '/data/adam/config.json' },
+    'runtime.setConfig': (p: Record<string, unknown>) => ({ restartPending: true, refused: p.unset ? [{ key: 'port', reason: 'local-only' }] : [] }),
     'runtime.verifySignature': true,
     'runtime.exportData': true,
     'runtime.importData': { success: true, count: 5 },
@@ -219,7 +251,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'runtime.computeLog': [],
 
     // ── AI ──
-    'ai.models': [{ id: 'model-1', name: 'GPT-Test', modelType: 'LLM', api: 'openai' }],
+    'ai.models': [{ id: 'model-1', name: 'GPT-Test', modelType: 'LLM', endpointId: 'e1', remoteModel: 'gpt-5', status: { state: 'READY' } }],
     'ai.addModel': 'model-new-id',
     'ai.updateModel': true,
     'ai.removeModel': true,
@@ -230,7 +262,8 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'ai.updateTask': { taskId: 'task-1', name: 'updated', modelId: 'model-1', systemPrompt: 'Updated', promptExamples: [] },
     'ai.removeTask': true,
     'ai.prompt': 'This is the AI response',
-    'ai.modelLoadingStatus': { model: 'model-1', progress: 100, status: 'loaded' },
+    'ai.modelStatus': { state: 'READY' },
+    'ai.discoverModels': [{ id: 'qwen3:8b', capabilities: ['chat'] }],
 
     // ── Users (unauthenticated on server — empty token allowed) ──
     'user.create': { success: true, did: 'did:test:new-user' },
@@ -335,7 +368,8 @@ class MockWebSocket {
                 : handler;
 
             const reply = (value: unknown) => setTimeout(() => {
-                this.onmessage?.({ data: JSON.stringify({ id, result: value }) });
+                const error = (value as Record<string, unknown> | null)?.[RPC_ERROR];
+                this.onmessage?.({ data: JSON.stringify(error ? { id, error } : { id, result: value }) });
             }, 0);
             if (result instanceof Promise) result.then(reply);
             else reply(result);
@@ -481,6 +515,7 @@ describe('AgentClient', () => {
 
     test('byDID() fetches agent by DID', async () => {
         const agent = await ad4m.agent.byDID('did:test:other');
+        expect(lastRpcCall!.params.dids).toEqual(['did:test:other']);
         expect(agent.did).toBe('did:test:other');
     });
 
@@ -642,6 +677,52 @@ describe('PerspectiveClient', () => {
         expect(lastRpcCall!.params.batchId).toBe('batch-id-1');
     });
 
+    test('instanceCreate() sends the body next to uuid and returns the created instance', async () => {
+        const created = await ad4m.perspective.instanceCreate('uuid-1', {
+            className: 'Task', properties: { title: 'Write' }, batchId: 'batch-1',
+        });
+        expect(lastRpcCall!.type).toBe('perspective.instanceCreate');
+        expect(lastRpcCall!.params).toEqual({
+            uuid: 'uuid-1', className: 'Task', properties: { title: 'Write' }, batchId: 'batch-1',
+        });
+        expect(created.baseUri).toBe('ad4m://obj/new');
+        expect(created.propertiesSet).toEqual(['title']);
+    });
+
+    test('a refused instance write rejects with the validation errors as RpcError.data', async () => {
+        const error = await ad4m.perspective
+            .instanceCreate('uuid-1', { className: 'Task', properties: { title: 't', colour: 'red' } })
+            .then(() => null, (e: unknown) => e);
+        expect(error).toBeInstanceOf(RpcError);
+        const rpcError = error as RpcError;
+        expect(rpcError.status).toBe(422);
+        const data = rpcError.data as { kind: string; errors: { property: string; problem: { kind: string } }[] };
+        expect(data.kind).toBe('validation');
+        expect(data.errors[0].property).toBe('colour');
+        expect(data.errors[0].problem.kind).toBe('unknownProperty');
+    });
+
+    test('the other instance writes call their methods with the body', async () => {
+        const base = { className: 'Task', baseUri: 'ad4m://obj/t' };
+        const item = { ...base, collection: 'labels', itemUri: 'ad4m://label/x' };
+
+        const updated = await ad4m.perspective.instanceUpdate('uuid-1', { ...base, properties: { status: 'doing' } });
+        expect(lastRpcCall).toEqual({ type: 'perspective.instanceUpdate', params: { uuid: 'uuid-1', ...base, properties: { status: 'doing' } } });
+        expect(updated.updatedProperties).toEqual(['status']);
+
+        const removed = await ad4m.perspective.instanceRemove('uuid-1', { ...base, batchId: 'b' });
+        expect(lastRpcCall).toEqual({ type: 'perspective.instanceRemove', params: { uuid: 'uuid-1', ...base, batchId: 'b' } });
+        expect(removed.linksRemoved).toBe(3);
+
+        const added = await ad4m.perspective.instanceAddToCollection('uuid-1', item);
+        expect(lastRpcCall).toEqual({ type: 'perspective.instanceAddToCollection', params: { uuid: 'uuid-1', ...item } });
+        expect(added.linksAdded).toBe(1);
+
+        const taken = await ad4m.perspective.instanceRemoveFromCollection('uuid-1', item);
+        expect(lastRpcCall).toEqual({ type: 'perspective.instanceRemoveFromCollection', params: { uuid: 'uuid-1', ...item } });
+        expect(taken.linksRemoved).toBe(1);
+    });
+
     test('updateLink() updates a link', async () => {
         const link = await ad4m.perspective.updateLink('uuid-1',
             { author: 'a', timestamp: 't', data: { source: 's', predicate: 'p', target: 't' }, proof: { valid: true } } as any,
@@ -667,9 +748,9 @@ describe('PerspectiveClient', () => {
         expect(result.additions).toHaveLength(1);
     });
 
-    test('addSdna() adds SDNA', async () => {
-        const result = await ad4m.perspective.addSdna('uuid-1', 'TestClass', 'code', 'subject_class');
-        expect(result).toBe(true);
+    test('registerShapes() registers shapes', async () => {
+        const result = await ad4m.perspective.registerShapes('uuid-1', [{ target_class: 'test://TestClass', properties: [] }]);
+        expect(result).toEqual({ unchanged: [], written: ['test://TestClass'], generation: 1 });
     });
 
     test('queryProlog() runs prolog query', async () => {
@@ -1054,19 +1135,19 @@ describe('NeighbourhoodClient', () => {
         expect(ws.rpc[0].params).toEqual({ 'sfu-call-renegotiation-offer': null, 'sfu-data': null, 'sfu-migrate': null });
 
         const room = { neighbourhoodUrl: 'neighbourhood://n', roomName: 'r' };
-        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:other', participantId: 'P2', ...room, sdpOffer: '{}' }));
-        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', participantId: 'P1', ...room, sdpOffer: '{"x":1}' }));
+        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:other', participantId: 'P2', offerId: 'o2', ...room, sdpOffer: '{}' }));
+        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', participantId: 'P1', offerId: 'o1', ...room, sdpOffer: '{"x":1}' }));
         ws.emit(event('sfu-migrate', { targetDid: 'did:me', ...room, migrateToDid: 'did:node' }));
         const message = { senderDid: 'did:other', senderParticipantId: 'P2', ...room, channelLabel: 'chat', binary: false, data: 'hi' };
         ws.emit(event('sfu-data', message));
 
         expect(offers).toHaveBeenCalledTimes(1);
-        expect(offers).toHaveBeenCalledWith({ targetDid: 'did:me', participantId: 'P1', ...room, sdpOffer: '{"x":1}', trackMapping: undefined });
+        expect(offers).toHaveBeenCalledWith({ targetDid: 'did:me', participantId: 'P1', offerId: 'o1', ...room, sdpOffer: '{"x":1}', trackMapping: undefined });
         expect(migrations).toHaveBeenCalledWith({ targetDid: 'did:me', ...room, migrateToDid: 'did:node' });
         expect(data).toHaveBeenCalledWith(expect.objectContaining(message));
 
         releaseOffers();
-        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', participantId: 'P1', ...room, sdpOffer: '{}' }));
+        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', participantId: 'P1', offerId: 'o3', ...room, sdpOffer: '{}' }));
         expect(offers).toHaveBeenCalledTimes(1);
     });
 });
@@ -1081,8 +1162,18 @@ describe('ExpressionClient', () => {
     test('getMany() returns multiple expressions', async () => {
         const exprs = await ad4m.expression.getMany(['url1', 'url2']);
         expect(exprs).toHaveLength(2);
-        expect(exprs[0].author).toBe('did:test:1');
-        expect(exprs[1].author).toBe('did:test:1');
+        expect(exprs[0].author).toBe('did:test:123');
+        expect(exprs[1].author).toBe('did:test:123');
+    });
+
+    test('getMany() sends at most 200 URLs per expression.getMany call', async () => {
+        const freshClient = newClient();
+        const urls = Array.from({ length: 201 }, (_, i) => `lang://test/Qm${i}`);
+        const exprs = await freshClient.expression.getMany(urls);
+        expect(exprs).toHaveLength(201);
+        const calls = lastOf(MockWebSocket.instances).rpc.filter(c => c.type === 'expression.getMany');
+        expect(calls.map(c => (c.params.urls as string[]).length)).toEqual([200, 1]);
+        expect(calls.flatMap(c => c.params.urls as string[])).toEqual(urls);
     });
 
     test('getRaw() returns raw expression', async () => {
@@ -1244,6 +1335,52 @@ describe('RuntimeClient', () => {
         const result = await ad4m.runtime.restartHolochain();
         expect(result).toBe(true);
     });
+
+    test('restart() calls runtime.restart', async () => {
+        expect(await ad4m.runtime.restart()).toBe(true);
+        expect(lastRpcCall!.type).toBe('runtime.restart');
+    });
+
+    test('logTail() sends the number of lines', async () => {
+        const tail = await ad4m.runtime.logTail(20);
+        expect(lastRpcCall!.params).toMatchObject({ lines: 20 });
+        expect(tail.lines).toEqual(['asked 20']);
+    });
+
+    test('setLogFilter() sends the filter and the ttl', async () => {
+        const status = await ad4m.runtime.setLogFilter('ws_rpc=debug,sfu=debug', 600);
+        expect(lastRpcCall!.type).toBe('runtime.setLogFilter');
+        expect(lastRpcCall!.params).toEqual({ filter: 'ws_rpc=debug,sfu=debug', ttlSeconds: 600 });
+        expect(status.overrideFilter).toBe('ws_rpc=debug,sfu=debug');
+        expect(status.revertsAt).toBe('2026-11-20T01:00:00+00:00');
+    });
+
+    test('setLogFilter() leaves the ttl to the executor when not given', async () => {
+        await ad4m.runtime.setLogFilter('ws_rpc=debug');
+        expect(lastRpcCall!.params).toEqual({ filter: 'ws_rpc=debug' });
+    });
+
+    test('logFilter() reads the filter in force', async () => {
+        const status = await ad4m.runtime.logFilter();
+        expect(lastRpcCall!.type).toBe('runtime.logFilter');
+        expect(status).toEqual({ startupFilter: 'rust_executor=info', overrideFilter: null, revertsAt: null });
+    });
+
+    test('config() returns the keys with their classes', async () => {
+        const config = await ad4m.runtime.config();
+        expect(lastRpcCall!.type).toBe('runtime.config');
+        expect(config.keys.find(k => k.key === 'port')?.class).toBe('machine');
+        expect(config.keys.find(k => k.key === 'port')?.pinned).toBe('config');
+        expect(config.file).toBe('/data/adam/config.json');
+    });
+
+    test('setConfig() sends set and unset and returns the refusals', async () => {
+        const result = await ad4m.runtime.setConfig({ mcp_port: 3005 }, ['port']);
+        expect(lastRpcCall!.type).toBe('runtime.setConfig');
+        expect(lastRpcCall!.params).toMatchObject({ set: { mcp_port: 3005 }, unset: ['port'] });
+        expect(result.restartPending).toBe(true);
+        expect(result.refused).toEqual([{ key: 'port', reason: 'local-only' }]);
+    });
 });
 
 // ===================== IDENTITY TESTS =====================
@@ -1287,6 +1424,18 @@ describe('IdentityClient', () => {
         expect(lastRpcCall!.params.fresh).toBeUndefined();
     });
 
+    test('rekey() calls identity.rekey and returns the new device keys', async () => {
+        const keys = await ad4m.identity.rekey();
+        expect(lastRpcCall!.type).toBe('identity.rekey');
+        expect(keys).toEqual({ sign: 'did:key:z6MkNew', enc: 'z6LSNew' });
+    });
+
+    test('custodyStatus() calls identity.custodyStatus', async () => {
+        const keys = await ad4m.identity.custodyStatus();
+        expect(lastRpcCall!.type).toBe('identity.custodyStatus');
+        expect(keys.enc).toBe('z6LSTest');
+    });
+
     test('agent.status() carries the identity beside the device did', async () => {
         const status = await ad4m.agent.status();
         expect(status.did).toBe('did:test:123');
@@ -1302,19 +1451,26 @@ describe('AIClient', () => {
         expect(models[0].name).toBe('GPT-Test');
     });
 
-    test('addModel() adds a model', async () => {
-        const id = await ad4m.ai.addModel({ name: 'New Model', modelType: 'LLM' } as any);
+    test('addModel() adds a model on an endpoint', async () => {
+        const model = { name: 'New Model', modelType: 'LLM' as const, endpointId: 'e1', remoteModel: 'qwen3:8b' };
+        const id = await ad4m.ai.addModel(model);
         expect(id).toBe('model-new-id');
-        expect(lastRpcCall!.params.model).toBeDefined();
-        expect((lastRpcCall!.params.model as any).type).toBe('LLM');
-        expect((lastRpcCall!.params.model as any).modelType).toBeUndefined();
+        expect(lastRpcCall!.params).toEqual({ model });
     });
 
     test('updateModel() updates a model', async () => {
-        const result = await ad4m.ai.updateModel('model-1', { name: 'Updated', modelType: 'EMBEDDING' } as any);
+        const model = { name: 'Updated', modelType: 'EMBEDDING' as const, endpointId: 'e1', remoteModel: 'nomic-embed-text' };
+        const result = await ad4m.ai.updateModel('model-1', model);
         expect(result).toBe(true);
-        expect((lastRpcCall!.params.model as any).type).toBe('EMBEDDING');
-        expect((lastRpcCall!.params.model as any).modelType).toBeUndefined();
+        expect(lastRpcCall!.params).toEqual({ id: 'model-1', model });
+    });
+
+    test('discoverModels() lists a saved endpoint or a server by its kind and URL', async () => {
+        const models = await ad4m.ai.discoverModels({ endpointId: 'e1' });
+        expect(models[0].id).toBe('qwen3:8b');
+        expect(lastRpcCall!.params).toEqual({ endpointId: 'e1' });
+        await ad4m.ai.discoverModels({ kind: 'OLLAMA', baseUrl: 'http://127.0.0.1:11434' });
+        expect(lastRpcCall!.params).toEqual({ kind: 'OLLAMA', baseUrl: 'http://127.0.0.1:11434' });
     });
 
     test('removeModel() removes a model', async () => {
@@ -1344,9 +1500,10 @@ describe('AIClient', () => {
         expect(lastRpcCall!.params.prompt).toBe('Hello AI');
     });
 
-    test('modelLoadingStatus() returns status', async () => {
-        const status = await ad4m.ai.modelLoadingStatus('model-1');
-        expect(status.progress).toBe(100);
+    test('modelStatus() returns where the model stands', async () => {
+        const status = await ad4m.ai.modelStatus('model-1');
+        expect(status.state).toBe('READY');
+        expect(lastRpcCall!.params).toEqual({ id: 'model-1' });
     });
 
     test('setDefaultModel() sets default', async () => {

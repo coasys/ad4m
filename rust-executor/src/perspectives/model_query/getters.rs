@@ -19,7 +19,7 @@
 //! ([`apply_where_filter_to_relation`]) can further narrow down relation
 //! results based on target instance properties.
 
-use deno_core::anyhow::Error;
+use anyhow::Error;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 
@@ -28,7 +28,7 @@ use super::hydration::{reorder_members, ORDERING_STASH_KEY};
 use super::sparql_builder::{verified_link_exists, LinkGuard};
 use super::types::{ModelShape, ShapeProperty};
 use super::utils::{parse_literal_value, validate_iri, values_or_str_filter};
-use crate::perspectives::sparql_store::SparqlStore;
+use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
 use crate::types::LinkStatus;
 
 /// Decode a SPARQL getter row's raw string based on the property's
@@ -55,6 +55,7 @@ fn decode_getter_target(target: &str, datatype: Option<&str>) -> Value {
 /// the client requests a targeted getter evaluation (as opposed to the
 /// full query pipeline).  Returns a map of `instance_id → { prop: value }`.
 pub fn evaluate_getters_batch(
+    stop: &EvalStop,
     store: &SparqlStore,
     shape: &ModelShape,
     instance_ids: &[String],
@@ -105,6 +106,7 @@ pub fn evaluate_getters_batch(
         .collect();
 
     evaluate_getters(
+        stop,
         store,
         &mut instances,
         &filtered_shape,
@@ -248,6 +250,15 @@ fn own_triple_end(getter: &str, predicate: &str) -> Option<usize> {
     .map(|m| m.end())
 }
 
+/// Whether `getter` is the conformance getter the SDK generates for a typed
+/// relation over `predicate`: the relation's own triple, then only the target
+/// class's conformance triples. Such a getter lists exactly the relation's
+/// links whose targets conform, which is also what a query of the target class
+/// scoped by those links returns.
+pub(super) fn is_generated_relation_getter(getter: &str, predicate: &str) -> bool {
+    own_triple_end(getter, predicate).is_some_and(|end| is_generated_conformance(&getter[end..]))
+}
+
 /// Whether `rest`, a getter after its own triple, is only conformance
 /// triples and the closing brace.
 fn is_generated_conformance(rest: &str) -> bool {
@@ -319,7 +330,9 @@ pub(super) fn inject_values_into_select(select: &str, source_constraint: &str) -
 ///
 /// Only the getters of `returned` keys run (all of them when `None`): each is
 /// a store read, and a value the query does not hand back would be stripped.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn evaluate_getters(
+    stop: &EvalStop,
     store: &SparqlStore,
     instances: &mut [Value],
     shape: &ModelShape,
@@ -364,7 +377,7 @@ pub(super) fn evaluate_getters(
 
         if upper.starts_with("ASK") {
             let batched = convert_ask_to_batched_select(getter, &source_constraint);
-            match store.query(&batched) {
+            match store.query(stop, &batched) {
                 Ok(result_json) => {
                     let rows: Vec<Value> = serde_json::from_str(&result_json).unwrap_or_default();
                     let matched: std::collections::HashSet<&str> = rows
@@ -386,6 +399,11 @@ pub(super) fn evaluate_getters(
                         }
                     }
                 }
+                // A stopped call must fail, not answer with the getters it had not
+                // reached yet missing: a re-check would store that as its baseline.
+                Err(e) if stop.is_stopped() => {
+                    return Err(stop.stopped_err("getter").unwrap_or(e));
+                }
                 Err(e) => {
                     log::warn!("Batched ASK getter failed for '{}': {}", prop.name, e);
                 }
@@ -398,7 +416,7 @@ pub(super) fn evaluate_getters(
             };
             let batched = inject_values_into_select(&getter, &source_constraint);
 
-            match store.query(&batched) {
+            match store.query(stop, &batched) {
                 Ok(result_json) => {
                     let rows: Vec<Value> = serde_json::from_str(&result_json).unwrap_or_default();
 
@@ -494,6 +512,11 @@ pub(super) fn evaluate_getters(
                         }
                     }
                 }
+                // A stopped call must fail, not answer with the getters it had not
+                // reached yet missing: a re-check would store that as its baseline.
+                Err(e) if stop.is_stopped() => {
+                    return Err(stop.stopped_err("getter").unwrap_or(e));
+                }
                 Err(e) => {
                     log::warn!("Batched SELECT getter failed for '{}': {}", prop.name, e);
                 }
@@ -508,6 +531,7 @@ pub(super) fn evaluate_getters(
             _ => continue,
         };
         apply_where_filter_to_relation(
+            stop,
             store,
             instances,
             &prop.name,
@@ -558,7 +582,9 @@ fn strip_stashed_entries(instances: &mut [Value]) {
 /// The values are read through the query's `linkStatus` and #1113 proof
 /// filter, so a withheld link on a target neither admits it nor, as the last
 /// row read, drops it.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn apply_where_filter_to_relation(
+    stop: &EvalStop,
     store: &SparqlStore,
     instances: &mut [Value],
     relation_name: &str,
@@ -631,7 +657,7 @@ pub(super) fn apply_where_filter_to_relation(
             )
         );
 
-        let result_json = store.query(&query)?;
+        let result_json = store.query(stop, &query)?;
         let rows: Vec<Value> = serde_json::from_str(&result_json).unwrap_or_default();
 
         let mut target_vals: HashMap<String, Value> = HashMap::new();

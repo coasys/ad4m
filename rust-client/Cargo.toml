@@ -1,6 +1,6 @@
 [package]
 name = "ad4m-client"
-version = "0.13.1-staging.9"
+version = "0.13.1-staging.19"
 edition = "2021"
 authors = ["Nicolas Luck <nicolas@coasys.org>"]
 description = "Client library wrapping AD4M's WebSocket RPC interface"
@@ -10,6 +10,12 @@ homepage = "https://ad4m.dev"
 repository = "https://github.com/perspect3vism/ad4m"
 documentation = "https://docs.ad4m.dev"
 readme = "README.md"
+
+[features]
+# Build OpenSSL from source instead of linking a system one — the
+# tokio-tungstenite `native-tls-vendored` passthrough — for hosts that
+# have no OpenSSL development files (the CI machine runners).
+vendored = ["tokio-tungstenite/native-tls-vendored"]
 
 [dependencies]
 anyhow = "1.0.65"
@@ -25,3 +31,16 @@ unicode-width = "0.1"
 rand = "0.8"
 regex = "1"
 maplit = "1"
+dirs = "5"
+reqwest = { version = "0.11.20", features = ["json", "native-tls"] }
+# The connect token store: a cross-process lock and atomic replace.
+fd-lock = "4"
+tempfile = "3"
+
+[dev-dependencies]
+# The connect example reads passwords and codes without echo.
+rpassword = "7"
+
+[target.'cfg(unix)'.dev-dependencies]
+# The connect example restores the terminal on ^C.
+libc = "0.2"

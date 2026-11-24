@@ -11,14 +11,17 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 | `mod.rs` | Global registry `PERSPECTIVES` (uuid → `PerspectiveInstance`), `add/update/remove_perspective`, `get_perspective(uuid)`, `all_perspectives()`, link-language signal routing (`handle_*_from_link_language`), telepresence publish, import/export |
 | `perspective_instance.rs` (7.6k) | **The** instance: link CRUD + batches, neighbourhood sync/commit loops, SDNA/SHACL registration, subject create/update/read, `execute_commands`, query subscriptions, notifications, telepresence signals, Prolog facade, auto-processor tick. One `impl`; being split into `perspective_instance/` |
 | `sparql_store.rs` | Per-perspective oxigraph store. Links stored as reified triples. `add_link/remove_link`, `query_links`, `query_arbitrary` (read-only SPARQL from clients), custom SPARQL fns (`parse_literal`, `strip_html`), named-graph → reifier migration |
+| `write_log.rs` | The store's log of recent writes by generation: the links each one only added, or `Other` (`SparqlStore::additions_since`) |
 | `model_query/` | Typed queries over SHACL shapes: `shape.rs` loads `ModelShape` from SHACL triples → `sparql_builder.rs` → `SparqlStore` → `hydration.rs` → `filtering.rs` → `getters.rs`/`relations.rs`/`projection.rs`. Entry: `execute_model_query` (`query.rs`). `mod.rs` has the pipeline diagram |
-| `shacl_parser.rs` | Writer side: SHACL class JSON → links (`parse_shacl_to_links`), flow JSON ↔ links (`parse_flow_to_links`, `parse_flow_from_links`). Types `SHACLShape`, `SHACLFlow`, `AD4MAction` |
+| `shacl_parser.rs` | Writer side: a class's links (`shape_links`; `parse_shacl_to_links` from JSON), which links on a class node are its own (`is_own_link`), links → shape (`shape_from_links`), `canonical_json`; flow JSON ↔ links (`parse_flow_to_links`, `parse_flow_from_links`). Types `SHACLShape`, `SHACLFlow`, `AD4MAction` |
+| `perspective_instance/shapes.rs` | Class registration: `register_shapes` (all-unchanged fast path over the cached registry link sets, otherwise a diff under `sdna_change_mutex`) and `shapes` / `class_names` over the cached registry |
+| `instances/` | Validated instance writes (create, update, remove, collection items) against a class's SHACL shape: the shared core of the MCP `instance_*` tools and the `perspective.instance*` RPC methods. See `instances/AGENTS.md` |
 | `subject_classes_of.rs` | Which classes a URI conforms to (SPARQL) |
 | `sdna.rs`, `shacl_to_prolog.rs` | Prolog fact generation from links/SHACL. Only used when Prolog mode ≠ Disabled |
 | `flow_classes.rs`, `flow_evaluator.rs`, `flow_spawn.rs`, `flow_semantic_check.rs`, `flow_context/` | SHACLFlow state machines: hard-wired classes, deterministic transition evaluation, spawn candidates, LLM flow context. Moving to `agentic/` (spec item 7) |
 | `interpretation/` | LLM interpretation: text → typed subjects. `run.rs` orchestrates, `prompt.rs`, `parse.rs`, `dedup.rs`, `graph/{read,write}.rs`, `overlay/` (provenance + human accept). Depends on `ai_service::harness` |
 | `agent_session.rs` | `perspective.runAgent`: a conversation with a model in one perspective over the static MCP tools in `SESSION_READS`, plus the writes the caller names from `SESSION_WRITES`. Both lists are explicit and perspective-scoped (a tool joins only by being added there), and `perspective_id` is forced. Same harness as interpretation, neutral prompt. Tests with a scripted model in `agent_session_tests.rs` |
-| `auto_processor/` | Runs interpretation automatically over neighbourhood conversations: `config.rs`, `watcher.rs` (debounce/batch), `cursor.rs`, `claim.rs` (multi-agent claim), `events.rs` (pubsub step signals) |
+| `auto_processor/` | Runs interpretation automatically over neighbourhood conversations: `config.rs`, `watcher.rs` (debounce/batch), `cursor.rs`, `claim.rs` (multi-agent claim), `events.rs` (pubsub step signals), `delta_read.rs` (a scope query's read of what added links gain it) |
 | `ordering/` | CRDT ordering for `@HasMany`. Parsed into `ModelShape.ordering` but **not wired** into hydration/writes yet (spec D2) |
 | `hardwired_class.rs` | Registration of hard-wired subject classes (used by flows and overlay) |
 | `migration.rs` | rusqlite → SPARQL link migration and other one-shot data migrations |
@@ -35,8 +38,62 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   typed event (`Topic::LinkAdded/LinkRemoved/LinkUpdated`, one event to all owners via
   `publish_to_owners`, the main agent if unowned) → commit to
   link language if `LinkStatus::Shared`. Use the same sequence; a helper `apply_diff` is planned.
-- SHACL triples are the source of truth for shapes. `shape_cache` on the instance is
-  invalidated by `add_sdna_inner`. `get_shape(class)` → `Arc<ModelShape>`.
+- SHACL triples are the source of truth for shapes. A class is its target class IRI; the name
+  index is two links on it: `rdf://type ad4m://SubjectClass` and `ad4m://shape <shape URI>`.
+  Links from older versions (`ad4m://has_subject_class`, `ad4m://sdna`, `ad4m://has_shacl`,
+  `ad4m://shacl_shape_uri`) are not read and not written. `shape_cache` is keyed by the key
+  the caller passed (a target class IRI or a name); it and the registry are cleared whole
+  (`clear_shape_cache`) by every store write that touches a shape own link (`touches_shape`).
+  The clear sits in the write itself (`write_link_diff`, and `persist_remote_diff` for synced
+  diffs), right after the store write and before it returns, with no await in between: a caller
+  cancelled after the write cannot leave the link stored and the cache stale. No caller clears
+  after its write (`register_shapes`, `import_perspective`, the publish path); a reload that
+  rebuilds the store clears too. So an IRI key and a name key never hold a stale or crossed shape.
+  `get_shape(class)` → `Arc<ModelShape>`, `class` a target class IRI or a name.
+- `register_shapes` compares the own links a shape gives with the own links stored, as
+  triples. Equal sets write nothing (`unchanged`); otherwise one Shared diff adds what is
+  missing and removes every copy of each stale own link. Copies of an expected triple stay
+  (two peers that registered the same shape agree); links other apps put on the class, shape
+  or property nodes stay. It answers once the registry and the shape cache hold the new shape.
+  The registry caches each class's own-link triple set beside its `ShapeSummary`
+  (`abstract_cache.own_links`, same generation, lifetime and clearing): an
+  all-unchanged call answers from those sets before `sdna_change_mutex`, with only the
+  shape-URI holder check left to run, so registering on every start is cheap. The
+  comparison is of the stored triples, never a shape hash — a stale `ad4m://shape` link
+  changes the set where `shape_from_links` still parses the least URI to the same shape.
+  The answer can come from the state just before a concurrent write commits, as a
+  slow-path call that took the mutex first could.
+- A class is addressed by its target class IRI; the SDK sends it on every call. Many classes
+  may share a name (`class_name_of`, the IRI's local name): `we://Topic` and `flux://Topic`
+  coexist. `model_query::shape::find_class` matches an IRI exactly; a bare name (MCP tools,
+  old callers) reads the least target class IRI of that name. A class with two `ad4m://shape`
+  links reads the least shape URI (`shacl_parser::current_shape_uri`), in the registry and
+  in `load_shape` alike. `register_shapes` refuses, writing nothing, one target class twice
+  in one call, a shape URI another class holds, and a shape URI not ending in `{Name}Shape`.
+  A relation resolves through `ShapeRelation::target_class` (the class owning its
+  `sh:class` shape), the name only when that shape is not stored.
+- Every answer names a class by IRI: `RegisterResult`, `__subjectClass`/`__subjectClasses`
+  (polymorphic hydration, unions, abstract reads; a union asked by name echoes the name as
+  `__subjectClass`), `abstract_classes::Resolution` (classes, views) and its aliases, the
+  containment edges, stored auto-processor `interpretation_classes` and signed flow
+  `OutputRef`s (resolved by `get_shape` before storing/signing; a class not registered yet is
+  kept as given). Abstract reads walk `concrete_subject_classes` and writes intersect
+  `subject_class_iris_of` with the resolution, so two classes of one name read and write
+  apart. MCP `describe_perspective` and the CLI list `class_keys` (the name, the IRI when
+  shared); the per-class MCP tools are named by `class_names`, so a shared name gets tools
+  for its least IRI only. `subject_classes_of` (the `subjectClassesOf` RPC, and flow spawn
+  matching a flow's `inputTypes`) still answers names; `subject_class_iris_of` the IRIs.
+- The executor's own paths address the six hard-wired classes by IRI (`ad4m://FlowInstance`,
+  `flow_classes::FLOW_INSTANCE_CLASS` and the like), so an app's `app://FlowInstance` is
+  stored beside them and never read in their place.
+- Hard-wired classes (`hardwired_class::ensure_subject_classes`) are upgrade-only: written when
+  missing or when the stored shape lacks the newest path / declares a removed one
+  (`HardwiredClass`), never over a newer stored shape. Only the executor registers them:
+  `create_subject` registers one not stored yet before its first instance
+  (`hardwired_class::ensure_before_write`), and a model query of one not stored yet reads as
+  empty without waiting or writing. A stored revision of it (an app's `@Model` copy, a
+  newer executor's) is used as it is. The SDK's `@Model` copies (`FlowModels.ts`,
+  `InterpretationModels.ts`) read them and are never registered by the SDK.
 - `get_subject_data` currently routes through Prolog and, while Prolog is disabled, returns only
   `author`/`timestamp` with no other properties. Migrating it to `model_query` is planned (spec
   item 1). Prefer `model_query` for reads.
@@ -45,7 +102,15 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   counter has its own short lock: `set_immediate_commits` never waits for a language call.
 - `pending_diffs_loop`: a failed `commit_pending_diffs` is logged at warn and retried after
   100 ms doubling to 30 s, reset on success (tests: `perspective_instance_pending_diffs_tests.rs`).
-  When a batch of several diffs fails, the oldest diff is sent alone, then the rest. A diff that
+  A batch is one diff, and a receiver applies its removals before its additions, so the rows are
+  never concatenated: `merge_pending_diffs` (db.rs) keeps only the last operation on each link
+  expression (`link_identity`: author, timestamp, source, target, and the predicate normalised
+  as the store keeps it, `Some("")` = `None`) in queue order, a row's removals before its
+  additions. A later removal drops the earlier addition and stays; a later addition drops the
+  earlier removal; a repeated `+x` or `-x` is sent once.
+  One commit per batch still.
+  When a batch of several diffs fails, the oldest diff is sent alone, then the rest, merged from
+  the rest's own rows (`get_pending_diffs_among`). A diff that
   fails while the language accepts the rest is parked: its `perspective_diff` row stays with
   `is_pending = 0` (`Ad4mDb::park_pending_diffs`; the export lists it), logged at
   error level by row id (its links stay local). The failure may have been transient, so the row
@@ -72,6 +137,58 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 - Background loops (`nh_sync_loop`, `pending_diffs_loop`, `fallback_sync_loop`,
   `subscribed_queries_loop`, `notification_check_loop`, auto-processor supervisor) exit on
   `is_teardown`; `teardown_background_tasks` must be called on remove.
+- Every model query runs through the runner (`perspective_instance/runner.rs`): a
+  `perspective.modelQuery`, a model subscription's first run and its re-check after a write.
+  Identical runs in flight share one store run, keyed by the classes, the query text as the
+  caller sent it (never normalised: a multi-key `order` ranks by key order, so another key order
+  is another query; the SDK sends one text per call), the shape-wait budget,
+  `SparqlStore::write_generation` and `shapes_generation` (a shape change alters a result without a link write; a peer diff and a
+  local commit both advance the write generation through `note_write`). The run is spawned under
+  its own deadline gate and takes one of `RECHECK_SLOTS`, so store reads never block async
+  workers; the entry leaves the map when the run settles. A waiter's own gate (deadline, cancel,
+  closed socket) ends its wait only; the last waiter to leave stops the run, and a run still
+  queued for a slot leaves the queue without running (the permit is acquired against the run's
+  cancel token, and the shape wait observes the run's stop). The connection's
+  running-query slot is held by the waiter, not the run. The agent is not in the key: a model
+  query's result does not depend on who asks (nothing under `model_query/` reads `AgentContext`),
+  so two agents' identical queries share one run. A re-check pass groups its subscriptions by
+  classes and query (`evaluation_key`), so N identical subscriptions, of any agents, cost one run
+  per write. A new way to run a model query must call
+  `PerspectiveInstance::run_model_query`, not `model_query_classes_within`. A read made *inside*
+  a run (a `producedByFlow` filter reads each output back) already holds a slot and the run's
+  stop, so it must not go back through the runner (a second slot deadlocks when every slot is
+  held by such runs): it goes through `runner::InRun`, a `RequiresQueryable` that calls
+  `model_query_classes_within` with the run's stop. The filter's other reads run under that
+  stop too: `flow_valid_outputs_reading` hands it to `load_shacl_flows` and
+  `load_flow_receipts`, which read links with `get_links_stopped` and check
+  `stop.stopped_err` per flow and per receipt entry, so an abandoned run frees its slot
+  instead of finishing a catalogue or receipt-index scan nobody waits on. Receipt verification
+  (`valid_outputs`, `produced_by_flow`, `first_produced_at`) takes the stop too and ends at the
+  next receipt once it fires, leaving a partial result, so `flow_valid_outputs_reading` returns
+  the stop error right after `valid_outputs` instead of a partial list. Callers with no
+  eval bound (flow passes, role gates, `flow_valid_outputs`, `mint_flow_receipt`,
+  `verify_flow_receipt`) pass `EvalStop::none()`.
+- `SparqlStore` bumps a write generation after every committed write (`write_generation`,
+  `watch_writes`). The auto-processor watch loop sleeps on it while idle (60 s fallback); a
+  write-woken idle tick still waits out the old idle back-off (doubling 0.5 s to 4 s) since the
+  last tick that read the store, so writes that add no turn never read more often than the poll
+  did. It keeps its config, transcript and cursor reads in `WatcherState` (`TickReads`) while the
+  generation is unchanged; the transcript keeps text only for turns that may still be queued
+  (consumed or out-of-window turns are id + timestamp), one copy per processor per loop (one loop
+  per perspective and per online managed user). After writes that only added links, the tick
+  reads only what they add to the kept transcript (`SparqlStore::additions_since`,
+  `auto_processor/delta_read.rs`: the scope query with one triple pattern at a time restricted
+  by `VALUES` to the added terms) and merges it where a fresh read puts each turn (`ORDER BY
+  ?timestamp` transcripts are kept sorted by timestamp, then turn id; any other `ORDER BY` is read
+  whole: `delta_read::transcript_order`); a removal, a reload, a log that no longer reaches
+  back (1024 links or 1024 writes; an `Other` write drops everything before it), or a scope query that is not monotone (`OPTIONAL`, `MINUS`, `EXISTS`,
+  `LIMIT`, aggregates, paths) reads it whole. A new store write path must call
+  `note_write(WriteDelta)`, `Added` only when it removed nothing and every reifier is new, or the
+  loop misses that change until some other write lands. With turns pending but no default
+  LLM set and spawned (`watcher::model_available`), a tick drains nothing and returns
+  `TickOutcome::NoModel`, and the loop backs off as if idle, waiting on writes and on
+  `AIService::watch_llm_readiness` (bumped by `set_default_model` and by every LLM worker
+  `spawn_llm_model` registers), so a model configured while turns wait is used at once.
 - **File descriptors.** Every perspective keeps one RocksDB store open
   (`SparqlStore::new`), and only `PerspectiveInstance` holds it: the store's descriptors close
   when the last clone of the removed instance drops, i.e. once its background loops have seen
@@ -93,8 +210,10 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 - Don't decode `literal://` payloads by hand: several copies exist (spec item 8 unifies them);
   reuse `model_query::utils::parse_literal_value` until then.
 - Tests that need a real instance: `interpretation_test_support.rs` (`pub(crate)`, `cfg(test)`).
-- `parse_shacl_to_links` is the only SHACL shape writer: the SDK's `addShacl` and `@Model`
-  registration both send `SHACLShape.toJSON()` through `add_sdna`. A new shape field needs the
+- `shape_links` is the only SHACL shape writer: the SDK's `registerShapes` and `@Model`
+  registration both send `SHACLShape.toJSON()` to `perspective.registerShapes`. Every JSON
+  literal is canonical (sorted keys) on both sides, so the same shape gives the same links
+  and the same hash. A property node is `{ns}{Class}.{name}`. A new shape field needs the
   Rust field, a link here, and `SHACLShape.fromLinks` in core; `fixtures/shacl_writer_golden.json`
   pins the links and the SDK test decodes the same file, so update it in the same change.
 - Flow transition URIs are `{ns}{flow}.transition/{from}/{to}/{action}`, each part

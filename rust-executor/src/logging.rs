@@ -131,12 +131,25 @@ pub fn without_mcp_session_ids(rust_log: &str) -> String {
 
 /// Set `RUST_LOG`: the environment's if set, else the one `log_config` (or the defaults)
 /// builds; either way without MCP session ids ([`without_mcp_session_ids`]).
-fn set_rust_log(log_config: Option<&std::collections::HashMap<String, String>>) {
+pub(crate) fn set_rust_log(log_config: Option<&std::collections::HashMap<String, String>>) {
     let rust_log = env::var("RUST_LOG").unwrap_or_else(|_| {
         let default_config = get_default_log_config();
         build_rust_log_from_config(log_config.unwrap_or(&default_config))
     });
     env::set_var("RUST_LOG", without_mcp_session_ids(&rust_log));
+}
+
+/// Install `builder`'s output as the global logger, filtered by `RUST_LOG` (set by
+/// [`set_rust_log`]) through [`crate::log_filter`], so `runtime.setLogFilter` can change the
+/// filter while the executor runs. The builder itself passes every record: the filter is
+/// the wrapper's. `RUST_LOG_STYLE` still sets the colours.
+fn install(builder: &mut Builder) -> Result<(), log::SetLoggerError> {
+    if let Ok(style) = env::var("RUST_LOG_STYLE") {
+        builder.parse_write_style(&style);
+    }
+    builder.filter_level(LevelFilter::Trace);
+    let rust_log = env::var("RUST_LOG").unwrap_or_default();
+    crate::log_filter::install(Box::new(builder.build()), &rust_log)
 }
 
 /// Initialize logging for CLI (stdout)
@@ -145,12 +158,45 @@ pub fn init_cli_logging(log_config: Option<&std::collections::HashMap<String, St
 
     let mut initialized = LOGGER_INITIALIZED.lock().unwrap();
     if !*initialized {
-        // Use parse_default_env() to respect RUST_LOG environment variable
-        if let Err(e) = env_logger::Builder::new().parse_default_env().try_init() {
+        if let Err(e) = install(&mut env_logger::Builder::new()) {
             eprintln!("Failed to initialize CLI logger: {}", e);
         }
         *initialized = true;
     }
+}
+
+/// Logging for an executor started with `--log-dir`: this run's lines go to
+/// `<dir>/executor-0.log` (`log_files`: the runs before rotate up, five kept, each file
+/// capped), one plain line per record: UTC time, level, target, message.
+pub fn init_file_logging(
+    dir: &std::path::Path,
+    log_config: Option<&std::collections::HashMap<String, String>>,
+) -> std::io::Result<()> {
+    set_rust_log(log_config);
+    let mut initialized = LOGGER_INITIALIZED.lock().unwrap();
+    if *initialized {
+        return Ok(());
+    }
+    let file = crate::log_files::LogFile::open(dir)?;
+    let mut builder = Builder::new();
+    builder
+        .target(Target::Pipe(Box::new(file)))
+        .format(|buf, record| {
+            writeln!(
+                buf,
+                "[{} {} {}] {}",
+                chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                record.level(),
+                record.target(),
+                record.args()
+            )
+        });
+    if let Err(e) = install(&mut builder) {
+        eprintln!("Failed to initialize the file logger: {}", e);
+    }
+    crate::log_files::set_log_dir(dir);
+    *initialized = true;
+    Ok(())
 }
 
 /// Create a formatted logger builder for launcher (file output)
@@ -161,7 +207,7 @@ fn create_launcher_logger_builder<W: Write + Send + 'static>(target: Box<W>) -> 
     let mut builder = Builder::new();
     builder
         .target(Target::Pipe(target))
-        .parse_default_env() // This reads RUST_LOG environment variable
+        .filter_level(LevelFilter::Trace) // the filter is `log_filter`'s (see `install`)
         .format(|buf, record| {
             let level = match record.level() {
                 log::Level::Error => record.level().as_str().red(),
@@ -205,7 +251,7 @@ pub fn init_launcher_logging<W: Write + Send + 'static>(
         return Ok(());
     }
 
-    if let Err(e) = create_launcher_logger_builder(target).try_init() {
+    if let Err(e) = install(&mut create_launcher_logger_builder(target)) {
         eprintln!("Failed to initialize launcher logger: {}", e);
     }
 

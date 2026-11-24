@@ -307,7 +307,8 @@ export function isTraverseScope(scope: Scope): scope is TraverseScope {
  * // One level deep
  * { comments: true }
  *
- * // Sub-query: only the 5 most-recent comments
+ * // Sub-query: only the 5 most-recent comments of each parent
+ * // (`limit` and `offset` page every parent's relation on its own)
  * { comments: { order: { createdAt: 'DESC' }, limit: 5 } }
  *
  * // Nested eager-load
@@ -400,6 +401,16 @@ export type Query = {
   order?: Order;
   offset?: number;
   limit?: number;
+  /**
+   * Keyset cursor: `""` for the first page, then the previous result's
+   * `nextCursor`. Needs the timestamp order (no `order`, or one of
+   * `timestamp` / `createdAt` / `updatedAt`, either direction), a `limit`, and
+   * no non-zero `offset`; the executor refuses it on any other query. Unlike
+   * `offset`, a row added before the cursor does not shift the next page.
+   * Subscriptions refuse it; the builder's subscribe methods leave it out.
+   */
+  after?: string;
+  /** Ask for `totalCount`. Without it the result has none and the executor runs no COUNT query. */
   count?: boolean;
   /**
    * When true, SPARQL property getters (@Property with `getter`) ARE evaluated
@@ -523,15 +534,16 @@ export type LinksMap = Record<string, LinkRow[]>;
 /**
  * Sub-query options for a specific relation inside an `IncludeMap`.
  *
- * Equivalent to `Query` without top-level scoping (`parent`) or `count`,
- * since the result set is already constrained to the linked relation.
+ * Equivalent to `Query` without top-level scoping (`parent`), `count` or a
+ * cursor (`after`), since the result set is already constrained to the linked
+ * relation. Page a relation with `limit`/`offset`.
  *
  * @example
  * ```typescript
  * await post.get({ include: { comments: { order: { createdAt: 'DESC' }, limit: 5 } } });
  * ```
  */
-export type RelationSubQuery = Omit<Query, 'parent' | 'count'>;
+export type RelationSubQuery = Omit<Query, 'parent' | 'count' | 'after'>;
 
 // ---------------------------------------------------------------------------
 // Typed Query DSL — Phase 1 of PLAN_6_TYPED_QUERIES.md
@@ -745,6 +757,8 @@ type StrictTypedQuery<T extends Ad4mModel> = {
   order?: TypedOrder<T>;
   offset?: number;
   limit?: number;
+  /** See {@link Query.after}. */
+  after?: string;
   count?: boolean;
   deepQuery?: boolean;
   /** See {@link Query.linkStatus}. */
@@ -772,8 +786,20 @@ export type GetOptions = Pick<Query, 'include' | 'properties'>;
 // ---------------------------------------------------------------------------
 
 export type AllInstancesResult = { AllInstances: Ad4mModel[]; TotalCount?: number };
-export type ResultsWithTotalCount<T> = { results: T[]; totalCount?: number };
-export type PaginationResult<T> = { results: T[]; totalCount?: number; pageSize: number; pageNumber: number };
+/**
+ * A model query's rows; `totalCount` is set when the query asked for it
+ * (`count: true`), `nextCursor` when a cursor query (`after`) got a full page.
+ */
+export type Page<T> = { results: T[]; totalCount?: number; nextCursor?: string };
+/** The result of `findAllAndCount()`, which always asks for the count. */
+export type ResultsWithTotalCount<T> = { results: T[]; totalCount: number };
+/**
+ * One cursor page. `nextCursor` is present while a full page came back; pass
+ * it to the next `page()` call. Its absence means this was the last page.
+ */
+export type CursorPage<T> = { results: T[]; nextCursor?: string; pageSize: number };
+/** The result of `paginate()` and `paginateSubscribe()`, which always ask for the count. */
+export type PaginationResult<T> = { results: T[]; totalCount: number; pageSize: number; pageNumber: number };
 
 // ---------------------------------------------------------------------------
 // Internal value transport

@@ -49,11 +49,18 @@ ignored, and the error names the key by its path, e.g.
 | `auto_permit_cap_requests` | bool | `false` with a config file, `true` without | `--auto-permit-cap-requests` / `AD4M_AUTO_PERMIT_CAP_REQUESTS` |
 | `mcp_enabled` | bool | `false` | `--enable-mcp` / `AD4M_ENABLE_MCP` |
 | `mcp_port` | number | `3001` | `--mcp-port` / `AD4M_MCP_PORT` |
-| `sfu_bind_addr` | string (IP) | `127.0.0.1`; the outbound interface with `localhost: false` | `--sfu-bind-addr` / `AD4M_SFU_BIND_ADDR` |
+| `sfu_bind_addr` | string (IP) | `127.0.0.1` and the LAN address (the default route's interface), both offered | `--sfu-bind-addr` / `AD4M_SFU_BIND_ADDR` |
 | `sfu_udp_port` | number | a free port, new at each start | `--sfu-udp-port` / `AD4M_SFU_UDP_PORT` |
 | `sfu_public_addr` | string (IP) | the STUN probe's address | `--sfu-public-addr` / `AD4M_SFU_PUBLIC_ADDR` |
 | `sfu_stun_server` | string (`host:port`) | no probe | `--sfu-stun-server` / `AD4M_SFU_STUN_SERVER` |
+| `ai_endpoints` | list of endpoints | none | file only, see below |
+| `ai_models` | list of models | none | file only, see below |
+| `ai_defaults` | object: `llm`, `embedding`, `transcription` → model name | none | file only, see below |
+| `local_ai_dir` | string (path) | `~/.local/share/ad4m/local-ai`, `~/Library/Application Support/ad4m/local-ai`, `%LOCALAPPDATA%\ad4m\local-ai` | `--local-ai-dir` / `AD4M_LOCAL_AI_DIR` |
+| `local_ai_autostart` | bool | `true` | `--local-ai-autostart` / `AD4M_LOCAL_AI_AUTOSTART` |
+| `local_ai_device` | `cpu`, `cuda`, `metal`, `vulkan` or `rocm` | the best backend detected | `--local-ai-device` / `AD4M_LOCAL_AI_DEVICE` |
 | `log_config` | object: crate → level | see below | `RUST_LOG` overrides it |
+| `log_dir` | string (folder) | stdout | `--log-dir` / `AD4M_LOG_DIR` |
 | `multi_user_config.enabled` | bool | `false` | `--enable-multi-user` / `AD4M_ENABLE_MULTI_USER` |
 | `multi_user_config.tls_config` | object or `null` | no TLS | see below |
 | `multi_user_config.smtp_config` | object or `null` | no email | see below |
@@ -71,6 +78,13 @@ out to get its default.
 `multi_user_config.enabled: false` (or `--enable-multi-user false`) does not
 turn multi-user off on a data directory where it was enabled before: the
 executor records multi-user as on in its database and only ever sets it.
+
+`local_ai_autostart` starts the local AI runtimes an install put in place when
+the executor starts. It never downloads or installs anything: local AI is
+installed only by `ai.localInstall` (an app's call, such as the launcher's setup screen),
+`ad4m-executor local-ai install`, or the Docker image's `INCLUDE_MODELS`. A
+request that needs a model of a type the executor has none of fails with an
+error that says how to get one.
 
 Multi-user mode needs an admin credential. Without one, a caller with no
 token on a loopback listener is the operator, who could act as every user:
@@ -103,8 +117,17 @@ flag turns TLS on, and TLS without both a certificate and a key stops `run`.
 With `enabled: true`, `run` stops unless a password is set (see
 [Secrets](#secrets)).
 
-**The `sfu_*` keys** decide where callers send media. The SFU binds
-`sfu_bind_addr` on `sfu_udp_port` and offers that address to every caller.
+**The `sfu_*` keys** decide where callers send media. Unset, the SFU binds
+127.0.0.1 and the machine's LAN address (the default route's interface) on
+one port and offers both: browsers on this machine that skip loopback
+(Firefox) and other machines on the LAN reach it. This holds with `localhost`
+too: the plain RPC port stays on loopback, and the SFU adds only its media
+UDP port on the LAN, guarded by ICE credentials and DTLS (a `tls_config`
+listener binds `0.0.0.0` on its own, as above). The LAN address is detected
+again for each call, so after a move to another network the next call offers
+the new one; offline, calls offer loopback only. With `sfu_bind_addr` set,
+the SFU binds that address on `sfu_udp_port` and offers it alone
+(`127.0.0.1` keeps media on this machine).
 On a machine behind NAT, set `sfu_bind_addr` to its LAN address, fix
 `sfu_udp_port` and forward that UDP port on the router: the SFU then also
 offers its public address on that port, which callers outside the LAN reach.
@@ -117,6 +140,38 @@ startup only: after the public IP changes, restart the executor.
 ```json
 { "sfu_bind_addr": "192.168.0.10", "sfu_udp_port": 40000,
   "sfu_stun_server": "stun.l.google.com:19302" }
+```
+
+**The `ai_*` keys** register AI model servers and models at startup, before
+the AI service loads. The executor runs no model itself: without these keys (or
+models added through the launcher or `ai.addModel`) AI features stay off. They apply by name: an entry that exists is brought to
+the file's settings, a missing one is added, and nothing the file does not
+name changes. An endpoint's key comes from the environment variable its
+`api_key_env` names; an `api_key` in the file stops `run`. An entry that
+cannot apply (its variable is unset, a key over plain HTTP to another host,
+an unknown endpoint or model name) is skipped with a warning. `kind` is one
+of `OLLAMA`, `LLAMA_SERVER`, `VLLM`, `OPEN_AI`, `ANTHROPIC`,
+`OPEN_AI_AUDIO`, `OPEN_AI_COMPATIBLE`; `capabilities` (`chat`,
+`embeddings`, `transcription`, `speech`) defaults to the kind's.
+`request_timeout_secs` bounds one request to the endpoint, queueing
+included (default 300 for chat, 60 for embeddings, 120 for speech); a
+stream `/v1` forwards may be silent that long between two chunks, not
+longer. An OpenAI-protocol chat client uses this setting for a stream
+too. A value above 600 seconds is kept. When the setting is unset, that
+client waits 600 seconds. `max_concurrent` lets at most that many requests through at once,
+the rest wait (default: no limit). A `model_type` is `LLM`, `EMBEDDING`,
+`TRANSCRIPTION` or `SPEECH`.
+
+```json
+{ "ai_endpoints": [
+    { "name": "ollama", "kind": "OLLAMA", "base_url": "http://127.0.0.1:11434", "max_num_ctx": 32768, "max_concurrent": 2 },
+    { "name": "openai", "kind": "OPEN_AI", "base_url": "https://api.openai.com/v1", "api_key_env": "OPENAI_API_KEY" }
+  ],
+  "ai_models": [
+    { "name": "qwen", "model_type": "LLM", "endpoint": "ollama", "remote_model": "qwen3:8b" },
+    { "name": "gpt", "model_type": "LLM", "endpoint": "openai", "remote_model": "gpt-5", "native_tools": true }
+  ],
+  "ai_defaults": { "llm": "qwen" } }
 ```
 
 **`identity`** (`storeUrl`, `storeKeys`, `allowPrivateSrc`; flags
@@ -150,14 +205,16 @@ Settings with no config key are flags only, each with its
 `--hc-use-bootstrap`, `--hc-use-local-proxy`, `--hc-use-mdns`,
 `--hc-use-proxy`, `--hc-proxy-url`, `--hc-bootstrap-url`, `--hc-relay-url`,
 `--log-holochain-metrics`, `--dynamic-class-tools`, `--pid-file`,
-`--exit-with-parent`, `--insecure-no-admin-credential`.
+`--watch-stdin`, `--custody-channel`, `--exit-with-parent`,
+`--insecure-no-admin-credential`.
 
 `--exit-with-parent` (`AD4M_EXIT_WITH_PARENT=true`) is for launchers and test
 harnesses: the executor shuts down once the process that started it is gone,
 however that process ended, so a launcher that crashes or is killed leaves no
 executor behind. Off by default, so an executor started in the background from
 a shell keeps running after the shell exits. Linux and macOS only: on Windows
-the setting is accepted and has no effect.
+the setting is accepted and has no effect. Its stop exits with 0, as the run
+contract's other stops do.
 The variable name is the flag in upper case with `-` as `_`, prefixed with
 `AD4M_`: `--hc-relay-url` reads `AD4M_HC_RELAY_URL`.
 
@@ -167,6 +224,89 @@ whitespace`), and so does such a flag value.
 Neither is laid over the file: `AD4M_APP_DATA_PATH=${DATA_DIR}` with
 `DATA_DIR` unset would otherwise put the data directory under the working
 directory. Unset the variable to use the file's value.
+
+## Changing the file while the executor runs
+
+`runtime.config` (operator) returns the file's values, every key with its
+class, and `restartPending`. `runtime.setConfig { set, unset }` (operator)
+writes keys to the file the executor started with; without `--config` it
+answers 409 `no-config-file`. It writes a temporary file in the same folder,
+mode 0600, then renames it over the file, and keeps the keys it does not
+change. Every written key takes effect at the next start
+(`restartPending: true`); `runtime.restart` answers, then exits 75 so the
+supervisor starts the executor again. The answer lists each key it did not
+write, with a reason:
+
+| Reason | When |
+|---|---|
+| `local-only` | a `machine` key from a caller that is not the operator on this machine (the admin credential on a loopback listener) |
+| `pinned-by-config` | a flag or an `AD4M_*` variable sets the key at this start, so a write would not take effect |
+| `invalid` | the value would stop the next start, or the key's validator refused it (`detail` says why) |
+| `unknown-key` | no such key |
+
+`restart` keys: `mcp_enabled`, `mcp_port`, `log_config`,
+`auto_permit_cap_requests`, `ai_models`, `ai_defaults`, `local_ai_autostart`.
+Every other key is a `machine` key: paths, listeners, ports,
+`multi_user_config`, `identity`, `log_dir`, `local_ai_dir`, `local_ai_device`,
+and `ai_endpoints` (an endpoint names an environment variable whose value is
+sent to its URL, so only the operator on this machine sets it). A write
+publishes `config-changed` to the operator.
+
+## Running under a supervisor
+
+A supervisor (the desktop app, systemd, a host) reads the exit code:
+
+| Code | Meaning | What the supervisor does |
+|---|---|---|
+| 0 | stopped: `runtime.quit`, SIGTERM, SIGINT, or stdin closed with `--watch-stdin true` | nothing |
+| 75 | `runtime.restart` | start the executor again with the same arguments |
+| 78 | the config or a flag is refused (also `--custody-channel` with multi-user mode) | do not retry: it fails the same way |
+| 79 | another executor holds this data folder (`<app_data_path>/executor.lock`) | report it |
+| 80 | the API port does not bind | pick another port and start again |
+| other, or a signal | a crash | restart with a delay |
+
+- **Readiness**: `GET /health` answers `{"status":"ok"}` once the API
+  listens, the last step of a start.
+- **`--watch-stdin true`**: the executor stops gracefully when its stdin
+  reaches its end. The supervisor holds the pipe's write end and never
+  writes, so the executor never outlives the supervisor.
+- **The admin credential**: pass it in the environment
+  (`AD4M_ADMIN_CREDENTIAL`, or `AD4M_ADMIN_CREDENTIAL_FILE`), never on the
+  command line, and give a new one at each start.
+- **`--log-dir <folder>`** (`log_dir`): the log goes to
+  `<folder>/executor-0.log`; the five newest runs stay (`executor-1.log` is
+  the run before), and a file stops at 50 MiB. `runtime.logTail { lines }`
+  (operator, at most 2000) returns its newest lines.
+- **`--custody-channel`**: this executor serves the custody channel
+  (`identity.custodyStatus`) to the admin credential on a loopback listener
+  only. Multi-user mode refuses it: `run` exits 78, and
+  `user.setMultiUserEnabled(true)` answers 403.
+- **Local only**: `runtime.quit`, `runtime.restart`, `agent.unlock`,
+  `identity.rekey` and `identity.custodyStatus` answer only the operator on a
+  loopback listener.
+  A caller without the admin credential gets 403 `Admin credential required`;
+  the admin credential on a network listener gets 403 `local-only`.
+  `runtime.setConfig` from such a caller writes the other keys and lists each
+  `machine` key in `refused` with the reason `local-only` (the table above).
+  A listener is loopback by the address it binds, not by the
+  address a caller connects from: on `--localhost false` without TLS the
+  executor binds 0.0.0.0, has no loopback listener, and these calls answer
+  no one. A request with a `Forwarded`, `X-Forwarded-For` or `X-Real-IP`
+  header counts as network, even on a loopback listener. So these calls
+  refuse through a proxy such as nginx, Caddy or cloudflared. A raw TCP
+  forward (`ssh -R`) sets none of these headers and still counts as
+  loopback. Only the admin credential guards that case. On an executor with
+  no admin credential (`--insecure-no-admin-credential`), a loopback connection without a token
+  is the operator, and the WebSocket endpoint does not check `Origin`: a web
+  page in a browser on the same machine can reach these methods. Run with an
+  admin credential.
+- **`ad4m-executor rekey`**: gives the executor a new main wallet key, so a
+  revoked server links again. Run it on the server itself: it calls
+  `identity.rekey` on a loopback address with the admin credential from
+  `AD4M_ADMIN_CREDENTIAL_FILE` (or `--admin-credential`,
+  `AD4M_ADMIN_CREDENTIAL`). Tokens signed with the old key stop working, so
+  apps ask for access again. With the local wallet, the old key signed every
+  token, so the apps of managed users ask again too.
 
 ## Secrets
 

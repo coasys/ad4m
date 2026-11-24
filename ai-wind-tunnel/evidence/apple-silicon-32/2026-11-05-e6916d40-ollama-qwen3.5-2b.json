@@ -1,0 +1,199 @@
+{
+  "schemaVersion": 1,
+  "runId": "71eccc14",
+  "startedAt": "2026-11-05T03:34:17.778Z",
+  "finishedAt": "2026-11-05T03:36:18.949Z",
+  "hardwareClass": "apple-silicon-32",
+  "fingerprint": {
+    "os": "macos",
+    "osVersion": "macOS 15.7.2",
+    "kernel": "24.6.0",
+    "arch": "arm64",
+    "cpu": {
+      "model": "Apple M4 Pro",
+      "cores": 14,
+      "threads": 14
+    },
+    "memoryBytes": 51539607552,
+    "gpus": [
+      {
+        "vendor": "apple",
+        "name": "Apple M4 Pro",
+        "vramBytes": 0,
+        "unified": true
+      }
+    ],
+    "backends": [
+      "cpu",
+      "metal"
+    ],
+    "gpuBudgetBytes": 38654705664,
+    "drivers": {},
+    "id": "e6916d40"
+  },
+  "executor": {
+    "commit": "unknown",
+    "binary": "ad4m-executor",
+    "version": "ad4m 0.13.1-staging.6",
+    "harnessCommit": "b498751fbed495c305aa1e53024f63e1283f2cfe"
+  },
+  "options": {
+    "repeat": 3,
+    "concurrency": [
+      1,
+      4
+    ],
+    "providers": [
+      "ollama"
+    ],
+    "services": [
+      "llm",
+      "completion",
+      "embeddings",
+      "stt",
+      "tts"
+    ],
+    "direct": true
+  },
+  "providers": {
+    "ollama": {
+      "status": "available",
+      "builds": [],
+      "mode": "spawned",
+      "version": "0.33.3"
+    }
+  },
+  "cells": [
+    {
+      "provider": "ollama",
+      "service": "stt",
+      "status": "unsupported",
+      "reason": "Ollama serves no transcription API (/v1/audio/transcriptions)",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "ollama",
+      "service": "tts",
+      "status": "unsupported",
+      "reason": "Ollama serves no speech API (/v1/audio/speech)",
+      "checks": [],
+      "metrics": {},
+      "durationMs": 0
+    },
+    {
+      "provider": "ollama",
+      "service": "llm",
+      "status": "pass",
+      "model": {
+        "remoteModel": "qwen3.5:2b",
+        "sizeBytes": 2683396637,
+        "license": "Apache-2.0",
+        "params": "2B",
+        "source": "https://ollama.com/library/qwen3.5",
+        "memoryBytes": 2683396637
+      },
+      "backend": "metal",
+      "endpointKind": "OLLAMA",
+      "checks": [
+        {
+          "name": "factual answer (/v1/chat/completions)",
+          "pass": true,
+          "detail": "\"Paris\"",
+          "value": "Paris"
+        },
+        {
+          "name": "task prompt (SDK ai.prompt)",
+          "pass": true,
+          "detail": "\"Paris\""
+        },
+        {
+          "name": "tool call (/v1/chat/completions, tools)",
+          "pass": true,
+          "detail": "get_weather({\"city\":\"Paris\"})"
+        },
+        {
+          "name": "streaming (/v1/chat/completions, stream)",
+          "pass": true,
+          "detail": "20 chunks, \"One, two, three, four, five, six, seven, eight, nine, ten.\"",
+          "value": 20,
+          "threshold": "> 1 chunk"
+        }
+      ],
+      "metrics": {
+        "firstRequestMs": 905,
+        "ttftMs": {
+          "n": 3,
+          "median": 63.105,
+          "p95": 64.495,
+          "min": 62.505,
+          "max": 64.649,
+          "mean": 63.42
+        },
+        "decodeTps": {
+          "n": 3,
+          "median": 88.116,
+          "p95": 88.296,
+          "min": 86.798,
+          "max": 88.316,
+          "mean": 87.743
+        },
+        "prefillTps": {
+          "n": 3,
+          "median": 1942.5,
+          "p95": 1944,
+          "min": 1915.1,
+          "max": 1944.2,
+          "mean": 1933.9
+        },
+        "latencyMs": {
+          "n": 3,
+          "median": 75.103,
+          "p95": 75.539,
+          "min": 73.885,
+          "max": 75.587,
+          "mean": 74.859
+        },
+        "tokenCountSource": "usage",
+        "directLatencyMs": {
+          "n": 3,
+          "median": 75.255,
+          "p95": 75.792,
+          "min": 73.336,
+          "max": 75.851,
+          "mean": 74.814
+        },
+        "executorOverheadMs": -0.2,
+        "throughputTpsC1": {
+          "n": 2,
+          "median": 84.774,
+          "p95": 84.938,
+          "min": 84.592,
+          "max": 84.956,
+          "mean": 84.774
+        },
+        "throughputTpsC4": {
+          "n": 2,
+          "median": 84.607,
+          "p95": 84.827,
+          "min": 84.361,
+          "max": 84.852,
+          "mean": 84.607
+        },
+        "peakRssBytes": 71221248,
+        "peakGpuBytes": null,
+        "pullMs": 86404,
+        "endpointHealth": "REACHABLE"
+      },
+      "fit": {
+        "fits": true,
+        "modelBytes": 2683396637,
+        "budgetBytes": 37580963840,
+        "gpuBudgetBytes": 38654705664,
+        "ramBytes": 51539607552
+      },
+      "durationMs": 112627
+    }
+  ]
+}

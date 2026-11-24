@@ -8,9 +8,7 @@
  * would: `http://127.0.0.1` is a secure context, so `getUserMedia` works.
  */
 
-import { createSocket } from "node:dgram";
 import { existsSync, readFileSync } from "node:fs";
-import { networkInterfaces } from "node:os";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
@@ -87,29 +85,6 @@ export async function launch(kind: BrowserKind): Promise<Launched> {
   }
 }
 
-/**
- * This host's IPv4 address on the interface its default route uses, as the
- * executor picks it for an SFU served beyond loopback (`detect_outbound_ip`):
- * a connected UDP socket's local address. Connecting sends nothing. Falls
- * back to the first non-internal IPv4 interface address; null with neither.
- */
-export async function outboundIp(): Promise<string | null> {
-  const viaRoute = await new Promise<string | null>((resolve) => {
-    const socket = createSocket("udp4");
-    socket.on("error", () => { socket.close(); resolve(null); });
-    socket.connect(53, "192.0.2.1", () => {
-      const { address } = socket.address();
-      socket.close();
-      resolve(address && address !== "0.0.0.0" ? address : null);
-    });
-  });
-  if (viaRoute) return viaRoute;
-  for (const addresses of Object.values(networkInterfaces())) {
-    for (const a of addresses ?? []) if (a.family === "IPv4" && !a.internal) return a.address;
-  }
-  return null;
-}
-
 /** Serve the page and the SDK's ESM bundle on loopback. */
 export async function servePage(): Promise<{ url: string; server: Server }> {
   if (!existsSync(SDK_BUNDLE)) throw new Error(`${SDK_BUNDLE} is missing: build core first (\`pnpm run build\` in core).`);
@@ -134,9 +109,20 @@ export interface BrowserUser {
   consoleErrors: string[];
 }
 
-/** Open a tab for a user in its own browser context, with the call harness installed. */
-export async function openTab(browser: Browser, kind: BrowserKind, name: string, did: string, pageUrl: string): Promise<BrowserUser> {
-  const context = await browser.newContext(kind === "firefox" ? {} : { permissions: ["camera", "microphone"] });
+/** A browser profile's storage, as `BrowserContext.storageState()` returns it. */
+export type Profile = Awaited<ReturnType<BrowserContext["storageState"]>>;
+
+/**
+ * Open a tab for a user in its own browser context, with the call harness
+ * installed. A new context is a new browser profile, so the SDK gives the tab
+ * a new device id; `profile` (an earlier context's storage) opens it in that
+ * profile again, with the device id it kept in `localStorage`.
+ */
+export async function openTab(browser: Browser, kind: BrowserKind, name: string, did: string, pageUrl: string, profile?: Profile): Promise<BrowserUser> {
+  const context = await browser.newContext({
+    ...(kind === "firefox" ? {} : { permissions: ["camera", "microphone"] }),
+    ...(profile ? { storageState: profile } : {}),
+  });
   await context.addInitScript(installCallHarness);
   const page = await context.newPage();
   const consoleErrors: string[] = [];
@@ -145,6 +131,8 @@ export async function openTab(browser: Browser, kind: BrowserKind, name: string,
     if (message.type() === "error") consoleErrors.push(message.text().replace(/token=[^'"\s]+/g, "token=…"));
   });
   page.on("pageerror", (error) => consoleErrors.push(`pageerror: ${error.message}`));
+  page.on("crash", () => consoleErrors.push(`the page crashed at ${new Date().toISOString()}`));
+  page.on("close", () => consoleErrors.push(`the page closed at ${new Date().toISOString()}`));
   await page.goto(pageUrl);
   await page.waitForFunction(() => (window as any).ad4mReady === true);
   return { name, kind, did, context, page, consoleErrors };
@@ -154,8 +142,32 @@ export async function joinCall(user: BrowserUser, args: JoinArgs): Promise<void>
   await user.page.evaluate((a) => (window as any).__call.join(a), args);
 }
 
+/** The device id the SDK keeps in the tab's profile (`defaultDeviceId`), or null before a join made one. */
+export async function deviceIdOf(user: BrowserUser): Promise<string | null> {
+  return user.page.evaluate(() => localStorage.getItem("v1/ad4m-sfu-device-id"));
+}
+
+/** How long a tab may take to report before it counts as hung. A report takes milliseconds. */
+export const REPORT_TIMEOUT_MS = 30_000;
+
+/**
+ * The tab's report. A tab whose page crashed or hung fails with the user
+ * and browser it was, instead of an anonymous "Target crashed" or the
+ * test's own timeout.
+ */
 export async function report(user: BrowserUser): Promise<PageReport> {
-  return user.page.evaluate(() => (window as any).__call.report());
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const hung = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`no report within ${REPORT_TIMEOUT_MS / 1000} s: the page is hung`)), REPORT_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([user.page.evaluate(() => (window as any).__call.report()), hung]);
+  } catch (error) {
+    throw new Error(`${user.name}'s ${user.kind} tab: ${error instanceof Error ? error.message : String(error)}` +
+      `\n  console errors: ${JSON.stringify(user.consoleErrors.slice(-10))}`);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Thresholds for "the media is real": a fake tone is far above 0.01; a fake camera's frame far above black. */
@@ -177,7 +189,7 @@ export function receiveProblems(before: PageReport | undefined, now: PageReport,
   if (!(b.audioPackets > (a?.audioPackets ?? 0))) problems.push(`audio packets from ${short(did)} not growing (${a?.audioPackets ?? 0} → ${b.audioPackets})`);
   if (!(b.videoPackets > (a?.videoPackets ?? 0))) problems.push(`video packets from ${short(did)} not growing (${a?.videoPackets ?? 0} → ${b.videoPackets})`);
   if (!(b.framesDecoded > (a?.framesDecoded ?? 0))) problems.push(`no new decoded frames from ${short(did)} (${a?.framesDecoded ?? 0} → ${b.framesDecoded})`);
-  if (!(b.audioPeak > AUDIBLE_PEAK)) problems.push(`audio from ${short(did)} is silent (peak ${b.audioPeak.toFixed(4)})`);
+  if (!(b.audioPeak > AUDIBLE_PEAK)) problems.push(`audio from ${short(did)} is silent (peak ${b.audioPeak.toFixed(4)}, ${b.audioMeter})`);
   if (b.luma !== null && !(b.luma > NOT_BLACK_LUMA)) problems.push(`video from ${short(did)} is black (luma ${b.luma.toFixed(1)})`);
   return problems;
 }
