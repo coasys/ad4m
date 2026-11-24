@@ -614,8 +614,23 @@ fn settle(
     content_patch: Option<&serde_json::Value>,
 ) {
     let owner = agent.managed_did();
-    if let Err(e) = store.finish_message(owner, reply_id, status, error, content_patch) {
-        log::error!("ai sessions: could not settle turn {reply_id}: {e}");
+    let changed = match store.finish_message(owner, reply_id, status, error, content_patch) {
+        Ok(changed) => changed,
+        Err(e) => {
+            log::error!("ai sessions: could not settle turn {reply_id}: {e}");
+            return;
+        }
+    };
+    // A cancel or a cut-off can have ended the row in the gap after this task
+    // released its slot. The write then matches nothing, and this path must
+    // not warn or publish over the status that already stuck. A missing row
+    // is the one case still worth a line: the turn ended with nowhere to land.
+    if !changed {
+        match store.message(owner, reply_id) {
+            Ok(None) => log::warn!("ai sessions: turn {reply_id} settled but its row is gone"),
+            Ok(Some(_)) => {}
+            Err(e) => log::error!("ai sessions: could not read the settled turn {reply_id}: {e}"),
+        }
         return;
     }
     match store.message(owner, reply_id) {
@@ -640,19 +655,13 @@ fn settle(
 /// their own line: a turn that dies mid-call is one event.
 fn cut_off_running(session_id: Option<&str>) -> Result<u64, anyhow::Error> {
     let store = ai_session_store();
-    let running = store.running_assistants(session_id);
-    let caught = store.interrupt_running(session_id)?;
-    match running {
-        Ok(rows) => {
-            for row in rows {
-                let cause = match row.error.as_deref() {
-                    Some(error) if !error.is_empty() => error,
-                    _ => CUT_OFF_ERROR,
-                };
-                warn_ended_turn(&store, &row, "interrupted", cause);
-            }
-        }
-        Err(e) => log::error!("ai sessions: could not list the turns a cut-off interrupted: {e}"),
+    let (caught, assistants) = store.interrupt_running(session_id)?;
+    for row in assistants {
+        let cause = match row.error.as_deref() {
+            Some(error) if !error.is_empty() => error,
+            _ => CUT_OFF_ERROR,
+        };
+        warn_ended_turn(&store, &row, "interrupted", cause);
     }
     Ok(caught)
 }
@@ -685,7 +694,7 @@ fn warn_ended_turn(
         "ai session {} turn {} model={model} steps={steps} {kind}: {}",
         row.session_id,
         row.id,
-        excerpt_turn_error(error),
+        warn_cause(error),
     );
     #[cfg(test)]
     ENDED_TURN_WARNS.lock().unwrap().push(line.clone());
@@ -717,6 +726,31 @@ fn turn_steps(
                 }
         })
         .count()
+}
+
+/// The cause a warn may carry. [`crate::ai_service::providers::http::UpstreamStatus`]'s
+/// Display is `{url} answered {status}: {body}`. The body can be a prompt the server
+/// echoed, and the provider already logs an excerpt of it. This warn names the status
+/// (`HTTP 400 Bad Request`) and drops the body. The stored row keeps the full error.
+/// Any other cause stays the excerpt the line already used.
+fn warn_cause(error: &str) -> String {
+    if let Some(status) = upstream_answered_status(error) {
+        return format!("HTTP {status}");
+    }
+    excerpt_turn_error(error)
+}
+
+/// The `{status}` of an upstream Display, when `error` carries one: the code and its
+/// reason, before the response body. `None` when the text is some other failure.
+fn upstream_answered_status(error: &str) -> Option<&str> {
+    let rest = error.split(" answered ").nth(1)?;
+    let status = rest.split(": ").next()?.trim();
+    let code = status.split_whitespace().next()?;
+    if code.len() == 3 && code.bytes().all(|b| b.is_ascii_digit()) && status.len() <= 40 {
+        Some(status)
+    } else {
+        None
+    }
 }
 
 fn excerpt_turn_error(error: &str) -> String {
@@ -872,6 +906,19 @@ fn wait_at_delete_pause() {
 #[cfg(test)]
 pub(crate) fn running_for_test(session_id: &str) -> bool {
     RUNNING.lock().unwrap().contains_key(session_id)
+}
+
+/// A terminal write, as the turn's task and a cancel call it. A test lands a
+/// second write after a cut-off without racing a live task.
+#[cfg(test)]
+pub(crate) fn settle_for_test(
+    store: &Arc<dyn AiSessionStore>,
+    agent: &AgentContext,
+    reply_id: &str,
+    status: AiTurnStatus,
+    error: Option<&str>,
+) {
+    settle(store, agent, reply_id, status, error, None);
 }
 
 /// For tests: whether the lifecycle table holds a lock for `owner`'s session.

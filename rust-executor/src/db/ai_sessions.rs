@@ -310,7 +310,8 @@ impl Ad4mDb {
     }
 
     /// `status` (and `error`, `content_patch` merged into `content`) written on the message
-    /// `id` of a session `owner_did` owns. `false`: no such message of this owner.
+    /// `id` of a session `owner_did` owns, and only while that row is still `running`.
+    /// `false`: no such message of this owner, or the row had already left `running`.
     pub fn finish_ai_message(
         &self,
         owner_did: Option<&str>,
@@ -331,7 +332,7 @@ impl Ad4mDb {
                 status = ?3,
                 error = ?4,
                 content = CASE WHEN ?5 IS NULL THEN content ELSE json_patch(content, ?5) END
-             WHERE id = ?1 AND EXISTS (
+             WHERE id = ?1 AND status = 'running' AND EXISTS (
                 SELECT 1 FROM ai_sessions s
                 WHERE s.id = ai_messages.session_id AND s.owner_did IS ?2
              )",
@@ -372,24 +373,35 @@ impl Ad4mDb {
     /// Every row still marked `running` — of the session `session_id` when one is named,
     /// of the whole table at startup — marked `interrupted`. A row is `running` while its
     /// task is alive; a `running` row that survives the task that wrote it was cut off.
+    ///
+    /// The count is every row this write changed. The messages are the assistant rows
+    /// it changed, in `seq` order: one statement, so a row a settle finished in the
+    /// same moment is not in the list.
     pub fn interrupt_running_ai_messages(
         &self,
         session_id: Option<&str>,
-    ) -> Result<u64, rusqlite::Error> {
-        let changed = self.conn.execute(
+    ) -> Result<(u64, Vec<AiSessionMessage>), rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
             "UPDATE ai_messages SET
                 status = 'interrupted',
                 error = COALESCE(error, ?2)
-             WHERE status = 'running' AND (?1 IS NULL OR session_id = ?1)",
-            params![session_id, CUT_OFF_ERROR],
+             WHERE status = 'running' AND (?1 IS NULL OR session_id = ?1)
+             RETURNING id, session_id, seq, role, content, status, error, created_at",
         )?;
-        Ok(changed as u64)
+        let changed = stmt
+            .query_map(params![session_id, CUT_OFF_ERROR], message_from)?
+            .collect::<Result<Vec<_>, _>>()?;
+        let caught = changed.len() as u64;
+        let mut assistants: Vec<_> = changed
+            .into_iter()
+            .filter(|row| row.role == AiSessionMessageRole::Assistant)
+            .collect();
+        assistants.sort_by_key(|row| row.seq);
+        Ok((caught, assistants))
     }
 
     /// Assistant rows still `running` — of the session `session_id` when one is named,
-    /// of the whole table otherwise — in `seq` order. Read these before
-    /// [`interrupt_running_ai_messages`] so a cut-off turn can be logged with its id;
-    /// the update itself only says how many rows it caught.
+    /// of the whole table otherwise — in `seq` order.
     pub fn list_running_assistant_messages(
         &self,
         session_id: Option<&str>,
@@ -572,10 +584,36 @@ mod tests {
             .finish_ai_message(Some("did:key:bob"), "t1", "done", None, None)
             .unwrap());
 
-        assert_eq!(db.interrupt_running_ai_messages(None).unwrap(), 1);
+        let (caught, assistants) = db.interrupt_running_ai_messages(None).unwrap();
+        assert_eq!(caught, 1);
+        assert!(
+            assistants.is_empty(),
+            "the assistant row had already finished, so the cut-off did not change it"
+        );
         let t1 = db.get_ai_message(alice, "t1").unwrap().unwrap();
         assert_eq!(t1.status, Some(AiTurnStatus::Interrupted));
         assert!(t1.error.is_some());
-        assert_eq!(db.interrupt_running_ai_messages(None).unwrap(), 0);
+        assert_eq!(db.interrupt_running_ai_messages(None).unwrap().0, 0);
+    }
+
+    #[test]
+    fn a_terminal_write_does_not_replace_a_row_that_already_ended() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        let alice = Some("did:key:alice");
+        db.create_ai_session(&session("s1", alice)).unwrap();
+        db.append_ai_message(alice, "a1", "s1", "assistant", "{}", Some("running"))
+            .unwrap();
+
+        assert!(db
+            .finish_ai_message(alice, "a1", "interrupted", Some("cut off"), None)
+            .unwrap());
+        assert!(
+            !db.finish_ai_message(alice, "a1", "failed", Some("late failure"), None)
+                .unwrap(),
+            "a late failure must not overwrite a turn that already ended"
+        );
+        let row = db.get_ai_message(alice, "a1").unwrap().unwrap();
+        assert_eq!(row.status, Some(AiTurnStatus::Interrupted));
+        assert_eq!(row.error.as_deref(), Some("cut off"));
     }
 }
