@@ -100,9 +100,15 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   `author`/`timestamp` with no other properties. Migrating it to `model_query` is planned (spec
   item 1). Prefer `model_query` for reads.
 - `commit`: holds `commit_order` from its pending-queue check until the diff is sent or queued,
-  so a commit whose language call fails is queued ahead of every later one. The immediate-commit
-  counter has its own short lock: `set_immediate_commits` never waits for a language call.
-- `pending_diffs_loop`: a failed `commit_pending_diffs` is logged at warn and retried after
+  so a commit whose language call fails is queued ahead of every later one. Every
+  `link_language.commit` of the file (immediate send, pending batch and its two refusal-path
+  sends, the fallback sync) takes a token from one bucket per perspective: `COMMIT_BURST` = 20,
+  one token back every `COMMIT_REFILL_INTERVAL` = 2 s, so at most 50 commits in any 60 s window,
+  under the server link language's 60 a minute per room token. No token: `commit` queues the
+  diff. The bucket has its own short lock: `set_commit_tokens` never waits for a language call.
+  A successful batch does not refill it.
+- `pending_diffs_loop`: a batch with no token is not sent; the queue waits for a later tick and
+  the failure backoff does not grow. A failed `commit_pending_diffs` is logged at warn and retried after
   100 ms doubling to 30 s, reset on success (tests: `perspective_instance_pending_diffs_tests.rs`).
   A batch is one diff, and a receiver applies its removals before its additions, so the rows are
   never concatenated: `merge_pending_diffs` (db.rs) keeps only the last operation on each link

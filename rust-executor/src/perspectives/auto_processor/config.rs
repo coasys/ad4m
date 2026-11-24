@@ -333,7 +333,7 @@ pub async fn write_processor(
     // AutoProcessorConfig instance lands as ONE `Shared` commit — instead of
     // ~11 individual commits (one per property setter) from `execute_commands`.
     // A single-class processor already blew past the per-perspective
-    // `IMMEDIATE_COMMITS_COUNT=20` immediate-commit throttle in
+    // `COMMIT_BURST=20` commit-token bucket in
     // `perspective_instance::commit` when combined with the other setup
     // writes on a fresh neighbourhood — subsequent commits (including the
     // wave-1 `InterpretationRun` cursor) landed in the pending-diff queue
