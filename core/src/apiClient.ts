@@ -365,9 +365,9 @@ export class ApiClient {
             }
         }
         this._armPendingProbe()
+        // Whatever went stale without a socket (a loss, a refusal, a close) loads now, once.
+        this.mirror.reloadWatched()
         if (this._hasConnectedOnce) {
-            // Events sent while the socket was down are lost.
-            this.mirror.markAllStale()
             for (const cb of this._reconnectCallbacks) {
                 try { cb() } catch (e) {
                     console.error('Error in reconnect callback:', e)
@@ -524,7 +524,8 @@ export class ApiClient {
         // Events from now until the next socket are lost: what the mirror holds may be old.
         if (this._liveWs === ws) {
             this._liveWs = null
-            this.mirror.markAllStale()
+            // No socket to read from: the watched values reload when the next one opens.
+            this.mirror.markAllStale(false)
         }
         for (const pending of this._pendingCalls.values()) {
             if (!pending.sent && ++pending.failedConnects < MAX_CONNECT_ATTEMPTS) continue
@@ -546,7 +547,7 @@ export class ApiClient {
         const error = new RpcError(401, reason)
         for (const pending of this._pendingCalls.values()) pending.reject(error)
         // No reconnect will mark the mirror stale: a read must reach the refusal, not a stored value.
-        this.mirror.markAllStale()
+        this.mirror.markAllStale(false)
         this._closeWs()
         for (const cb of [...this._authFailedCallbacks]) callSafely(cb, 'Error in auth-failed callback:', reason)
     }

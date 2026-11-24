@@ -136,6 +136,36 @@ describe('KeyedCache', () => {
         expect(live.getSnapshot()).toMatchObject({ state: 'unknown', error: undefined });
     });
 
+    test('a failed refresh of a key with a value keeps its error only while watched', async () => {
+        let fail = false;
+        const cache = new KeyedCache<string>({ loadMany: async keys => keys.map(() => (fail ? new Error('boom') : 'v')) });
+        const live = cache.live('k');
+        const off = live.subscribe(() => {});
+        await until(() => live.getSnapshot().state === 'fresh');
+        fail = true;
+        cache.markStale();
+        await until(() => live.getSnapshot().state === 'error');
+        off();
+        expect(live.getSnapshot()).toMatchObject({ state: 'stale', value: 'v', error: undefined });
+    });
+
+    test('markStale(false) sends no read for a watched key; reloadWatched() reads it once', async () => {
+        const loadMany = jest.fn(async (keys: string[]) => keys.map(() => 'v'));
+        const cache = new KeyedCache<string>({ loadMany });
+        const live = cache.live('k');
+        const off = live.subscribe(() => {});
+        await until(() => live.getSnapshot().state === 'fresh');
+        cache.markStale(false);
+        await new Promise(r => setTimeout(r, 20));
+        expect(loadMany).toHaveBeenCalledTimes(1);
+        expect(live.getSnapshot().state).toBe('stale');
+        cache.reloadWatched();
+        cache.reloadWatched();
+        await until(() => live.getSnapshot().state === 'fresh');
+        expect(loadMany).toHaveBeenCalledTimes(2);
+        off();
+    });
+
     test('a failed read of an unwatched key keeps no error', async () => {
         const cache = new KeyedCache<string>({ loadMany: async keys => keys.map(() => new Error('boom')) });
         for (let i = 0; i < 20; i++) await expect(cache.get(`k${i}`)).rejects.toThrow('boom');

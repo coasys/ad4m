@@ -32,7 +32,7 @@ The hook returns:
 
 ## useAgent
 
-Reads an agent by DID from the client's data mirror, with support for profile formatting. Components that read one DID with one client share one entry. A mounted view reloads when an executor event (`agent-updated`) replaces the agent, when the socket is lost or the executor reports dropped events (a `lagged` marker), when it mounts again, or when something reads the agent. It does not reload when the 5-minute age passes: the agent then counts as old, and the next mount or read loads it. A DID the executor does not know shows as `fresh` with a `null` agent. `error` is set only while the last read failed, not during the retry. There is no `reload`.
+Reads an agent by DID from the client's data mirror, with support for profile formatting. Components that read one DID with one client share one entry. A mounted view reloads when an executor event (`agent-updated`) replaces the agent, when the socket opens again after a loss or a close, when the executor reports dropped events (a `lagged` marker), when it mounts again, or when something reads the agent. It does not reload when the 5-minute age passes: the agent then counts as old, and the next mount or read loads it. A DID the executor does not know shows as `fresh` with a `null` agent. `error` is set only while the last read failed, not during the retry. There is no `reload`.
 
 ```typescript
 import { useAgent } from '@coasys/ad4m-react-hooks';
@@ -62,7 +62,7 @@ function AgentProfile({ agentClient, did }) {
 
 ## useMe
 
-Provides access to the current agent's data and status. It takes the `Ad4mClient` and reads the agent and its status from the client's data mirror: `agent-updated` and `agent-status-changed` events replace them and re-render, and a lost socket reads them again. Two clients share nothing. `status` and `me` are `undefined` until the first read ends.
+Provides access to the current agent's data and status. It takes the `Ad4mClient` and reads the agent and its status from the client's data mirror: `agent-updated` and `agent-status-changed` events replace them and re-render, and the next open of the socket after a loss reads them again (nothing is sent while there is no socket). Two clients share nothing. `status` and `me` are `undefined` until the first read ends.
 
 ```typescript
 import { useMe } from '@coasys/ad4m-react-hooks';

@@ -136,7 +136,7 @@ export class KeyedCache<V> {
      * again by the next read), and a read in flight is not kept. Keys with subscribers
      * are read again at once, the misses of this tick in one call.
      */
-    markStale(): void {
+    markStale(refetch = true): void {
         const again: string[] = [];
         const keys = new Set([...this.#slots.keys(), ...this.#flights.keys(), ...this.#errors.keys(), ...this.#missing]);
         for (const key of keys) {
@@ -145,10 +145,19 @@ export class KeyedCache<V> {
             this.#missing.delete(key);
             const slot = this.#slots.get(key);
             if (slot) slot.stale = true;
-            if (this.#listeners.get(key)?.size) again.push(key);
+            if (refetch && this.#listeners.get(key)?.size) again.push(key);
             else this.#notify(key);
         }
         for (const key of again) this.#read(key, this.#loader(key)).catch(() => {});
+    }
+
+    /** A socket opened: each watched key that is not fresh and not loading reads once, the misses of this tick in one call. */
+    reloadWatched(): void {
+        for (const [key, listeners] of [...this.#listeners]) {
+            if (!listeners.size) continue;
+            const { state } = this.#snapshot(key);
+            if (state !== 'fresh' && state !== 'loading') this.#read(key, this.#loader(key)).catch(() => {});
+        }
     }
 
     /** A view on one key: `getSnapshot`, `subscribe`, `read`. A subscriber to a key that is not fresh makes it load. */
@@ -253,8 +262,9 @@ export class KeyedCache<V> {
 
     /** Drops what the maps hold for a key that has no value, no read and no subscriber. */
     #prune(key: string): void {
-        if (this.#slots.has(key) || this.#flights.has(key) || this.#listeners.get(key)?.size) return;
+        if (this.#listeners.get(key)?.size) return;
         this.#errors.delete(key);
+        if (this.#slots.has(key) || this.#flights.has(key)) return;
         this.#missing.delete(key);
         this.#snapshots.delete(key);
     }

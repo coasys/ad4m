@@ -294,3 +294,79 @@ describe('values and events across a lost socket, a close and a cold start', () 
         expect(asks('perspective.subscribe')).toBe(2)
     })
 })
+
+describe('watched values: no request without a socket, one read when it opens', () => {
+    const agentWire = (did: string, lang: string) => ({ did, directMessageLanguage: lang, perspective: null })
+    const requests = () => Sock.instances.flatMap((s) => s.sent).filter((m) => m.type !== 'ping' && m.type !== 'events.watch').length
+    beforeEach(() => {
+        Sock.handle = (msg) => {
+            if (msg.type === 'agent.status') return status('did:test:me')
+            if (msg.type === 'agent.byDIDs') return msg.params.dids.map((did: string) => agentWire(did, 'lang://one'))
+            return {}
+        }
+    })
+
+    /** A profile and the status entry watched, both loaded. */
+    async function watch() {
+        const profile = ad4m.agent.live.byDID('did:test:bob')
+        const own = ad4m.agent.live.status()
+        const offs = [profile.subscribe(() => {}), own.subscribe(() => {})]
+        await settle()
+        expect(profile.getSnapshot().state).toBe('fresh')
+        expect(own.getSnapshot().state).toBe('fresh')
+        return { profile, own, offs }
+    }
+
+    it('closeAll() with watched values opens no socket and sends no request; a reuse loads each once', async () => {
+        const { profile, own } = await watch()
+        const sockets = Sock.instances.length
+        const sent = requests()
+        ad4m.close()
+        await settle()
+        await jest.advanceTimersByTimeAsync(60_000)
+        expect(Sock.instances.length).toBe(sockets)
+        expect(requests()).toBe(sent)
+        expect(profile.getSnapshot().state).toBe('stale')
+        expect(own.getSnapshot().state).toBe('stale')
+
+        // explicit reuse: the app's own call opens the socket, the watched values load once
+        Sock.handle = (msg) => {
+            if (msg.type === 'agent.byDIDs') return msg.params.dids.map((did: string) => agentWire(did, 'lang://two'))
+            return status('did:test:again')
+        }
+        await ad4m.agent.did()
+        await settle()
+        expect(Sock.instances.length).toBe(sockets + 1)
+        expect(asks('agent.status')).toBe(2)
+        expect(asks('agent.byDIDs')).toBe(2)
+        expect(profile.getSnapshot()).toMatchObject({ state: 'fresh' })
+        expect(profile.getSnapshot().value?.directMessageLanguage).toBe('lang://two')
+        // and an executor event reaches them
+        lastSock().reply({ type: 'agent-status-changed', agent: status('did:test:pushed') })
+        expect(own.getSnapshot().value?.did).toBe('did:test:pushed')
+        expect(asks('agent.status')).toBe(2)
+    })
+
+    it('a reconnect sends one read per watched value, none before the socket reopens', async () => {
+        await watch()
+        const sent = requests()
+        const before = Sock.instances.length
+        Sock.instances[before - 1].drop()
+        await jest.advanceTimersByTimeAsync(0)
+        expect(requests()).toBe(sent)
+        expect(Sock.instances.length).toBe(before)
+        await jest.advanceTimersByTimeAsync(500)
+        expect(Sock.instances.length).toBe(before + 1)
+        expect(asks('agent.status')).toBe(2)
+        expect(asks('agent.byDIDs')).toBe(2)
+    })
+
+    it('a lagged marker refetches a watched profile at once', async () => {
+        const { profile } = await watch()
+        lastSock().reply({ type: 'query-subscription-update', lagged: true })
+        await settle()
+        expect(asks('agent.byDIDs')).toBe(2)
+        expect(asks('agent.status')).toBe(2)
+        expect(profile.getSnapshot().state).toBe('fresh')
+    })
+})

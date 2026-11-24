@@ -98,13 +98,22 @@ export class Entry<T> implements Live<T> {
         this.#accept(value)
     }
 
-    /** The executor changed the value without giving it, or the connection lost events: stale. */
-    invalidate(): void {
+    /**
+     * The executor changed the value without giving it, or the connection lost events: stale.
+     * With subscribers it reads again at once, unless `refetch` is false (no socket: see
+     * {@link reloadWatched}).
+     */
+    invalidate(refetch = true): void {
         this.#version++
         this.#inflight = null
         if (this.#state === 'unknown' || this.#state === 'stale') return
         this.#set('stale')
-        if (this.#listeners.size > 0) this.#refetch()
+        if (refetch && this.#listeners.size > 0) this.#refetch()
+    }
+
+    /** A socket opened: a stale entry with subscribers reads once; a fresh or loading one does not. */
+    reloadWatched(): void {
+        if (this.#state === 'stale' && this.#listeners.size > 0) this.#refetch()
     }
 
     #accept(value: T): void {

@@ -98,11 +98,21 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
 - States: `unknown | loading | fresh | stale | error`. A read of an unknown,
   stale or failed entry sends one request; concurrent reads share it. A value
   push (`entry.push`) replaces the value and notifies unless it is equal; an
-  invalidation, a reconnect (`ApiClient._onOpen` after the first open), the
-  `lagged` marker (`{"type":"query-subscription-update","lagged":true}`) or a
-  refused token (`ApiClient._failAuth`: close code 1008 or a 401, after which no
-  reconnect comes) calls `invalidate`: the entry is stale and reloads only if it
-  has subscribers. After a refused token every read fails with 401. Until the
+  invalidation or the
+  `lagged` marker (`{"type":"query-subscription-update","lagged":true}`; the socket
+  is up) calls `invalidate`: the entry is stale and reloads at once only if it
+  has subscribers. One rule for the absence of a socket: the loss of the socket
+  that had opened (`ApiClient._onClose`), a refused token (`ApiClient._failAuth`:
+  close code 1008 or a 401, after which no reconnect comes) and `closeAll()`
+  (`Mirror.reset`) mark every value stale and send **no request**
+  (`markAllStale(false)`, `invalidate(false)`, `markStale(false)`). Every socket
+  open (`ApiClient._onOpen`, a reused client's first open included) then calls
+  `Mirror.reloadWatched()`: each stale value with a subscriber loads once; fresh
+  values and reads in flight are left alone. So a watched value never dials a
+  socket by itself, and a reconnect reads each watched value once, after the
+  socket is back. A read the app started before `closeAll()` and that a keyed
+  cache had only queued (the tick's batch) can still dial once after it. After a
+  refused token every read fails with 401. Until the
   1008 close arrives, a client whose token was revoked still answers from its
   stored values.
 - An answer is kept only if nothing changed the entry since its request went
@@ -112,7 +122,7 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
   it listens to (`on`) and its `load`. An `Entry` is keyed by its RPC name
   (`mirror.entry({ method, load, on })`: one entry per method per client); the
   perspective uuid in a key belongs only to live queries and one-shot reads
-  (`live`, `liveResult`, `oneShot`, `wrote`). The loss of the socket, a reconnect or `lagged` makes every
+  (`live`, `liveResult`, `oneShot`, `wrote`). The loss of the socket, `closeAll()` or `lagged` makes every
   entry stale, and every keyed cache except the expressions (`staleOnReconnect: false`). Entries (see the sections below and the code for each one's events):
   - `agent.status`: pushed by `agent-status-changed` and the results of
     `agent.unlock/lock/generate/import`; read through `client.agent.status()` and
@@ -132,7 +142,7 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
 - A keyed cache answers `null` for an unknown key and does not keep it (the next
   `get()` asks again), but a key with a subscriber shows it as `{ state: 'fresh',
   value: null }`. Its maps hold only keys with a value, a read in flight or a
-  subscriber (a failed read's error is kept only while a view watches the key, until
+  subscriber (a failed read's error is kept only while a view watches the key, even when the key has a value, until
   its next read, a reconnect, or the last subscriber leaving); a read that finds
   nothing for a key that had a value drops the value and its persisted copy;
   `storedUsed` follows the held values.

@@ -171,10 +171,16 @@ export class Mirror {
      * again. A cache with `staleOnReconnect: false` stays. The live results answer no
      * one-shot read until their resync delivers a result; their snapshots keep the last value.
      */
-    markAllStale(): void {
-        for (const entry of this.#entries.values()) entry.invalidate()
-        for (const { staleOnReconnect, cache } of this.#caches.values()) if (staleOnReconnect) cache.markStale()
+    markAllStale(refetch = true): void {
+        for (const entry of this.#entries.values()) entry.invalidate(refetch)
+        for (const { staleOnReconnect, cache } of this.#caches.values()) if (staleOnReconnect) cache.markStale(refetch)
         for (const shared of this.#lives.values()) shared.stale()
+    }
+
+    /** A socket opened: every stale value with a subscriber loads once. Fresh values and those loading stay. */
+    reloadWatched(): void {
+        for (const entry of this.#entries.values()) entry.reloadWatched()
+        for (const { staleOnReconnect, cache } of this.#caches.values()) if (staleOnReconnect) cache.reloadWatched()
     }
 
     /**
@@ -185,7 +191,7 @@ export class Mirror {
     reset(): void {
         for (const shared of this.#lives.values()) shared.close()
         this.#lives.clear()
-        this.markAllStale()
+        this.markAllStale(false)
         for (const [name, handler] of this.#registrations) this.#listen(name, handler)
     }
 
