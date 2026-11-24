@@ -322,7 +322,7 @@ pub(crate) async fn create_with(
     let (class_name, shape) = resolve_class(perspective, &params.class_name).await?;
 
     let props = params.properties.unwrap_or_default();
-    let validated = validate_properties(&shape, &props, WriteMode::Create)
+    let validated = validate_properties(&shape, &props, WriteMode::Create, pending.json_objects)
         .map_err(|errors| invalid(&class_name, errors))?;
     let setter_errors = check_setters(perspective, &shape, &validated.scalars).await;
     if !setter_errors.is_empty() {
@@ -340,7 +340,7 @@ pub(crate) async fn create_with(
     // found" and let the create land on top of an existing instance, merging its property
     // links.
     // An id this call removed or created as another class is not found again in the store.
-    let existing = match pending.lookup(&class_name, &base_uri) {
+    let existing = match pending.lookup(&shape.target_class, &base_uri) {
         Some(true) => Ok(Some(Value::Null)),
         Some(false) => Ok(None),
         None => fetch_instance(perspective, &class_name, &base_uri).await,
@@ -529,8 +529,13 @@ pub(crate) async fn update_with(
         return Err(InstanceError::EmptyProperties);
     }
 
-    let validated = validate_properties(&shape, &params.properties, WriteMode::Update)
-        .map_err(|errors| invalid(&class_name, errors))?;
+    let validated = validate_properties(
+        &shape,
+        &params.properties,
+        WriteMode::Update,
+        pending.json_objects,
+    )
+    .map_err(|errors| invalid(&class_name, errors))?;
     // Through an abstract class (#1435) the record's own classes' setters write;
     // `update_subject_raw` checks those.
     let is_abstract = perspective
@@ -554,7 +559,14 @@ pub(crate) async fn update_with(
 
     let base_uri = instance_uri("base_uri", &params.base_uri)?;
     // Where it is stored: a legacy-spelled id's node is not the normalised one.
-    let stored = require_instance(perspective, &class_name, &base_uri, pending).await?;
+    let stored = require_instance(
+        perspective,
+        &class_name,
+        &shape.target_class,
+        &base_uri,
+        pending,
+    )
+    .await?;
 
     // One batch for the whole update so remove-old + add-new per property lands atomically
     // (same reasoning as the per-class setters: without it a peer can observe the property as
@@ -619,10 +631,17 @@ pub(crate) async fn remove_with(
     params: InstanceRemove,
     pending: &Pending,
 ) -> Result<InstanceRemoved, InstanceError> {
-    let (class_name, _shape) = resolve_class(perspective, &params.class_name).await?;
+    let (class_name, shape) = resolve_class(perspective, &params.class_name).await?;
     let base_uri = instance_uri("base_uri", &params.base_uri)?;
     // Where it is stored: a legacy-spelled id's node is not the normalised one.
-    let stored = require_instance(perspective, &class_name, &base_uri, pending).await?;
+    let stored = require_instance(
+        perspective,
+        &class_name,
+        &shape.target_class,
+        &base_uri,
+        pending,
+    )
+    .await?;
     check_batch(perspective, params.batch_id.as_deref()).await?;
 
     // The class's side first: its destructor, else the links of its declared predicates;
@@ -685,15 +704,28 @@ pub(crate) async fn add_to_collection_with(
     let (class_name, shape) = resolve_writable_class(perspective, &params.class_name).await?;
 
     let infos = class_properties(&shape);
-    let info = resolve_collection(&class_name, &infos, &params.collection, &params.item_uri)
-        .map_err(|e| invalid(&class_name, vec![e]))?;
+    let info = resolve_collection(
+        &class_name,
+        &infos,
+        &params.collection,
+        &params.item_uri,
+        false,
+    )
+    .map_err(|e| invalid(&class_name, vec![e]))?;
     let coerced = coerce_scalar(info, &Value::String(params.item_uri.clone()))
         .map_err(|e| invalid(&class_name, vec![e]))?;
     let collection = info.name().to_string();
 
     let base_uri = instance_uri("base_uri", &params.base_uri)?;
     // Where it is stored: a legacy-spelled id's node is not the normalised one.
-    let stored = require_instance(perspective, &class_name, &base_uri, pending).await?;
+    let stored = require_instance(
+        perspective,
+        &class_name,
+        &shape.target_class,
+        &base_uri,
+        pending,
+    )
+    .await?;
     check_batch(perspective, params.batch_id.as_deref()).await?;
 
     let predicate = shacl::resolve_property_predicate(perspective, &class_name, &collection)
@@ -847,13 +879,26 @@ pub(crate) async fn remove_from_collection_with(
     let (class_name, shape) = resolve_writable_class(perspective, &params.class_name).await?;
 
     let infos = class_properties(&shape);
-    let info = resolve_collection(&class_name, &infos, &params.collection, &params.item_uri)
-        .map_err(|e| invalid(&class_name, vec![e]))?;
+    let info = resolve_collection(
+        &class_name,
+        &infos,
+        &params.collection,
+        &params.item_uri,
+        true,
+    )
+    .map_err(|e| invalid(&class_name, vec![e]))?;
     let collection = info.name().to_string();
 
     let base_uri = instance_uri("base_uri", &params.base_uri)?;
     // Where it is stored: a legacy-spelled id's node is not the normalised one.
-    let stored = require_instance(perspective, &class_name, &base_uri, pending).await?;
+    let stored = require_instance(
+        perspective,
+        &class_name,
+        &shape.target_class,
+        &base_uri,
+        pending,
+    )
+    .await?;
     check_batch(perspective, params.batch_id.as_deref()).await?;
 
     let predicate = shacl::resolve_property_predicate(perspective, &class_name, &collection)

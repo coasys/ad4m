@@ -34,9 +34,9 @@ pub struct InstanceRemoveParams {
 }
 
 impl Ad4mMcpHandler {
-    /// Update single-valued properties of an instance.
+    /// Update properties of an instance; an array on a collection replaces its members.
     #[tool(
-        description = "Set one or more single-valued properties on an existing instance. class_name is one of the class names from describe_perspective; properties is a JSON object of the values to change (unlisted properties are untouched). Values are validated against the class schema — the error names the property, expected type and cardinality. Collections cannot be set here: use instance_add_to_collection. Example: instance_update(perspective_id, class_name='Task', base_uri='<id>', properties={\"status\": \"done\"})."
+        description = "Set one or more properties on an existing instance. class_name is one of the class names from describe_perspective; properties is a JSON object of the values to change (unlisted properties are untouched). Values are validated against the class schema — the error names the property, expected type and cardinality. An array on a collection property replaces its members with those items (instance_add_to_collection and instance_remove_from_collection change single members). Example: instance_update(perspective_id, class_name='Task', base_uri='<id>', properties={\"status\": \"done\"})."
     )]
     pub async fn instance_update(&self, params: Parameters<InstanceUpdateParams>) -> String {
         let p = &params.0;

@@ -147,7 +147,7 @@ pub(crate) fn validate_properties(
     props: &Map<String, Value>,
     mode: WriteMode,
 ) -> Result<ValidatedWrite, Vec<ValidationError>> {
-    shared::validate_properties(shape, props, mode)
+    shared::validate_properties(shape, props, mode, false)
         .map_err(|errors| errors.iter().map(ValidationError::from).collect())
 }
 

@@ -42,6 +42,10 @@ pub enum InstanceError {
     },
     /// The batch the caller named is not open.
     BatchNotFound { batch_id: String },
+    /// The batch the caller named was written to (by another call or a raw link write) while
+    /// this call ran, so the call's result no longer follows from it. Nothing was written; the
+    /// call can be sent again.
+    BatchConflict { batch_id: String },
     /// The write breaks the class's shape. Validation runs before any link write, so the call
     /// staged and wrote nothing.
     Validation {

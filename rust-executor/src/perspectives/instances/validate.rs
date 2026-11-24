@@ -178,13 +178,18 @@ fn matches_allowed(candidate: &Value, allowed: &Value) -> bool {
 pub(crate) fn coerce_scalar(info: &PropView<'_>, value: &Value) -> Result<Value, ValidationError> {
     let err = |problem: ValidationProblem| ValidationError::on(info, problem, Some(value));
 
+    if value.is_null() {
+        return Err(err(ValidationProblem::Null));
+    }
+    // A value signed into the literal language is any JSON value: an object or an array is
+    // stored whole, as one `literal:json:` expression.
+    if info.relation().is_none() && info.resolve_language() == Some("literal") {
+        return Ok(value.clone());
+    }
     if let Value::Array(items) = value {
         return Err(err(ValidationProblem::ArrayForScalar {
             length: items.len(),
         }));
-    }
-    if value.is_null() {
-        return Err(err(ValidationProblem::Null));
     }
 
     if let Some((_, target)) = info.relation() {
@@ -272,6 +277,7 @@ pub fn validate_properties(
     shape: &ModelShape,
     props: &Map<String, Value>,
     mode: WriteMode,
+    json_objects: bool,
 ) -> Result<ValidatedWrite, Vec<ValidationError>> {
     let infos = class_properties(shape);
     let mut errors: Vec<ValidationError> = Vec::new();
@@ -360,7 +366,18 @@ pub fn validate_properties(
             continue;
         }
 
-        match coerce_scalar(info, value) {
+        // The SDK stores an object-typed field as one `literal:json:` value on a string
+        // property: `json_objects` lets a string property take the object whole. A write that
+        // does not say so (the MCP tools) still refuses an object for a string.
+        let json_object = json_objects
+            && value.is_object()
+            && info.relation().is_none()
+            && info.type_name() == "string";
+        match if json_object {
+            Ok(value.clone())
+        } else {
+            coerce_scalar(info, value)
+        } {
             Ok(v) => {
                 out.scalars.insert(info.name().to_string(), v);
             }
@@ -369,7 +386,12 @@ pub fn validate_properties(
     }
 
     if mode == WriteMode::Create {
-        for info in infos.iter().filter(|i| i.required() && i.writable()) {
+        // A required property whose class constructor writes an initial value is held by the
+        // constructor when the call gives none.
+        for info in infos
+            .iter()
+            .filter(|i| i.required() && i.writable() && !i.has_initial())
+        {
             let supplied = if info.collection() {
                 out.collections.iter().any(|(n, _)| n == info.name())
             } else {
@@ -394,12 +416,15 @@ pub fn validate_properties(
 }
 
 /// Resolve `collection` to a writable collection property of the class, or the error that says
-/// why it is not one (unknown name, single-valued property, read-only relation).
+/// why it is not one (unknown name, single-valued property, read-only relation). `removing`
+/// also takes a single-valued relation (`@HasOne`): dropping its one member is a removal like
+/// any other, while adding to it is a `set`.
 pub(crate) fn resolve_collection<'a, 'p>(
     class_name: &str,
     infos: &'a [PropView<'p>],
     collection: &str,
     item_uri: &str,
+    removing: bool,
 ) -> Result<&'a PropView<'p>, ValidationError> {
     let Some(info) = find_property(infos, collection) else {
         return Err(ValidationError {
@@ -419,7 +444,7 @@ pub(crate) fn resolve_collection<'a, 'p>(
             item: None,
         });
     };
-    if !info.collection() {
+    if !info.collection() && !(removing && info.relation().is_some()) {
         return Err(ValidationError::on(
             info,
             ValidationProblem::NotACollection,

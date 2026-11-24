@@ -448,7 +448,8 @@ async function writeOps(perspective: PerspectiveProxy, ops: MutateOp[], batchId?
  * throws before anything is written. `{ id }` (containment, #1446) has the
  * executor use the parent's own `children` relation, else `ad4m://has_child`;
  * `{ model, id }` names the parent's relation to the child class, written
- * through its adder (with ordering); `{ id, predicate }` is one plain link.
+ * through its adder (with ordering) or, for a `@HasOne`, as the relation's one
+ * member; `{ id, predicate }` is one plain link.
  */
 function parentRef(scope: Scope, childCtor: Function): ParentRef {
   const parent = requireSingleParent(scope);
@@ -1704,8 +1705,12 @@ export class Ad4mModel {
     }
     if (value == null) return;
     const ids = (Array.isArray(value) ? value : [value]).map((v) => this.resolveRelationId(v));
-    const members = { [key]: kind === 'set' ? this.relationWrite(key, ids) : ids };
-    const change = kind === 'set' ? { set: members } : { [kind]: members };
+    // A single-valued relation (`@HasOne`) has one member: adding one points the relation at it,
+    // which is a `set`; the executor refuses `add` on a relation that is not a collection.
+    const single = (this.constructor as typeof Ad4mModel).getModelMetadata().relations[key].maxCount === 1;
+    const asSet = kind === 'set' || (kind === 'add' && single);
+    const members = { [key]: asSet ? this.relationWrite(key, ids) : ids };
+    const change = asSet ? { set: members } : { [kind]: members };
     await writeOps(this._perspective, [{ op: 'update', class: this.mutateClass(), id: this._baseExpression, ...change }], batchId);
   }
 
@@ -1747,11 +1752,11 @@ export class Ad4mModel {
    * await recipe.save();
    * ```
    */
-  async save(batchId?: string) {
-    await this.persist(batchId);
+  async save(batchId?: string, options?: { parent?: ParentRef; readBack?: boolean }) {
+    await this.persist(batchId, options?.parent);
     // With a caller's batch nothing is committed yet: reading would fetch
     // stale data and overwrite in-memory values.
-    if (!batchId) await this.getData();
+    if (!batchId && options?.readBack !== false) await this.getData();
   }
 
   /**
@@ -1764,8 +1769,16 @@ export class Ad4mModel {
   private async persist(batchId?: string, parent?: ParentRef): Promise<void> {
     const op = this._snapshot ? this.updateOp() : this.createOp(parent);
     const before = this._snapshot;
-    if (op) await writeOps(this._perspective, [op], batchId, () => { this._snapshot = before; });
+    // The snapshot holds what the op carries: take it before the await, so a field
+    // changed while the call is pending stays dirty for the next save.
     this.takeSnapshot();
+    if (!op) return;
+    try {
+      await writeOps(this._perspective, [op], batchId, () => { this._snapshot = before; });
+    } catch (e) {
+      this._snapshot = before;
+      throw e;
+    }
   }
 
   /** The class the executor writes this instance as. */
@@ -2117,7 +2130,10 @@ export class Ad4mModel {
     // One create op, with the parent: the executor commits the instance and
     // its parent link together, or writes nothing. In a caller's batch, the
     // caller commits.
-    await instance.persist(options?.batchId, parent);
+    // Through save(), the one public write: code that wraps it (a write
+    // check) sees every create. The create has no read-back of its own; the
+    // row is read below when the caller asks for it.
+    await instance.save(options?.batchId, { parent, readBack: false });
     if (options?.batchId) return instance;
 
     // The instance holds what it wrote and its snapshot is taken (persist()

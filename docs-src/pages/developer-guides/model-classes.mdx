@@ -662,6 +662,11 @@ const recipe = await Recipe.create(perspective, { name: "Cake" }, {
 });
 ```
 
+The new instance joins the parent's relation to its class (name it with `field` when the parent has several). On a `@HasMany` it is added to the members; on a `@HasOne` it becomes the relation's one member, replacing the one it had.
+
+`Recipe.create(...)` builds the instance, assigns your values and calls `save()` on it, so a
+subclass that overrides `save()` (to add a check or a hook) sees every create, static or not.
+
 `create` returns the instance it built from your values, with its `id`, and reads nothing back
 after the commit. `author`, `createdAt`, `updatedAt`, getters and relations you did not write are
 not set. Pass `returns: 'row'` to read the row after the commit (one more round trip) and fill them:
@@ -725,7 +730,7 @@ await recipe.delete();
 await Recipe.delete(perspective, recipeId);
 ```
 
-`delete()` also cleans up incoming links: every link whose target is the instance is removed (e.g. a parent's `hasMany` reference to this instance, including polymorphic relations, and links from other models), in the same batch as the rest of the delete. A failed removal rejects `delete()`. Incoming links are read from committed state, so a link to the instance added earlier in the same batch is not removed. Removing incoming links does not respect a second class on the same node: a node that has more than one class loses the links that point at it.
+`delete()` also cleans up incoming links: every link whose target is the instance is removed (e.g. a parent's `hasMany` reference to this instance, including polymorphic relations, and links from other models), in the same batch as the rest of the delete. A failed removal rejects `delete()`. Incoming links are read from the batch's effective graph (committed links plus the batch's staged work), so a link to the instance added earlier in the same batch is removed too. Removing incoming links does not respect a second class on the same node: a node that has more than one class loses the links that point at it.
 
 ### Dirty Tracking
 

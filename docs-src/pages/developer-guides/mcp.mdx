@@ -141,7 +141,7 @@ These tools are the default way to work with typed data. The subject class is an
 | `instance_create` | `(perspective_id, class_name, properties{}, base_uri?, parent?)` | Create an instance; `properties` is a JSON object, validated against the class |
 | `instance_query` | `(perspective_id, class_name, filter?, parent?, limit?, offset?)` | List instances with typed property values; `filter` is a where clause (`{"status": "open"}`, `{"title": {"contains": "mcp"}}`, `OR` / `AND` / `NOT`) |
 | `instance_get` | `(perspective_id, class_name, base_uri)` | One instance with all properties and collections |
-| `instance_update` | `(perspective_id, class_name, base_uri, properties{})` | Set single-valued properties |
+| `instance_update` | `(perspective_id, class_name, base_uri, properties{})` | Set properties; an array on a collection replaces its members |
 | `instance_add_to_collection` | `(perspective_id, class_name, base_uri, collection, item_uri)` | Add an item to a collection property |
 | `instance_remove_from_collection` | `(perspective_id, class_name, base_uri, collection, item_uri)` | Remove the membership link only; the item itself is untouched |
 | `instance_remove` | `(perspective_id, class_name, base_uri)` | Delete an instance and every link touching it |

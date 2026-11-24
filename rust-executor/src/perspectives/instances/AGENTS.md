@@ -42,9 +42,11 @@ Invariants:
   batch it works in a private fork of it (`fork_batch`: a copy, so its reads see the caller's
   work plus its own) and, when every op succeeded, merges what the fork changed into the
   caller's batch in one step under the batch store's write lock (`merge_batch`); on failure
-  it drops the fork. A commit or a raw add into the caller's batch during the call is
-  therefore never lost or half-undone: a raw add stays, and a commit makes the merge find
-  no batch (`BatchNotFound`), so the call publishes nothing. The failing op's index travels
+  it drops the fork. The merge is conditional: the caller's batch must still equal what the
+  fork was copied from. A commit makes the merge find no batch (`BatchNotFound`); a raw
+  add, a raw update or another call's merge during the call makes it find a changed one
+  (`BatchConflict`, 409, retryable: the caller reads again and repeats the call). Either way
+  the call publishes nothing and nothing the other writer staged is lost or half-undone. The failing op's index travels
   with the error (`MutateError`) and the RPC puts it in the message and in `data.opIndex`.
 
 Write rules (one set, for the MCP tools and `perspective.mutate`, whose handlers call these

@@ -484,7 +484,7 @@ impl PerspectiveInstance {
     /// The actions of `class` that do `op` to its property `own`. Setting a
     /// relation or collection (`membership`) with no setter falls back to
     /// a `collectionSetter` on each predicate its adder appends to.
-    async fn actions_for(
+    pub(super) async fn actions_for(
         &self,
         class: &str,
         own: &str,
@@ -558,9 +558,20 @@ impl PerspectiveInstance {
         value: &Value,
         context: &AgentContext,
     ) -> Result<Vec<Run>, AnyError> {
-        let parameters: Vec<Parameter> = self
-            .members(class, own, value, context)
-            .await?
+        // `null` clears a single-valued relation (a HasOne): that is how the SDK clears it.
+        // A collection refuses it (see `members`).
+        let clears_scalar = value.is_null()
+            && self.get_shape(class).is_ok_and(|shape| {
+                shape
+                    .properties
+                    .iter()
+                    .any(|p| p.name == own && p.is_scalar_relation)
+            });
+        let members = match clears_scalar {
+            true => Vec::new(),
+            false => self.members(class, own, value, context).await?,
+        };
+        let parameters: Vec<Parameter> = members
             .into_iter()
             .map(|m| Parameter {
                 name: String::new(),
@@ -865,7 +876,7 @@ struct HasChildWrite {
 
 /// What an update through an abstract class does to one name.
 #[derive(Clone, Copy, PartialEq)]
-enum Op {
+pub(super) enum Op {
     Set,
     Add,
     Remove,

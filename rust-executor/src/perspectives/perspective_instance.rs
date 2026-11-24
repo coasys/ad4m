@@ -92,6 +92,7 @@ mod expected_links;
 pub use expected_links::{ExpectedLinks, LinksChanged};
 // A batch's effective view of the graph for the validated write core.
 mod batch_view;
+pub(crate) use batch_view::MergeOutcome;
 // Remote telepresence broadcasts, off the link-language queue's critical path.
 mod language_broadcasts;
 
@@ -5506,12 +5507,16 @@ impl PerspectiveInstance {
             ))
     }
 
-    async fn get_property_setter_actions(
+    /// The actions that set `property`: its `ad4m://setter`, else, for a relation or
+    /// collection whose adder only appends links, a `collectionSetter` on each predicate the
+    /// adder appends to (the SDK's relation decorators declare an adder and a remover, never a
+    /// setter). A property that is neither has none.
+    pub(crate) async fn get_property_setter_actions(
         &self,
         class_name: &str,
         property: &str,
     ) -> Result<Option<Vec<Command>>, AnyError> {
-        self.get_property_actions_from_shacl(class_name, property, "ad4m://setter")
+        self.actions_for(class_name, property, abstract_classes::Op::Set, true)
             .await
     }
 
@@ -5890,9 +5895,9 @@ impl PerspectiveInstance {
     }
 
     /// The commands `setter` runs to write `value` to `prop` of `class_name`.
-    /// Same collection expansion as `create_subject`: an array on an
-    /// all-`addLink` setter appends one link per element; any other array
-    /// stays a single `literal:json:` value.
+    /// An array on an all-`addLink` setter is a collection: it replaces the
+    /// members, removing those stored (and staged) and appending one link per
+    /// element; any other array stays a single `literal:json:` value.
     ///
     /// `null` and `""` clear the property instead: a `removeLink` with target
     /// `*` per predicate the setter writes, which removes every stored link
@@ -5937,6 +5942,23 @@ impl PerspectiveInstance {
             _ => vec![value.clone()],
         };
         let mut commands = Vec::new();
+        // Setting a collection replaces its members: what the setter appends to is emptied
+        // first (in the batch's effective graph), then the new members go in, in the order given.
+        if expand_collection {
+            for setter_cmd in setter {
+                if !commands
+                    .iter()
+                    .any(|c: &Command| c.predicate == setter_cmd.predicate)
+                {
+                    commands.push(Command {
+                        target: Some("*".to_string()),
+                        local: None,
+                        action: Action::RemoveLink,
+                        ..setter_cmd.clone()
+                    });
+                }
+            }
+        }
         for element in &elements {
             let target_value = self
                 .resolve_property_value(class_name, prop, element, context)
@@ -7123,6 +7145,12 @@ impl PerspectiveInstance {
     /// waiting on the next `create_batch` sweep to prune it.
     pub async fn discard_batch(&self, batch_uuid: &str) -> bool {
         self.batch_store.write().await.remove(batch_uuid).is_some()
+    }
+
+    /// How many batches are open.
+    #[cfg(test)]
+    pub(crate) async fn open_batch_count(&self) -> usize {
+        self.batch_store.read().await.len()
     }
 
     pub async fn commit_batch(
@@ -8754,8 +8782,8 @@ mod tests {
             meta_links[0].data.target,
         );
 
-        // update_subject appends further collection elements through the
-        // same expansion.
+        // update_subject replaces the collection: the derived setter removes the
+        // old members, then adds each new element as its own link.
         perspective
             .update_subject_raw(
                 SubjectClassOption {
@@ -8770,10 +8798,13 @@ mod tests {
             .await
             .expect("update_subject");
         let tag_links = perspective.get_links(&links_for("t://tag")).await.unwrap();
+        let mut tag_targets: Vec<String> =
+            tag_links.iter().map(|l| l.data.target.clone()).collect();
+        tag_targets.sort();
         assert_eq!(
-            tag_links.len(),
-            4,
-            "update_subject must append each array element as its own link",
+            tag_targets,
+            vec![lit("c"), lit("d")],
+            "update_subject must replace the members, one link per new element",
         );
     }
 

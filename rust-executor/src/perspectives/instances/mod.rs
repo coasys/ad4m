@@ -112,6 +112,12 @@ impl<'a> PropView<'a> {
         self.prop.is_required
     }
 
+    /// The constructor writes a value for this property on every create (its `initial`), so a
+    /// create that gives none still holds the link `required` asks for.
+    pub(crate) fn has_initial(&self) -> bool {
+        self.prop.initial_value.is_some()
+    }
+
     /// The language the value is stored through as an expression, when it is not a literal — a
     /// file property's file-storage language, say. Such a value is what the language takes, which
     /// need not be the declared datatype: a file is an object of its bytes and type.
@@ -488,6 +494,7 @@ async fn find_instance(
 async fn require_instance(
     perspective: &PerspectiveInstance,
     class_name: &str,
+    target_class: &str,
     base_uri: &str,
     pending: &Pending,
 ) -> Result<String, InstanceError> {
@@ -495,7 +502,7 @@ async fn require_instance(
         class_name: class_name.to_string(),
         base_uri: base_uri.to_string(),
     };
-    match pending.lookup(class_name, base_uri) {
+    match pending.lookup(target_class, base_uri) {
         Some(true) => return Ok(base_uri.to_string()),
         Some(false) => return Err(not_found()),
         None => {}
@@ -516,16 +523,26 @@ async fn require_instance(
 /// in it as gone. Empty for a single write.
 #[derive(Default)]
 pub(crate) struct Pending {
-    /// Instances this call created: id to the class's canonical name.
-    created: std::collections::HashMap<String, String>,
+    /// Instances this call created: id to every class it gave the id, as the shape's
+    /// `target_class` (what names a class however the op spelled it) and the key the class was
+    /// resolved under.
+    created: std::collections::HashMap<String, Vec<(String, String)>>,
     /// Ids this call removed.
     removed: std::collections::HashSet<String>,
+    /// A string property takes a JSON object whole (an object-typed field of an SDK model is
+    /// stored so). Set by `perspective.mutate`, the SDK's call; the MCP tools, whose callers
+    /// write prose for a string property, refuse an object.
+    pub(crate) json_objects: bool,
 }
 
 impl Pending {
-    pub(crate) fn created(&mut self, class_name: &str, id: &str) {
+    /// `id` was created as the class `target_class`, resolved under the key `class_name`.
+    pub(crate) fn created(&mut self, target_class: &str, class_name: &str, id: &str) {
         self.removed.remove(id);
-        self.created.insert(id.to_string(), class_name.to_string());
+        let classes = self.created.entry(id.to_string()).or_default();
+        if !classes.iter().any(|(target, _)| target == target_class) {
+            classes.push((target_class.to_string(), class_name.to_string()));
+        }
     }
 
     pub(crate) fn removed(&mut self, id: &str) {
@@ -533,35 +550,37 @@ impl Pending {
         self.removed.insert(id.to_string());
     }
 
-    /// The class this call created `id` as, if it did and has not removed it since.
-    pub(crate) fn created_class(&self, id: &str) -> Option<&str> {
-        self.created.get(id).map(String::as_str)
+    /// The keys of the classes this call created `id` as, if it did and has not removed it since.
+    pub(crate) fn created_classes(&self, id: &str) -> Vec<&str> {
+        self.created
+            .get(id)
+            .map(|classes| classes.iter().map(|(_, name)| name.as_str()).collect())
+            .unwrap_or_default()
     }
 
-    /// Whether `id` exists as `class_name` as far as this call knows: `Some(true)` when the call
-    /// created it as that class, `Some(false)` when it removed it or created it as another class,
-    /// `None` when the call has not touched it (the committed store decides).
-    pub(crate) fn lookup(&self, class_name: &str, id: &str) -> Option<bool> {
+    /// Whether `id` exists as the class `target_class` (the shape's own, whatever name the op
+    /// used) as far as this call knows: `Some(true)` when the call created it as that class,
+    /// `Some(false)` when it removed it or created it only as other classes, `None` when the call
+    /// has not touched it (the committed store decides).
+    pub(crate) fn lookup(&self, target_class: &str, id: &str) -> Option<bool> {
         if self.removed.contains(id) {
             return Some(false);
         }
-        self.created.get(id).map(|created| created == class_name)
+        self.created
+            .get(id)
+            .map(|classes| classes.iter().any(|(target, _)| target == target_class))
     }
 }
 
-/// Whether the SDNA declares a setter for `prop` on `class_uri`. `create_subject_raw` /
-/// `update_subject_raw` silently skip properties without one (they only log), so the check has to
-/// happen here for the write to be honest about what it did.
+/// Whether the SDNA declares a way to set `prop` on `class_uri`: a setter, or, for a relation or
+/// collection, an adder that only appends links (what the relation decorators declare).
+/// `create_subject_raw` / `update_subject_raw` silently skip properties without one (they only
+/// log), so the check has to happen here for the write to be honest about what it did.
 async fn has_setter(perspective: &PerspectiveInstance, class_uri: &str, prop: &str) -> bool {
-    let prop_shape_uri = format!("{class_uri}.{prop}");
     perspective
-        .get_links(&LinkQuery {
-            source: Some(prop_shape_uri),
-            predicate: Some("ad4m://setter".to_string()),
-            ..Default::default()
-        })
+        .get_property_setter_actions(class_uri, prop)
         .await
-        .map(|links| !links.is_empty())
+        .map(|actions| actions.is_some())
         .unwrap_or(false)
 }
 

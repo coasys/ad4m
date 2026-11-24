@@ -4053,6 +4053,19 @@ describe("relation cardinality in mutate ops", () => {
     ]);
   });
 
+  it("addOwner on a HasOne is a set of one id; removeOwner stays a remove; a HasMany add stays an add", async () => {
+    const perspective = makePerspective();
+    const holder = new CardHolder(perspective, "card://h1");
+    await (holder as any).addOwner(new CardTarget(perspective, "card://a"), "b");
+    await (holder as any).removeOwner("card://a", "b");
+    await (holder as any).addTags("card://t1", "b");
+    expect(ops(perspective)).toEqual([
+      { op: "update", class: "card://CardHolder", id: "card://h1", set: { owner: "card://a" } },
+      { op: "update", class: "card://CardHolder", id: "card://h1", remove: { owner: ["card://a"] } },
+      { op: "update", class: "card://CardHolder", id: "card://h1", add: { tags: ["card://t1"] } },
+    ]);
+  });
+
   it("an update keeps an array for a HasMany, empty included", async () => {
     const perspective = makePerspective();
     const holder = new CardHolder(perspective, "card://h1");
@@ -4102,6 +4115,31 @@ describe("save() create path and its own batch", () => {
     );
     expect(perspective.createBatch).not.toHaveBeenCalled();
     expect(perspective.commitBatch).not.toHaveBeenCalled();
+  });
+
+  it("a field changed while a batched save is pending stays dirty: the snapshot holds what was sent", async () => {
+    @Model({ name: "PendingCard" })
+    class PendingCard extends Ad4mModel {
+      @Property({ through: "pc://title" })
+      title: string = "";
+    }
+    let release!: () => void;
+    const perspective = {
+      uuid: "p",
+      mutate: jest.fn(() => new Promise<{ ids: string[] }>((resolve) => { release = () => resolve({ ids: [] }); })),
+    } as any;
+    const card = new PendingCard(perspective, "pc://c1");
+    card.title = "one";
+    const saving = card.save("raw-batch");
+    card.title = "two";
+    release();
+    await saving;
+    perspective.mutate.mockImplementation(async () => ({ ids: [] }));
+    await card.save("raw-batch");
+    expect(perspective.mutate).toHaveBeenLastCalledWith(
+      [{ op: "update", class: "pc://PendingCard", id: "pc://c1", set: { title: "two" } }],
+      { batch: "raw-batch" },
+    );
   });
 
   it("rethrows the executor's refusal and writes no snapshot when the create fails", async () => {
@@ -4180,6 +4218,24 @@ describe("save() create path and its own batch", () => {
     );
     expect(perspective.createBatch).not.toHaveBeenCalled();
     expect(perspective.add).not.toHaveBeenCalled();
+  });
+
+  it("create() goes through save(), the one entry a write check wraps, and the parent still reaches the one create op", async () => {
+    const perspective = { uuid: "p", mutate: jest.fn(async () => ({ ids: [] })), modelQuery: jest.fn() } as any;
+    const save = jest.spyOn(Ad4mModel.prototype, "save");
+    try {
+      await SaveBatchCard.create(perspective, {}, { parent: { id: "sb://parent", predicate: "sb://child" } });
+      expect(save).toHaveBeenCalledTimes(1);
+      // Without a batch the create has no read of its own.
+      expect(perspective.modelQuery).not.toHaveBeenCalled();
+      expect(perspective.mutate).toHaveBeenCalledTimes(1);
+      expect(perspective.mutate).toHaveBeenCalledWith(
+        [expect.objectContaining({ op: "create", parent: { id: "sb://parent", predicate: "sb://child" } })],
+        {},
+      );
+    } finally {
+      save.mockRestore();
+    }
   });
 
   it("create() with a parent rethrows the executor's refusal", async () => {

@@ -9,18 +9,21 @@
 //!   their own that is committed at the end and discarded on failure. With a caller's `batch`
 //!   they stage into a private copy of it, merged into the caller's batch in one step when the
 //!   call succeeds and dropped when it fails; nothing is committed. A caller's batch that is
-//!   gone by the merge (committed or discarded meanwhile) fails the call.
+//!   gone by the merge (committed or discarded meanwhile) fails the call, and so does one that
+//!   changed since the copy (a raw add, a raw update, another call's merge): the copy's result
+//!   may no longer follow from it, so nothing is merged (`BatchConflict`, retryable).
 //! - An update op writes its `set` properties, then its `remove` items, then its `add` items.
 
 use super::write::{
     add_to_collection_with, create_with, remove_from_collection_with, remove_with, update_with,
 };
 use super::{
-    instance_uri, link_target, InstanceAddToCollection, InstanceCreate, InstanceError,
-    InstanceRemove, InstanceRemoveFromCollection, InstanceUpdate, Pending, WriteStep,
+    class_properties, find_property, instance_uri, link_target, resolve_class,
+    InstanceAddToCollection, InstanceCreate, InstanceError, InstanceRemove,
+    InstanceRemoveFromCollection, InstanceUpdate, Pending, WriteStep,
 };
 use crate::agent::AgentContext;
-use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::perspectives::perspective_instance::{MergeOutcome, PerspectiveInstance};
 use crate::types::{Link, LinkStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -166,15 +169,22 @@ pub(crate) async fn mutate(
             let Some((private, base)) = perspective.fork_batch(&batch_id).await else {
                 return Err(call_error(InstanceError::BatchNotFound { batch_id }));
             };
+            let guard = DropDiscard::new(perspective, &private);
             match run_ops(perspective, agent, ops, &private).await {
                 Ok(done) => {
-                    if perspective.merge_batch(&batch_id, &private, base).await {
-                        Ok(done)
-                    } else {
-                        Err(call_error(InstanceError::BatchNotFound { batch_id }))
+                    guard.disarm();
+                    match perspective.merge_batch(&batch_id, &private, base).await {
+                        MergeOutcome::Merged => Ok(done),
+                        MergeOutcome::Gone => {
+                            Err(call_error(InstanceError::BatchNotFound { batch_id }))
+                        }
+                        MergeOutcome::Conflict => {
+                            Err(call_error(InstanceError::BatchConflict { batch_id }))
+                        }
                     }
                 }
                 Err(error) => {
+                    guard.disarm();
                     perspective.discard_batch(&private).await;
                     Err(error)
                 }
@@ -182,8 +192,10 @@ pub(crate) async fn mutate(
         }
         None => {
             let batch_id = perspective.create_batch().await;
+            let guard = DropDiscard::new(perspective, &batch_id);
             match run_ops(perspective, agent, ops, &batch_id).await {
                 Ok(done) => {
+                    guard.disarm();
                     let class_name = done.first().map(|m| m.class_name.clone());
                     perspective
                         .commit_batch(batch_id, agent)
@@ -198,10 +210,50 @@ pub(crate) async fn mutate(
                     Ok(done)
                 }
                 Err(error) => {
+                    guard.disarm();
                     perspective.discard_batch(&batch_id).await;
                     Err(error)
                 }
             }
+        }
+    }
+}
+
+/// Discards a batch when it is dropped still armed: a call the client cancels drops the
+/// handler's future between two awaits, and the private batch it worked in must not stay
+/// open (the caller's own batch is untouched until the merge, so nothing else needs undoing).
+struct DropDiscard {
+    perspective: PerspectiveInstance,
+    batch_id: String,
+    armed: bool,
+}
+
+impl DropDiscard {
+    fn new(perspective: &PerspectiveInstance, batch_id: &str) -> Self {
+        DropDiscard {
+            perspective: perspective.clone(),
+            batch_id: batch_id.to_string(),
+            armed: true,
+        }
+    }
+
+    /// The call ends the batch itself from here on.
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for DropDiscard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let perspective = self.perspective.clone();
+        let batch_id = std::mem::take(&mut self.batch_id);
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                perspective.discard_batch(&batch_id).await;
+            });
         }
     }
 }
@@ -212,7 +264,10 @@ async fn run_ops(
     ops: Vec<MutateOp>,
     batch_id: &str,
 ) -> Result<Vec<Mutated>, MutateError> {
-    let mut pending = Pending::default();
+    let mut pending = Pending {
+        json_objects: true,
+        ..Pending::default()
+    };
     let mut done = Vec::with_capacity(ops.len());
     for (index, op) in ops.into_iter().enumerate() {
         let mutated = run_op(perspective, agent, op, batch_id, &mut pending)
@@ -245,8 +300,31 @@ fn parent_class(
     pending: &Pending,
 ) -> Result<String, InstanceError> {
     let parent_id = instance_uri("parent", id)?;
-    if let Some(class) = pending.created_class(&parent_id) {
-        return Ok(class.to_string());
+    // An instance this call created, as one class or several: the one that declares the
+    // relation (the only one, when it is only one).
+    let created = pending.created_classes(&parent_id);
+    if !created.is_empty() {
+        let declaring: Vec<&str> = created
+            .iter()
+            .copied()
+            .filter(|class| {
+                perspective.get_shape(class).is_ok_and(|shape| {
+                    class_properties(&shape)
+                        .iter()
+                        .any(|info| info.name() == relation)
+                })
+            })
+            .collect();
+        match (declaring.as_slice(), created.as_slice()) {
+            ([class], _) | ([], [class]) => return Ok(class.to_string()),
+            _ => {
+                return Err(InstanceError::ParentClassUnresolved {
+                    parent: id.to_string(),
+                    relation: relation.to_string(),
+                    candidates: declaring.iter().map(|c| c.to_string()).collect(),
+                })
+            }
+        }
     }
     let parent = link_target(&parent_id);
     let mut candidates = perspective
@@ -330,7 +408,8 @@ async fn run_op(
             )
             .await?;
             // The new instance is known to the parent writes below.
-            pending.created(&created.class_name, &created.base_uri);
+            let (_, shape) = resolve_class(perspective, &created.class_name).await?;
+            pending.created(&shape.target_class, &created.class_name, &created.base_uri);
             match parent {
                 Some(ParentRef::Relation {
                     id,
@@ -341,19 +420,41 @@ async fn run_op(
                         Some(model) => model,
                         None => parent_class(perspective, &id, &relation, pending)?,
                     };
-                    add_to_collection_with(
-                        perspective,
-                        agent,
-                        InstanceAddToCollection {
-                            class_name: model,
-                            base_uri: id,
-                            collection: relation,
-                            item_uri: created.base_uri.clone(),
-                            batch_id: batch,
-                        },
-                        pending,
-                    )
-                    .await?;
+                    // A single-valued relation (`@HasOne`) has one member: the child is what
+                    // it points at now, a `set`, not an addition to a collection.
+                    let (_, parent_shape) = resolve_class(perspective, &model).await?;
+                    let single = find_property(&class_properties(&parent_shape), &relation)
+                        .is_some_and(|info| info.relation().is_some() && !info.collection());
+                    if single {
+                        let mut properties = Map::new();
+                        properties.insert(relation, Value::String(created.base_uri.clone()));
+                        update_with(
+                            perspective,
+                            agent,
+                            InstanceUpdate {
+                                class_name: model,
+                                base_uri: id,
+                                properties,
+                                batch_id: batch,
+                            },
+                            pending,
+                        )
+                        .await?;
+                    } else {
+                        add_to_collection_with(
+                            perspective,
+                            agent,
+                            InstanceAddToCollection {
+                                class_name: model,
+                                base_uri: id,
+                                collection: relation,
+                                item_uri: created.base_uri.clone(),
+                                batch_id: batch,
+                            },
+                            pending,
+                        )
+                        .await?;
+                    }
                 }
                 Some(ParentRef::Predicate { id, predicate }) => {
                     let parent_uri = instance_uri("parent", &id)?;

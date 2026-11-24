@@ -234,7 +234,7 @@ impl Ad4mMcpHandler {
     }
     /// Write what a tool answered with through the class's setters, every property in one batch,
     /// committed only if the store still holds `expected`.
-    async fn write_record(
+    pub(super) async fn write_record(
         &self,
         perspective_id: &str,
         class_name: &str,
@@ -259,7 +259,16 @@ impl Ad4mMcpHandler {
         };
         let validated =
             validate_properties(&shape, &properties, WriteMode::Update).map_err(&refused)?;
-        let missing = check_setters(&perspective, &shape, &validated.scalars).await;
+        // The combined map `instances::update_with` builds: values, `null` for a property to
+        // clear, an array for the members a collection is set to.
+        let mut values = validated.scalars.clone();
+        for name in &validated.clears {
+            values.insert(name.clone(), Value::Null);
+        }
+        for (name, items) in &validated.collections {
+            values.insert(name.clone(), Value::Array(items.clone()));
+        }
+        let missing = check_setters(&perspective, &shape, &values).await;
         if !missing.is_empty() {
             return Err(refused(missing).into());
         }
@@ -269,7 +278,7 @@ impl Ad4mMcpHandler {
             .update_subject_raw(
                 subject_class(&class_name),
                 base_uri.to_string(),
-                Value::Object(validated.scalars),
+                Value::Object(values),
                 Some(batch_id.clone()),
                 &agent_context,
             )
@@ -290,7 +299,7 @@ impl Ad4mMcpHandler {
 }
 
 /// Why [`Ad4mMcpHandler::write_record`] wrote nothing.
-enum WriteError {
+pub(super) enum WriteError {
     /// The record changed after the tool's last read of it.
     Changed,
     Refused(String),

@@ -243,6 +243,9 @@ pub(super) fn common_error(error: &InstanceError) -> Option<String> {
         InstanceError::BatchNotFound { batch_id } => {
             error_json(format!("No open batch '{batch_id}' — nothing was written."))
         }
+        InstanceError::BatchConflict { batch_id } => error_json(format!(
+            "Batch '{batch_id}' was written to meanwhile — nothing was written; try again."
+        )),
         _ => return None,
     })
 }

@@ -28,14 +28,16 @@
 //! (`item`).
 //!
 //! `returns: { kind: "rows" }` also returns each created or updated instance as a read shows it
-//! after the commit; it needs a call without `batch`.
+//! after the commit; it needs a call without `batch`, and, as a read of the instances, the
+//! caller's `perspective:READ` on the perspective too (`Guard::perspective` with
+//! `perspective_query_capability`, checked before anything is written).
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use ts_rs::TS;
 
-use crate::agent::capabilities::perspective_update_capability;
+use crate::agent::capabilities::{perspective_query_capability, perspective_update_capability};
 use crate::perspectives::instances::{
     self, fetch_instance, InstanceError, MutateError, MutateOp, PerspectiveMutateResult, Returns,
     ValidationProblem,
@@ -146,6 +148,13 @@ pub(crate) fn instance_error(error: InstanceError) -> WsRpcError {
             format!("No {class_name} instance found at '{base_uri}'"),
         ),
         InstanceError::BatchNotFound { batch_id } => (404, format!("No open batch '{batch_id}'")),
+        InstanceError::BatchConflict { batch_id } => (
+            409,
+            format!(
+                "Batch '{batch_id}' was written to while this call ran; nothing was written. \
+                 Send the call again"
+            ),
+        ),
         InstanceError::AlreadyExists {
             class_name,
             base_uri,
@@ -210,6 +219,12 @@ async fn mutate(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcE
         Some(Returns::Rows { properties }) => Some(properties.clone()),
         _ => None,
     };
+    // The rows are instance data the call reads back: the guard of the methods that read.
+    if rows.is_some() {
+        Guard::perspective(perspective_query_capability)
+            .admit("perspective.mutate", &params, &ctx)
+            .await?;
+    }
     if rows.is_some() && body.batch.is_some() {
         return Err(WsRpcError::bad_request(
             "returns rows needs a call without batch: a caller's batch is not committed yet",

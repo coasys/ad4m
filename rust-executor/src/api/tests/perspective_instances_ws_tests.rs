@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 
 use super::multi_user::{expect_code, Executor, RegisteredPerspective};
 use super::support::{admin_ctx, registered_perspective};
-use crate::agent::capabilities::perspective_query_capability;
+use crate::agent::capabilities::{perspective_query_capability, perspective_update_capability};
 use crate::api::ws_handler::{build_handler_map, HandlerMap, WsRpcError};
 use crate::types::{LinkQuery, RequestContext};
 use std::sync::Arc;
@@ -911,10 +911,90 @@ async fn returns_rows_reads_back_each_created_and_updated_instance() {
     assert!(rows[2].is_null(), "a delete has no row: {rows:?}");
 }
 
+/// An update that survives the call returns its instance as a read shows it, with the values it
+/// wrote and the ones it left; an update of one instance twice returns it twice.
+#[tokio::test(flavor = "multi_thread")]
+async fn returns_rows_gives_a_surviving_update_its_row() {
+    let world = World::new().await;
+    let existing = world.create(json!({ "title": "old", "rank": 2 })).await;
+    let done = world
+        .ok(
+            "perspective.mutate",
+            json!({
+                "ops": [
+                    update_op(&existing, json!({ "set": { "title": "newer" } })),
+                    update_op(&existing, json!({ "set": { "rank": 5 } })),
+                ],
+                "returns": { "kind": "rows" },
+            }),
+        )
+        .await;
+    assert_eq!(done["ids"], json!([existing, existing]));
+    let rows = done["rows"].as_array().expect("rows");
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        assert_eq!(row["id"], json!(existing), "{rows:?}");
+        assert_eq!(row["title"], "newer", "{rows:?}");
+        assert_eq!(row["rank"], 5, "the row is read after the commit: {rows:?}");
+    }
+}
+
+/// `returns: rows` reads instance data, so the caller needs `perspective:READ` as well as
+/// UPDATE; without it the call is refused before anything is written. The same call without
+/// `returns` stays an update.
+#[tokio::test(flavor = "multi_thread")]
+async fn returns_rows_needs_the_read_capability() {
+    let world = World::new().await;
+    let before = world.link_count().await;
+    let writer = Arc::new(RequestContext::app_for_test(vec![
+        perspective_update_capability(vec!["*".to_string()]),
+    ]));
+    let call = |returns: Value| {
+        let mut params = json!({
+            "uuid": world.uuid,
+            "ops": [create_op_at("ad4m://task/rows", json!({ "title": "t" }))],
+        });
+        if !returns.is_null() {
+            params["returns"] = returns;
+        }
+        world
+            .handlers
+            .dispatch("perspective.mutate", params, writer.clone())
+    };
+
+    let refused = call(json!({ "kind": "rows" })).await;
+    expect_code(refused, 403, "perspective.mutate with rows");
+    assert_eq!(world.link_count().await, before, "the refused call wrote");
+
+    call(Value::Null)
+        .await
+        .unwrap_or_else(|e| panic!("a write without rows needs no read: {}", e.message));
+    assert!(world.task("ad4m://task/rows").await.is_some());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn returns_rows_with_a_batch_is_refused() {
     let world = World::new().await;
+    // What one staged Task adds, measured by writing a reference outside any batch.
+    let start = world.link_count().await;
+    world
+        .mutate_ok(vec![create_op_at(
+            "ad4m://task/ref",
+            json!({ "title": "ref" }),
+        )])
+        .await;
+    let one_task = world.link_count().await - start;
     let batch = world.create_batch().await;
+    world
+        .mutate_in(
+            &batch,
+            vec![create_op_at(
+                "ad4m://task/staged",
+                json!({ "title": "staged" }),
+            )],
+        )
+        .await
+        .expect("the first call stages");
     let error = world
         .call(
             "perspective.mutate",
@@ -927,6 +1007,19 @@ async fn returns_rows_with_a_batch_is_refused() {
         .await
         .expect_err("a caller's batch is not committed yet");
     assert_eq!(error.code, 400, "{}", error.message);
+
+    // The refused call touched nothing: the batch holds what the first call staged, and the
+    // refused call's op is not in it.
+    world.commit(&batch).await;
+    assert_eq!(
+        world.task("ad4m://task/staged").await.unwrap()["title"],
+        "staged"
+    );
+    assert_eq!(
+        world.link_count().await,
+        start + 2 * one_task,
+        "the refused call left an op in the batch"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

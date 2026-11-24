@@ -861,13 +861,13 @@ export default function perspectiveTests(testContext: TestContext) {
 
                     // Nothing changed before the commit.
                     let keep = await instanceLinks(perspective, "test://keep");
-                    expect(keep.map((l) => l.data.target)).to.deep.equal([Literal.from("old").toUrl()]);
+                    expect(keep.map((l) => Literal.fromUrl(l.data.target).get())).to.deep.equal(["old"]);
                     expect(await instanceLinks(perspective, "test://drop")).to.have.length(1);
 
                     await perspective.commitBatch(batchId);
 
                     keep = await instanceLinks(perspective, "test://keep");
-                    expect(keep.map((l) => l.data.target)).to.deep.equal([Literal.from("new").toUrl()]);
+                    expect(keep.map((l) => Literal.fromUrl(l.data.target).get())).to.deep.equal(["new"]);
                     expect(await instanceLinks(perspective, "test://drop")).to.have.length(0);
                 });
             });

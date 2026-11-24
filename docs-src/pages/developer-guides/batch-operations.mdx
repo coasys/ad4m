@@ -161,13 +161,21 @@ try {
 }
 ```
 
-**A failed call does not roll back the batch.** The staged writes of every call that
-succeeded stay in the open batch — and the failed call itself may have staged part of its
+**A failed raw call does not roll back the batch.** The staged writes of every raw link call
+that succeeded stay in the open batch — and a failed raw call may have staged part of its
 work before it erred. Discard the batch with `perspective.discardBatch(batchId)`; committing
-it to keep the successful calls also commits whatever the failed call left behind. (The
-`perspective.mutate` validated writes stage nothing for a *refused* call — a 422 shape
-violation is detected before any link is written — but a failure that is not a refusal, like
-a store error mid-write, can still leave a partial write staged.)
+it to keep the successful calls also commits whatever the failed call left behind.
+
+**A failed `perspective.mutate` call leaves the batch as it was**, whatever the failure (a
+refused op, a store error mid-write, a dropped connection). The call works in a private copy
+of the batch and merges it back only when every op succeeded. Earlier successful calls stay
+staged.
+
+**A batch that changed under a `perspective.mutate` call refuses the call.** If a raw call,
+another `mutate` call or a commit changes the batch while the call runs, the merge is refused
+and nothing of the call is staged: `409 batchConflict` (retryable: read again and repeat the
+call) when the batch changed, `batchNotFound` when it was committed or discarded. Calls into
+one batch should therefore not run at the same time.
 
 **Ops of one `perspective.mutate` call see each other.** An update, delete or collection
 edit op finds an instance an earlier op of the same call created. A separate call that

@@ -48,45 +48,27 @@ pub(crate) struct BatchSnapshot {
     updates: Vec<(LinkExpression, LinkExpression)>,
 }
 
-/// What `now` has changed against `base`, by `key`, counting copies: `(dropped, added)`.
-fn changes<T: Clone, K: std::hash::Hash + Eq>(
-    base: &[T],
-    now: &[T],
-    key: impl Fn(&T) -> K,
-) -> (Vec<T>, Vec<T>) {
-    let mut counts: HashMap<K, usize> = HashMap::new();
-    for item in base {
-        *counts.entry(key(item)).or_default() += 1;
-    }
-    let mut added = Vec::new();
-    for item in now {
-        match counts.get_mut(&key(item)) {
-            Some(n) if *n > 0 => *n -= 1,
-            _ => added.push(item.clone()),
-        }
-    }
-    let mut counts: HashMap<K, usize> = HashMap::new();
-    for item in now {
-        *counts.entry(key(item)).or_default() += 1;
-    }
-    let mut dropped = Vec::new();
-    for item in base {
-        match counts.get_mut(&key(item)) {
-            Some(n) if *n > 0 => *n -= 1,
-            _ => dropped.push(item.clone()),
-        }
-    }
-    (dropped, added)
+/// How [`PerspectiveInstance::merge_batch`] ended.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MergeOutcome {
+    /// The fork's work is now the target's.
+    Merged,
+    /// The target batch is gone (committed, discarded or swept).
+    Gone,
+    /// The target batch changed since the fork: nothing was merged.
+    Conflict,
 }
 
-/// Take `dropped` out of `target` (one copy each, by `key`) and append `added`.
-fn apply<T, K: Eq>(target: &mut Vec<T>, dropped: &[T], added: Vec<T>, key: impl Fn(&T) -> K) {
-    for item in dropped {
-        if let Some(at) = target.iter().position(|t| key(t) == key(item)) {
-            target.remove(at);
-        }
+/// Whether `now` holds the same items as `base`, by `key`, counting copies.
+fn same_items<T, K: std::hash::Hash + Eq>(base: &[T], now: &[T], key: impl Fn(&T) -> K) -> bool {
+    let mut counts: HashMap<K, isize> = HashMap::new();
+    for item in base {
+        *counts.entry(key(item)).or_default() += 1;
     }
-    target.extend(added);
+    for item in now {
+        *counts.entry(key(item)).or_default() -= 1;
+    }
+    counts.values().all(|n| *n == 0)
 }
 
 impl EffectiveLink {
@@ -193,27 +175,37 @@ impl PerspectiveInstance {
     }
 
     /// Merge what the private batch `fork_id` staged since `base` into `into`, and drop the
-    /// private batch: one step under the batch store's lock, so what else was staged into (or
-    /// committed from) `into` meanwhile is neither overwritten nor published half. `false` when
-    /// `into` is gone (committed, discarded or swept): nothing is merged.
-    pub(crate) async fn merge_batch(&self, into: &str, fork_id: &str, base: BatchSnapshot) -> bool {
+    /// private batch: one step under the batch store's lock. The merge is conditional: when
+    /// `into` is not exactly `base` any more (its additions, removals or updates changed since
+    /// the fork), the fork's result may no longer follow from it (two calls replacing the same
+    /// single-valued relation, a raw update of a link the fork replaced), so nothing is merged
+    /// and the fork is dropped.
+    pub(crate) async fn merge_batch(
+        &self,
+        into: &str,
+        fork_id: &str,
+        base: BatchSnapshot,
+    ) -> MergeOutcome {
         let mut batches = self.batch_store.write().await;
         let Some(fork) = batches.remove(fork_id) else {
-            return false;
+            return MergeOutcome::Gone;
         };
         let Some(target) = batches.get_mut(into) else {
-            return false;
+            return MergeOutcome::Gone;
         };
-        let (dropped, added) = changes(&base.diff.additions, &fork.diff.additions, link_identity);
-        apply(&mut target.diff.additions, &dropped, added, link_identity);
-        let (dropped, added) = changes(&base.diff.removals, &fork.diff.removals, link_identity);
-        apply(&mut target.diff.removals, &dropped, added, link_identity);
         let pair = |(old, new): &(LinkExpression, LinkExpression)| {
             (link_identity(old), link_identity(new))
         };
-        let (dropped, added) = changes(&base.updates, &fork.updates, pair);
-        apply(&mut target.updates, &dropped, added, pair);
-        true
+        if !(same_items(&base.diff.additions, &target.diff.additions, link_identity)
+            && same_items(&base.diff.removals, &target.diff.removals, link_identity)
+            && same_items(&base.updates, &target.updates, pair))
+        {
+            return MergeOutcome::Conflict;
+        }
+        // The target is `base`: the fork's staged work replaces it.
+        target.diff = fork.diff;
+        target.updates = fork.updates;
+        MergeOutcome::Merged
     }
 
     /// Drop the staged additions that are `link` (by `link_identity`), returning whether any
