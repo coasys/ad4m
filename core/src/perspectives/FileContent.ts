@@ -22,23 +22,26 @@ import { Model, Property } from "../model/decorators";
  *
  * The waker lists the files a mentioned record holds through it
  * (`MentionMessage.attachments`).
+ *
+ * Its own predicates are W3C terms: `rdfs:label` for the name, and DCAT's
+ * `dcat:mediaType`, `dcat:byteSize` and `dcat:downloadURL`.
  */
-@Model({ name: "FileContent", abstract: true })
+@Model({ name: "FileContent", namespace: "ad4m://", abstract: true })
 export class FileContent extends Ad4mModel {
   /** The URI the executor reads it by. */
   static readonly builtinUri = "ad4m://FileContent";
 
-  @Property({ through: "ad4m://file_name" })
+  @Property({ through: "http://www.w3.org/2000/01/rdf-schema#label" })
   name: string = "";
 
-  @Property({ through: "ad4m://file_mime_type" })
+  @Property({ through: "http://www.w3.org/ns/dcat#mediaType" })
   mimeType: string = "";
 
   /** Bytes. */
-  @Property({ through: "ad4m://file_size" })
+  @Property({ through: "http://www.w3.org/ns/dcat#byteSize" })
   size: number = 0;
 
   /** The address of the stored bytes. */
-  @Property({ through: "ad4m://file_url" })
+  @Property({ through: "http://www.w3.org/ns/dcat#downloadURL" })
   url: string = "";
 }

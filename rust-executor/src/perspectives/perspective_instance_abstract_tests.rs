@@ -1139,7 +1139,7 @@ async fn a_required_property_refuses_to_clear() {
 }
 
 /// An app's file record, shaped like WE's `FileBlock`: its own predicates,
-/// none of them `ad4m://file_*`.
+/// none of them the built-in's own (`rdfs:label`, `dcat:*`).
 const FILE_BLOCK_SDNA: &str = r#"{
   "target_class":"we://FileBlock",
   "constructor_actions":[{"action":"addLink","source":"this","predicate":"we://type","target":"we://file_block"}],

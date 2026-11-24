@@ -3,9 +3,9 @@
   "abstract": true,
   "interpretation_hint": "A file: an attachment to a message, a post or a note. Its url is the address of the stored bytes.",
   "properties": [
-    {"path": "ad4m://file_name", "name": "name", "max_count": 1},
-    {"path": "ad4m://file_mime_type", "name": "mimeType", "max_count": 1},
-    {"path": "ad4m://file_size", "name": "size", "max_count": 1},
-    {"path": "ad4m://file_url", "name": "url", "max_count": 1}
+    {"path": "http://www.w3.org/2000/01/rdf-schema#label", "name": "name", "max_count": 1},
+    {"path": "http://www.w3.org/ns/dcat#mediaType", "name": "mimeType", "max_count": 1},
+    {"path": "http://www.w3.org/ns/dcat#byteSize", "name": "size", "max_count": 1},
+    {"path": "http://www.w3.org/ns/dcat#downloadURL", "name": "url", "max_count": 1}
   ]
 }
