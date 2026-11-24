@@ -1975,7 +1975,6 @@ describe("ad4mPlugin", () => {
     const neverResolves = vi.fn(() => new Promise(() => {}));
     vi.doMock("@coasys/ad4m", () => ({
       Ad4mClient: vi.fn(() => makeMockAd4mClient({ status: neverResolves })),
-      QuerySubscriptionProxy: vi.fn(),
     }));
 
     const mockApi = {
@@ -2383,17 +2382,11 @@ describe("ad4mPlugin", () => {
 
     // A connected waker whose executor accepted the socket but never answers
     // the subscribe RPC: the subscribe tools used to hang here with no trace.
+    const hanging = makeLiveClient({}, { querySparql: vi.fn() });
+    hanging.gate.text = hanging.gate.mentions = () => new Promise(() => {});
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: { querySparql: vi.fn() },
+      perspectiveClient: hanging.client,
       logger: makeMockLogger(),
-      QuerySubscriptionProxy: vi.fn(function () {
-        return {
-          initialized: Promise.resolve(),
-          subscribe: vi.fn(() => new Promise<void>(() => {})),
-          dispose: vi.fn(),
-          onResult: vi.fn(),
-        };
-      }),
       debounceMs: 10,
       subscribeTimeoutMs: 50,
       retryPendingMs: 60_000,
@@ -2411,7 +2404,7 @@ describe("ad4mPlugin", () => {
       });
       const text: string = result.content[0].text;
       expect(text).toMatch(
-        /^Error: Waker subscription mention-persp-uuid-1 failed: subscribe handshake timed out after 50ms/,
+        /^Error: Waker subscription mention-persp-uuid-1 failed: subscription opening timed out after 50ms/,
       );
       expect(text).toContain("re-attempting within 60s");
       expect(text).toContain("(waker executor: http://marvin.example:12200)");
@@ -2465,19 +2458,12 @@ describe("ad4mPlugin", () => {
       registerService: vi.fn(),
       registerCli: vi.fn(),
     });
-    const opened: any[][] = [];
+    const live = makeLiveClient({}, { modelQuery: vi.fn() });
+    // `[uuid, { className, queryJson }, options]` per live query opened.
+    const opened = live.client.subscribe.mock.calls;
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: { modelQuery: vi.fn() },
+      perspectiveClient: live.client,
       logger: makeMockLogger(),
-      QuerySubscriptionProxy: vi.fn(function (...args: any[]) {
-        opened.push(args);
-        return {
-          initialized: Promise.resolve(),
-          subscribe: vi.fn(() => Promise.resolve()),
-          dispose: vi.fn(),
-          onResult: vi.fn(),
-        };
-      }),
       onWake: () => {},
     });
     _setSubscriptionManagerForTests(manager);
@@ -2504,7 +2490,7 @@ describe("ad4mPlugin", () => {
       did: "did:key:zTest",
       subscription: { id: "mention-persp-uuid-1", perspective: "persp-uuid-1", query },
     });
-    expect(opened.map((args) => [args[0], args[1], args[3]])).toEqual([
+    expect(opened.map(([uuid, target]) => [uuid, target.queryJson, target.className])).toEqual([
       ["persp-uuid-1", query, "ad4m://TextContent"],
       ["persp-uuid-1", mentionQuery, "ad4m://Mentioning"],
     ]);
@@ -2534,8 +2520,8 @@ describe("ad4mPlugin", () => {
       subscription: { id: "mention-persp-uuid-1", perspective: "persp-uuid-1", query },
     };
     try {
-      // Not saved: the manager decides, from the text query's opening result.
-      expect((await subscribeToMentions(config)).active.map((s) => s.textHistoryRead)).toEqual([undefined]);
+      // Not saved: the manager decides, from the text query's opening result, which it read.
+      expect((await subscribeToMentions(config)).active.map((s) => s.textHistoryRead)).toEqual([true]);
       // Saved after its text query read its history: a mention found only through its text
       // while the waker was down still wakes after the restart.
       parkSubscription(
@@ -2609,21 +2595,12 @@ describe("ad4mPlugin", () => {
       registerCli: vi.fn(),
     });
 
-    let deliver: ((result: any) => void) | undefined;
-    const constructed: any[][] = [];
+    const live = makeLiveClient({}, { modelQuery: vi.fn() });
+    const constructed = live.client.subscribe.mock.calls;
     const wakes: any[] = [];
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: { modelQuery: vi.fn() },
+      perspectiveClient: live.client,
       logger: makeMockLogger(),
-      QuerySubscriptionProxy: vi.fn(function (...args: any[]) {
-        constructed.push(args);
-        return {
-          initialized: Promise.resolve(),
-          subscribe: vi.fn(() => Promise.resolve()),
-          dispose: vi.fn(),
-          onResult: vi.fn((cb: any) => { deliver = cb; }),
-        };
-      }),
       debounceMs: 10,
       onWake: (_sub, result) => { wakes.push(result); },
     });
@@ -2638,12 +2615,14 @@ describe("ad4mPlugin", () => {
       // No hard-coded child class.
       expect(asked[0].class_name).not.toBe("Message");
       // A model subscription over Container, not has_child SPARQL.
-      expect(constructed[0][1]).toBe(JSON.stringify({ where: { id: "we://call/1" }, properties: ["children"] }));
-      expect(constructed[0][3]).toBe("ad4m://Container");
+      expect(constructed[0][1]).toEqual({
+        className: "ad4m://Container",
+        queryJson: JSON.stringify({ where: { id: "we://call/1" }, properties: ["children"] }),
+      });
       expect(manager.getActive()[0].className).toBe("ad4m://Container");
 
       // A TextBlock (not a Message) lands under the call: it wakes.
-      deliver!({ instances: [{ id: "we://call/1", children: ["we://text-block/1"] }], totalCount: 1 });
+      live.deliver({ instances: [{ id: "we://call/1", children: ["we://text-block/1"] }], totalCount: 1 });
       await new Promise((r) => setTimeout(r, 50));
       expect(wakes).toHaveLength(1);
       expect(wakes[0].instances[0].children).toEqual(["we://text-block/1"]);
@@ -2695,17 +2674,11 @@ describe("ad4mPlugin", () => {
     };
     ad4mPlugin(mockApi);
 
+    const hanging = makeLiveClient({}, { querySparql: vi.fn() });
+    hanging.gate.text = hanging.gate.mentions = () => new Promise(() => {});
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: { querySparql: vi.fn() },
+      perspectiveClient: hanging.client,
       logger: makeMockLogger(),
-      QuerySubscriptionProxy: vi.fn(function () {
-        return {
-          initialized: Promise.resolve(),
-          subscribe: vi.fn(() => new Promise<void>(() => {})),
-          dispose: vi.fn(),
-          onResult: vi.fn(),
-        };
-      }),
       debounceMs: 10,
       subscribeTimeoutMs: 50,
       retryPendingMs: 60_000,
@@ -3911,49 +3884,69 @@ const OLD_AND_LINK_ONLY = {
   },
 };
 
+type LivePath = "text" | "mentions";
+
 /**
- * A QuerySubscriptionProxy stand-in that opens on `opening`: the text query on `opening.text`,
- * the mention query (over Mentioning) on `opening.mentions`.
+ * The executor client a waker's live queries run over (the real `LiveQuery` on top): each
+ * `perspective.subscribe` replies with a value, `opening.text` for the text query and
+ * `opening.mentions` for the mention query (over Mentioning), once its `gate` (when set) settles:
+ * a gate that rejects fails the opening, one that never settles hangs it. `deliver` sends the
+ * text query's subscription an update, `deliverMentions` the mention query's. `base` is the rest
+ * of the client (`modelQuery`, ...).
  */
-const proxyOpeningOn = (opening: { text?: unknown; mentions?: unknown }) =>
-  vi.fn(function (...args: unknown[]) {
-    return {
-      initialized: Promise.resolve(),
-      subscribe: vi.fn(() => Promise.resolve()),
-      dispose: vi.fn(),
-      onResult: vi.fn(),
-      result: args[3] === "ad4m://Mentioning" ? opening.mentions : opening.text,
-    };
-  });
+function makeLiveClient(
+  opening: { text?: unknown; mentions?: unknown } = {},
+  base: Record<string, unknown> = {},
+) {
+  const updates: ((update: any) => void)[] = [];
+  const gate: Partial<Record<LivePath, () => Promise<unknown>>> = {};
+  const signals: AbortSignal[] = [];
+  const ids: Record<LivePath, string> = { text: "", mentions: "" };
+  const revisions: Record<LivePath, number> = { text: 0, mentions: 0 };
+  let opened = 0;
+  const empty = { instances: [], totalCount: 0 };
+  const client = {
+    ...base,
+    subscribe: vi.fn(async (_uuid: string, target: any, options?: { signal?: AbortSignal }) => {
+      const path: LivePath = target.className === "ad4m://Mentioning" ? "mentions" : "text";
+      if (options?.signal) signals.push(options.signal);
+      const subscriptionId = `${path}-${++opened}`;
+      await gate[path]?.();
+      ids[path] = subscriptionId;
+      revisions[path] = 0;
+      return { subscriptionId, revision: 0, result: opening[path] ?? empty };
+    }),
+    onQueryUpdate: vi.fn((listener: (update: any) => void) => {
+      updates.push(listener);
+      return () => {};
+    }),
+    onReconnect: vi.fn(() => () => {}),
+    disposeQuerySubscription: vi.fn(() => Promise.resolve(true)),
+    resyncSubscription: vi.fn(() => Promise.resolve()),
+  };
+  const send = (path: LivePath, result: unknown) => {
+    const update = { subscriptionId: ids[path], revision: ++revisions[path], result };
+    for (const listener of updates) listener(update);
+  };
+  return {
+    client,
+    gate,
+    /** Hand the text query's subscription `result` as its next value. */
+    deliver: (result: unknown) => send("text", result),
+    deliverMentions: (result: unknown) => send("mentions", result),
+    /** Whether a live query was disposed or an opening cancelled. */
+    ended: () => client.disposeQuerySubscription.mock.calls.length > 0 || signals.some((s) => s.aborted),
+  };
+}
 
 describe("WakerSubscriptionManager", () => {
   /**
-   * Create a mock QuerySubscriptionProxy that lets tests control onResult delivery: `deliver`
-   * reaches the subscription's query. A mention subscription's mention query gets a proxy of its
-   * own, which delivers nothing.
+   * A live-query client that lets tests control openings and updates ({@link makeLiveClient}):
+   * `deliver` reaches the subscription's text query. A mention subscription's mention query
+   * opens on its own: whether it opens decides whether the subscription opens (#1735).
    */
-  function makeMockProxy() {
-    let resultCallback: ((result: any) => void) | null = null;
-    const proxy = {
-      initialized: Promise.resolve(),
-      subscribe: vi.fn(() => Promise.resolve()),
-      dispose: vi.fn(),
-      onResult: vi.fn((cb: (result: any) => void) => {
-        resultCallback = cb;
-      }),
-    };
-    const mentionProxy = { ...proxy, onResult: vi.fn() };
-    return {
-      ProxyClass: vi.fn(function (...args: unknown[]) { return args[3] === "ad4m://Mentioning" ? mentionProxy : proxy; }),
-      proxy,
-      /** The mention query's proxy: whether it opens decides whether the subscription opens (#1735). */
-      mentionProxy,
-      /** Simulate the subscription delivering a result */
-      deliver: (result: any) => {
-        if (!resultCallback) throw new Error("onResult not registered yet");
-        resultCallback(result);
-      },
-    };
+  function makeMockLive(base: Record<string, unknown> = mockPerspectiveClientSimple) {
+    return makeLiveClient({}, base);
   }
 
   const noopLogger = {
@@ -3968,16 +3961,15 @@ describe("WakerSubscriptionManager", () => {
   };
 
   it("should throw when the executor rejects the subscription, and not keep it active", async () => {
-    const mock = makeMockProxy();
-    mock.proxy.subscribe = mock.mentionProxy.subscribe = vi.fn(() =>
+    const mock = makeMockLive();
+    mock.gate.text = mock.gate.mentions = vi.fn(() =>
       Promise.reject(new Error("RPC error 403: main key not found")),
     );
     const persisted: { subs: any[] } = { subs: [{ placeholder: true }] };
 
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: mockPerspectiveClientSimple,
+      perspectiveClient: mock.client,
       logger: { ...noopLogger },
-      QuerySubscriptionProxy: mock.ProxyClass,
       debounceMs: 10,
       onWake: () => {},
       onPersist: (subs: any[]) => { persisted.subs = subs; },
@@ -3996,15 +3988,14 @@ describe("WakerSubscriptionManager", () => {
     expect(manager.has("mention-fail")).toBe(false);
     expect(manager.getActive()).toHaveLength(0);
     expect(persisted.subs).toHaveLength(0);
-    expect(mock.proxy.dispose).toHaveBeenCalled();
     // ...and it stays pending, because the caller asked to be enrolled
     expect(manager.getPending().map((s) => s.id)).toEqual(["mention-fail"]);
   });
 
   it("re-attempts a rejected subscription until the executor accepts it", async () => {
-    const mock = makeMockProxy();
+    const mock = makeMockLive();
     let attempt = 0;
-    mock.mentionProxy.subscribe = vi.fn(() => {
+    mock.gate.mentions = vi.fn(() => {
       attempt += 1;
       // Fails while the wallet is locked, succeeds once it is unlocked.
       return attempt === 1
@@ -4013,9 +4004,8 @@ describe("WakerSubscriptionManager", () => {
     });
 
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: mockPerspectiveClientSimple,
+      perspectiveClient: mock.client,
       logger: { ...noopLogger },
-      QuerySubscriptionProxy: mock.ProxyClass,
       debounceMs: 10,
       retryPendingMs: 20,
       onWake: () => {},
@@ -4041,15 +4031,14 @@ describe("WakerSubscriptionManager", () => {
   });
 
   it("stops re-attempting a subscription that was disposed", async () => {
-    const mock = makeMockProxy();
-    mock.proxy.subscribe = mock.mentionProxy.subscribe = vi.fn(() =>
+    const mock = makeMockLive();
+    mock.gate.text = mock.gate.mentions = vi.fn(() =>
       Promise.reject(new Error("RPC error 403: main key not found")),
     );
 
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: mockPerspectiveClientSimple,
+      perspectiveClient: mock.client,
       logger: { ...noopLogger },
-      QuerySubscriptionProxy: mock.ProxyClass,
       debounceMs: 10,
       retryPendingMs: 20,
       onWake: () => {},
@@ -4067,23 +4056,22 @@ describe("WakerSubscriptionManager", () => {
     manager.dispose("mention-gone");
     expect(manager.getPending()).toHaveLength(0);
 
-    const attemptsAfterDispose = mock.proxy.subscribe.mock.calls.length;
+    const attemptsAfterDispose = mock.client.subscribe.mock.calls.length;
     await manager.retryPending();
-    expect(mock.proxy.subscribe.mock.calls.length).toBe(attemptsAfterDispose);
+    expect(mock.client.subscribe.mock.calls.length).toBe(attemptsAfterDispose);
   });
 
   it("times out a subscribe handshake the executor never answers, and keeps it pending (#1016)", async () => {
-    const mock = makeMockProxy();
+    const mock = makeMockLive();
     // The executor accepted the socket but never replies to the subscribe
     // RPC. Nothing rejects, so before the deadline existed this await never
     // settled: the sub was neither active nor pending, the 30s re-attempt
     // never saw it, and the tool call died at the harness timeout instead.
-    mock.proxy.subscribe = mock.mentionProxy.subscribe = vi.fn(() => new Promise<void>(() => {}));
+    mock.gate.text = mock.gate.mentions = vi.fn(() => new Promise<void>(() => {}));
 
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: mockPerspectiveClientSimple,
+      perspectiveClient: mock.client,
       logger: { ...noopLogger },
-      QuerySubscriptionProxy: mock.ProxyClass,
       debounceMs: 10,
       subscribeTimeoutMs: 50,
       retryPendingMs: 60_000,
@@ -4105,23 +4093,22 @@ describe("WakerSubscriptionManager", () => {
     expect(manager.getActive()).toHaveLength(0);
     expect(manager.getPending().map((s) => s.id)).toEqual(["mention-hang"]);
     // The proxy is dropped so a late answer backs out instead of registering.
-    expect(mock.proxy.dispose).toHaveBeenCalled();
+    expect(mock.ended()).toBe(true);
     manager.disposeAll();
   });
 
   it("re-attempts a timed-out subscription and enrolls it once the executor answers", async () => {
-    const mock = makeMockProxy();
+    const mock = makeMockLive();
     let attempt = 0;
-    mock.mentionProxy.subscribe = vi.fn(() => {
+    mock.gate.mentions = vi.fn(() => {
       attempt += 1;
       // Hangs the first time, answers on the re-attempt.
       return attempt === 1 ? new Promise<void>(() => {}) : Promise.resolve();
     });
 
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: mockPerspectiveClientSimple,
+      perspectiveClient: mock.client,
       logger: { ...noopLogger },
-      QuerySubscriptionProxy: mock.ProxyClass,
       debounceMs: 10,
       subscribeTimeoutMs: 30,
       retryPendingMs: 30,
@@ -4157,14 +4144,13 @@ describe("WakerSubscriptionManager", () => {
   });
 
   it("should ignore non-array results (e.g. false) and not store them as seen", async () => {
-    const mock = makeMockProxy();
+    const mock = makeMockLive();
     const persisted: { seen: Record<string, string[]> } = { seen: {} };
     let wakeCount = 0;
 
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: mockPerspectiveClientSimple,
+      perspectiveClient: mock.client,
       logger: { ...noopLogger },
-      QuerySubscriptionProxy: mock.ProxyClass,
       debounceMs: 10,
       onWake: () => { wakeCount++; },
       onPersist: (_subs, seenMessages) => { persisted.seen = seenMessages; },
@@ -4194,13 +4180,12 @@ describe("WakerSubscriptionManager", () => {
   });
 
   it("should not re-wake for already-seen messages after restart", async () => {
-    const mock = makeMockProxy();
+    const mock = makeMockLive();
     let wakeCount = 0;
 
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: mockPerspectiveClientSimple,
+      perspectiveClient: mock.client,
       logger: { ...noopLogger },
-      QuerySubscriptionProxy: mock.ProxyClass,
       debounceMs: 10,
       onWake: () => { wakeCount++; },
       // Simulate persisted state with previously seen messages
@@ -4229,13 +4214,12 @@ describe("WakerSubscriptionManager", () => {
   });
 
   it("should ignore null and undefined results", async () => {
-    const mock = makeMockProxy();
+    const mock = makeMockLive();
     let wakeCount = 0;
 
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: mockPerspectiveClientSimple,
+      perspectiveClient: mock.client,
       logger: { ...noopLogger },
-      QuerySubscriptionProxy: mock.ProxyClass,
       debounceMs: 10,
       onWake: () => { wakeCount++; },
     });
@@ -4264,7 +4248,7 @@ describe("WakerSubscriptionManager", () => {
   });
 
   it("should resolve per-message parents via second query for mention subscriptions", async () => {
-    const mock = makeMockProxy();
+    const mock = makeMockLive();
     let capturedMentions: any[] | undefined;
 
     // Mock perspectiveClient.modelQuery: the executor's Container answers
@@ -4284,13 +4268,12 @@ describe("WakerSubscriptionManager", () => {
     };
 
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: mockPerspectiveClient,
+      perspectiveClient: Object.assign(mock.client, mockPerspectiveClient),
       logger: { ...noopLogger },
       debounceMs: 0,
       onWake: (_sub, _result, mentions) => {
         capturedMentions = mentions;
       },
-      QuerySubscriptionProxy: mock.ProxyClass,
     });
 
     await manager.subscribe({
@@ -4322,7 +4305,7 @@ describe("WakerSubscriptionManager", () => {
   });
 
   it("should return empty parents array when parent resolution returns nothing", async () => {
-    const mock = makeMockProxy();
+    const mock = makeMockLive();
     let capturedMentions: any[] | undefined;
 
     const mockPerspectiveClient = {
@@ -4330,13 +4313,12 @@ describe("WakerSubscriptionManager", () => {
     };
 
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: mockPerspectiveClient,
+      perspectiveClient: Object.assign(mock.client, mockPerspectiveClient),
       logger: { ...noopLogger },
       debounceMs: 0,
       onWake: (_sub, _result, mentions) => {
         capturedMentions = mentions;
       },
-      QuerySubscriptionProxy: mock.ProxyClass,
     });
 
     await manager.subscribe({
@@ -4358,7 +4340,7 @@ describe("WakerSubscriptionManager", () => {
   });
 
   it("should handle parent resolution failure gracefully with empty parents", async () => {
-    const mock = makeMockProxy();
+    const mock = makeMockLive();
     let capturedMentions: any[] | undefined;
     let wakeCount = 0;
 
@@ -4367,14 +4349,13 @@ describe("WakerSubscriptionManager", () => {
     };
 
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: mockPerspectiveClient,
+      perspectiveClient: Object.assign(mock.client, mockPerspectiveClient),
       logger: { ...noopLogger },
       debounceMs: 0,
       onWake: (_sub, _result, mentions) => {
         capturedMentions = mentions;
         wakeCount++;
       },
-      QuerySubscriptionProxy: mock.ProxyClass,
     });
 
     await manager.subscribe({
@@ -4406,17 +4387,13 @@ describe("WakerSubscriptionManager disposal races", () => {
     modelQuery: vi.fn(() => Promise.resolve({ instances: [], totalCount: 0 })),
   };
 
-  /** A proxy whose subscribe() only settles when the test says so. */
+  /** A client whose perspective.subscribe only answers when the test says so. */
   function makeSlowProxy() {
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
-    const proxy = {
-      initialized: Promise.resolve(),
-      subscribe: vi.fn(() => gate),
-      dispose: vi.fn(),
-      onResult: vi.fn(),
-    };
-    return { ProxyClass: vi.fn(function () { return proxy; }), proxy, release };
+    const live = makeLiveClient({}, perspectiveClient);
+    live.gate.text = live.gate.mentions = () => gate;
+    return { ...live, release };
   }
 
   const sub: WakerSubscription = {
@@ -4430,9 +4407,8 @@ describe("WakerSubscriptionManager disposal races", () => {
   it("dispose() during subscribe() must not leave a live subscription behind", async () => {
     const mock = makeSlowProxy();
     const manager = new WakerSubscriptionManager({
-      perspectiveClient,
+      perspectiveClient: mock.client,
       logger: noopLogger(),
-      QuerySubscriptionProxy: mock.ProxyClass,
       debounceMs: 10,
       onWake: () => {},
     });
@@ -4444,15 +4420,14 @@ describe("WakerSubscriptionManager disposal races", () => {
 
     expect(manager.getActive()).toEqual([]);
     expect(manager.has(sub.id)).toBe(false);
-    expect(mock.proxy.dispose).toHaveBeenCalled();
+    expect(mock.ended()).toBe(true);
   });
 
   it("disposeAll() during subscribe() must not leave a live subscription behind", async () => {
     const mock = makeSlowProxy();
     const manager = new WakerSubscriptionManager({
-      perspectiveClient,
+      perspectiveClient: mock.client,
       logger: noopLogger(),
-      QuerySubscriptionProxy: mock.ProxyClass,
       debounceMs: 10,
       onWake: () => {},
     });
@@ -4464,22 +4439,17 @@ describe("WakerSubscriptionManager disposal races", () => {
 
     expect(manager.getActive()).toEqual([]);
     expect(manager.getPending()).toEqual([]);
-    expect(mock.proxy.dispose).toHaveBeenCalled();
+    expect(mock.ended()).toBe(true);
   });
 
   it("a subscription disposed mid-attempt is not re-queued as pending on failure", async () => {
     let reject!: (e: Error) => void;
     const gate = new Promise<void>((_r, rj) => { reject = rj; });
-    const proxy = {
-      initialized: Promise.resolve(),
-      subscribe: vi.fn(() => gate),
-      dispose: vi.fn(),
-      onResult: vi.fn(),
-    };
+    const live = makeLiveClient({}, perspectiveClient);
+    live.gate.text = live.gate.mentions = () => gate;
     const manager = new WakerSubscriptionManager({
-      perspectiveClient,
+      perspectiveClient: live.client,
       logger: noopLogger(),
-      QuerySubscriptionProxy: vi.fn(function () { return proxy; }),
       debounceMs: 10,
       onWake: () => {},
     });
@@ -4571,16 +4541,8 @@ describe("restoreSavedSubscription", () => {
     // the active nor the pending set, so the next persist deleted it.
     const persisted: { subs: WakerSubscription[] } = { subs: [] };
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: { querySparql: vi.fn() },
+      perspectiveClient: makeLiveClient({}, { querySparql: vi.fn() }).client,
       logger: makeMockLogger(),
-      QuerySubscriptionProxy: vi.fn(function () {
-        return {
-          initialized: Promise.resolve(),
-          subscribe: vi.fn(() => Promise.resolve()),
-          dispose: vi.fn(),
-          onResult: vi.fn(),
-        };
-      }),
       debounceMs: 10,
       onWake: () => {},
       onPersist: (subs: WakerSubscription[]) => { persisted.subs = subs; },
@@ -4643,19 +4605,12 @@ describe("a mention subscription saved by an older executor", () => {
     persisted: { subs: WakerSubscription[]; seen?: Record<string, string[]> },
     previousSeenMessages: Record<string, string[]> = {},
   ) {
-    const constructed: any[][] = [];
+    const live = makeLiveClient({}, { querySparql: vi.fn(), modelQuery: vi.fn() });
+    // What was opened: `[uuid, { className, queryJson }, options]` per `perspective.subscribe`.
+    const constructed = live.client.subscribe.mock.calls;
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: { querySparql: vi.fn(), modelQuery: vi.fn() },
+      perspectiveClient: live.client,
       logger: makeMockLogger(),
-      QuerySubscriptionProxy: vi.fn(function (...args: any[]) {
-        constructed.push(args);
-        return {
-          initialized: Promise.resolve(),
-          subscribe: vi.fn(() => Promise.resolve()),
-          dispose: vi.fn(),
-          onResult: vi.fn(),
-        };
-      }),
       debounceMs: 10,
       onWake: () => {},
       previousSeenMessages,
@@ -4692,13 +4647,14 @@ describe("a mention subscription saved by an older executor", () => {
         park,
       );
       // The text query over TextContent, and the mention query over Mentioning.
-      expect(constructed.map((args) => [args[1], args[3]])).toEqual([
+      expect(constructed.map(([, target]) => [target.queryJson, target.className])).toEqual([
         [current.query, "ad4m://TextContent"],
         [current.mentionQuery, "ad4m://Mentioning"],
       ]);
-      expect(manager.getActive()).toEqual([current]);
+      // It read the text query's opening result, so it is saved as having read its history.
+      expect(manager.getActive()).toEqual([{ ...current, textHistoryRead: true }]);
       expect(_parkedSubscriptionsForTests().size).toBe(0);
-      expect(persisted.subs).toEqual([current]);
+      expect(persisted.subs).toEqual([{ ...current, textHistoryRead: true }]);
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("restoring it as saved"));
     } finally {
       manager.disposeAll();
@@ -4727,7 +4683,7 @@ describe("a mention subscription saved by an older executor", () => {
           );
         }
         // The manager would refuse it: nothing opens it.
-        expect(constructed.map((args) => args[3])).toEqual(["ad4m://Container"]);
+        expect(constructed.map(([, target]) => target.className)).toEqual(["ad4m://Container"]);
         expect(manager.getActive().map((s) => s.id)).toEqual(["children-p"]);
         expect(manager.getPending()).toEqual([]);
         // The children subscription's persist keeps the older one on disk.
@@ -4755,7 +4711,7 @@ describe("a mention subscription saved by an older executor", () => {
         ...MENTION_CONFIG,
       };
       await manager.subscribe(current);
-      expect(persisted.subs).toEqual([current]);
+      expect(persisted.subs).toEqual([{ ...current, textHistoryRead: true }]);
       expect(_parkedSubscriptionsForTests().size).toBe(0);
     } finally {
       manager.disposeAll();
@@ -4776,9 +4732,8 @@ describe("a mention subscription saved by an older executor", () => {
     // subscription opens and persists.
     let state = loadWakerState(stateDir);
     const first = new WakerSubscriptionManager({
-      perspectiveClient,
+      perspectiveClient: makeLiveClient({}, perspectiveClient).client,
       logger: makeMockLogger(),
-      QuerySubscriptionProxy: proxyOpeningOn({}),
       debounceMs: 10,
       onWake: () => {},
       previousSeenMessages: state.seenMessages,
@@ -4814,9 +4769,8 @@ describe("a mention subscription saved by an older executor", () => {
       ...MENTION_CONFIG,
     };
     const second = new WakerSubscriptionManager({
-      perspectiveClient,
+      perspectiveClient: makeLiveClient(OLD_AND_LINK_ONLY, perspectiveClient).client,
       logger: makeMockLogger(),
-      QuerySubscriptionProxy: proxyOpeningOn(OLD_AND_LINK_ONLY),
       debounceMs: 10,
       onWake: (_sub, _result, mentions) => {
         woken.push((mentions ?? []).map((m) => m.address));
@@ -4850,9 +4804,8 @@ describe("a mention subscription saved by an older executor", () => {
       const state = loadWakerState(stateDir);
       const woken: string[][] = [];
       const manager = new WakerSubscriptionManager({
-        perspectiveClient: { querySparql: vi.fn(), modelQuery: vi.fn().mockResolvedValue([]) },
+        perspectiveClient: makeLiveClient(opening, { querySparql: vi.fn(), modelQuery: vi.fn().mockResolvedValue([]) }).client,
         logger: makeMockLogger(),
-        QuerySubscriptionProxy: proxyOpeningOn(opening),
         debounceMs: 10,
         onWake: (_sub, _result, mentions) => {
           woken.push((mentions ?? []).map((m) => m.address));
@@ -4913,10 +4866,9 @@ describe("a mention subscription saved by an older executor", () => {
     saveWakerState(stateDir, [textQuery, children], { [textQuery.id]: ["msg-old"] });
     const state = loadWakerState(stateDir);
     const manager = new WakerSubscriptionManager({
-      perspectiveClient: { querySparql: vi.fn(), modelQuery: vi.fn().mockResolvedValue([]) },
+      perspectiveClient: makeLiveClient(OLD_AND_LINK_ONLY, { querySparql: vi.fn(), modelQuery: vi.fn().mockResolvedValue([]) }).client,
       logger: makeMockLogger(),
       // msg-new holds no name, only the we://mention link to the DID.
-      QuerySubscriptionProxy: proxyOpeningOn(OLD_AND_LINK_ONLY),
       debounceMs: 10,
       onWake: (_sub, _result, mentions) => {
         woken.push((mentions ?? []).map((m) => m.address));

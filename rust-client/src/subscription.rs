@@ -21,7 +21,7 @@ use tokio::task::JoinHandle;
 
 use crate::ws_rpc::WsRpcClient;
 
-/// Reply to `perspective.subscribeQuery` / `perspective.modelSubscribe`: the
+/// Reply to `perspective.subscribe`: the
 /// first result, as JSON, at its revision.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -846,7 +846,7 @@ mod tests {
                 let ws = ws.clone();
                 Box::pin(async move {
                     ws.call(
-                        "perspective.subscribeQuery",
+                        "perspective.subscribe",
                         serde_json::json!({"uuid": "p1", "subscriptionId": "s1"}),
                     )
                     .await
@@ -896,7 +896,7 @@ mod tests {
                     let n = opens.fetch_add(1, Ordering::Relaxed) + 1;
                     let sid = format!("sub-{n}");
                     ws.call(
-                        "perspective.subscribeQuery",
+                        "perspective.subscribe",
                         serde_json::json!({"uuid": "p1", "subscriptionId": sid}),
                     )
                     .await
@@ -927,7 +927,7 @@ mod tests {
         let inner_a = query.inner.clone();
         let retry_a = tokio::spawn(async move { inner_a.reopen().await });
         let req_a = fake.next_request().await;
-        assert_eq!(req_a["type"], "perspective.subscribeQuery");
+        assert_eq!(req_a["type"], "perspective.subscribe");
         fake.reply_error(&req_a, 500, "socket just came back").await;
 
         // The bug window needs A *asleep* before B's start bumps the
@@ -948,13 +948,13 @@ mod tests {
         let inner_b = query.inner.clone();
         let retry_b = tokio::spawn(async move { inner_b.reopen().await });
         let req_b = fake.next_request().await;
-        assert_eq!(req_b["type"], "perspective.subscribeQuery");
+        assert_eq!(req_b["type"], "perspective.subscribe");
         fake.reply(&req_b, serde_json::json!({"result": [], "revision": 0}))
             .await;
         retry_b.await.unwrap();
 
         // A's sleep outlasts B's open. When it wakes it must see the world
-        // moved on — a third subscribeQuery means it clobbered B's live
+        // moved on — a third subscribe means it clobbered B's live
         // subscription with an untracked one. (A disposeQuery here is B
         // releasing the subscription its own start replaced — expected.)
         let third = tokio::time::timeout(Duration::from_secs(5), async {
@@ -962,7 +962,7 @@ mod tests {
                 let req = fake.maybe_request(Duration::from_millis(300)).await;
                 let Some(req) = req else { continue };
                 eprintln!("[test] frame: {}", req["type"]);
-                if req["type"] == "perspective.subscribeQuery" {
+                if req["type"] == "perspective.subscribe" {
                     return req;
                 }
                 fake.reply(&req, serde_json::json!(true)).await;
@@ -997,7 +997,7 @@ mod tests {
                     let n = opens.fetch_add(1, Ordering::Relaxed) + 1;
                     let sid = format!("sub-{n}");
                     ws.call(
-                        "perspective.subscribeQuery",
+                        "perspective.subscribe",
                         serde_json::json!({"uuid": "p1", "subscriptionId": sid}),
                     )
                     .await
@@ -1029,7 +1029,7 @@ mod tests {
         let q2 = query.clone();
         let restart = tokio::spawn(async move { q2.start().await });
         let reopened = fake.next_request().await;
-        assert_eq!(reopened["type"], "perspective.subscribeQuery");
+        assert_eq!(reopened["type"], "perspective.subscribe");
         fake.reply(&reopened, serde_json::json!({"result": [], "revision": 0}))
             .await;
         let disposed = tokio::time::timeout(Duration::from_secs(2), async {
@@ -1071,7 +1071,7 @@ mod tests {
                     let n = opens.fetch_add(1, Ordering::Relaxed) + 1;
                     let sid = format!("sub-{n}");
                     ws.call(
-                        "perspective.subscribeQuery",
+                        "perspective.subscribe",
                         serde_json::json!({"uuid": "p1", "subscriptionId": sid}),
                     )
                     .await
@@ -1148,14 +1148,14 @@ mod tests {
 
         for _ in 0..2 {
             let req = fake.next_request().await;
-            assert_eq!(req["type"], "perspective.subscribeQuery");
+            assert_eq!(req["type"], "perspective.subscribe");
             fake.reply_error(&req, 500, "socket just came back").await;
         }
         // One loop survives and retries after its backoff (≤ 1 s).
         let retry = tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 let req = fake.next_request().await;
-                if req["type"] == "perspective.subscribeQuery" {
+                if req["type"] == "perspective.subscribe" {
                     return req;
                 }
                 fake.reply(&req, serde_json::json!(true)).await;
@@ -1358,7 +1358,7 @@ mod tests {
                 let ws = ws.clone();
                 Box::pin(async move {
                     ws.call(
-                        "perspective.subscribeQuery",
+                        "perspective.subscribe",
                         serde_json::json!({"uuid": "p1", "subscriptionId": "s1"}),
                     )
                     .await
@@ -1385,7 +1385,7 @@ mod tests {
         );
         fake.reply(&watch, serde_json::json!(true)).await;
         let sub = fake.next_request().await;
-        assert_eq!(sub["type"], "perspective.subscribeQuery");
+        assert_eq!(sub["type"], "perspective.subscribe");
         fake.reply(&sub, serde_json::json!({"result": [], "revision": 0}))
             .await;
         start.await.unwrap().unwrap();
@@ -1415,7 +1415,7 @@ mod tests {
         assert!(QueryUpdate::from_event(&json!({"type": "other"})).is_none());
     }
 
-    /// A scripted open on `client`: `perspective.subscribeQuery` answered
+    /// A scripted open on `client`: `perspective.subscribe` answered
     /// by the test, id `s1`.
     fn scripted_open(client: &Arc<WsRpcClient>) -> OpenFn {
         let ws = client.clone();
@@ -1423,7 +1423,7 @@ mod tests {
             let ws = ws.clone();
             Box::pin(async move {
                 ws.call(
-                    "perspective.subscribeQuery",
+                    "perspective.subscribe",
                     serde_json::json!({"uuid": "p1", "subscriptionId": "s1"}),
                 )
                 .await

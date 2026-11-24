@@ -4,7 +4,6 @@
  */
 import { Ad4mModel } from "./Ad4mModel";
 import { Model, Property } from "./decorators";
-import { ModelQueryBuilder } from "./ModelQueryBuilder";
 import { resolveParentPredicate } from "./query-common";
 import { isContainedScope } from "./types";
 
@@ -26,10 +25,8 @@ describe("containment scope { id }", () => {
     expect(JSON.parse(queryJson).parent).toEqual({ id: "ad4m://p" });
   });
 
-  it("is what .parent(id) with no second argument asks for", () => {
-    const builder: any = new ModelQueryBuilder({} as any, ScopedNote).parent("ad4m://p");
-    expect(builder.queryParams.parent).toEqual({ id: "ad4m://p" });
-    expect(isContainedScope(builder.queryParams.parent)).toBe(true);
+  it("is the scope with an id and nothing else", () => {
+    expect(isContainedScope({ id: "ad4m://p" })).toBe(true);
   });
 
   it("is one scope over a union: every class sends the same", () => {

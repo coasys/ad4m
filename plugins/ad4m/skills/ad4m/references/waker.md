@@ -5,7 +5,7 @@ The AD4M waker watches perspectives for data changes via WebSocket subscriptions
 ## How It Works
 
 1. The plugin's `ad4m-waker` service connects to the AD4M executor's WebSocket event endpoint
-2. When you call `subscribe_to_mentions` or `subscribe_to_children`, the plugin creates a `QuerySubscriptionProxy` with a live model query (for mentions, one over the built-in Mentioning and one over the built-in TextContent; for children, one over the built-in Container)
+2. When you call `subscribe_to_mentions` or `subscribe_to_children`, the plugin opens a `LiveQuery` (`perspective.subscribe`) with a live model query (for mentions, one over the built-in Mentioning and one over the built-in TextContent; for children, one over the built-in Container)
 3. When query results change, the plugin debounces and POSTs to OpenClaw's `/hooks/wake` endpoint
 4. Your agent wakes up with context about what changed and processes the new data via MCP tools
 
