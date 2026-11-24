@@ -12,8 +12,6 @@ export interface Snapshot<T> {
     value: T | undefined
     /** Why the last read failed; set while `state` is `error`. */
     error: unknown
-    /** True while `value` is the first one the entry ever had. */
-    initial: boolean
 }
 
 /** A typed view on one entry. */
@@ -47,7 +45,7 @@ export class Entry<T> implements Live<T> {
     #state: State = 'unknown'
     #value: T | undefined
     #error: unknown
-    #values = 0
+    #hasValue = false
     /** Counts what changed the entry from outside a read: a push, an invalidation. */
     #version = 0
     #inflight: Promise<T> | null = null
@@ -111,10 +109,10 @@ export class Entry<T> implements Live<T> {
 
     #accept(value: T): void {
         // An equal value stays the same object: subscribers compare snapshots by identity.
-        const same = this.#listeners.size > 0 && this.#values > 0 && canonical(value) === canonical(this.#value)
+        const same = this.#listeners.size > 0 && this.#hasValue && canonical(value) === canonical(this.#value)
         if (!same) {
             this.#value = value
-            this.#values++
+            this.#hasValue = true
         }
         this.#error = undefined
         if (!same || this.#state !== 'fresh') this.#set('fresh')
@@ -125,7 +123,7 @@ export class Entry<T> implements Live<T> {
     }
 
     #makeSnapshot(): Snapshot<T> {
-        return { state: this.#state, value: this.#value, error: this.#error, initial: this.#values === 1 }
+        return { state: this.#state, value: this.#value, error: this.#error }
     }
 
     #set(state: State): void {

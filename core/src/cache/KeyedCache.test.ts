@@ -190,6 +190,21 @@ describe('KeyedCache', () => {
         expect(loadMany.mock.calls.slice(3).map(([keys]) => keys)).toEqual([['x', 'y'], ['z'], ['x']]);
     });
 
+    test('a watched key is not evicted: its view keeps its value, and the oldest unwatched key goes', async () => {
+        const loadMany = jest.fn(async (keys: string[]) => keys);
+        const cache = new KeyedCache<string>({ loadMany, limits: () => ({ entries: 2, bytes: Infinity }) });
+        const a = cache.live('a');
+        const off = a.subscribe(() => {});
+        await until(() => a.getSnapshot().state === 'fresh');
+        await cache.get('b');
+        await cache.get('c'); // over the limit: b goes, not the watched a
+        expect(a.getSnapshot()).toMatchObject({ state: 'fresh', value: 'a' });
+        await cache.get('a');
+        await cache.get('b');
+        expect(loadMany.mock.calls.map(([keys]) => keys)).toEqual([['a'], ['b'], ['c'], ['b']]);
+        off();
+    });
+
     test('the persistent tier serves fresh entries without a load and is not rewritten by them', async () => {
         const store = new MapStore<string>();
         store.entries.set('fresh', { value: 'stored', ts: Date.now() });

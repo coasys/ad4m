@@ -52,12 +52,10 @@ interface Slot<V> {
     stale: boolean;
     /** Length of the value's JSON, when the cache has memory limits. */
     size: number;
-    /** Values this key has held: 1 for the first. */
-    count: number;
 }
 
 /** The snapshot of a key nothing is known of. */
-const UNKNOWN: Snapshot<unknown> = { state: 'unknown', value: undefined, error: undefined, initial: false };
+const UNKNOWN: Snapshot<unknown> = { state: 'unknown', value: undefined, error: undefined };
 
 /** A read in flight; `valid` goes false when something changed the key since it went out. */
 interface Flight<V> {
@@ -77,8 +75,9 @@ interface Flight<V> {
  *   neither is a failure; a key that has subscribers shows the `null` as `fresh`;
  * - an answer is kept only when nothing changed the key since its request went out
  *   (`set`, `delete`, `clear`, `markStale`): then it reaches its readers once and is dropped.
- * {@link live} gives a view on one key with the mirror's states, built from what the cache
- * holds: the cache is the state machine, there is no second copy per key.
+ * {@link live} gives a view on one key with the mirror's states, derived from what the cache
+ * holds; a key keeps a snapshot, an error or a not-found marker only while something is
+ * held or watched for it. A watched key is never evicted.
  */
 export class KeyedCache<V> {
     #opts: KeyedCacheOptions<V>;
@@ -275,8 +274,11 @@ export class KeyedCache<V> {
         const size = limits ? text!.length : 0;
         this.#forget(key);
         if (limits) {
+            // A watched key is not evicted: its view would go blank with nothing to load it
+            // again. While views hold them, watched keys may take the cache past its limits.
             for (const oldest of [...this.#slots.keys()]) {
                 if (this.#slots.size < limits.entries && this.#bytes + size <= limits.bytes) break;
+                if (this.#listeners.get(oldest)?.size) continue;
                 this.#evict(oldest);
             }
         }
@@ -285,7 +287,6 @@ export class KeyedCache<V> {
             ts: Date.now(),
             stale,
             size,
-            count: (prev?.count ?? 0) + (same ? 0 : 1),
         });
         this.#bytes += size;
         this.#notify(key);
@@ -309,13 +310,13 @@ export class KeyedCache<V> {
             : missing ? 'fresh'
             : 'unknown';
         const prev = this.#snapshots.get(key);
-        if (state === 'unknown' && !slot) {
+        if (state === 'unknown') {
             // Nothing to show: every such key has the same snapshot, so none is stored.
             this.#snapshots.delete(key);
             return UNKNOWN as Snapshot<V | null>;
         }
-        const next: Snapshot<V | null> = { state, value: slot ? slot.value : missing ? null : undefined, error: this.#errors.get(key), initial: slot?.count === 1 };
-        if (prev && prev.state === next.state && prev.value === next.value && prev.error === next.error && prev.initial === next.initial) return prev;
+        const next: Snapshot<V | null> = { state, value: slot ? slot.value : missing ? null : undefined, error: this.#errors.get(key) };
+        if (prev && prev.state === next.state && prev.value === next.value && prev.error === next.error) return prev;
         this.#snapshots.set(key, next);
         return next;
     }

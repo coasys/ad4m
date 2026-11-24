@@ -68,7 +68,8 @@ export class PerspectiveClient {
     #expressionClient?: ExpressionClient
     #neighbourhoodClient?: NeighbourhoodClient
     #neighbourhoodProxies = new Map<string, NeighbourhoodProxy>()
-    #stopWatchingRemoved?: () => void
+    /** A perspective removed by any client of this executor takes its neighbourhood proxy with it. */
+    #dropProxy = ({ perspectiveUuid }: { perspectiveUuid: string }) => { this.#neighbourhoodProxies.delete(perspectiveUuid) }
     #aiClient?: AIClient
 
     constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
@@ -701,11 +702,10 @@ export class PerspectiveClient {
 
     /** The perspective's neighbourhood proxy: one per uuid, so its sessions and handlers are shared. */
     getNeighbourhoodProxy(uuid: string): NeighbourhoodProxy {
-        // Registered once, with the first proxy: a perspective removed by another client of
-        // this executor takes its proxy with it, not only one removed through `remove()`.
-        this.#stopWatchingRemoved ??= this.#apiClient.on('perspective-removed', ({ perspectiveUuid }) => {
-            this.#neighbourhoodProxies.delete(perspectiveUuid)
-        })
+        // With the first proxy, not in the constructor, so a client opens no socket for it.
+        // `on` keeps one registration per handler. `remove()` still drops its own proxy at once,
+        // before the event arrives.
+        this.#apiClient.on('perspective-removed', this.#dropProxy)
         let proxy = this.#neighbourhoodProxies.get(uuid)
         if (!proxy) {
             proxy = new NeighbourhoodProxy(this.#neighbourhoodClient!, uuid, this.#apiClient)

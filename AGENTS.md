@@ -160,7 +160,9 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
   call's spec wins), so two clients share nothing. It has its own per-key state (same
   states and rules as `Entry`) and adds tick batching through `loadMany` (50 `byDID`
   misses in one tick = one `agent.byDIDs`; a failed batch retries per key; a failure is
-  never kept), `maxAgeMs`, the memory limits and the persistent tier.
+  never kept), `maxAgeMs`, the memory limits and the persistent tier. The limits never
+  evict a key a view is subscribed to (its view would go blank): while views hold them,
+  watched keys may take a cache past its limits.
   `mirror.persistent(db, store)` is the IndexedDB tier, keyed `origin|acting DID|key`; the DID
   is the one the client already knows (the status entry, never a request), so a cold read
   waits on nothing, and while it is unknown nothing is stored or read (Node has none).

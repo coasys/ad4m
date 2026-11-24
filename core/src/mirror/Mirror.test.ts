@@ -22,7 +22,7 @@ describe('Mirror entry transitions', () => {
         expect(entry.getSnapshot().state).toBe('loading')
         asks[0].resolve('a')
         expect(await read).toBe('a')
-        expect(entry.getSnapshot()).toMatchObject({ state: 'fresh', value: 'a', initial: true })
+        expect(entry.getSnapshot()).toMatchObject({ state: 'fresh', value: 'a' })
         expect(await entry.read()).toBe('a')
         expect(load).toHaveBeenCalledTimes(1)
     })
@@ -59,7 +59,6 @@ describe('Mirror entry transitions', () => {
         entry.push({ n: 2 })
         expect(seen).toEqual([{ n: 2 }])
         expect(await entry.read()).toEqual({ n: 2 })
-        expect(entry.getSnapshot().initial).toBe(false)
     })
 
     it('fresh -> fresh: a push of an equal value does not notify', async () => {
