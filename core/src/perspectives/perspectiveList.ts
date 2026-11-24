@@ -11,9 +11,7 @@ import { PerspectiveHandle } from './PerspectiveHandle'
  */
 export function perspectiveList(apiClient: ApiClient): Entry<PerspectiveHandle[]> {
     return apiClient.mirror.entry<PerspectiveHandle[]>({
-        scope: 'agent',
         method: 'perspective.all',
-        params: {},
         load: async () => (await apiClient.call('perspective.all', {})).map(PerspectiveHandle.fromWire),
         on: {
             'perspective-added': ({ perspective }, entry) => keep(entry, PerspectiveHandle.fromWire(perspective)),

@@ -82,6 +82,16 @@ describe('the caller DID and the SFU status, per client', () => {
         expect(ad4m.perspective.getNeighbourhoodProxy('p1')).not.toBe(ad4m.perspective.getNeighbourhoodProxy('p2'))
     })
 
+    it('a perspective-removed event drops the uuid\'s proxy, and only that one', async () => {
+        const p1 = ad4m.perspective.getNeighbourhoodProxy('p1')
+        const p2 = ad4m.perspective.getNeighbourhoodProxy('p2')
+        await settle()
+        const sock = Sock.instances[Sock.instances.length - 1]
+        sock.reply({ type: 'perspective-removed', perspectiveUuid: 'p1', uuid: 'p1' })
+        expect(ad4m.perspective.getNeighbourhoodProxy('p2')).toBe(p2)
+        expect(ad4m.perspective.getNeighbourhoodProxy('p1')).not.toBe(p1)
+    })
+
     it('both go out in one wave', async () => {
         Sock.handle = () => new Promise(() => {}) // no answer yet
         const joining = join()

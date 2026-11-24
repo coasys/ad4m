@@ -1,18 +1,16 @@
-import { canonical, Entry, type Scope } from './Entry'
+import { canonical, Entry } from './Entry'
 import type { EventMap, EventName } from '../generated/api/Events'
 import { KeyedCache, type KeyedCacheOptions } from '../cache/KeyedCache'
 import type { LiveQuery, LiveSubscription } from '../perspectives/LiveQuery'
 import { SharedLive } from './live'
 import { createPersistentCache, NullCache, type PersistentCache } from '../cache/PersistentCache'
 
-export type { Live, Scope, Snapshot, State, Unsubscribe } from './Entry'
+export type { Live, Snapshot, State, Unsubscribe } from './Entry'
 
 /** What names one entry, and how it loads. */
 export interface EntrySpec<T> {
-    scope: Scope
-    /** The RPC the entry reads, e.g. `agent.status`. */
+    /** The RPC the entry reads, e.g. `agent.status`: one entry per method, the key. */
     method: string
-    params: unknown
     load: () => Promise<T>
     /**
      * The events that keep the entry fresh. The mirror registers each once, when it creates
@@ -22,15 +20,16 @@ export interface EntrySpec<T> {
 }
 
 /**
- * The values one `ApiClient` read from its executor, one {@link Entry} per data point,
- * keyed by scope, RPC name and canonical params. Two clients share nothing: each owns a mirror.
+ * The values one `ApiClient` read from its executor, one {@link Entry} per data point
+ * (keyed by RPC name), plus the live queries and one-shot reads of its perspectives (keyed by
+ * perspective uuid, RPC name and canonical params). Two clients share nothing: each owns a mirror.
  */
 export class Mirror {
     #entries = new Map<string, Entry<unknown>>()
     #caches = new Map<string, { staleOnReconnect: boolean; cache: KeyedCache<any> }>()
     #lives = new Map<string, SharedLive<any>>()
     #flights = new Map<string, Promise<any>>()
-    /** Per scope, how many writes of this client have settled (see {@link wrote}). */
+    /** Per perspective, how many writes of this client have settled (see {@link wrote}). */
     #writes = new Map<string, number>()
     #origin: () => string
     #listen: <K extends EventName>(name: K, handler: (event: EventMap[K]) => void) => unknown
@@ -101,9 +100,9 @@ export class Mirror {
         }
     }
 
-    /** The entry for this key; the first call's `load` stays. */
+    /** The entry for this RPC; the first call's `load` stays. */
     entry<T>(spec: EntrySpec<T>): Entry<T> {
-        const key = keyOf(spec)
+        const key = spec.method
         let entry = this.#entries.get(key)
         if (!entry) {
             const created = new Entry<T>(spec.load)
@@ -123,11 +122,11 @@ export class Mirror {
      * after a reconnect, so the mirror does not mark it stale. After the last handle is
      * disposed it stays open `keepAliveMs` (default 30 s), so a handle opened again answers at once.
      */
-    live<T>(spec: { scope: Scope; method: string; params: unknown; keepAliveMs?: number; open: () => LiveSubscription<T> }): LiveQuery<T> {
+    live<T>(spec: { perspective: string; method: string; params: unknown; keepAliveMs?: number; open: () => LiveSubscription<T> }): LiveQuery<T> {
         const key = keyOf(spec)
         let shared = this.#lives.get(key)
         if (!shared?.usable) {
-            const created: SharedLive<T> = new SharedLive(spec.open(), scopeOf(spec.scope), () => {
+            const created: SharedLive<T> = new SharedLive(spec.open(), spec.perspective, () => {
                 if (this.#lives.get(key) === created) this.#lives.delete(key)
             })
             shared = created
@@ -140,23 +139,22 @@ export class Mirror {
      * The raw result of the open `live` entry for this key while it is ready and live, so a
      * one-shot read of the same question needs no request; `undefined` otherwise. A copy.
      */
-    liveResult(spec: { scope: Scope; method: string; params: unknown }): { result: any } | undefined {
+    liveResult(spec: { perspective: string; method: string; params: unknown }): { result: any } | undefined {
         const held = this.#lives.get(keyOf(spec))?.answer()
         return held && { result: structuredClone(held.result) }
     }
 
     /**
-     * A write of this client to `scope` settled. The `live` entries of that scope answer no
+     * A write of this client to the perspective settled. Its `live` entries answer no
      * one-shot read until an update changes their result: the executor sends it after the
      * write's reply, so what they hold may not include the write yet. The cost: a write that
      * does not change a query's result sends every later one-shot of that query to the
      * executor, until an update changes the result. It also starts a new generation for
      * {@link oneShot}: a call made after the write does not join a request that went out before it.
      */
-    wrote(scope: Scope): void {
-        const name = scopeOf(scope)
-        this.#writes.set(name, (this.#writes.get(name) ?? 0) + 1)
-        for (const shared of this.#lives.values()) if (shared.scope === name) shared.wrote()
+    wrote(perspective: string): void {
+        this.#writes.set(perspective, (this.#writes.get(perspective) ?? 0) + 1)
+        for (const shared of this.#lives.values()) if (shared.perspective === perspective) shared.wrote()
     }
 
     /**
@@ -171,12 +169,12 @@ export class Mirror {
 
     /**
      * One request for identical one-shot reads: while one is in flight, a call with the same
-     * scope, RPC name and params (and no write of this client to the scope settled since it
+     * perspective, RPC name and params (and no write of this client to it settled since it
      * went out) gets its promise. The caller reads its own copy of the reply. Nothing is kept
      * after it settles.
      */
-    oneShot<T>(spec: { scope: Scope; method: string; params: unknown; request: () => Promise<T> }): Promise<T> {
-        const key = `${keyOf(spec)}|${this.#writes.get(scopeOf(spec.scope)) ?? 0}`
+    oneShot<T>(spec: { perspective: string; method: string; params: unknown; request: () => Promise<T> }): Promise<T> {
+        const key = `${keyOf(spec)}|${this.#writes.get(spec.perspective) ?? 0}`
         let reply = this.#flights.get(key)
         if (!reply) {
             reply = spec.request().finally(() => this.#flights.delete(key))
@@ -186,11 +184,7 @@ export class Mirror {
     }
 }
 
-/** Scope, RPC name and canonical params: the key of an entry. */
-function keyOf(spec: { scope: Scope; method: string; params: unknown }): string {
-    return `${scopeOf(spec.scope)}|${spec.method}|${canonical(spec.params)}`
-}
-
-function scopeOf(scope: Scope): string {
-    return typeof scope === 'string' ? scope : JSON.stringify(scope)
+/** Perspective uuid, RPC name and canonical params: the key of a live query or one-shot read. */
+function keyOf(spec: { perspective: string; method: string; params: unknown }): string {
+    return `${JSON.stringify(spec.perspective)}|${spec.method}|${canonical(spec.params)}`
 }

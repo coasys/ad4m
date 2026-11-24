@@ -58,4 +58,4 @@ export { fileToDataUri } from './shacl/index'
 export * from "./generated/api";
 export { RpcError, LONG_TIMEOUT_MS } from "./apiClient";
 export type { CallOptions, EventFilter } from "./apiClient";
-export type { Live, Snapshot as MirrorSnapshot, State as MirrorState, Unsubscribe } from "./mirror/Mirror";
+export type { Live, Snapshot as MirrorSnapshot, Unsubscribe } from "./mirror/Mirror";

@@ -10,9 +10,7 @@ import type { SfuStatus } from '../generated/api/SfuStatus'
  */
 export function sfuStatusEntry(apiClient: ApiClient): Entry<SfuStatus> {
     return apiClient.mirror.entry<SfuStatus>({
-        scope: 'executor',
         method: 'sfu.status',
-        params: {},
         load: () => apiClient.call('sfu.status', {}),
     })
 }

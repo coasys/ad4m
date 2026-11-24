@@ -56,6 +56,9 @@ interface Slot<V> {
     count: number;
 }
 
+/** The snapshot of a key nothing is known of. */
+const UNKNOWN: Snapshot<unknown> = { state: 'unknown', value: undefined, error: undefined, initial: false };
+
 /** A read in flight; `valid` goes false when something changed the key since it went out. */
 interface Flight<V> {
     valid: boolean;
@@ -70,7 +73,8 @@ interface Flight<V> {
  * - `maxAgeMs`: a value older than that is stale, nobody is told, the next read loads;
  * - `limits`: the oldest values go first;
  * - the persistent tier (`persistent`, `persistentMaxAgeMs`, `persistentStale`);
- * - a `null` (not found) is returned but not kept, and neither is a failure;
+ * - a `null` (not found) is returned but not kept for {@link get} (the next read asks again), and
+ *   neither is a failure; a key that has subscribers shows the `null` as `fresh`;
  * - an answer is kept only when nothing changed the key since its request went out
  *   (`set`, `delete`, `clear`, `markStale`): then it reaches its readers once and is dropped.
  * {@link live} gives a view on one key with the mirror's states, built from what the cache
@@ -84,9 +88,16 @@ export class KeyedCache<V> {
     #flights = new Map<string, Flight<V>>();
     #errors = new Map<string, unknown>();
     #listeners = new Map<string, Set<(snapshot: Snapshot<V | null>) => void>>();
+    /** Snapshots handed out, kept for identity; only for keys with a slot, a read, an error or a listener. */
     #snapshots = new Map<string, Snapshot<V | null>>();
+    /** Keys with a listener whose last read answered `null`: their snapshot is `fresh` with a `null` value. */
+    #missing = new Set<string>();
     #batch: { keys: string[]; done: Promise<Map<string, Loaded<V | Error>>> } | null = null;
-    /** Keys whose stored value was already used this session (see `persistentStale`). */
+    /**
+     * Keys whose stored value was already used this session (see `persistentStale`). Only
+     * keys with a slot or a read in flight: a key that leaves the slots (not found, failed,
+     * evicted, deleted) leaves this set.
+     */
     #storedUsed = new Set<string>();
 
     constructor(opts: KeyedCacheOptions<V>) {
@@ -110,12 +121,14 @@ export class KeyedCache<V> {
     /** Forgets a key in memory and in the persistent store. */
     delete(key: string): void {
         this.#drop(key);
+        this.#storedUsed.delete(key);
         this.#opts.persistent?.delete(key); // fire-and-forget
     }
 
     /** Forgets every key in memory, and in the persistent store when `persistent` is set. */
     clear(persistent = false): void {
-        for (const key of new Set([...this.#slots.keys(), ...this.#flights.keys(), ...this.#errors.keys()])) this.#drop(key);
+        for (const key of new Set([...this.#slots.keys(), ...this.#flights.keys(), ...this.#errors.keys(), ...this.#missing])) this.#drop(key);
+        this.#storedUsed.clear();
         if (persistent) this.#opts.persistent?.clear(); // fire-and-forget
     }
 
@@ -126,10 +139,11 @@ export class KeyedCache<V> {
      */
     markStale(): void {
         const again: string[] = [];
-        const keys = new Set([...this.#slots.keys(), ...this.#flights.keys(), ...this.#errors.keys()]);
+        const keys = new Set([...this.#slots.keys(), ...this.#flights.keys(), ...this.#errors.keys(), ...this.#missing]);
         for (const key of keys) {
             this.#cancel(key);
             this.#errors.delete(key);
+            this.#missing.delete(key);
             const slot = this.#slots.get(key);
             if (slot) slot.stale = true;
             if (this.#listeners.get(key)?.size) again.push(key);
@@ -151,6 +165,7 @@ export class KeyedCache<V> {
                 return () => {
                     listeners!.delete(fn);
                     if (listeners!.size === 0 && this.#listeners.get(key) === listeners) this.#listeners.delete(key);
+                    this.#prune(key);
                 };
             },
             read: () => this.get(key),
@@ -185,6 +200,8 @@ export class KeyedCache<V> {
             (loaded) => {
                 if (finish()) {
                     if (loaded.value === null) {
+                        if (!this.#slots.has(key)) this.#storedUsed.delete(key);
+                        if (this.#listeners.get(key)?.size) this.#missing.add(key);
                         this.#notify(key);
                     } else {
                         const stored = loaded.stored;
@@ -193,12 +210,14 @@ export class KeyedCache<V> {
                         // The stored value is shown now, the source read once in the background.
                         if (stale) this.#read(key, this.#loader(key)).catch(() => {});
                     }
+                    this.#prune(key);
                 }
                 return loaded.value;
             },
             (error) => {
                 if (finish()) {
                     this.#errors.set(key, error);
+                    if (!this.#slots.has(key)) this.#storedUsed.delete(key);
                     this.#notify(key);
                 }
                 throw error;
@@ -220,9 +239,18 @@ export class KeyedCache<V> {
     #drop(key: string): void {
         this.#cancel(key);
         this.#errors.delete(key);
+        this.#missing.delete(key);
         this.#forget(key);
-        this.#snapshots.delete(key);
         this.#notify(key);
+        this.#prune(key);
+    }
+
+    /** Drops what the maps hold for a key that has no value, no read and no subscriber. */
+    #prune(key: string): void {
+        if (this.#slots.has(key) || this.#flights.has(key) || this.#listeners.get(key)?.size) return;
+        this.#errors.delete(key);
+        this.#missing.delete(key);
+        this.#snapshots.delete(key);
     }
 
     #forget(key: string): void {
@@ -242,6 +270,7 @@ export class KeyedCache<V> {
         const prev = this.#slots.get(key);
         const same = listening && !!prev && text === canonical(prev.value);
         this.#errors.delete(key);
+        this.#missing.delete(key);
         if (!stored) this.#opts.persistent?.put(key, { value, ts: Date.now() }); // fire-and-forget
         const size = limits ? text!.length : 0;
         this.#forget(key);
@@ -266,18 +295,26 @@ export class KeyedCache<V> {
     #evict(key: string): void {
         this.#cancel(key);
         this.#forget(key);
-        this.#snapshots.delete(key);
+        this.#storedUsed.delete(key);
         this.#notify(key);
+        this.#prune(key);
     }
 
     #snapshot(key: string): Snapshot<V | null> {
         const slot = this.#slots.get(key);
+        const missing = !slot && this.#missing.has(key);
         const state: State = this.#flights.has(key) ? 'loading'
             : this.#errors.has(key) ? 'error'
             : slot ? (this.#fresh(key) ? 'fresh' : 'stale')
+            : missing ? 'fresh'
             : 'unknown';
-        const next: Snapshot<V | null> = { state, value: slot?.value, error: this.#errors.get(key), initial: slot?.count === 1 };
         const prev = this.#snapshots.get(key);
+        if (state === 'unknown' && !slot) {
+            // Nothing to show: every such key has the same snapshot, so none is stored.
+            this.#snapshots.delete(key);
+            return UNKNOWN as Snapshot<V | null>;
+        }
+        const next: Snapshot<V | null> = { state, value: slot ? slot.value : missing ? null : undefined, error: this.#errors.get(key), initial: slot?.count === 1 };
         if (prev && prev.state === next.state && prev.value === next.value && prev.error === next.error && prev.initial === next.initial) return prev;
         this.#snapshots.set(key, next);
         return next;
@@ -287,7 +324,7 @@ export class KeyedCache<V> {
     #notify(key: string): void {
         const listeners = this.#listeners.get(key);
         if (!listeners?.size) return;
-        const prev = this.#snapshots.get(key);
+        const prev = this.#snapshots.get(key) ?? UNKNOWN;
         const next = this.#snapshot(key);
         if (next === prev) return;
         for (const fn of [...listeners]) {

@@ -1,6 +1,10 @@
 import { KeyedCache, StoredEntry } from './KeyedCache';
 import { PersistentCache } from './PersistentCache';
 
+async function until(condition: () => boolean): Promise<void> {
+    while (!condition()) await new Promise(r => setTimeout(r, 1));
+}
+
 function deferred<T>() {
     let resolve!: (v: T) => void;
     const promise = new Promise<T>(r => { resolve = r; });
@@ -75,6 +79,57 @@ describe('KeyedCache', () => {
         expect(await cache.get('x')).toBeNull();
         expect(await cache.get('x')).toBeNull();
         expect(loadMany).toHaveBeenCalledTimes(2);
+    });
+
+    test('a subscribed key whose read answers null is fresh with a null value; get() still asks again', async () => {
+        const loadMany = jest.fn(async (keys: string[]) => keys.map(() => null));
+        const cache = new KeyedCache<string>({ loadMany });
+        const live = cache.live('x');
+        expect(live.getSnapshot()).toMatchObject({ state: 'unknown', value: undefined });
+        const seen: string[] = [];
+        const off = live.subscribe(s => seen.push(`${s.state}:${s.value}`));
+        await until(() => live.getSnapshot().state === 'fresh');
+        expect(live.getSnapshot()).toMatchObject({ state: 'fresh', value: null });
+        expect(seen).toEqual(['loading:undefined', 'fresh:null']);
+        expect(loadMany).toHaveBeenCalledTimes(1);
+        expect(await live.read()).toBeNull();
+        expect(loadMany).toHaveBeenCalledTimes(2);
+        // A set() replaces the null, a markStale() makes it load again.
+        cache.set('x', 'there');
+        expect(live.getSnapshot()).toMatchObject({ state: 'fresh', value: 'there' });
+        off();
+    });
+
+    test('a not-found key keeps nothing once it is no longer watched', async () => {
+        const persistent = new MapStore<string>();
+        const cache = new KeyedCache<string>({
+            loadMany: async keys => keys.map(() => null),
+            persistent,
+            persistentStale: true,
+            limits: () => ({ entries: 3, bytes: 1_000 }),
+        });
+        for (let i = 0; i < 50; i++) {
+            const live = cache.live(`k${i}`);
+            const off = live.subscribe(() => {});
+            await until(() => live.getSnapshot().state === 'fresh');
+            expect(live.getSnapshot().value).toBeNull();
+            off();
+        }
+        for (let i = 0; i < 50; i++) await cache.get(`g${i}`);
+        // Nothing is held for them: each key is back to unknown.
+        for (let i = 0; i < 50; i++) {
+            expect(cache.live(`k${i}`).getSnapshot().state).toBe('unknown');
+            expect(cache.live(`g${i}`).getSnapshot().state).toBe('unknown');
+        }
+    });
+
+    test('a failed key keeps its error while it is watched; the last unsubscribe drops it', async () => {
+        const cache = new KeyedCache<string>({ loadMany: async keys => keys.map(() => new Error('boom')) });
+        const live = cache.live('k');
+        const off = live.subscribe(() => {});
+        await until(() => live.getSnapshot().state === 'error');
+        off();
+        expect(live.getSnapshot()).toMatchObject({ state: 'unknown', error: undefined });
     });
 
     test('a set() while a read is in flight wins over the read', async () => {

@@ -28,6 +28,7 @@ export function useAgent<T>(props: Props<T>) {
   return {
     agent,
     profile,
-    error: snapshot?.error === undefined ? undefined : String(snapshot.error),
+    // The error of the last read, only while it is the state: not during a retry (`loading`).
+    error: snapshot?.state === "error" ? String(snapshot.error) : undefined,
   };
 }

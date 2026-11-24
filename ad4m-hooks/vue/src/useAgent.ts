@@ -7,7 +7,7 @@ import { LinkExpression, AgentClient, type Live, type Agent } from "@coasys/ad4m
  */
 export function useAgent<T>(client: AgentClient, did: string | Function, formatter: (links: LinkExpression[]) => T) {
   const didRef = typeof did === "function" ? (did as any) : ref(did);
-  const snapshot = shallowRef<{ value?: Agent | null; error?: unknown }>({});
+  const snapshot = shallowRef<{ state?: string; value?: Agent | null; error?: unknown }>({});
 
   let unsubscribe: (() => void) | undefined;
   const follow = (live: Live<Agent | null> | undefined) => {
@@ -34,7 +34,8 @@ export function useAgent<T>(client: AgentClient, did: string | Function, formatt
     const perspective = agent.value?.perspective;
     return perspective ? ({ ...formatter(perspective.links), did: didRef.value } as T) : null;
   });
-  const error = computed(() => (snapshot.value.error === undefined ? undefined : String(snapshot.value.error)));
+  // The error of the last read, only while it is the state: not during a retry (`loading`).
+  const error = computed(() => (snapshot.value.state === "error" ? String(snapshot.value.error) : undefined));
 
   return { agent, profile, error };
 }

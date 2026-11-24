@@ -105,13 +105,31 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
   out: one sent before a reconnect reaches its readers once and is dropped. A
   failure is never kept.
 - What keeps an entry fresh is written in its spec, not in a kind: the events
-  it listens to (`on`), whether a reconnect makes it stale, an age limit. Built so far:
-  `agent.status` (pushed: `agent-status-changed`
-  and the results of `agent.unlock/lock/generate/import`; read through
-  `client.agent.status()` and `client.agent.did()`, a status with no DID is not
-  kept) and `sfu.status` (fixed for an executor process: `client.runtime.sfuStatus()`; a failure
-  is not kept). `NeighbourhoodProxy.createSession` reads both together;
-  `PerspectiveClient.getNeighbourhoodProxy(uuid)` returns one proxy per uuid.
+  it listens to (`on`) and its `load`. An `Entry` is keyed by its RPC name
+  (`mirror.entry({ method, load, on })`: one entry per method per client); the
+  perspective uuid in a key belongs only to live queries and one-shot reads
+  (`live`, `liveResult`, `oneShot`, `wrote`). A reconnect or `lagged` makes every
+  entry stale, and every keyed cache except the expressions (`staleOnReconnect: false`). Entries (see the sections below and the code for each one's events):
+  - `agent.status`: pushed by `agent-status-changed` and the results of
+    `agent.unlock/lock/generate/import`; read through `client.agent.status()` and
+    `client.agent.did()`; a status with no DID is not kept.
+  - `sfu.status`: fixed for an executor process (`client.runtime.sfuStatus()`); a
+    failure is not kept.
+  - `agent.get`, `hosting.info` and `perspective.all`: below.
+  `NeighbourhoodProxy.createSession` reads `agent.status` and `sfu.status` together;
+  `PerspectiveClient.getNeighbourhoodProxy(uuid)` returns one proxy per uuid, and
+  a `perspective-removed` event or `remove()` drops that uuid's proxy.
+- A mounted view (a `Live` with a subscriber, a hook) reloads on an executor
+  event that changes the value, on a reconnect or `lagged` marker, on a
+  remount, or on a read. It does not reload on the age of a keyed value
+  (`REMOTE_AGENT_TTL_MS`, `EXPRESSION_TTL_MS`) by itself: an aged value is old
+  and no one is told, so the next read or subscribe loads it. There is no expiry
+  timer.
+- A keyed cache answers `null` for an unknown key and does not keep it (the next
+  `get()` asks again), but a key with a subscriber shows it as `{ state: 'fresh',
+  value: null }`. Its maps hold only keys with a value, a read in flight or a
+  subscriber (a failed read's error stays until the next read, a reconnect, or the
+  last subscriber leaving); `storedUsed` follows the held values.
 - Profiles and expressions. The own agent (`agent.get`, read through
   `client.agent.me()` / `client.agent.live.me()`) is pushed: `agent-updated`
   for the own DID and the result of `updatePublicPerspective` /

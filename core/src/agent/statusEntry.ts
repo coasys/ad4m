@@ -10,9 +10,7 @@ import { AgentStatus } from './AgentStatus'
  */
 export function agentStatusEntry(apiClient: ApiClient): Entry<AgentStatus> {
     return apiClient.mirror.entry<AgentStatus>({
-        scope: 'agent',
         method: 'agent.status',
-        params: {},
         load: async () => new AgentStatus(await apiClient.call('agent.status', {})),
         on: { 'agent-status-changed': (event, entry) => entry.push(new AgentStatus(event.agent)) },
     })

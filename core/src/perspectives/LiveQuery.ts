@@ -1,4 +1,4 @@
-import { canonical } from "../mirror/Entry";
+import { canonical, type Unsubscribe } from "../mirror/Entry";
 import type { PerspectiveClient } from "./PerspectiveClient";
 
 /** Reply to `perspective.subscribe`. */
@@ -100,8 +100,6 @@ export interface Snapshot<T> {
      *  the first result of a re-open that differs from the last one, is `false`. */
     initial: boolean
 }
-
-export type Unsubscribe = () => void
 
 /** The rows of a SPARQL live query, as the executor serialises them. */
 export type SparqlRows = any[]

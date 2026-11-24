@@ -1,6 +1,3 @@
-/** Where a value belongs: the executor, the calling agent or one perspective. */
-export type Scope = 'executor' | 'agent' | { perspective: string }
-
 export type State = 'unknown' | 'loading' | 'fresh' | 'stale' | 'error'
 
 export type Unsubscribe = () => void

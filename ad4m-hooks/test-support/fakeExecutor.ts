@@ -25,6 +25,17 @@ export function profileOf(did: string, name = profiles.get(did) ?? "none") {
   };
 }
 
+/** Methods that fail (500) while listed. */
+export const failing = new Set<string>();
+
+/** Methods whose replies wait while listed; `release()` sends them. */
+export const holding = new Set<string>();
+const held: (() => void)[] = [];
+export function release() {
+  holding.clear();
+  for (const send of held.splice(0)) send();
+}
+
 /** The perspectives `perspective.all` lists, per token (wire handles). */
 export const perspectives = new Map<string, object[]>();
 
@@ -61,7 +72,11 @@ export class FakeExecutorSocket {
       : type === "agent.byDIDs" ? params.dids.map((d: string) => profileOf(d))
       : type === "perspective.all" ? (perspectives.get(this.token) ?? [])
       : true;
-    setTimeout(() => this.onmessage?.({ data: JSON.stringify({ id, result }) }), 0);
+    const reply = () => this.onmessage?.({
+      data: JSON.stringify(failing.has(type) ? { id, error: { code: 500, message: `${type} failed` } } : { id, result }),
+    });
+    if (holding.has(type)) held.push(reply);
+    else setTimeout(reply, 0);
   }
 }
 
@@ -75,6 +90,9 @@ export function installFakeExecutor() {
   sockets.length = 0;
   profiles.clear();
   perspectives.clear();
+  failing.clear();
+  holding.clear();
+  held.length = 0;
   (globalThis as any).WebSocket = FakeExecutorSocket;
 }
 

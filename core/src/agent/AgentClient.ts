@@ -12,6 +12,7 @@ import { HostingUserInfo, PaymentRequestResult, ComputeLogEntry } from "../runti
 import { AgentStatus } from "./AgentStatus";
 import { agentDid, agentStatusEntry } from "./statusEntry";
 import type { Live } from "../mirror/Mirror";
+import type { Entry } from "../mirror/Entry";
 import { AGENT_KIND } from "./AgentKind";
 import { LinkMutations, LinkExpression, LinkInput, linkEqual } from "../links/Links";
 import { VerificationRequestResult } from "../runtime/RuntimeTypes";
@@ -37,6 +38,9 @@ const MAX_DIDS_PER_CALL = 200;
 
 export class AgentClient {
   #apiClient: ApiClient;
+  #me?: Entry<Agent>;
+  #status?: Entry<AgentStatus>;
+  #hosting?: Entry<HostingUserInfo>;
 
   /**
    * How long another agent's profile stays fresh (ms). `agent-updated` refreshes it
@@ -62,12 +66,10 @@ export class AgentClient {
     return this.#meEntry().read();
   }
 
-  /** The one `agent.get` entry of this client's mirror. */
-  #meEntry() {
-    return this.#apiClient.mirror.entry<Agent>({
-      scope: 'agent',
+  /** The one `agent.get` entry of this client's mirror, made on first use. */
+  #meEntry(): Entry<Agent> {
+    this.#me ??= this.#apiClient.mirror.entry<Agent>({
       method: 'agent.get',
-      params: {},
       load: async () => toAgent(await this.#apiClient.call('agent.get', {})) as Agent,
       on: {
         'agent-updated': (event, entry) => {
@@ -76,6 +78,7 @@ export class AgentClient {
         },
       },
     });
+    return this.#me;
   }
 
   /**
@@ -125,12 +128,16 @@ export class AgentClient {
     me: (): Live<Agent> => this.#meEntry(),
     /** The hosting account of this client's user; {@link hostingUserInfo} reads it. */
     hostingUserInfo: (): Live<HostingUserInfo> => this.#hostingEntry(),
-    /** The agent with this DID, `null` while unknown; {@link byDID} reads it. */
+    /**
+     * The agent with this DID; {@link byDID} reads it. The value is `undefined` until a read
+     * answers. A DID the executor does not know is `fresh` with the value `null` (while the
+     * view has a subscriber; the answer is not kept, so a read asks again).
+     */
     byDID: (did: string): Live<Agent | null> => this.#agents().live(did),
   };
 
-  #statusEntry() {
-    return agentStatusEntry(this.#apiClient);
+  #statusEntry(): Entry<AgentStatus> {
+    return (this.#status ??= agentStatusEntry(this.#apiClient));
   }
 
   /** Keeps the status the executor returned from a call that changes it. */
@@ -303,7 +310,6 @@ export class AgentClient {
    * Always one request: not mirrored. `apps-changed` is sent only when a grant is
    * minted, and `removeApp` / `revokeToken` send nothing, so no event says the list is stale.
    */
-
   async getApps(): Promise<Apps[]> {
     return this.#apiClient.call('agent.getApps', {});
   }
@@ -366,12 +372,10 @@ export class AgentClient {
     return this.#hostingEntry().read();
   }
 
-  /** The one `hosting.info` entry of this client's mirror; it hears `hosting-user-info-changed`. */
-  #hostingEntry() {
-    return this.#apiClient.mirror.entry<HostingUserInfo>({
-      scope: 'agent',
+  /** The one `hosting.info` entry of this client's mirror, made on first use; it hears `hosting-user-info-changed`. */
+  #hostingEntry(): Entry<HostingUserInfo> {
+    this.#hosting ??= this.#apiClient.mirror.entry<HostingUserInfo>({
       method: 'hosting.info',
-      params: {},
       load: async () => {
         const info = (await this.#apiClient.call('hosting.info', {})).userInfo ?? {
           email: '', credits: null, hotWalletAddress: null, freeAccess: false,
@@ -395,6 +399,7 @@ export class AgentClient {
         },
       },
     });
+    return this.#hosting;
   }
 
   async computeLog(since?: string, limit?: number, userEmail?: string): Promise<ComputeLogEntry[]> {

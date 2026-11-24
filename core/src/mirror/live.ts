@@ -1,9 +1,10 @@
-import { DEFAULT_KEEP_ALIVE_MS, type LiveQuery, type LiveQueryStatus, type LiveSubscription, type Snapshot, type Unsubscribe } from '../perspectives/LiveQuery'
+import { DEFAULT_KEEP_ALIVE_MS, type LiveQuery, type LiveQueryStatus, type LiveSubscription, type Snapshot } from '../perspectives/LiveQuery'
+import type { Unsubscribe } from './Entry'
 
 /** What a `live` entry of the mirror is: one subscription, and the handles held on it. */
 export class SharedLive<T> {
     readonly subscription: LiveSubscription<T>
-    readonly scope: string
+    readonly perspective: string
     #views = 0
     // `changes` when a write of this client settled: until the result changes, it may not hold the write.
     #barrier?: number
@@ -11,9 +12,9 @@ export class SharedLive<T> {
     #end: () => void
 
     /** `end` runs once the grace after the last handle is over: the mirror forgets the entry. */
-    constructor(subscription: LiveSubscription<T>, scope: string, end: () => void) {
+    constructor(subscription: LiveSubscription<T>, perspective: string, end: () => void) {
         this.subscription = subscription
-        this.scope = scope
+        this.perspective = perspective
         this.#end = end
     }
 

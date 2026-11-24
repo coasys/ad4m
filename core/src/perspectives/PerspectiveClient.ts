@@ -68,6 +68,7 @@ export class PerspectiveClient {
     #expressionClient?: ExpressionClient
     #neighbourhoodClient?: NeighbourhoodClient
     #neighbourhoodProxies = new Map<string, NeighbourhoodProxy>()
+    #stopWatchingRemoved?: () => void
     #aiClient?: AIClient
 
     constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
@@ -157,7 +158,7 @@ export class PerspectiveClient {
         const params = { uuid, engine: 'sparql' as const, query }
         if (options) return JSON.parse(await this.#apiClient.call('perspective.querySparql', params, options)) as T
         return JSON.parse(await this.#apiClient.mirror.oneShot({
-            scope: { perspective: uuid },
+            perspective: uuid,
             method: 'perspective.querySparql',
             params,
             request: () => this.#apiClient.call('perspective.querySparql', params),
@@ -174,7 +175,7 @@ export class PerspectiveClient {
         try {
             return await write
         } finally {
-            this.#apiClient.mirror.wrote({ perspective: uuid })
+            this.#apiClient.mirror.wrote(uuid)
         }
     }
 
@@ -185,7 +186,7 @@ export class PerspectiveClient {
      */
     liveQuery<T>(uuid: string, query: LiveQueryText, project: (raw: any) => T, options: LiveOptions = {}): LiveQuery<T> {
         return this.#apiClient.mirror.live<T>({
-            scope: { perspective: uuid },
+            perspective: uuid,
             method: 'perspective.subscribe',
             params: subscribeWire(query),
             keepAliveMs: options.keepAliveMs,
@@ -205,7 +206,7 @@ export class PerspectiveClient {
      */
     #liveAnswer(uuid: string, query: LiveQueryText): { result: any } | undefined {
         return this.#apiClient.mirror.liveResult({
-            scope: { perspective: uuid }, method: 'perspective.subscribe', params: subscribeWire(query),
+            perspective: uuid, method: 'perspective.subscribe', params: subscribeWire(query),
         })
     }
 
@@ -265,7 +266,7 @@ export class PerspectiveClient {
         const params = { uuid, ...classParams(className), query_json: queryJson }
         if (options) return JSON.parse(await this.#apiClient.call('perspective.modelQuery', params, options))
         return JSON.parse(await this.#apiClient.mirror.oneShot({
-            scope: { perspective: uuid },
+            perspective: uuid,
             method: 'perspective.modelQuery',
             params,
             request: () => this.#apiClient.call('perspective.modelQuery', params),
@@ -700,6 +701,11 @@ export class PerspectiveClient {
 
     /** The perspective's neighbourhood proxy: one per uuid, so its sessions and handlers are shared. */
     getNeighbourhoodProxy(uuid: string): NeighbourhoodProxy {
+        // Registered once, with the first proxy: a perspective removed by another client of
+        // this executor takes its proxy with it, not only one removed through `remove()`.
+        this.#stopWatchingRemoved ??= this.#apiClient.on('perspective-removed', ({ perspectiveUuid }) => {
+            this.#neighbourhoodProxies.delete(perspectiveUuid)
+        })
         let proxy = this.#neighbourhoodProxies.get(uuid)
         if (!proxy) {
             proxy = new NeighbourhoodProxy(this.#neighbourhoodClient!, uuid, this.#apiClient)
