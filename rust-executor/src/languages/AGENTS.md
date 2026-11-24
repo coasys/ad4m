@@ -115,7 +115,9 @@ deadline error
 (`a_read_admitted_beside_a_read_that_holds_the_thread_gets_an_error_at_the_deadline`).
 The runtime never
 starts a call whose caller has gone, so a deadline error means the call did
-not run.
+not run. The deadline reads the tokio clock (`tokio::time::Instant`), so a test
+on a paused clock (`start_paused`) reaches it with no real wait
+(`the_deadline_follows_the_paused_tokio_clock`).
 
 A call that never returns, by kind. A hung ordered call (an `await` nothing
 settles) blocks the language's ordered calls and its own caller for ever; the

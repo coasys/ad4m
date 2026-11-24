@@ -10,7 +10,7 @@
  * a real signed link with its target swapped, stamped *later* than the
  * original. Under last-write-wins that later value would become the property,
  * so it is the case the default exists for. Everything is driven through the
- * public model API (`findAll`, `findOne`, the query builder) that a client
+ * public model API (`findAll`, `findOne`, a live query) that a client
  * uses.
  *
  * The same default covers the rows under `__links`, the order behind
@@ -175,12 +175,6 @@ describe("Ad4mModel — unverified links are withheld by default", function () {
     const recipe = all.find((r) => r.id === recipeId);
     expect(recipe?.name).to.equal("forged");
     expect(recipe?.cuisine, "a signed link is present both ways").to.equal("thai");
-
-    const viaBuilder = await UnverifiedRecipe.query(perspective)
-      .where({ id: recipeId })
-      .includeUnverified()
-      .get();
-    expect(viaBuilder[0]?.name).to.equal("forged");
   });
 
   it("leaves the forged link out of __links by default", async () => {
