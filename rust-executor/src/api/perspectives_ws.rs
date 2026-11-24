@@ -122,7 +122,7 @@ pub(crate) async fn get_perspective_with_access(
     let perspective = get_perspective_or_404(uuid).await?;
 
     if !ctx.is_operator() {
-        let handle = perspective.persisted.lock().await.clone();
+        let handle = perspective.persisted.snapshot();
         if !ctx.session.is_authenticated()
             || !can_access_perspective_with_did(ctx.user_did(), &handle)
         {
@@ -274,7 +274,7 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
     if ctx.is_operator() {
         let mut handles: Vec<PerspectiveHandle> = Vec::new();
         for p in all {
-            handles.push(p.persisted.lock().await.clone());
+            handles.push(p.persisted.snapshot());
         }
         return Ok(serde_json::to_value(handles)?);
     }
@@ -285,7 +285,7 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
     let readable = pointers_covered(&ctx.session.capabilities(), PERSPECTIVE, READ);
     let mut filtered: Vec<PerspectiveHandle> = Vec::new();
     for p in all {
-        let handle = p.persisted.lock().await.clone();
+        let handle = p.persisted.snapshot();
         if can_access_perspective_with_did(ctx.user_did(), &handle)
             && readable
                 .as_ref()
@@ -311,7 +311,7 @@ async fn get_perspective_handler(
     _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
     let perspective = guarded_perspective(&params).await?;
-    let handle = perspective.persisted.lock().await.clone();
+    let handle = perspective.persisted.snapshot();
     Ok(serde_json::to_value(handle)?)
 }
 

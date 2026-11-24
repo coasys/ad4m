@@ -345,7 +345,7 @@ pub(crate) const CLAIM_SETTLE_POLL_MS: u64 = 500;
 /// executors, or when this executor runs one loop per managed user. Only an
 /// unshared perspective on a single-user executor skips the wait.
 pub async fn claim_settle_ms(perspective: &PerspectiveInstance) -> u64 {
-    let shared = perspective.persisted.lock().await.shared_url.is_some();
+    let shared = perspective.persisted.load().shared_url.is_some();
     if shared || crate::user_management::is_multi_user_enabled() {
         CLAIM_SETTLE_MS
     } else {
@@ -837,7 +837,9 @@ mod tests {
 
         crate::db::Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(false))
             .expect("disable multi-user");
-        p.persisted.lock().await.shared_url = Some("neighbourhood://test".to_string());
+        p.persisted
+            .update(|h| h.shared_url = Some("neighbourhood://test".to_string()))
+            .await;
         assert_eq!(claim_settle_ms(&p).await, CLAIM_SETTLE_MS, "shared");
     }
 }
