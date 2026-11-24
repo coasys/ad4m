@@ -1711,9 +1711,15 @@ async fn a_wasm_language_runs_concurrent_calls_each_as_its_own_agent() {
     });
 
     // Gate on the event — her sender is registered inside the language —
-    // not on a sleep that would only guess she got that far.
-    within(Duration::from_secs(10), "alice's wait to park", async {
+    // not on a sleep that would only guess she got that far. A call that
+    // has already ended can never park: hers ending here is the failure
+    // (a refused token, an agent that did not resolve), not this wait's
+    // timeout.
+    let parked = within(Duration::from_secs(10), "alice's wait to park", async {
         loop {
+            if alice_call.is_finished() {
+                break false;
+            }
             let probe = concurrent(
                 &handle,
                 format!(
@@ -1727,12 +1733,18 @@ async fn a_wasm_language_runs_concurrent_calls_each_as_its_own_agent() {
                 .and_then(|v| v.pointer("/data").and_then(|d| d.as_bool()))
                 .unwrap_or(false);
             if waiting {
-                break;
+                break true;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await;
+    if !parked {
+        panic!(
+            "alice's wait call ended before it parked: {:?}",
+            alice_call.await
+        );
+    }
 
     // Bob's release sends on Alice's sender: her parked future resumes
     // inside his poll on the shared scheduler. His answer signs as Bob.
@@ -1751,11 +1763,18 @@ async fn a_wasm_language_runs_concurrent_calls_each_as_its_own_agent() {
     .await
     .expect("bob's release answers");
     let bob_expression: serde_json::Value = serde_json::from_str(&bob_answer).unwrap();
+    let released = bob_expression
+        .pointer("/data/released")
+        .and_then(|r| r.as_bool())
+        .unwrap_or(false);
+    if !released && alice_call.is_finished() {
+        panic!(
+            "alice's wait call ended before bob's release: {:?}",
+            alice_call.await
+        );
+    }
     assert!(
-        bob_expression
-            .pointer("/data/released")
-            .and_then(|r| r.as_bool())
-            .unwrap_or(false),
+        released,
         "bob's release found no parked wait to wake: {bob_answer}"
     );
     assert_eq!(
