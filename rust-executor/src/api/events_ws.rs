@@ -810,6 +810,41 @@ mod audience_matrix_tests {
                 ),
                 main_agent.to_vec(),
             ),
+            // The list topics of a user's perspective reach its owner and the operator, whom
+            // `perspective.all` lists every perspective to; not user B, not an app that acts as
+            // the main agent. The perspective's link events stay with its owner.
+            (
+                "list-added-of-a".into(),
+                event(
+                    Topic::PerspectiveAdded,
+                    Audience::DidsAndOperator(vec![A.into()]),
+                ),
+                vec!["operator", "user A"],
+            ),
+            (
+                "list-removed-of-a".into(),
+                event(
+                    Topic::PerspectiveRemoved,
+                    Audience::DidsAndOperator(vec![A.into()]),
+                ),
+                vec!["operator", "user A"],
+            ),
+            (
+                "list-updated-of-a-and-b".into(),
+                event(
+                    Topic::PerspectiveUpdated,
+                    Audience::DidsAndOperator(vec![A.into(), B.into()]),
+                ),
+                vec!["operator", "user A", "user B"],
+            ),
+            (
+                "list-added-of-main".into(),
+                event(
+                    Topic::PerspectiveAdded,
+                    Audience::DidsAndOperator(vec![main.clone()]),
+                ),
+                main_agent.to_vec(),
+            ),
             (
                 "no-did".into(),
                 event(Topic::AgentUpdated, Audience::Dids(vec![])),
@@ -1166,7 +1201,7 @@ mod audience_matrix_tests {
     }
 
     // The real publishers: creating, renaming, syncing and removing a user's perspective
-    // reaches that user's stream only. An unowned perspective's events, its removal too,
+    // reaches that user's stream, and its list events (not its sync state) the operator's. An unowned perspective's events, its removal too,
     // reach the operator and the apps that may query it (its removal used to reach nobody).
     #[tokio::test]
     async fn perspective_lifecycle_events_reach_exactly_the_owners_streams() {
@@ -1221,7 +1256,24 @@ mod audience_matrix_tests {
             let got = perspective_events(stream, &run, &fence).await;
             let expected = match *name {
                 "user A" => lifecycle(&owned.uuid),
-                "operator" | "app" | "permit app" => lifecycle(&unowned.uuid),
+                // `perspective.all` lists every perspective to the operator, so it hears A's
+                // list events (added, updated twice, removed), but not A's sync state.
+                "operator" => {
+                    use Topic::*;
+                    let mut list = lifecycle(&unowned.uuid);
+                    list.extend(expect(
+                        &[
+                            PerspectiveAdded,
+                            PerspectiveUpdated,
+                            PerspectiveUpdated,
+                            PerspectiveRemoved,
+                        ],
+                        &owned.uuid,
+                    ));
+                    list.sort();
+                    list
+                }
+                "app" | "permit app" => lifecycle(&unowned.uuid),
                 _ => vec![],
             };
             assert_eq!(got, expected, "{name}");

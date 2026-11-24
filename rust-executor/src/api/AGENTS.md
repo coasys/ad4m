@@ -456,9 +456,9 @@ them against those two guards.
   `events_ws::event_specs()` is keyed by `Topic`. A socket's stream
   (`events_ws::build_event_stream`) delivers an event when `Session::may_receive` and
   `event_interest::wants` (the watch, keyed by `Topic`) hold, as `events_ws::wire_message`.
-- `Audience = Everyone | Dids(Vec<String>) | Operator`. `may_receive` needs both: the session is
-  in the audience (everyone, `Session::acts_as_did` is one of the DIDs, or for `Operator` the
-  operator principal only; a grant acts as its agent, the operator as the main agent it owns),
+- `Audience = Everyone | Dids(Vec<String>) | Operator | DidsAndOperator(Vec<String>)`. `may_receive`
+  needs both: the session is in the audience (everyone, `Session::acts_as_did` is one of the DIDs,
+  for `Operator` the operator principal only, for `DidsAndOperator` either of the two, once; a grant acts as its agent, the operator as the main agent it owns),
   and it holds `Event::capability`. `Event::new` fills
   the capability from `Topic::capability(perspective)`, the capability of the RPC method that
   reads the same data (#1284): per-perspective topics name the event's perspective
@@ -480,7 +480,12 @@ them against those two guards.
   (or one whose owner list is empty), read when the event is published. No per-perspective event
   goes to `Everyone`. Each goes out once, to all recipients (`perspectives::publish_to_owners`),
   and no payload names an `owner`: `perspective-added/-updated/-removed`, `sync-state-change`,
-  `link-added/-removed/-updated`. `query-subscription-update`
+  `link-added/-removed/-updated`. The rule: whoever `perspective.all` lists a perspective to must
+  hear the list events of that perspective. `perspective.all` lists every perspective to the
+  operator, so the three list topics go out as `Audience::DidsAndOperator(recipients)`
+  (`perspectives::list_event`), because an SDK client mirrors that list and refreshes it from
+  those events. Link, state and every other per-perspective event stay on `Dids`: the operator
+  does not read another agent's perspective (`helpers::can_access_perspective`). `query-subscription-update`
   (`PerspectiveInstance::send_delta_update`, which reads the recipients when it publishes)
   goes only to the subscriber (`SubscribedQuery::subscriber`, the main agent for `None`) when it
   is one of them: the query ran as the subscriber, so a co-owner must not get its results.

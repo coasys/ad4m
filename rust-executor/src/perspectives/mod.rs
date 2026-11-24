@@ -338,7 +338,7 @@ pub async fn add_perspective(
         perspectives.insert(handle.uuid.clone(), RwLock::new(p));
     }
 
-    publish_to_owners(
+    publish_list_event(
         Topic::PerspectiveAdded,
         event_recipients(&handle),
         PerspectiveEvent {
@@ -366,6 +366,18 @@ pub(crate) fn event_recipients(handle: &PerspectiveHandle) -> Vec<String> {
 /// perspective's [`event_recipients`]): one event per audience, not one per owner.
 pub(crate) fn publish_to_owners(topic: Topic, owners: Vec<String>, payload: impl Serialize) {
     get_global_pubsub_sync().publish_event(Event::new(topic, Audience::Dids(owners), payload));
+}
+
+/// Publishes a perspective list event (`perspective-added`, `-updated`, `-removed`) to the
+/// owners and to the operator: `perspective.all` lists every perspective to the operator, so
+/// the operator must hear every change to that list. Link and state events use
+/// [`publish_to_owners`].
+fn publish_list_event(topic: Topic, owners: Vec<String>, payload: impl Serialize) {
+    get_global_pubsub_sync().publish_event(Event::new(
+        topic,
+        Audience::DidsAndOperator(owners),
+        payload,
+    ));
 }
 
 /// End every live query the RPC connection `connection_id` opened.
@@ -463,7 +475,7 @@ pub async fn update_perspective_with(
     }
     let handle = result?;
 
-    publish_to_owners(
+    publish_list_event(
         Topic::PerspectiveUpdated,
         event_recipients(&handle),
         PerspectiveEvent {
@@ -536,7 +548,7 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
         }
 
         let recipients = event_recipients(&instance.persisted.snapshot());
-        publish_to_owners(
+        publish_list_event(
             Topic::PerspectiveRemoved,
             recipients,
             PerspectiveRemovedEvent {
