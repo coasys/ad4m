@@ -93,7 +93,69 @@ test_restores_deleted_tracked_files() {
         || fail "stamp file does not hold $REV"
 }
 
-for t in test_fresh_install test_restores_deleted_tracked_files; do
+# #1101: a runner kept bin/kitsune2-bootstrap-srv from an older crates.io
+# version. `cargo install` then exits 101 ("already exists") unless the
+# invocation passes --force, and the stamp stays on the old version.
+test_kitsune_drift_reinstall_passes_force() {
+    cat >> "$WORKSPACE/Cargo.lock" <<'EOF'
+
+[[package]]
+name = "kitsune2_bootstrap_srv"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+EOF
+
+    mkdir -p "$WORKSPACE/.hc-toolchain/bin"
+    printf '%s\n' "$REV" > "$WORKSPACE/.hc-toolchain/.installed_rev"
+    printf '#!/bin/sh\necho "holochain_cli fake"\n' > "$WORKSPACE/.hc-toolchain/bin/hc"
+    chmod +x "$WORKSPACE/.hc-toolchain/bin/hc"
+    printf '0.5.0\n' > "$WORKSPACE/.hc-toolchain/.installed_kitsune_version"
+    printf '#!/bin/sh\necho "kitsune2-bootstrap-srv 0.5.0"\n' > "$WORKSPACE/.hc-toolchain/bin/kitsune2-bootstrap-srv"
+    chmod +x "$WORKSPACE/.hc-toolchain/bin/kitsune2-bootstrap-srv"
+
+    # install exits 101, like real cargo, when the binary is already there
+    # and --force is absent. Other subcommands keep the hc-build stand-in.
+    cat > "$TMP/bin/cargo" <<'EOF'
+#!/usr/bin/env bash
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+printf '%s\n' "$*" >> "$ROOT/cargo-args.log"
+if [[ "${1:-}" == "install" ]]; then
+    has_force=0
+    for arg in "$@"; do
+        if [[ "$arg" == "--force" ]]; then
+            has_force=1
+        fi
+    done
+    if [[ "$has_force" -ne 1 ]]; then
+        echo "error: binary \`kitsune2-bootstrap-srv\` already exists in destination" >&2
+        echo "help: use --force to overwrite" >&2
+        exit 101
+    fi
+    exit 0
+fi
+if [[ ! -f crates/fixt/Cargo.toml ]]; then
+    echo "error: failed to read \`$PWD/crates/fixt/Cargo.toml\`" >&2
+    exit 101
+fi
+mkdir -p target/release
+printf '#!/bin/sh\necho "holochain_cli fake"\n' > target/release/hc
+chmod +x target/release/hc
+EOF
+    chmod +x "$TMP/bin/cargo"
+
+    install_toolchain || fail "kitsune drift reinstall failed"
+    [[ "$(cat "$WORKSPACE/.hc-toolchain/.installed_kitsune_version" 2>/dev/null)" == "0.5.1" ]] \
+        || fail "kitsune stamp does not hold 0.5.1 (got '$(cat "$WORKSPACE/.hc-toolchain/.installed_kitsune_version" 2>/dev/null)')"
+    if [[ ! -f "$TMP/cargo-args.log" ]] || ! grep -q -- '--force' "$TMP/cargo-args.log"; then
+        echo "  cargo args: $(cat "$TMP/cargo-args.log" 2>/dev/null || echo '<none>')"
+        fail "fake cargo install did not see --force"
+    fi
+    if [[ -f "$TMP/cargo-args.log" ]] && ! grep -q 'kitsune2_bootstrap_srv' "$TMP/cargo-args.log"; then
+        fail "fake cargo was not asked to install kitsune2_bootstrap_srv"
+    fi
+}
+
+for t in test_fresh_install test_restores_deleted_tracked_files test_kitsune_drift_reinstall_passes_force; do
     echo "$t"
     make_fixture
     "$t"
