@@ -110,23 +110,27 @@ export class NeighbourhoodClient {
         }
     }
 
-    async subscribeToSignals(perspectiveUUID: string): Promise<void> {
+    subscribeToSignals(perspectiveUUID: string): void {
         const unsub = this.#apiClient.on(
             'signal',
             (event) => this.dispatchSignal(perspectiveUUID, PerspectiveExpression.fromWire(event.signal)),
             { perspective: perspectiveUUID },
         )
         this.#signalUnsubscribers.set(perspectiveUUID, unsub)
-        await this.#apiClient.watchApplied()
     }
 
-    async addSignalHandler(perspectiveUUID: string, handler: TelepresenceSignalCallback): Promise<void> {
+    /**
+     * Call `handler` with every signal of the neighbourhood. The executor
+     * applies the subscription before any call this client sends next; a
+     * signal another agent sent earlier may be missed.
+     */
+    addSignalHandler(perspectiveUUID: string, handler: TelepresenceSignalCallback): void {
         let handlersForPerspective = this.#signalHandlers.get(perspectiveUUID)
         if (!handlersForPerspective) {
             handlersForPerspective = []
             this.#signalHandlers.set(perspectiveUUID, handlersForPerspective)
             handlersForPerspective.push(handler)
-            await this.subscribeToSignals(perspectiveUUID)
+            this.subscribeToSignals(perspectiveUUID)
         } else {
             handlersForPerspective.push(handler)
         }

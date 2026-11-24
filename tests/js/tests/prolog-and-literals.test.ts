@@ -17,7 +17,7 @@ import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     path as shaclPath,
 } from "@coasys/ad4m";
 import { readFileSync } from "node:fs";
-import { startExecutor, baseUrl, quitExecutor, pollUntil, assertAbsentBySentinel, sleep } from "../utils/utils";
+import { startExecutor, baseUrl, quitExecutor, pollUntil, assertAbsentBySentinel } from "../utils/utils";
 
 /** Opens the live query's first value, then calls `onChange` with every
  *  later result (`initial` false), and returns the opening value. */
@@ -1585,11 +1585,6 @@ describe("Prolog + Literals", () => {
                     })).totalCount;
                     expect(subscription).to.equal(3);
 
-                    // Subscription-init delay: SPARQL change-watchers register
-                    // asynchronously inside the executor — no observable "ready"
-                    // state exists to poll for, so a fixed delay is required.
-                    await sleep(500);
-
                     // Add another recipe and verify callback is called
                     const recipe4 = new Recipe(perspective!);
                     recipe4.name = "Recipe 4";
@@ -1719,10 +1714,6 @@ describe("Prolog + Literals", () => {
                     expect(initialResult.totalCount).to.equal(10);
                     // Reset lastResult to verify we get an update
                     lastResult = null;
-
-                    // Subscription-init delay: SPARQL change-watchers register
-                    // asynchronously — no observable "ready" state to poll for.
-                    await sleep(500);
 
                     // Add a new recipe and verify subscription updates
                     const newRecipe = new Recipe(perspective!);
@@ -2499,10 +2490,6 @@ describe("Prolog + Literals", () => {
                         const initialCount = (await watch(live, (page) => countCallback(page.totalCount))).totalCount;
                         expect(initialCount).to.equal(0);
 
-                        // Subscription-init delay: SPARQL change-watchers register
-                        // asynchronously — no observable "ready" state to poll for.
-                        await sleep(500);
-
                         // Add a matching model
                         const model = new TestModel(perspective);
                         model.name = "Test";
@@ -2544,10 +2531,6 @@ describe("Prolog + Literals", () => {
                         const initialPage = await watch(live, pageCallback);
                         expect(initialPage.results.length).to.equal(0);
                         expect(initialPage.totalCount).to.equal(0);
-
-                        // Subscription-init delay: SPARQL change-watchers register
-                        // asynchronously — no observable "ready" state to poll for.
-                        await sleep(500);
 
                         // Add the first model and synchronize on its dispatch before
                         // saving the second. The underlying change-detection SPARQL is

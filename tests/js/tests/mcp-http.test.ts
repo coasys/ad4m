@@ -1655,6 +1655,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 perspective_id: wakerPerspectiveUuid,
             }, mcpSessionId);
 
+            var subscribed: Promise<void> = Promise.resolve();
             var wakePromise = new Promise<{ sub: any, result: any, parentChannel?: string }>(function(resolve, reject) {
                 var timeout = setTimeout(function() {
                     reject(new Error("WakerSubscriptionManager did not fire onWake within 15s"));
@@ -1671,7 +1672,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     },
                 });
 
-                manager.subscribe({
+                subscribed = manager.subscribe({
                     id: "test-mention-" + Date.now(),
                     type: "mention" as const,
                     perspective: wakerPerspectiveUuid,
@@ -1682,10 +1683,12 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     did: config.did,
                     mentionClass: config.mention_class,
                     mentionQuery: config.mention_query,
-                }).catch(reject);
+                });
+                subscribed.catch(reject);
             });
 
-            await sleep(2000);
+            // A subscribe that fails already rejects wakePromise.
+            await subscribed.catch(function() {});
 
             var peerMessage = await peerSays(wakerPerspectiveUuid, wakerChannelAddr, "Hey @wakerbot, can you help with this?", [agentDid]);
             console.log("Peer message created with mention:", peerMessage);
@@ -1762,8 +1765,6 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 mentionQuery: config.mention_query,
             });
 
-            await sleep(1000);
-
             // "wakerbots" and "WakerTesting" contain the agent's names but do not
             // name it, and there is no mention link. Nor is a mention link to
             // someone else a mention of the agent.
@@ -1836,7 +1837,6 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 mentionClass: config.mention_class,
                 mentionQuery: config.mention_query,
             });
-            await sleep(1000);
 
             // A bot's reply that names and mentions itself (e2e 2026-10-15 woke the
             // bot again): its own message, with its own `we://mention` link to its DID.
@@ -1899,6 +1899,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 perspective_id: didPerspId,
             }, mcpSessionId);
 
+            var subscribed: Promise<void> = Promise.resolve();
             var wakePromise = new Promise<any>(function(resolve, reject) {
                 var timeout = setTimeout(function() {
                     reject(new Error("WakerSubscriptionManager did not fire onWake for DID mention within 15s"));
@@ -1915,7 +1916,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     },
                 });
 
-                manager.subscribe({
+                subscribed = manager.subscribe({
                     id: "test-did-mention-" + Date.now(),
                     type: "mention" as const,
                     perspective: didPerspId,
@@ -1926,10 +1927,12 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     did: config.did,
                     mentionClass: config.mention_class,
                     mentionQuery: config.mention_query,
-                }).catch(reject);
+                });
+                subscribed.catch(reject);
             });
 
-            await sleep(2000);
+            // A subscribe that fails already rejects wakePromise.
+            await subscribed.catch(function() {});
 
             // A WE post: its root, a CollectionBlock with no text, links the
             // agent's DID with `we://mention`, its `mentions`; its text block
@@ -1971,6 +1974,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }, mcpSessionId);
 
             var manager: any;
+            var subscribed: Promise<void> = Promise.resolve();
             var wakePromise = new Promise<any[]>(function(resolve, reject) {
                 var timeout = setTimeout(function() {
                     reject(new Error("WakerSubscriptionManager did not fire onWake for a text mention within 15s"));
@@ -1984,7 +1988,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                         resolve(mentions ?? []);
                     },
                 });
-                manager.subscribe({
+                subscribed = manager.subscribe({
                     id: "test-text-mention-" + Date.now(),
                     type: "mention" as const,
                     perspective: textPerspId,
@@ -1995,10 +1999,12 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     did: config.did,
                     mentionClass: config.mention_class,
                     mentionQuery: config.mention_query,
-                }).catch(reject);
+                });
+                subscribed.catch(reject);
             });
 
-            await sleep(2000);
+            // A subscribe that fails already rejects wakePromise.
+            await subscribed.catch(function() {});
             var named = await peerSays(textPerspId, textChannel, "wakerbot, can you look at this?");
 
             var mentions = await wakePromise;
@@ -2078,7 +2084,6 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                     mentionClass: config.mention_class,
                     mentionQuery: config.mention_query,
                 }).then(async function() {
-                    await sleep(1000);
                     // The block files the message through its own relation, then a peer writes it.
                     var message = "flux://block-held-message-" + Date.now();
                     var added = await callMcpTool(MCP_BASE_URL, 'add_child', {
