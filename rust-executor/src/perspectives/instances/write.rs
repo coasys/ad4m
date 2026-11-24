@@ -892,15 +892,34 @@ pub(super) async fn require_members_left(
                 anyhow!(e),
             )
         })?;
-    let left = perspective
-        .get_links_effective(
-            &LinkQuery {
-                source: Some(stored),
-                predicate: Some(predicate),
-                ..Default::default()
+    let query = LinkQuery {
+        source: Some(stored),
+        predicate: Some(predicate),
+        ..Default::default()
+    };
+    // The answer rests on the members the store holds: a standalone commit expects them
+    // still held, so a concurrent removal of the member this one counts on is refused.
+    let committed = perspective.get_links(&query).await.map_err(|e| {
+        failed(
+            &class_name,
+            WriteStep::ReadCollection {
+                collection: collection.to_string(),
             },
-            batch_id,
+            e,
         )
+    })?;
+    if let Some(source) = &query.source {
+        perspective
+            .record_read(
+                &batch_id.map(str::to_string),
+                source,
+                &query.predicate,
+                &committed,
+            )
+            .await;
+    }
+    let left = perspective
+        .get_links_effective(&query, batch_id)
         .await
         .map_err(|e| {
             failed(

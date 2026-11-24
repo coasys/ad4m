@@ -59,7 +59,7 @@ impl PerspectiveInstance {
     /// Note that a replacing command staged into `batch_id` read `links` from `source` along
     /// `predicate`, for [`Self::expected_by_batch`]. The first read of a pair stands: it is what
     /// the batch's decisions rest on. No batch, or one that is not open, records nothing.
-    pub(super) async fn record_read(
+    pub(crate) async fn record_read(
         &self,
         batch_id: &Option<String>,
         source: &str,

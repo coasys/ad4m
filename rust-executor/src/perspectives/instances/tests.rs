@@ -2116,10 +2116,24 @@ mod review_round_4 {
         .await;
     }
 
-    /// An array on a single-valued property stays one value.
+    /// An array on a single-valued property is one value, on create and on update; an update
+    /// replaces the value even when the setter only appends a link, so `maxCount: 1` holds.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_array_on_a_single_valued_property_is_not_expanded() {
         let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Slot", SLOT_SDNA)]).await;
+        ok(
+            &mut p,
+            &ctx,
+            json!([{"op":"create","class":"Slot","id":"ns://c","values":{"value":["x","y"]}}]),
+        )
+        .await;
+        let created = stored_targets(&p, "ns://c", "ns://slot_value").await;
+        assert_eq!(created.len(), 1, "{created:?}");
+        assert!(
+            created[0].contains("%5B%22x%22%2C%22y%22%5D"),
+            "{created:?}"
+        );
+
         ok(
             &mut p,
             &ctx,
@@ -2132,15 +2146,12 @@ mod review_round_4 {
             json!([{"op":"update","class":"Slot","id":"ns://s","set":{"value":["x","y"]}}]),
         )
         .await;
-        // The setter only adds: "one" stays, and the array is one more link,
-        // not one link for "x" and one for "y".
         let targets = stored_targets(&p, "ns://s", "ns://slot_value").await;
-        assert_eq!(targets.len(), 2, "{targets:?}");
-        let array: Vec<_> = targets
-            .iter()
-            .filter(|t| t.contains("%5B%22x%22%2C%22y%22%5D"))
-            .collect();
-        assert_eq!(array.len(), 1, "{targets:?}");
+        assert_eq!(targets.len(), 1, "{targets:?}");
+        assert!(
+            targets[0].contains("%5B%22x%22%2C%22y%22%5D"),
+            "{targets:?}"
+        );
     }
 
     /// A setter that writes one predicate at two sources clears both when it replaces.
@@ -2379,6 +2390,49 @@ mod review_round_4 {
         assert_eq!(
             stored_targets(&p, "ns://o1", "ns://ot_owner").await,
             vec!["ns://c"]
+        );
+    }
+
+    /// A required collection holds {a, b}. Call A removes `a` and finds `b` left; before A
+    /// commits, call B removes `b` and finds `a` left, and commits. A's removal read no
+    /// replacing command, but it relied on the committed members: the commit sees them changed
+    /// and refuses, so the collection is not left empty.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_standalone_removals_do_not_empty_a_required_collection() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Labelled", LABELLED_SDNA)]).await;
+        ok(
+            &mut p,
+            &ctx,
+            json!([{"op":"create","class":"Labelled","id":"ns://l","values":{"labels":["ns://a","ns://b"]}}]),
+        )
+        .await;
+        let (mut other, other_ctx) = (p.clone(), ctx.clone());
+        *p.mutate_gap_hook.lock().unwrap() = Some(Box::new(move || {
+            Box::pin(async move {
+                ok(
+                    &mut other,
+                    &other_ctx,
+                    json!([{"op":"update","class":"Labelled","id":"ns://l","remove":{"labels":["ns://b"]}}]),
+                )
+                .await;
+            })
+        }));
+        let err = run(
+            &mut p,
+            &ctx,
+            json!([{"op":"update","class":"Labelled","id":"ns://l","remove":{"labels":["ns://a"]}}]),
+        )
+        .await
+        .err()
+        .expect("the second commit is refused")
+        .error;
+        assert!(
+            matches!(err, InstanceError::ConcurrentWrite { .. }),
+            "{err:?}"
+        );
+        assert_eq!(
+            stored_targets(&p, "ns://l", "ns://label").await,
+            vec!["ns://a"]
         );
     }
 }

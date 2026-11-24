@@ -3782,6 +3782,15 @@ describe("Ad4mModel.transaction()", () => {
     title: string = "";
   }
 
+  @Model({ name: "TxNote" })
+  class TxNote extends Ad4mModel {
+    @Property({ through: "tx://title" })
+    title: string = "";
+
+    @Property({ through: "tx://body" })
+    body: string = "";
+  }
+
   it("sends the callback's model writes as one mutate call in the batch, then commits", async () => {
     const { perspective } = makePerspective();
     await Ad4mModel.transaction(perspective, async (tx) => {
@@ -3885,6 +3894,88 @@ describe("Ad4mModel.transaction()", () => {
     await card.save();
     expect(perspective.mutate).toHaveBeenCalledWith(
       [{ op: "update", class: "tx://TxCard", id: "tx://c1", set: { title: "A" } }],
+      {},
+    );
+  });
+
+  it("a no-op save after a queued write does not stop the undo: a retry sends the update", async () => {
+    const { perspective } = makePerspective();
+    const card = new TxCard(perspective, "tx://c1");
+    jest.spyOn(card as any, "getData").mockResolvedValue(card);
+    card.title = "A";
+    await card.save();
+    perspective.mutate.mockClear();
+
+    await expect(
+      Ad4mModel.transaction(perspective, async (tx) => {
+        card.title = "B";
+        await card.save(tx.batchId);
+        await card.save(tx.batchId); // nothing changed: no op
+        throw new Error("callback failed");
+      }),
+    ).rejects.toThrow("callback failed");
+    expect(perspective.mutate).not.toHaveBeenCalled();
+
+    // The store holds "A": "B" is still a change.
+    await card.save();
+    expect(perspective.mutate).toHaveBeenCalledWith(
+      [{ op: "update", class: "tx://TxCard", id: "tx://c1", set: { title: "B" } }],
+      {},
+    );
+  });
+
+  it("a no-op save after a queued create does not make the new instance look saved", async () => {
+    const { perspective } = makePerspective();
+    const card = new TxCard(perspective, "tx://c1");
+    jest.spyOn(card as any, "getData").mockResolvedValue(card);
+    await expect(
+      Ad4mModel.transaction(perspective, async (tx) => {
+        card.title = "one";
+        await card.save(tx.batchId);
+        await card.save(tx.batchId); // nothing changed: no op
+        throw new Error("callback failed");
+      }),
+    ).rejects.toThrow("callback failed");
+
+    await card.save();
+    expect(perspective.mutate).toHaveBeenCalledTimes(1);
+    expect(perspective.mutate).toHaveBeenCalledWith(
+      [{ op: "create", class: "tx://TxCard", id: "tx://c1", values: { title: "one" } }],
+      {},
+    );
+  });
+
+  it("a save of another field outside a failed transaction does not keep the transaction's field in the snapshot", async () => {
+    const { perspective } = makePerspective();
+    const note = new TxNote(perspective, "tx://n1");
+    jest.spyOn(note as any, "getData").mockResolvedValue(note);
+    note.title = "A";
+    note.body = "X";
+    await note.save();
+    perspective.mutate.mockClear();
+
+    await expect(
+      Ad4mModel.transaction(perspective, async (tx) => {
+        note.title = "B";
+        await note.save(tx.batchId);
+        // Outside the transaction: writes only the body, and does not read back.
+        note.body = "Y";
+        await note.save(undefined, { readBack: false });
+        throw new Error("callback failed");
+      }),
+    ).rejects.toThrow("callback failed");
+    expect(perspective.mutate).toHaveBeenCalledTimes(1);
+    expect(perspective.mutate).toHaveBeenCalledWith(
+      [{ op: "update", class: "tx://TxNote", id: "tx://n1", set: { body: "Y" } }],
+      {},
+    );
+    perspective.mutate.mockClear();
+
+    // The store holds title "A" and body "Y": only the title is a change.
+    await note.save();
+    expect(perspective.mutate).toHaveBeenCalledTimes(1);
+    expect(perspective.mutate).toHaveBeenCalledWith(
+      [{ op: "update", class: "tx://TxNote", id: "tx://n1", set: { title: "B" } }],
       {},
     );
   });

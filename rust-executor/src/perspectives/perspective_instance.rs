@@ -5690,14 +5690,20 @@ impl PerspectiveInstance {
                         if setter_commands.is_empty() {
                             continue;
                         }
-                        // An array value on a property whose setter actions are all
+                        // An array value on a collection whose setter actions are all
                         // `addLink` is a collection write: one setter execution per
                         // element, accumulating N links. Everywhere else an array
                         // stays a single `literal:json:` value (a scalar property may
-                        // legitimately hold a JSON blob), because expanding over a
+                        // legitimately hold a JSON blob): expanding over a
                         // `setSingleTarget` setter would run last-element-wins and
-                        // silently drop the rest.
+                        // silently drop the rest, and over an `addLink` setter of a
+                        // single-valued property it would write more than one value.
                         let expand_collection = matches!(value, serde_json::Value::Array(_))
+                            && self
+                                .get_shape(&class_name)?
+                                .properties
+                                .iter()
+                                .any(|p| p.name == *prop && p.is_collection)
                             && setter_commands.iter().all(|c| c.action == Action::AddLink);
                         let elements: Vec<serde_json::Value> = match (expand_collection, value) {
                             (true, serde_json::Value::Array(items)) => items.clone(),
@@ -5888,9 +5894,10 @@ impl PerspectiveInstance {
     }
 
     /// The commands `setter` runs to write `value` to `prop` of `class_name`.
-    /// An array on an all-`addLink` setter is a collection: it replaces the
+    /// An array on an all-`addLink` setter of a collection replaces the
     /// members, removing those stored (and staged) and appending one link per
-    /// element; any other array stays a single `literal:json:` value.
+    /// element; any other array stays a single `literal:json:` value, which
+    /// an all-`addLink` setter of a single-valued property replaces the same way.
     ///
     /// `null` and `""` clear the property instead: a `removeLink` with target
     /// `*` per predicate the setter writes, which removes every stored link
@@ -5945,9 +5952,13 @@ impl PerspectiveInstance {
             _ => vec![value.clone()],
         };
         let mut commands = Vec::new();
-        // Setting a collection replaces its members: what the setter appends to is emptied
-        // first (in the batch's effective graph), then the new members go in, in the order given.
-        if expand_collection {
+        // Setting replaces: what an appending setter writes to is emptied first (in the
+        // batch's effective graph), then the new members go in, in the order given. A
+        // single-valued property replaces its one value the same way, so `maxCount: 1` holds
+        // even when the setter only adds a link.
+        if expand_collection
+            || (!is_collection && setter.iter().all(|c| c.action == Action::AddLink))
+        {
             for setter_cmd in setter {
                 if !commands.iter().any(|c: &Command| {
                     c.predicate == setter_cmd.predicate && c.source == setter_cmd.source

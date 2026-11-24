@@ -447,6 +447,12 @@ async function writeOps(perspective: PerspectiveProxy, ops: MutateOp[], batchId?
   await perspective.mutate(ops, batchId ? { batch: batchId } : {});
 }
 
+/** The fields an update op writes. */
+function opFields(op: MutateOp): string[] {
+  const { set, add, remove } = op as { set?: object; add?: object; remove?: object };
+  return [...new Set([...Object.keys(set ?? {}), ...Object.keys(add ?? {}), ...Object.keys(remove ?? {})])];
+}
+
 /** The parent of the create that `Model.create()` is writing, by instance (see `persist`). */
 const createParents = new WeakMap<object, ParentRef>();
 
@@ -1777,22 +1783,40 @@ export class Ad4mModel {
   private async persist(batchId?: string): Promise<void> {
     const parent = createParents.get(this);
     const op = this._snapshot ? this.updateOp() : this.createOp(parent);
+    // Nothing to write: the snapshot (and an undo that waits on it) stays as it is.
+    if (!op) return;
     const before = this._snapshot;
     // The snapshot holds what the op carries: take it before the await, so a field
     // changed while the call is pending stays dirty for the next save.
     this.takeSnapshot();
-    if (!op) return;
-    const provisional = this._snapshot;
+    const fields = op.op === "create" ? Object.keys(this._snapshot!) : opFields(op);
+    const undo = this.undoOf(fields, this._snapshot!, before);
     try {
-      // The undo restores the snapshot only while this write's is the current one: a
-      // later save that was written has set its own, which matches the store.
-      await writeOps(this._perspective, [op], batchId, () => {
-        if (this._snapshot === provisional) this._snapshot = before;
-      });
+      await writeOps(this._perspective, [op], batchId, undo);
     } catch (e) {
-      this._snapshot = before;
+      undo();
       throw e;
     }
+  }
+
+  /**
+   * The undo of one write of `fields`: each field whose snapshot value is still the
+   * one this write took (`written`) goes back to what `before` held. A later write
+   * of the field has set its own value, which matches the store, and fields the
+   * write did not carry are never touched. With no `before` (a create) the
+   * instance is unsaved again.
+   */
+  private undoOf(fields: string[], written: Record<string, any>, before: Record<string, any> | null): () => void {
+    return () => {
+      const snapshot = this._snapshot;
+      if (!snapshot) return;
+      for (const field of fields) {
+        if (snapshot[field] !== written[field]) continue;
+        if (before && field in before) snapshot[field] = before[field];
+        else delete snapshot[field];
+      }
+      if (!before && Object.keys(snapshot).length === 0) this._snapshot = null;
+    };
   }
 
   /** The class the executor writes this instance as. */

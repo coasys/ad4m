@@ -42,8 +42,11 @@ Invariants:
 - With no caller's batch, `mutate` commits its own batch with `commit_batch_if`, expecting
   (`expected_by_batch`) what the batch's replacing commands read — a single-valued setter, a
   collection setter, a clear: each records the `(source, predicate)` links it read, an empty
-  read included (`record_read`, the batch's `reads`) — plus, for removals by id that no such
-  read covers (`remove`), what the store holds now, a removal no longer held failing at once.
+  read included (`record_read`, the batch's `reads`) — plus the committed members of a
+  required collection that `require_members_left` counted on (`get_links`, not the batch's
+  effective view: two calls each removing a different member must not both commit and
+  empty it) — plus, for removals by id that no such read covers (`remove`), what the store
+  holds now, a removal no longer held failing at once.
   Links are compared in full (author, timestamp, target). Another writer that changed them
   meanwhile makes the call fail with `ConcurrentWrite` (409, retryable): two calls that set one
   single-valued property or relation cannot both commit, whether it had a value or not.
@@ -73,7 +76,10 @@ functions):
   for the parent's relation.
 - Update: `null` or `""` clears a property (a required one is `missingRequired`); an array on a
   relation sets its members (adds the missing, removes the extra, keeps the ordering
-  entries). `add_to_collection` / `remove_from_collection` (`add` / `remove` of an update) are
+  entries). An array on a single-valued property is one value (a JSON value of a
+  literal-language property, `arrayForScalar` otherwise), on create and on update, and an
+  update replaces the value even when the setter only appends a link, so `maxCount: 1` holds.
+  `add_to_collection` / `remove_from_collection` (`add` / `remove` of an update) are
   incremental; an `add` to an ordered relation writes its ordering entry. A `set` of `null`,
   `""` or `[]` on a required collection is `missingRequired`, as for a scalar. A single-valued
   relation takes one id (or `null` to clear); only a collection takes an array.
