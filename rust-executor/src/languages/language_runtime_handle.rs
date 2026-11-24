@@ -4,19 +4,21 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::runtime::Builder;
 use tokio::sync::{
     mpsc::{self, UnboundedSender},
     oneshot,
 };
+use tokio::time::Instant;
 
 use crate::agent::AgentContext;
 use crate::languages::capability::{parse_capability_list, Capability};
 use crate::languages::LanguageContext;
 
 use super::language_runtime::{
-    CallKind, LanguageOperation, LanguageRuntime, LanguageRuntimeRequest, RunningRequest,
+    CallKind, LanguageOperation, LanguageRuntime, LanguageRuntimeRequest, QueuedRequests,
+    RunningRequest,
 };
 
 /// How long a script call into a language (`Execute`) may run before the calls behind it stop
@@ -40,6 +42,30 @@ pub(crate) const LANGUAGE_CALL_DEADLINE: Duration = Duration::from_secs(60);
 /// Ids for `LanguageRuntimeRequest::id`.
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 
+/// A call's entry in the queue report while its caller waits; removed when dropped. The
+/// runtime also removes it when it starts the call.
+struct QueuedEntry<'a> {
+    queued: &'a QueuedRequests,
+    id: u64,
+}
+
+impl Drop for QueuedEntry<'_> {
+    fn drop(&mut self) {
+        self.queued
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id);
+    }
+}
+
+/// What [`LanguageRuntimeHandle::queue_snapshot`] reports.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct QueueSnapshot {
+    pub depth: usize,
+    pub oldest_wait: Duration,
+    pub running_for: Option<Duration>,
+}
+
 /// Handle to a per-language runtime running in its own thread.
 /// Thin communication layer that sends requests to a LanguageRuntime
 /// via a channel.
@@ -52,6 +78,8 @@ pub struct LanguageRuntimeHandle {
     call_deadline: Duration,
     /// The request the runtime is running.
     running: RunningRequest,
+    /// The requests sent and not yet started by the runtime (`queue_report`).
+    queued: QueuedRequests,
     /// Set by `load_module`: the bundle is wasm-bindgen output without the
     /// ALDK concurrency marker (`is_wasm_bundle` but not `aldk_marked`), so
     /// every call into it runs ordered — `send` rewrites a concurrent-declared
@@ -81,6 +109,8 @@ impl LanguageRuntimeHandle {
         let prefix_len = 8.min(addr.len());
         let running = RunningRequest::default();
         let runtime_running = running.clone();
+        let queued = QueuedRequests::default();
+        let runtime_queued = queued.clone();
 
         std::thread::Builder::new()
             .name(format!("lang-{}", &addr[..prefix_len]))
@@ -100,7 +130,9 @@ impl LanguageRuntimeHandle {
                         return;
                     }
 
-                    runtime.process_requests(rx, runtime_running).await;
+                    runtime
+                        .process_requests(rx, runtime_running, runtime_queued)
+                        .await;
                 });
             })
             .map_err(|e| format!("Failed to spawn language thread: {}", e))?;
@@ -113,6 +145,7 @@ impl LanguageRuntimeHandle {
             call_deadline: LANGUAGE_CALL_DEADLINE,
             call_stats: Arc::default(),
             running,
+            queued,
             unmarked_wasm: Default::default(),
         })
     }
@@ -131,6 +164,7 @@ impl LanguageRuntimeHandle {
             call_deadline: LANGUAGE_CALL_DEADLINE,
             call_stats: Arc::default(),
             running: RunningRequest::default(),
+            queued: QueuedRequests::default(),
             unmarked_wasm: Default::default(),
         }
     }
@@ -146,6 +180,29 @@ impl LanguageRuntimeHandle {
     #[cfg(test)]
     pub(crate) fn running_request(&self) -> RunningRequest {
         self.running.clone()
+    }
+
+    /// How many calls wait in this runtime's queue, how long the oldest has waited, and how
+    /// long the running ordered call has run; `None` when nothing waits.
+    pub(crate) fn queue_snapshot(&self) -> Option<QueueSnapshot> {
+        let queued = self.queued.lock().unwrap();
+        let oldest = queued.values().min().copied()?;
+        Some(QueueSnapshot {
+            depth: queued.len(),
+            oldest_wait: oldest.elapsed(),
+            running_for: self
+                .running
+                .lock()
+                .unwrap()
+                .ordered
+                .map(|(_, since)| since.elapsed()),
+        })
+    }
+
+    /// Test-only: mark the language an unmarked wasm-bindgen bundle, as `load_module` does.
+    #[cfg(test)]
+    pub(crate) fn set_unmarked_wasm(&self) {
+        self.unmarked_wasm.store(true, Ordering::SeqCst);
     }
 
     /// Whether the bundle is wasm-bindgen output (a Rust/ALDK language).
@@ -226,7 +283,10 @@ impl LanguageRuntimeHandle {
             tokio::select! {
                 biased;
                 response = &mut response_rx => return response,
-                _ = tokio::time::sleep_until(check_at.into()) => {}
+                // `Instant` is the tokio clock that this sleep uses: with `std::time::Instant`,
+                // a paused test clock ends the sleep at once but never reaches the limit,
+                // and the loop spins for the real deadline.
+                _ = tokio::time::sleep_until(check_at) => {}
             }
         }
         response_rx.await
@@ -254,11 +314,11 @@ impl LanguageRuntimeHandle {
             _ => None,
         };
 
-        let op_name = format!("{:?}", operation);
+        // Formatted after the WASM rewrite so the log names the kind sent.
         debug!(
             "[handle:{}] Sending operation: {}",
             self.language_address,
-            &op_name[..op_name.len().min(100)]
+            op_summary(&operation)
         );
         // A call refused below (busy, channel closed) counts as an error.
         let counted = kind.is_some().then(|| self.call_stats.start());
@@ -273,12 +333,21 @@ impl LanguageRuntimeHandle {
         }
         let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
         let queued_at = Instant::now();
+        let started = Arc::new(std::sync::OnceLock::new());
+        self.queued.lock().unwrap().insert(id, queued_at);
+        // Off the queue report however this call ends: answered, failed, or dropped by a
+        // caller that stopped waiting (a timeout, a cancelled RPC).
+        let _queued = QueuedEntry {
+            queued: &self.queued,
+            id,
+        };
         self.tx
             .send(LanguageRuntimeRequest {
                 operation,
                 response_tx,
                 queued_at,
                 id,
+                started: started.clone(),
             })
             .map_err(|e| format!("Language runtime channel closed: {}", e))?;
 
@@ -287,6 +356,15 @@ impl LanguageRuntimeHandle {
         } else {
             response_rx.await
         };
+        // For a caller that times its phases (`neighbourhood.sendBroadcast`): the time in
+        // the queue, then the time the call ran.
+        let ended = Instant::now();
+        let ran_from = started.get().copied().unwrap_or(ended);
+        crate::call_diag::phase(
+            "language_queue",
+            ran_from.saturating_duration_since(queued_at),
+        );
+        crate::call_diag::phase("language_call", ended.saturating_duration_since(ran_from));
         let result =
             response.map_err(|e| format!("Language runtime dropped without responding: {}", e))?;
         if let Some(call) = counted {
@@ -418,5 +496,27 @@ impl LanguageRuntimeHandle {
             Some(name) => format!("{} ({})", name, self.language_address),
             None => self.language_address.clone(),
         }
+    }
+}
+
+/// The start of `operation`'s `{:?}` for a log line: a script can be long.
+fn op_summary(operation: &LanguageOperation) -> String {
+    format!("{:?}", operation).chars().take(100).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A script with a multi-byte character across byte 100 of its `{:?}` (a name with an
+    /// umlaut) is cut at a character, not in the middle of one.
+    #[test]
+    fn a_long_script_is_cut_at_a_character() {
+        // `Execute("` is 9 bytes: 90 ASCII bytes put the `ü` at bytes 99..101.
+        let script = format!("{}ü and more", "a".repeat(90));
+        let op = LanguageOperation::Execute(script, AgentContext::main_agent(), CallKind::Ordered);
+        let summary = op_summary(&op);
+        assert_eq!(summary.chars().count(), 100);
+        assert!(summary.ends_with('ü'), "{summary:?}");
     }
 }

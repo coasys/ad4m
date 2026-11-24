@@ -13,7 +13,8 @@ use super::language_runtime_handle::LanguageRuntimeHandle;
 use crate::agent::AgentContext;
 use crate::languages::language_context::LanguageContext;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 /// The process-wide V8 start: a second `Once` here set the flags after another test had
 /// started V8, which aborts the process (`Check failed: !IsFrozen()`).
@@ -409,6 +410,28 @@ async fn a_call_sent_while_the_running_call_is_past_the_deadline_is_not_queued()
         .contains("deadline"));
     assert!(rx.try_recv().is_err(), "the refused call was queued");
     queued.abort();
+}
+
+/// The deadline follows the tokio clock: under a paused clock, a queued call that never
+/// starts gets its error once the clock reaches the deadline, with no real wait.
+#[tokio::test(start_paused = true)]
+async fn the_deadline_follows_the_paused_tokio_clock() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let handle = LanguageRuntimeHandle::from_channel("QmDeadlinePausedClock".into(), tx);
+    let real_start = std::time::Instant::now();
+    let call = tokio::spawn({
+        let handle = handle.clone();
+        async move { handle.execute("1 + 1".into()).await }
+    });
+    // Held, never started: the caller waits for its start deadline.
+    let _request = rx.recv().await.expect("the call is queued");
+    let error = call.await.unwrap().expect_err("the call never started");
+    assert!(error.contains("did not start the call"), "{error}");
+    assert!(
+        real_start.elapsed() < Duration::from_secs(10),
+        "the 60 s deadline took {:?} of real time",
+        real_start.elapsed()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2013,6 +2036,43 @@ async fn an_ordered_export_on_wasm_still_runs_alone() {
         event_pos(&events, "create-start") > event_pos(&events, "get-end:slow:1500:x"),
         "the create's export entered before the read's had exited: {events:?}"
     );
+}
+
+/// A concurrent-marked call on an unmarked WASM bundle runs ordered, so its caller's
+/// deadline is the ordered one: behind a running call already past the
+/// deadline it is refused at once (not queued to wait out the concurrent
+/// deadline); behind one approaching it, it gets the busy error when that
+/// call passes the deadline — the error names the running call, not "did not
+/// start". `set_unmarked_wasm` plays `load_module`'s share of the flag.
+#[tokio::test]
+async fn a_concurrent_call_on_wasm_gets_the_ordered_deadline() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let handle = LanguageRuntimeHandle::from_channel("QmWasmDeadline".into(), tx)
+        .with_call_deadline(Duration::from_millis(500));
+    handle.set_unmarked_wasm();
+    let running = handle.running_request();
+
+    // Already past the deadline: refused at once, never queued.
+    running.lock().unwrap().ordered = Some((u64::MAX, Instant::now() - Duration::from_secs(1)));
+    let refused = within(Duration::from_secs(1), "the refused call", async {
+        concurrent(&handle, "1 + 1".into()).await
+    })
+    .await;
+    assert!(refused
+        .expect_err("the running call is past the deadline")
+        .contains("is busy"));
+    assert!(rx.try_recv().is_err(), "the refused call was queued");
+
+    // Approaching it: the wait ends at the running call's deadline with the
+    // busy error, not at the concurrent deadline with "did not start".
+    running.lock().unwrap().ordered = Some((u64::MAX, Instant::now() - Duration::from_millis(450)));
+    let queued = within(Duration::from_secs(1), "the queued call", async {
+        concurrent(&handle, "1 + 1".into()).await
+    })
+    .await;
+    assert!(queued
+        .expect_err("the running call passed the deadline")
+        .contains("is busy"));
 }
 
 // ---------------------------------------------------------------------------

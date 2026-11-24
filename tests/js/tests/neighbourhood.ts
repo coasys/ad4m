@@ -1,6 +1,6 @@
 import { PerspectiveExpression, Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle } from "@coasys/ad4m";
 import { TestContext } from './test-context'
-import { assertStaysFalse, pollUntil, sleep } from "../utils/utils";
+import { assertStaysFalse, listenForSignals, pollUntil, sleep } from "../utils/utils";
 import { LinkLangConfig, publishLinkLanguage } from "../utils/linkLangConfig";
 import { expect } from "chai";
 
@@ -581,10 +581,10 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                         //@ts-ignore
                         aliceData = payload;
                     };
-                    // Awaited: it resolves once the executor applied the
-                    // socket's `signal` watch. A signal that arrives before
-                    // that is not delivered to the client, nor sent again.
-                    await aliceNH!.addSignalHandler(aliceHandler)
+                    // A signal that arrives before the executor applied the
+                    // socket's `signal` watch is not delivered to the client,
+                    // nor sent again: listenForSignals returns once it did.
+                    await listenForSignals(aliceNH!, aliceHandler)
 
                     let bobCalls = 0;
                     let bobData = null;
@@ -593,7 +593,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                         //@ts-ignore
                         bobData = payload;
                     };
-                    await bobNH!.addSignalHandler(bobHandler)
+                    await listenForSignals(bobNH!, bobHandler)
 
                     let link = new LinkExpression()
                     link.author = aliceDID!;
@@ -636,7 +636,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                         //@ts-ignore
                         aliceData = payload;
                     };
-                    await aliceNH!.addSignalHandler(aliceHandler)
+                    await listenForSignals(aliceNH!, aliceHandler)
 
                     let bobCalls = 0;
                     let bobData = null;
@@ -645,7 +645,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                         //@ts-ignore
                         bobData = payload;
                     };
-                    await bobNH!.addSignalHandler(bobHandler)
+                    await listenForSignals(bobNH!, bobHandler)
 
                     // Test broadcast without loopback. The executor routes a
                     // broadcast to every agent it hosts in the neighbourhood,

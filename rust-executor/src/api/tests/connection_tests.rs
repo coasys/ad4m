@@ -132,8 +132,8 @@ impl Socket {
     /// Open a live query on `perspective`; returns its subscription id.
     async fn subscribe(&mut self, perspective: &str) -> String {
         let id = uuid::Uuid::new_v4().to_string();
-        self.send(json!({ "id": id, "type": "perspective.subscribeQuery",
-            "params": { "uuid": perspective, "query": QUERY, "subscriptionId": id } }));
+        self.send(json!({ "id": id, "type": "perspective.subscribe",
+            "params": { "uuid": perspective, "sparql": QUERY, "subscriptionId": id } }));
         let reply = self.reply(&id).await;
         reply["result"]["subscriptionId"]
             .as_str()
@@ -212,7 +212,9 @@ async fn owned_by_alice(
     uuid: &str,
 ) -> crate::perspectives::perspective_instance::PerspectiveInstance {
     let inst = crate::perspectives::get_perspective(uuid).unwrap();
-    inst.persisted.lock().await.owners = Some(vec![DID.to_string()]);
+    inst.persisted
+        .update(|h| h.owners = Some(vec![DID.to_string()]))
+        .await;
     inst
 }
 
@@ -242,11 +244,9 @@ async fn closing_the_socket_ends_its_subscriptions_only() {
 async fn a_prolog_live_query_gets_400() {
     let p = registered_perspective(&[]).await;
     let mut socket = Socket::open().await;
-    socket.send(
-        json!({ "id": "prolog", "type": "perspective.subscribeQuery",
-        "params": { "uuid": p.0, "query": "triple(X, _, \"todo-ontology://is-todo\").",
-            "subscriptionId": "prolog" } }),
-    );
+    socket.send(json!({ "id": "prolog", "type": "perspective.subscribe",
+        "params": { "uuid": p.0, "sparql": "triple(X, _, \"todo-ontology://is-todo\").",
+            "subscriptionId": "prolog" } }));
     let reply = socket.reply("prolog").await;
     assert_eq!(reply["error"]["code"], 400, "{reply}");
     assert_eq!(
@@ -264,8 +264,8 @@ async fn a_subscribe_cancelled_then_disposed_leaves_nothing() {
     let mut socket = Socket::open().await;
     for round in 0..20 {
         let (call, sub) = (format!("s{round}"), format!("minted-{round}"));
-        socket.send(json!({ "id": call, "type": "perspective.subscribeQuery",
-            "params": { "uuid": p.0, "query": QUERY, "subscriptionId": sub } }));
+        socket.send(json!({ "id": call, "type": "perspective.subscribe",
+            "params": { "uuid": p.0, "sparql": QUERY, "subscriptionId": sub } }));
         socket.send(
             json!({ "id": format!("c{round}"), "type": "request.cancel", "params": { "targetId": call } }),
         );
@@ -500,7 +500,10 @@ async fn query_updates_of_a_co_owned_perspective_reach_only_the_subscriber() {
     let bob_did = "did:key:bob";
     let p = registered_perspective(&[]).await;
     let perspective = crate::perspectives::get_perspective(&p.0).unwrap();
-    perspective.persisted.lock().await.owners = Some(vec![DID.into(), bob_did.into()]);
+    perspective
+        .persisted
+        .update(|h| h.owners = Some(vec![DID.into(), bob_did.into()]))
+        .await;
     let mut sockets = [Socket::open().await, Socket::open_as(bob_did).await];
 
     for (subscriber, first) in [(DID, true), (bob_did, false)] {
@@ -633,7 +636,7 @@ async fn a_token_that_expired_gets_401_and_ends_the_connection() {
         .unwrap();
 }
 
-/// A handler map whose `perspective.subscribeQuery` never answers: it reports each call that
+/// A handler map whose `perspective.subscribe` never answers: it reports each call that
 /// starts on `started` and each one dropped (cancelled) on `dropped`.
 fn hanging_subscribe(
     started: mpsc::UnboundedSender<()>,
@@ -649,7 +652,7 @@ fn hanging_subscribe(
     }
     let mut map = HandlerMap::new();
     // Every method needs a guard, or the dispatcher refuses it before the handler runs.
-    map.method::<NoParams, bool>("perspective.subscribeQuery", move |_, _| {
+    map.method::<NoParams, bool>("perspective.subscribe", move |_, _| {
         let (started, dropped) = (started.clone(), dropped.clone());
         async move {
             let _dropped = OnDrop(dropped);
@@ -667,7 +670,7 @@ async fn closing_the_socket_cancels_a_live_query_still_opening() {
     let (started, mut starts) = mpsc::unbounded_channel();
     let (dropped, mut drops) = mpsc::unbounded_channel();
     let mut socket = Socket::open_with_handlers(hanging_subscribe(started, dropped)).await;
-    socket.send(json!({ "id": "s", "type": "perspective.subscribeQuery" }));
+    socket.send(json!({ "id": "s", "type": "perspective.subscribe" }));
     tokio::time::timeout(Duration::from_secs(5), starts.recv())
         .await
         .expect("the subscribe call starts");
@@ -688,7 +691,7 @@ async fn a_connection_runs_a_bounded_number_of_live_query_opens_at_once() {
     let socket = Socket::open_with_handlers(hanging_subscribe(started, dropped)).await;
     // A client that abandons each subscribe and asks again, as the waker did (#1595).
     for i in 0..MAX_OPENING_LIVE_QUERIES + 4 {
-        socket.send(json!({ "id": format!("s{i}"), "type": "perspective.subscribeQuery" }));
+        socket.send(json!({ "id": format!("s{i}"), "type": "perspective.subscribe" }));
     }
     for _ in 0..MAX_OPENING_LIVE_QUERIES {
         tokio::time::timeout(Duration::from_secs(5), starts.recv())
@@ -718,7 +721,7 @@ async fn a_live_query_open_cancelled_while_it_waits_never_starts() {
     let (dropped, _drops) = mpsc::unbounded_channel();
     let mut socket = Socket::open_with_handlers(hanging_subscribe(started, dropped)).await;
     for i in 0..=MAX_OPENING_LIVE_QUERIES {
-        socket.send(json!({ "id": format!("s{i}"), "type": "perspective.subscribeQuery" }));
+        socket.send(json!({ "id": format!("s{i}"), "type": "perspective.subscribe" }));
     }
     for _ in 0..MAX_OPENING_LIVE_QUERIES {
         tokio::time::timeout(Duration::from_secs(5), starts.recv())
@@ -737,4 +740,55 @@ async fn a_live_query_open_cancelled_while_it_waits_never_starts() {
             .is_err(),
         "the call cancelled while it waited started"
     );
+}
+
+/// An RPC slower than 2 s gives exactly one `rpc.slow` warning, with the method, the
+/// connection and where its time went (queued before the handler, in the handler); a fast
+/// one gives none.
+#[tokio::test]
+async fn a_slow_rpc_logs_one_warning_with_its_timings() {
+    use crate::call_diag::capture;
+    let mut handlers = HandlerMap::new();
+    handlers
+        .method::<Value, bool>("test.slowCall", |_, _| async {
+            tokio::time::sleep(Duration::from_millis(2100)).await;
+            Ok(json!(true))
+        })
+        .guard(crate::api::guards::Guard::Open);
+    handlers
+        .method::<Value, bool>("test.fastCall", |_, _| async { Ok(json!(true)) })
+        .guard(crate::api::guards::Guard::Open);
+    let mut socket = Socket::open_with_handlers(handlers).await;
+    let conn = format!("conn={}", socket.connection_id);
+
+    socket.send(json!({ "id": "fast", "type": "test.fastCall" }));
+    socket.send(json!({ "id": "slow", "type": "test.slowCall" }));
+    assert_eq!(socket.reply("fast").await["result"], true);
+    assert_eq!(socket.reply("slow").await["result"], true);
+
+    assert!(capture::lines("rpc.slow", &[&conn, "method=test.fastCall"]).is_empty());
+    let lines = capture::lines("rpc.slow", &[&conn]);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let slow = &lines[0];
+    assert_eq!(slow.level, log::Level::Warn);
+    assert_eq!(slow.target, "rust_executor::api::ws_rpc");
+    capture::assert_format(&slow.line);
+    let field = |key| capture::field(&slow.line, key).unwrap_or_else(|| panic!("no {key}"));
+    assert_eq!(field("method"), "test.slowCall");
+    assert_eq!(field("did"), "admin");
+    assert_eq!(field("outcome"), "ok");
+    let handler_ms: u64 = field("handler_ms").parse().unwrap();
+    let queued_ms: u64 = field("queued_ms").parse().unwrap();
+    let total_ms: u64 = field("total_ms").parse().unwrap();
+    assert!(handler_ms >= 2100, "{}", slow.line);
+    assert!(queued_ms < 1000, "{}", slow.line);
+    assert!(total_ms >= handler_ms, "{}", slow.line);
+    assert_eq!(
+        field("response_bytes"),
+        json!({"id": "slow", "result": true})
+            .to_string()
+            .len()
+            .to_string()
+    );
+    socket.close().await;
 }
