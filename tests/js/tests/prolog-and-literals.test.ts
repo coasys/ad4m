@@ -1772,6 +1772,9 @@ describe("Prolog + Literals", () => {
 
                     // Set up subscription for high-priority unread notifications
                     let updateCount = 0;
+                    // Every snapshot's length, so a wrong update that a later one overwrites
+                    // before a poll still counts.
+                    const seenLengths: number[] = [];
                     const live = Notification.query(perspective!, {
                         where: {
                             priority: { gt: 5 },
@@ -1780,6 +1783,7 @@ describe("Prolog + Literals", () => {
                     });
                     const initialResults = (await watch(live, (page) => {
                         notifications = page.results;
+                        seenLengths.push(page.results.length);
                         updateCount++;
                     })).results;
 
@@ -1827,7 +1831,7 @@ describe("Prolog + Literals", () => {
                     // notification3 would show up (length 3) before the removal's (length 1).
                     notification1.read = true;
                     await notification1.save();
-                    await assertAbsentBySentinel(() => notifications.length === 1, () => notifications.length > 2, {
+                    await assertAbsentBySentinel(() => notifications.length === 1, () => seenLengths.some((n) => n > 2), {
                         timeoutMs: 5000, label: "low-priority notification stays out of filtered results"
                     });
                     expect(notifications.length).to.equal(1);

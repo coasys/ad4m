@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { assertAbsentBySentinel, sleep, startExecutor, stopChildProcess } from "../utils/utils";
+import { assertAbsentBySentinel, assertStaysFalse, sleep, startExecutor, stopChildProcess } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import { createHash, generateKeyPairSync, sign as signBytes } from "node:crypto";
@@ -1618,7 +1618,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 perspectiveClient: wakerClient.perspective,
                 logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
                 debounceMs: 100,
-                onWake: function(sub: any, result: any) { wakes.push(result); },
+                onWake: function(sub: any, result: any, mentions?: any[]) { wakes.push({ result: result, mentions: mentions || [] }); },
             });
 
             await manager.subscribe({
@@ -1639,10 +1639,13 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             // text and the mention link each match): wakes of one subscription
             // arrive in order over its stream, so a wake for the empty result
             // would come before the sentinel's, with no rows.
-            await peerSays(emptyPerspId, emptyChannel, "Hey @wakerbot, anyone there?", [agentDid]);
+            var emptySentinel = await peerSays(emptyPerspId, emptyChannel, "Hey @wakerbot, anyone there?", [agentDid]);
+            // With `className` the result is `{ instances: [...] }`: a wake with no
+            // instances is the empty result. The sentinel is a wake that names the
+            // sentinel message.
             await assertAbsentBySentinel(
-                function() { return wakes.length >= 1; },
-                function() { return wakes.some(function(r) { return (Array.isArray(r) ? r : [r]).length === 0; }); },
+                function() { return wakes.some(function(w) { return w.mentions.some(function(m: any) { return m.address === emptySentinel; }); }); },
+                function() { return wakes.some(function(w) { return (Array.isArray(w.result) ? w.result : (w.result && w.result.instances) || []).length === 0; }); },
                 { timeoutMs: 15000, label: "onWake for the empty initial result" },
             );
             manager.disposeAll();
@@ -1706,7 +1709,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         });
 
         it("should NOT fire onWake for messages without mentions", async function() {
-            this.timeout(20000);
+            this.timeout(40000);
 
             // Use a FRESH perspective to avoid shared subscription state
             var freshPerspResult = await callMcpTool(MCP_BASE_URL, 'add_perspective', {
@@ -1768,21 +1771,28 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             // "wakerbots" and "WakerTesting" contain the agent's names but do not
             // name it, and there is no mention link. Nor is a mention link to
             // someone else a mention of the agent.
-            await peerSays(freshPerspId, freshChannel, "Just a normal message about wakerbots and WakerTesting metadata.");
-            await peerSays(freshPerspId, freshChannel, "Hey @someonei", [peer.did]);
+            var notMention1 = await peerSays(freshPerspId, freshChannel, "Just a normal message about wakerbots and WakerTesting metadata.");
+            var notMention2 = await peerSays(freshPerspId, freshChannel, "Hey @someonei", [peer.did]);
             console.log("Non-mention message created in fresh perspective");
 
-            // A real mention, written after them, is the sentinel: same perspective,
-            // same subscription, so its wake arrives in order after any wake for the
-            // messages above. `allWakes` holds the mentions each wake delivered (its
-            // third argument); the first argument is the whole query result, whose
-            // substring match also lists the non-mentions, so it proves nothing. (Not a wake count: the sentinel's text and its mention link each
-            // match, so it may wake more than once.)
-            await peerSays(freshPerspId, freshChannel, "Hey @wakerbot, this one is for you.", [agentDid]);
+            // A real mention, written after them, proves the subscription is live: a
+            // wake must name it. `allWakes` holds the mentions each wake delivered (its
+            // third argument, `MentionMessage`s with the message address), so the checks
+            // are by id: the sentinel's present, the two non-mentions' absent.
+            var mentionAddrs = function() { return allWakes.reduce(function(all: string[], ms: any[]) { return all.concat(ms.map(function(m) { return m.address; })); }, []); };
+            var sentinelId = await peerSays(freshPerspId, freshChannel, "Hey @wakerbot, this one is for you.", [agentDid]);
             await assertAbsentBySentinel(
-                function() { return wakeCount >= 1; },
-                function() { return /wakerbots|WakerTesting|someonei/.test(JSON.stringify(allWakes)); },
+                function() { return mentionAddrs().includes(sentinelId); },
+                function() { return mentionAddrs().some(function(a: string) { return a === notMention1 || a === notMention2; }); },
                 { timeoutMs: 15000, label: "onWake for a non-mention message" },
+            );
+            // The mention subscription has two live queries, each handled on its own
+            // (parent and ancestor lookups, then a debounce), and the manager exposes no
+            // signal that its handlers have settled: a wake for the earlier messages may
+            // still be resolving when the sentinel's arrives. A window (5 s, as before).
+            await assertStaysFalse(
+                function() { return mentionAddrs().some(function(a: string) { return a === notMention1 || a === notMention2; }); },
+                { waitMs: 5000, label: "onWake for a non-mention message (window)" },
             );
 
             manager.disposeAll();
@@ -1790,7 +1800,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         });
 
         it("should NOT fire onWake for the agent's own message that names itself", async function() {
-            this.timeout(20000);
+            this.timeout(40000);
 
             var ownPerspResult = await callMcpTool(MCP_BASE_URL, 'add_perspective', {
                 name: "Waker Own-Write Test",
@@ -1855,11 +1865,18 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             // A peer's mention of the agent, written after the own message, is the
             // sentinel: same perspective and subscription, so its wake arrives in
             // order after any wake for the own message, which would show its text.
-            await peerSays(ownPerspId, ownChannel, "Hey @wakerbot, a message from someone else.", [agentDid]);
+            var ownAddrs = function() { return allWakes.reduce(function(all: string[], ms: any[]) { return all.concat(ms.map(function(m) { return m.address; })); }, []); };
+            var ownSentinelId = await peerSays(ownPerspId, ownChannel, "Hey @wakerbot, a message from someone else.", [agentDid]);
             await assertAbsentBySentinel(
-                function() { return wakeCount >= 1; },
-                function() { return JSON.stringify(allWakes).includes("wakerbot here: on it"); },
+                function() { return ownAddrs().includes(ownSentinelId); },
+                function() { return ownAddrs().includes(createResult.expression_address); },
                 { timeoutMs: 15000, label: "onWake for the agent's own message" },
+            );
+            // Same missing drain signal as above (two live queries, handled apart): a
+            // window (5 s, as before) for a wake for the own message still resolving.
+            await assertStaysFalse(
+                function() { return ownAddrs().includes(createResult.expression_address); },
+                { waitMs: 5000, label: "onWake for the agent's own message (window)" },
             );
             manager.disposeAll();
         });

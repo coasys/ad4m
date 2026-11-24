@@ -533,7 +533,14 @@ export async function stopChildProcess(child: ChildProcess, graceMs = 5000): Pro
  * Across executors it holds only for one author's commits, which a link
  * language applies by ancestry: the sentinel must be a later commit by the
  * same agent. Two authors' links have no delivery order between them.
- * Exceptions from either predicate propagate.
+ * Exceptions from either predicate propagate, and each call is bounded by
+ * the time left, so a predicate that never settles fails at `timeoutMs` too.
+ *
+ * Not for a sentinel on a different channel from the event it vouches for
+ * (a spawned publish, another perspective's loop, a later live query of the
+ * same subscription): there use `assertStaysFalse`, and say which signal is
+ * missing. A sentinel must also be tied to identities (its own id), not to a
+ * count a wrong event could satisfy.
  */
 export async function assertAbsentBySentinel(
     sentinel: () => boolean | Promise<boolean>,
@@ -542,14 +549,64 @@ export async function assertAbsentBySentinel(
 ): Promise<void> {
     const { timeoutMs = 15000, intervalMs = 50, label = "unexpected event" } = opts;
     const deadline = Date.now() + timeoutMs;
-    while (true) {
-        const sentinelSeen = await sentinel();
-        if (await unexpected()) throw new Error(`assertAbsentBySentinel failed: ${label} happened`);
-        if (sentinelSeen) return;
-        if (Date.now() >= deadline) {
-            throw new Error(`assertAbsentBySentinel: sentinel not seen within ${timeoutMs}ms (checking: ${label})`);
+    const timeoutError = () => new Error(`assertAbsentBySentinel: sentinel not seen within ${timeoutMs}ms (checking: ${label})`);
+    // A predicate that never settles must not outlive the deadline.
+    const bounded = async <T>(call: () => T | Promise<T>): Promise<T> => {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw timeoutError();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const expired = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(timeoutError()), remaining); });
+        try {
+            return await Promise.race([Promise.resolve().then(call), expired]);
+        } finally {
+            clearTimeout(timer);
         }
+    };
+    while (true) {
+        const sentinelSeen = await bounded(sentinel);
+        if (await bounded(unexpected)) throw new Error(`assertAbsentBySentinel failed: ${label} happened`);
+        if (sentinelSeen) return;
+        if (Date.now() >= deadline) throw timeoutError();
         await sleep(intervalMs);
+    }
+}
+
+/**
+ * Actively polls a predicate for `waitMs` and fails as soon as it becomes true.
+ * For the absences `assertAbsentBySentinel` cannot prove: where no later event
+ * is ordered after the one that must not happen (the executor spawns the
+ * publish, or checks of different perspectives run on their own loops). The
+ * window must be at least as long as the latency of the thing that must not
+ * happen; say at each call site which signal is missing.
+ *
+ * A predicate that throws counts as "not evaluable", not as false: if it never
+ * evaluated successfully during the window, this fails with the last error, so
+ * a broken predicate cannot pass the check vacuously.
+ */
+export async function assertStaysFalse(
+    predicate: () => boolean | Promise<boolean>,
+    opts: { waitMs?: number; intervalMs?: number; label?: string } = {},
+): Promise<void> {
+    const { waitMs = 1000, intervalMs = 100, label = "condition" } = opts;
+    const deadline = Date.now() + waitMs;
+    let evaluations = 0;
+    let lastError: unknown;
+    while (Date.now() < deadline) {
+        let value: boolean;
+        try {
+            value = await predicate();
+            evaluations++;
+        } catch (err) {
+            lastError = err;
+            await sleep(intervalMs);
+            continue;
+        }
+        if (value) throw new Error(`assertStaysFalse failed: ${label} became true`);
+        await sleep(intervalMs);
+    }
+    if (evaluations === 0) {
+        const detail = lastError instanceof Error ? lastError.message : String(lastError);
+        throw new Error(`assertStaysFalse: ${label} never evaluated in ${waitMs}ms (last error: ${detail})`);
     }
 }
 
