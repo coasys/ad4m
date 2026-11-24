@@ -191,6 +191,32 @@ const MEMO_SDNA: &str = r#"{
   ]
 }"#;
 
+/// A required collection.
+const LABELLED_SDNA: &str = r#"{
+  "target_class": "ns://Labelled",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Labelled"}
+  ],
+  "properties": [
+    {"path":"ns://label","name":"labels","collection":true,"min_count":1,"writable":true,
+     "setter":[{"action":"collectionSetter","source":"this","predicate":"ns://label","target":"value"}],
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://label","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://label","target":"value"}]}
+  ]
+}"#;
+
+/// A single-valued relation (what `@HasOne` registers): one target, no datatype.
+const OWNED_SDNA: &str = r#"{
+  "target_class": "ns://Owned",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Owned"}
+  ],
+  "properties": [
+    {"path":"ns://owner","name":"owner","max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://owner","target":"value"}]}
+  ]
+}"#;
+
 async fn run(
     p: &mut PerspectiveInstance,
     ctx: &AgentContext,
@@ -373,6 +399,131 @@ mod mutate_rules {
         assert!(stored_targets(&p, "ns://n1", "ns://note_tag")
             .await
             .is_empty());
+    }
+
+    /// A parent created by an earlier op of the same call is found without a `model`: its
+    /// class is the one the call created it as.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_parent_created_in_the_same_call_needs_no_model() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Note", NOTE_SDNA)]).await;
+        run(
+            &mut p,
+            &ctx,
+            json!([
+                {"op":"create","class":"Note","id":"ns://folder","values":{"title":"f"}},
+                {"op":"create","class":"Note","id":"ns://child","values":{"title":"c"},
+                 "parent":{"id":"ns://folder","relation":"children"}}
+            ]),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("op {:?}: {:?}", e.op_index, e.error));
+        assert_eq!(
+            stored_targets(&p, "ns://folder", "ns://note_child").await,
+            vec!["ns://child"]
+        );
+    }
+
+    /// A single-valued relation takes one id on create, a new id on update and `null` to
+    /// clear, as the SDK sends them; an array is refused, so the SDK must not send one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_single_valued_relation_takes_one_id_not_an_array() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Owned", OWNED_SDNA)]).await;
+        run(
+            &mut p,
+            &ctx,
+            json!([{"op":"create","class":"Owned","id":"ns://o1","values":{"owner":"ns://a"}}]),
+        )
+        .await
+        .expect("create with one id");
+        assert_eq!(
+            stored_targets(&p, "ns://o1", "ns://owner").await,
+            vec!["ns://a"]
+        );
+
+        let refused = run(
+            &mut p,
+            &ctx,
+            json!([{"op":"update","class":"Owned","id":"ns://o1","set":{"owner":["ns://b"]}}]),
+        )
+        .await
+        .err()
+        .expect("an array is refused");
+        assert!(
+            matches!(
+                refused.error,
+                super::super::InstanceError::Validation { .. }
+            ),
+            "{:?}",
+            refused.error
+        );
+
+        run(
+            &mut p,
+            &ctx,
+            json!([{"op":"update","class":"Owned","id":"ns://o1","set":{"owner":"ns://b"}}]),
+        )
+        .await
+        .expect("replace with one id");
+        assert_eq!(
+            stored_targets(&p, "ns://o1", "ns://owner").await,
+            vec!["ns://b"]
+        );
+
+        run(
+            &mut p,
+            &ctx,
+            json!([{"op":"update","class":"Owned","id":"ns://o1","set":{"owner":null}}]),
+        )
+        .await
+        .expect("null clears");
+        assert!(stored_targets(&p, "ns://o1", "ns://owner").await.is_empty());
+    }
+
+    /// A required collection is not emptied on update, whichever way the empty set is spelled;
+    /// a non-empty set is taken.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_required_collection_is_not_emptied() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Labelled", LABELLED_SDNA)]).await;
+        run(
+            &mut p,
+            &ctx,
+            json!([{"op":"create","class":"Labelled","id":"ns://l1","values":{"labels":["ns://a"]}}]),
+        )
+        .await
+        .expect("create");
+        for empty in [json!(null), json!(""), json!([])] {
+            let refused = run(
+                &mut p,
+                &ctx,
+                json!([{"op":"update","class":"Labelled","id":"ns://l1","set":{"labels":empty}}]),
+            )
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{empty} emptied a required collection"));
+            assert!(
+                matches!(
+                    refused.error,
+                    super::super::InstanceError::Validation { .. }
+                ),
+                "{:?}",
+                refused.error
+            );
+            assert_eq!(
+                stored_targets(&p, "ns://l1", "ns://label").await,
+                vec!["ns://a"]
+            );
+        }
+        run(
+            &mut p,
+            &ctx,
+            json!([{"op":"update","class":"Labelled","id":"ns://l1","set":{"labels":["ns://b"]}}]),
+        )
+        .await
+        .expect("a non-empty set");
+        assert_eq!(
+            stored_targets(&p, "ns://l1", "ns://label").await,
+            vec!["ns://b"]
+        );
     }
 
     /// How many ordering entries `source` holds, and the order the strategy reads its members
@@ -796,5 +947,180 @@ mod decoded_literal {
         assert_eq!(decoded_literal("literal:string:a%20b"), "a b");
         assert_eq!(decoded_literal("literal:boolean:true"), "true");
         assert_eq!(decoded_literal("ns://item"), "ns://item");
+    }
+}
+
+/// A `mutate` call into a caller's batch is all or none against everything that touches the
+/// batch beside it, not only against other `mutate` calls. The hook runs after op 0 of the call.
+mod caller_batch {
+    use super::*;
+    use crate::types::{Link, LinkStatus};
+
+    /// Create `ns://kept`, then update an instance that does not exist: the call fails at op 1.
+    fn failing_ops() -> serde_json::Value {
+        json!([
+            {"op":"create","class":"Note","id":"ns://kept","values":{"title":"t"}},
+            {"op":"update","class":"Note","id":"ns://missing","set":{"title":"x"}}
+        ])
+    }
+
+    async fn call(
+        p: &mut PerspectiveInstance,
+        ctx: &AgentContext,
+        ops: serde_json::Value,
+        batch: &str,
+    ) -> Result<Vec<super::super::mutate::Mutated>, super::super::MutateError> {
+        super::super::mutate(
+            p,
+            ctx,
+            serde_json::from_value(ops).expect("ops"),
+            Some(batch.to_string()),
+        )
+        .await
+    }
+
+    /// The caller commits the batch between op 0 and the failing op 1: op 0 is not published.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_commit_of_the_batch_in_flight_does_not_publish_a_failed_call() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Note", NOTE_SDNA)]).await;
+        let batch = p.create_batch().await;
+        let (mut other, other_ctx, id) = (p.clone(), ctx.clone(), batch.clone());
+        *p.mutate_gap_hook.lock().unwrap() = Some(Box::new(move || {
+            Box::pin(async move {
+                other.commit_batch(id, &other_ctx).await.expect("commit");
+            })
+        }));
+
+        let failed = call(&mut p, &ctx, failing_ops(), &batch)
+            .await
+            .err()
+            .expect("op 1 fails");
+        assert_eq!(failed.op_index, Some(1), "{:?}", failed.error);
+        assert!(
+            stored_targets(&p, "ns://kept", "rdf://type")
+                .await
+                .is_empty(),
+            "op 0 of the failed call was published by the commit"
+        );
+    }
+
+    /// The caller commits the batch while a call that would succeed is in flight: the call
+    /// fails as a whole (the batch is gone) and publishes nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_commit_of_the_batch_in_flight_fails_the_call_whole() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Note", NOTE_SDNA)]).await;
+        let batch = p.create_batch().await;
+        let (mut other, other_ctx, id) = (p.clone(), ctx.clone(), batch.clone());
+        *p.mutate_gap_hook.lock().unwrap() = Some(Box::new(move || {
+            Box::pin(async move {
+                other.commit_batch(id, &other_ctx).await.expect("commit");
+            })
+        }));
+
+        let failed = call(
+            &mut p,
+            &ctx,
+            json!([
+                {"op":"create","class":"Note","id":"ns://kept","values":{"title":"t"}},
+                {"op":"create","class":"Note","id":"ns://second","values":{"title":"t"}}
+            ]),
+            &batch,
+        )
+        .await
+        .err()
+        .expect("the batch was committed under the call");
+        assert!(
+            matches!(
+                failed.error,
+                super::super::InstanceError::BatchNotFound { .. }
+            ),
+            "{:?}",
+            failed.error
+        );
+        for id in ["ns://kept", "ns://second"] {
+            assert!(
+                stored_targets(&p, id, "rdf://type").await.is_empty(),
+                "{id}"
+            );
+        }
+    }
+
+    /// A raw link staged into the batch while a call into it fails is still staged after.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_raw_add_in_flight_survives_a_failed_call() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Note", NOTE_SDNA)]).await;
+        let batch = p.create_batch().await;
+        let (mut other, other_ctx, id) = (p.clone(), ctx.clone(), batch.clone());
+        *p.mutate_gap_hook.lock().unwrap() = Some(Box::new(move || {
+            Box::pin(async move {
+                other
+                    .add_link(
+                        Link {
+                            source: "ns://raw".into(),
+                            predicate: Some("ns://p".into()),
+                            target: "ns://o".into(),
+                        },
+                        LinkStatus::Shared,
+                        Some(id),
+                        &other_ctx,
+                    )
+                    .await
+                    .expect("raw add");
+            })
+        }));
+
+        call(&mut p, &ctx, failing_ops(), &batch)
+            .await
+            .err()
+            .expect("op 1 fails");
+        p.commit_batch(batch, &ctx).await.expect("commit");
+        assert_eq!(
+            stored_targets(&p, "ns://raw", "ns://p").await,
+            vec!["ns://o"],
+            "the restore overwrote the raw add"
+        );
+        assert!(stored_targets(&p, "ns://kept", "rdf://type")
+            .await
+            .is_empty());
+    }
+
+    /// A successful call merges into what the batch holds now: a raw add staged meanwhile stays.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_successful_call_keeps_a_raw_add_staged_meanwhile() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Note", NOTE_SDNA)]).await;
+        let batch = p.create_batch().await;
+        let (mut other, other_ctx, id) = (p.clone(), ctx.clone(), batch.clone());
+        *p.mutate_gap_hook.lock().unwrap() = Some(Box::new(move || {
+            Box::pin(async move {
+                other
+                    .add_link(
+                        Link {
+                            source: "ns://raw".into(),
+                            predicate: Some("ns://p".into()),
+                            target: "ns://o".into(),
+                        },
+                        LinkStatus::Shared,
+                        Some(id),
+                        &other_ctx,
+                    )
+                    .await
+                    .expect("raw add");
+            })
+        }));
+
+        call(
+            &mut p,
+            &ctx,
+            json!([
+                {"op":"create","class":"Note","id":"ns://kept","values":{"title":"t"}},
+                {"op":"update","class":"Note","id":"ns://kept","set":{"body":"b"}}
+            ]),
+            &batch,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{:?}", e.error));
+        p.commit_batch(batch, &ctx).await.expect("commit");
+        assert_eq!(stored_targets(&p, "ns://raw", "ns://p").await.len(), 1);
+        assert_eq!(stored_targets(&p, "ns://kept", "rdf://type").await.len(), 1);
     }
 }

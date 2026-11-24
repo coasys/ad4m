@@ -21,7 +21,7 @@
 //! copies are still one link. [`EffectiveLink`] folds one identity to one entry and keeps
 //! the two presences apart.
 
-use super::PerspectiveInstance;
+use super::{PerspectiveInstance, TimestampedBatch};
 use crate::db::link_identity;
 use crate::types::{DecoratedLinkExpression, Link, LinkExpression, LinkQuery, PerspectiveDiff};
 use deno_core::error::AnyError;
@@ -41,10 +41,52 @@ pub(crate) struct EffectiveLink {
     pub staged: bool,
 }
 
-/// An open batch's staged work at one moment, for [`PerspectiveInstance::restore_batch`].
+/// An open batch's staged work at one moment: what [`PerspectiveInstance::fork_batch`] copied,
+/// for [`PerspectiveInstance::merge_batch`] to tell what the fork changed.
 pub(crate) struct BatchSnapshot {
     diff: PerspectiveDiff,
     updates: Vec<(LinkExpression, LinkExpression)>,
+}
+
+/// What `now` has changed against `base`, by `key`, counting copies: `(dropped, added)`.
+fn changes<T: Clone, K: std::hash::Hash + Eq>(
+    base: &[T],
+    now: &[T],
+    key: impl Fn(&T) -> K,
+) -> (Vec<T>, Vec<T>) {
+    let mut counts: HashMap<K, usize> = HashMap::new();
+    for item in base {
+        *counts.entry(key(item)).or_default() += 1;
+    }
+    let mut added = Vec::new();
+    for item in now {
+        match counts.get_mut(&key(item)) {
+            Some(n) if *n > 0 => *n -= 1,
+            _ => added.push(item.clone()),
+        }
+    }
+    let mut counts: HashMap<K, usize> = HashMap::new();
+    for item in now {
+        *counts.entry(key(item)).or_default() += 1;
+    }
+    let mut dropped = Vec::new();
+    for item in base {
+        match counts.get_mut(&key(item)) {
+            Some(n) if *n > 0 => *n -= 1,
+            _ => dropped.push(item.clone()),
+        }
+    }
+    (dropped, added)
+}
+
+/// Take `dropped` out of `target` (one copy each, by `key`) and append `added`.
+fn apply<T, K: Eq>(target: &mut Vec<T>, dropped: &[T], added: Vec<T>, key: impl Fn(&T) -> K) {
+    for item in dropped {
+        if let Some(at) = target.iter().position(|t| key(t) == key(item)) {
+            target.remove(at);
+        }
+    }
+    target.extend(added);
 }
 
 impl EffectiveLink {
@@ -129,22 +171,49 @@ impl PerspectiveInstance {
         Ok(out)
     }
 
-    /// A copy of the batch's staged work, or `None` when no such batch is open.
-    pub(crate) async fn snapshot_batch(&self, batch_id: &str) -> Option<BatchSnapshot> {
-        let batches = self.batch_store.read().await;
-        batches.get(batch_id).map(|batch| BatchSnapshot {
-            diff: batch.diff.clone(),
-            updates: batch.updates.clone(),
-        })
+    /// Open a private batch seeded with a copy of `batch_id`'s staged work, so the reads of a
+    /// `perspective.mutate` call into `batch_id` see the caller's work plus its own, and the
+    /// call's writes touch only the private batch. Answers the private batch's id and the
+    /// copy it was seeded with; `None` when `batch_id` is not open.
+    pub(crate) async fn fork_batch(&self, batch_id: &str) -> Option<(String, BatchSnapshot)> {
+        let mut batches = self.batch_store.write().await;
+        let source = batches.get(batch_id)?;
+        let base = BatchSnapshot {
+            diff: source.diff.clone(),
+            updates: source.updates.clone(),
+        };
+        let fork = TimestampedBatch {
+            diff: base.diff.clone(),
+            updates: base.updates.clone(),
+            created_at: source.created_at,
+        };
+        let fork_id = uuid::Uuid::new_v4().to_string();
+        batches.insert(fork_id.clone(), fork);
+        Some((fork_id, base))
     }
 
-    /// Put the batch's staged work back as `snapshot` had it: what was staged since is dropped.
-    /// A batch that is gone stays gone.
-    pub(crate) async fn restore_batch(&self, batch_id: &str, snapshot: BatchSnapshot) {
-        if let Some(batch) = self.batch_store.write().await.get_mut(batch_id) {
-            batch.diff = snapshot.diff;
-            batch.updates = snapshot.updates;
-        }
+    /// Merge what the private batch `fork_id` staged since `base` into `into`, and drop the
+    /// private batch: one step under the batch store's lock, so what else was staged into (or
+    /// committed from) `into` meanwhile is neither overwritten nor published half. `false` when
+    /// `into` is gone (committed, discarded or swept): nothing is merged.
+    pub(crate) async fn merge_batch(&self, into: &str, fork_id: &str, base: BatchSnapshot) -> bool {
+        let mut batches = self.batch_store.write().await;
+        let Some(fork) = batches.remove(fork_id) else {
+            return false;
+        };
+        let Some(target) = batches.get_mut(into) else {
+            return false;
+        };
+        let (dropped, added) = changes(&base.diff.additions, &fork.diff.additions, link_identity);
+        apply(&mut target.diff.additions, &dropped, added, link_identity);
+        let (dropped, added) = changes(&base.diff.removals, &fork.diff.removals, link_identity);
+        apply(&mut target.diff.removals, &dropped, added, link_identity);
+        let pair = |(old, new): &(LinkExpression, LinkExpression)| {
+            (link_identity(old), link_identity(new))
+        };
+        let (dropped, added) = changes(&base.updates, &fork.updates, pair);
+        apply(&mut target.updates, &dropped, added, pair);
+        true
     }
 
     /// Drop the staged additions that are `link` (by `link_identity`), returning whether any

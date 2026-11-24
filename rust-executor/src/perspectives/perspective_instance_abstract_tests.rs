@@ -1137,3 +1137,67 @@ async fn a_required_property_refuses_to_clear() {
         );
     }
 }
+
+/// `perspective.mutate` `add` / `remove` on an instance read through an abstract class write
+/// each of the record's classes that has the collection, at its own predicate: `fb` is a Folder
+/// and a Box, `f1` only a Folder. Nothing lands at the abstract predicate.
+#[tokio::test(flavor = "multi_thread")]
+async fn mutate_add_and_remove_through_an_abstract_class_reach_each_classs_collection() {
+    async fn mutate(
+        p: &mut PerspectiveInstance,
+        ctx: &AgentContext,
+        ops: Value,
+    ) -> Result<
+        Vec<crate::perspectives::instances::mutate::Mutated>,
+        crate::perspectives::instances::MutateError,
+    > {
+        crate::perspectives::instances::mutate(p, ctx, serde_json::from_value(ops).unwrap(), None)
+            .await
+    }
+
+    let (mut p, ctx) = relation_setup().await;
+    let children = |p: &PerspectiveInstance, id: &str| {
+        [
+            targets_on(p, id, "ns://folder_child"),
+            targets_on(p, id, "ns://box_child"),
+            targets_on(p, id, "ns://children"),
+        ]
+    };
+
+    mutate(&mut p, &ctx, json!([
+        {"op":"update","class":"Folderish","id":"ad4m://fb","add":{"children":["ad4m://c1","ad4m://c2"]}},
+        {"op":"update","class":"Folderish","id":"ad4m://f1","add":{"children":["ad4m://c1"]}}
+    ]))
+    .await
+    .unwrap_or_else(|e| panic!("add through the abstract class: {:?}", e.error));
+    assert_eq!(
+        children(&p, "ad4m://fb"),
+        [
+            vec!["ad4m://c1".to_string(), "ad4m://c2".to_string()],
+            vec!["ad4m://c1".to_string(), "ad4m://c2".to_string()],
+            vec![]
+        ]
+    );
+    assert_eq!(
+        children(&p, "ad4m://f1"),
+        [vec!["ad4m://c1".to_string()], vec![], vec![]]
+    );
+
+    mutate(
+        &mut p,
+        &ctx,
+        json!([
+            {"op":"update","class":"Folderish","id":"ad4m://fb","remove":{"children":["ad4m://c1"]}}
+        ]),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("remove through the abstract class: {:?}", e.error));
+    assert_eq!(
+        children(&p, "ad4m://fb"),
+        [
+            vec!["ad4m://c2".to_string()],
+            vec!["ad4m://c2".to_string()],
+            vec![]
+        ]
+    );
+}

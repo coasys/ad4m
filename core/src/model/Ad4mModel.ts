@@ -418,21 +418,25 @@ function jsonToModelInstance<T extends Ad4mModel>(
 
 /**
  * The ops of each open {@link Ad4mModel.transaction}, by the id of the batch it
- * opened. A model write that names such a batch is queued here and sent with
- * the others as one `perspective.mutate` call, so a later write of the
- * transaction finds an instance an earlier one created.
+ * opened, with the undo of each write's provisional snapshot. A model write
+ * that names such a batch is queued here and sent with the others as one
+ * `perspective.mutate` call, so a later write of the transaction finds an
+ * instance an earlier one created. When the call or the callback fails,
+ * the undos run, so no instance looks saved that was not.
  */
-const transactionOps = new Map<string, MutateOp[]>();
+const transactionOps = new Map<string, { ops: MutateOp[]; undo: (() => void)[] }>();
 
 /**
  * Writes `ops` as one `perspective.mutate` call: into the open batch `batchId`
  * when given (the caller commits), else committed at once. In a transaction's
- * batch they are queued instead; the transaction sends them.
+ * batch they are queued instead; the transaction sends them, and runs `undo`
+ * if they are never written.
  */
-async function writeOps(perspective: PerspectiveProxy, ops: MutateOp[], batchId?: string): Promise<void> {
+async function writeOps(perspective: PerspectiveProxy, ops: MutateOp[], batchId?: string, undo?: () => void): Promise<void> {
   const queued = batchId ? transactionOps.get(batchId) : undefined;
   if (queued) {
-    queued.push(...ops);
+    queued.ops.push(...ops);
+    if (undo) queued.undo.push(undo);
     return;
   }
   await perspective.mutate(ops, batchId ? { batch: batchId } : {});
@@ -1700,7 +1704,7 @@ export class Ad4mModel {
     }
     if (value == null) return;
     const ids = (Array.isArray(value) ? value : [value]).map((v) => this.resolveRelationId(v));
-    const members = { [key]: ids };
+    const members = { [key]: kind === 'set' ? this.relationWrite(key, ids) : ids };
     const change = kind === 'set' ? { set: members } : { [kind]: members };
     await writeOps(this._perspective, [{ op: 'update', class: this.mutateClass(), id: this._baseExpression, ...change }], batchId);
   }
@@ -1759,7 +1763,8 @@ export class Ad4mModel {
    */
   private async persist(batchId?: string, parent?: ParentRef): Promise<void> {
     const op = this._snapshot ? this.updateOp() : this.createOp(parent);
-    if (op) await writeOps(this._perspective, [op], batchId);
+    const before = this._snapshot;
+    if (op) await writeOps(this._perspective, [op], batchId, () => { this._snapshot = before; });
     this.takeSnapshot();
   }
 
@@ -1782,6 +1787,18 @@ export class Ad4mModel {
       if (collides) return null;
     }
     return relMeta;
+  }
+
+  /**
+   * Members `ids` of relation `key` as the executor takes them: one id (or
+   * `null` for none) for a single-valued relation, which refuses an array;
+   * the array for a collection. More than one member for a single-valued
+   * relation stays an array, so the executor refuses it.
+   */
+  private relationWrite(key: string, ids: string[]): string | string[] | null {
+    const single = (this.constructor as typeof Ad4mModel).getModelMetadata().relations[key].maxCount === 1;
+    if (!single || ids.length > 1) return ids;
+    return ids[0] ?? null;
   }
 
   /** A relation field's value as the member ids to write: an array, a single member, or a `{ action, value }` envelope. */
@@ -1812,7 +1829,7 @@ export class Ad4mModel {
         // A remover has nothing to remove from a new instance.
         if (value?.action === "remover") continue;
         const members = this.relationMembers(value);
-        if (members.length > 0) values[key] = members;
+        if (members.length > 0) values[key] = this.relationWrite(key, members);
         continue;
       }
       // Only a declared, settable property: not ORM bookkeeping, a read-only
@@ -1847,8 +1864,8 @@ export class Ad4mModel {
         // An envelope that is not an adder or a remover sets, as `set<Rel>` does.
         if (value?.action === "adder" || value?.action === "remover") {
           if (members.length > 0) (value.action === "adder" ? add : remove)[key] = members;
-        } else if (value?.action || Array.isArray(value) || members.length > 0) {
-          set[key] = members;
+        } else if (value?.action || Array.isArray(value) || members.length > 0 || metadata.relations[key].maxCount === 1) {
+          set[key] = this.relationWrite(key, members);
         }
         continue;
       }
@@ -2283,17 +2300,19 @@ export class Ad4mModel {
     fn: (tx: { batchId: string }) => Promise<R>,
   ): Promise<R> {
     const batchId = await perspective.createBatch();
-    const ops: MutateOp[] = [];
-    transactionOps.set(batchId, ops);
+    const queue = { ops: [] as MutateOp[], undo: [] as (() => void)[] };
+    transactionOps.set(batchId, queue);
     try {
       const result = await fn({ batchId });
       // The model writes of the callback go out as one call, so a later op
       // finds an instance an earlier one created, and a refused op fails all.
       transactionOps.delete(batchId);
-      if (ops.length > 0) await perspective.mutate(ops, { batch: batchId });
+      if (queue.ops.length > 0) await perspective.mutate(queue.ops, { batch: batchId });
       await perspective.commitBatch(batchId);
       return result;
     } catch (e) {
+      // Nothing was written: the instances saved in the callback are unsaved again.
+      for (const undo of queue.undo.reverse()) undo();
       // A failed discard must not hide the original error.
       await perspective.discardBatch(batchId).catch(() => {});
       throw e;

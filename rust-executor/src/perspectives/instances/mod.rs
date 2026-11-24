@@ -533,6 +533,11 @@ impl Pending {
         self.removed.insert(id.to_string());
     }
 
+    /// The class this call created `id` as, if it did and has not removed it since.
+    pub(crate) fn created_class(&self, id: &str) -> Option<&str> {
+        self.created.get(id).map(String::as_str)
+    }
+
     /// Whether `id` exists as `class_name` as far as this call knows: `Some(true)` when the call
     /// created it as that class, `Some(false)` when it removed it or created it as another class,
     /// `None` when the call has not touched it (the committed store decides).

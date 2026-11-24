@@ -637,6 +637,11 @@ const NOTIFICATION_DEBOUNCE: Duration = Duration::from_millis(100);
 /// notification's query.
 const NOTIFICATION_MIN_SPACING: Duration = Duration::from_secs(1);
 
+/// See `PerspectiveInstance::mutate_gap_hook`.
+#[cfg(test)]
+pub(crate) type MutateGapHook =
+    Box<dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send>;
+
 #[derive(Clone)]
 pub struct PerspectiveInstance {
     pub persisted: Arc<PersistedHandle>,
@@ -686,9 +691,6 @@ pub struct PerspectiveInstance {
     /// Model query runs in flight, shared by identical calls (see `runner.rs`).
     runs: runner::Runs,
     batch_store: Arc<RwLock<HashMap<String, TimestampedBatch>>>,
-    /// Serialises `perspective.mutate` calls into a caller's batch: a call that fails puts the
-    /// batch back as it found it, which would drop the staged work of a call running beside it.
-    pub(crate) mutate_mutex: Arc<Mutex<()>>,
     // Fallback sync tracking for ensure_public_links_are_shared
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
     fallback_sync_interval: Arc<Mutex<Duration>>,
@@ -742,6 +744,10 @@ pub struct PerspectiveInstance {
     /// concurrent local write in that gap deterministically (#1146).
     #[cfg(test)]
     pub(crate) ingest_gap_hook: Arc<std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>>,
+    /// Test-only hook run once by `perspective.mutate` after the first op of a call, so a test
+    /// can land a commit or a raw write on the caller's batch while the call is in flight.
+    #[cfg(test)]
+    pub(crate) mutate_gap_hook: Arc<std::sync::Mutex<Option<MutateGapHook>>>,
     /// Test-only: makes the next [`Self::commit_batch`] fail, dropping the
     /// batch as a real failure does. Compiled out in non-test builds — see
     /// [`Self::fail_next_commit_batch`].
@@ -838,7 +844,6 @@ impl PerspectiveInstance {
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
             runs: runner::Runs::default(),
             batch_store: Arc::new(RwLock::new(HashMap::new())),
-            mutate_mutex: Arc::new(Mutex::new(())),
             last_successful_fallback_sync: Arc::new(Mutex::new(None)),
             fallback_sync_interval: Arc::new(Mutex::new(Duration::from_secs(30))),
             sparql_store: Arc::new(
@@ -856,6 +861,8 @@ impl PerspectiveInstance {
             fail_add_link_after: Arc::new(AtomicI64::new(-1)),
             #[cfg(test)]
             ingest_gap_hook: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(test)]
+            mutate_gap_hook: Arc::new(std::sync::Mutex::new(None)),
             #[cfg(test)]
             fail_next_commit: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]

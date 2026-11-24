@@ -7,8 +7,9 @@
 //!   links.
 //! - The call applies all its ops or none. Without a `batch` the ops stage into a batch of
 //!   their own that is committed at the end and discarded on failure. With a caller's `batch`
-//!   they stage into it and a failure puts the batch back as the call found it; nothing is
-//!   committed.
+//!   they stage into a private copy of it, merged into the caller's batch in one step when the
+//!   call succeeds and dropped when it fails; nothing is committed. A caller's batch that is
+//!   gone by the merge (committed or discarded meanwhile) fails the call.
 //! - An update op writes its `set` properties, then its `remove` items, then its `add` items.
 
 use super::write::{
@@ -159,16 +160,22 @@ pub(crate) async fn mutate(
     }
     match batch {
         Some(batch_id) => {
-            // One call at a time into a caller's batch: a failed call restores the batch.
-            let mutex = perspective.mutate_mutex.clone();
-            let _one_at_a_time = mutex.lock().await;
-            let Some(snapshot) = perspective.snapshot_batch(&batch_id).await else {
+            // The ops stage into a private batch that starts as a copy of the caller's; a
+            // success merges what they changed into the caller's batch in one step, a failure
+            // drops the private batch. The caller's batch is touched only by that merge.
+            let Some((private, base)) = perspective.fork_batch(&batch_id).await else {
                 return Err(call_error(InstanceError::BatchNotFound { batch_id }));
             };
-            match run_ops(perspective, agent, ops, &batch_id).await {
-                Ok(done) => Ok(done),
+            match run_ops(perspective, agent, ops, &private).await {
+                Ok(done) => {
+                    if perspective.merge_batch(&batch_id, &private, base).await {
+                        Ok(done)
+                    } else {
+                        Err(call_error(InstanceError::BatchNotFound { batch_id }))
+                    }
+                }
                 Err(error) => {
-                    perspective.restore_batch(&batch_id, snapshot).await;
+                    perspective.discard_batch(&private).await;
                     Err(error)
                 }
             }
@@ -218,18 +225,30 @@ async fn run_ops(
             pending.removed(&mutated.id);
         }
         done.push(mutated);
+        #[cfg(test)]
+        if index == 0 {
+            let hook = perspective.mutate_gap_hook.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook().await;
+            }
+        }
     }
     Ok(done)
 }
 
 /// The class of the instance `id` that declares `relation`; one class must, or the caller
-/// names it.
+/// names it. An instance this call created is the class the call created it as.
 fn parent_class(
     perspective: &PerspectiveInstance,
     id: &str,
     relation: &str,
+    pending: &Pending,
 ) -> Result<String, InstanceError> {
-    let parent = link_target(&instance_uri("parent", id)?);
+    let parent_id = instance_uri("parent", id)?;
+    if let Some(class) = pending.created_class(&parent_id) {
+        return Ok(class.to_string());
+    }
+    let parent = link_target(&parent_id);
     let mut candidates = perspective
         .classes_declaring(&parent, relation)
         .map_err(|error| InstanceError::Failed {
@@ -245,6 +264,37 @@ fn parent_class(
         relation: relation.to_string(),
         candidates,
     })
+}
+
+/// The `(class, collection)` pairs an `add` or `remove` on `class` writes. A concrete class is
+/// itself. Through an abstract class (#1435) it is each of the record's classes it reads that
+/// has the collection, under its own name for it.
+fn collection_targets(
+    perspective: &PerspectiveInstance,
+    class: &str,
+    id: &str,
+    collection: &str,
+) -> Result<Vec<(String, String)>, InstanceError> {
+    let failed = |error| InstanceError::Failed {
+        class_name: class.to_string(),
+        step: WriteStep::ResolveCollection {
+            collection: collection.to_string(),
+        },
+        error,
+    };
+    if !perspective.is_abstract_class(class).map_err(failed)? {
+        return Ok(vec![(class.to_string(), collection.to_string())]);
+    }
+    let base = link_target(&instance_uri("base_uri", id)?);
+    let targets = perspective
+        .collection_targets(class, &base, collection)
+        .map_err(failed)?;
+    if targets.is_empty() {
+        return Err(failed(anyhow::anyhow!(
+            "none of the record's classes read through '{class}' has '{collection}'"
+        )));
+    }
+    Ok(targets)
 }
 
 async fn run_op(
@@ -289,7 +339,7 @@ async fn run_op(
                 }) => {
                     let model = match model {
                         Some(model) => model,
-                        None => parent_class(perspective, &id, &relation)?,
+                        None => parent_class(perspective, &id, &relation, pending)?,
                     };
                     add_to_collection_with(
                         perspective,
@@ -361,41 +411,53 @@ async fn run_op(
                 base_uri = updated.base_uri;
             }
             for (collection, items) in remove {
-                for item in items {
-                    let removed = remove_from_collection_with(
-                        perspective,
-                        agent,
-                        InstanceRemoveFromCollection {
-                            class_name: class.clone(),
-                            base_uri: id.clone(),
-                            collection: collection.clone(),
-                            item_uri: item,
-                            batch_id: batch.clone(),
-                        },
-                        pending,
-                    )
-                    .await?;
-                    class_name = removed.class_name;
-                    base_uri = removed.base_uri;
+                for (target_class, own) in
+                    collection_targets(perspective, &class, &id, &collection)?
+                {
+                    for item in &items {
+                        let removed = remove_from_collection_with(
+                            perspective,
+                            agent,
+                            InstanceRemoveFromCollection {
+                                class_name: target_class.clone(),
+                                base_uri: id.clone(),
+                                collection: own.clone(),
+                                item_uri: item.clone(),
+                                batch_id: batch.clone(),
+                            },
+                            pending,
+                        )
+                        .await?;
+                        if target_class == class {
+                            class_name = removed.class_name;
+                        }
+                        base_uri = removed.base_uri;
+                    }
                 }
             }
             for (collection, items) in add {
-                for item in items {
-                    let added = add_to_collection_with(
-                        perspective,
-                        agent,
-                        InstanceAddToCollection {
-                            class_name: class.clone(),
-                            base_uri: id.clone(),
-                            collection: collection.clone(),
-                            item_uri: item,
-                            batch_id: batch.clone(),
-                        },
-                        pending,
-                    )
-                    .await?;
-                    class_name = added.class_name;
-                    base_uri = added.base_uri;
+                for (target_class, own) in
+                    collection_targets(perspective, &class, &id, &collection)?
+                {
+                    for item in &items {
+                        let added = add_to_collection_with(
+                            perspective,
+                            agent,
+                            InstanceAddToCollection {
+                                class_name: target_class.clone(),
+                                base_uri: id.clone(),
+                                collection: own.clone(),
+                                item_uri: item.clone(),
+                                batch_id: batch.clone(),
+                            },
+                            pending,
+                        )
+                        .await?;
+                        if target_class == class {
+                            class_name = added.class_name;
+                        }
+                        base_uri = added.base_uri;
+                    }
                 }
             }
             Ok(Mutated {

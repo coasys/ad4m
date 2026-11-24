@@ -320,6 +320,27 @@ impl PerspectiveInstance {
         Ok(targets)
     }
 
+    /// The classes of `base` that a collection write through `abstract_class` reaches, each
+    /// with its own name for the collection `name` of the abstract class: those of the record's
+    /// classes the abstract class reads that have a property or relation answering to `name`.
+    pub(crate) fn collection_targets(
+        &self,
+        abstract_class: &str,
+        base: &str,
+        name: &str,
+    ) -> Result<Vec<(String, String)>, AnyError> {
+        let (alias_key, _) = self.abstract_shape(abstract_class)?;
+        let index = self.abstract_index()?;
+        let mut found = Vec::new();
+        for class in self.write_targets(abstract_class, base)? {
+            let shape = self.get_shape(&class)?;
+            if let Some(own) = index.own_name(&class, &shape, name, &alias_key) {
+                found.push((class, own.to_string()));
+            }
+        }
+        Ok(found)
+    }
+
     /// `update_subject` through `abstract_class`: each value is written by
     /// every target class's setter for the property answering to its name.
     /// A command another class already wrote for this name (same action,

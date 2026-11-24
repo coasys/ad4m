@@ -2638,7 +2638,7 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
   const writtenTargets = (perspective: any): string[] =>
     sentOps(perspective).flatMap((op: any) =>
       [op.values, op.set, op.add, op.remove].flatMap((group) =>
-        Object.values(group ?? {}).flatMap((v) => (Array.isArray(v) ? v : [])) as string[]
+        Object.values(group ?? {}).flatMap((v) => (Array.isArray(v) ? v : typeof v === "string" && v.includes("://") ? [v] : [])) as string[]
       )
     );
 
@@ -2677,7 +2677,7 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
       expect(sentOps(perspective)).toEqual([
         expect.objectContaining({
           op: "create",
-          values: { label: "contradicts", source: ["we://block/a"] },
+          values: { label: "contradicts", source: "we://block/a" },
         }),
       ]);
     });
@@ -2739,7 +2739,7 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
       await TestNoisyPost.create(perspective, { title: "hello", channel: "test://channel/1" }, { batchId: "batch-1" });
 
       // The @HasOne value is written as a relation; the flag and the empty tags are not sent.
-      expect(sentOps(perspective)[0].values).toEqual({ title: "hello", channel: ["test://channel/1"] });
+      expect(sentOps(perspective)[0].values).toEqual({ title: "hello", channel: "test://channel/1" });
     });
   });
 
@@ -3807,6 +3807,58 @@ describe("Ad4mModel.transaction()", () => {
     expect(perspective.mutate.mock.invocationCallOrder[0]).toBeLessThan(perspective.commitBatch.mock.invocationCallOrder[0]);
   });
 
+  it("a refused flush leaves a new instance unsaved: a retry sends a create", async () => {
+    const { perspective } = makePerspective();
+    perspective.mutate.mockRejectedValueOnce(new Error("refused"));
+    const card = new TxCard(perspective, "tx://c1");
+    jest.spyOn(card as any, "getData").mockResolvedValue(card);
+    await expect(
+      Ad4mModel.transaction(perspective, async (tx) => {
+        card.title = "one";
+        await card.save(tx.batchId);
+      }),
+    ).rejects.toThrow("refused");
+
+    await card.save();
+    expect(perspective.mutate).toHaveBeenLastCalledWith(
+      [{ op: "create", class: "tx://TxCard", id: "tx://c1", values: { title: "one" } }],
+      {},
+    );
+  });
+
+  it("a callback that throws leaves a new instance unsaved too", async () => {
+    const { perspective } = makePerspective();
+    const card = new TxCard(perspective, "tx://c1");
+    jest.spyOn(card as any, "getData").mockResolvedValue(card);
+    await expect(
+      Ad4mModel.transaction(perspective, async (tx) => {
+        card.title = "one";
+        await card.save(tx.batchId);
+        throw new Error("callback failed");
+      }),
+    ).rejects.toThrow("callback failed");
+
+    await card.save();
+    expect(perspective.mutate).toHaveBeenCalledTimes(1);
+    expect(perspective.mutate.mock.calls[0][0][0].op).toBe("create");
+  });
+
+  it("a flush that succeeds keeps the snapshot: a later save updates", async () => {
+    const { perspective } = makePerspective();
+    const card = new TxCard(perspective, "tx://c1");
+    jest.spyOn(card as any, "getData").mockResolvedValue(card);
+    await Ad4mModel.transaction(perspective, async (tx) => {
+      card.title = "one";
+      await card.save(tx.batchId);
+    });
+    card.title = "two";
+    await card.save();
+    expect(perspective.mutate).toHaveBeenLastCalledWith(
+      [{ op: "update", class: "tx://TxCard", id: "tx://c1", set: { title: "two" } }],
+      {},
+    );
+  });
+
   it("sends nothing when the callback writes no model", async () => {
     const { perspective } = makePerspective();
     await Ad4mModel.transaction(perspective, async () => {});
@@ -3954,6 +4006,74 @@ describe("delete() and incoming links", () => {
     const failure = new Error("delete refused");
     perspective.mutate.mockRejectedValue(failure);
     await expect(new DelTarget(perspective, "del://t1").delete()).rejects.toBe(failure);
+  });
+});
+
+describe("relation cardinality in mutate ops", () => {
+  @Model({ name: "CardTarget" })
+  class CardTarget extends Ad4mModel {}
+
+  @Model({ name: "CardHolder" })
+  class CardHolder extends Ad4mModel {
+    @HasOne({ through: "card://owner" })
+    owner: string = "";
+
+    @HasMany({ through: "card://tags" })
+    tags: string[] = [];
+  }
+
+  const ops = (perspective: any) => perspective.mutate.mock.calls.flatMap((call: any[]) => call[0]);
+  const makePerspective = () => ({ uuid: "p", mutate: jest.fn(async () => ({ ids: [] })) }) as any;
+
+  it("a create sends a HasOne as one id and a HasMany as an array", async () => {
+    const perspective = makePerspective();
+    const holder = new CardHolder(perspective, "card://h1");
+    holder.owner = "card://a";
+    holder.tags = ["card://t1", "card://t2"];
+    await holder.save("b");
+    expect(ops(perspective)).toEqual([
+      { op: "create", class: "card://CardHolder", id: "card://h1", values: { owner: "card://a", tags: ["card://t1", "card://t2"] } },
+    ]);
+  });
+
+  it("an update replaces a HasOne with one id and clears it with null", async () => {
+    const perspective = makePerspective();
+    const holder = new CardHolder(perspective, "card://h1");
+    holder.owner = "card://a";
+    await holder.save("b");
+    perspective.mutate.mockClear();
+
+    holder.owner = "card://b";
+    await holder.save("b");
+    holder.owner = null as any;
+    await holder.save("b");
+    expect(ops(perspective)).toEqual([
+      { op: "update", class: "card://CardHolder", id: "card://h1", set: { owner: "card://b" } },
+      { op: "update", class: "card://CardHolder", id: "card://h1", set: { owner: null } },
+    ]);
+  });
+
+  it("an update keeps an array for a HasMany, empty included", async () => {
+    const perspective = makePerspective();
+    const holder = new CardHolder(perspective, "card://h1");
+    holder.tags = ["card://t1"];
+    await holder.save("b");
+    perspective.mutate.mockClear();
+
+    holder.tags = [];
+    await holder.save("b");
+    expect(ops(perspective)).toEqual([
+      { op: "update", class: "card://CardHolder", id: "card://h1", set: { tags: [] } },
+    ]);
+  });
+
+  it("setOwner sends one id, not an array", async () => {
+    const perspective = makePerspective();
+    const holder = new CardHolder(perspective, "card://h1");
+    await (holder as any).setOwner(new CardTarget(perspective, "card://a"), "b");
+    expect(ops(perspective)).toEqual([
+      { op: "update", class: "card://CardHolder", id: "card://h1", set: { owner: "card://a" } },
+    ]);
   });
 });
 

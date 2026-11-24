@@ -38,11 +38,14 @@ Invariants:
   (the ids this `mutate` call created or removed) when the call passes one. `Pending` lives
   for one call: an instance an earlier call staged into the caller's batch is not found, and
   the single writes (`create`, `update`, ...) called alone pass none.
-- `mutate` applies all ops or none. Its own batch is discarded on failure. A caller's batch is
-  snapshotted first (`snapshot_batch`) and restored on failure (`restore_batch`), under
-  `PerspectiveInstance::mutate_mutex` so two calls into one batch do not interleave. The
-  failing op's index travels with the error (`MutateError`) and the RPC puts it in the
-  message and in `data.opIndex`.
+- `mutate` applies all ops or none. Its own batch is discarded on failure. With a caller's
+  batch it works in a private fork of it (`fork_batch`: a copy, so its reads see the caller's
+  work plus its own) and, when every op succeeded, merges what the fork changed into the
+  caller's batch in one step under the batch store's write lock (`merge_batch`); on failure
+  it drops the fork. A commit or a raw add into the caller's batch during the call is
+  therefore never lost or half-undone: a raw add stays, and a commit makes the merge find
+  no batch (`BatchNotFound`), so the call publishes nothing. The failing op's index travels
+  with the error (`MutateError`) and the RPC puts it in the message and in `data.opIndex`.
 
 Write rules (one set, for the MCP tools and `perspective.mutate`, whose handlers call these
 functions):
@@ -54,12 +57,19 @@ functions):
 - Update: `null` or `""` clears a property (a required one is `missingRequired`); an array on a
   relation sets its members (adds the missing, removes the extra, keeps the ordering
   entries). `add_to_collection` / `remove_from_collection` (`add` / `remove` of an update) are
-  incremental; an `add` to an ordered relation writes its ordering entry.
+  incremental; an `add` to an ordered relation writes its ordering entry. A `set` of `null`,
+  `""` or `[]` on a required collection is `missingRequired`, as for a scalar. A single-valued
+  relation takes one id (or `null` to clear); only a collection takes an array.
+  Through an abstract class, `add` and `remove` go to each record class's own collection
+  (`collection_targets`), as `set` does.
 - `ParentRef::Relation.model` is optional: without it the class is the one of the parent
-  instance that declares the relation (`ParentClassUnresolved` unless exactly one does).
+  instance that declares the relation (`ParentClassUnresolved` unless exactly one does). A
+  parent created earlier in the same call is read from `Pending`, so it needs no `model`.
 - Delete: run the class's destructor if it has a non-empty one; else follow each record class
   through an abstract class, or remove the class's own declared predicates; then remove every
   link that targets the instance (`remove_incoming_links_of`). `links_removed` counts both.
+  Removing the incoming links does not respect a second class on the same node: a node of
+  several classes loses the links that point at it.
 - `PerspectiveInstance::{create,update,remove}_subject_raw` are the class-side half, called
   by these functions after validation and by the executor's own hard-wired classes
   (auto processor, flows, interpretation overlay), which write executor-owned shapes.

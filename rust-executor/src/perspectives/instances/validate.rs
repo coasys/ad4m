@@ -331,6 +331,15 @@ pub fn validate_properties(
                     }
                 }
             }
+            // A required collection is not emptied, as a required scalar is not cleared.
+            if !bad && mode == WriteMode::Update && coerced.is_empty() && info.required() {
+                errors.push(ValidationError::on(
+                    info,
+                    ValidationProblem::MissingRequired,
+                    Some(value),
+                ));
+                continue;
+            }
             // A create with no members writes nothing; an update sets the collection to none.
             if !bad && (mode == WriteMode::Update || !coerced.is_empty()) {
                 out.collections.push((info.name().to_string(), coerced));

@@ -860,6 +860,8 @@ export interface RelationMetadata {
   readOnly?: boolean;
   /** Whether stored locally only */
   local?: boolean;
+  /** 1 for `@HasOne` / `@BelongsToOne`: the relation holds one member and is written as one id. Unset for a collection. */
+  maxCount?: number;
   /** Link direction: 'forward' for HasMany/HasOne, 'reverse' for BelongsToMany/BelongsToOne */
   direction?: 'forward' | 'reverse';
   /**
