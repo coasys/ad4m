@@ -277,7 +277,8 @@ pub(crate) fn token_ended_frame() -> CloseFrame {
 
 /// How long a connection whose token stopped working still waits for the replies of calls
 /// in flight before it closes. The call that ended the session (`user.logout`) gets its
-/// reply this way.
+/// reply this way. A refused socket ([`close_refused`]) waits as long, at most, for the
+/// client's close.
 const REPLY_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Close code for a connection refused because the executor's wallet is locked (RFC 6455 "try
@@ -296,6 +297,18 @@ pub(crate) async fn close_refused(mut socket: WebSocket, code: u16, reason: Stri
         reason: close_reason(&reason).into(),
     };
     let _ = socket.send(Message::Close(Some(close))).await;
+    // A client writes as soon as the socket opens. Dropping the connection now would make
+    // those writes fail, and a client whose write fails aborts the socket (1006) without
+    // reading the close above. So the connection stays until the client's close, or
+    // `REPLY_GRACE` at most; what the client sent meanwhile is read and ignored.
+    let _ = tokio::time::timeout(REPLY_GRACE, async {
+        while let Some(Ok(message)) = socket.recv().await {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await;
 }
 
 /// Closes a socket whose token stopped working while it was open.
@@ -1640,6 +1653,47 @@ mod socket_tests {
             assert!(
                 !close.reason.is_empty(),
                 "{name}: the close names the reason"
+            );
+        }
+    }
+
+    // A client writes its first frames as soon as the socket opens, before it reads the
+    // refusal. A server that dropped the connection right after its close frame made those
+    // writes fail (broken pipe, then a reset), and a client whose write fails aborts the
+    // socket (1006) without reading the close it already received: it never learned that its
+    // token was refused. The server keeps the connection until the client's close.
+    #[tokio::test]
+    async fn the_refusal_survives_frames_the_client_sends_before_it_reads_it() {
+        let addr = start_server().await;
+        for attempt in 0..3 {
+            let mut ws = connect(addr, "invalid-jwt").await;
+            // The server has sent its close by now.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            for id in ["1", "2"] {
+                let request = json!({"id": id, "type": "agent.status", "params": {}}).to_string();
+                ws.send(WsMessage::Text(request.into()))
+                    .await
+                    .unwrap_or_else(|e| panic!("{attempt}: write {id} failed: {e}"));
+                // Time for a reset to come back from a connection that is gone.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            let close = loop {
+                match tokio::time::timeout(Duration::from_secs(10), ws.next())
+                    .await
+                    .expect("the socket stayed open")
+                {
+                    Some(Ok(WsMessage::Close(frame))) => break frame,
+                    Some(Ok(WsMessage::Text(text))) => panic!("{attempt}: got a reply: {text}"),
+                    Some(Ok(_)) => continue,
+                    other => panic!("{attempt}: no close frame: {other:?}"),
+                }
+            };
+            let close = close.unwrap_or_else(|| panic!("{attempt}: a close frame without a code"));
+            assert_eq!(u16::from(close.code), CLOSE_TOKEN_ENDED, "{attempt}");
+            assert!(
+                close.reason.contains("InvalidToken"),
+                "{attempt}: {}",
+                close.reason
             );
         }
     }

@@ -524,7 +524,11 @@ them against those two guards.
   already-cancelled child, so there is no race to check. Only the socket's own task writes the
   close frame. The RPC socket first delivers in-flight replies for up to `REPLY_GRACE`, so
   `user.logout` gets its answer; each call's `cancel_token` is a child of the socket's token, so
-  the calls still running are cancelled (401). Expiry closes an idle socket the same way:
+  the calls still running are cancelled (401). A socket whose token opens no session is closed
+  by `close_refused` right after the upgrade, which then reads (and ignores) what the client
+  sends until the client's close, for up to `REPLY_GRACE`: a client writes as soon as the socket
+  opens, and a connection dropped under those writes makes the client abort (1006) without
+  reading the 1008 and its reason. Expiry closes an idle socket the same way:
   every socket (and the SSE chat stream, and the RPC socket's event stream,
   `build_event_stream`) also waits on `session.over()`, which completes when
   the grant ends or the token expires (leeway included). A new socket type must watch

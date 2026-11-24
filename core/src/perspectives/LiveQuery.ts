@@ -126,8 +126,9 @@ export const DEFAULT_KEEP_ALIVE_MS = 30_000
  * handle is disposed.
  *
  * The snapshot changes only when the result, the status or `reopening` does.
- * `initial` is `true` only for a handle opened on the result the subscription
- * first had: a handle that joins a subscription already open gets `false`.
+ * `initial` is `true` only for the result the handle opened on (its `first`):
+ * for a handle that joins a subscription already open, the result it holds
+ * then. Any later result is `false`.
  */
 export interface LiveQuery<T> {
     /** The first result; rejects when the first open fails or this handle is

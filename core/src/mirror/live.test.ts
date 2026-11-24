@@ -64,6 +64,31 @@ describe('live entries of the mirror', () => {
         expect(socketListeners()).toBe(1)
     })
 
+    it('a handle that joins an open subscription opens on its current result: initial, until a change', async () => {
+        const { client, push, subscriptionId } = setup()
+        const a = client.liveQuery('p1', model, project)
+        await a.first
+        push({ subscriptionId: subscriptionId(), revision: 1, ids: ['a', 'b'], upsert: [{ id: 'b' }] })
+        // The grace keeps the subscription for a handle that comes after the last one went.
+        a.dispose()
+        const b = client.liveQuery('p1', model, project)
+        expect(await b.first).toEqual(['a', 'b'])
+        expect(b.getSnapshot()).toMatchObject({ data: ['a', 'b'], initial: true })
+        const seen = jest.fn()
+        b.subscribe(seen)
+        // Called at once with the value it opened on, which is initial.
+        expect(seen).toHaveBeenCalledTimes(1)
+        expect(seen.mock.calls[0][0]).toMatchObject({ data: ['a', 'b'], initial: true })
+        push({ subscriptionId: subscriptionId(), revision: 2, ids: ['a', 'b', 'c'], upsert: [{ id: 'c' }] })
+        expect(seen).toHaveBeenCalledTimes(2)
+        expect(seen.mock.calls[1][0]).toMatchObject({ data: ['a', 'b', 'c'], initial: false })
+        // A handle that opens now opens on that result.
+        const c = client.liveQuery('p1', model, project)
+        expect(await c.first).toEqual(['a', 'b', 'c'])
+        expect(c.getSnapshot().initial).toBe(true)
+        expect(b.getSnapshot().initial).toBe(false)
+    })
+
     it('a different query, perspective, kind of query or client is a separate subscription', async () => {
         const one = setup()
         const other = setup()

@@ -99,11 +99,17 @@ class LiveView<T> implements LiveQuery<T> {
     #rejectFirst!: (error: Error) => void
     // The subscription's snapshot this handle's last one was made from, so the same one stays the same object.
     #last?: { from: Snapshot<any>; to: Snapshot<T> }
+    // The raw result this handle opened on when the subscription already had one; absent when
+    // the subscription was still loading (its own first result is then the opening one).
+    #openedOn?: { data: any }
 
     constructor(subscription: LiveSubscription, project: (raw: any) => T, release: () => void) {
         this.#subscription = subscription
         this.#project = project
         this.#release = release
+        // A handle that joins a subscription already holding a result opens on that result.
+        const held = subscription.getSnapshot()
+        if (held.status === 'ready') this.#openedOn = { data: held.data }
         this.first = new Promise<T>((resolve, reject) => {
             this.#rejectFirst = reject
             // The result the subscription has once it is ready, not the one it opened with.
@@ -125,16 +131,18 @@ class LiveView<T> implements LiveQuery<T> {
         if (from.status !== 'ready') {
             to = from as Snapshot<T>
         } else {
+            // `initial` is about this handle: the result it opened on, not the subscription's first.
+            const initial = this.#openedOn ? from.data === this.#openedOn.data : from.initial
             try {
                 // A change of `reopening` alone leaves the raw result, and so the projected data, as it was.
                 const data = prev?.to.status === 'ready' && prev.from.data === from.data ? prev.to.data as T : this.#project(from.data)
-                to = { ...from, data }
+                to = { ...from, data, initial }
             } catch (e) {
                 if (prev?.to.status !== 'ready') {
                     to = { status: 'error', error: e as Error, reopening: false, initial: false }
                 } else {
                     console.error('Live query result could not be read:', e)
-                    to = { ...prev.to, reopening: from.reopening }
+                    to = { ...prev.to, reopening: from.reopening, initial }
                 }
             }
         }
