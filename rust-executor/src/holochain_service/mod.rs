@@ -1066,8 +1066,6 @@ fn normalize_relay_scheme(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use tokio::time::{Duration, Instant};
-
     #[test]
     fn test_normalize_relay_scheme() {
         // Legacy websocket schemes from pre-0.7 proxy_url configs map to
@@ -1257,59 +1255,5 @@ mod tests {
         assert_eq!(existing_key.get_raw_39().len(), 39);
 
         iface.shutdown().await.expect("Failed to shutdown");
-    }
-
-    #[tokio::test]
-    async fn test_signal_loop_performance() {
-        // Test that the signal processing loop doesn't consume excessive CPU
-        // when no signals are being processed
-
-        let start_time = Instant::now();
-        let test_duration = Duration::from_millis(100);
-
-        // Simulate the signal processing pattern with backoff
-        let iterations = tokio::spawn(async move {
-            let mut count = 0;
-            let start = Instant::now();
-
-            while start.elapsed() < test_duration {
-                // Simulate the select! pattern with backoff
-                tokio::select! {
-                    // Simulate no signals available
-                    _ = tokio::time::sleep(Duration::from_millis(1)) => {
-                        // This branch represents the backoff case
-                    }
-                }
-                count += 1;
-            }
-            count
-        })
-        .await
-        .unwrap();
-
-        let elapsed = start_time.elapsed();
-
-        // With 1ms delays, we should get roughly 100 iterations in 100ms
-        // This verifies the backoff is working and not busy-waiting
-        // Allow for some variance due to system scheduling
-        assert!(
-            iterations < 300,
-            "Too many iterations: {} (expected < 300), suggests busy-waiting",
-            iterations
-        );
-        assert!(
-            iterations > 20,
-            "Too few iterations: {} (expected > 20), suggests delays are too long",
-            iterations
-        );
-        assert!(
-            elapsed >= test_duration,
-            "Test didn't run for expected duration"
-        );
-
-        println!(
-            "Signal loop test: {} iterations in {:?}",
-            iterations, elapsed
-        );
     }
 }
