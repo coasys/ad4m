@@ -437,6 +437,37 @@ fn interpretation_reply_needs_no_thinking(result: &PromptResult) -> bool {
     result.text.trim().is_empty() || result.stop_reason.as_deref() == Some("length")
 }
 
+/// Chars of model output kept on a suspect-reply warn line.
+const SUSPECT_REPLY_LOG_CHARS: usize = 200;
+
+/// Warn line for an interpretation reply that came back empty or as at most
+/// one token. `text` is debug-quoted and cut at [`SUSPECT_REPLY_LOG_CHARS`],
+/// so `""` and `"\n"` stay visible and the line holds no further model output.
+/// `attempt` is 1 for the thinking-on call and 2 for the thinking-off call.
+fn suspect_reply_log_line(task_id: &str, attempt: u32, text: &str, tokens_out: usize) -> String {
+    let total = text.chars().count();
+    let capped: String = text.chars().take(SUSPECT_REPLY_LOG_CHARS).collect();
+    if total > SUSPECT_REPLY_LOG_CHARS {
+        format!(
+            "interpretation: suspect reply task_id={task_id} attempt={attempt} tokens_out={tokens_out} text={capped:?} [+{} more chars]",
+            total - SUSPECT_REPLY_LOG_CHARS
+        )
+    } else {
+        format!(
+            "interpretation: suspect reply task_id={task_id} attempt={attempt} tokens_out={tokens_out} text={capped:?}"
+        )
+    }
+}
+
+fn log_suspect_reply(task_id: &str, attempt: u32, result: &PromptResult) {
+    if result.text.is_empty() || result.completion_tokens <= 1 {
+        log::warn!(
+            "{}",
+            suspect_reply_log_line(task_id, attempt, &result.text, result.completion_tokens)
+        );
+    }
+}
+
 /// The local window check refused the prompt. A split matches this error.
 /// A sentence that merely contains the same words is not this error.
 #[derive(Debug)]
@@ -1293,20 +1324,31 @@ impl AIService {
         let already_off =
             stick_no_thinking.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed));
         if already_off {
-            return self
-                .prompt_with(task_id, prompt, None, Some((true, cap)))
+            let result = self
+                .prompt_with(task_id.clone(), prompt, None, Some((true, cap)))
                 .await;
+            if let Ok(reply) = &result {
+                log_suspect_reply(&task_id, 2, reply);
+            }
+            return result;
         }
 
         if !allow_size_retry {
-            return self
-                .prompt_with(task_id, prompt, None, Some((false, cap)))
+            let result = self
+                .prompt_with(task_id.clone(), prompt, None, Some((false, cap)))
                 .await;
+            if let Ok(reply) = &result {
+                log_suspect_reply(&task_id, 1, reply);
+            }
+            return result;
         }
 
         let first = self
             .prompt_with(task_id.clone(), prompt.clone(), None, Some((false, cap)))
             .await;
+        if let Ok(reply) = &first {
+            log_suspect_reply(&task_id, 1, reply);
+        }
         let size_problem = match &first {
             Ok(result) => interpretation_reply_needs_no_thinking(result),
             Err(error) => context_was_exceeded(error),
@@ -1321,8 +1363,13 @@ impl AIService {
             "interpretation: reasoning reply was empty, cut at the cap, or exceeded \
              the context; retrying once with thinking off"
         );
-        self.prompt_with(task_id, prompt, None, Some((true, cap)))
-            .await
+        let second = self
+            .prompt_with(task_id.clone(), prompt, None, Some((true, cap)))
+            .await;
+        if let Ok(reply) = &second {
+            log_suspect_reply(&task_id, 2, reply);
+        }
+        second
     }
 
     /// [`Self::prompt`] with a generation constraint. `disable_thinking` asks
@@ -2908,6 +2955,115 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.text, "{\"ok\":true}");
+        first.assert_async().await;
+        retry.assert_async().await;
+    }
+
+    /// The warn line for an empty reply and for a one-token reply names the
+    /// task, the attempt (1 = thinking on, 2 = thinking off) and the token
+    /// count, and debug-quotes the raw text. A reply longer than 200 chars is
+    /// cut on a char boundary, including when a multibyte char sits on it.
+    ///
+    /// There is no log-capture seam (`log::set_logger` may already be taken),
+    /// so this checks the line the warn emits. The test below checks the
+    /// retry still makes exactly two model calls.
+    #[test]
+    fn an_interpretation_suspect_reply_log_quotes_empty_one_token_and_caps_at_200_chars() {
+        let empty = suspect_reply_log_line("86802", 1, "", 0);
+        let one = suspect_reply_log_line("86802", 2, "\n", 1);
+        let zee = suspect_reply_log_line("86802", 2, "Z", 1);
+        assert!(empty.contains("task_id=86802"), "{empty}");
+        assert!(empty.contains("attempt=1"), "{empty}");
+        assert!(empty.contains("tokens_out=0"), "{empty}");
+        assert!(
+            empty.contains(&format!("{:?}", "")),
+            "an empty reply must be visible, got {empty}"
+        );
+        assert!(one.contains("attempt=2"), "{one}");
+        assert!(one.contains("tokens_out=1"), "{one}");
+        assert!(
+            one.contains(&format!("{:?}", "\n")),
+            "a lone newline must be visible, got {one}"
+        );
+        assert!(
+            zee.contains(&format!("{:?}", "Z")),
+            "the one-token text must be in the line, got {zee}"
+        );
+
+        // 199 ASCII chars, then a 3-byte char as the 200th (byte 200 is inside
+        // it), then another multibyte char that must not appear.
+        let mut long = "a".repeat(199);
+        long.push('你');
+        long.push('界');
+        long.push_str(&"b".repeat(80));
+        assert!(!long.is_char_boundary(200), "the cap must not split 你");
+        let kept: String = long.chars().take(200).collect();
+        let too_far: String = long.chars().take(201).collect();
+        assert_eq!(kept.chars().count(), 200);
+        let line = suspect_reply_log_line("86802", 1, &long, 80);
+        assert!(line.contains("attempt=1"), "{line}");
+        assert!(line.contains("tokens_out=80"), "{line}");
+        assert!(
+            line.contains(&format!("{:?}", kept)),
+            "the first 200 chars, multibyte included, must be logged, got {line}"
+        );
+        assert!(
+            !line.contains(&format!("{:?}", too_far)),
+            "char 201 must be cut, got {line}"
+        );
+        assert!(!line.contains('界'), "{line}");
+        assert!(!line.contains('b'), "{line}");
+    }
+
+    // Empty on the thinking-on attempt, one token on the thinking-off retry:
+    // still exactly two model calls. No third attempt.
+    #[tokio::test]
+    async fn an_empty_then_one_token_interpretation_makes_exactly_two_calls() {
+        let service = service();
+        let mut upstream = mockito::Server::new_async().await;
+        let _show = upstream
+            .mock("POST", "/api/show")
+            .with_body(
+                r#"{"capabilities":["completion","thinking"],"model_info":{"qwen3.context_length":8192}}"#,
+            )
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        let retry = upstream
+            .mock("POST", "/api/chat")
+            .match_request(|request| {
+                let body = request_json(request);
+                body["think"] == false && body["options"]["num_predict"].as_u64().is_some()
+            })
+            .with_body(
+                r#"{"message":{"role":"assistant","content":"Z"},"done":true,"done_reason":"stop"}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let first = upstream
+            .mock("POST", "/api/chat")
+            .match_request(|request| {
+                let body = request_json(request);
+                body.get("think").is_none() && body["options"]["num_predict"].as_u64().is_some()
+            })
+            .with_body(
+                r#"{"message":{"role":"assistant","content":""},"done":true,"done_reason":"stop"}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let mut endpoint = Endpoint::for_test("ollama", EndpointKind::Ollama, &upstream.url(), "");
+        endpoint.max_num_ctx = Some(8_192);
+        Ad4mDb::with_global_instance(|db| db.insert_endpoint(&endpoint)).unwrap();
+        let task_id = interpretation_task_on(&service, &endpoint).await;
+
+        let result = service
+            .prompt_interpretation_call(task_id, "p".into(), None, true)
+            .await
+            .unwrap();
+        assert_eq!(result.text, "Z");
+        assert_eq!(result.completion_tokens, 1);
         first.assert_async().await;
         retry.assert_async().await;
     }
