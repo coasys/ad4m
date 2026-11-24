@@ -453,6 +453,12 @@ function opFields(op: MutateOp): string[] {
   return [...new Set([...Object.keys(set ?? {}), ...Object.keys(add ?? {}), ...Object.keys(remove ?? {})])];
 }
 
+/** One snapshot value equals another: arrays element by element, in order. */
+function sameValue(a: unknown, b: unknown): boolean {
+  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((v, i) => v === b[i]);
+  return a === b;
+}
+
 /** The parent of the create that `Model.create()` is writing, by instance (see `persist`). */
 const createParents = new WeakMap<object, ParentRef>();
 
@@ -1790,7 +1796,8 @@ export class Ad4mModel {
     // changed while the call is pending stays dirty for the next save.
     this.takeSnapshot();
     const fields = op.op === "create" ? Object.keys(this._snapshot!) : opFields(op);
-    const undo = this.undoOf(fields, this._snapshot!, before);
+    const written = this._snapshot!;
+    const undo = this.undoOf(fields, Object.fromEntries(fields.map((field) => [field, written[field]])), before);
     try {
       await writeOps(this._perspective, [op], batchId, undo);
     } catch (e) {
@@ -1800,8 +1807,9 @@ export class Ad4mModel {
   }
 
   /**
-   * The undo of one write of `fields`: each field whose snapshot value is still the
-   * one this write took (`written`) goes back to what `before` held. A later write
+   * The undo of one write of `fields`: each field whose snapshot value still equals the
+   * one this write took (`written`; arrays element by element, as a later snapshot copies
+   * them) goes back to what `before` held. A later write
    * of the field has set its own value, which matches the store, and fields the
    * write did not carry are never touched. With no `before` (a create) the
    * instance is unsaved again.
@@ -1811,7 +1819,7 @@ export class Ad4mModel {
       const snapshot = this._snapshot;
       if (!snapshot) return;
       for (const field of fields) {
-        if (snapshot[field] !== written[field]) continue;
+        if (!sameValue(snapshot[field], written[field])) continue;
         if (before && field in before) snapshot[field] = before[field];
         else delete snapshot[field];
       }

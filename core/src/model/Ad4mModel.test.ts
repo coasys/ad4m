@@ -3980,6 +3980,37 @@ describe("Ad4mModel.transaction()", () => {
     );
   });
 
+  it("a save of another field during a failed transaction does not keep the transaction's relation in the snapshot", async () => {
+    @Model({ name: "TxTagged" })
+    class TxTagged extends Ad4mModel {
+      @Property({ through: "tx://title" })
+      title: string = "";
+
+      @HasMany({ through: "tx://tag" })
+      tags: string[] = [];
+    }
+    const { perspective } = makePerspective();
+    const item = new TxTagged(perspective, "tx://t1");
+    jest.spyOn(item as any, "getData").mockResolvedValue(item);
+    item.title = "A";
+    item.tags = ["tx://a"];
+    await item.save();
+
+    await expect(
+      Ad4mModel.transaction(perspective, async (tx) => {
+        item.tags = ["tx://b"];
+        await item.save(tx.batchId);
+        // A second save in the transaction writes only the title, and copies the tags anew.
+        item.title = "B";
+        await item.save(tx.batchId);
+        throw new Error("callback failed");
+      }),
+    ).rejects.toThrow("callback failed");
+
+    // Nothing was written: both fields are changes again.
+    expect(item.changedFields().sort()).toEqual(["tags", "title"]);
+  });
+
   it("a flush that succeeds keeps the snapshot: a later save updates", async () => {
     const { perspective } = makePerspective();
     const card = new TxCard(perspective, "tx://c1");
