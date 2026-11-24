@@ -56,7 +56,6 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'agent.generate': { did: 'did:test:generated', didDocument: 'doc', isInitialized: true, isUnlocked: true },
     'agent.lock': { did: 'did:test:123', isInitialized: true, isUnlocked: false },
     'agent.unlock': { did: 'did:test:123', isInitialized: true, isUnlocked: true },
-    'agent.import': { did: 'did:test:imported', isInitialized: true, isUnlocked: true },
     'agent.byDIDs': (p: Record<string, unknown>) => (p.dids as string[]).map(did => ({ did, perspective: new Perspective() })),
     'agent.updateProfile': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm' },
     'agent.sign': 'signed-message-data',
@@ -91,7 +90,6 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'perspective.snapshot': {
         links: [{ author: 'did:test:123', timestamp: '2024-01-01', data: { source: 's', predicate: 'p', target: 't' }, proof: { valid: true } }],
     },
-    'perspective.publishSnapshot': 'Qm123',
     'perspective.queryLinks': [
         { author: 'did:test:123', timestamp: '2024-01-01', data: { source: 's', predicate: 'p', target: 't' }, proof: { valid: true } },
     ],
@@ -116,7 +114,6 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
         data: { source: 'new-s', predicate: 'p', target: 't' }, proof: { valid: true },
     },
     'perspective.removeLink': true,
-    'perspective.queryProlog': JSON.stringify([{ X: 'test' }]),
     'perspective.querySparql': JSON.stringify([{ id: '1' }]),
     'perspective.registerShapes': { unchanged: [], written: ['test://TestClass'], generation: 1 },
     // A `colour` property is refused as the executor refuses an unknown property: 422 with the
@@ -151,7 +148,6 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
         templateAppliedParams: null, possibleTemplateParams: null, sourceCodeLink: null,
     },
     'language.source': 'source-code-here',
-    'language.writeSettings': true,
     'language.applyTemplate': { name: 'applied-lang', address: 'lang://applied' },
     'language.publish': {
         name: 'published-lang', address: 'lang://published', description: 'Published',
@@ -457,7 +453,6 @@ beforeEach(() => {
     MockWebSocket.instances = [];
     // Clear caches to prevent cross-test interference
     ad4m.agent.clearByDidCache();
-    ad4m.expression.clearCache();
 });
 
 // ===================== AGENT TESTS =====================
@@ -493,14 +488,6 @@ describe('AgentClient', () => {
         expect(lastRpcCall!.params.passphrase).toBe('secret123');
         expect(lastRpcCall!.params.holochain).toBe(true);
         expect(status.isUnlocked).toBe(true);
-    });
-
-    test('import() imports a DID keystore', async () => {
-        const status = await ad4m.agent.import({
-            did: 'did:test:import', didDocument: 'doc', keystore: 'ks', passphrase: 'pass',
-        });
-        expect(lastRpcCall!.params.did).toBe('did:test:import');
-        expect(status.did).toBe('did:test:imported');
     });
 
     test('byDID() fetches agent by DID', async () => {
@@ -732,11 +719,6 @@ describe('PerspectiveClient', () => {
         expect(result).toEqual({ unchanged: [], written: ['test://TestClass'], generation: 1 });
     });
 
-    test('queryProlog() runs prolog query', async () => {
-        const result = await ad4m.perspective.queryProlog('uuid-1', 'test(X)');
-        expect(result).toEqual([{ X: 'test' }]);
-    });
-
     test('the last unsubscribe closes the socket', async () => {
         const freshClient = newClient();
         const unsubscribe = freshClient.perspective.onQueryUpdate(jest.fn());
@@ -956,11 +938,6 @@ describe('PerspectiveClient', () => {
         expect(lastRpcCall).toEqual({ type: 'perspective.disposeQuery', params: { uuid: 'uuid-1', subscriptionId: 'sub-1' } });
     });
 
-    test('publishSnapshotByUUID() publishes a snapshot', async () => {
-        const hash = await ad4m.perspective.publishSnapshotByUUID('uuid-1');
-        expect(hash).toBe('Qm123');
-    });
-
     test('createBatch() creates a batch', async () => {
         const batchId = await ad4m.perspective.createBatch('uuid-1');
         expect(batchId).toBe('batch-id-1');
@@ -980,11 +957,6 @@ describe('LanguageClient', () => {
         expect(langs[0].name).toBe('test-lang');
     });
 
-    test('byFilter() filters languages', async () => {
-        await ad4m.languages.byFilter('test');
-        expect(lastRpcCall!.params.filter).toBe('test');
-    });
-
     test('byAddress() returns a language handle', async () => {
         const lang = await ad4m.languages.byAddress('lang://test');
         expect(lang.name).toBe('test-lang');
@@ -999,12 +971,6 @@ describe('LanguageClient', () => {
     test('source() returns source code', async () => {
         const source = await ad4m.languages.source('lang://test');
         expect(source).toBe('source-code-here');
-    });
-
-    test('writeSettings() writes language settings', async () => {
-        const result = await ad4m.languages.writeSettings('lang://test', '{"key":"value"}');
-        expect(result).toBe(true);
-        expect(lastRpcCall!.params.settings).toBe('{"key":"value"}');
     });
 
     test('applyTemplateAndPublish() applies a template', async () => {

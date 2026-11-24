@@ -401,7 +401,7 @@ export function buildModelFromJSONSchema(
   (DynamicModelClass.prototype as any).__jsonSchema = schema;
   (DynamicModelClass.prototype as any).__jsonSchemaOptions = options;
   
-  // Apply the Model decorator to set up the generateSDNA method
+  // Apply the Model decorator to set up the generateSHACL method
   const ModelDecorator = Model({ name: options.name });
   ModelDecorator(DynamicModelClass);
   

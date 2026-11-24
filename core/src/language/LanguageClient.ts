@@ -14,16 +14,8 @@ export class LanguageClient {
         return this.#apiClient.call('language.get', { address })
     }
 
-    async byFilter(filter: string): Promise<LanguageHandle[]> {
-        return this.#apiClient.call('language.all', { filter })
-    }
-
     async all(): Promise<LanguageHandle[]> {
         return this.#apiClient.call('language.all', {})
-    }
-
-    async writeSettings(languageAddress: string, settings: string): Promise<Boolean> {
-        return this.#apiClient.call('language.writeSettings', { address: languageAddress, settings })
     }
 
     async applyTemplateAndPublish(sourceLanguageHash: string, templateData: string, options?: CallOptions): Promise<LanguageRef> {

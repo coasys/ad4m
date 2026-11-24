@@ -1,5 +1,4 @@
 use crate::agent;
-use crate::perspectives::shacl_to_prolog::generate_prolog_facts_from_shacl;
 use crate::types::{DecoratedLinkExpression, ExpressionRef, LanguageRef, Link};
 use ad4m_client::literal::Literal;
 use chrono::DateTime;
@@ -745,13 +744,6 @@ pub fn get_sdna_facts(
             lines.extend(code.split('\n').map(|s| s.to_string()));
         }
     }
-
-    // Generate Prolog facts from SHACL links for backward compatibility
-    // This allows infer() queries and template matching to work with SHACL-only classes
-    lines.extend(generate_prolog_facts_from_shacl(
-        all_links,
-        &seen_subject_classes,
-    ));
 
     Ok(lines)
 }

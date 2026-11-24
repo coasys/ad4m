@@ -253,14 +253,6 @@ memberPost(Post, Agent, Neighbourhood) :-
 ?- memberPost(Post, Agent, "neighbourhood://QmGroup789").
 ```
 
-This could be queried via the AD4M client:
-```javascript
-const posts = await perspective.infer(
-  "memberPost(Post, Agent, 'neighbourhood://QmGroup789')"
-);
-console.log(posts); // [{Post: "QmXyz123://post456", Agent: "did:key:z6Mk..."}, ...]
-```
-
 While these raw query engines are powerful, AD4M simplifies development with a higher-level abstraction.
 
 ### Ad4mModel

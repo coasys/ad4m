@@ -573,11 +573,6 @@ const todos = await perspective.querySparql(`
           rdf:object <active> .
   }
 `);
-
-// Option 3: Prolog (for backward compatibility)
-const todos = await perspective.infer(
-  'instance(Todo, "Todo"), property_getter("Todo", Todo, "state", "active")'
-);
 ```
 
 ## Best Practices

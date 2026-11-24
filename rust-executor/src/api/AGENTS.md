@@ -176,7 +176,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-229 methods: Cap 83, CapAnyPointer 1, Executor 43, Open 5, Operator 30, Owns 65, UserOrOperator 2. Local only (the operator on this machine): 5.
+228 methods: Cap 83, CapAnyPointer 1, Executor 43, Open 5, Operator 30, Owns 64, UserOrOperator 2. Local only (the operator on this machine): 5.
 
 | Method | Guard |
 |---|---|
@@ -227,7 +227,6 @@ the guard checked:
 | `ai.removeEndpoint` | `Executor(artificial intelligence:DELETE)` |
 | `ai.removeModel` | `Executor(artificial intelligence:DELETE)` |
 | `ai.removeTask` | `Owns(Task id, artificial intelligence:CREATE)` |
-| `ai.session` | `Owns(AiSession id, artificial intelligence:READ)` |
 | `ai.sessionCancel` | `Owns(AiSession sessionId, artificial intelligence:CREATE)` |
 | `ai.sessionCreate` | `Cap(artificial intelligence:CREATE)` |
 | `ai.sessionDelete` | `Owns(AiSession id, artificial intelligence:CREATE)` |

@@ -311,7 +311,7 @@ impl PerspectiveInstance {
 
             // Publish link-added/-removed/-updated to WS subscribers. The
             // single-mutation paths publish their own diff, and
-            // spawn_prolog_facts_update deliberately does not (no double
+            // record_write deliberately does not (no double
             // delivery there), so a batch must publish here or its links never
             // reach WS subscribers. Updates go out as `link-updated`, not as a
             // removal plus an addition.

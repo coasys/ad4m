@@ -60,7 +60,7 @@ async fn a_session_is_its_owners_alone() {
     assert!(listed(&operator).contains(&main_session.id));
     assert!(!listed(&operator).contains(&alice_session.id));
     for (owner, own) in [(&alice, &alice_session), (&operator, &main_session)] {
-        assert_eq!(service::get(owner, &own.id).unwrap().title, "test");
+        assert_eq!(get(owner, &own.id).unwrap().title, "test");
         assert!(service::messages(owner, &own.id, None, None)
             .unwrap()
             .is_empty());
@@ -239,7 +239,7 @@ async fn the_running_turn_rules() {
     until_asked(&model).await;
     assert!(service::delete(&alice, &session.id).unwrap());
     assert!(matches!(
-        service::get(&alice, &session.id),
+        get(&alice, &session.id),
         Err(SessionError::NotFound(_))
     ));
     assert!(service::messages(&alice, &session.id, None, None).is_err());
@@ -297,7 +297,7 @@ async fn only_its_owner_ends_a_sessions_running_turn() {
     let reply = settled(Some(did), &started.reply_id).await;
     assert_eq!(reply.status, Some(Done));
     assert_eq!(reply.content["text"], "done");
-    assert!(service::get(&alice, &session.id).is_ok());
+    assert!(get(&alice, &session.id).is_ok());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -312,7 +312,6 @@ async fn a_caller_who_may_only_read_changes_no_session_and_starts_no_turn() {
 
     for (method, params) in [
         ("ai.sessionList", json!({})),
-        ("ai.session", json!({ "id": session.id })),
         ("ai.sessionMessages", json!({ "sessionId": session.id })),
     ] {
         let answer = methods.dispatch(method, params, reader()).await;
@@ -339,7 +338,7 @@ async fn a_caller_who_may_only_read_changes_no_session_and_starts_no_turn() {
     }
 
     // The session is as Alice made it, with nothing said on it.
-    let kept = service::get(&alice, &session.id).unwrap();
+    let kept = get(&alice, &session.id).unwrap();
     assert_eq!(kept.title, "test");
     assert_eq!(service::list(&alice).unwrap().len(), 1);
     assert!(service::messages(&alice, &session.id, None, None)

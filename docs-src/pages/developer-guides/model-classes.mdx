@@ -777,7 +777,6 @@ Every model instance automatically gets these properties, populated from link me
 | `.author` | `string` | DID of the agent who created the earliest link (e.g. `"did:key:z6Mk..."`) |
 | `.createdAt` | `string \| number` | Timestamp of the earliest link (epoch ms or ISO string) |
 | `.updatedAt` | `string \| number` | Timestamp of the most recent link |
-| `.timestamp` | *(deprecated)* | Alias for `.createdAt` — use `.createdAt` instead |
 
 These are available after any fetch operation (`get()`, `findAll()`, `findOne()`, etc.) and can be used in queries:
 
@@ -1428,7 +1427,6 @@ For lower-level batch control, see the [Batch Operations Guide](/developer-guide
 | `query` | `query(perspective, query?, options?)` | A live query: a `LiveQuery` of the current page, updated on each change |
 | `queryOf` | `queryOf(perspective, classes, query?, options?)` | A live query over several classes |
 | `getModelMetadata` | `getModelMetadata()` | Introspect property & relation metadata |
-| `generateSDNA` | `generateSDNA()` | Returns the generated Prolog SDNA rules (injected by `@Model`) |
 | `generateSHACL` | `generateSHACL()` | Returns the generated SHACL shape graph (injected by `@Model`) |
 
 ### Introspection
@@ -1442,7 +1440,7 @@ console.log(meta.properties);  // [{ name: "name", predicate: "recipe://name", .
 console.log(meta.relations);   // [{ name: "comments", predicate: "recipe://comment", ... }, ...]
 ```
 
-`generateSDNA()` and `generateSHACL()` return the raw Prolog rules and SHACL shape respectively — primarily useful for debugging schema registration issues.
+`generateSHACL()` returns the raw SHACL shape — primarily useful for debugging schema registration issues.
 
 ## Relation Filtering
 

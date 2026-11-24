@@ -660,16 +660,6 @@ describe('ExpressionClient Cache', () => {
         }
     });
 
-    test('clearCache() forces re-fetch', async () => {
-        await ad4m.expression.get('lang://test/Qm-clear');
-        expect(expressionReads()).toHaveLength(1);
-
-        ad4m.expression.clearCache();
-
-        await ad4m.expression.get('lang://test/Qm-clear');
-        expect(expressionReads()).toHaveLength(2);
-    });
-
     test('interact() invalidates cache for that URL', async () => {
         const url = 'lang://test/Qm-interact';
         await ad4m.expression.get(url);

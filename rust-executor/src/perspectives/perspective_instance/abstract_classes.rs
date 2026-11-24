@@ -846,7 +846,6 @@ impl PerspectiveInstance {
             }
             // No resolution: no longer abstract (re-registered as a concrete
             // class). The re-run reads it as named; watch it as named.
-            let (trigger_sparql, predicates) = self.model_trigger_query(&targets, &query_json);
             let mut queries = self.subscribed_queries.lock().await;
             let Some(query) = queries.get_mut(&id) else {
                 continue;
@@ -857,8 +856,6 @@ impl PerspectiveInstance {
             };
             params.abstract_read = Self::abstract_read(&targets, generation);
             params.trigger = trigger;
-            query.query = trigger_sparql;
-            query.predicates = predicates;
             changed.insert(id);
         }
         changed

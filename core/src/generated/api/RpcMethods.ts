@@ -283,7 +283,6 @@ export interface RpcMethods {
   "ai.removeEndpoint": { params: AiRemoveEndpointParams; result: boolean };
   "ai.removeModel": { params: AiIdParams; result: boolean };
   "ai.removeTask": { params: AiIdParams; result: boolean };
-  "ai.session": { params: AiIdParams; result: AISession };
   "ai.sessionCancel": { params: AISessionCancelParams; result: boolean };
   "ai.sessionCreate": { params: AISessionCreate; result: AISession };
   "ai.sessionDelete": { params: AiIdParams; result: boolean };
@@ -491,7 +490,6 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "ai.localStatus",
   "ai.modelStatus",
   "ai.models",
-  "ai.session",
   "ai.sessionList",
   "ai.sessionMessages",
   "ai.tasks",

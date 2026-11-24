@@ -198,21 +198,6 @@ closes, so a page closed without disposing leaves nothing behind.
 
 Always remember to call `dispose()` when you're done with a live query.
 
-### Prolog Integration (Legacy)
-
-Perspectives also include a Prolog engine for backward compatibility and advanced logic programming:
-
-```typescript
-const results = await perspective.queryProlog(
-  'triple(Post, "sioc://likes", Agent), triple(Agent, "foaf://knows", "did:key:z6Mk...")'
-);
-// Finds posts liked by agents who know a specific person
-```
-
-Prolog queries are one-shot: there are no Prolog live queries. `liveSparql()` (the `perspective.subscribe` RPC) refuses a Prolog query with a 400 error; use a SPARQL or model query for live results.
-
-**Recommendation**: Use SPARQL for most queries, and reserve Prolog for complex logic programming or custom SDNA rules.
-
 ### Advanced Data Modeling
 
 AD4M provides a sophisticated data modeling system built on SHACL (Shapes Constraint Language) schemas. This allows you to:

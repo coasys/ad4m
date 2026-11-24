@@ -41,7 +41,6 @@ pub mod perspective_instance;
 mod read_back_round_trip_tests;
 pub mod sdna;
 pub mod shacl_parser;
-pub mod shacl_to_prolog;
 pub mod sparql_store;
 pub mod subject_classes_of;
 pub mod utils;

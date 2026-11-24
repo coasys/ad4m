@@ -3,17 +3,10 @@ import { OnlineAgent } from "../language/Language";
 import { Perspective, PerspectiveExpression, PerspectiveUnsignedInput } from "../perspectives/Perspective";
 import { NeighbourhoodClient } from "./NeighbourhoodClient";
 import type {
-    CallSessionInfo,
-    SfuAnswerResult,
-    SfuCallRenegotiationOffer,
     SfuCascadeStatus,
     SfuConfig,
-    SfuDataMessage,
-    SfuMigrateEvent,
     SfuParticipantQualityPreference,
-    SfuQualityPreference,
     SfuRoomInfo,
-    SfuSessionReplaced,
     SfuStatus,
 } from "./SfuTypes";
 import { createSession, type Session, type SessionCreateOptions } from "./Session";
@@ -203,116 +196,6 @@ export class NeighbourhoodProxy {
 
     async sfuListRooms(): Promise<SfuRoomInfo[]> {
         return await this.#client.sfuListRooms()
-    }
-
-    /** Join from `deviceId`: a join from the same device replaces this agent's session there. */
-    async callJoin(
-        neighbourhoodUrl: string,
-        roomName: string,
-        sdpOffer: string,
-        deviceId: string,
-        sessionKey: string,
-    ): Promise<CallSessionInfo> {
-        return await this.#client.sfuCallJoin(neighbourhoodUrl, roomName, sdpOffer, deviceId, sessionKey)
-    }
-
-    /** Leave the session `participantId` (the join's). */
-    async callLeave(neighbourhoodUrl: string, roomName: string, participantId: string): Promise<boolean> {
-        return await this.#client.sfuCallLeave(neighbourhoodUrl, roomName, participantId)
-    }
-
-    async callSetQualityPreference(
-        neighbourhoodUrl: string,
-        roomName: string,
-        participantId: string,
-        preference: SfuQualityPreference,
-    ): Promise<boolean> {
-        return await this.#client.sfuCallSetQualityPreference(
-            neighbourhoodUrl,
-            roomName,
-            participantId,
-            preference,
-        )
-    }
-
-    async callAnswerServerOffer(
-        neighbourhoodUrl: string,
-        roomName: string,
-        participantId: string,
-        offerId: string,
-        sdpAnswer: string,
-    ): Promise<SfuAnswerResult> {
-        return await this.#client.sfuCallAnswerServerOffer(neighbourhoodUrl, roomName, participantId, offerId, sdpAnswer)
-    }
-
-    /**
-     * Subscribe to the executor's notices that a session of this agent was
-     * replaced by a later join from the same device. Returns an unsubscribe
-     * function.
-     */
-    subscribeSessionReplaced(callback: (event: SfuSessionReplaced) => void): () => void {
-        return this.#client.subscribeSfuSessionReplaced(callback)
-    }
-
-    /**
-     * Subscribe to server-pushed renegotiation offers for `targetDid`.
-     * Returns an unsubscribe function.  See
-     * `NeighbourhoodClient.subscribeSfuCallRenegotiationOffer` for the
-     * underlying mechanism.
-     */
-    subscribeCallRenegotiationOffer(
-        targetDid: string,
-        callback: (payload: SfuCallRenegotiationOffer) => void,
-    ): () => void {
-        return this.#client.subscribeSfuCallRenegotiationOffer(targetDid, callback)
-    }
-
-    /**
-     * Subscribe to cascade rebalance migration events for `targetDid`.
-     * Returns an unsubscribe function.
-     */
-    subscribeMigrateEvent(
-        targetDid: string,
-        callback: (event: SfuMigrateEvent) => void,
-    ): () => void {
-        return this.#client.subscribeSfuMigrateEvent(targetDid, callback)
-    }
-
-    // ── SFU trickle ICE ─────────────────────────────────────────────────
-
-    async addIceCandidate(
-        neighbourhoodUrl: string,
-        roomName: string,
-        participantId: string,
-        candidate: string,
-    ): Promise<boolean> {
-        return await this.#client.sfuAddIceCandidate(neighbourhoodUrl, roomName, participantId, candidate)
-    }
-
-    // ── SFU data channel relay ────────────────────────────────────────
-
-    async sendData(
-        neighbourhoodUrl: string,
-        roomName: string,
-        participantId: string,
-        channelLabel: string,
-        data: string,
-        binary: boolean = false,
-    ): Promise<boolean> {
-        return await this.#client.sfuSendData(
-            neighbourhoodUrl,
-            roomName,
-            participantId,
-            channelLabel,
-            data,
-            binary,
-        )
-    }
-
-    subscribeDataChannel(
-        callback: (message: SfuDataMessage) => void,
-    ): () => void {
-        return this.#client.subscribeSfuDataChannel(callback)
     }
 
     // ── SFU diagnostic / test-harness ──────────────────────────────────

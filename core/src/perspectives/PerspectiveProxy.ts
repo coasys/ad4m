@@ -474,33 +474,6 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Executes a Prolog query against the perspective's knowledge base.
-     * This is a powerful way to find complex patterns in the graph.
-     * 
-     * @param query - Prolog query string
-     * @returns Query results or false if no results
-     * 
-     * @example
-     * ```typescript
-     * // Find friends of friends
-     * const results = await perspective.infer(`
-     *   triple(A, "knows", B),
-     *   triple(B, "knows", C),
-     *   A \= C
-     * `);
-     * 
-     * // Find all active todos
-     * const todos = await perspective.infer(`
-     *   instance(Todo, "Todo"),
-     *   property_getter("Todo", Todo, "state", "active")
-     * `);
-     * ```
-     */
-    async infer(query: string, options?: CallOptions): Promise<any> {
-        return await this.#client.queryProlog(this.#handle.uuid, query, options)
-    }
-
-    /**
      * Executes a SPARQL query against the perspective's link cache.
      * This allows powerful SQL-like queries on the link data stored in SPARQL.
      *
@@ -822,24 +795,6 @@ export class PerspectiveProxy {
      */
     async snapshot(): Promise<Perspective> {
         return this.#client.snapshotByUUID(this.#handle.uuid)
-    }
-
-    /**
-     * Loads a perspective snapshot, replacing current content.
-     * 
-     * @param snapshot - Perspective snapshot to load
-     */
-    async loadSnapshot(snapshot: Perspective) {
-        //Clean the input data from __typename
-        const cleanedSnapshot = JSON.parse(JSON.stringify(snapshot));
-        delete cleanedSnapshot.__typename;
-        cleanedSnapshot.links.forEach(link => {
-           delete link.data.__typename;
-        });
-
-        for(const link of cleanedSnapshot.links) {
-            await this.addLinkExpression(link)
-        }
     }
 
     /**

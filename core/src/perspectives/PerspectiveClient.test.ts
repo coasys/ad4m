@@ -239,17 +239,6 @@ describe('PerspectiveClient RPC operations', () => {
         )
     })
 
-    it('queryProlog forwards options to apiClient.call', async () => {
-        mockCall.mockResolvedValue(JSON.stringify([]))
-        const client = new PerspectiveClient('http://localhost:12000', 'token')
-        const controller = new AbortController()
-        await client.queryProlog('uuid-q', 'foo(X).', { signal: controller.signal })
-        expect(mockCall).toHaveBeenCalledWith(
-            'perspective.queryProlog',
-            expect.objectContaining({ uuid: 'uuid-q', query: 'foo(X).' }),
-            { signal: controller.signal },
-        )
-    })
 })
 
 describe('PerspectiveProxy.querySparql shares in-flight calls', () => {

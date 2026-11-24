@@ -34,7 +34,7 @@
  * ---
  *
  * Why this file exists: the Rust suite pins the query engine against a seeded
- * store, and `query-sparql.test.ts` pins what TypeScript emits. Both sit on one
+ * store, and the SDK's unit tests pin what TypeScript emits. Both sit on one
  * side of the wire, which is how `limitPerAnchor` came to be dropped in transit
  * by a missing `rename_all` and stayed green in 300-odd tests — the field was
  * written on one side and read on the other, and nothing crossed.

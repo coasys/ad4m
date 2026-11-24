@@ -23,7 +23,6 @@ import {
   SHACLPropertyShape,
   ConformanceCondition,
 } from "../shacl/SHACLShape";
-import { compileWhereClause } from "./query-utils";
 
 // ============================================================================
 // Test models
@@ -922,53 +921,6 @@ describe("where clause compilation", () => {
     expect(prop).toBeDefined();
     expect(prop!.whereFilter).toEqual({ status: "active" });
     expect(prop!.wherePredicates).toEqual({ status: "test://status" });
-  });
-});
-
-// ============================================================================
-// compileWhereClause() unit tests
-// ============================================================================
-
-describe("compileWhereClause()", () => {
-  it("should compile simple equality to SPARQL condition", () => {
-    const conditions = compileWhereClause(
-      { status: "active" },
-      { properties: { status: { name: "status", predicate: "test://status", required: false, readOnly: false } }, relations: {}, className: "Test" }
-    );
-    expect(conditions).toHaveLength(1);
-    expect(conditions[0]).toContain("test://status");
-    expect(conditions[0]).toContain("active");
-  });
-
-  it("should compile not operator", () => {
-    const conditions = compileWhereClause(
-      { status: { not: "archived" } },
-      { properties: { status: { name: "status", predicate: "test://status", required: false, readOnly: false } }, relations: {}, className: "Test" }
-    );
-    expect(conditions).toHaveLength(1);
-    expect(conditions[0]).toContain("NOT EXISTS");  // negation
-    expect(conditions[0]).toContain("archived");
-  });
-
-  it("should compile array values to IN clause", () => {
-    const conditions = compileWhereClause(
-      { category: ["food", "drink"] },
-      { properties: { category: { name: "category", predicate: "test://category", required: false, readOnly: false } }, relations: {}, className: "Test" }
-    );
-    expect(conditions).toHaveLength(1);
-    expect(conditions[0]).toContain("food");
-    expect(conditions[0]).toContain("drink");
-    expect(conditions[0]).toContain("IN");
-  });
-
-  it("should fall back to raw predicate URIs when metadata is null", () => {
-    const conditions = compileWhereClause(
-      { "test://raw_pred": "value" },
-      null as any
-    );
-    expect(conditions).toHaveLength(1);
-    expect(conditions[0]).toContain("test://raw_pred");
-    expect(conditions[0]).toContain("value");
   });
 });
 

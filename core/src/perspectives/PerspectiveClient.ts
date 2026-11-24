@@ -100,10 +100,6 @@ export class PerspectiveClient {
         return snapshot ? new Perspective(snapshot.links.map(LinkExpression.fromWire)) : null
     }
 
-    async publishSnapshotByUUID(uuid: string): Promise<string|null> {
-        return this.#apiClient.call('perspective.publishSnapshot', { uuid })
-    }
-
     async queryLinks(uuid: string, query: LinkQuery, options?: CallOptions): Promise<LinkExpression[]> {
         const params: PerspectiveQueryLinksParams = { uuid }
         if (query.source) params.source = query.source
@@ -114,11 +110,6 @@ export class PerspectiveClient {
         if (query.limit !== undefined) params.limit = query.limit
         const links = await this.#apiClient.call('perspective.queryLinks', params, options)
         return links.map(LinkExpression.fromWire)
-    }
-
-    async queryProlog(uuid: string, query: string, options?: CallOptions): Promise<unknown> {
-        const result = await this.#apiClient.call('perspective.queryProlog', { uuid, query }, options)
-        return JSON.parse(result)
     }
 
     /**

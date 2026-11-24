@@ -16,7 +16,6 @@ import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     focus,
     path as shaclPath,
 } from "@coasys/ad4m";
-import { readFileSync } from "node:fs";
 
 /** Opens the live query's first value, then calls `onChange` with every
  *  later result (`initial` false), and returns the opening value. */
@@ -177,19 +176,6 @@ describe("Prolog + Literals", () => {
                 const classes = await perspective!.shapes();
 
                 expect(classes.map((c) => c.name)).to.deep.equal(["Todo"])
-            })
-
-            it.skip("should generate correct SDNA from a JS class", async () => {
-                // @ts-ignore
-                const { name, sdna } = Todo.generateSDNA();
-
-                const regExp = /\("Todo", ([^)]+)\)/;
-                const matches = regExp.exec(sdna);
-                const value = matches![1];
-
-                const equal = readFileSync("./sdna/subject.pl").toString().replace(/c\)/g, `${value})`).replace(/\(c/g, `(${value}`);
-
-                expect(sdna.normalize('NFC')).to.equal(equal.normalize('NFC'))
             })
 
             it("should be possible to use that class for type-safe interaction with subject instances", async () => {
@@ -3181,92 +3167,6 @@ describe("Prolog + Literals", () => {
 
     })
 
-    // SKIPPED: Embedding cache tests - only applies to Prolog-pooled mode
-    // These tests verify embedding URL post-processing with Prolog infer() queries.
-    // With SHACL migration, embedding queries should use SPARQL vector search instead.
-    // Keeping as reference for future SPARQL vector embedding implementation.
-    describe.skip('Embedding cache', () => {
-        let perspective: PerspectiveProxy | null = null;
-        const EMBEDDING_LANG = "QmzSYwdbqjGGbYbWJvdKA4WnuFwmMx3AsTfgg7EwbeNUGyE555c";
-
-        before(async () => {
-            perspective = await ad4m!.perspective.add("embedding-cache-test");
-        });
-
-        it('correctly post-processes nested query results containing embedding URLs', async () => {
-            // Create some links with embedding URLs
-            const embeddingUrl1 = `${EMBEDDING_LANG}://vector1/1.2,3.4,5.6`;
-            const embeddingUrl2 = `${EMBEDDING_LANG}://vector2/7.8,9.0,1.2`;
-            const embeddingUrl3 = `${EMBEDDING_LANG}://vector3/2.3,4.5,6.7`;
-
-            // Create a link structure that will produce nested results
-            await perspective!.add({
-                source: "test://root",
-                predicate: "test://has-vector",
-                target: embeddingUrl1
-            });
-
-            await perspective!.add({
-                source: embeddingUrl1,
-                predicate: "test://related-to",
-                target: embeddingUrl2
-            });
-
-            await perspective!.add({
-                source: embeddingUrl2,
-                predicate: "test://points-to",
-                target: embeddingUrl3
-            });
-
-            // Query that will produce nested results with embedding URLs at different levels
-            const result = await perspective!.infer(`
-                % Find all vectors connected to root
-                findall(
-                    [FirstVector, RelatedVectors],
-                    (
-                        % Get first vector from root
-                        triple("test://root", "test://has-vector", FirstVector),
-                        % Find all vectors related to the first one
-                        findall(
-                            [SecondVector, ThirdVector],
-                            (
-                                triple(FirstVector, "test://related-to", SecondVector),
-                                triple(SecondVector, "test://points-to", ThirdVector)
-                            ),
-                            RelatedVectors
-                        )
-                    ),
-                    Results
-                ).
-            `);
-
-            // The query should return a deeply nested structure:
-            // Results = [
-            //   [embeddingUrl1, [
-            //     [embeddingUrl2, embeddingUrl3]
-            //   ]]
-            // ]
-            console.log("result", result)
-            expect(result).to.be.an('array')
-            expect(result.length).to.be.greaterThan(0)
-
-            let binding = result[0]
-            expect(binding.Results).to.be.an('array');
-            expect(binding.Results).to.have.lengthOf(1);
-            
-            const [firstLevel] = binding.Results;
-            expect(firstLevel).to.be.an('array');
-            expect(firstLevel[0]).to.equal(embeddingUrl1);
-            expect(firstLevel[1]).to.be.an('array');
-            
-            const relatedVectors = firstLevel[1];
-            expect(relatedVectors).to.have.lengthOf(1);
-            expect(relatedVectors[0]).to.be.an('array');
-            expect(relatedVectors[0][0]).to.equal(embeddingUrl2);
-            expect(relatedVectors[0][1]).to.equal(embeddingUrl3);
-        });
-    });
-
     describe("Ad4mModel.fromJSONSchema", () => {
         let perspective: PerspectiveProxy | null = null
 
@@ -3408,12 +3308,6 @@ describe("Prolog + Literals", () => {
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 expect(bob!.email).to.equal("bob.wilson@company.com")
 
-                // Verify the custom predicates were used by checking the generated SDNA
-                // @ts-ignore - generateSDNA is added dynamically
-                const sdna = ContactClass.generateSDNA()
-                expect(sdna.sdna).to.include("foaf://name")
-                expect(sdna.sdna).to.include("foaf://mbox")
-
                 // Test querying works with custom predicates
                 const bobQuery = await ContactClass.findAll(perspective!, {
                     where: { name: "Bob Wilson" }
@@ -3507,12 +3401,6 @@ describe("Prolog + Literals", () => {
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 expect(expensiveProducts[0].name).to.equal("Gaming Laptop")
 
-                // Verify custom predicates from x-ad4m were used
-                // @ts-ignore - generateSDNA is added dynamically
-                const sdna = ProductClass.generateSDNA()
-                expect(sdna.sdna).to.include("product://title") // custom predicate for name
-                expect(sdna.sdna).to.include("product://cost")  // custom predicate for price
-                expect(sdna.sdna).to.include("product://description") // inferred from namespace + property
             })
         })
 
@@ -3584,12 +3472,6 @@ describe("Prolog + Literals", () => {
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 expect(fitzgeraldBooks[0].title).to.equal("The Great Gatsby")
 
-                // Verify inferred predicates (should be book://title, book://author, etc.)
-                // @ts-ignore - generateSDNA is added dynamically
-                const sdna = BookClass.generateSDNA()
-                expect(sdna.sdna).to.include("book://title")
-                expect(sdna.sdna).to.include("book://writer")
-                expect(sdna.sdna).to.include("book://isbn")
             })
         })
 
@@ -3636,10 +3518,6 @@ describe("Prolog + Literals", () => {
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 expect(instance.__ad4m_type).to.be.undefined
 
-                // Verify SDNA does NOT include ad4m://type auto-flag
-                // @ts-ignore - generateSDNA is added dynamically
-                const sdna = OptionalClass.generateSDNA()
-                expect(sdna.sdna).to.not.include('ad4m://type')
             })
 
             it("should work when properties have explicit initial values even if not required", async () => {
@@ -3668,12 +3546,6 @@ describe("Prolog + Literals", () => {
                 // @ts-ignore - className is added dynamically
                 expect(TestClass.className).to.equal("WithInitials")
 
-                // Verify SDNA has constructor actions
-                // @ts-ignore - generateSDNA is added dynamically
-                const sdna = TestClass.generateSDNA()
-                expect(sdna.sdna).to.include('constructor(')
-                expect(sdna.sdna).to.include('test://active')
-                expect(sdna.sdna).to.include('literal:number:0')
             })
 
             it("should handle complex property types with full data storage and retrieval", async () => {
@@ -3781,15 +3653,6 @@ describe("Prolog + Literals", () => {
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 expect(advancedPosts[0].metadata.author).to.equal("Bob")
 
-                // Verify SDNA structure for complex types
-                // @ts-ignore - generateSDNA is added dynamically
-                const sdna = BlogPostClass.generateSDNA()
-                expect(sdna.sdna).to.include('collection(') // tags and categories should be collections
-                expect(sdna.sdna).to.include('property(') // title and metadata should be properties
-                expect(sdna.sdna).to.include('blogpost://title')
-                expect(sdna.sdna).to.include('blogpost://tags')
-                expect(sdna.sdna).to.include('blogpost://metadata')
-                expect(sdna.sdna).to.include('blogpost://categories')
             })
 
             it("should handle realistic Holon-like schema with nested objects", async () => {

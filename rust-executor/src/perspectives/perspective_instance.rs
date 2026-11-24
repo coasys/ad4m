@@ -2342,7 +2342,7 @@ impl PerspectiveInstance {
                 .await?
                 .fold_into(&mut decorated_perspective_diff);
 
-            self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
+            self.record_write(decorated_perspective_diff.clone(), None);
             self.pubsub_publish_diff(&decorated_perspective_diff).await;
 
             if status == LinkStatus::Shared {
@@ -2458,7 +2458,7 @@ impl PerspectiveInstance {
             .await?
             .fold_into(&mut decorated_diff);
 
-        self.spawn_prolog_facts_update(decorated_diff.clone(), None);
+        self.record_write(decorated_diff.clone(), None);
         self.pubsub_publish_diff(&decorated_diff).await;
 
         let shared = |links: &[LinkExpression]| -> Vec<LinkExpression> {
@@ -3153,7 +3153,7 @@ impl PerspectiveInstance {
     async fn update_prolog_engines(&self, diff: DecoratedPerspectiveDiff) {
         // Pooled-mode facts update, then notification and live-query checks
         // (spawned task)
-        self.spawn_prolog_facts_update(diff, None);
+        self.record_write(diff, None);
 
         // Mark query engine dirty for lazy update on next query
         self.mark_prolog_engine_dirty().await;
@@ -4335,7 +4335,11 @@ impl PerspectiveInstance {
         }
     }
 
-    fn spawn_prolog_facts_update(
+    /// Record a write for the subscription and notification checks: queue a
+    /// notification check, note the diff's predicates and flag the subscription
+    /// check, then signal `completion_sender`. In Pooled Prolog mode it also
+    /// brings the engine's facts up to date first.
+    fn record_write(
         &self,
         diff: DecoratedPerspectiveDiff,
         completion_sender: Option<tokio::sync::oneshot::Sender<()>>,
@@ -6206,16 +6210,18 @@ impl PerspectiveInstance {
         // that lands while resolving is seen.
         let generation = self.shapes_generation();
         let targets = self.trigger_targets(&classes, &query_json);
-        let (trigger_sparql, predicate_set) = self.model_trigger_query(&targets, &query_json);
         // No result yet: `open_subscription` points the trigger at the
         // nodes of the first result when it stores it.
         let trigger = self.build_model_trigger_for(&targets, &query_json, "");
         let abstract_read = Self::abstract_read(&targets, generation);
 
         let subscribed_query = SubscribedQuery {
-            query: trigger_sparql,
+            // Model subscriptions re-run through `trigger`, never through
+            // this text or a predicate set; the JSON is kept so the memory
+            // estimate and the heartbeat log still see the query.
+            query: query_json.clone(),
             last_result: String::new(),
-            predicates: predicate_set,
+            predicates: HashSet::new(),
             model_query_params: Some(ModelSubscriptionParams {
                 classes: classes.clone(),
                 abstract_read,
@@ -6230,45 +6236,6 @@ impl PerspectiveInstance {
             self.run_model_query(stop, &classes, &query_json, MODEL_QUERY_SHAPE_WAIT);
         self.open_subscription(subscription_id, subscribed_query, first_result)
             .await
-    }
-
-    /// Extract predicates from a model shape for subscription trigger matching.
-    /// Reads the shape from the cache (which warms from SHACL triples on miss)
-    /// so subscription re-evaluation matches the same predicate set queries do.
-    fn build_model_trigger_predicates(
-        &self,
-        class_name: &str,
-        query_json: Option<&str>,
-    ) -> Vec<String> {
-        let mut predicates = Vec::new();
-
-        let shape = self.get_shape(class_name).ok();
-        if let Some(shape) = &shape {
-            predicates.extend(shape.predicates());
-        }
-
-        if let Some(qj) = query_json {
-            predicates.extend(self.model_query_side_predicates(shape.as_deref(), qj));
-        }
-
-        // Extract parent predicate from query JSON (parent-scoped subscriptions
-        // must trigger when the parent link is added/removed)
-        if let Some(qj) = query_json {
-            if let Ok(query) = serde_json::from_str::<serde_json::Value>(qj) {
-                if let Some(pred) = query
-                    .get("parent")
-                    .and_then(|p| p.get("predicate"))
-                    .and_then(|p| p.as_str())
-                {
-                    predicates.push(pred.to_string());
-                }
-            }
-        }
-
-        predicates.sort();
-        predicates.dedup();
-
-        predicates
     }
 
     async fn check_subscribed_queries(&self, changed_predicates: ChangedPredicates) {
@@ -6576,8 +6543,9 @@ impl PerspectiveInstance {
                         queries.len()
                     );
                     for (id, query) in queries.iter() {
-                        let query_preview = if query.query.len() > 100 {
-                            format!("{}...", &query.query[..100])
+                        // By characters: a model subscription's query is its JSON, which may hold any text.
+                        let query_preview = if query.query.chars().count() > 100 {
+                            format!("{}...", query.query.chars().take(100).collect::<String>())
                         } else {
                             query.query.clone()
                         };
@@ -9259,81 +9227,6 @@ mod tests {
         )
     }
 
-    /// A subscription's trigger set covers the predicates its `links` read,
-    /// including ones the shape does not declare and ones asked for inside an
-    /// `include` sub-query. Before, it held only the shape's predicates, so a
-    /// subscription asking for a revocation tombstone never re-ran when the
-    /// tombstone landed and kept reporting `[]`.
-    #[tokio::test]
-    async fn test_model_trigger_predicates_cover_links_iris() {
-        let mut perspective = setup().await;
-        perspective
-            .register_shape_json(
-                &cache_test_shacl("Recipe", "ns://"),
-                &AgentContext::main_agent(),
-            )
-            .await
-            .expect("register the shape");
-        let query = r#"{
-            "links": ["name", "ad4m://flow/role_grant_revoked"],
-            "include": { "steps": { "links": ["ns://nested_note"] } }
-        }"#;
-        let predicates = perspective.build_model_trigger_predicates("Recipe", Some(query));
-        for expected in [
-            "ns://name",
-            "ad4m://flow/role_grant_revoked",
-            "ns://nested_note",
-        ] {
-            assert!(
-                predicates.iter().any(|p| p == expected),
-                "trigger set {predicates:?} is missing {expected}"
-            );
-        }
-    }
-
-    /// A `producedByFlow` subscription's answer moves when a receipt lands
-    /// (index entry or body, which sync may deliver separately) or a flow is
-    /// registered — none of them shape predicates. Before, the trigger set
-    /// held only the shape's predicates, so a receipt minted after the
-    /// subscription never re-ran it and the new output never appeared.
-    #[tokio::test]
-    async fn test_model_trigger_predicates_cover_produced_by_flow_reads() {
-        use crate::perspectives::flow_instance::{produced, receipt};
-        let mut perspective = setup().await;
-        perspective
-            .register_shape_json(
-                &cache_test_shacl("Recipe", "ns://"),
-                &AgentContext::main_agent(),
-            )
-            .await
-            .expect("register the shape");
-        let reads = [
-            produced::FLOW_RECEIPT_INDEX_PREDICATE,
-            receipt::FLOW_RECEIPT_CONTENT_PREDICATE,
-            "rdf://type",
-        ];
-
-        let filtered = perspective.build_model_trigger_predicates(
-            "Recipe",
-            Some(r#"{ "where": { "producedByFlow": { "flow": "ns://F", "state": "done" } } }"#),
-        );
-        for expected in reads.iter().copied().chain(["ns://name"]) {
-            assert!(
-                filtered.iter().any(|p| p == expected),
-                "trigger set {filtered:?} is missing {expected}"
-            );
-        }
-
-        // Only the filter pays for them: a plain subscription stays narrow.
-        let plain = perspective.build_model_trigger_predicates("Recipe", Some("{}"));
-        for unexpected in reads {
-            assert!(
-                !plain.iter().any(|p| p == unexpected),
-                "plain trigger set {plain:?} should not carry {unexpected}"
-            );
-        }
-    }
-
     #[tokio::test]
     async fn test_get_shape_returns_error_when_no_shacl_stored() {
         let perspective = setup().await;
@@ -10172,7 +10065,7 @@ mod tests {
     /// Regression: `commit_batch()` must publish `link-added` (and
     /// the corresponding removed/updated topics) so WebSocket subscribers see
     /// batched diffs. The single-mutation paths publish synchronously before
-    /// spawning prolog, and `spawn_prolog_facts_update` deliberately skips
+    /// spawning prolog, and `record_write` deliberately skips
     /// publishing to avoid double-delivery on those paths — so without an
     /// explicit publish in `commit_batch`, batched diffs silently never reach
     /// WS subscribers. Asserts a message lands on the topic within 2s of the

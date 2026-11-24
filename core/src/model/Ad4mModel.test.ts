@@ -24,7 +24,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
       @Optional({ through: "test://optional" })
       optional: string = "";
       
-      @ReadOnly({ through: "test://readonly", prologGetter: "custom_getter" })
+      @ReadOnly({ through: "test://readonly" })
       readonly: string = "";
       
       @Flag({ through: "test://type", value: "test://flag" })
@@ -51,7 +51,6 @@ describe("Ad4mModel.getModelMetadata()", () => {
     // Verify "readonly" property
     expect(metadata.properties.readonly.predicate).toBe("test://readonly");
     expect(metadata.properties.readonly.readOnly).toBe(true);
-    expect(metadata.properties.readonly.prologGetter).toBe("custom_getter");
     
     // Verify "type" property (flag)
     expect(metadata.properties.type.predicate).toBe("test://type");
@@ -101,25 +100,6 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.properties.data.transform).toEqual(transform);
   });
 
-  it("should extract custom getter and setter from property metadata", () => {
-    @Model({ name: "CustomModel" })
-    class CustomModel extends Ad4mModel {
-      @Optional({
-        through: "test://computed",
-        prologGetter: "triple(Base, 'test://value', V), Value is V * 2",
-        prologSetter: "Value is V / 2, Actions = [{action: 'setSingleTarget', source: 'this', predicate: 'test://value', target: Value}]"
-      })
-      computed: number = 0;
-    }
-
-    const metadata = CustomModel.getModelMetadata();
-    
-    // Assert prologGetter and prologSetter contain the custom code
-    expect(metadata.properties.computed.prologGetter).toContain("triple(Base, 'test://value', V), Value is V * 2");
-    expect(metadata.properties.computed.prologSetter).toContain("Value is V / 2");
-    expect(metadata.properties.computed.prologSetter).toContain("setSingleTarget");
-  });
-
   it("should handle relation with typed target relation", () => {
     @Model({ name: "Comment" })
     class Comment extends Ad4mModel {}
@@ -156,7 +136,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
       @Optional({ through: "recipe://description" })
       description: string = "";
       
-      @ReadOnly({ through: "recipe://rating", prologGetter: "avg_rating(Base, Value)" })
+      @ReadOnly({ through: "recipe://rating" })
       rating: number = 0;
       
       @HasMany({ through: "recipe://ingredient" })
@@ -188,7 +168,6 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.properties.name.resolveLanguage).toBeUndefined();
     expect(metadata.properties.description.predicate).toBe("recipe://description");
     expect(metadata.properties.rating.predicate).toBe("recipe://rating");
-    expect(metadata.properties.rating.prologGetter).toBe("avg_rating(Base, Value)");
     expect(metadata.relations.ingredients.predicate).toBe("recipe://ingredient");
     expect(metadata.relations.steps.predicate).toBe("recipe://step");
     expect(metadata.relations.steps.local).toBe(true);
@@ -437,190 +416,6 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
 
 
 
-describe("Ad4mModel.queryToSPARQL()", () => {
-  const mockPerspective = {} as any;
-
-  function normalizeQuery(query: string): string {
-    return query.replace(/\s+/g, ' ').trim();
-  }
-
-  @Model({ name: "Recipe" })
-  class Recipe extends Ad4mModel {
-    @Property({ through: "recipe://name", required: true })
-    name: string = "";
-    
-    @Property({ through: "recipe://rating", required: true })
-    rating: number = 0;
-    
-    @HasMany({ through: "recipe://ingredient" })
-    ingredients: string[] = [];
-  }
-
-  it("should generate basic SPARQL query with no filters", async () => {
-    const query = await (Recipe as any).queryToSPARQL(mockPerspective, {});
-    const norm = normalizeQuery(query);
-
-    // Must be a SPARQL SELECT
-    expect(norm).toContain("SELECT ?source ?predicate ?target ?author ?timestamp");
-    // Must have conformance JOIN for required properties using direct triple patterns
-    expect(norm).toContain("cfTarget_name");
-    expect(norm).toContain("recipe://name");
-  });
-
-  it("should generate query with simple property filter", async () => {
-    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: "Pasta" } });
-    const norm = normalizeQuery(query);
-
-    expect(norm).toContain("SELECT ?source ?predicate ?target ?author ?timestamp");
-    // For literal-stored properties, SPARQL only adds a JOIN (no FILTER value) — filtering is in JS
-    expect(norm).toContain("recipe://name");
-    // Value should NOT be in SPARQL — filtering happens in JS post-filter
-    expect(norm).toContain("?wTarget_name");
-  });
-
-  it("should generate query with NOT operator", async () => {
-    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: { not: "Salad" } } });
-    const norm = normalizeQuery(query);
-
-    // For literal-stored properties, NOT filtering is done in JS — no NOT EXISTS in SPARQL
-    expect(norm).toContain("recipe://name");
-  });
-
-  it("should generate query with NOT IN operator (array)", async () => {
-    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: { not: ["Salad", "Soup"] } } });
-    const norm = normalizeQuery(query);
-
-    // For literal-stored properties, NOT IN filtering is done in JS — no filter values in SPARQL
-    expect(norm).toContain("recipe://name");
-  });
-
-  it("should generate query with IN clause (array values)", async () => {
-    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: ["Pasta", "Pizza"] } });
-    const norm = normalizeQuery(query);
-
-    // For literal-stored properties, IN filtering is done in JS — only a JOIN exists
-    expect(norm).toContain("recipe://name");
-    expect(norm).toContain("?wTarget_name");
-  });
-
-  it("should generate query with base filter", async () => {
-    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { base: "ad4m://test123" } });
-    const norm = normalizeQuery(query);
-
-    expect(norm).toContain("?source =");
-    expect(norm).toContain("ad4m://test123");
-  });
-
-  it("should escape special characters in SPARQL strings", async () => {
-    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: 'O\'Brien' } });
-    const norm = normalizeQuery(query);
-
-    // Should not break the query
-    expect(norm).toContain("SELECT ?source");
-  });
-
-  // =========================================================================
-  // Additional models for thorough SPARQL structure tests
-  // =========================================================================
-
-  @Model({ name: "Task" })
-  class Task extends Ad4mModel {
-    @Property({ through: "task://title", required: true })
-    title: string = "";
-
-    @Property({ through: "task://priority" })
-    priority: number = 0;
-
-    @Property({ through: "task://done" })
-    done: boolean = false;
-
-    @Optional({ through: "task://description" })
-    description: string = "";
-
-    @HasMany({ through: "task://tag" })
-    tags: string[] = [];
-
-    @HasMany({ through: "task://assignee" })
-    assignees: string[] = [];
-  }
-
-  @Model({ name: "EmptyModel" })
-  class EmptyModel extends Ad4mModel {
-    @Optional({ through: "empty://optField" })
-    optField: string = "";
-  }
-
-  // ---- Comparison operators (gt, lt, gte, lte, between, contains) ----
-  // These are handled in JS post-processing, NOT in SPARQL.
-  // The tests verify that the SPARQL still generates valid output (conformance filters)
-  // but does NOT inject FILTER clauses for these operators.
-
-  it("should inject SPARQL FILTER for gt operator", async () => {
-    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { rating: { gt: 3 } } });
-    const norm = normalizeQuery(query);
-    expect(norm).toContain("SELECT ?source");
-    // gt is now handled via JS post-filter — SPARQL just joins the property
-    expect(norm).toContain("wTarget_cmp_rating");
-  });
-
-  it("should inject SPARQL FILTER for lt operator", async () => {
-    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { rating: { lt: 5 } } });
-    const norm = normalizeQuery(query);
-    expect(norm).toContain("SELECT ?source");
-    // lt is now handled via JS post-filter
-    expect(norm).toContain("wTarget_cmp_rating");
-  });
-
-  it("should inject SPARQL FILTER for gte/lte combined", async () => {
-    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { rating: { gte: 2, lte: 8 } } });
-    const norm = normalizeQuery(query);
-    expect(norm).toContain("SELECT ?source");
-    // gte/lte are now handled via JS post-filter
-    expect(norm).toContain("wTarget_cmp_rating");
-  });
-
-  it("should inject SPARQL FILTER for between operator", async () => {
-    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { rating: { between: [1, 10] } } });
-    const norm = normalizeQuery(query);
-    expect(norm).toContain("SELECT ?source");
-    // between is now handled via JS post-filter
-    expect(norm).toContain("wTarget_cmp_rating");
-  });
-
-  it("should inject SPARQL FILTER for contains operator", async () => {
-    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { where: { name: { contains: "pasta" } } });
-    const norm = normalizeQuery(query);
-    expect(norm).toContain("SELECT ?source");
-    // contains is now handled via JS post-filter
-    expect(norm).toContain("wTarget_cmp_name");
-  });
-
-  // ---- Multiple property filters combined ----
-
-  it("should combine multiple property equality filters with &&", async () => {
-    const query = await (Recipe as any).queryToSPARQL(mockPerspective, {
-      where: { name: "Pasta", rating: ["4", "5"] }
-    });
-    const norm = normalizeQuery(query);
-    // Should have EXISTS blocks for both name and rating
-    expect(norm).toContain("recipe://name");
-    expect(norm).toContain("recipe://rating");
-    expect(norm).toContain("&&");
-  });
-
-  // ---- ORDER BY, LIMIT, OFFSET are JS post-processed ----
-
-  it("should include ORDER BY/LIMIT/OFFSET in SPARQL pagination subquery", async () => {
-    const query = await (Recipe as any).queryToSPARQL(mockPerspective, { order: { name: "ASC" }, limit: 10, offset: 5 });
-    const norm = normalizeQuery(query);
-    expect(norm).toContain("SELECT ?source");
-    // SPARQL-level pagination via subquery
-    expect(norm).toContain("ORDER BY");
-    expect(norm).toContain("LIMIT 10");
-    expect(norm).toContain("OFFSET 5");
-    expect(norm).toContain("SELECT DISTINCT ?source");
-  });
-});
 describe("Ad4mModel query methods (modelQuery integration)", () => {
   // Test Recipe model
   @Model({ name: "Recipe" })
@@ -990,180 +785,7 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
 });
 
 
-describe("SPARQL comparison filters", () => {
-  @Model({ name: "Item" })
-  class Item extends Ad4mModel {
-    @Property({ through: "item://price", required: true })
-    price!: string;
-
-    @Property({ through: "item://name", required: true })
-    name!: string;
-  }
-
-  it("should generate gt filter", async () => {
-    const mockPersp = { getLinks: jest.fn().mockResolvedValue([]) } as any;
-    const query = await (Item as any).queryToSPARQL(mockPersp, { where: { price: { gt: 10 } } });
-    // gt is now JS post-filter — SPARQL just joins the property
-    expect(query).toContain("item://price");
-  });
-
-  it("should generate between filter", async () => {
-    const mockPersp = { getLinks: jest.fn().mockResolvedValue([]) } as any;
-    const query = await (Item as any).queryToSPARQL(mockPersp, { where: { price: { between: [5, 20] } } });
-    // between is now JS post-filter
-    expect(query).toContain("item://price");
-  });
-
-  it("should generate contains filter", async () => {
-    const mockPersp = { getLinks: jest.fn().mockResolvedValue([]) } as any;
-    const query = await (Item as any).queryToSPARQL(mockPersp, { where: { name: { contains: "widget" } } });
-    // contains is now JS post-filter
-    expect(query).toContain("item://name");
-  });
-});
-
-// ──────────────────────────────────────────────────────────
-// SPARQL Direct Triple Pattern & IRI Tests
-// ──────────────────────────────────────────────────────────
-
-import { buildSPARQLQuery, formatSPARQLValue } from "./query-sparql";
 import { SHACLShape } from "../shacl/SHACLShape";
-
-describe("SPARQL direct triple pattern generation", () => {
-  @Model({ name: "Channel" })
-  class Channel extends Ad4mModel {
-    @Flag({ through: "flux://entry_type", value: "flux://channel" })
-    type: string = "";
-
-    @Property({ through: "flux://name", required: true })
-    name: string = "";
-
-    @Optional({ through: "flux://description" })
-    description: string = "";
-
-    @HasMany({ through: "flux://has_message" })
-    messages: string[] = [];
-  }
-
-  const mockPersp = {} as any;
-
-  it("generates direct triple pattern with ?source ?predicate ?target", async () => {
-    const query = await (Channel as any).queryToSPARQL(mockPersp, {});
-    // Must use direct triple pattern, not link-node reification
-    expect(query).toContain("?source ?predicate ?target");
-    expect(query).not.toContain("rdf:type");
-    expect(query).not.toContain("ad4m:Link");
-  });
-
-  it("generates Flag filter as ?source <predicate> <value>", async () => {
-    const query = await (Channel as any).queryToSPARQL(mockPersp, {});
-    expect(query).toContain("<flux://entry_type>");
-    expect(query).toContain("<flux://channel>");
-  });
-
-  it("generates Property binding as ?source <predicate> ?varName", async () => {
-    const query = await (Channel as any).queryToSPARQL(mockPersp, {});
-    expect(query).toContain("<flux://name>");
-    expect(query).toMatch(/\?source\s+<flux:\/\/name>\s+\?cfTarget_name/);
-  });
-
-  it("uses RDF 1.2 reifier pattern for author/timestamp", async () => {
-    const query = await (Channel as any).queryToSPARQL(mockPersp, {});
-    expect(query).toContain("<http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies>");
-    expect(query).toContain("?source ?predicate ?target .");
-    expect(query).toContain("?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>>");
-    expect(query).toContain("?_reifier <ad4m://ontology/author> ?author");
-    expect(query).toContain("?_reifier <ad4m://ontology/timestamp> ?timestamp");
-    expect(query).not.toContain("GRAPH");
-  });
-
-  it("uses FILTER(isIRI(?source)) to exclude non-IRI subjects", async () => {
-    const query = await (Channel as any).queryToSPARQL(mockPersp, {});
-    expect(query).toContain("FILTER(isIRI(?source)");
-  });
-});
-
-
-
-describe("formatSPARQLValue", () => {
-  it("wraps strings in double quotes", () => {
-    expect(formatSPARQLValue("hello")).toBe('"hello"');
-  });
-
-  it("escapes special characters", () => {
-    expect(formatSPARQLValue('say "hi"')).toBe('"say \\"hi\\""');
-  });
-
-  it("converts numbers to quoted strings", () => {
-    expect(formatSPARQLValue(42)).toBe('"42"');
-  });
-});
-
-// ──────────────────────────────────────────────────────────
-//  Comprehensive SPARQL migration unit tests
-// ──────────────────────────────────────────────────────────
-
-import { Literal } from "../Literal";
-
-// Helper: create literal URLs using JSON encoding (which handles all types including booleans)
-function literalUrl(value: any): string {
-  if (typeof value === 'string') return Literal.from(value).toUrl();
-  // Use JSON encoding for numbers and booleans since Literal.get() doesn't handle boolean: prefix
-  return `literal:json:${encodeURIComponent(JSON.stringify(value))}`;
-}
-
-describe("buildSPARQLQuery edge cases", () => {
-  @Model({ name: "FlagModel" })
-  class FlagModel extends Ad4mModel {
-    @Flag({ through: "flag://type", value: "flag://FlagModel" })
-    type: string = "";
-
-    @Property({ through: "flag://name", required: true })
-    name: string = "";
-  }
-
-  @Model({ name: "NoFlagModel" })
-  class NoFlagModel extends Ad4mModel {
-    @Property({ through: "noflag://title" })
-    title: string = "";
-  }
-
-  it("adds conformance JOIN for flag + required properties", () => {
-    const metadata = FlagModel.getModelMetadata();
-    const allRelsMeta = {} as any;
-    const sparql = buildSPARQLQuery(metadata, allRelsMeta, {}, FlagModel);
-    // Should contain flag triple pattern
-    expect(sparql).toContain("<flag://type>");
-    expect(sparql).toContain("<flag://FlagModel>");
-    // Should contain required property pattern
-    expect(sparql).toContain("<flag://name>");
-  });
-
-  it("uses structural subquery when no conformance patterns exist", () => {
-    const metadata = NoFlagModel.getModelMetadata();
-    const allRelsMeta = {} as any;
-    const sparql = buildSPARQLQuery(metadata, allRelsMeta, {}, NoFlagModel);
-    // Should contain structural subquery with DISTINCT
-    expect(sparql).toContain("SELECT DISTINCT ?source");
-    expect(sparql).toContain("<noflag://title>");
-  });
-
-  it("adds JOIN for where-clause on literal-stored fields", () => {
-    const metadata = FlagModel.getModelMetadata();
-    const allRelsMeta = {} as any;
-    const sparql = buildSPARQLQuery(metadata, allRelsMeta, { where: { name: "test" } }, FlagModel);
-    // Where clause should add a join pattern for name
-    expect(sparql).toContain("flag://name");
-  });
-
-  it("handles where: {id: 'specific-id'} with FILTER on ?source", () => {
-    const metadata = FlagModel.getModelMetadata();
-    const allRelsMeta = {} as any;
-    const sparql = buildSPARQLQuery(metadata, allRelsMeta, { where: { id: "expr:123" } as any }, FlagModel);
-    // Should filter by source
-    expect(sparql).toContain("expr:123");
-  });
-});
 
 // ── Batch hydration for reverse relations (3.4) ─────────────────────────────
 describe("Batch hydration for reverse relations", () => {
@@ -1263,50 +885,6 @@ describe("Batch hydration for reverse relations", () => {
 });
 
 // ── Push-down FILTER for literal equality (3.5) ──────────────────────────────
-describe("Push-down FILTER for literal equality", () => {
-  const mockPerspective = {} as any;
-
-  @Model({ name: "FilterTest" })
-  class FilterTest extends Ad4mModel {
-    @Property({ through: "ft://name", required: true })
-    name: string = "";
-    @Property({ through: "ft://rating", required: true })
-    rating: number = 0;
-  }
-
-  const normalizeQuery = (q: string) => q.replace(/\s+/g, " ").trim();
-
-  it("SPARQL query for where: { name: 'Alice' } should use <ad4m://fn/parse_literal> FILTER", async () => {
-    const query = await (FilterTest as any).queryToSPARQL(mockPerspective, { where: { name: "Alice" } });
-    const norm = normalizeQuery(query);
-    // JOIN pattern exists
-    expect(norm).toContain("?wTarget_name");
-    // parse_literal push-down FILTER is present (using correct SPARQL IRI syntax)
-    expect(norm).toContain("ad4m://fn/parse_literal");
-    expect(norm).not.toContain("fn::parse_literal");
-  });
-
-  it("SPARQL query for where: { name: ['Alice', 'Bob'] } should use <ad4m://fn/parse_literal> IN FILTER", async () => {
-    const query = await (FilterTest as any).queryToSPARQL(mockPerspective, { where: { name: ["Alice", "Bob"] } });
-    const norm = normalizeQuery(query);
-    expect(norm).toContain("?wTarget_name");
-    expect(norm).toContain("ad4m://fn/parse_literal");
-    expect(norm).not.toContain("fn::parse_literal");
-  });
-
-  it("SPARQL query for where: { rating: { gt: 5 } } should NOT include parse_literal FILTER", async () => {
-    const query = await (FilterTest as any).queryToSPARQL(mockPerspective, { where: { rating: { gt: 5 } } });
-    const norm = normalizeQuery(query);
-    expect(norm).not.toContain("parse_literal");
-  });
-
-  it("literal property where clause adds JOIN for JS post-filter", async () => {
-    const query = await (FilterTest as any).queryToSPARQL(mockPerspective, { where: { name: "Alice" } });
-    const norm = normalizeQuery(query);
-    expect(norm).toContain("?wTarget_name");
-  });
-});
-
 // ── Model.query (live) ───────────────────────────────────────────────────────────────
 
 /** A perspective whose client answers `subscribe` with `initial` and keeps the
@@ -2089,19 +1667,6 @@ describe("Ad4mModel.fromSHACL()", () => {
     expect(meta.properties["body"]).toBeDefined();
   });
 
-  it("flag property from fromSHACL produces SPARQL type-discriminator triple", () => {
-    const shape = makeShape("flux://Message", [
-      { name: "type", path: "flux://entry_type", hasValue: "flux://message" },
-      { name: "body", path: "flux://body", maxCount: 1 },
-    ]);
-    const Cls = Ad4mModel.fromSHACL(shape, "Message");
-    const meta = Cls.getModelMetadata();
-    const allRelsMeta = {} as any;
-    const sparql = buildSPARQLQuery(meta, allRelsMeta, {}, Cls);
-    expect(sparql).toContain("<flux://entry_type>");
-    expect(sparql).toContain("<flux://message>");
-  });
-
   it("recovers flag value from constructor_actions (backward-compat for old shapes)", () => {
     const shape = new SHACLShape("flux://Channel");
     // An old shape: property has NO hasValue, but constructor_actions carries it
@@ -2136,12 +1701,11 @@ describe("Ad4mModel.fromSHACL()", () => {
     expect(meta.relations["drafts"].local).toBe(true);
   });
 
-  it("applies Model decorator so generateSHACL and generateSDNA are available", () => {
+  it("applies Model decorator so generateSHACL is available", () => {
     const shape = makeShape("flux://Channel", [
       { name: "title", path: "flux://has_title", maxCount: 1 },
     ]);
     const Cls = Ad4mModel.fromSHACL(shape, "Channel");
-    expect(typeof (Cls as any).generateSDNA).toBe("function");
     expect(typeof (Cls as any).generateSHACL).toBe("function");
   });
 
@@ -4796,8 +4360,6 @@ describe("live query by class name", () => {
     expect(perspective.client.subscribe).not.toHaveBeenCalled();
   });
 });
-
-import { valueToLiteralIri } from "./query-sparql";
 
 describe("Model writes: one mutate op per write", () => {
   @Model({ name: "P4Card" })

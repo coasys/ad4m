@@ -247,12 +247,7 @@ export function buildSHACL(
         }
 
         // ── Setter actions ──────────────────────────────────────────────
-        if (propMeta.prologSetter) {
-            console.warn(
-                `[SHACL Generation] Custom Prolog setter for property '${propName}' in class '${subjectName}' is not yet supported. ` +
-                `The property will be created without setter actions. Consider using standard writable properties or provide explicit SHACL JSON.`
-            );
-        } else if (propMeta.writable && propMeta.through) {
+        if (propMeta.writable && propMeta.through) {
             let setter = obj[propertyNameToSetterName(propName)];
             if (typeof setter === "function") {
                 propShape.setter = [{

@@ -516,33 +516,6 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(String(stored[0].status).toLowerCase()).to.equal('local')
             })
 
-            // SdnaOnly doesn't load links into prolog engine
-            it.skip('can run Prolog queries', async () => {
-                const ad4mClient: Ad4mClient = testContext.ad4mClient!
-                const p = await ad4mClient.perspective.add("Prolog test")
-                await p.add(new Link({
-                    source: "ad4m://root",
-                    target: "note-ipfs://Qm123"
-                }))
-                await p.add(new Link({
-                    source: "note-ipfs://Qm123",
-                    target: "todo-ontology://is-todo"
-                }))
-
-                const result = await p.infer('triple(X, _, "todo-ontology://is-todo").')
-                expect(result).not.to.be.false;
-                expect(result.length).to.equal(1)
-                expect(result[0].X).to.equal('note-ipfs://Qm123')
-
-                expect(await p.infer('reachable("ad4m://root", "todo-ontology://is-todo")')).to.be.true;
-
-                const linkResult = await p.infer('link(X, _, "todo-ontology://is-todo", Timestamp, Author).')
-                expect(linkResult).not.to.be.false;
-                expect(linkResult.length).to.equal(1)
-                expect(linkResult[0].X).to.equal('note-ipfs://Qm123');
-                expect(linkResult[0].Timestamp).not.to.be.null;
-                expect(linkResult[0].Author).not.to.be.null;
-            })
         })
 
         describe.skip('Batch Operations', () => {

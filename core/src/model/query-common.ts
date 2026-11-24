@@ -1,5 +1,5 @@
 /**
- * Shared query helpers used by both the Prolog and SPARQL query pipelines.
+ * Shared query helpers for the model query builder.
  */
 
 import type { Scope, TraverseScope } from "./types";

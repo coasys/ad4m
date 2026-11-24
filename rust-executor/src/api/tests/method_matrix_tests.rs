@@ -343,7 +343,6 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ("ai.removeTask", || json!({ "id": TARGET })),
     ("ai.prompt", || json!({ "taskId": TARGET, "prompt": "p" })),
     // The AI sessions: `id` on the session methods, `sessionId` on the turn calls.
-    ("ai.session", || json!({ "id": TARGET })),
     ("ai.sessionUpdate", || json!({ "id": TARGET })),
     ("ai.sessionDelete", || json!({ "id": TARGET })),
     (

@@ -3,7 +3,6 @@ import { CallOptions } from "../apiClient";
 import { makeRandomId } from "./util";
 import { getPropertiesMetadata, getRelationsMetadata, setPropertyRegistryEntry, setRelationRegistryEntry, Model } from "./decorators";
 import type { PropertyOptions, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
-import { formatQueryValue, compileWhereClause } from "./query-utils";
 import { requireSingleParent, requireTotalCount, resolveParentPredicate, resolveParentRelation } from "./query-common";
 import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
 import type { SHACLShape } from "../shacl/SHACLShape";
@@ -11,7 +10,6 @@ import type { RegisterResult } from "../generated/api/RegisterResult";
 import type { MutateOp, ParentRef } from "../generated/api";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 
-import { buildSPARQLQuery } from "./query-sparql";
 import { LiveQuery } from "../perspectives/LiveQuery";
 import type { LiveOptions } from "../perspectives/LiveQuery";
 import {
@@ -621,23 +619,6 @@ export class Ad4mModel {
   declare __links?: LinksMap;
 
   /**
-   * Backwards compatibility alias for createdAt.
-   * @deprecated Use createdAt instead. This will be removed in a future version.
-   */
-  get timestamp(): any {
-    return (this as any).createdAt;
-  }
-
-  /**
-   * Generates the SDNA (Subject DNA) Prolog rules for this model class.
-   * Injected at class-definition time by the `@Model` decorator.
-   * Returns a default value on un-decorated base classes.
-   */
-  static generateSDNA(): { sdna: string; name: string } {
-    return { sdna: '', name: '' };
-  }
-
-  /**
    * Generates the SHACL shape graph for this model class.
    * Injected at class-definition time by the `@Model` decorator.
    * Returns `{ shape: null, name: '' }` on un-decorated base classes —
@@ -727,9 +708,7 @@ export class Ad4mModel {
         readOnly: !(options.writable ?? false),
         ...(options.initial !== undefined && { initial: options.initial }),
         ...(options.resolveLanguage !== undefined && { resolveLanguage: options.resolveLanguage }),
-        ...(options.prologGetter !== undefined && { prologGetter: options.prologGetter }),
         ...(options.getter !== undefined && { getter: options.getter }),
-        ...(options.prologSetter !== undefined && { prologSetter: options.prologSetter }),
         ...(options.local !== undefined && { local: options.local }),
         ...(options.flag !== undefined && { flag: options.flag }),
         ...(options.transform !== undefined && { transform: options.transform })
@@ -1056,48 +1035,6 @@ export class Ad4mModel {
 
     this.takeSnapshot(opts?.include);
     return this;
-  }
-
-  /**
-   * Generates a SPARQL query from a Query object.
-   * 
-   * @description
-   * This method translates high-level query parameters into a SPARQL query string
-   * that can be executed against the SPARQL backend. Unlike Prolog queries which
-   * operate on SDNA-aware predicates, SPARQL queries operate directly on raw links
-   * stored in SPARQL.
-   * 
-   * The generated query uses a CTE (Common Table Expression) pattern:
-   * 1. First, identify candidate base expressions by filtering links based on where conditions
-   * 2. Then, for each candidate base, resolve properties and relations via subqueries
-   * 3. Finally, apply ordering, pagination (LIMIT/START) at the SQL level
-   * 
-   * Key architectural notes:
-   * - SPARQL stores only raw links (source, predicate, target, author, timestamp)
-   * - No SDNA knowledge at the database level
-   * - Properties are resolved via subqueries that look for links with specific predicates
-   * - Relations are similar but return multiple values instead of one
-   * - Special fields (base, author, timestamp) are accessed directly, not via subqueries
-   * 
-   * @param perspective - The perspective to query (used for metadata extraction)
-   * @param query - Query parameters (where, order, limit, offset, properties, relations)
-   * @returns Complete SPARQL query string ready for execution
-   * 
-   * @example
-   * ```typescript
-   * const query = Recipe.queryToSPARQL(perspective, {
-   *   where: { name: "Pasta", rating: { gt: 4 } },
-   *   order: { timestamp: "DESC" },
-   *   limit: 10
-   * });
-   * // Returns: SELECT source AS base, array::first(target[WHERE predicate = ...]) AS name, ...
-   * //          FROM link WHERE ... GROUP BY source ORDER BY timestamp DESC LIMIT 10
-   * ```
-   */
-  public static async queryToSPARQL(perspective: PerspectiveProxy, query: Query): Promise<string> {
-    const metadata = this.getModelMetadata();
-    const allRelMeta = getRelationsMetadata(this as any);
-    return buildSPARQLQuery(metadata, allRelMeta, query, this);
   }
 
   /**
@@ -1673,17 +1610,6 @@ export class Ad4mModel {
       pageSize,
     };
   }
-
-  /**
-   * Generates a SPARQL COUNT query for the model.
-   * 
-   * @param perspective - The perspective context
-   * @param query - Query parameters to filter the count
-   * @returns SPARQL COUNT query string
-   * 
-   * @private
-   */
-  // countQueryToSPARQL — removed (zero callers; Rust COUNT fast-path supersedes)
 
   /**
    * Gets a count of all matching instances.
@@ -2298,30 +2224,6 @@ export class Ad4mModel {
     Object.assign(instance, data);
     await instance.save();
     return instance;
-  }
-
-  /**
-   * Deletes an existing model instance identified by `id`.
-   *
-   * Also removes every incoming link that points to this instance.
-   *
-   * @param perspective - The perspective containing the instance
-   * @param id - The expression URI of the instance to delete
-   * @throws Will throw if removing the instance's links or its incoming links fails
-   *
-   * @example
-   * ```typescript
-   * await Recipe.delete(perspective, recipeId);
-   * ```
-   *
-   * @deprecated Use the name `delete` — `remove` is preserved as an alias.
-   */
-  static async remove(
-    this: typeof Ad4mModel & (new (...args: any[]) => Ad4mModel),
-    perspective: PerspectiveProxy,
-    id: string,
-  ): Promise<void> {
-    return this.delete(perspective, id);
   }
 
   /**
