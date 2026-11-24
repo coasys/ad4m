@@ -209,7 +209,7 @@ impl Ad4mMcpHandler {
             Ok(perspective) => perspective,
             Err(e) => return e,
         };
-        let handle = perspective.persisted.lock().await.clone();
+        let handle = perspective.persisted.snapshot();
         pretty(&describe_perspective_value(&perspective, &handle).await)
     }
 }
