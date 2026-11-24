@@ -169,3 +169,92 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
+/// The add-link examples in the docs and `--help` agree with the parser. Here, not in
+/// `perspectives.rs`: that module is in the `ad4m-executor` binary too, which has no `ClapApp`.
+#[cfg(test)]
+mod add_link_order_tests {
+    #[test]
+    fn add_link_documented_examples_match_parser() {
+        use clap::Parser;
+
+        for (documentation, expected_source, expected_target, expected_predicate) in [
+            (
+                include_str!("../README.md"),
+                "<source>",
+                "<target>",
+                "<predicate>",
+            ),
+            (
+                include_str!("../../docs-src/pages/developer-guides/cli.mdx"),
+                "Alice",
+                "Bob",
+                "knows",
+            ),
+        ] {
+            let example = documentation
+                .lines()
+                .find(|line| line.starts_with("ad4m perspectives add-link "))
+                .unwrap();
+            let args = example.split_whitespace().map(|arg| arg.trim_matches('"'));
+            let app = crate::ClapApp::try_parse_from(args).unwrap();
+            let crate::Domain::Perspectives {
+                command:
+                    Some(crate::perspectives::PerspectiveFunctions::AddLink {
+                        id,
+                        source,
+                        target,
+                        predicate,
+                        status,
+                    }),
+            } = app.domain
+            else {
+                panic!("expected add-link command");
+            };
+            assert_eq!(id, "<perspective-UUID>");
+            assert_eq!(source, expected_source);
+            assert_eq!(target, expected_target);
+            assert_eq!(predicate.as_deref(), Some(expected_predicate));
+            assert_eq!(status, None);
+        }
+    }
+
+    #[test]
+    fn add_link_help_matches_positional_order() {
+        use clap::Parser;
+
+        let help = crate::ClapApp::try_parse_from(["ad4m", "perspectives", "add-link", "--help"])
+            .unwrap_err();
+        assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+        assert!(help
+            .to_string()
+            .contains("<ID> <SOURCE> <TARGET> [PREDICATE] [STATUS]"));
+
+        let app = crate::ClapApp::try_parse_from([
+            "ad4m",
+            "perspectives",
+            "add-link",
+            "id",
+            "source",
+            "target",
+        ])
+        .unwrap();
+        let crate::Domain::Perspectives {
+            command:
+                Some(crate::perspectives::PerspectiveFunctions::AddLink {
+                    source,
+                    target,
+                    predicate,
+                    status,
+                    ..
+                }),
+        } = app.domain
+        else {
+            panic!("expected add-link command");
+        };
+        assert_eq!(source, "source");
+        assert_eq!(target, "target");
+        assert_eq!(predicate, None);
+        assert_eq!(status, None);
+    }
+}
