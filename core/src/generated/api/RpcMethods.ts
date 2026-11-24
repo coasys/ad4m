@@ -148,7 +148,6 @@ import type { PerspectiveLinkMutationsParams } from "./PerspectiveLinkMutationsP
 import type { PerspectiveMintFlowReceiptParams } from "./PerspectiveMintFlowReceiptParams";
 import type { PerspectiveMintFlowReceiptResult } from "./PerspectiveMintFlowReceiptResult";
 import type { PerspectiveModelQueryParams } from "./PerspectiveModelQueryParams";
-import type { PerspectiveModelSubscribeParams } from "./PerspectiveModelSubscribeParams";
 import type { PerspectiveProposeFlowTransitionParams } from "./PerspectiveProposeFlowTransitionParams";
 import type { PerspectiveQueryLinksParams } from "./PerspectiveQueryLinksParams";
 import type { PerspectiveQueryParams } from "./PerspectiveQueryParams";
@@ -163,7 +162,7 @@ import type { PerspectiveResynced } from "./PerspectiveResynced";
 import type { PerspectiveShapesParams } from "./PerspectiveShapesParams";
 import type { PerspectiveSparqlParams } from "./PerspectiveSparqlParams";
 import type { PerspectiveSubjectClassesOfParams } from "./PerspectiveSubjectClassesOfParams";
-import type { PerspectiveSubscribeQueryParams } from "./PerspectiveSubscribeQueryParams";
+import type { PerspectiveSubscribeParams } from "./PerspectiveSubscribeParams";
 import type { PerspectiveSubscribed } from "./PerspectiveSubscribed";
 import type { PerspectiveSubscriptionParams } from "./PerspectiveSubscriptionParams";
 import type { PerspectiveUpdateLinkParams } from "./PerspectiveUpdateLinkParams";
@@ -368,7 +367,6 @@ export interface RpcMethods {
   "perspective.createSubject": { params: PerspectiveCreateSubjectParams; result: boolean };
   "perspective.discardBatch": { params: PerspectiveDiscardBatchParams; result: boolean };
   "perspective.disposeQuery": { params: PerspectiveSubscriptionParams; result: boolean };
-  "perspective.disposeSparql": { params: PerspectiveSubscriptionParams; result: boolean };
   "perspective.evaluateGetters": { params: PerspectiveEvaluateGettersParams; result: string };
   "perspective.executeCommands": { params: PerspectiveExecuteCommandsParams; result: null };
   "perspective.flowFired": { params: PerspectiveFlowFiredParams; result: Array<FlowFiredEntry> };
@@ -385,7 +383,6 @@ export interface RpcMethods {
   "perspective.linkMutations": { params: PerspectiveLinkMutationsParams; result: PerspectiveLinkDiff };
   "perspective.mintFlowReceipt": { params: PerspectiveMintFlowReceiptParams; result: PerspectiveMintFlowReceiptResult };
   "perspective.modelQuery": { params: PerspectiveModelQueryParams; result: string };
-  "perspective.modelSubscribe": { params: PerspectiveModelSubscribeParams; result: PerspectiveSubscribed };
   "perspective.proposeFlowTransition": { params: PerspectiveProposeFlowTransitionParams; result: ProposeOutcome };
   "perspective.publishSnapshot": { params: PerspectiveUuidParams; result: string };
   "perspective.queryLinks": { params: PerspectiveQueryLinksParams; result: Array<DecoratedLinkExpression> };
@@ -406,8 +403,7 @@ export interface RpcMethods {
   "perspective.shapes": { params: PerspectiveShapesParams; result: Array<ShapeSummary> };
   "perspective.snapshot": { params: PerspectiveUuidParams; result: DecoratedPerspective | null };
   "perspective.subjectClassesOf": { params: PerspectiveSubjectClassesOfParams; result: { [key in string]: Array<string> } };
-  "perspective.subscribeQuery": { params: PerspectiveSubscribeQueryParams; result: PerspectiveSubscribed };
-  "perspective.subscribeSparql": { params: PerspectiveQueryParams; result: PerspectiveSubscribed };
+  "perspective.subscribe": { params: PerspectiveSubscribeParams; result: PerspectiveSubscribed };
   "perspective.update": { params: PerspectiveUpdateParams; result: PerspectiveHandle };
   "perspective.updateLink": { params: PerspectiveUpdateLinkParams; result: DecoratedLinkExpression };
   "perspective.updateSubject": { params: PerspectiveUpdateSubjectParams; result: boolean };
@@ -617,6 +613,5 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
 
 /** Calls that open something on the executor that outlives them (a live query): the client cancels one that timed out, as one it aborted. */
 export const OPENS_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
-  "perspective.modelSubscribe",
-  "perspective.subscribeQuery",
+  "perspective.subscribe",
 ]);

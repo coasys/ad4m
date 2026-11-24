@@ -53,6 +53,7 @@ use lazy_static::lazy_static;
 use perspective_instance::PerspectiveInstance;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::RwLock;
 
 use crate::events::{Audience, Event, Topic};
@@ -426,30 +427,40 @@ pub async fn update_perspective_with(
 ) -> Result<PerspectiveHandle, String> {
     let instance =
         get_perspective(uuid).ok_or_else(|| format!("Perspective with uuid {} not found", uuid))?;
-    let handle = {
-        let mut persisted = instance.persisted.lock().await;
-        let link_language = |h: &PerspectiveHandle| {
-            h.neighbourhood
-                .as_ref()
-                .map(|nh| nh.data.link_language.clone())
-        };
-        let before = link_language(&persisted);
-        change(&mut persisted);
-        // A publish sets the link language: wake the loop that attaches it.
-        if link_language(&persisted) != before {
-            instance.link_language_changed();
-        }
-        crate::db_backend::db_backend()
-            .update_perspective(&persisted)
-            .map_err(|e| e.to_string())?;
-        // Signals reach owners through this cached copy, so it must not lag the handle
-        // (users joining later got no broadcasts). Written under the lock, so a
-        // concurrent change cannot register an older copy after a newer one.
-        if let Some(nh) = &persisted.neighbourhood {
-            register_link_language_perspective(nh.data.link_language.clone(), persisted.clone());
-        }
-        persisted.clone()
-    };
+    let mut language_changed = false;
+    let result = instance
+        .persisted
+        .update(|persisted| {
+            let link_language = |h: &PerspectiveHandle| {
+                h.neighbourhood
+                    .as_ref()
+                    .map(|nh| nh.data.link_language.clone())
+            };
+            let before = link_language(persisted);
+            change(persisted);
+            language_changed = link_language(persisted) != before;
+            crate::db_backend::db_backend()
+                .update_perspective(persisted)
+                .map_err(|e| e.to_string())?;
+            // Keep the DB and routing cache writes serialized with handle writes.
+            // A removed perspective's change must not put its entry back after
+            // `remove_perspective` cleared it.
+            let torn_down = instance.is_teardown.load(Ordering::Acquire);
+            if let (Some(nh), false) = (&persisted.neighbourhood, torn_down) {
+                register_link_language_perspective(
+                    nh.data.link_language.clone(),
+                    persisted.clone(),
+                );
+            }
+            Ok::<_, String>(persisted.clone())
+        })
+        .await;
+    // Wake only after the new snapshot is visible, including on a DB error:
+    // historically the in-memory change survives a failed DB write.
+    if language_changed {
+        instance.link_language_changed();
+    }
+    let handle = result?;
 
     publish_to_owners(
         Topic::PerspectiveUpdated,
@@ -493,13 +504,17 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
         // cached handle DIRECTLY without verifying get_perspective
         // still returns Some, so signals would keep flowing for a
         // removed perspective until the cache entry was overwritten.
-        {
-            let handle_snapshot = instance.persisted.lock().await.clone();
-            if let Some(nh) = &handle_snapshot.neighbourhood {
-                let mut cache = LINK_LANG_TO_PERSPECTIVE_HANDLE.write().unwrap();
-                cache.remove(&nh.data.link_language);
-            }
-        }
+        // Taken as a handle write, so a change already writing finishes (and
+        // registers its entry) first; later ones see the teardown flag.
+        instance
+            .persisted
+            .update(|handle| {
+                if let Some(nh) = &handle.neighbourhood {
+                    let mut cache = LINK_LANG_TO_PERSPECTIVE_HANDLE.write().unwrap();
+                    cache.remove(&nh.data.link_language);
+                }
+            })
+            .await;
 
         // Clean up the per-perspective SPARQL (Oxigraph/RocksDB) directory
         if let Some(data_path) = get_app_data_path() {
@@ -519,7 +534,7 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
             }
         }
 
-        let recipients = event_recipients(&*instance.persisted.lock().await);
+        let recipients = event_recipients(&instance.persisted.snapshot());
         publish_to_owners(
             Topic::PerspectiveRemoved,
             recipients,
@@ -577,14 +592,27 @@ async fn perspective_by_link_language(language_address: String) -> Option<Perspe
         .map(|lock| lock.read().unwrap().clone())
         .collect::<Vec<_>>();
     for perspective in perspectives.into_iter() {
-        let handle = perspective.persisted.lock().await;
-        if let Some(nh) = &handle.neighbourhood {
-            if nh.data.link_language == language_address {
-                // Populate the cache for future lookups, under the lock like every cache write.
-                register_link_language_perspective(language_address, handle.clone());
-                drop(handle);
-                return Some(perspective);
-            }
+        let matches = perspective
+            .persisted
+            .update(|handle| {
+                if perspective.is_teardown.load(Ordering::Acquire) {
+                    return false;
+                }
+                if let Some(nh) = &handle.neighbourhood {
+                    if nh.data.link_language == language_address {
+                        // Serialize cache fills with handle updates, so an old copy cannot win.
+                        register_link_language_perspective(
+                            language_address.clone(),
+                            handle.clone(),
+                        );
+                        return true;
+                    }
+                }
+                false
+            })
+            .await;
+        if matches {
+            return Some(perspective);
         }
     }
     None
@@ -722,7 +750,7 @@ pub async fn handle_telepresence_signal_from_link_language_impl(
 pub async fn export_perspective(uuid: &str) -> Result<SerializedPerspective, String> {
     let perspective =
         get_perspective(uuid).ok_or_else(|| format!("Perspective not found: {}", uuid))?;
-    let handle = perspective.persisted.lock().await.clone();
+    let handle = perspective.persisted.snapshot();
 
     let decorated_links = perspective
         .get_links(&LinkQuery::default())
@@ -835,7 +863,7 @@ mod tests {
             .await
             .expect("Failed to find perspective by uuid");
         assert_eq!(
-            p1.persisted.lock().await.name,
+            p1.persisted.load().name,
             Some("Test Perspective 1".to_string())
         );
 
@@ -847,7 +875,7 @@ mod tests {
 
         let p1_updated = get_perspective(&handle1.uuid).unwrap();
         assert_eq!(
-            p1_updated.persisted.lock().await.name,
+            p1_updated.persisted.load().name,
             Some("Test Perspective 1 Updated".to_string())
         );
 
@@ -857,7 +885,7 @@ mod tests {
             .await
             .expect("Failed to find perspective by uuid");
         assert_eq!(
-            p1_updated_from_all.persisted.lock().await.name,
+            p1_updated_from_all.persisted.load().name,
             Some("Test Perspective 1 Updated".to_string())
         );
 
@@ -1087,7 +1115,7 @@ mod tests {
         });
         let instance = instance.clone();
         let hook: RoutingCacheWriteHook = Arc::new(move || {
-            let lock_released = instance.persisted.try_lock().is_ok();
+            let lock_released = instance.persisted.try_hold_writer().is_some();
             start_b.notify_one();
             if lock_released {
                 let b_done = b_done.clone();
@@ -1161,6 +1189,54 @@ mod tests {
         assert!(
             owners.contains(&"did:test:b".to_string()),
             "the routing cache lost B: {owners:?}"
+        );
+    }
+
+    /// A change still writing when the perspective is removed must not leave
+    /// the removed handle in the routing cache: the signal fast path uses the
+    /// cached handle without checking the perspective still exists.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn removing_a_perspective_during_a_change_leaves_no_routing_cache_entry() {
+        setup();
+        let link_language = "routing-cache-remove-during-change";
+        let instance = neighbourhood_perspective(link_language, None);
+        let uuid = instance.uuid.clone();
+
+        let writer = instance.persisted.hold_writer().await;
+        let change = tokio::spawn({
+            let uuid = uuid.clone();
+            async move { update_perspective_with(&uuid, |h| h.add_owner("did:test:b")).await }
+        });
+        // The change has found the instance and waits for the handle's writer lock.
+        let queued = |n| {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                instance.persisted.writers_queued(n),
+            )
+        };
+        queued(1)
+            .await
+            .expect("the change never queued for the writer lock");
+        let removal = tokio::spawn({
+            let uuid = uuid.clone();
+            async move { remove_perspective(&uuid).await }
+        });
+        // The removal's cache cleanup waits behind it, so the two overlap.
+        queued(2)
+            .await
+            .expect("the removal never queued for the writer lock");
+        drop(writer);
+        change.await.unwrap().unwrap();
+        assert!(removal.await.unwrap().is_some());
+
+        let cached = cached_perspective_handle(link_language);
+        LINK_LANG_TO_PERSPECTIVE_HANDLE
+            .write()
+            .unwrap()
+            .remove(link_language);
+        assert!(
+            cached.is_none(),
+            "the routing cache kept the removed perspective"
         );
     }
 

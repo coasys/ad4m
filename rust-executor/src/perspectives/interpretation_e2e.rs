@@ -2342,16 +2342,18 @@ async fn auto_processor_election_only_online_participants_process() {
 
     // Make the perspective a shared neighbourhood owned by all four, so
     // `online_agents()` reports co-located presence instead of erroring.
-    {
-        let mut h = perspective.persisted.lock().await;
-        h.shared_url = Some("test://neighbourhood".into());
-        h.owners = Some(vec![
-            did_carol.clone(),
-            did_bob.clone(),
-            did_alice.clone(),
-            did_dave.clone(),
-        ]);
-    }
+    perspective
+        .persisted
+        .update(|h| {
+            h.shared_url = Some("test://neighbourhood".into());
+            h.owners = Some(vec![
+                did_carol.clone(),
+                did_bob.clone(),
+                did_alice.clone(),
+                did_dave.clone(),
+            ]);
+        })
+        .await;
     // "Log in" bob, alice, dave (recent last_seen ⇒ online). carol stays offline.
     for email in ["bob@e2e", "alice@e2e", "dave@e2e"] {
         Ad4mDb::with_global_instance(|db| db.update_user_last_seen(email)).expect("last_seen");

@@ -1640,7 +1640,7 @@ async fn pass_owner_session(
     context: &AgentContext,
 ) -> crate::agent::session::Session {
     use crate::agent::session::Session;
-    let handle = perspective.persisted.lock().await.clone();
+    let handle = perspective.persisted.snapshot();
     let main_did = crate::agent::AgentService::global_instance()
         .lock()
         .ok()
@@ -1731,11 +1731,13 @@ mod pass_session_tests {
 
     async fn fixture(class: &str, sdna: &str, owner: Option<&str>) -> Fixture {
         let (perspective, _shapes, _ctx) = setup_perspective_no_llm(&[(class, sdna)]).await;
-        let uuid = {
-            let mut handle = perspective.persisted.lock().await;
-            handle.owners = owner.map(|did| vec![did.to_string()]);
-            handle.uuid.clone()
-        };
+        let uuid = perspective
+            .persisted
+            .update(|handle| {
+                handle.owners = owner.map(|did| vec![did.to_string()]);
+                handle.uuid.clone()
+            })
+            .await;
         register_perspective(uuid.clone(), perspective.clone());
         Fixture { perspective, uuid }
     }
