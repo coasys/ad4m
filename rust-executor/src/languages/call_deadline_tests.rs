@@ -13,7 +13,8 @@ use super::language_runtime_handle::LanguageRuntimeHandle;
 use crate::agent::AgentContext;
 use crate::languages::language_context::LanguageContext;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 /// The process-wide V8 start: a second `Once` here set the flags after another test had
 /// started V8, which aborts the process (`Check failed: !IsFrozen()`).
@@ -363,6 +364,28 @@ async fn a_call_sent_while_the_running_call_is_past_the_deadline_is_not_queued()
         .contains("deadline"));
     assert!(rx.try_recv().is_err(), "the refused call was queued");
     queued.abort();
+}
+
+/// The deadline follows the tokio clock: under a paused clock, a queued call that never
+/// starts gets its error once the clock reaches the deadline, with no real wait.
+#[tokio::test(start_paused = true)]
+async fn the_deadline_follows_the_paused_tokio_clock() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let handle = LanguageRuntimeHandle::from_channel("QmDeadlinePausedClock".into(), tx);
+    let real_start = std::time::Instant::now();
+    let call = tokio::spawn({
+        let handle = handle.clone();
+        async move { handle.execute("1 + 1".into()).await }
+    });
+    // Held, never started: the caller waits for its start deadline.
+    let _request = rx.recv().await.expect("the call is queued");
+    let error = call.await.unwrap().expect_err("the call never started");
+    assert!(error.contains("did not start the call"), "{error}");
+    assert!(
+        real_start.elapsed() < Duration::from_secs(10),
+        "the 60 s deadline took {:?} of real time",
+        real_start.elapsed()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

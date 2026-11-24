@@ -35,7 +35,7 @@ async fn a_slow_broadcast_logs_its_phases_and_names_the_largest() {
     );
     tokio::spawn(async move {
         while let Some(request) = requests.recv().await {
-            let _ = request.started.set(std::time::Instant::now());
+            let _ = request.started.set(tokio::time::Instant::now());
             let _ = request.response_tx.send(Ok("null".to_string()));
         }
     });
