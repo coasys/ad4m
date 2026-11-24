@@ -176,7 +176,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-263 methods: Cap 87, CapAnyPointer 1, Executor 48, Open 9, Operator 37, Owns 76, UserLoginOrOperator 1, UserOrOperator 4. Local only (the operator on this machine): 14.
+267 methods: Cap 89, CapAnyPointer 1, Executor 48, Open 9, Operator 39, Owns 76, UserLoginOrOperator 1, UserOrOperator 4. Local only (the operator on this machine): 14.
 
 | Method | Guard |
 |---|---|
@@ -259,20 +259,35 @@ the guard checked:
 | `hosting.setHotWallet` | `Cap(agent:UPDATE)` |
 | `hosting.wallet` | `Executor(runtime.hosting:READ)` |
 | `hosting.walletHistory` | `Executor(runtime.hosting:READ)` |
+| `identity.acceptJoin` | `Operator`, local only |
+| `identity.cancelJoin` | `Operator`, local only |
 | `identity.claimOffer` | `Operator` |
 | `identity.cosignIncept` | `UserOrOperator(agent:SIGN)` |
 | `identity.custodyStatus` | `Operator`, local only |
+| `identity.deleteRequest` | `UserOrOperator(agent:UPDATE)` |
 | `identity.devices` | `Cap(agent:READ)` |
+| `identity.endPrepared` | `Operator`, local only |
+| `identity.inbox` | `Operator`, local only |
+| `identity.inboxAck` | `Operator`, local only |
+| `identity.inboxPut` | `Cap(agent:UPDATE)` |
+| `identity.inboxSealed` | `Operator`, local only |
 | `identity.joinStatus` | `Cap(agent:READ)` |
+| `identity.keyOwner` | `Cap(agent:READ)` |
 | `identity.log` | `Cap(agent:READ)` |
 | `identity.offers` | `Cap(agent:READ)` |
 | `identity.openOffer` | `Cap(agent:UPDATE)` |
+| `identity.postRequest` | `UserOrOperator(agent:UPDATE)` |
+| `identity.prepareDevice` | `Operator`, local only |
 | `identity.publish` | `UserOrOperator(agent:UPDATE)` |
+| `identity.record` | `Cap(agent:READ)` |
+| `identity.recordPut` | `Cap(agent:UPDATE)` |
 | `identity.rekey` | `Operator`, local only |
+| `identity.requests` | `Cap(agent:READ)` |
 | `identity.resetLog` | `Operator` |
 | `identity.resolve` | `Cap(agent:READ)` |
 | `identity.status` | `Cap(agent:READ)` |
 | `identity.unlinkSelf` | `UserLoginOrOperator(agent:UPDATE)` |
+| `identity.unwrapRecordKey` | `Operator`, local only |
 | `language.all` | `Cap(language:READ)` |
 | `language.applyTemplate` | `Cap(language:CREATE)` |
 | `language.applyTemplateLocal` | `Cap(language:CREATE)` |
