@@ -145,3 +145,41 @@ Live queries in `perspectives/perspective_instance.rs` have two branches:
 2. `sparql_query` — SPARQL subscription — 🔎 🔗
 
 Log messages should distinguish these.
+
+### Model RPC and response-size diagnostics
+
+`rpc.slow` stays at **warn**, but triggers when either elapsed time is **> 2 s**
+(from arrival through serialization) or serialized response size is **> 1,000,000
+bytes**. `reason=slow|size|slow,size` distinguishes triggers; one record is emitted
+when both apply. No per-call info logging is added. `kind=response` is an ordinary
+reply; `kind=initial` is a live-query opening reply. Sizes are serialized UTF-8
+wire-envelope bytes, not just the embedded result JSON.
+
+`perspective.modelQuery` and `perspective.modelSubscribe` add `perspective`,
+comma-joined `classes`, and `results` (returned instances, not totalCount;
+subscriptions use the initial result). Errors may lack results. Handlers write a
+request-task-local slot, collected by dispatch even when its handler is cancelled;
+no slot is shared between concurrent requests or inherited by spawned tasks.
+There is no unified `perspective.subscribe` model branch on this base.
+
+`shape` contains only limit, offset, order property/direction, scope presence
+(`parent`), where property/operator names, and include/projection keys. No filter
+operands, scope IDs, cursor tokens, or instance content are logged. Operand objects
+are not traversed. Nested where structure stops at depth 16. `shape_hash` is a
+16-hex-digit FNV-1a grouping hint over the sanitized JSON before display truncation
+(not a cryptographic identity); object keys are sorted. It deliberately ignores
+values and does not describe include/projection sub-query bodies.
+
+Raw field limits in UTF-8 bytes: shape 2048, classes 512, perspective 128. Truncated
+fields end in `...`; the common formatter escapes line breaks and quotes.
+`Origin` is read once during upgrade, capped at 512 bytes, stored on the connection,
+and included in debug `ws.open` and triggered `rpc.slow`. Missing/invalid headers
+use `-`. Origin is client-supplied evidence, never identity or authorization.
+
+The event forwarding path also measures serialized `query-subscription-update`
+frames and emits size-triggered `rpc.slow` with `kind=update`, perspective,
+subscription ID, connection, caller and origin. Updates are deltas, not a complete
+instance result: no `results` count, class or query shape is inferred from their
+payload. They have no request latency. Other event types are not measured here.
+Projection missing-relation warnings include the bounded shape class; the projection
+resolver has no perspective or request context, so it cannot include those IDs.

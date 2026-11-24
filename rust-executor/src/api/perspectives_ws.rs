@@ -857,6 +857,7 @@ async fn subscribed(
             message: "Request cancelled by client".to_string(),
         });
     }
+    crate::call_diag::model::results(&result);
     Ok(serde_json::to_value(PerspectiveSubscribed {
         subscription_id,
         result: result_json(&result),
@@ -1063,6 +1064,11 @@ async fn subject_classes_of_handler(
 async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let classes = query_classes(&params)?;
     let query_json = params.require_str("query_json")?;
+    crate::call_diag::model::query(
+        &crate::api::guards::UUID_PARAM.require(&params)?,
+        classes.names(),
+        &query_json,
+    );
 
     let perspective = guarded_perspective(&params).await?;
 
@@ -1073,7 +1079,10 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
         .model_query_classes_stopped(&gate.stop(), &classes, &query_json)
         .await
     {
-        Ok(json) => Ok(Value::String(json)),
+        Ok(json) => {
+            crate::call_diag::model::results(&json);
+            Ok(Value::String(json))
+        }
         Err(e) => Err(query_eval_error_ws(e)),
     }
 }
@@ -1135,6 +1144,11 @@ async fn model_subscribe_handler(
 ) -> Result<Value, WsRpcError> {
     let classes = query_classes(&params)?;
     let query_json = params.require_str("query_json")?;
+    crate::call_diag::model::query(
+        &crate::api::guards::UUID_PARAM.require(&params)?,
+        classes.names(),
+        &query_json,
+    );
     // A subscription re-runs one query; cursor paging is `modelQuery`'s.
     if model_query_sends_cursor(&query_json) {
         return Err(WsRpcError::bad_request(
