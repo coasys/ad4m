@@ -260,4 +260,17 @@ describe('agent.get, a pushed entry', () => {
         expect((await ad4m.agent.me()).directMessageLanguage).toBe('p1')
         expect(asks('agent.get')).toBe(1)
     })
+
+    it('the reply of a profile write gains no identity key when the held agent has none', async () => {
+        const before = Sock.handle
+        Sock.handle = (msg, sock) => {
+            if (msg.type === 'agent.get') return { ...wire(), directMessageLanguage: 'p0' }
+            if (msg.type === 'agent.updateProfile') return { ...wire(), directMessageLanguage: 'p1' }
+            return before(msg, sock)
+        }
+        await ad4m.agent.me()
+        const reply = await ad4m.agent.updateDirectMessageLanguage('p1')
+        // The reply equals the agent an `agent-updated` event carries, which has no identity.
+        expect('identity' in reply).toBe(false)
+    })
 })

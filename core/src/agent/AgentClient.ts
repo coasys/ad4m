@@ -60,7 +60,8 @@ function pushAgent(entry: Entry<Agent>, agent: Agent): void {
   if (agent.identity === undefined) {
     const { state, value } = entry.getSnapshot();
     if (state !== 'fresh' || !value) return entry.invalidate();
-    agent.identity = value.identity;
+    // Only a known identity: the agent is the caller's result too, which gains no empty key.
+    if (value.identity !== undefined) agent.identity = value.identity;
   }
   entry.push(agent);
 }
