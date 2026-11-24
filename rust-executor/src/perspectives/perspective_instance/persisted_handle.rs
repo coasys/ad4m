@@ -7,6 +7,10 @@ use tokio::sync::Mutex;
 pub struct PersistedHandle {
     current: ArcSwap<PerspectiveHandle>,
     write: Mutex<()>,
+    /// Writers queued for `write`, so a test can wait for a change to reach the lock instead of
+    /// sleeping.
+    #[cfg(test)]
+    queued_writers: std::sync::atomic::AtomicUsize,
 }
 
 impl PersistedHandle {
@@ -14,6 +18,8 @@ impl PersistedHandle {
         Self {
             current: ArcSwap::from_pointee(handle),
             write: Mutex::new(()),
+            #[cfg(test)]
+            queued_writers: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -29,7 +35,13 @@ impl PersistedHandle {
     /// Keep ordered DB/cache writes in this closure. No await is allowed inside it.
     /// A returned error does not roll back the change (as with the old mutable guard).
     pub async fn update<R>(&self, change: impl FnOnce(&mut PerspectiveHandle) -> R) -> R {
+        #[cfg(test)]
+        self.queued_writers
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let _write = self.write.lock().await;
+        #[cfg(test)]
+        self.queued_writers
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         let mut handle = self.snapshot();
         let result = change(&mut handle);
         self.current.store(Arc::new(handle));
@@ -39,6 +51,19 @@ impl PersistedHandle {
     #[cfg(test)]
     pub(crate) fn try_hold_writer(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
         self.write.try_lock().ok()
+    }
+
+    /// Wait until `n` writers are queued for the writer lock. No sleeps: it yields between
+    /// checks, and a test bounds it with a timeout.
+    #[cfg(test)]
+    pub(crate) async fn writers_queued(&self, n: usize) {
+        while self
+            .queued_writers
+            .load(std::sync::atomic::Ordering::SeqCst)
+            < n
+        {
+            tokio::task::yield_now().await;
+        }
     }
 
     /// Pause handle mutations without preventing snapshot reads.

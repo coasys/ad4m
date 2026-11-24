@@ -1208,13 +1208,24 @@ mod tests {
             let uuid = uuid.clone();
             async move { update_perspective_with(&uuid, |h| h.add_owner("did:test:b")).await }
         });
-        // Let the change find the instance and queue for the handle lock.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // The change has found the instance and waits for the handle's writer lock.
+        let queued = |n| {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                instance.persisted.writers_queued(n),
+            )
+        };
+        queued(1)
+            .await
+            .expect("the change never queued for the writer lock");
         let removal = tokio::spawn({
             let uuid = uuid.clone();
             async move { remove_perspective(&uuid).await }
         });
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // The removal's cache cleanup waits behind it, so the two overlap.
+        queued(2)
+            .await
+            .expect("the removal never queued for the writer lock");
         drop(writer);
         change.await.unwrap().unwrap();
         assert!(removal.await.unwrap().is_some());
