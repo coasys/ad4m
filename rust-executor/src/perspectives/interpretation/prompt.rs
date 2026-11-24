@@ -314,11 +314,29 @@ pub(crate) fn build_interpretation_input_showing(
 /// `existing` is empty so the caller can omit the key entirely.
 ///
 /// One line is [`outline_line`]. The existing-row budget counts that line
-/// (at depth 0) with the row, so the outline cannot grow the prompt past
-/// the budget.
+/// at the depth [`outline_depths`] assigns (two spaces per level) and drops
+/// rows until the indented outline fits, so the outline cannot grow the
+/// prompt past the budget.
 fn render_existing_outline(existing: &ExistingInstances, shapes: &[ModelShape]) -> String {
+    walk_existing_outline(existing, shapes).0
+}
+
+/// Depth of each shown id in [`render_existing_outline`]. The existing-row
+/// budget charges [`outline_line`] at these depths. An id that is not rendered
+/// (an empty row list) is absent and counts as a root.
+pub(crate) fn outline_depths(
+    existing: &ExistingInstances,
+    shapes: &[ModelShape],
+) -> HashMap<String, usize> {
+    walk_existing_outline(existing, shapes).1
+}
+
+fn walk_existing_outline(
+    existing: &ExistingInstances,
+    shapes: &[ModelShape],
+) -> (String, HashMap<String, usize>) {
     if existing.is_empty() {
-        return String::new();
+        return (String::new(), HashMap::new());
     }
     // class label → shape, so each item's parent relations resolve in the
     // shape's declared (property) order rather than map order.
@@ -381,6 +399,11 @@ fn render_existing_outline(existing: &ExistingInstances, shapes: &[ModelShape]) 
     }
     roots.sort_unstable();
 
+    struct OutlineAccum {
+        lines: Vec<String>,
+        depths: HashMap<String, usize>,
+    }
+
     fn emit<'a>(
         id: &'a str,
         depth: usize,
@@ -388,13 +411,15 @@ fn render_existing_outline(existing: &ExistingInstances, shapes: &[ModelShape]) 
         children: &HashMap<&'a str, Vec<&'a str>>,
         rendered: &mut HashSet<&'a str>,
         on_stack: &mut HashSet<&'a str>,
-        lines: &mut Vec<String>,
+        out: &mut OutlineAccum,
     ) {
         if !rendered.insert(id) {
             return;
         }
         let node = &nodes[id];
-        lines.push(outline_line(depth, &node.class, &node.title, id));
+        out.depths.insert(id.to_string(), depth);
+        out.lines
+            .push(outline_line(depth, &node.class, &node.title, id));
         on_stack.insert(id);
         if let Some(kids) = children.get(id) {
             for kid in kids {
@@ -402,14 +427,17 @@ fn render_existing_outline(existing: &ExistingInstances, shapes: &[ModelShape]) 
                 // cycle — skip it; the member still renders once (as its
                 // own root below if nothing else reached it).
                 if !on_stack.contains(kid) {
-                    emit(kid, depth + 1, nodes, children, rendered, on_stack, lines);
+                    emit(kid, depth + 1, nodes, children, rendered, on_stack, out);
                 }
             }
         }
         on_stack.remove(id);
     }
 
-    let mut lines: Vec<String> = Vec::with_capacity(nodes.len());
+    let mut out = OutlineAccum {
+        lines: Vec::with_capacity(nodes.len()),
+        depths: HashMap::with_capacity(nodes.len()),
+    };
     let mut rendered: HashSet<&str> = HashSet::new();
     let mut on_stack: HashSet<&str> = HashSet::new();
     for id in roots {
@@ -420,7 +448,7 @@ fn render_existing_outline(existing: &ExistingInstances, shapes: &[ModelShape]) 
             &children,
             &mut rendered,
             &mut on_stack,
-            &mut lines,
+            &mut out,
         );
     }
     // Cycle members unreachable from any root (e.g. A→B→A) still get a
@@ -433,10 +461,10 @@ fn render_existing_outline(existing: &ExistingInstances, shapes: &[ModelShape]) 
             &children,
             &mut rendered,
             &mut on_stack,
-            &mut lines,
+            &mut out,
         );
     }
-    lines.join("\n")
+    (out.lines.join("\n"), out.depths)
 }
 
 /// One outline row: `- [Class] title (id)`, indented two spaces per nesting
