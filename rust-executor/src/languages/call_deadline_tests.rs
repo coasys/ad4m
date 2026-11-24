@@ -10,9 +10,13 @@
 //!
 //! The tests do not sleep to let a call start: they wait for the runtime's own record that it
 //! has (`ordered_call_started`, `concurrent_calls_started`, which read the handle's running
-//! marker), so the deadline can be short (`SHORT_DEADLINE`) and a slow machine does not make
-//! the test's own timing the thing that fails. A fresh runtime is answered once before its
-//! deadline is set (`spawn_runtime_with_deadline`): its isolate's start would otherwise count
+//! marker; `calls_waiting`, which reads the queue report: an entry there means the request is
+//! in the runtime's channel), so the deadline can be short (`SHORT_DEADLINE`) and a slow
+//! machine does not make the test's own timing the thing that fails. The handle a test gets
+//! (`spawn_warm_runtime`) keeps the default deadline, for the calls that must start; the call
+//! whose expiry a test asserts goes through `short(&handle)`, a clone of it with the short
+//! deadline (the deadline is the handle's field; the runtime, queue and running marker are
+//! shared). A fresh runtime is answered once first: its isolate's start would otherwise count
 //! against the deadline of the first call.
 use super::language_runtime::{CallKind, MAX_CONCURRENT_CALLS};
 use super::language_runtime_handle::LanguageRuntimeHandle;
@@ -36,17 +40,20 @@ fn spawn_runtime(name: &str) -> (LanguageRuntimeHandle, tempfile::TempDir) {
     (handle, dir)
 }
 
-/// The call deadline of the tests that wait for it: long enough that a call which must start
-/// before it does so on a loaded machine, short enough that waiting it out is cheap.
+/// The call deadline of the calls whose expiry a test asserts. Only those calls get it: a call
+/// that must start is sent on the handle's default deadline, which no scheduling delay
+/// reaches.
 const SHORT_DEADLINE: Duration = Duration::from_millis(200);
 
-/// Spawns a runtime, waits until it answers a call, and gives the handle `deadline`. A call
-/// sent to a runtime still starting its isolate waits for that, and the wait counts against
-/// the deadline.
-async fn spawn_runtime_with_deadline(
-    name: &str,
-    deadline: Duration,
-) -> (LanguageRuntimeHandle, tempfile::TempDir) {
+/// The same runtime, queue and running marker, with `SHORT_DEADLINE` for the calls sent
+/// through it.
+fn short(handle: &LanguageRuntimeHandle) -> LanguageRuntimeHandle {
+    handle.clone().with_call_deadline(SHORT_DEADLINE)
+}
+
+/// Spawns a runtime and waits until it answers a call. A call sent to a runtime still
+/// starting its isolate waits for that, and the wait counts against the deadline.
+async fn spawn_warm_runtime(name: &str) -> (LanguageRuntimeHandle, tempfile::TempDir) {
     let (handle, dir) = spawn_runtime(name);
     within(
         Duration::from_secs(10),
@@ -55,13 +62,7 @@ async fn spawn_runtime_with_deadline(
     )
     .await
     .expect("the runtime answers its first call");
-    (handle.with_call_deadline(deadline), dir)
-}
-
-async fn spawn_runtime_with_short_deadline(
-    name: &str,
-) -> (LanguageRuntimeHandle, tempfile::TempDir) {
-    spawn_runtime_with_deadline(name, SHORT_DEADLINE).await
+    (handle, dir)
 }
 
 /// Polls `ready` every 2 ms until it holds. `what` names it in the failure when it does not
@@ -95,7 +96,8 @@ async fn concurrent_calls_started(handle: &LanguageRuntimeHandle, n: usize) {
 }
 
 /// Waits until the runtime has been sent `n` calls it has not started: they are in its
-/// channel or its queue.
+/// channel or its queue. `send` puts the report's entry and the request in the channel under
+/// one hold of the report's lock, so a depth seen here counts requests already in the channel.
 async fn calls_waiting(handle: &LanguageRuntimeHandle, n: usize) {
     until("the calls to be queued", || {
         handle.queue_snapshot().is_some_and(|q| q.depth >= n)
@@ -296,7 +298,7 @@ async fn signer_of_a_call_whose_caller_has_gone(
 /// The call queued behind it gets an error once the hung call has run for the deadline.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_call_queued_behind_a_hung_call_gets_an_error_at_the_deadline() {
-    let (handle, _dir) = spawn_runtime_with_short_deadline("QmDeadlineHung").await;
+    let (handle, _dir) = spawn_warm_runtime("QmDeadlineHung").await;
 
     let hung = {
         let handle = handle.clone();
@@ -307,7 +309,7 @@ async fn a_call_queued_behind_a_hung_call_gets_an_error_at_the_deadline() {
     let behind = within(
         Duration::from_secs(10),
         "the call queued behind it",
-        async { handle.execute("1 + 1".into()).await },
+        async { short(&handle).execute("1 + 1".into()).await },
     )
     .await;
     let waited = t.elapsed();
@@ -332,7 +334,7 @@ async fn a_call_queued_behind_a_hung_call_gets_an_error_at_the_deadline() {
 /// error and is never run, so its caller can retry without doing the work twice.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_call_still_queued_at_its_deadline_is_not_run() {
-    let (handle, _dir) = spawn_runtime_with_short_deadline("QmDeadlineQueued").await;
+    let (handle, _dir) = spawn_warm_runtime("QmDeadlineQueued").await;
 
     // Holds the isolate's thread for 800 ms: nothing on that thread can interrupt it.
     let busy = {
@@ -351,7 +353,7 @@ async fn a_call_still_queued_at_its_deadline_is_not_run() {
     ordered_call_started(&handle).await;
     let t = Instant::now();
     let queued = within(Duration::from_secs(10), "the queued call", async {
-        handle
+        short(&handle)
             .execute("(globalThis.__queuedRan = true)".into())
             .await
     })
@@ -384,11 +386,14 @@ async fn a_call_still_queued_at_its_deadline_is_not_run() {
 /// bounded, and its caller must get the address.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_call_that_keeps_making_progress_past_the_deadline_returns_its_result() {
-    let (handle, _dir) = spawn_runtime_with_short_deadline("QmDeadlineLong").await;
+    let (handle, _dir) = spawn_warm_runtime("QmDeadlineLong").await;
 
+    // The one call that must start on the short deadline: the test is that a call running
+    // past it is not cut off, so no other deadline can stand in for it. The runtime is idle
+    // and warm, so the call starts at once.
     let t = Instant::now();
     let upload = within(Duration::from_secs(10), "the upload", async {
-        handle
+        short(&handle)
             .execute(format!(
                 r#"(async () => {{
                     for (let i = 0; i < 10; i++) {{ {}; }}
@@ -820,10 +825,12 @@ async fn the_concurrent_call_past_the_bound_waits_for_a_slot() {
     };
     concurrent_calls_started(&handle, MAX_CONCURRENT_CALLS).await;
 
-    // The call past the bound waits, and an ordered call does not wait for it. Once the
-    // runtime has the call in its channel or queue, the ordered call `started` sends is
-    // answered after the runtime has taken the call in and held it back: the runtime takes
-    // requests in send order, and an ordered call is not held up by a waiting concurrent one.
+    // The call past the bound waits, and an ordered call does not wait for it. A depth the
+    // queue report shows means the call is already in the runtime's channel (`send` puts the
+    // entry and the request there under one lock), so the ordered call `started` sends is
+    // behind it: the runtime takes requests in send order, so `started` is answered after the
+    // runtime has taken the call in and held it back, and an ordered call is not held up by a
+    // waiting concurrent one.
     let waiting = gated(MAX_CONCURRENT_CALLS);
     calls_waiting(&handle, 1).await;
     assert_eq!(
@@ -873,7 +880,7 @@ async fn the_concurrent_call_past_the_bound_waits_for_a_slot() {
 /// and is never run.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_read_that_cannot_start_by_the_deadline_gets_an_error_and_is_not_run() {
-    let (handle, _dir) = spawn_runtime_with_short_deadline("QmConcurrentReadDeadline").await;
+    let (handle, _dir) = spawn_warm_runtime("QmConcurrentReadDeadline").await;
 
     let busy = {
         let handle = handle.clone();
@@ -889,7 +896,7 @@ async fn a_read_that_cannot_start_by_the_deadline_gets_an_error_and_is_not_run()
     ordered_call_started(&handle).await;
     let t = Instant::now();
     let read = within(Duration::from_secs(10), "the read", async {
-        concurrent(&handle, "(globalThis.__readRan = true)".into()).await
+        concurrent(&short(&handle), "(globalThis.__readRan = true)".into()).await
     })
     .await;
     let read_after = t.elapsed();
@@ -946,9 +953,12 @@ async fn hold_the_thread(
 /// other has not started, so its caller gets the deadline error, and it never runs.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_read_admitted_beside_a_read_that_holds_the_thread_gets_an_error_at_the_deadline() {
-    // The blocker ends 100 ms into the 300 ms the reads have to start in.
-    let (handle, _dir) =
-        spawn_runtime_with_deadline("QmReadBurstDeadline", Duration::from_millis(300)).await;
+    // The blocker ends 100 ms into the 300 ms the reads have to start in; it is sent on the
+    // default deadline, and only the reads carry the short one.
+    let (handle, _dir) = spawn_warm_runtime("QmReadBurstDeadline").await;
+    let reads = handle
+        .clone()
+        .with_call_deadline(Duration::from_millis(300));
     handle
         .execute("(globalThis.__ran = [], 0)".into())
         .await
@@ -956,7 +966,7 @@ async fn a_read_admitted_beside_a_read_that_holds_the_thread_gets_an_error_at_th
 
     let blocker = hold_the_thread(&handle).await;
     let read = |label: &'static str| {
-        let handle = handle.clone();
+        let handle = reads.clone();
         tokio::spawn(async move {
             let t = Instant::now();
             let result = concurrent(&handle, busy_js(label, 800)).await;
@@ -964,6 +974,14 @@ async fn a_read_admitted_beside_a_read_that_holds_the_thread_gets_an_error_at_th
         })
     };
     let (first, second) = (read("first"), read("second"));
+    // Both are in the runtime's channel, and the blocker still holds the thread: the runtime
+    // admits them in one burst when it ends. A blocker already over means the reads reached
+    // the channel too late for that, and the test would prove plain queued expiry instead.
+    calls_waiting(&handle, 2).await;
+    assert!(
+        handle.running_request().lock().unwrap().ordered.is_some(),
+        "the blocker ended before both reads were sent: the reads were not admitted together"
+    );
     let first = within(Duration::from_secs(10), "the first read", first)
         .await
         .unwrap();
@@ -1029,12 +1047,23 @@ async fn a_read_whose_caller_left_before_it_started_is_not_run() {
         handle.queue_snapshot().is_some() || !running.lock().unwrap().concurrent.is_empty()
     })
     .await;
+    let holder_started = || !running.lock().unwrap().concurrent.is_empty();
     let left = {
         let handle = handle.clone();
         tokio::spawn(async move {
             concurrent(&handle, "(globalThis.__ran.push(\"left\"), 0)".into()).await
         })
     };
+    // The read itself must be in the channel before its caller gives up, or the abort could
+    // land before the task first runs and no request would ever be sent. Two requests are
+    // waiting (the holder and the read), or the holder has started and one is. The holder's
+    // state is read first: a holder seen started has left the report by the depth read.
+    until("the read to be sent", || {
+        let holder_running = holder_started();
+        let depth = handle.queue_snapshot().map_or(0, |q| q.depth);
+        depth >= 2 || (holder_running && depth >= 1)
+    })
+    .await;
     // Its caller gives up once the holder runs: after the admission, before the read can start.
     concurrent_calls_started(&handle, 1).await;
     left.abort();
