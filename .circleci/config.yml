@@ -725,6 +725,11 @@ jobs:
       - setup_env
       - restore_rust_compile_inputs
       - run:
+          # The runtime tests that .expect() the bundle fail without it (the bundle is not
+          # tracked); same step as rust-tests.
+          name: Build test WASM language
+          command: bash tests/rust-languages/build.sh && test -f tests/rust-languages/test-wasm-language/build/bundle.js
+      - run:
           name: Install cargo-nextest 0.9.152
           command: |
             set -euo pipefail
