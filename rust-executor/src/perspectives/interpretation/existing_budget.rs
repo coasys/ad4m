@@ -303,12 +303,17 @@ fn outline_line_tokens(depth: usize, class: &str, title: &str, id: &str) -> usiz
 /// - an id in `full_ids` stays whole. These are the subjects of the active
 ///   flows, which the prompt names by full id under `active_flows`, so the
 ///   model can tie a flow to its row.
-/// - a handle that is also a real id in `existing` is not used, so every
-///   handle in the answer means one row.
+/// - a handle that is also a real id in `existing`, or that equals any
+///   parent target (including a target with no row), is not used. A dangling
+///   target that spelled a handle would otherwise nest under the unrelated
+///   row that took that handle, and a handle in the answer must mean one row.
 ///
-/// `shapes` is how the outline nests (the same walk as the prompt). After
-/// the fill, a parent target that names a selected row is rewritten to that
-/// row's shown id — the handle map is complete then, including when the
+/// `shapes` is how the outline nests (the same walk as the prompt). A
+/// candidate is priced with the shown id of a parent already selected, so a
+/// long parent id does not reject a child that fits once that parent is a
+/// handle. A parent selected later is still a full id at that point. After
+/// the fill, every parent target that names a selected row is rewritten to
+/// that row's shown id — the handle map is complete then, including when the
 /// child was selected first. A parent the budget left out keeps its full
 /// id. The outline is then charged at the depth it will render, and the
 /// lowest-priority rows are dropped until the block fits. Flat rows stay
@@ -333,6 +338,15 @@ pub(crate) fn select_existing(
     };
     let mut taken: HashSet<&String> = HashSet::new();
     let mut next_handle = 1usize;
+    // Parent targets are reserved even when they are not rows. `P1` as a
+    // dangling target must not become some other row's handle.
+    let reserved_targets: HashSet<&str> = existing
+        .values()
+        .flat_map(|rows| {
+            rows.iter()
+                .flat_map(|r| r.parents.values().map(String::as_str))
+        })
+        .collect();
     for stage in fill_stages(existing, base_prefix, scores) {
         let free = budget_tokens - out.tokens;
         let cap = (free as f64 * stage.share) as usize;
@@ -347,18 +361,34 @@ pub(crate) fn select_existing(
             }
             let handle = compact == Compact::Yes && !full_ids.contains(id);
             let shown_id = if handle {
-                while existing.contains_key(&format!("P{next_handle}")) {
+                loop {
+                    let candidate = format!("P{next_handle}");
+                    if !existing.contains_key(&candidate)
+                        && !reserved_targets.contains(candidate.as_str())
+                    {
+                        break candidate;
+                    }
                     next_handle += 1;
                 }
-                format!("P{next_handle}")
             } else {
                 id.clone()
             };
+            // Price a parent that is already in the view by its shown id.
+            // Reconciliation still rewrites parents selected later, and
+            // charges the indent; it cannot add a row the fill rejected.
             let shown_rows: Vec<InstanceContext> = existing[id]
                 .iter()
-                .map(|r| InstanceContext {
-                    id: shown_id.clone(),
-                    ..r.clone()
+                .map(|r| {
+                    let mut row = InstanceContext {
+                        id: shown_id.clone(),
+                        ..r.clone()
+                    };
+                    for target in row.parents.values_mut() {
+                        if let Some(shown) = shown_for_selected(&out, target) {
+                            *target = shown;
+                        }
+                    }
+                    row
                 })
                 .collect();
             // Each row costs its JSON plus the comma between rows, and the
@@ -389,12 +419,27 @@ pub(crate) fn select_existing(
         }
         out.stages.push((stage.name, rows_taken));
     }
-    // Parents were copied as full ids while handles were still being
-    // assigned. Point a parent at the shown id of a selected row, charge
-    // each outline line at the depth it will render, and drop the
+    // The fill priced parents that were already selected. Rewrite every
+    // parent from the original rows now that the handle map is complete
+    // (a child may have been selected before its parent), charge each
+    // outline line at the depth it will render, and drop the
     // lowest-priority rows until that fits.
     reconcile_shown_outline(&mut out, existing, shapes, budget_tokens);
     out
+}
+
+/// Shown id of a row already selected into `out`. A compact row is stored
+/// under its handle; a row kept whole (not compact, or a flow subject) is
+/// stored under its own id.
+fn shown_for_selected(out: &PromptExisting, full_id: &str) -> Option<String> {
+    if out.shown.contains_key(full_id) {
+        return Some(full_id.to_string());
+    }
+    out.handles
+        .to_id
+        .iter()
+        .find(|(_, full)| full.as_str() == full_id)
+        .map(|(shown, _)| shown.clone())
 }
 
 /// Full id → shown id for the rows in `out`. A compact handle maps back to
@@ -1314,6 +1359,120 @@ mod tests {
             "an unselected parent stays the full id, outside the shown handles"
         );
         assert_eq!(prompt_outline(&shapes, &view.shown), "- [Note] Note 1 (P1)");
+    }
+
+    /// A child whose parent is already selected is priced with that parent's
+    /// shown handle. Pricing the full id rejects a note that fits, including
+    /// the extra indent of nesting under the chapter, and reconciliation only
+    /// drops rows, so the note never comes back.
+    #[test]
+    fn a_child_priced_with_a_selected_parents_handle_still_fits() {
+        let shapes = vec![
+            shape_from_sdna("Chapter", AA_PARENT_SDNA),
+            shape_from_sdna("Note", AA_CHILD_SDNA),
+        ];
+        let parent_id = format!("ns://chapter/{}", "x".repeat(200));
+        let child_id = "ns://note/1";
+        // The chapter is newer, so the fill selects it before the note and
+        // its handle exists while the note is being priced.
+        let chapter = row(&parent_id, "Chapter", "A", 200);
+        let mut note = row(child_id, "Note", "B", 100);
+        note.parents.insert("partOf".into(), parent_id.clone());
+
+        let mut chapter_shown = chapter.clone();
+        chapter_shown.id = "P1".into();
+        let chapter_cost = estimate_token_count(&existing_entry_json(&chapter_shown).to_string())
+            + 1
+            + outline_line_tokens(0, "Chapter", "A", "P1");
+
+        let mut note_short = note.clone();
+        note_short.id = "P2".into();
+        note_short.parents.insert("partOf".into(), "P1".into());
+        let note_at_depth = estimate_token_count(&existing_entry_json(&note_short).to_string())
+            + 1
+            + outline_line_tokens(1, "Note", "B", "P2");
+
+        let mut note_long = note.clone();
+        note_long.id = "P2".into();
+        let note_with_full_parent =
+            estimate_token_count(&existing_entry_json(&note_long).to_string())
+                + 1
+                + outline_line_tokens(0, "Note", "B", "P2");
+        assert!(
+            note_with_full_parent > note_at_depth,
+            "the full parent id must be what pushes the note over the budget"
+        );
+
+        let budget = chapter_cost + note_at_depth;
+        let existing = existing_of(vec![chapter, note]);
+        let view = select_existing(
+            &existing,
+            "",
+            budget,
+            None,
+            Compact::Yes,
+            &HashSet::new(),
+            &shapes,
+        );
+        assert_eq!(
+            view.order,
+            vec![parent_id.clone(), child_id.to_string()],
+            "the note fits once its parent is the handle P1"
+        );
+        assert_eq!(
+            view.shown["P2"][0]
+                .parents
+                .get("partOf")
+                .map(String::as_str),
+            Some("P1")
+        );
+        assert!(view.tokens <= budget, "{} > {budget}", view.tokens);
+        assert_eq!(
+            prompt_outline(&shapes, &view.shown),
+            "- [Chapter] A (P1)\n  - [Note] B (P2)"
+        );
+    }
+
+    /// A parent target that is not a row can still spell a compact handle.
+    /// Allocating that handle to an unrelated row makes the outline nest the
+    /// note under it. The target stays the original string, and the handle
+    /// is skipped.
+    #[test]
+    fn a_dangling_parent_target_is_not_reused_as_a_compact_handle() {
+        let shapes = vec![
+            shape_from_sdna("Chapter", AA_PARENT_SDNA),
+            shape_from_sdna("Note", AA_CHILD_SDNA),
+        ];
+        let chapter_id = "ns://chapter/1";
+        let note_id = "ns://note/1";
+        let chapter = row(chapter_id, "Chapter", "A", 200);
+        let mut note = row(note_id, "Note", "B", 100);
+        note.parents.insert("partOf".into(), "P1".into());
+        let existing = existing_of(vec![chapter, note]);
+        let view = select_existing(
+            &existing,
+            "",
+            usize::MAX,
+            None,
+            Compact::Yes,
+            &HashSet::new(),
+            &shapes,
+        );
+        assert_eq!(view.handles.id_of("P1"), None, "P1 is a dangling target");
+        assert_eq!(view.handles.id_of("P2"), Some(chapter_id));
+        assert_eq!(view.handles.id_of("P3"), Some(note_id));
+        assert_eq!(
+            view.shown["P3"][0]
+                .parents
+                .get("partOf")
+                .map(String::as_str),
+            Some("P1"),
+            "the target is not a selected row, so it stays P1"
+        );
+        assert_eq!(
+            prompt_outline(&shapes, &view.shown),
+            "- [Chapter] A (P2)\n- [Note] B (P3)"
+        );
     }
 
     /// Depth-0 outline accounting under-counts a chain: the renderer indents
