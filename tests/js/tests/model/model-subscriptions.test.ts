@@ -190,8 +190,7 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
       callCount++;
     });
 
-    // Wait for the immediate callback
-    await new Promise((r) => setTimeout(r, 400));
+    // The initial result is the return value above; the callback only sees later updates.
     const countAfterInitial = callCount;
     builder.dispose();
 
@@ -329,9 +328,6 @@ describe("Ad4mModel — Subscriptions (SPARQL)", function () {
     const initialPage = await builder.paginateSubscribe(10, 1, (page) => pages.push(page));
     expect(initialPage.results).to.have.length(0);
     expect(initialPage.totalCount).to.equal(0);
-
-    // Give the subscription a brief moment to finish wiring up before the batch commit.
-    await new Promise((r) => setTimeout(r, 500));
 
     const post = await TestPost.create(
       perspective,

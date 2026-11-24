@@ -453,9 +453,8 @@ describe("Authentication integration tests", () => {
         it("requesting a capability toke should trigger a CapabilityRequested exception", async () => {
             let excpetions: EventMap['exception-occurred']['exception'][] = [];
             adminAd4mClient!.on('exception-occurred', ({ exception }) => { excpetions.push(exception) })
-            // Subscription-init delay: the subscription registered with the
-            // callback does not wait for the server, and exceptions are not redelivered.
-            await sleep(1000);
+            // Exceptions are not redelivered: wait until the executor applied the watch.
+            await adminAd4mClient!.watchApplied();
 
             let requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability({
                 appName: "demo-app",

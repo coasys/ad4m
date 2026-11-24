@@ -900,6 +900,27 @@ describe('PerspectiveClient', () => {
         }
     });
 
+    test('Ad4mClient.watchApplied() settles only after the events.watch reply', async () => {
+        const watchReply = MOCK_RESPONSES['events.watch'];
+        let acceptWatch!: (ok: boolean) => void;
+        MOCK_RESPONSES['events.watch'] = () => new Promise<boolean>(r => { acceptWatch = r; });
+        const client = newClient();
+        try {
+            client.on('link-added', () => {}, { perspective: 'A' });
+            let settled = false;
+            const waiting = client.watchApplied().then(() => { settled = true; });
+            await new Promise(r => setTimeout(r, 20));
+            expect(lastOf(MockWebSocket.instances).rpc.map(c => c.type)).toEqual(['events.watch']);
+            expect(settled).toBe(false);
+
+            acceptWatch(true);
+            await waiting;
+            expect(settled).toBe(true);
+        } finally {
+            MOCK_RESPONSES['events.watch'] = watchReply;
+        }
+    });
+
     test('a failed events.watch is sent again, a bounded number of times', async () => {
         jest.useFakeTimers();
         const watchReply = MOCK_RESPONSES['events.watch'];

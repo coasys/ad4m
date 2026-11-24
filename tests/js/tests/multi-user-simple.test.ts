@@ -2515,8 +2515,8 @@ describe("Multi-User Simple integration tests", () => {
     // topic's events to a WebSocket in publish order, so once user 1 receives
     // its own barrier event (published after user 2's action), a leaked user 2
     // event would already have arrived. User 2's own event is the barrier for
-    // the reverse direction. The subscription-init sleep stays: subscribe*()
-    // does not wait for the server, and there is no state to poll for it.
+    // the reverse direction. `watchApplied()` waits for the executor to apply
+    // each client's `on()` watch before the test triggers an event.
     describe("Perspective Subscriptions", () => {
         after(cleanupAllMainExecutorPerspectives);
 
@@ -2550,8 +2550,7 @@ describe("Multi-User Simple integration tests", () => {
                 user2Events.push(perspective);
             });
 
-            // Subscription-init delay (see comment above this describe)
-            await sleep(1000);
+            await Promise.all([client1.watchApplied(), client2.watchApplied()]);
 
             // User 1 creates a perspective
             console.log("\nUser 1 creating perspective...");
@@ -2617,8 +2616,7 @@ describe("Multi-User Simple integration tests", () => {
                 user2UpdateEvents.push(perspective);
             });
 
-            // Subscription-init delay (see comment above this describe)
-            await sleep(1000);
+            await Promise.all([client1.watchApplied(), client2.watchApplied()]);
 
             // User 1 updates their perspective metadata (name)
             console.log("\nUser 1 updating their perspective name...");
@@ -2686,8 +2684,7 @@ describe("Multi-User Simple integration tests", () => {
                 user2LinkEvents.push(link);
             }, { perspective: user2Perspective.uuid });
 
-            // Subscription-init delay (see comment above this describe)
-            await sleep(1000);
+            await Promise.all([client1.watchApplied(), client2.watchApplied()]);
 
             // User 1 adds a link to their perspective
             console.log("\nUser 1 adding link to their perspective...");
@@ -2782,8 +2779,7 @@ describe("Multi-User Simple integration tests", () => {
                 user2RemoveEvents.push(uuid);
             });
 
-            // Subscription-init delay (see comment above this describe)
-            await sleep(1000);
+            await Promise.all([client1.watchApplied(), client2.watchApplied()]);
 
             // User 1 removes their perspective
             console.log("\nUser 1 removing their perspective...");
