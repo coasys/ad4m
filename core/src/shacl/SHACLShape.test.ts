@@ -551,8 +551,25 @@ describe('SHACLShape', () => {
     });
 
     it('rejects an invalid auto_accept in fromJSON', () => {
-      const shape = { ...new SHACLShape('test://Model').toJSON(), auto_accept: 'sometimes' };
+      // The fixture is not a valid AutoAccept. Cast only the argument so the
+      // runtime value stays "sometimes" and fromJSON still throws.
+      const shape = {
+        ...new SHACLShape('test://Model').toJSON(),
+        auto_accept: 'sometimes',
+      } as unknown as Parameters<typeof SHACLShape.fromJSON>[0];
       expect(() => SHACLShape.fromJSON(shape)).toThrow(/auto_accept/);
+    });
+
+    it('leaves autoAccept unset when fromLinks sees two different rules', () => {
+      const original = new SHACLShape('test://Model');
+      original.autoAccept = 'always';
+      const links = original.toLinks();
+      links.push({
+        source: 'test://ModelShape',
+        predicate: 'ad4m://auto_accept',
+        target: 'literal:string:never',
+      });
+      expect(SHACLShape.fromLinks(links, 'test://ModelShape').autoAccept).toBeUndefined();
     });
 
     it('preserves constructor and destructor actions', () => {

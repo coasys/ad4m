@@ -845,9 +845,23 @@ export class SHACLShape {
     shape.constructor_actions = json(shapeUri, "ad4m://constructor");
     shape.destructor_actions = json(shapeUri, "ad4m://destructor");
     shape.interpretationHint = str(shapeUri, "ad4m://interpretation_hint");
-    const autoAccept = str(shapeUri, "ad4m://auto_accept");
-    if (['always', 'when_placed', 'never'].includes(autoAccept!))
-      shape.autoAccept = autoAccept as SHACLShape['autoAccept'];
+    // The executor's `single_auto_accept_rule` keeps a rule only when the
+    // stored links name exactly one of the three values. The first link
+    // winning would turn a conflict (`always` and `never`) into `always`
+    // on a round-trip, and registering that result would enable acceptance.
+    const autoAcceptValues = Array.from(new Set(
+      links
+        .filter(l => l.source === shapeUri && l.predicate === 'ad4m://auto_accept')
+        .map(l => l.target.replace(/^literal:string:/, ''))
+    ));
+    if (
+      autoAcceptValues.length === 1 &&
+      (autoAcceptValues[0] === 'always' ||
+        autoAcceptValues[0] === 'when_placed' ||
+        autoAcceptValues[0] === 'never')
+    ) {
+      shape.autoAccept = autoAcceptValues[0];
+    }
     if (bool(shapeUri, "ad4m://abstract")) shape.isAbstract = true;
 
     for (const propLink of links.filter(l => l.source === shapeUri && l.predicate === "sh://property")) {
