@@ -7,7 +7,9 @@
   "files": [
     "src"
   ],
-  "scripts": {},
+  "scripts": {
+    "test": "vitest run"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
@@ -17,6 +19,10 @@
   },
   "peerDependencies": {
     "vue": "^3.2.47"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0",
+    "vue": "^3.4.19"
   },
   "repository": {
     "type": "git",

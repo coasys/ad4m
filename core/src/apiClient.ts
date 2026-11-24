@@ -200,7 +200,9 @@ export class ApiClient {
      * or a `lagged` marker (the executor dropped events for this socket) marks every entry
      * stale. Two clients share nothing.
      */
-    readonly mirror = new Mirror()
+    readonly mirror = new Mirror(() => {
+        try { return new URL(this.baseUrl).origin } catch { return this.baseUrl }
+    })
 
     getBaseUrl(): string { return this.baseUrl }
     getToken(): string | undefined { return this.token }

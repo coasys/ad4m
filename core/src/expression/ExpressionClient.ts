@@ -2,8 +2,7 @@ import { ApiClient, RpcError } from "../apiClient";
 import { InteractionCall, InteractionMeta } from "../language/Language";
 import { ExpressionRendered } from "./Expression";
 import { Literal } from "../Literal";
-import { createPersistentCache } from "../cache/PersistentCache";
-import { KeyedCache, StoredEntry } from "../cache/KeyedCache";
+import type { KeyedCache, StoredEntry } from "../cache/KeyedCache";
 
 /** Most URLs the executor takes in one `expression.getMany` call. */
 const MAX_URLS_PER_CALL = 200;
@@ -15,38 +14,38 @@ export class ExpressionClient {
     static MAX_MEM_ENTRIES = 200;
     /** Maximum total size (in bytes of JSON) of the expressions kept in memory. */
     static MAX_MEM_BYTES = 5 * 1024 * 1024; // 5 MB
-    /**
-     * TTL of every cached expression, in memory and in the persistent cache
-     * (ms). A language may change what a URL returns, and no event tells the
-     * client, so a cached expression expires instead of staying stale.
-     */
-    static EXPRESSION_TTL_MS = 5 * 60_000; // 5 minutes
-
-    // A `get` miss is its own `expression.get`, so it waits for no slower
-    // expression and has its own call timeout. The misses of the `getMany`
-    // calls made in one tick go out in `expression.getMany` calls of at most
-    // MAX_URLS_PER_CALL URLs, which answer per URL what `expression.get` would.
-    #expressions: KeyedCache<ExpressionRendered>;
 
     constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token)
-        this.#expressions = new KeyedCache<ExpressionRendered>({
-            load: (url) => this.#apiClient.call('expression.get', { url }),
-            loadMany: async (urls) => (await this.#apiClient.call('expression.getMany', { urls })).map(entry =>
-                entry && 'code' in entry ? new RpcError(entry.code, entry.message) : entry as ExpressionRendered | null),
-            maxBatch: MAX_URLS_PER_CALL,
-            persistent: createPersistentCache<StoredEntry<ExpressionRendered>>('ad4m-expression-cache', 'expressions'),
-            maxAgeMs: () => ExpressionClient.EXPRESSION_TTL_MS,
-            persistentMaxAgeMs: () => ExpressionClient.EXPRESSION_TTL_MS,
-            limits: () => ({ entries: ExpressionClient.MAX_MEM_ENTRIES, bytes: ExpressionClient.MAX_MEM_BYTES }),
+    }
+
+    /**
+     * The expressions of this client's mirror: an `immutable` cache of `expression.get`,
+     * which a reconnect leaves alone. A `get` miss is its own `expression.get`, so it waits
+     * for no slower expression and has its own call timeout. The misses of the `getMany`
+     * calls made in one tick go out in `expression.getMany` calls of at most
+     * MAX_URLS_PER_CALL URLs, which answer per URL what `expression.get` would.
+     */
+    #expressions(): KeyedCache<ExpressionRendered> {
+        return this.#apiClient.mirror.cache<ExpressionRendered>({
+            method: 'expression.get',
+            kind: 'immutable',
+            options: () => ({
+                load: (url) => this.#apiClient.call('expression.get', { url }),
+                loadMany: async (urls) => (await this.#apiClient.call('expression.getMany', { urls })).map(entry =>
+                    entry && 'code' in entry ? new RpcError(entry.code, entry.message) : entry as ExpressionRendered | null),
+                maxBatch: MAX_URLS_PER_CALL,
+                persistent: this.#apiClient.mirror.persistent<StoredEntry<ExpressionRendered>>('ad4m-expression-cache', 'expressions'),
+                limits: () => ({ entries: ExpressionClient.MAX_MEM_ENTRIES, bytes: ExpressionClient.MAX_MEM_BYTES }),
+            }),
         });
     }
 
-    /** The expression at `url`; `alwaysGet` skips the literal fast path and the cache. */
+    /** The expression at `url`; `alwaysGet` skips the literal fast path and the cache (and keeps the answer). */
     async get(url: string, alwaysGet: boolean = false): Promise<ExpressionRendered> {
         if (alwaysGet) {
             const result = await this.#apiClient.call('expression.get', { url });
-            if (result) this.#expressions.set(url, result);
+            if (result) this.#expressions().set(url, result);
             return result;
         }
         try {
@@ -57,7 +56,7 @@ export class ExpressionClient {
                 }
             }
         } catch(e) {}
-        return this.#expressions.get(url);
+        return this.#expressions().get(url);
     }
 
     /**
@@ -65,14 +64,14 @@ export class ExpressionClient {
      * out in calls of at most 200 URLs. Rejects with the `RpcError` `get` gives when a URL's read fails.
      */
     async getMany(urls: string[]): Promise<ExpressionRendered[]> {
-        return this.#expressions.getMany(urls);
+        return this.#expressions().getMany(urls);
     }
 
     /**
      * Clear both the memory and the persistent expression caches.
      */
     clearCache(): void {
-        this.#expressions.clear(true);
+        this.#expressions().clear(true);
     }
 
     async getRaw(url: string): Promise<string> {
@@ -91,7 +90,7 @@ export class ExpressionClient {
     async interact(url: string, interactionCall: InteractionCall): Promise<string|null> {
         const result = await this.#apiClient.call('expression.interact', { url, interactionCall });
         // Interactions can mutate the expression — invalidate cache so next get() fetches fresh
-        this.#expressions.delete(url);
+        this.#expressions().delete(url);
         return result;
     }
 }

@@ -3,7 +3,6 @@ export * from "./Address";
 export * from "./agent/Agent";
 export * from "./agent/AgentStatus";
 export * from "./agent/AgentKind";
-export * from "./cache/PersistentCache";
 export * from "./Exception";
 export * from "./expression/Expression";
 export * from "./expression/ExpressionRef";
@@ -59,4 +58,4 @@ export { fileToDataUri } from './shacl/index'
 export * from "./generated/api";
 export { RpcError, LONG_TIMEOUT_MS } from "./apiClient";
 export type { CallOptions, EventFilter } from "./apiClient";
-export type { Live, Snapshot, State as MirrorState, Unsubscribe } from "./mirror/Mirror";
+export type { Live, Snapshot as MirrorSnapshot, State as MirrorState, Unsubscribe } from "./mirror/Mirror";

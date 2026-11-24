@@ -14,8 +14,7 @@ import type { Live } from "../mirror/Mirror";
 import { AGENT_KIND } from "./AgentKind";
 import { LinkMutations, LinkExpression, LinkInput, linkEqual } from "../links/Links";
 import { VerificationRequestResult } from "../runtime/RuntimeTypes";
-import { createPersistentCache } from "../cache/PersistentCache";
-import { KeyedCache, StoredEntry } from "../cache/KeyedCache";
+import type { KeyedCache, StoredEntry } from "../cache/KeyedCache";
 import type { Agent as AgentData } from "../generated/api/Agent";
 import type { AgentSignature } from "../generated/api/AgentSignature";
 import type { AgentWithIdentity } from "../generated/api/AgentWithIdentity";
@@ -37,29 +36,55 @@ const MAX_DIDS_PER_CALL = 200;
 export class AgentClient {
   #apiClient: ApiClient;
 
-  // byDID cache: concurrent misses go out in one `agent.byDIDs` call.
-  #agents: KeyedCache<Agent>;
   /**
-   * TTL of every cached profile, the own one too, in memory and in the
-   * persistent cache (ms). `agent-updated` only comes from this executor, so
-   * a profile changed through another executor of the same agent shows up
-   * when the entry expires.
+   * How long another agent's profile stays fresh (ms). `agent-updated` refreshes it
+   * early, but only comes from this executor, so a profile changed through another
+   * executor shows up when the entry expires.
    */
   static REMOTE_AGENT_TTL_MS = 5 * 60_000; // 5 minutes
 
   constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
     this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token);
-    this.#agents = new KeyedCache<Agent>({
-      loadMany: (dids) => this.#loadAgents(dids),
-      maxBatch: MAX_DIDS_PER_CALL,
-      persistent: createPersistentCache<StoredEntry<Agent>>('ad4m-agent-cache', 'agents'),
-      maxAgeMs: () => AgentClient.REMOTE_AGENT_TTL_MS,
-      persistentMaxAgeMs: () => AgentClient.REMOTE_AGENT_TTL_MS,
+    this.#apiClient.mirror.actingDid = () => this.did();
+  }
+
+  /**
+   * The agent itself. One value is kept per client and followed: `agent-updated` for the
+   * own DID and the results of {@link updatePublicPerspective} and
+   * {@link updateDirectMessageLanguage} replace it. The returned object is shared: do not change it.
+   */
+  async me(): Promise<Agent> {
+    return this.#meEntry().read();
+  }
+
+  /** The one `agent.get` entry of this client's mirror. */
+  #meEntry() {
+    this.#listen();
+    return this.#apiClient.mirror.entry<Agent>({
+      scope: 'agent',
+      kind: 'pushed',
+      method: 'agent.get',
+      params: {},
+      load: async () => toAgent(await this.#apiClient.call('agent.get', {})) as Agent,
     });
   }
 
-  async me(): Promise<Agent> {
-    return toAgent(await this.#apiClient.call('agent.get', {}));
+  /**
+   * The profiles of other agents: the mirror's `declared` cache of `agent.byDIDs`. Concurrent
+   * misses go out in one call; stored profiles are shown stale and read once per session.
+   */
+  #agents(): KeyedCache<Agent> {
+    return this.#apiClient.mirror.cache<Agent>({
+      method: 'agent.byDIDs',
+      kind: 'declared',
+      options: () => ({
+        loadMany: (dids) => this.#loadAgents(dids),
+        maxBatch: MAX_DIDS_PER_CALL,
+        persistent: this.#apiClient.mirror.persistent<StoredEntry<Agent>>('ad4m-agent-cache', 'agents'),
+        persistentStale: true,
+        maxAgeMs: () => AgentClient.REMOTE_AGENT_TTL_MS,
+      }),
+    });
   }
 
   /**
@@ -86,6 +111,13 @@ export class AgentClient {
   readonly live = {
     /** The agent's status; {@link status} reads it. */
     status: (): Live<AgentStatus> => this.#statusEntry(),
+    /** The agent itself; {@link me} reads it. */
+    me: (): Live<Agent> => this.#meEntry(),
+    /** The agent with this DID, `null` while unknown; {@link byDID} reads it. */
+    byDID: (did: string): Live<Agent | null> => {
+      this.#listen();
+      return this.#agents().live(did);
+    },
   };
 
   /** The one `agent.status` entry of this client's mirror; it hears `agent-status-changed`. */
@@ -141,7 +173,7 @@ export class AgentClient {
   async byDID(did: string): Promise<Agent> {
     // agent-updated events refresh cached entries before their TTL runs out.
     this.#listen();
-    return this.#agents.get(did);
+    return this.#agents().get(did) as Promise<Agent>;
   }
 
   /**
@@ -160,25 +192,17 @@ export class AgentClient {
     }
   }
 
-  #cacheAgent(agent: Agent): void {
-    if (!agent.did) return;
-    this.#agents.set(agent.did, agent);
+  /** Keeps an agent the executor just gave: its profile entry, and the own entry when it is the own agent. */
+  #cacheAgent(agent: Agent | null, own = false): void {
+    if (!agent?.did) return;
+    this.#agents().set(agent.did, agent);
     this.#listen();
+    if (own || agent.did === this.#ownDid()) this.#meEntry().push(agent);
   }
 
-  /**
-   * Invalidate a specific DID's cache entry in both L1 and L2.
-   */
-  invalidateByDid(did: string): void {
-    this.#agents.delete(did);
-  }
-
-  /**
-   * Clear the entire L1 (memory) byDID cache.
-   * L2 (IndexedDB) is preserved — agent data remains valid across sessions.
-   */
-  clearByDidCache(): void {
-    this.#agents.clear();
+  /** The own DID as far as the mirror knows it, without a request. */
+  #ownDid(): string | undefined {
+    return this.#statusEntry().getSnapshot().value?.did || this.#meEntry().getSnapshot().value?.did || undefined;
   }
 
   async updatePublicPerspective(perspective: PerspectiveInput): Promise<Agent> {
@@ -193,9 +217,8 @@ export class AgentClient {
     };
     const agent = toAgent(await this.#apiClient.call('agent.updateProfile', { publicPerspective }));
 
-    // Immediately update byDID cache so subsequent byDID() calls
-    // return fresh data without waiting for the agent-updated event
-    this.#cacheAgent(agent);
+    // Read-your-writes: me() and byDID() answer with the result without waiting for the agent-updated event.
+    this.#cacheAgent(agent, true);
 
     return agent;
   }
@@ -239,9 +262,7 @@ export class AgentClient {
   async updateDirectMessageLanguage(directMessageLanguage: string): Promise<Agent> {
     const agent = toAgent(await this.#apiClient.call('agent.updateProfile', { dmLanguage: directMessageLanguage }));
 
-    // Immediately update byDID cache so subsequent byDID() calls
-    // return fresh data without waiting for the agent-updated event
-    this.#cacheAgent(agent);
+    this.#cacheAgent(agent, true);
 
     return agent;
   }

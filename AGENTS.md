@@ -111,6 +111,26 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
   kept) and `sfu.status` (`fixed`: `client.runtime.sfuStatus()`; a failure
   is not kept). `NeighbourhoodProxy.createSession` reads both together;
   `PerspectiveClient.getNeighbourhoodProxy(uuid)` returns one proxy per uuid.
+- Profiles and expressions. The own agent (`agent.get`, read through
+  `client.agent.me()` / `client.agent.live.me()`) is `pushed`: `agent-updated`
+  for the own DID and the result of `updatePublicPerspective` /
+  `updateDirectMessageLanguage` (read-your-writes) replace it. Other agents
+  (`agent.byDIDs`, `client.agent.byDID(did)` / `live.byDID(did)`) are
+  `declared`: fresh for `AgentClient.REMOTE_AGENT_TTL_MS` (5 min), replaced at
+  once by `agent-updated`, stale after a reconnect or `lagged`. Expressions
+  (`expression.get`) are `immutable`: LRU-bounded (200 entries, 5 MB), kept
+  through a reconnect and `lagged`, dropped only by `clearCache()` or an
+  `interact`.
+- `immutable` and `declared` values live in a `KeyedCache` the mirror owns, one
+  per RPC name (`mirror.cache({method, kind, options})`; the first call's
+  options win), so two clients share nothing and its tick batching is the
+  batching (50 `byDID` misses in one tick = one `agent.byDIDs`; a failed batch
+  retries per key; a failure is never kept). `mirror.persistent(db, store)` is
+  the IndexedDB tier, keyed `origin|acting DID|key` (nothing is stored while the
+  DID is unknown; Node has none). A value loaded from it is shown `stale` and
+  read again once per session. `markAllStale()` leaves `immutable` caches alone.
+- The hooks (`ad4m-hooks` react and vue `useMe`, `useAgent`) subscribe to these
+  `Live` views; they keep no state of their own.
 - A test that reuses one client across tests must not expect a fresh read:
   the mirror keeps the last status. Use a new client.
 

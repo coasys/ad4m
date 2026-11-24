@@ -32,7 +32,7 @@ The hook returns:
 
 ## useAgent
 
-Fetches and caches agent data by DID, with support for profile formatting.
+Reads an agent by DID from the client's data mirror, with support for profile formatting. The agent is fresh for 5 minutes, an `agent-updated` event refreshes it at once and re-renders, and components that read one DID with one client share one entry. There is no `reload`: the entry reloads itself when it goes stale.
 
 ```typescript
 import { useAgent } from '@coasys/ad4m-react-hooks';
@@ -62,7 +62,7 @@ function AgentProfile({ agentClient, did }) {
 
 ## useMe
 
-Provides access to the current agent's data and status. It takes the `Ad4mClient` and follows `agent-updated` and `agent-status-changed` events.
+Provides access to the current agent's data and status. It takes the `Ad4mClient` and reads the agent and its status from the client's data mirror: `agent-updated` and `agent-status-changed` events replace them and re-render, and a reconnect reads them again. Two clients share nothing. `status` and `me` are `undefined` until the first read ends.
 
 ```typescript
 import { useMe } from '@coasys/ad4m-react-hooks';
@@ -80,7 +80,7 @@ function MyProfile({ client }) {
     <div>
       <h2>{profile?.name}</h2>
       <p>{profile?.bio}</p>
-      <p>Status: {status.isUnlocked ? 'Unlocked' : 'Locked'}</p>
+      <p>Status: {status?.isUnlocked ? 'Unlocked' : 'Locked'}</p>
     </div>
   );
 }

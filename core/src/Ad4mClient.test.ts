@@ -462,12 +462,14 @@ afterAll(() => {
 
 afterEach(closeClients);
 
-beforeEach(() => {
+beforeEach(async () => {
+    // A new client has a new mirror: no value of an earlier test is read. Its status entry
+    // is read first, so the client has watched its events before a test looks at the last call.
+    ad4m.close();
+    ad4m = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
+    await ad4m.agent.status();
     lastRpcCall = null;
     MockWebSocket.instances = [];
-    // Clear caches to prevent cross-test interference
-    ad4m.agent.clearByDidCache();
-    ad4m.expression.clearCache();
 });
 
 // ===================== AGENT TESTS =====================

@@ -1,99 +1,34 @@
-import { useState, useCallback, useEffect } from "react";
-import { getCache, setCache, subscribe, unsubscribe } from "@coasys/hooks-helpers";
+import { useMemo } from "react";
 import { Ad4mClient, Agent, AgentStatus, LinkExpression } from "@coasys/ad4m";
-
-type MeData = {
-  agent?: Agent;
-  status?: AgentStatus;
-};
+import { useLive } from "./useLive";
 
 type MyInfo<T> = {
   me?: Agent;
   status?: AgentStatus;
   profile: T | null;
   error: string | undefined;
-  mutate: Function;
-  reload: Function;
 };
 
+/**
+ * The agent and its status, read from the client's mirror: `agent-updated` and
+ * `agent-status-changed` replace them and re-render, a reconnect reloads them. Two
+ * components using this hook with one client share the entries; two clients share nothing.
+ */
 export function useMe<T>(client: Ad4mClient | undefined, formatter: (links: LinkExpression[]) => T): MyInfo<T> {
-  const forceUpdate = useForceUpdate();
-  const [error, setError] = useState<string | undefined>(undefined);
+  const status = useLive(useMemo(() => client?.agent.live.status(), [client]));
+  const me = useLive(useMemo(() => client?.agent.live.me(), [client]));
 
-  // Create cache key for entry
-  const cacheKey = `agents/me`;
-
-  // Mutate shared/cached data for all subscribers
-  const mutate = useCallback(
-    (data: MeData | null) => setCache(cacheKey, data),
-    [cacheKey]
+  const perspective = me?.value?.perspective;
+  const profile = useMemo(
+    () => (perspective && formatter ? formatter(perspective.links) : null),
+    [perspective]
   );
-
-  // Fetch data from AD4M and save to cache
-  const getData = useCallback(() => {
-    if (!client) {
-      return;
-    }
-
-    const promises = Promise.all([client.agent.status(), client.agent.me()]);
-
-    promises
-      .then(async ([status, agent]) => {
-        setError(undefined);
-        mutate({ agent, status });
-      })
-      .catch((error) => setError(error.toString()));
-  }, [client, mutate]);
-
-  // Trigger initial fetch
-  useEffect(getData, [getData]);
-
-  // Subscribe to changes (re-render on data change)
-  useEffect(() => {
-    subscribe(cacheKey, forceUpdate);
-    return () => unsubscribe(cacheKey, forceUpdate);
-  }, [cacheKey, forceUpdate]);
-
-  // Listen to remote changes
-  useEffect(() => {
-    if (!client) return;
-
-    const releases = [
-      client.on("agent-status-changed", ({ agent: status }) => {
-        const current = getCache<MeData>(cacheKey);
-        mutate({ agent: current?.agent, status: new AgentStatus(status) });
-      }),
-      client.on("agent-updated", ({ agent }) => {
-        const current = getCache<MeData>(cacheKey);
-        mutate({ agent: Agent.fromWire(agent), status: current?.status });
-      }),
-    ];
-
-    return () => releases.forEach((release) => release());
-  }, [client, cacheKey, mutate]);
-
-  const data = getCache<MeData>(cacheKey);
-  let profile = null as T | null;
-  const perspective = data?.agent?.perspective;
-
-  if (perspective) {
-    if (formatter) {
-        profile = formatter(perspective.links)
-    }
- 
-  }
+  const failure = me?.error ?? status?.error;
 
   return {
-    status: data?.status,
-    me: data?.agent,
+    status: status?.value,
+    me: me?.value,
     profile,
-    error,
-    mutate,
-    reload: getData,
+    error: failure === undefined ? undefined : String(failure),
   };
-}
-
-function useForceUpdate() {
-  const [, setState] = useState<number[]>([]);
-  return useCallback(() => setState([]), [setState]);
 }
