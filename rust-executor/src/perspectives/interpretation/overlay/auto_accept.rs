@@ -49,10 +49,10 @@
 //! that answer is a set: the item is accepted only if every class in the set
 //! allows it.
 //!
-//! Ordering: items whose class declares no parent relations are accepted
-//! first — a parent-class item is real before any children that link to it
-//! are materialized. Within each group, the op/touched-base order is kept,
-//! so the whole pass is deterministic.
+//! Ordering: items whose class declares no parent relations are attempted
+//! first. A parent whose rule is `never` is skipped, and a child can still
+//! be accepted. Within each group, the op/touched-base order is kept, so
+//! the whole pass is deterministic.
 
 use super::classes::INTERP_OVERLAY_CLASS;
 use super::{accept_interpretation, is_overlay_link, INFERRED_PREFIX, OVERLAY_KIND_PRED};
@@ -272,8 +272,9 @@ pub(crate) async fn auto_accept_pass(
         }
     };
 
-    // Root-class items first (their classes declare no parent relation), then
-    // nested ones — so a parent is real before its children are materialized.
+    // Root-class items are attempted first (their classes declare no parent
+    // relation), then nested ones. A parent with rule `never` is skipped;
+    // that does not keep its children pending.
     let mut order: Vec<(String, Vec<Arc<ModelShape>>)> = Vec::new();
     let mut nested: Vec<(String, Vec<Arc<ModelShape>>)> = Vec::new();
     for base in bases {
