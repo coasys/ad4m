@@ -5,7 +5,7 @@ import { Ad4mClient, VerificationRequestResult } from "@coasys/ad4m";
 import autoBind from "auto-bind";
 
 import { Ad4mConnectOptions, ConnectionStates, AuthStates, ConfigStates, RemoteHost, UserInfo } from './types';
-import { fetchUserInfo, requestPayment } from './services/hostIndex';
+import { toUserInfo, requestPayment } from './services/hostIndex';
 
 const DEFAULT_PORT = 12000;
 /** What the executor says, in words, when a call needs keys a locked wallet cannot open. */
@@ -40,7 +40,6 @@ type AuthReading = { state: 'authenticated' | 'locked' | 'unauthenticated'; erro
 type ClientOptions = ConstructorParameters<typeof Ad4mClient>[2];
 
 const DEFAULT_INDEX_URL = "https://hosting.ad4m.dev";
-const CREDIT_POLL_INTERVAL_MS = 60000;
 const DEFAULT_LOW_CREDIT_THRESHOLD = 10;
 
 /**
@@ -83,10 +82,13 @@ export default class Ad4mConnect extends EventTarget {
 
   // Hosting state
   connectedHost: RemoteHost | null = null;
-  userInfo: UserInfo | null = null;
+  /** The executor's account for this user, read from the client's mirror; null before it is first read. */
+  get userInfo(): UserInfo | null {
+    const info = this.ad4mClient?.agent.live.hostingUserInfo().getSnapshot().value;
+    return info ? toUserInfo(info) : null;
+  }
   hostIndexUrl: string;
   lowCreditThreshold: number;
-  private creditPollInterval: ReturnType<typeof setInterval> | null = null;
   private releaseCreditListener?: () => void;
   /** How \`buildClient\` reaches the executor in embedded proxy mode; unset for a direct connection. */
   private proxy?: { baseUrl: string; options: ClientOptions };
@@ -424,9 +426,8 @@ export default class Ad4mConnect extends EventTarget {
     
     // Clear hosting state
     this.connectedHost = null;
-    this.userInfo = null;
-    this.stopCreditPolling();
     this.releaseCreditListener?.();
+    this.releaseCreditListener = undefined;
     removeLocal('ad4m-last-host');
 
     // Update connection state
@@ -435,24 +436,22 @@ export default class Ad4mConnect extends EventTarget {
     console.log('[Ad4m Connect] Disconnected successfully');
   }
 
-  // Hosting — credit subscription & polling fallback
+  // Hosting: credits
 
   /**
-   * Subscribe to real-time credit updates.
-   * Polling runs beside it as a safety net.
+   * Follow the user's credits. The client's mirror keeps them (`agent.live.hostingUserInfo()`):
+   * one `hosting.info` read, then the executor's `hosting-user-info-changed` events, and a read
+   * again after a reconnect. Each value that arrives dispatches `userinfochange`, and
+   * `creditdepleted` or `creditlow` when it is at or under the limit. Runs once however often it is called.
    */
   startCreditSubscription(): void {
     if (!this.ad4mClient) return;
 
     this.releaseCreditListener?.();
-    this.releaseCreditListener = this.ad4mClient.on('hosting-user-info-changed', (info) => {
-      const userInfo: UserInfo = {
-        email: info.email,
-        remainingCredits: info.remainingCredits === 'unlimited' ? Infinity : (parseFloat(info.remainingCredits) || 0),
-        hotWalletAddress: info.hotWalletAddress || null,
-        freeAccess: info.freeAccess,
-      };
-      this.userInfo = userInfo;
+    const live = this.ad4mClient.agent.live.hostingUserInfo();
+    const announce = (snapshot: ReturnType<typeof live.getSnapshot>) => {
+      if (snapshot.state !== 'fresh' || !snapshot.value) return;
+      const userInfo = toUserInfo(snapshot.value);
       this.dispatchEvent(new CustomEvent('userinfochange', { detail: userInfo }));
 
       if (!userInfo.freeAccess && userInfo.remainingCredits <= 0) {
@@ -461,43 +460,10 @@ export default class Ad4mConnect extends EventTarget {
       if (!userInfo.freeAccess && userInfo.remainingCredits <= this.lowCreditThreshold) {
         this.dispatchEvent(new CustomEvent('creditlow'));
       }
-    });
-
-    // Always start polling as a safety-net (at a longer 60s interval)
-    this.startCreditPolling();
-  }
-
-  startCreditPolling(): void {
-    this.stopCreditPolling();
-
-    const poll = async () => {
-      try {
-        if (!this.ad4mClient) return;
-        const info = await fetchUserInfo(this.ad4mClient);
-        this.userInfo = info;
-        this.dispatchEvent(new CustomEvent('userinfochange', { detail: info }));
-
-        if (!info.freeAccess && info.remainingCredits <= this.lowCreditThreshold) {
-          this.dispatchEvent(new CustomEvent('creditlow'));
-        }
-        if (!info.freeAccess && info.remainingCredits <= 0) {
-          this.dispatchEvent(new CustomEvent('creditdepleted'));
-        }
-      } catch (error) {
-        console.error('[Ad4m Connect] Credit polling error:', error);
-      }
     };
-
-    // Immediate first poll, then every 30s
-    poll();
-    this.creditPollInterval = setInterval(poll, CREDIT_POLL_INTERVAL_MS);
-  }
-
-  stopCreditPolling(): void {
-    if (this.creditPollInterval) {
-      clearInterval(this.creditPollInterval);
-      this.creditPollInterval = null;
-    }
+    // Subscribing makes the entry load when it is not fresh; a fresh one is announced now.
+    this.releaseCreditListener = live.subscribe(announce);
+    announce(live.getSnapshot());
   }
 
   async requestTopUp(amountHOT: number): Promise<{ success: boolean; amountHOT: string }> {

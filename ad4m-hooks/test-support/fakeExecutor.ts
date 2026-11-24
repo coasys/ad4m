@@ -25,6 +25,13 @@ export function profileOf(did: string, name = profiles.get(did) ?? "none") {
   };
 }
 
+/** The perspectives `perspective.all` lists, per token (wire handles). */
+export const perspectives = new Map<string, object[]>();
+
+export function handleOf(uuid: string, name = uuid, sharedUrl: string | null = null) {
+  return { uuid, name, state: "SYNCED", sharedUrl, neighbourhood: null, owners: null };
+}
+
 export class FakeExecutorSocket {
   static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
   readonly CONNECTING = 0; readonly OPEN = 1; readonly CLOSING = 2; readonly CLOSED = 3;
@@ -52,6 +59,7 @@ export class FakeExecutorSocket {
       type === "agent.status" ? { did, isInitialized: true, isUnlocked: true }
       : type === "agent.get" ? profileOf(did)
       : type === "agent.byDIDs" ? params.dids.map((d: string) => profileOf(d))
+      : type === "perspective.all" ? (perspectives.get(this.token) ?? [])
       : true;
     setTimeout(() => this.onmessage?.({ data: JSON.stringify({ id, result }) }), 0);
   }
@@ -66,6 +74,7 @@ export function installFakeExecutor() {
   rpcLog.length = 0;
   sockets.length = 0;
   profiles.clear();
+  perspectives.clear();
   (globalThis as any).WebSocket = FakeExecutorSocket;
 }
 

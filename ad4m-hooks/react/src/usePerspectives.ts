@@ -1,105 +1,72 @@
-import { useState, useEffect, useRef } from "react";
-import { Ad4mClient, EventMap, PerspectiveProxy } from "@coasys/ad4m";
+import { useState, useEffect, useMemo, useRef } from "react";
+import { Ad4mClient, PerspectiveHandle, PerspectiveProxy } from "@coasys/ad4m";
+import { useLive } from "./useLive";
 
 type UUID = string;
 
+/**
+ * The agent's perspectives, read from the client's mirror: the executor's
+ * `perspective-added`, `-updated` and `-removed` events change the list and re-render, a
+ * reconnect reloads it. Hooks with one client share the list; two clients share nothing.
+ * Link callbacks fire for every perspective listed.
+ */
 export function usePerspectives(client: Ad4mClient) {
+    const handles = useLive(useMemo(() => client.perspective.live.all(), [client]))?.value;
     const [perspectives, setPerspectives] = useState<{ [x: UUID]: PerspectiveProxy }>({});
-    const [neighbourhoods, setNeighbourhoods] = useState<{ [x: UUID]: PerspectiveProxy }>({});
     const onAddedLinkCbs = useRef<Function[]>([]);
     const onRemovedLinkCbs = useRef<Function[]>([]);
-    const hasFetched = useRef(false);
+    /** The proxy built for each listed handle, with the link listeners it carries. */
+    const held = useRef(new Map<UUID, { handle: PerspectiveHandle; proxy: PerspectiveProxy }>());
 
     useEffect(() => {
-        const fetchPerspectives = async () => {
-            if (hasFetched.current) return;
-            hasFetched.current = true;
-
-            const allPerspectives = await client.perspective.all();
-            const newPerspectives: { [x: UUID]: PerspectiveProxy } = {};
-
-            allPerspectives.forEach((p) => {
-                newPerspectives[p.uuid] = p;
-                addListeners(p);
-            });
-
-            setPerspectives(newPerspectives);
-        };
-
-        const addListeners = (p: PerspectiveProxy) => {
-            p.on("link-added", ({ link }) => {
-                onAddedLinkCbs.current.forEach((cb) => {
-                    cb(p, link);
-                });
-            });
-
-            p.on("link-removed", ({ link }) => {
-                onRemovedLinkCbs.current.forEach((cb) => {
-                    cb(p, link);
-                });
-            });
-
-            // An update replaces a link: the old one leaves, the new one arrives.
-            p.on("link-updated", ({ oldLink, newLink }) => {
-                onRemovedLinkCbs.current.forEach((cb) => cb(p, oldLink));
-                onAddedLinkCbs.current.forEach((cb) => cb(p, newLink));
-            });
-        };
-
-        const perspectiveUpdatedListener = async ({ perspective: handle }: EventMap["perspective-updated"]) => {
-            const perspective = await client.perspective.byUUID(handle.uuid);
-            if (perspective) {
-                setPerspectives((prevPerspectives) => ({
-                    ...prevPerspectives,
-                    [handle.uuid]: perspective,
-                }));
+        if (!handles) return;
+        const next = new Map<UUID, { handle: PerspectiveHandle; proxy: PerspectiveProxy }>();
+        for (const handle of handles) {
+            const prev = held.current.get(handle.uuid);
+            if (prev?.handle === handle) {
+                next.set(handle.uuid, prev);
+                continue;
             }
-        };
+            prev?.proxy.dispose();
+            const proxy = new PerspectiveProxy(handle, client.perspective);
+            addListeners(proxy);
+            next.set(handle.uuid, { handle, proxy });
+        }
+        for (const [uuid, { proxy }] of held.current) if (!next.has(uuid)) proxy.dispose();
+        held.current = next;
+        setPerspectives(Object.fromEntries([...next].map(([uuid, { proxy }]) => [uuid, proxy])));
+    }, [handles]);
 
-        const perspectiveAddedListener = async ({ perspective: handle }: EventMap["perspective-added"]) => {
-            const perspective = await client.perspective.byUUID(handle.uuid);
-            if (perspective) {
-                setPerspectives((prevPerspectives) => ({
-                    ...prevPerspectives,
-                    [handle.uuid]: perspective,
-                }));
-                addListeners(perspective);
-            }
-        };
-
-        const perspectiveRemovedListener = ({ perspectiveUuid: uuid }: EventMap["perspective-removed"]) => {
-            setPerspectives((prevPerspectives) => {
-                const newPerspectives = { ...prevPerspectives };
-                delete newPerspectives[uuid];
-                return newPerspectives;
-            });
-        };
-
-        fetchPerspectives();
-
-        const releases = [
-            client.on("perspective-updated", perspectiveUpdatedListener),
-            client.on("perspective-added", perspectiveAddedListener),
-            client.on("perspective-removed", perspectiveRemovedListener),
-        ];
-
-        return () => releases.forEach((release) => release());
+    // The listeners go with the component.
+    useEffect(() => () => {
+        held.current.forEach(({ proxy }) => proxy.dispose());
+        held.current = new Map();
     }, []);
 
-    useEffect(() => {
-        const newNeighbourhoods = Object.keys(perspectives).reduce((acc, key) => {
-            if (perspectives[key]?.sharedUrl) {
-                return {
-                    ...acc,
-                    [key]: perspectives[key],
-                };
-            } else {
-                return acc;
-            }
-        }, {});
+    const addListeners = (p: PerspectiveProxy) => {
+        p.on("link-added", ({ link }) => {
+            onAddedLinkCbs.current.forEach((cb) => {
+                cb(p, link);
+            });
+        });
 
-        setNeighbourhoods(newNeighbourhoods);
-    }, [perspectives]);
+        p.on("link-removed", ({ link }) => {
+            onRemovedLinkCbs.current.forEach((cb) => {
+                cb(p, link);
+            });
+        });
+
+        // An update replaces a link: the old one leaves, the new one arrives.
+        p.on("link-updated", ({ oldLink, newLink }) => {
+            onRemovedLinkCbs.current.forEach((cb) => cb(p, oldLink));
+            onAddedLinkCbs.current.forEach((cb) => cb(p, newLink));
+        });
+    };
+
+    const neighbourhoods = useMemo(
+        () => Object.fromEntries(Object.entries(perspectives).filter(([, p]) => p.sharedUrl)),
+        [perspectives]
+    );
 
     function onLinkAdded(cb: Function) {
         onAddedLinkCbs.current.push(cb);

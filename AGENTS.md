@@ -121,15 +121,29 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
   (`expression.get`) are `immutable`: LRU-bounded (200 entries, 5 MB), kept
   through a reconnect and `lagged`, dropped only by `clearCache()` or an
   `interact`.
+- The perspective list (`perspective.all`, `client.perspective.all()` /
+  `client.perspective.live.all()`) is `pushed`: `perspective-added`,
+  `-updated` and `-removed` change it, and so do the handles an own write
+  returns (`add`, `update`, `remove`, `neighbourhood.joinFromUrl`), with no
+  read. An event or write on a list that is not fresh makes it stale instead
+  (no sound base to patch). The hosting account (`hosting.info`,
+  `client.agent.hostingUserInfo()` / `client.agent.live.hostingUserInfo()`) is
+  `pushed`: `hosting-user-info-changed` for its own email replaces it, an event
+  for another email (an operator hears every user's) and `setHotWalletAddress`
+  make it stale. `connect` reads it, so it no longer polls. `agent.getApps` is
+  not mirrored: `apps-changed` is sent only when a grant is minted and carries
+  one app; `removeApp` and `revokeToken` send nothing, so no push source says
+  when the list is stale.
 - `immutable` and `declared` values live in a `KeyedCache` the mirror owns, one
   per RPC name (`mirror.cache({method, kind, options})`; the first call's
-  options win), so two clients share nothing and its tick batching is the
-  batching (50 `byDID` misses in one tick = one `agent.byDIDs`; a failed batch
+  options win), so two clients share nothing. Each key is an `Entry` (the one
+  state machine); the cache adds only tick batching through `loadMany`, the
+  `maxAgeMs` rule, the LRU limits and the persistent tier. The batching (50 `byDID` misses in one tick = one `agent.byDIDs`; a failed batch
   retries per key; a failure is never kept). `mirror.persistent(db, store)` is
   the IndexedDB tier, keyed `origin|acting DID|key` (nothing is stored while the
   DID is unknown; Node has none). A value loaded from it is shown `stale` and
   read again once per session. `markAllStale()` leaves `immutable` caches alone.
-- The hooks (`ad4m-hooks` react and vue `useMe`, `useAgent`) subscribe to these
+- The hooks (`ad4m-hooks` react and vue `useMe`, `useAgent`, `usePerspectives`) subscribe to these
   `Live` views; they keep no state of their own.
 - A test that reuses one client across tests must not expect a fresh read:
   the mirror keeps the last status. Use a new client.

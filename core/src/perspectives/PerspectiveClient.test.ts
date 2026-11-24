@@ -18,6 +18,8 @@ jest.mock('../apiClient', () => {
         ApiClient: jest.fn().mockImplementation(() => ({
             call: mockCall,
             on: mockOn,
+            // The client's own mirror, as the real ApiClient has one.
+            mirror: new (jest.requireActual('../mirror/Mirror').Mirror)(),
         })),
         RpcError: class RpcError extends Error {
             readonly status: number

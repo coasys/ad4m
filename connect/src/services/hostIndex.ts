@@ -1,5 +1,5 @@
 import type { RemoteHost, UserInfo } from '../types';
-import type { Ad4mClient } from '@coasys/ad4m';
+import type { Ad4mClient, HostingUserInfo } from '@coasys/ad4m';
 
 const DEFAULT_INDEX_URL = "https://hosting.ad4m.dev";
 
@@ -30,9 +30,8 @@ export async function fetchHosts(indexUrl?: string): Promise<RemoteHost[]> {
   return hosts;
 }
 
-/** Fetch current user info from the executor */
-export async function fetchUserInfo(ad4mClient: Ad4mClient): Promise<UserInfo> {
-  const info = await ad4mClient.agent.hostingUserInfo();
+/** The executor's `HostingUserInfo` (credits as text) as the `UserInfo` connect shows. */
+export function toUserInfo(info: HostingUserInfo): UserInfo {
   return {
     email: info.email,
     remainingCredits: info.remainingCredits === "unlimited" ? Infinity : (parseFloat(info.remainingCredits) || 0),

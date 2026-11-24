@@ -41,7 +41,7 @@ export class Mirror {
     cache<V>(spec: { method: string; kind: 'immutable' | 'declared'; options: () => KeyedCacheOptions<V> }): KeyedCache<V> {
         let held = this.#caches.get(spec.method)
         if (!held) {
-            held = { kind: spec.kind, cache: new KeyedCache<V>(spec.options()) }
+            held = { kind: spec.kind, cache: new KeyedCache<V>(spec.options(), spec.kind) }
             this.#caches.set(spec.method, held)
         }
         return held.cache as KeyedCache<V>

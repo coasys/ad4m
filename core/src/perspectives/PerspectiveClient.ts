@@ -11,6 +11,8 @@ import { NeighbourhoodProxy, type SessionOwners } from "../neighbourhood/Neighbo
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
 import { PerspectiveHandle } from "./PerspectiveHandle";
+import { forgetPerspective, keepPerspective, perspectiveList } from "./perspectiveList";
+import type { Live } from "../mirror/Mirror";
 import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
 import type { QueryLagged, QueryUpdate, Subscribed } from "./LiveQuery";
@@ -88,9 +90,21 @@ export class PerspectiveClient {
         return this.#aiClient!
     }
 
+    /**
+     * Every perspective of the agent. One list is kept per client and followed: the
+     * executor's `perspective-added`, `-updated` and `-removed` events and the handles that
+     * {@link add}, {@link update}, {@link remove} and `neighbourhood.joinFromUrl` return
+     * change it, so a read of a fresh list is local. Each call returns new proxies.
+     */
     async all(): Promise<PerspectiveProxy[]> {
-        const perspectives = await this.#apiClient.call('perspective.all', {})
-        return perspectives.map(handle => new PerspectiveProxy(PerspectiveHandle.fromWire(handle), this))
+        const handles = await perspectiveList(this.#apiClient).read()
+        return handles.map(handle => new PerspectiveProxy(handle, this))
+    }
+
+    /** Views on the client's mirror entries: subscribe for changes, or read. */
+    readonly live = {
+        /** The agent's perspectives as handles; {@link all} reads it. */
+        all: (): Live<PerspectiveHandle[]> => perspectiveList(this.#apiClient),
     }
 
     async byUUID(uuid: string): Promise<PerspectiveProxy|null> {
@@ -246,17 +260,20 @@ export class PerspectiveClient {
     }
 
     async add(name: string): Promise<PerspectiveProxy> {
-        const handle = await this.#apiClient.call('perspective.create', { name })
-        return new PerspectiveProxy(PerspectiveHandle.fromWire(handle), this)
+        const handle = PerspectiveHandle.fromWire(await this.#apiClient.call('perspective.create', { name }))
+        keepPerspective(this.#apiClient, handle)
+        return new PerspectiveProxy(handle, this)
     }
 
     async update(uuid: string, name: string): Promise<PerspectiveProxy> {
-        const handle = await this.#apiClient.call('perspective.update', { uuid, name })
-        return new PerspectiveProxy(PerspectiveHandle.fromWire(handle), this)
+        const handle = PerspectiveHandle.fromWire(await this.#apiClient.call('perspective.update', { uuid, name }))
+        keepPerspective(this.#apiClient, handle)
+        return new PerspectiveProxy(handle, this)
     }
 
     async remove(uuid: string): Promise<{perspectiveRemove: boolean}> {
         const result = await this.#apiClient.call('perspective.remove', { uuid })
+        if (result) forgetPerspective(this.#apiClient, uuid)
         this.#neighbourhoodProxies.delete(uuid)
         return { perspectiveRemove: result }
     }

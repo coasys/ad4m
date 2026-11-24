@@ -16,6 +16,7 @@ import { LinkMutations, LinkExpression, LinkInput, linkEqual } from "../links/Li
 import { VerificationRequestResult } from "../runtime/RuntimeTypes";
 import type { KeyedCache, StoredEntry } from "../cache/KeyedCache";
 import type { Agent as AgentData } from "../generated/api/Agent";
+import type { HostingUserInfo as HostingUserInfoData } from "../generated/api/HostingUserInfo";
 import type { AgentSignature } from "../generated/api/AgentSignature";
 import type { AgentWithIdentity } from "../generated/api/AgentWithIdentity";
 
@@ -113,6 +114,8 @@ export class AgentClient {
     status: (): Live<AgentStatus> => this.#statusEntry(),
     /** The agent itself; {@link me} reads it. */
     me: (): Live<Agent> => this.#meEntry(),
+    /** The hosting account of this client's user; {@link hostingUserInfo} reads it. */
+    hostingUserInfo: (): Live<HostingUserInfo> => this.#hostingEntry(),
     /** The agent with this DID, `null` while unknown; {@link byDID} reads it. */
     byDID: (did: string): Live<Agent | null> => {
       this.#listen();
@@ -314,6 +317,11 @@ export class AgentClient {
     return this.#apiClient.call('agent.generateJwt', { requestId, rand });
   }
 
+  /**
+   * Always one request: not mirrored. `apps-changed` is sent only when a grant is
+   * minted, and `removeApp` / `revokeToken` send nothing, so no event says the list is stale.
+   */
+
   async getApps(): Promise<Apps[]> {
     return this.#apiClient.call('agent.getApps', {});
   }
@@ -366,24 +374,60 @@ export class AgentClient {
   }
 
   // Hosting methods
+  /**
+   * The hosting account of this client's user. One value is kept per client and followed:
+   * `hosting-user-info-changed` replaces it, {@link setHotWalletAddress} makes it stale, and a
+   * reconnect makes the next read ask the executor again. Concurrent reads share one request.
+   * The returned object is shared: do not change it.
+   */
   async hostingUserInfo(): Promise<HostingUserInfo> {
-    const info = (await this.#apiClient.call('hosting.info', {})).userInfo ?? {
-      email: '', credits: null, hotWalletAddress: null, freeAccess: false,
-    };
-    return new HostingUserInfo(
-      info.email,
-      info.freeAccess ? 'unlimited' : String(info.credits ?? 0),
-      info.hotWalletAddress || undefined,
-      !!info.freeAccess,
-    );
+    return this.#hostingEntry().read();
   }
+
+  /** The one `hosting.info` entry of this client's mirror; it hears `hosting-user-info-changed`. */
+  #hostingEntry() {
+    this.#apiClient.on('hosting-user-info-changed', this.#onHostingChanged);
+    return this.#apiClient.mirror.entry<HostingUserInfo>({
+      scope: 'agent',
+      kind: 'pushed',
+      method: 'hosting.info',
+      params: {},
+      load: async () => {
+        const info = (await this.#apiClient.call('hosting.info', {})).userInfo ?? {
+          email: '', credits: null, hotWalletAddress: null, freeAccess: false,
+        };
+        return new HostingUserInfo(
+          info.email,
+          info.freeAccess ? 'unlimited' : String(info.credits ?? 0),
+          info.hotWalletAddress || undefined,
+          !!info.freeAccess,
+        );
+      },
+    });
+  }
+
+  /**
+   * An operator's client hears the events of every user, so only an event for the user
+   * this entry holds replaces it; any other event says the entry may be old.
+   */
+  #onHostingChanged = (event: HostingUserInfoData): void => {
+    const entry = this.#hostingEntry();
+    if (entry.getSnapshot().value?.email === event.email) {
+      entry.push(new HostingUserInfo(event.email, event.remainingCredits, event.hotWalletAddress || undefined, event.freeAccess));
+    } else {
+      entry.invalidate();
+    }
+  };
 
   async computeLog(since?: string, limit?: number, userEmail?: string): Promise<ComputeLogEntry[]> {
     return this.#apiClient.call('runtime.computeLog', { since, limit, userEmail });
   }
 
   async setHotWalletAddress(address: string): Promise<boolean> {
-    return this.#apiClient.call('hosting.setHotWallet', { address });
+    const set = await this.#apiClient.call('hosting.setHotWallet', { address });
+    // The executor publishes no event for this write: the held info is old.
+    this.#hostingEntry().invalidate();
+    return set;
   }
 
   async requestPayment(amountHOT: string): Promise<PaymentRequestResult> {

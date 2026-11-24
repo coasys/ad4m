@@ -1,114 +1,82 @@
-import { ref, effect, shallowRef, watch } from "vue";
-import { Ad4mClient, PerspectiveProxy } from "@coasys/ad4m";
+import { computed, onScopeDispose, shallowRef, watch } from "vue";
+import { Ad4mClient, PerspectiveHandle, PerspectiveProxy } from "@coasys/ad4m";
+import { useLive } from "./useLive";
 
 type UUID = string;
 
-const perspectives = shallowRef<{ [x: UUID]: PerspectiveProxy }>({});
-const neighbourhoods = shallowRef<{ [x: UUID]: PerspectiveProxy }>({});
-const onAddedLinkCbs = ref<Function[]>([]);
-const onRemovedLinkCbs = ref<Function[]>([]);
-const hasFetched = ref(false);
-
-watch(
-  () => perspectives.value,
-  (newPers) => {
-    neighbourhoods.value = Object.keys(newPers).reduce((acc, key) => {
-      if (newPers[key]?.sharedUrl) {
-        return {
-          ...acc,
-          [key]: newPers[key],
-        };
-      } else {
-        return acc;
-      }
-    }, {});
-  },
-  { immediate: true }
-);
-
-function addListeners(p: PerspectiveProxy) {
-  p.on("link-added", ({ link }) => {
-    onAddedLinkCbs.value.forEach((cb) => {
-      cb(p, link);
-    });
-  });
-
-  p.on("link-removed", ({ link }) => {
-    onRemovedLinkCbs.value.forEach((cb) => {
-      cb(p, link);
-    });
-  });
-
-  // An update replaces a link: the old one leaves, the new one arrives.
-  p.on("link-updated", ({ oldLink, newLink }) => {
-    onRemovedLinkCbs.value.forEach((cb) => cb(p, oldLink));
-    onAddedLinkCbs.value.forEach((cb) => cb(p, newLink));
-  });
-}
-
+/**
+ * The agent's perspectives, read from the client's mirror: the executor's
+ * `perspective-added`, `-updated` and `-removed` events change the list, a reconnect
+ * reloads it. Calls with one client share the list; two clients share nothing. Link
+ * callbacks fire for every perspective listed.
+ */
 export function usePerspectives(client: Ad4mClient) {
-  effect(async () => {
-    if (hasFetched.value) return;
-    // First component that uses this hook will set this to true,
-    // so the next components will not fetch and add listeners
-    hasFetched.value = true;
+  const snapshot = useLive(client.perspective.live.all());
+  const perspectives = shallowRef<{ [x: UUID]: PerspectiveProxy }>({});
+  const onAddedLinkCbs: Function[] = [];
+  const onRemovedLinkCbs: Function[] = [];
+  /** The proxy built for each listed handle, with the link listeners it carries. */
+  let held = new Map<UUID, { handle: PerspectiveHandle; proxy: PerspectiveProxy }>();
 
-    // Get all perspectives
-    const allPerspectives = await client.perspective.all();
-
-    perspectives.value = allPerspectives.reduce((acc, p) => {
-      return { ...acc, [p.uuid]: p };
-    }, {});
-
-    // Add each perspective to our state
-    allPerspectives.forEach((p) => {
-      addListeners(p);
+  function addListeners(p: PerspectiveProxy) {
+    p.on("link-added", ({ link }) => {
+      onAddedLinkCbs.forEach((cb) => {
+        cb(p, link);
+      });
     });
 
-    client.on("perspective-updated", async ({ perspective: handle }) => {
-      const perspective = await client.perspective.byUUID(handle.uuid);
+    p.on("link-removed", ({ link }) => {
+      onRemovedLinkCbs.forEach((cb) => {
+        cb(p, link);
+      });
+    });
 
-      if (perspective) {
-        perspectives.value = {
-          ...perspectives.value,
-          [handle.uuid]: perspective,
-        };
+    // An update replaces a link: the old one leaves, the new one arrives.
+    p.on("link-updated", ({ oldLink, newLink }) => {
+      onRemovedLinkCbs.forEach((cb) => cb(p, oldLink));
+      onAddedLinkCbs.forEach((cb) => cb(p, newLink));
+    });
+  }
+
+  watch(
+    () => snapshot.value.value,
+    (handles) => {
+      if (!handles) return;
+      const next = new Map<UUID, { handle: PerspectiveHandle; proxy: PerspectiveProxy }>();
+      for (const handle of handles) {
+        const prev = held.get(handle.uuid);
+        if (prev?.handle === handle) {
+          next.set(handle.uuid, prev);
+          continue;
+        }
+        prev?.proxy.dispose();
+        const proxy = new PerspectiveProxy(handle, client.perspective);
+        addListeners(proxy);
+        next.set(handle.uuid, { handle, proxy });
       }
-    });
+      for (const [uuid, { proxy }] of held) if (!next.has(uuid)) proxy.dispose();
+      held = next;
+      perspectives.value = Object.fromEntries([...next].map(([uuid, { proxy }]) => [uuid, proxy]));
+    },
+    { immediate: true }
+  );
 
-    // Add new incoming perspectives
-    client.on("perspective-added", async ({ perspective: handle }) => {
-      const perspective = await client.perspective.byUUID(handle.uuid);
+  // The listeners go with the calling effect scope.
+  onScopeDispose(() => {
+    held.forEach(({ proxy }) => proxy.dispose());
+    held = new Map();
+  });
 
-      if (perspective) {
-        perspectives.value = {
-          ...perspectives.value,
-          [handle.uuid]: perspective,
-        };
-        addListeners(perspective);
-      }
-    });
-
-    // Remove new deleted perspectives
-    client.on("perspective-removed", ({ perspectiveUuid: uuid }) => {
-      perspectives.value = Object.keys(perspectives.value).reduce(
-        (acc, key) => {
-          const p = perspectives.value[key];
-          return key === uuid ? acc : { ...acc, [key]: p };
-        },
-        {}
-      );
-    });
-  }, {});
-
-  function fetchPerspectives() {}
+  const neighbourhoods = computed(() =>
+    Object.fromEntries(Object.entries(perspectives.value).filter(([, p]) => p.sharedUrl))
+  );
 
   function onLinkAdded(cb: Function) {
-    onAddedLinkCbs.value.push(cb);
+    onAddedLinkCbs.push(cb);
   }
 
   function onLinkRemoved(cb: Function) {
-    onRemovedLinkCbs.value.push(cb);
+    onRemovedLinkCbs.push(cb);
   }
 
   return { perspectives, neighbourhoods, onLinkAdded, onLinkRemoved };

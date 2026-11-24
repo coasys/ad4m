@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { fetchHosts, fetchUserInfo, requestPayment } from './hostIndex';
+import { fetchHosts, toUserInfo, requestPayment } from './hostIndex';
 
 describe('fetchHosts', () => {
   beforeEach(() => {
@@ -66,20 +66,14 @@ describe('fetchHosts', () => {
   });
 });
 
-describe('fetchUserInfo', () => {
-  it('parses numeric credits', async () => {
-    const mockClient = {
-      agent: {
-        hostingUserInfo: vi.fn().mockResolvedValue({
-          email: 'user@test.com',
-          remainingCredits: '42.5',
-          hotWalletAddress: '0xabc',
-          freeAccess: false,
-        }),
-      },
-    } as any;
-
-    const info = await fetchUserInfo(mockClient);
+describe('toUserInfo', () => {
+  it('parses numeric credits', () => {
+    const info = toUserInfo({
+      email: 'user@test.com',
+      remainingCredits: '42.5',
+      hotWalletAddress: '0xabc',
+      freeAccess: false,
+    });
     expect(info).toEqual({
       email: 'user@test.com',
       remainingCredits: 42.5,
@@ -88,36 +82,24 @@ describe('fetchUserInfo', () => {
     });
   });
 
-  it('treats "unlimited" as Infinity', async () => {
-    const mockClient = {
-      agent: {
-        hostingUserInfo: vi.fn().mockResolvedValue({
-          email: 'admin@test.com',
-          remainingCredits: 'unlimited',
-          hotWalletAddress: null,
-          freeAccess: true,
-        }),
-      },
-    } as any;
-
-    const info = await fetchUserInfo(mockClient);
+  it('treats "unlimited" as Infinity', () => {
+    const info = toUserInfo({
+      email: 'admin@test.com',
+      remainingCredits: 'unlimited',
+      hotWalletAddress: null,
+      freeAccess: true,
+    });
     expect(info.remainingCredits).toBe(Infinity);
     expect(info.freeAccess).toBe(true);
   });
 
-  it('treats non-numeric strings as 0', async () => {
-    const mockClient = {
-      agent: {
-        hostingUserInfo: vi.fn().mockResolvedValue({
-          email: 'user@test.com',
-          remainingCredits: 'invalid',
-          hotWalletAddress: '',
-          freeAccess: false,
-        }),
-      },
-    } as any;
-
-    const info = await fetchUserInfo(mockClient);
+  it('treats non-numeric strings as 0', () => {
+    const info = toUserInfo({
+      email: 'user@test.com',
+      remainingCredits: 'invalid',
+      hotWalletAddress: '',
+      freeAccess: false,
+    });
     expect(info.remainingCredits).toBe(0);
     expect(info.hotWalletAddress).toBeNull();
   });

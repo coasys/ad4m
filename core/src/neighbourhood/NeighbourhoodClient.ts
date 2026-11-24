@@ -4,6 +4,7 @@ import { DID } from "../DID"
 import { OnlineAgent, TelepresenceSignalCallback } from "../language/Language"
 import { Perspective, PerspectiveExpression, PerspectiveUnsignedInput } from "../perspectives/Perspective"
 import { PerspectiveHandle } from "../perspectives/PerspectiveHandle"
+import { keepPerspective } from "../perspectives/perspectiveList"
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy"
 import type {
     CallSessionInfo,
@@ -42,7 +43,9 @@ export class NeighbourhoodClient {
     }
 
     async joinFromUrl(url: string, options?: CallOptions): Promise<PerspectiveHandle> {
-        return PerspectiveHandle.fromWire(await this.#apiClient.call('neighbourhood.join', { url }, options))
+        const handle = PerspectiveHandle.fromWire(await this.#apiClient.call('neighbourhood.join', { url }, options))
+        keepPerspective(this.#apiClient, handle)
+        return handle
     }
 
     async otherAgents(perspectiveUUID: string): Promise<DID[]> {
