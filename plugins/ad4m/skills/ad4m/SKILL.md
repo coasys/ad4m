@@ -244,7 +244,7 @@ The waker POSTs to your `/hooks/wake` endpoint. Parse `Agent DID`, `Perspective`
 
 ### The wake event hands you addresses, not types
 
-`Item` is the address of whatever mentions you (a record whose `mentions` link to your DID, or whose text names you) — the mention queries read the abstract Mentioning and TextContent, not a `Message` class, so in a space with a user-defined ontology it is as likely to be a task, a proposal or a comment. `Parents` are the nodes it hangs under, and `Ancestors` everything above them, nearest first — the thread, the conversation, the space the item sits in, a few levels up. Nothing in the event tells you what any of them are; the space's own ontology does.
+`Item` is the address of whatever mentions you (a record whose `mentions` link to your DID, or whose text names you) — the mention queries read the abstract Mentioning and TextContent, not a `Message` class, so in a space with a user-defined ontology it is as likely to be a task, a proposal or a comment. `Parents` are the nodes it hangs under, and `Ancestors` everything above them, nearest first — the thread, the conversation, the space the item sits in, a few levels up. Nothing in the event tells you what any of them are; the space's own ontology does. When the item holds files (a message's attachments) the event lists them under `Attachments`: each file's name, MIME type, size, the id of its record (`ad4m_instance_get` it) and `content at` — the file-storage address of its bytes.
 
 ### Step 1: work out what you are looking at
 

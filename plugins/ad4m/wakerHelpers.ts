@@ -55,6 +55,14 @@ export function buildWakeMessage(
       if (m.ancestors?.length) {
         lines.push(`  Ancestors: ${m.ancestors.join(", ")}`);
       }
+      // Files held by the item: what each is, and where its bytes are, so the agent need not
+      // walk the item's children to learn that it was sent a file.
+      if (m.attachments.length) {
+        lines.push(`  Attachments (${m.attachments.length}):`);
+        for (const a of m.attachments) {
+          lines.push(`    File: ${a.name} (${a.mimeType}, ${a.size} bytes) record ${a.address}, content at ${a.url}`);
+        }
+      }
     }
   }
 

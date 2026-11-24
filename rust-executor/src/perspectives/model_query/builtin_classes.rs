@@ -24,6 +24,13 @@ use std::sync::{Arc, OnceLock};
 pub const TEXT_CONTENT_URI: &str = "ad4m://TextContent";
 pub(crate) const TEXT_CONTENT_SDNA: &str = include_str!("../hardwired_sdna/text_content.json");
 
+/// `FileContent { name, mimeType, size, url }`: a file, such as an attachment
+/// to a message. `url` is the address its bytes are stored under. A class
+/// conforms when it has all four names, under any predicate; the waker lists
+/// the files a mentioned record holds through it.
+pub const FILE_CONTENT_URI: &str = "ad4m://FileContent";
+pub(crate) const FILE_CONTENT_SDNA: &str = include_str!("../hardwired_sdna/file_content.json");
+
 /// `Mentioning { mentions }`: a record that mentions agents, a relation to
 /// their DIDs. Any class with a relation named or aliased `mentions` conforms,
 /// under any predicate, with text or without. The waker's mention
@@ -43,6 +50,7 @@ pub(crate) const CONTAINER_SDNA: &str = include_str!("../hardwired_sdna/containe
 /// [`Builtin::member`]).
 const BUILTINS: &[(&str, &str, &str, bool)] = &[
     (TEXT_CONTENT_URI, "TextContent", TEXT_CONTENT_SDNA, false),
+    (FILE_CONTENT_URI, "FileContent", FILE_CONTENT_SDNA, false),
     (MENTIONING_URI, "Mentioning", MENTIONING_SDNA, false),
     (CONTAINER_URI, "Container", CONTAINER_SDNA, true),
 ];
@@ -141,6 +149,25 @@ mod tests {
     }
 
     #[test]
+    fn file_content_is_an_abstract_class_with_a_files_name_type_size_and_address() {
+        let file = builtin(FILE_CONTENT_URI).expect("FileContent is built in");
+        assert_eq!(file.name, "FileContent");
+        assert_eq!(file.shape.target_class, FILE_CONTENT_URI);
+        // The shape holds its properties unordered, so compare them sorted.
+        let mut names: Vec<&str> = file
+            .shape
+            .properties
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["mimeType", "name", "size", "url"]);
+        assert!(file.member.is_none());
+        let sdna: serde_json::Value = serde_json::from_str(FILE_CONTENT_SDNA).unwrap();
+        assert_eq!(sdna["abstract"], true);
+    }
+
+    #[test]
     fn mentioning_is_an_abstract_class_with_mentions() {
         let mentioning = builtin(MENTIONING_URI).expect("Mentioning is built in");
         assert_eq!(mentioning.name, "Mentioning");
@@ -187,5 +214,6 @@ mod tests {
         assert!(builtin("app://TextContent").is_none());
         assert!(builtin("Container").is_none());
         assert!(builtin("Mentioning").is_none());
+        assert!(builtin("FileContent").is_none());
     }
 }

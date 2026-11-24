@@ -1701,8 +1701,8 @@ describe("buildWakeMessage", () => {
 
   it("builds a mention wake message with per-item parents", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
-      { address: "msg-1", parents: ["channel-abc", "conversation-xyz"], ancestors: [], verified: false },
-      { address: "msg-2", parents: ["channel-abc"], ancestors: [], verified: false },
+      { address: "msg-1", parents: ["channel-abc", "conversation-xyz"], ancestors: [], attachments: [], verified: false },
+      { address: "msg-2", parents: ["channel-abc"], ancestors: [], attachments: [], verified: false },
     ]);
     expect(msg).toContain("You were @mentioned in an AD4M neighbourhood.");
     expect(msg).toContain("When you reply, mention whoever you answer");
@@ -1722,7 +1722,7 @@ describe("buildWakeMessage", () => {
    */
   it("labels a mentioned address class-agnostically", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
-      { address: "task-1", parents: ["board-abc"], ancestors: [], verified: false },
+      { address: "task-1", parents: ["board-abc"], ancestors: [], attachments: [], verified: false },
     ]);
     expect(msg).toContain("Item: task-1");
     expect(msg).not.toContain("Message:");
@@ -1739,8 +1739,8 @@ describe("buildWakeMessage", () => {
 
   it("lists the ancestors above the parents, and says nothing when there are none", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
-      { address: "msg-1", parents: ["thread-1"], ancestors: ["call-1", "space-1"], verified: false },
-      { address: "msg-2", parents: ["thread-2"], ancestors: [], verified: false },
+      { address: "msg-1", parents: ["thread-1"], ancestors: ["call-1", "space-1"], attachments: [], verified: false },
+      { address: "msg-2", parents: ["thread-2"], ancestors: [], attachments: [], verified: false },
     ]);
     expect(msg).toContain("Ancestors: call-1, space-1");
     expect(msg.match(/Ancestors:/g)).toHaveLength(1);
@@ -1757,11 +1757,12 @@ describe("buildWakeMessage", () => {
         address: "msg-1",
         parents: ["channel-abc"],
         ancestors: [],
+        attachments: [],
         author: "did:key:zJosh",
         timestamp: "2026-10-27T00:41:23.437Z",
         verified: true,
       },
-      { address: "msg-2", parents: ["channel-abc"], ancestors: [], verified: false },
+      { address: "msg-2", parents: ["channel-abc"], ancestors: [], attachments: [], verified: false },
     ]);
     expect(msg).toContain(
       "  Item: msg-1\n  Mentioned by: did:key:zJosh (signature verified)\n  Mentioned at: 2026-10-27T00:41:23.437Z",
@@ -1777,9 +1778,9 @@ describe("buildWakeMessage", () => {
    */
   it("says whether each item mentions the agent by a mention link or by its name in the text", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
-      { address: "msg-1", parents: ["channel-abc"], ancestors: [], verified: true, via: "mentions" },
-      { address: "msg-2", parents: ["channel-abc"], ancestors: [], verified: true, via: "text" },
-      { address: "msg-3", parents: ["channel-abc"], ancestors: [], verified: false },
+      { address: "msg-1", parents: ["channel-abc"], ancestors: [], attachments: [], verified: true, via: "mentions" },
+      { address: "msg-2", parents: ["channel-abc"], ancestors: [], attachments: [], verified: true, via: "text" },
+      { address: "msg-3", parents: ["channel-abc"], ancestors: [], attachments: [], verified: false },
     ]);
     expect(msg).toContain(
       "  Item: msg-1\n  Mentioned by: (unknown) (signature verified)\n  Matched by: a mention link to you\n",
@@ -1791,9 +1792,32 @@ describe("buildWakeMessage", () => {
     expect(msg.match(/Matched by:/g)).toHaveLength(2);
   });
 
+  it("tells the agent each attached file's name, type, size and where its content is", () => {
+    const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
+      {
+        address: "msg-1",
+        parents: ["channel-1"],
+        ancestors: [],
+        verified: true,
+        attachments: [
+          { address: "file-1", name: "plan.pdf", mimeType: "application/pdf", size: 2048, url: "QmPlan" },
+        ],
+      },
+    ]);
+    expect(msg).toContain("Attachments (1):");
+    expect(msg).toContain("File: plan.pdf (application/pdf, 2048 bytes) record file-1, content at QmPlan");
+  });
+
+  it("lists no attachments for an item that holds none", () => {
+    const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
+      { address: "msg-1", parents: ["channel-1"], ancestors: [], attachments: [], verified: true },
+    ]);
+    expect(msg).not.toContain("Attachments");
+  });
+
   it("shows (unknown) parents when empty", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
-      { address: "msg-1", parents: [], ancestors: [], verified: false },
+      { address: "msg-1", parents: [], ancestors: [], attachments: [], verified: false },
     ]);
     expect(msg).toContain("Parents: (unknown)");
   });
@@ -4252,8 +4276,9 @@ describe("WakerSubscriptionManager", () => {
     mock.deliver(named('msg-1', 'msg-2'));
     await new Promise(r => setTimeout(r, 50));
 
-    // Per message: one step in for its parents, one bounded walk for what is above them.
-    expect(mockPerspectiveClient.modelQuery).toHaveBeenCalledTimes(4);
+    // Per message: one step in for its parents, one bounded walk for what is above them, and one
+    // for the files it holds.
+    expect(mockPerspectiveClient.modelQuery).toHaveBeenCalledTimes(6);
     expect(capturedMentions).toBeDefined();
     expect(capturedMentions).toHaveLength(2);
     // msg-1 has two parents

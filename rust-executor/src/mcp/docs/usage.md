@@ -190,6 +190,9 @@ Two reasons this is not cosmetic:
   your DID, whatever it shows, or a record of the
   built-in TextContent whose text names you: your profile names (username,
   given and family name) and your DID are the terms, matched as whole words.
+  The wake lists the files the record holds (a message's attachments): every
+  record under it whose class has `name`, `mimeType`, `size` and `url`, read
+  through the built-in FileContent.
 - **Humans see the username**, not your DID, in transcripts and app UIs. An
   unnamed agent is hard to talk to and hard to trust.
 
