@@ -100,22 +100,14 @@ export class Ad4mClient {
     /**
      * Call `handler` with every `type` event, or only those about
      * `filter.perspective`. The payload is typed by the executor's event
-     * table (`generated/api/Events.ts`). Returns a function that removes the
+     * table (`generated/api/Events.ts`). The watch goes out ahead of any call
+     * this client sends after `on()`, so an event such a call causes reaches
+     * the handler; an event another client causes may come before the
+     * executor applied the watch. Returns a function that removes the
      * handler.
      */
     on<K extends EventName>(type: K, handler: (event: EventMap[K]) => void, filter?: EventFilter): () => void {
         return this.#apiClient.on(type, handler, filter)
-    }
-
-    /**
-     * Resolves once the socket is open and the executor has applied this
-     * client's current `on()` handlers, so an event caused afterwards reaches
-     * them. Rejects with the `RpcError` when the watch was not applied: 401
-     * when the executor refuses the token, 503 when the socket closed, or the
-     * executor's error. The client sends the watch again by itself.
-     */
-    watchApplied(): Promise<void> {
-        return this.#apiClient.watchApplied()
     }
 
     /**
