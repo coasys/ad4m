@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { baseUrl, pollUntil, startExecutor, runHcLocalServices, gracefulShutdown, sleep } from "../utils/utils";
+import { baseUrl, listenForSignals, pollUntil, startExecutor, runHcLocalServices, gracefulShutdown, sleep } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { joinCall } from "../helpers/call-session.js";
 import { ChildProcess } from 'node:child_process';
@@ -1543,7 +1543,7 @@ describe("Multi-User Simple integration tests", () => {
 
             // Set up signal listener for User 2
             const user2ReceivedSignals: any[] = [];
-            await user2Neighbourhood!.addSignalHandler((signal: any) => {
+            await listenForSignals(user2Neighbourhood!, (signal: any) => {
                 //console.log("User 2 received signal:", signal);
                 user2ReceivedSignals.push(signal);
             });
@@ -1556,13 +1556,11 @@ describe("Multi-User Simple integration tests", () => {
 
             // Set up signal listener for User 1 to verify they DON'T receive User 2's signals
             const user1ReceivedSignals: any[] = [];
-            await user1Neighbourhood!.addSignalHandler((signal) => {
+            await listenForSignals(user1Neighbourhood!, (signal) => {
                 //console.log("User 1 received signal:", signal);
                 user1ReceivedSignals.push(signal);
             });
 
-            // addSignalHandler resolves once the executor applied the watch, so no
-            // signal sent from here on is missed.
             console.log("User 1 signal listener set up");
 
             // User 1 sends a signal to User 2
@@ -1726,12 +1724,12 @@ describe("Multi-User Simple integration tests", () => {
             const user1ReceivedSignals: any[] = [];
             const user2ReceivedSignals: any[] = [];
 
-            await user1Neighbourhood!.addSignalHandler((signal) => {
+            await listenForSignals(user1Neighbourhood!, (signal) => {
                 console.log("✉️ User 1 received signal:", JSON.stringify(signal, null, 2));
                 user1ReceivedSignals.push(signal);
             });
 
-            await user2Neighbourhood!.addSignalHandler((signal) => {
+            await listenForSignals(user2Neighbourhood!, (signal) => {
                 console.log("✉️ User 2 received signal:", JSON.stringify(signal, null, 2));
                 user2ReceivedSignals.push(signal);
             });
@@ -1867,11 +1865,11 @@ describe("Multi-User Simple integration tests", () => {
             const mainAgentReceivedSignals: any[] = [];
             const userReceivedSignals: any[] = [];
 
-            await mainAgentNH!.addSignalHandler((signal: any) => {
+            await listenForSignals(mainAgentNH!, (signal: any) => {
                 console.log("✉️ Main agent received signal:", JSON.stringify(signal));
                 mainAgentReceivedSignals.push(signal);
             });
-            await userNH!.addSignalHandler((signal: any) => {
+            await listenForSignals(userNH!, (signal: any) => {
                 console.log("✉️ Managed user received signal:", JSON.stringify(signal));
                 userReceivedSignals.push(signal);
             });
@@ -2189,18 +2187,17 @@ describe("Multi-User Simple integration tests", () => {
 
             // Set up signal handlers
             const node2User1ReceivedSignals: any[] = [];
-            await node2User1Proxy!.addSignalHandler((signal) => {
+            await listenForSignals(node2User1Proxy!, (signal) => {
                 console.log("Node 2 User 1 received signal from:", signal.author);
                 node2User1ReceivedSignals.push(signal);
             });
 
             const node2User2ReceivedSignals: any[] = [];
-            await node2User2Proxy!.addSignalHandler((signal) => {
+            await listenForSignals(node2User2Proxy!, (signal) => {
                 console.log("Node 2 User 2 received signal from:", signal.author);
                 node2User2ReceivedSignals.push(signal);
             });
 
-            // The handlers are registered (addSignalHandler waited for the executor).
             // The cross-node signal below also needs node 1 to know node 2's user.
             await pollUntil(
                 async () => (await node1User1Proxy!.otherAgents()).includes(node2User1Did),
@@ -2258,7 +2255,7 @@ describe("Multi-User Simple integration tests", () => {
 
             // Now test the reverse: Node 2 User 1 sends to Node 1 User 1
             const node1User1ReceivedSignals: any[] = [];
-            await node1User1Proxy!.addSignalHandler((signal) => {
+            await listenForSignals(node1User1Proxy!, (signal) => {
                 console.log("Node 1 User 1 received signal from:", signal.author);
                 node1User1ReceivedSignals.push(signal);
             });
@@ -2515,8 +2512,10 @@ describe("Multi-User Simple integration tests", () => {
     // topic's events to a WebSocket in publish order, so once user 1 receives
     // its own barrier event (published after user 2's action), a leaked user 2
     // event would already have arrived. User 2's own event is the barrier for
-    // the reverse direction. The subscription-init sleep stays: subscribe*()
-    // does not wait for the server, and there is no state to poll for it.
+    // the reverse direction. Each client's `events.watch` goes out ahead of its
+    // next call and the executor applies it before reading that call, so the
+    // cheap call each test makes after the `on()`s means both watches are
+    // applied before either user acts: a leaked event would be delivered.
     describe("Perspective Subscriptions", () => {
         after(cleanupAllMainExecutorPerspectives);
 
@@ -2550,8 +2549,7 @@ describe("Multi-User Simple integration tests", () => {
                 user2Events.push(perspective);
             });
 
-            // Subscription-init delay (see comment above this describe)
-            await sleep(1000);
+            await Promise.all([client1.agent.status(), client2.agent.status()]);
 
             // User 1 creates a perspective
             console.log("\nUser 1 creating perspective...");
@@ -2617,8 +2615,7 @@ describe("Multi-User Simple integration tests", () => {
                 user2UpdateEvents.push(perspective);
             });
 
-            // Subscription-init delay (see comment above this describe)
-            await sleep(1000);
+            await Promise.all([client1.agent.status(), client2.agent.status()]);
 
             // User 1 updates their perspective metadata (name)
             console.log("\nUser 1 updating their perspective name...");
@@ -2686,8 +2683,7 @@ describe("Multi-User Simple integration tests", () => {
                 user2LinkEvents.push(link);
             }, { perspective: user2Perspective.uuid });
 
-            // Subscription-init delay (see comment above this describe)
-            await sleep(1000);
+            await Promise.all([client1.agent.status(), client2.agent.status()]);
 
             // User 1 adds a link to their perspective
             console.log("\nUser 1 adding link to their perspective...");
@@ -2782,8 +2778,7 @@ describe("Multi-User Simple integration tests", () => {
                 user2RemoveEvents.push(uuid);
             });
 
-            // Subscription-init delay (see comment above this describe)
-            await sleep(1000);
+            await Promise.all([client1.agent.status(), client2.agent.status()]);
 
             // User 1 removes their perspective
             console.log("\nUser 1 removing their perspective...");
@@ -3243,16 +3238,16 @@ describe("Multi-User Simple integration tests", () => {
             const remoteReceivedSignals: any[] = [];
             const localMainReceivedSignals: any[] = [];
 
-            // addSignalHandler resolves once the executor has applied the subscription.
-            await localManagedProxy!.addSignalHandler((signal: any) => {
+            // listenForSignals returns once the executor has applied the subscription.
+            await listenForSignals(localManagedProxy!, (signal: any) => {
                 console.log("  [RECV] Managed user got signal from:", signal.author);
                 managedReceivedSignals.push(signal);
             });
-            await remoteProxy!.addSignalHandler((signal: any) => {
+            await listenForSignals(remoteProxy!, (signal: any) => {
                 console.log("  [RECV] Remote main agent got signal from:", signal.author);
                 remoteReceivedSignals.push(signal);
             });
-            await localMainProxy!.addSignalHandler((signal: any) => {
+            await listenForSignals(localMainProxy!, (signal: any) => {
                 console.log("  [RECV] Local main agent got signal from:", signal.author);
                 localMainReceivedSignals.push(signal);
             });
