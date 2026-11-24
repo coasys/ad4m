@@ -176,7 +176,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-236 methods: Cap 83, CapAnyPointer 1, Executor 43, Open 5, Operator 30, Owns 72, UserOrOperator 2. Local only (the operator on this machine): 5.
+233 methods: Cap 83, CapAnyPointer 1, Executor 43, Open 5, Operator 30, Owns 69, UserOrOperator 2. Local only (the operator on this machine): 5.
 
 | Method | Guard |
 |---|---|
@@ -297,7 +297,6 @@ the guard checked:
 | `perspective.createSubject` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.discardBatch` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.disposeQuery` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.disposeSparql` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.evaluateGetters` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.executeCommands` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.flowFired` | `Owns(Perspective uuid, perspective:READ)` |
@@ -309,7 +308,6 @@ the guard checked:
 | `perspective.linkMutations` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.mintFlowReceipt` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.modelQuery` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.modelSubscribe` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.mutate` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.proposeFlowTransition` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.publishSnapshot` | `Owns(Perspective uuid, perspective:READ)` |
@@ -331,8 +329,7 @@ the guard checked:
 | `perspective.shapes` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.snapshot` | `Owns(Perspective uuid, perspective:READ)`, 404 → `null` |
 | `perspective.subjectClassesOf` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.subscribeQuery` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.subscribeSparql` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.subscribe` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.update` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.updateLink` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.updateSubject` | `Owns(Perspective uuid, perspective:UPDATE)` |

@@ -24,7 +24,7 @@ impl Ad4mMcpHandler {
             None => {
                 let mut uuids = Vec::new();
                 for p in all_perspectives() {
-                    uuids.push(p.persisted.lock().await.uuid.clone());
+                    uuids.push(p.persisted.load().uuid.clone());
                 }
                 uuids
             }
