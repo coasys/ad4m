@@ -1,7 +1,5 @@
 import path from "path";
 import { Ad4mClient } from "@coasys/ad4m";
-import * as ad4mModule from "@coasys/ad4m";
-const QuerySubscriptionProxy = (ad4mModule as any).QuerySubscriptionProxy;
 import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
@@ -1602,7 +1600,6 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             var manager = new WakerSubscriptionManager({
                 perspectiveClient: wakerClient.perspective,
                 logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
-                QuerySubscriptionProxy,
                 debounceMs: 100,
                 onWake: function() { wakeCount++; },
             });
@@ -1642,7 +1639,6 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 var manager = new WakerSubscriptionManager({
                     perspectiveClient: wakerClient.perspective,
                     logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
-                    QuerySubscriptionProxy,
                     debounceMs: 100,
                     onWake: function(sub: any, result: any, parentChannel?: string) {
                         console.log("  [WakerManager] onWake fired! parentChannel:", parentChannel);
@@ -1721,7 +1717,6 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             var manager = new WakerSubscriptionManager({
                 perspectiveClient: wakerClient.perspective,
                 logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
-                QuerySubscriptionProxy,
                 debounceMs: 100,
                 onWake: function(sub: any, result: any) {
                     wakeCount++;
@@ -1792,7 +1787,6 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             var manager = new WakerSubscriptionManager({
                 perspectiveClient: wakerClient.perspective,
                 logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
-                QuerySubscriptionProxy,
                 debounceMs: 100,
                 onWake: function() { wakeCount++; },
             });
@@ -1872,7 +1866,6 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 var manager = new WakerSubscriptionManager({
                     perspectiveClient: wakerClient.perspective,
                     logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
-                    QuerySubscriptionProxy,
                     debounceMs: 100,
                     onWake: function(sub: any, result: any, mentions?: any[]) {
                         console.log("  [DID mention] onWake fired!", JSON.stringify(mentions));
@@ -1947,7 +1940,6 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 manager = new WakerSubscriptionManager({
                     perspectiveClient: wakerClient.perspective,
                     logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
-                    QuerySubscriptionProxy,
                     debounceMs: 100,
                     onWake: function(_sub: any, _result: any, mentions?: any[]) {
                         clearTimeout(timeout);
@@ -2029,7 +2021,6 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 manager = new WakerSubscriptionManager({
                     perspectiveClient: wakerClient.perspective,
                     logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
-                    QuerySubscriptionProxy,
                     debounceMs: 100,
                     onWake: function(_sub: any, _result: any, found?: any[]) {
                         var mine = (found ?? []).filter((m: any) => m.parents.includes(block));
@@ -2097,7 +2088,6 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             var manager = new WakerSubscriptionManager({
                 perspectiveClient: wakerClient.perspective,
                 logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
-                QuerySubscriptionProxy,
                 debounceMs: 100,
                 onWake: function(sub: any, result: any) {
                     initialWake = result;
@@ -2142,7 +2132,6 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             var manager = new WakerSubscriptionManager({
                 perspectiveClient: wakerClient.perspective,
                 logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
-                QuerySubscriptionProxy,
                 debounceMs: 100,
                 onWake: function() { wakeCount++; },
             });
@@ -2199,7 +2188,6 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             var manager = new WakerSubscriptionManager({
                 perspectiveClient: wakerClient.perspective,
                 logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
-                QuerySubscriptionProxy,
                 debounceMs: 100,
                 onWake: function() {},
             });

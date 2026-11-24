@@ -26,7 +26,7 @@
  * A5_MARKER, A5_NAME, A5_EXPECT_REPLY. Prints `[<tag>] METRICS|WAKE-OK|FAIL`.
  */
 import { createHmac } from "crypto";
-import { Ad4mClient, QuerySubscriptionProxy, WakerSubscriptionManager } from "@coasys/ad4m";
+import { Ad4mClient, WakerSubscriptionManager } from "@coasys/ad4m";
 import { McpClient } from "../../src/mcp-client.ts";
 import { isCallActive, registerMessageClass, seedCallPresence, seedTranscript, transcriptAddrFor } from "./mock-av.ts";
 import { findChildWithMarker } from "./sovereign/waker-ad4m.ts";
@@ -90,7 +90,6 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const mgr = new WakerSubscriptionManager({
     perspectiveClient: ad4m.perspective,
     logger,
-    QuerySubscriptionProxy,
     debounceMs: DEBOUNCE,
     onWake: (_sub: any, _r: any, mentions: any) => {
       woke++;

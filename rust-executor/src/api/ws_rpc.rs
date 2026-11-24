@@ -673,8 +673,7 @@ pub(crate) struct Connection {
     opening: Arc<tokio::sync::Semaphore>,
     /// Bounds how many query-running calls one connection evaluates at once (#1736):
     /// `perspective.querySparql`, `perspective.getLinks`, `perspective.modelQuery`,
-    /// `perspective.evaluateGetters`, `perspective.subscribeQuery` and
-    /// `perspective.modelSubscribe`. A call acquires one slot in
+    /// `perspective.evaluateGetters` and `perspective.subscribe`. A call acquires one slot in
     /// `sparql_store::query_gate`, which hangs the permit on the eval's stop:
     /// the slot frees only when the blocking evaluation has actually ended,
     /// not when the call's future ends.
