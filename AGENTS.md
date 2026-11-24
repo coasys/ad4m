@@ -209,7 +209,9 @@ It needs no model and no GPU, and has its own serial group, `nightly-feed-scale`
   `executor.idle_cpu_percent.after_ui` (idle with the watch on). A fix to the
   auto-processor's tick shows in these two.
 - It writes `metrics.json` (metrics in the performance-history record format, job
-  `feed-scale`, params `{"messages": N}`) and `results.json` (the same, with the
+  `feed-scale`, params `{"messages": N}`; the failure counts and
+  `executor.cpu_seconds.ui_phase` add `"loads": L`, the number of loads, so a run with
+  another number of loads makes its own series) and `results.json` (the same, with the
   per-call detail). The `perf` step gives `metrics.json` to `scripts/perf/record`,
   draws the trend page with `scripts/perf/report`, and for a passed run asks
   `scripts/perf/check` for the verdict, by the `feed-scale` rules in
