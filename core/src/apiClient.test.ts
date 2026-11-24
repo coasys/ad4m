@@ -1664,6 +1664,21 @@ describe('ApiClient when the executor refuses the token', () => {
         expect(authFailed).toHaveBeenCalledTimes(1)
     })
 
+    it('rejects watchApplied() when events.watch fails otherwise, and sends the watch again', async () => {
+        open()
+        jest.runAllTicks() // fake timers hold the queued watch flush
+        socket(0).open()
+        const watches = () => socket(0).sent.filter((m) => m.type === 'events.watch')
+        const applied = client.watchApplied()
+        socket(0).reply({ id: watches()[0].id, error: { code: 500, message: 'store busy' } })
+        // The watch was not applied, so a peer event caused now could be missed.
+        await expect(applied).rejects.toMatchObject({ name: 'RpcError', status: 500 })
+        jest.advanceTimersByTime(60_000)
+        jest.runAllTicks()
+        expect(watches()).toHaveLength(2)
+        expect(authFailed).not.toHaveBeenCalled()
+    })
+
     it('fails every pending call on a 401 reply and stops once the executor closes the socket', async () => {
         open()
         socket(0).open()

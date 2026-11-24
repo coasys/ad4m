@@ -845,7 +845,9 @@ export class ApiClient {
      * Resolves once the socket is open and the executor has applied this
      * client's current `events.watch`. After it, every event the registered
      * handlers need reaches them. Only events other peers cause (signals)
-     * need this: a call already sends the watch ahead of itself.
+     * need this: a call already sends the watch ahead of itself. Rejects with
+     * the `RpcError` when the watch was not applied (401, a socket that closed,
+     * or another failure); the client sends the watch again by itself.
      */
     async watchApplied(): Promise<void> {
         this._ensureWs()
@@ -893,10 +895,10 @@ export class ApiClient {
         const sent = this._request('events.watch', events).then(() => { this._watchRetries = 0 }, (e) => {
             if (this._watching !== key) return
             this._watching = null
-            // A refused token (401) gets no next socket: watchApplied() must not resolve.
-            if (e instanceof RpcError && e.status === 401) throw e
-            // A closed socket (503) gets the watch again when the next one opens.
-            if (e instanceof RpcError && e.status === 503) return
+            // The watch was not applied, so watchApplied() rejects whatever the cause. A refused
+            // token (401) gets no next socket; a closed socket (503) gets the watch again when the
+            // next one opens; any other failure is retried below.
+            if (e instanceof RpcError && (e.status === 401 || e.status === 503)) throw e
             console.error('events.watch failed:', e)
             if (!this._watchRetryTimer && this._watchRetries++ < MAX_WATCH_RETRIES) {
                 this._watchRetryTimer = setTimeout(() => {
@@ -904,6 +906,7 @@ export class ApiClient {
                     this._scheduleWatch()
                 }, WATCH_RETRY_DELAY_MS)
             }
+            throw e
         })
         // Only watchApplied() awaits this; a refused watch is not an unhandled rejection otherwise.
         sent.catch(() => {})

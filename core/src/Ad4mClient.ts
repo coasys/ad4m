@@ -110,8 +110,9 @@ export class Ad4mClient {
     /**
      * Resolves once the socket is open and the executor has applied this
      * client's current `on()` handlers, so an event caused afterwards reaches
-     * them. Rejects with the `RpcError` (401) when the executor refuses the
-     * token or the watch.
+     * them. Rejects with the `RpcError` when the watch was not applied: 401
+     * when the executor refuses the token, 503 when the socket closed, or the
+     * executor's error. The client sends the watch again by itself.
      */
     watchApplied(): Promise<void> {
         return this.#apiClient.watchApplied()
