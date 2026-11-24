@@ -155,12 +155,11 @@ when both apply. No per-call info logging is added. `kind=response` is an ordina
 reply; `kind=initial` is a live-query opening reply. Sizes are serialized UTF-8
 wire-envelope bytes, not just the embedded result JSON.
 
-`perspective.modelQuery` and `perspective.modelSubscribe` add `perspective`,
+`perspective.modelQuery` and `perspective.subscribe` with `model` add `perspective`,
 comma-joined `classes`, and `results` (returned instances, not totalCount;
 subscriptions use the initial result). Errors may lack results. Handlers write a
 request-task-local slot, collected by dispatch even when its handler is cancelled;
 no slot is shared between concurrent requests or inherited by spawned tasks.
-There is no unified `perspective.subscribe` model branch on this base.
 
 `shape` contains only limit, offset, order property/direction, scope presence
 (`parent`), where property/operator names, and include/projection keys. No filter

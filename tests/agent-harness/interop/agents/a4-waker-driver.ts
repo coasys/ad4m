@@ -4,7 +4,7 @@
  *
  * The detection half is production code from this checkout: core's
  * `WakerSubscriptionManager` (the class the @coasys/openclaw-ad4m plugin
- * re-exports) on `Ad4mClient` + `QuerySubscriptionProxy`, subscribed to the
+ * re-exports) on `Ad4mClient`'s perspective client, subscribed to the
  * query the executor's `generate_waker_query` returns for a channel: a model
  * query over the built-in `ad4m://Container` (the channel's children). The
  * delivery half depends on the harness:
@@ -25,7 +25,7 @@
  * 1 (assertion fail) / 2 (fatal).
  */
 import { createHmac } from "crypto";
-import { Ad4mClient, QuerySubscriptionProxy, WakerSubscriptionManager } from "@coasys/ad4m";
+import { Ad4mClient, WakerSubscriptionManager } from "@coasys/ad4m";
 import { McpClient } from "../../src/mcp-client.ts";
 
 const TAG = process.env.A4_TAG || "a4";
@@ -96,7 +96,6 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const mgr = new WakerSubscriptionManager({
     perspectiveClient: client.perspective,
     logger,
-    QuerySubscriptionProxy,
     debounceMs: DEBOUNCE,
     onWake: (sub: any, _r: any, mentions: any) => {
       woke++;
