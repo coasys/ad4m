@@ -48,6 +48,12 @@ Invariants:
   (`BatchConflict`, 409, retryable: the caller reads again and repeats the call). Either way
   the call publishes nothing and nothing the other writer staged is lost or half-undone. The failing op's index travels
   with the error (`MutateError`) and the RPC puts it in the message and in `data.opIndex`.
+  A call cancelled by `request.cancel` or the end of its session drops the handler's future:
+  `DropDiscard` discards the fork (or the call's own batch) on a task, and stays armed
+  until the awaited merge, discard or commit has returned, so a cancel that lands while that
+  step waits for the batch store's lock still cleans up. A closed socket does not cancel the
+  call (`ws_rpc` fires the token only for those two), so after a transport failure the
+  caller cannot know whether the call merged or committed.
 
 Write rules (one set, for the MCP tools and `perspective.mutate`, whose handlers call these
 functions):

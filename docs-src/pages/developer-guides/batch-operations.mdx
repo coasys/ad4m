@@ -166,10 +166,15 @@ that succeeded stay in the open batch — and a failed raw call may have staged 
 work before it erred. Discard the batch with `perspective.discardBatch(batchId)`; committing
 it to keep the successful calls also commits whatever the failed call left behind.
 
-**A failed `perspective.mutate` call leaves the batch as it was**, whatever the failure (a
-refused op, a store error mid-write, a dropped connection). The call works in a private copy
+**A failed `perspective.mutate` call leaves the batch as it was**, whatever the failure the
+executor reports (a refused op, a store error mid-write). The call works in a private copy
 of the batch and merges it back only when every op succeeded. Earlier successful calls stay
 staged.
+
+**After a transport failure the outcome is unknown.** Closing the socket does not cancel a
+`perspective.mutate` call: one already running can still merge into the batch, or commit,
+after the client has gone. A client that lost the connection or timed out without a reply
+should read the batch or the instances to find out what happened before it repeats the call.
 
 **A batch that changed under a `perspective.mutate` call refuses the call.** If a raw call,
 another `mutate` call or a commit changes the batch while the call runs, the merge is refused

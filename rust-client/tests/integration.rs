@@ -332,10 +332,11 @@ async fn model_batch_subscription_reconnect_and_flow() {
     assert_eq!(after.len(), 3);
     let _ = next_result(&mut sub, "commit").await;
 
-    // ── batch: a failed write is not rolled back per call. The caller
-    // discards the whole batch: the good write staged before it never
-    // lands, and a second discard of the same batch is refused (`false`
-    // from the executor, an error here). ──────────────────────────────────
+    // ── batch: a failed `perspective.mutate` stages nothing in the caller's
+    // batch (it works in a private fork), so the batch still holds the good
+    // write an earlier call staged. Discarding the batch drops that write: it
+    // never lands, and a second discard of the same batch is refused (`false`
+    // from the executor, an error here). ───────────────────────────────────
     let batch = model.batch().await.unwrap();
     let in_batch = || CreateOptions {
         batch_id: Some(batch.id().to_string()),
@@ -345,9 +346,9 @@ async fn model_batch_subscription_reconnect_and_flow() {
         .create(props(&[("title", json!("staged"))]), in_batch())
         .await
         .unwrap();
-    // `title` is required: this write fails inside the batch.
+    // `nope` is not a property of the class: the shape refuses this write.
     assert!(model
-        .create(props(&[("done", json!(true))]), in_batch())
+        .create(props(&[("nope", json!(1))]), in_batch())
         .await
         .is_err());
     batch.discard().await.unwrap();

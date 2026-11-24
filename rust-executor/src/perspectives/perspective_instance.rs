@@ -7153,6 +7153,12 @@ impl PerspectiveInstance {
         self.batch_store.read().await.len()
     }
 
+    /// Hold the batch store's write lock until the guard drops: a test makes a call wait for it.
+    #[cfg(test)]
+    pub(crate) async fn hold_batch_store(&self) -> Box<dyn std::any::Any + Send> {
+        Box::new(self.batch_store.clone().write_owned().await)
+    }
+
     pub async fn commit_batch(
         &mut self,
         batch_uuid: String,

@@ -968,6 +968,35 @@ mod mutate_rules {
         );
         validate(json!({"content":{"b":1}}), false).expect("the literal language takes any JSON");
     }
+
+    /// An object is never one of the allowed values (`sh:in`) of a string property, though
+    /// the string property takes objects whole.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_json_object_is_not_an_allowed_value_of_a_string_property() {
+        let (p, _s, _ctx) = setup_perspective_no_llm(&[("Doc", DOC_SDNA)]).await;
+        let mut shape = (*p.get_shape("Doc").expect("shape")).clone();
+        shape
+            .properties
+            .iter_mut()
+            .find(|prop| prop.name == "meta")
+            .expect("meta")
+            .in_values = Some(vec![json!("open"), json!("done")]);
+        let validate = |values: serde_json::Value| {
+            crate::perspectives::instances::validate_properties(
+                &shape,
+                values.as_object().expect("object"),
+                crate::perspectives::instances::WriteMode::Create,
+                true,
+            )
+        };
+        validate(json!({"meta":"open"})).expect("an allowed value");
+        let errors =
+            validate(json!({"meta":{"anything":true}})).expect_err("an object is no option");
+        assert_eq!(
+            errors[0].problem,
+            crate::perspectives::instances::ValidationProblem::NotAllowed
+        );
+    }
 }
 
 /// A collection with a setter of its own that only appends links.
@@ -1557,6 +1586,75 @@ mod caller_batch {
         }
         p.commit_batch(batch, &ctx).await.expect("commit");
         assert!(stored_targets(&p, "ns://a", "rdf://type").await.is_empty());
+    }
+
+    /// Cancel a one-op call at the step that ends its batch, while that step waits for the
+    /// batch store's lock; `with_batch` says whether the call runs in a caller's batch.
+    /// Answers the batches open once the call is gone and the lock is free.
+    async fn open_batches_after_a_call_cancelled_at_its_last_step(with_batch: bool) -> usize {
+        let (p, _s, ctx) = setup_perspective_no_llm(&[("Note", NOTE_SDNA)]).await;
+        let batch = if with_batch {
+            Some(p.create_batch().await)
+        } else {
+            None
+        };
+        // The hook runs after the call's only op: it takes the lock, so the merge or the
+        // commit that follows waits for it.
+        let held = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let (hold_p, slot) = (p.clone(), held.clone());
+        *p.mutate_gap_hook.lock().unwrap() = Some(Box::new(move || {
+            Box::pin(async move {
+                *slot.lock().unwrap() = Some(hold_p.hold_batch_store().await);
+            })
+        }));
+        let ops = serde_json::from_value(json!([
+            {"op":"create","class":"Note","id":"ns://a","values":{"title":"a"}}
+        ]))
+        .expect("ops");
+        {
+            let mut call_p = p.clone();
+            let call = super::super::mutate(&mut call_p, &ctx, ops, batch.clone());
+            tokio::pin!(call);
+            // Drive the call until the hook holds the lock: the same poll goes on to the
+            // merge or the commit, which then waits for it.
+            while held.lock().unwrap().is_none() {
+                assert!(
+                    futures::poll!(call.as_mut()).is_pending(),
+                    "the call ended before it held the lock"
+                );
+                tokio::task::yield_now().await;
+            }
+        }
+        drop(held.lock().unwrap().take());
+        let expected = usize::from(with_batch);
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while p.open_batch_count().await > expected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let _ = settled;
+        p.open_batch_count().await
+    }
+
+    /// A call cancelled while its merge waits for the batch store leaves no private batch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_call_cancelled_while_its_merge_waits_leaves_no_private_batch() {
+        assert_eq!(
+            open_batches_after_a_call_cancelled_at_its_last_step(true).await,
+            1,
+            "only the caller's batch stays open"
+        );
+    }
+
+    /// A call cancelled while its commit waits for the batch store leaves its batch discarded.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_call_cancelled_while_its_commit_waits_leaves_no_batch() {
+        assert_eq!(
+            open_batches_after_a_call_cancelled_at_its_last_step(false).await,
+            0,
+            "the call's own batch is discarded"
+        );
     }
 
     /// A raw update of the link a call replaces, made while the call runs: the call is refused

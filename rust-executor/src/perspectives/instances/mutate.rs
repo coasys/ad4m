@@ -172,8 +172,11 @@ pub(crate) async fn mutate(
             let guard = DropDiscard::new(perspective, &private);
             match run_ops(perspective, agent, ops, &private).await {
                 Ok(done) => {
+                    // Disarmed only once the merge has returned: a call cancelled while
+                    // the merge waits for the batch store still discards the fork.
+                    let outcome = perspective.merge_batch(&batch_id, &private, base).await;
                     guard.disarm();
-                    match perspective.merge_batch(&batch_id, &private, base).await {
+                    match outcome {
                         MergeOutcome::Merged => Ok(done),
                         MergeOutcome::Gone => {
                             Err(call_error(InstanceError::BatchNotFound { batch_id }))
@@ -184,8 +187,8 @@ pub(crate) async fn mutate(
                     }
                 }
                 Err(error) => {
-                    guard.disarm();
                     perspective.discard_batch(&private).await;
+                    guard.disarm();
                     Err(error)
                 }
             }
@@ -195,23 +198,23 @@ pub(crate) async fn mutate(
             let guard = DropDiscard::new(perspective, &batch_id);
             match run_ops(perspective, agent, ops, &batch_id).await {
                 Ok(done) => {
-                    guard.disarm();
                     let class_name = done.first().map(|m| m.class_name.clone());
-                    perspective
-                        .commit_batch(batch_id, agent)
-                        .await
-                        .map_err(|error| {
-                            call_error(InstanceError::Failed {
-                                class_name: class_name.unwrap_or_default(),
-                                step: WriteStep::Commit,
-                                error,
-                            })
-                        })?;
+                    // Disarmed once the commit has returned, whatever it answered: a
+                    // cancel while it waits for the batch store still discards the batch.
+                    let committed = perspective.commit_batch(batch_id, agent).await;
+                    guard.disarm();
+                    committed.map_err(|error| {
+                        call_error(InstanceError::Failed {
+                            class_name: class_name.unwrap_or_default(),
+                            step: WriteStep::Commit,
+                            error,
+                        })
+                    })?;
                     Ok(done)
                 }
                 Err(error) => {
-                    guard.disarm();
                     perspective.discard_batch(&batch_id).await;
+                    guard.disarm();
                     Err(error)
                 }
             }

@@ -252,16 +252,29 @@ pub(crate) fn coerce_scalar(info: &PropView<'_>, value: &Value) -> Result<Value,
         _ => Ok(value.clone()),
     }?;
 
-    // `sh:in`: the coerced value must match one declared entry. Runs after the type coercion so
-    // "42" for an integer property matches entry `42`; the relation and language-stored early
-    // returns above keep it off properties whose values are URIs or language expressions (no
-    // class in WE puts `options` on those). An empty list allows nothing.
+    check_allowed(info, value, coerced)
+}
+
+/// `sh:in`: the coerced value must match one declared entry. Runs after the type coercion so
+/// "42" for an integer property matches entry `42`; the relation and language-stored early
+/// returns of `coerce_scalar` keep it off properties whose values are URIs or language
+/// expressions (no class in WE puts `options` on those). An empty list allows nothing. A JSON
+/// object a string property takes whole is checked too, so it never satisfies a list of strings.
+fn check_allowed(
+    info: &PropView<'_>,
+    given: &Value,
+    coerced: Value,
+) -> Result<Value, ValidationError> {
     if let Some(allowed) = info.in_values() {
         if !allowed
             .iter()
             .any(|entry| matches_allowed(&coerced, allowed_value(entry)))
         {
-            return Err(err(ValidationProblem::NotAllowed));
+            return Err(ValidationError::on(
+                info,
+                ValidationProblem::NotAllowed,
+                Some(given),
+            ));
         }
     }
     Ok(coerced)
@@ -374,7 +387,7 @@ pub fn validate_properties(
             && info.relation().is_none()
             && info.type_name() == "string";
         match if json_object {
-            Ok(value.clone())
+            check_allowed(info, value, value.clone())
         } else {
             coerce_scalar(info, value)
         } {
