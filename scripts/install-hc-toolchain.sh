@@ -288,8 +288,11 @@ else
     fi
 
     if [[ "$K_INSTALL_NEEDED" == "1" ]]; then
-        echo "install-hc-toolchain: cargo install kitsune2_bootstrap_srv --version $KITSUNE_VERSION --root $TOOLCHAIN_DIR"
+        # --force replaces bin/kitsune2-bootstrap-srv when one is already
+        # there. cargo install exits 101 without it, and the old version stays.
+        echo "install-hc-toolchain: cargo install --force kitsune2_bootstrap_srv --version $KITSUNE_VERSION --root $TOOLCHAIN_DIR"
         cargo install \
+            --force \
             --version "$KITSUNE_VERSION" \
             --root "$TOOLCHAIN_DIR" \
             kitsune2_bootstrap_srv
