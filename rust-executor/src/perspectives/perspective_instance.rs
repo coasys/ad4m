@@ -85,6 +85,11 @@ pub(crate) use subscriptions::{result_json, SubscriptionIdTaken};
 mod subscription_triggers;
 // Registering this executor's owners with the link language.
 mod local_agents;
+// Pacing commits to the link language.
+mod commit_tokens;
+#[cfg(test)]
+use commit_tokens::COMMIT_REFILL_INTERVAL;
+use commit_tokens::{CommitTokens, COMMIT_BURST};
 mod persisted_handle;
 pub use persisted_handle::PersistedHandle;
 // Committing a batch only if the links it expects still stand.
@@ -126,50 +131,6 @@ mod telepresence_tests;
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
 static MAX_PENDING_SECONDS: u64 = 3;
-/// Commits a perspective may send to its link language at once. The server link
-/// language (the default neighbourhood language) lets a room token POST 60
-/// commits a minute, and setup writes on a fresh neighbourhood must go out
-/// without waiting (see `auto_processor/config.rs`).
-const COMMIT_BURST: usize = 20;
-/// One commit token comes back this often: 30 a minute. In any 60 s window a
-/// perspective sends at most `COMMIT_BURST` + 30 = 50 commits, under the
-/// server's 60 a minute per room token.
-const COMMIT_REFILL_INTERVAL: Duration = Duration::from_secs(2);
-
-/// The token bucket every `link_language.commit` of a perspective takes from.
-struct CommitTokens {
-    tokens: usize,
-    /// When the next token is counted from; reset when the bucket is full.
-    refilled_at: Instant,
-}
-
-impl CommitTokens {
-    fn new(tokens: usize) -> Self {
-        Self {
-            tokens,
-            refilled_at: Instant::now(),
-        }
-    }
-
-    /// Take a token if there is one, after counting those refilled since the
-    /// last call.
-    fn take(&mut self) -> bool {
-        let now = Instant::now();
-        let refilled = (now - self.refilled_at).as_nanos() / COMMIT_REFILL_INTERVAL.as_nanos();
-        self.tokens = (self.tokens + refilled as usize).min(COMMIT_BURST);
-        if self.tokens == COMMIT_BURST {
-            self.refilled_at = now;
-        } else {
-            self.refilled_at += COMMIT_REFILL_INTERVAL * refilled as u32;
-        }
-        if self.tokens > 0 {
-            self.tokens -= 1;
-            true
-        } else {
-            false
-        }
-    }
-}
 static QUERY_SUBSCRIPTION_CHECK_INTERVAL: u64 = 200; // 200ms
 /// How long `model_query` will poll a shared perspective for a
 /// class's SHACL to arrive over p-diff-sync before erroring — see
@@ -1943,16 +1904,6 @@ impl PerspectiveInstance {
         }
 
         Ok(())
-    }
-
-    /// Take one token of the commit bucket; false when it is empty.
-    async fn take_commit_token(&self) -> bool {
-        self.commit_tokens.lock().await.take()
-    }
-
-    /// Set the tokens left in the commit bucket (tests drive the pacing with it).
-    pub async fn set_commit_tokens(&self, count: usize) {
-        *self.commit_tokens.lock().await = CommitTokens::new(count);
     }
 
     fn spawn_commit_and_handle_error(&self, diff: &PerspectiveDiff) {
