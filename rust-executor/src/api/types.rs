@@ -478,18 +478,7 @@ pub struct NotificationGrantRequest {
     pub granted: bool,
 }
 
-// ── SDNA / Commands / Subjects ──
-
-#[derive(Deserialize, TS)]
-#[ts(optional_fields)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct AddSdnaRequest {
-    pub name: String,
-    pub sdna_code: Option<String>,
-    pub sdna_type: String,
-    pub shacl_json: Option<String>,
-}
+// ── Commands / Subjects ──
 
 #[derive(Deserialize, TS)]
 #[ts(optional_fields)]
@@ -720,15 +709,6 @@ pub struct CommitBatchRequest {
 #[ts(export)]
 pub struct DiscardBatchRequest {
     pub batch_id: String,
-}
-
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct SubscribeQueryRequest {
-    pub query: String,
-    /// Minted by the client, so it can end the subscription without the reply.
-    pub subscription_id: String,
 }
 
 #[derive(Deserialize, TS)]

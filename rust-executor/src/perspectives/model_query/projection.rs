@@ -99,9 +99,13 @@ pub(super) async fn resolve_projections(
             }
             None => {
                 log::warn!(
-                    "IncludeProjection '{}': relation '{}' not found in shape — skipping",
+                    "IncludeProjection '{}': relation '{}' not found in shape class={} — skipping",
                     key,
-                    proj.from
+                    proj.from,
+                    crate::call_diag::field_value(&crate::call_diag::model::bounded(
+                        &crate::perspectives::shacl_parser::class_name_of(&shape.target_class),
+                        512
+                    ))
                 );
                 continue;
             }
@@ -423,7 +427,7 @@ fn with_where_target<'a>(
         .find(|r| r.name == proj.from && !r.target_class_name.is_empty())
     {
         Some(rel) => std::borrow::Cow::Owned(ProjectionInput {
-            target_class_name: Some(rel.target_class_name.clone()),
+            target_class_name: Some(rel.target().to_string()),
             ..proj.clone()
         }),
         None => std::borrow::Cow::Borrowed(proj),

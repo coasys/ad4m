@@ -8,7 +8,7 @@
  * 45 s added one more live model query over 76k links, until the executor sat
  * at 400 % CPU.
  *
- * These tests run the real ApiClient, PerspectiveClient, QuerySubscriptionProxy
+ * These tests run the real ApiClient, PerspectiveClient, LiveQuery
  * and WakerSubscriptionManager against a fake executor socket that keeps
  * subscriptions as the executor does: registered under the id the client minted
  * when the subscribe call arrives (a taken id is refused), dropped again by a
@@ -17,12 +17,11 @@
  */
 import { ApiClient } from '../apiClient'
 import { PerspectiveClient } from './PerspectiveClient'
-import { QuerySubscriptionProxy } from './PerspectiveProxy'
 import { WakerSubscriptionManager } from './WakerSubscriptionManager'
 
 type AnyMsg = Record<string, any>
 
-const OPENS = new Set(['perspective.modelSubscribe', 'perspective.subscribeQuery'])
+const OPENS = new Set(['perspective.subscribe'])
 
 /** What the fake executor holds: the live subscriptions it would re-check on every change. */
 const executor = {
@@ -32,7 +31,7 @@ const executor = {
     firstResultMs: 0,
     /** How long a reply takes to reach the client once sent. */
     transitMs: 0,
-    /** Every `perspective.modelSubscribe` / `subscribeQuery` call received. */
+    /** Every `perspective.subscribe` call received. */
     subscribes: 0,
     reset() {
         this.live = new Set()
@@ -129,7 +128,6 @@ function waker(options: { subscribeTimeoutMs?: number } = {}) {
         perspectiveClient: perspectives,
         logger: quiet,
         onWake: () => {},
-        QuerySubscriptionProxy,
         // Re-attempts are driven by hand below.
         retryPendingMs: 0,
         ...options,
@@ -166,7 +164,7 @@ describe('a subscribe the client gave up on', () => {
         executor.transitMs = 50
 
         const first = await settleWithin(manager.subscribe(mention), 16_000)
-        expect(String(first)).toMatch(/handshake timed out after 15000ms/)
+        expect(String(first)).toMatch(/opening timed out after 15000ms/)
         expect(executor.subscribes).toBe(2) // the text query and the Mentioning query
         expect([...executor.live]).toEqual([])
 
@@ -206,7 +204,7 @@ describe('a subscribe the client gave up on', () => {
         executor.firstResultMs = 1_000
         executor.transitMs = 50
         const controller = new AbortController()
-        const call = perspectives.modelSubscribe('p', 'ad4m://TextContent', '{}', { signal: controller.signal })
+        const call = perspectives.subscribe('p', { className: 'ad4m://TextContent', queryJson: '{}' }, { signal: controller.signal })
         call.catch(() => {})
         // Abort after the executor answered, before the answer arrives: the cancel finds nothing in flight.
         await jest.advanceTimersByTimeAsync(1_020)

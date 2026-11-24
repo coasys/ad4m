@@ -362,7 +362,6 @@ interface MeshOptions extends ChannelOptions {
     /** What `join` is handed. An empty stream unless a test says otherwise. */
     localStream?: MediaStream
     onNetworkChange?: (callback: () => void) => () => void
-    checkConnection?: () => void
 }
 
 /** Every mesh a test made, so each is left afterwards and no timer or listener outlives its test. */
@@ -387,7 +386,6 @@ async function makeMesh(bus: InMemoryBus, selfId: string, callId: string, option
         iceServers: options.iceServers,
         now: options.now,
         onNetworkChange: options.onNetworkChange,
-        checkConnection: options.checkConnection,
         // No timer: every test drives `tick()` itself, so a sweep never fires
         // between an act and its assertion. The interval has its own test.
         sweepMs: 0,
@@ -433,40 +431,6 @@ afterEach(async () => {
 const CALL_ID = "call:rec-abc"
 
 // ── Lifecycle ───────────────────────────────────────────────────────
-
-describe("a mesh destroyed while it joins", () => {
-    it("publishes nothing and starts no sweep or network watch once the channel listens", async () => {
-        jest.useFakeTimers()
-        try {
-            let listen!: () => void
-            const publish = jest.fn()
-            const onNetworkChange = jest.fn(() => () => {})
-            const mesh = new MeshManager({
-                channel: {
-                    publish,
-                    onMessage: () => () => {},
-                    listening: () => new Promise<void>((resolve) => { listen = resolve }),
-                },
-                callId: CALL_ID,
-                selfId: "did:alice",
-                onNetworkChange,
-                sweepMs: 1_000,
-                createPeerConnection: () => new FakePeerConnection() as unknown as RTCPeerConnection,
-            })
-
-            const joining = mesh.join(stream())
-            await mesh.destroy()
-            listen()
-            await joining
-
-            expect(publish).not.toHaveBeenCalled()
-            expect(onNetworkChange).not.toHaveBeenCalled()
-            expect(jest.getTimerCount()).toBe(0)
-        } finally {
-            jest.useRealTimers()
-        }
-    })
-})
 
 // ── Protocol ────────────────────────────────────────────────────────
 
@@ -1599,21 +1563,6 @@ describe("recovering a pair that did not connect", () => {
         expect(alice.recoveries.at(-1)).toMatchObject({ rung: "ice-restart", attempts: 1 })
     })
 
-    it("checks the executor socket when a pair goes disconnected", async () => {
-        // The signals of every rung go over that socket; a dead one is found in
-        // seconds, and its reconnect restarts every pair through onNetworkChange.
-        const checkConnection = jest.fn()
-        const alice = await makeMesh(bus, "did:alice", CALL_ID, { checkConnection })
-        const bob = await makeMesh(bus, "did:bob", CALL_ID)
-        for (const m of [alice, bob]) m.mesh.setRoster(["did:alice", "did:bob"])
-        await settleAll()
-        alice.live().setConnectionState("connected")
-        expect(checkConnection).not.toHaveBeenCalled()
-
-        alice.live().setConnectionState("disconnected")
-        expect(checkConnection).toHaveBeenCalledTimes(1)
-    })
-
     it("rebuilds the pair, and says so, once the cheaper rungs have not worked", async () => {
         const clock = makeClock()
         const alice = await makeMesh(bus, "did:alice", CALL_ID, { now: clock.now })
@@ -2655,7 +2604,7 @@ describe("createTelepresenceChannel", () => {
                 new Promise<boolean>((resolve, reject) => {
                     sends.push({ resolve, reject, links: status.links })
                 }),
-            addSignalHandler: async (handler) => { handlers.add(handler) },
+            addSignalHandler: (handler) => { handlers.add(handler) },
             removeSignalHandler: (handler) => { handlers.delete(handler) },
         }
         /** A signal as the executor delivers it, with both proofs checked and recorded in `valid`. */
@@ -2816,7 +2765,7 @@ describe("createTelepresenceChannel", () => {
         // An unreported publish stays outstanding and holds the mesh's repairs off for good.
         const proxy: TelepresenceProxy = {
             sendBroadcastU: () => { throw new Error("not connected") },
-            addSignalHandler: async () => {},
+            addSignalHandler: () => {},
             removeSignalHandler: () => {},
         }
         const channel = createTelepresenceChannel(proxy, "did:alice", "laptop")

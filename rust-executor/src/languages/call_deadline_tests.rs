@@ -8,16 +8,18 @@
 //! `cargo test --release -p ad4m-executor --lib call_deadline_bench -- --ignored --nocapture --test-threads=1`,
 //! but `call_deadline_bench_e2` on its own: its looping threads spin until the process exits.
 
+use super::language_runtime::{CallKind, MAX_CONCURRENT_CALLS};
 use super::language_runtime_handle::LanguageRuntimeHandle;
 use crate::agent::AgentContext;
-use std::time::{Duration, Instant};
+use crate::languages::language_context::LanguageContext;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::Instant;
 
+/// The process-wide V8 start: a second `Once` here set the flags after another test had
+/// started V8, which aborts the process (`Check failed: !IsFrozen()`).
 fn init_v8_platform() {
-    static V8_INIT: std::sync::Once = std::sync::Once::new();
-    V8_INIT.call_once(|| {
-        deno_core::v8::V8::set_flags_from_string("--max-opt=0");
-        deno_core::JsRuntime::init_platform(None);
-    });
+    crate::test_utils::init_v8_platform();
 }
 
 fn spawn_runtime(name: &str) -> (LanguageRuntimeHandle, tempfile::TempDir) {
@@ -28,10 +30,76 @@ fn spawn_runtime(name: &str) -> (LanguageRuntimeHandle, tempfile::TempDir) {
     (handle, dir)
 }
 
+/// Waits until `globalThis.__log`, read by a concurrent call, is `expected`:
+/// the calls that push to it have started.
+async fn log_reaches(handle: &LanguageRuntimeHandle, expected: &str) {
+    within(Duration::from_secs(10), expected, async {
+        loop {
+            let log = concurrent(handle, "JSON.stringify(globalThis.__log)".into()).await;
+            if log.expect("the log check answers").trim() == expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+}
+
+/// The CPU time, user and system, of the one thread of this process named
+/// `name` (a runtime's thread is `lang-` plus the first 8 characters of its
+/// address): other tests running in parallel do not count.
+#[cfg(target_os = "linux")]
+fn runtime_thread_cpu_time(name: &str) -> Duration {
+    let threads = std::fs::read_dir("/proc/self/task").unwrap();
+    let stats: Vec<String> = threads
+        .filter_map(|t| {
+            let path = t.ok()?.path();
+            let comm = std::fs::read_to_string(path.join("comm")).ok()?;
+            (comm.trim() == name).then(|| std::fs::read_to_string(path.join("stat")).ok())?
+        })
+        .collect();
+    assert_eq!(stats.len(), 1, "one thread named {name}");
+    // utime and stime are fields 14 and 15, counted after the ")" that ends
+    // the thread name.
+    let fields: Vec<u64> = stats[0]
+        .rsplit_once(')')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .skip(11)
+        .take(2)
+        .map(|f| f.parse().unwrap())
+        .collect();
+    // SAFETY: sysconf reads a constant.
+    let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64;
+    Duration::from_millis((fields[0] + fields[1]) * 1000 / ticks_per_second)
+}
+
+/// Drops the last handle and waits for the runtime to end: the runtime holds
+/// its clone of the running request until `process_requests` returns.
+async fn drop_and_await_end(handle: LanguageRuntimeHandle) {
+    let running = handle.running_request();
+    drop(handle);
+    within(Duration::from_secs(10), "the runtime's end", async {
+        while Arc::strong_count(&running) > 1 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+}
+
 /// A JS expression that resolves after `ms` without using the CPU: a file-storage upload,
 /// a zome call or an HTTP round trip as the language sees it.
 fn sleep_js(ms: u64) -> String {
     format!("await new Promise((resolve) => setTimeout(resolve, {ms}))")
+}
+
+/// A concurrent call as the main agent (`CallKind::Concurrent`): the read sent
+/// beside other calls in the tests below.
+async fn concurrent(handle: &LanguageRuntimeHandle, script: String) -> Result<String, String> {
+    handle
+        .call(script, AgentContext::main_agent(), CallKind::Concurrent)
+        .await
 }
 
 /// `n` calls, sent in order; each logs its index when it starts and when it ends, after
@@ -276,7 +344,7 @@ async fn a_call_sent_while_the_running_call_is_past_the_deadline_is_not_queued()
     let running = handle.running_request();
 
     // A call that has run for 100 ms: the next call is queued behind it.
-    *running.lock().unwrap() = Some((u64::MAX, Instant::now() - Duration::from_millis(100)));
+    running.lock().unwrap().ordered = Some((u64::MAX, Instant::now() - Duration::from_millis(100)));
     let queued = tokio::spawn({
         let handle = handle.clone();
         async move { handle.execute("1 + 1".into()).await }
@@ -286,7 +354,7 @@ async fn a_call_sent_while_the_running_call_is_past_the_deadline_is_not_queued()
         .expect("the call is queued");
 
     // The same call, 1 s on.
-    *running.lock().unwrap() = Some((u64::MAX, Instant::now() - Duration::from_secs(1)));
+    running.lock().unwrap().ordered = Some((u64::MAX, Instant::now() - Duration::from_secs(1)));
     let refused = within(Duration::from_secs(1), "the refused call", async {
         handle.execute("1 + 1".into()).await
     })
@@ -296,6 +364,28 @@ async fn a_call_sent_while_the_running_call_is_past_the_deadline_is_not_queued()
         .contains("deadline"));
     assert!(rx.try_recv().is_err(), "the refused call was queued");
     queued.abort();
+}
+
+/// The deadline follows the tokio clock: under a paused clock, a queued call that never
+/// starts gets its error once the clock reaches the deadline, with no real wait.
+#[tokio::test(start_paused = true)]
+async fn the_deadline_follows_the_paused_tokio_clock() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let handle = LanguageRuntimeHandle::from_channel("QmDeadlinePausedClock".into(), tx);
+    let real_start = std::time::Instant::now();
+    let call = tokio::spawn({
+        let handle = handle.clone();
+        async move { handle.execute("1 + 1".into()).await }
+    });
+    // Held, never started: the caller waits for its start deadline.
+    let _request = rx.recv().await.expect("the call is queued");
+    let error = call.await.unwrap().expect_err("the call never started");
+    assert!(error.contains("did not start the call"), "{error}");
+    assert!(
+        real_start.elapsed() < Duration::from_secs(10),
+        "the 60 s deadline took {:?} of real time",
+        real_start.elapsed()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -362,6 +452,898 @@ async fn a_started_call_whose_caller_has_gone_signs_as_its_own_agent() {
         outcome.signer, alice,
         "alice's call signed as another agent after her caller had gone"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Reads run beside other calls
+// ---------------------------------------------------------------------------
+
+/// An expression read does not wait for a slow call to the same language: a model query's
+/// expression reads used to queue behind every upload and commit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_does_not_wait_for_a_slow_call() {
+    let (handle, _dir) = spawn_runtime("QmConcurrentRead");
+    let slow = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .execute(format!("({}, \"slow\")", sleep_js(2000)))
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let t = Instant::now();
+    let read = within(
+        Duration::from_secs(10),
+        "the read",
+        concurrent(&handle, "1 + 1".into()),
+    )
+    .await;
+    let read_after = t.elapsed();
+
+    assert_eq!(read.expect("the read answers").trim(), "2");
+    assert!(
+        read_after < Duration::from_millis(500),
+        "the read waited {read_after:?} for the slow call"
+    );
+    let slow = within(Duration::from_secs(10), "the slow call", slow)
+        .await
+        .unwrap();
+    assert_eq!(slow.expect("the slow call answers").trim(), "slow");
+}
+
+/// Reads overlap each other: 8 reads that each await 500 ms end together.
+#[tokio::test(flavor = "multi_thread")]
+async fn reads_to_one_language_overlap() {
+    let (handle, _dir) = spawn_runtime("QmConcurrentReads");
+    let t = Instant::now();
+    let reads = (0..8).map(|i| concurrent(&handle, format!("({}, {i})", sleep_js(500))));
+    let results = within(
+        Duration::from_secs(10),
+        "the reads",
+        futures::future::join_all(reads),
+    )
+    .await;
+    let wall = t.elapsed();
+
+    for (i, result) in results.into_iter().enumerate() {
+        assert_eq!(result.expect("every read answers").trim(), i.to_string());
+    }
+    assert!(
+        wall < Duration::from_millis(1500),
+        "8 reads of 500 ms took {wall:?}: they ran one at a time"
+    );
+}
+
+/// A call that reads the agent it acts as, awaits `ms`, reads it again and signs. Logs `label`
+/// in `globalThis.__ends` when it ends. Returns `[did before, did after, author]`.
+fn agent_probe_js(label: &str, ms: u64) -> String {
+    format!(
+        r#"(async () => {{
+            const before = AGENT.did();
+            {sleep};
+            const after = AGENT.did();
+            const author = AGENT.createSignedExpression({{ note: "{label}" }}).author;
+            globalThis.__ends.push("{label}");
+            return JSON.stringify([before, after, author]);
+        }})()"#,
+        sleep = sleep_js(ms)
+    )
+}
+
+/// Calls that overlap act each as its own agent, also after an await: Alice's call awaits
+/// while a read as the main agent and a read as Bob start and end.
+#[tokio::test(flavor = "multi_thread")]
+async fn overlapping_calls_each_act_as_their_own_agent() {
+    let (alice, bob) = two_users();
+    let main = crate::agent::did();
+    let (handle, _dir) = spawn_runtime("QmConcurrentAgents");
+    handle
+        .execute("(globalThis.__ends = [], 0)".into())
+        .await
+        .unwrap();
+
+    // Alice: 0 to 800 ms. Main agent: 100 to 500 ms. Bob: 200 to 400 ms.
+    let alice_call = handle.execute_with_context(
+        agent_probe_js("alice", 800),
+        AgentContext::managed(alice.clone()),
+    );
+    let main_call = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        concurrent(&handle, agent_probe_js("main", 400)).await
+    };
+    let bob_call = async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        handle
+            .call(
+                agent_probe_js("bob", 200),
+                AgentContext::managed(bob.clone()),
+                CallKind::Concurrent,
+            )
+            .await
+    };
+    let (alice_seen, main_seen, bob_seen) = within(
+        Duration::from_secs(10),
+        "the three calls",
+        futures::future::join3(alice_call, main_call, bob_call),
+    )
+    .await;
+
+    let seen = |result: Result<String, String>| -> Vec<String> {
+        serde_json::from_str(result.expect("the call answers").trim()).unwrap()
+    };
+    assert_eq!(seen(alice_seen), vec![alice.clone(); 3], "alice's call");
+    assert_eq!(
+        seen(main_seen),
+        vec![main.clone(); 3],
+        "the main agent's call"
+    );
+    assert_eq!(seen(bob_seen), vec![bob.clone(); 3], "bob's call");
+    let ends = handle
+        .execute("JSON.stringify(globalThis.__ends)".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        ends.trim(),
+        r#"["bob","main","alice"]"#,
+        "the calls did not overlap"
+    );
+}
+
+/// Calls other than reads (commits, uploads, sync) still start and end in send order while
+/// reads run beside them.
+#[tokio::test(flavor = "multi_thread")]
+async fn writes_stay_in_send_order_while_reads_run_beside_them() {
+    let (handle, _dir) = spawn_runtime("QmConcurrentOrder");
+    let reads = (0..20).map(|i| {
+        let latency = (i * 29) % 40;
+        concurrent(&handle, format!("({}, {i})", sleep_js(latency)))
+    });
+    let ((started, ended), reads) = within(
+        Duration::from_secs(20),
+        "the burst",
+        futures::future::join(ordered_burst(&handle, 20), futures::future::join_all(reads)),
+    )
+    .await;
+
+    let sent: Vec<usize> = (0..20).collect();
+    assert_eq!(
+        started, sent,
+        "the language received the writes out of order"
+    );
+    assert_eq!(ended, sent, "a later write finished before an earlier one");
+    for (i, read) in reads.into_iter().enumerate() {
+        assert_eq!(read.expect("every read answers").trim(), i.to_string());
+    }
+}
+
+/// The other direction: a commit sent after a slow read does not wait for it. A 20-person
+/// call queued every telepresence signal behind commits and syncs (#1856).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_sent_after_a_slow_concurrent_call_does_not_wait_for_it() {
+    let (handle, _dir) = spawn_runtime("QmConcurrentBeforeOrdered");
+    let slow = {
+        let handle = handle.clone();
+        tokio::spawn(
+            async move { concurrent(&handle, format!("({}, \"slow\")", sleep_js(2000))).await },
+        )
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let t = Instant::now();
+    let commit = within(
+        Duration::from_secs(10),
+        "the ordered call",
+        handle.execute("1 + 1".into()),
+    )
+    .await;
+    let commit_after = t.elapsed();
+
+    assert_eq!(commit.expect("the ordered call answers").trim(), "2");
+    assert!(
+        commit_after < Duration::from_millis(500),
+        "the ordered call waited {commit_after:?} for the slow concurrent call"
+    );
+    let slow = within(Duration::from_secs(10), "the slow call", slow)
+        .await
+        .unwrap();
+    assert_eq!(slow.expect("the slow call answers").trim(), "slow");
+}
+
+/// `finish` clears a call's running marker and sends its result under the one
+/// lock. A caller whose deadline check runs in what was once the gap between
+/// the two — marker gone, result on its way — takes the delivered result, not
+/// "did not start" (a retried write would then apply twice). Played
+/// deterministically: the thread below holds the lock across the call's whole
+/// wait; the test sends the result, then the thread releases — the state the
+/// waiter sees after `finish` — so the waiter's next check finds the marker gone, the deadline
+/// (zero) past, and the result already there. Without the `try_recv`, the call
+/// would return the "did not start" error below.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_finished_as_its_deadline_passes_returns_its_result() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let handle = LanguageRuntimeHandle::from_channel("QmFinishRace".into(), tx)
+        .with_call_deadline(Duration::ZERO);
+    let running = handle.running_request();
+
+    let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _guard = running.lock().unwrap();
+        held_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    held_rx.recv().unwrap();
+
+    // Concurrent: `send`'s admission check does not lock for it, so the request
+    // is queued while the thread holds `running`.
+    let call = tokio::spawn({
+        let handle = handle.clone();
+        async move { concurrent(&handle, "1 + 1".into()).await }
+    });
+    let request = within(Duration::from_secs(5), "the request", rx.recv())
+        .await
+        .expect("the call is queued");
+
+    // `finish` with the marker never set: the result sent under the lock the
+    // waiter needs for its check, held past the deadline, then released.
+    request.response_tx.send(Ok("2".to_string())).unwrap();
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+
+    let result = within(Duration::from_secs(10), "the call", call)
+        .await
+        .expect("the call task completes");
+    assert_eq!(result.expect("the finished call answers").trim(), "2");
+}
+
+/// At the in-flight bound, the next concurrent call waits until a running one ends, without
+/// holding up ordered calls: a burst cannot grow one runtime's futures without bound.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_concurrent_call_past_the_bound_waits_for_a_slot() {
+    let (handle, _dir) = spawn_runtime("QmConcurrentBound");
+    handle
+        .execute("(globalThis.__started = [], globalThis.__release = [], 0)".into())
+        .await
+        .unwrap();
+    let gated = |i: usize| {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            concurrent(
+                &handle,
+                format!(
+                    r#"(async () => {{
+                        globalThis.__started.push({i});
+                        await new Promise((resolve) => globalThis.__release.push(resolve));
+                        return {i};
+                    }})()"#
+                ),
+            )
+            .await
+        })
+    };
+    let mut calls: Vec<_> = (0..MAX_CONCURRENT_CALLS).map(gated).collect();
+
+    // Wait until all of them run.
+    let started = || async {
+        handle
+            .execute("globalThis.__started.length".into())
+            .await
+            .unwrap()
+            .trim()
+            .parse::<usize>()
+            .unwrap()
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while started().await < MAX_CONCURRENT_CALLS {
+        assert!(
+            Instant::now() < deadline,
+            "the concurrent calls never started"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // The call past the bound waits, and an ordered call does not wait for it.
+    let waiting = gated(MAX_CONCURRENT_CALLS);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        started().await,
+        MAX_CONCURRENT_CALLS,
+        "a call past the bound started"
+    );
+    assert!(!waiting.is_finished(), "the call past the bound answered");
+
+    // Release all of them; the waiting call takes the freed slot. It starts only after
+    // this release, so a second release ends its wait too.
+    handle
+        .execute(
+            "(globalThis.__release.forEach((resolve) => resolve()), globalThis.__release.splice(0), 0)"
+                .into(),
+        )
+        .await
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while started().await == MAX_CONCURRENT_CALLS {
+        assert!(Instant::now() < deadline, "the waiting call never started");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    handle
+        .execute(
+            "(globalThis.__release.forEach((resolve) => resolve()), globalThis.__release.splice(0), 0)"
+                .into(),
+        )
+        .await
+        .unwrap();
+    let waited = within(Duration::from_secs(10), "the call past the bound", waiting)
+        .await
+        .unwrap();
+    assert_eq!(
+        waited.expect("the call past the bound answers").trim(),
+        MAX_CONCURRENT_CALLS.to_string()
+    );
+    for call in calls.drain(..) {
+        within(Duration::from_secs(10), "a gated call", call)
+            .await
+            .unwrap()
+            .expect("a gated call answers");
+    }
+}
+
+/// A read that cannot start by the deadline (a call holds the isolate's thread) gets an error
+/// and is never run.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_that_cannot_start_by_the_deadline_gets_an_error_and_is_not_run() {
+    let (handle, _dir) = spawn_runtime("QmConcurrentReadDeadline");
+    let handle = handle.with_call_deadline(Duration::from_millis(500));
+
+    let busy = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .execute(
+                    "(() => { const end = Date.now() + 2000; while (Date.now() < end) {} return 1; })()"
+                        .into(),
+                )
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let t = Instant::now();
+    let read = within(Duration::from_secs(10), "the read", async {
+        concurrent(&handle, "(globalThis.__readRan = true)".into()).await
+    })
+    .await;
+    let read_after = t.elapsed();
+    within(Duration::from_secs(10), "the busy call", busy)
+        .await
+        .unwrap()
+        .expect("the busy call answers its caller");
+
+    assert!(read
+        .expect_err("the read could not start by its deadline")
+        .contains("deadline"));
+    assert!(
+        read_after < Duration::from_millis(1500),
+        "the read waited {read_after:?}, past the deadline"
+    );
+    let ran = handle
+        .execute("String(globalThis.__readRan === true)".into())
+        .await
+        .unwrap();
+    assert_eq!(ran.trim(), "false", "a read ran after its caller gave up");
+}
+
+/// A JS expression that holds the isolate's thread for `ms`, after logging `label` in
+/// `globalThis.__ran`, and returns `label`.
+fn busy_js(label: &str, ms: u64) -> String {
+    format!(
+        r#"(() => {{
+            globalThis.__ran.push("{label}");
+            const end = Date.now() + {ms};
+            while (Date.now() < end) {{}}
+            return "{label}";
+        }})()"#
+    )
+}
+
+/// Sends an ordered call that holds the thread for 300 ms, so the requests sent in the next
+/// 300 ms are all in the channel when the runtime next receives: it admits them in one burst.
+fn hold_the_thread(
+    handle: &LanguageRuntimeHandle,
+) -> tokio::task::JoinHandle<Result<String, String>> {
+    let handle = handle.clone();
+    tokio::spawn(async move { handle.execute(busy_js("blocker", 300)).await })
+}
+
+/// Two reads admitted together: the first to start holds the thread past the deadline. The
+/// other has not started, so its caller gets the deadline error, and it never runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_admitted_beside_a_read_that_holds_the_thread_gets_an_error_at_the_deadline() {
+    let (handle, _dir) = spawn_runtime("QmReadBurstDeadline");
+    let handle = handle.with_call_deadline(Duration::from_millis(500));
+    handle
+        .execute("(globalThis.__ran = [], 0)".into())
+        .await
+        .unwrap();
+
+    let blocker = hold_the_thread(&handle);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let read = |label: &'static str| {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            let t = Instant::now();
+            let result = concurrent(&handle, busy_js(label, 1500)).await;
+            (label, t.elapsed(), result)
+        })
+    };
+    let (first, second) = (read("first"), read("second"));
+    let first = within(Duration::from_secs(10), "the first read", first)
+        .await
+        .unwrap();
+    let second = within(Duration::from_secs(10), "the second read", second)
+        .await
+        .unwrap();
+    within(Duration::from_secs(10), "the blocker", blocker)
+        .await
+        .unwrap()
+        .expect("the blocker answers");
+
+    // Either read may start first; the other one must not run.
+    let (started, refused) = if first.2.is_ok() {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    assert_eq!(
+        started.2.expect("the read that started answers").trim(),
+        started.0
+    );
+    let error = refused.2.expect_err(
+        "a read that had not started while another held the thread past the deadline answered",
+    );
+    assert!(error.contains("deadline"), "unexpected error: {error}");
+    assert!(
+        refused.1 < Duration::from_millis(1200),
+        "the read that had not started waited {:?}, past its deadline",
+        refused.1
+    );
+    let ran = handle
+        .execute("JSON.stringify(globalThis.__ran)".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        ran.trim(),
+        format!(r#"["blocker","{}"]"#, started.0),
+        "a read ran after its caller got the deadline error"
+    );
+}
+
+/// A read whose caller stops waiting after the runtime admitted it, but before it started (a
+/// read ahead of it holds the thread), is never run.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_whose_caller_left_before_it_started_is_not_run() {
+    let (handle, _dir) = spawn_runtime("QmReadCallerLeft");
+    handle
+        .execute("(globalThis.__ran = [], 0)".into())
+        .await
+        .unwrap();
+
+    let blocker = hold_the_thread(&handle);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Admitted at about 300 ms with the read below, and started first: holds the thread until
+    // about 1300 ms.
+    let holder = {
+        let handle = handle.clone();
+        tokio::spawn(async move { concurrent(&handle, busy_js("holder", 1000)).await })
+    };
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    // Its caller gives up at about 470 ms: after the admission, before the read can start.
+    let left = tokio::time::timeout(
+        Duration::from_millis(400),
+        concurrent(&handle, "(globalThis.__ran.push(\"left\"), 0)".into()),
+    )
+    .await;
+    assert!(left.is_err(), "the read answered before its caller gave up");
+    within(Duration::from_secs(10), "the holder", holder)
+        .await
+        .unwrap()
+        .expect("the holder answers");
+    within(Duration::from_secs(10), "the blocker", blocker)
+        .await
+        .unwrap()
+        .expect("the blocker answers");
+
+    let ran = handle
+        .execute("JSON.stringify(globalThis.__ran)".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        ran.trim(),
+        r#"["blocker","holder"]"#,
+        "a read ran after its caller had gone"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Isolate-level errors and WASM languages
+// ---------------------------------------------------------------------------
+
+/// A bundle whose top-level await can never settle stalls its module
+/// evaluation: the load drives the evaluation itself (`JsCore::load_module_from_source`),
+/// so the stall the event loop reports ends it instead of pending for ever.
+/// Deno cannot retract the pending evaluation — it keeps reporting the stall on
+/// every poll while the isolate is otherwise idle — so a load that fails this
+/// way ends the language: the caller drops the handle, as
+/// `LanguageController::load_language` does on any load error, the channel
+/// closes and the runtime's thread ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_module_stalled_on_top_level_await_fails_its_load() {
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+    let address = "QmStalledLoad".to_string();
+    let (handle, dir) = spawn_runtime(&address);
+    let context = LanguageContext::new(
+        crate::agent::did(),
+        crate::agent::signing_key_id(),
+        None,
+        dir.path().to_path_buf(),
+        address,
+    );
+    let bundle = "await new Promise(() => {});\nexport function init() {}\n";
+    let result = within(
+        Duration::from_secs(20),
+        "the module load",
+        handle.load_module(bundle.to_string(), context),
+    )
+    .await;
+    let err = result.expect_err("the stalled module load fails");
+    assert!(
+        err.contains("never resolved") || err.contains("still pending"),
+        "unexpected error: {err}"
+    );
+
+    drop_and_await_end(handle).await;
+}
+
+/// A stalled dynamic `import()` is an isolate-level error, not a call's — a
+/// concurrent call that leaves one pending must not end the ordered call
+/// running beside it. The ordered call keeps its slot until its own promise
+/// settles: a call queued behind it does not start, and the call that stalled
+/// stays pending with its own (never-settling) promise.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stalled_import_in_a_concurrent_call_does_not_free_the_ordered_call() {
+    let (handle, dir) = spawn_runtime("QmImportStall");
+    handle
+        .execute("(globalThis.__log = [], 0)".into())
+        .await
+        .unwrap();
+    // In the storage directory, the one path the sandbox may read.
+    let stalled_module = dir.path().join("stalled.js");
+    std::fs::write(
+        &stalled_module,
+        "await new Promise(() => {});\nexport const x = 1;\n",
+    )
+    .unwrap();
+    let stalled_url = url::Url::from_file_path(&stalled_module).unwrap();
+
+    // Ordered: starts, then awaits a resolver the test holds in a global.
+    let ordered = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .execute(
+                    r#"(globalThis.__log.push("ordered"),
+                        await new Promise((resolve) => (globalThis.__resolveOrdered = resolve)),
+                        "ordered")"#
+                        .into(),
+                )
+                .await
+        })
+    };
+    log_reaches(&handle, r#"["ordered"]"#).await;
+
+    // Concurrent: its `import()` stalls on the module's top-level await — the
+    // event loop reports the stall as an isolate-level error.
+    let stalled = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            concurrent(
+                &handle,
+                format!(r#"(globalThis.__log.push("stalled"), await import("{stalled_url}"))"#),
+            )
+            .await
+        })
+    };
+    log_reaches(&handle, r#"["ordered","stalled"]"#).await;
+    // Queued behind the ordered call: starts only when it ends.
+    let behind = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .execute(r#"(globalThis.__log.push("behind"), "behind")"#.into())
+                .await
+        })
+    };
+    // The loop now has nothing to do but report the stall: it waits for the
+    // next request instead of polling again (`EventLoopFuture`), so the
+    // process stays idle rather than spinning a core.
+    #[cfg(target_os = "linux")]
+    {
+        let cpu_before = runtime_thread_cpu_time("lang-QmImport");
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        let cpu_idle = runtime_thread_cpu_time("lang-QmImport") - cpu_before;
+        assert!(
+            cpu_idle < Duration::from_millis(500),
+            "the runtime spun on the stall: {cpu_idle:?} of CPU in 1 s idle"
+        );
+    }
+
+    // The stall ended neither call: the ordered one still holds its slot, so
+    // the queued call has not started, and the stalled call's own promise is
+    // still pending.
+    let log = within(Duration::from_secs(10), "the check", async {
+        concurrent(&handle, "JSON.stringify(globalThis.__log)".into()).await
+    })
+    .await;
+    assert_eq!(
+        log.expect("the check answers").trim(),
+        r#"["ordered","stalled"]"#,
+        "a call ran before the ordered call's promise settled"
+    );
+    assert!(
+        !ordered.is_finished(),
+        "the ordered call ended on the stall"
+    );
+    assert!(!stalled.is_finished(), "the call that stalled answered");
+    assert!(!behind.is_finished(), "the queued call answered");
+
+    // A concurrent call starts a timer that resolves the global the ordered
+    // call awaits, and returns: the timer still fires after the stall, with
+    // no call sent to drive the loop. The ordered call ends with its own
+    // result, then the queued call runs.
+    concurrent(
+        &handle,
+        "(setTimeout(() => globalThis.__resolveOrdered(), 300), 0)".into(),
+    )
+    .await
+    .unwrap();
+    let ordered = within(Duration::from_secs(10), "the ordered call", ordered)
+        .await
+        .unwrap();
+    assert_eq!(ordered.expect("the ordered call answers").trim(), "ordered");
+    let behind = within(Duration::from_secs(10), "the call behind", behind)
+        .await
+        .unwrap();
+    assert_eq!(behind.expect("the call behind answers").trim(), "behind");
+
+    // The stalled call's promise never settles; the runtime ends with the isolate.
+    stalled.abort();
+    drop_and_await_end(handle).await;
+}
+
+/// An unhandled rejection is an isolate-level error, not a call's. A concurrent call that
+/// leaves one behind must not end the ordered call running beside it: the ordered call keeps
+/// its slot until its own promise settles, so a call queued behind it starts only after it,
+/// and the offending call still answers its own caller. (Before `EventLoopErrors`, whichever
+/// call's future polled the loop next took the error as its own result — ending a call whose
+/// promise still ran and freeing its slot early.)
+#[tokio::test(flavor = "multi_thread")]
+async fn an_event_loop_error_in_a_concurrent_call_does_not_free_the_ordered_call() {
+    let (handle, _dir) = spawn_runtime("QmEventLoopErr");
+    handle
+        .execute("(globalThis.__log = [], 0)".into())
+        .await
+        .unwrap();
+
+    let ordered = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .execute(format!(
+                    "({}, globalThis.__log.push(\"ordered\"), \"ordered\")",
+                    sleep_js(1200)
+                ))
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Its own promise resolves; the rejected promise beside it is nobody's handler.
+    let bad = within(Duration::from_secs(10), "the call that rejects", async {
+        concurrent(
+            &handle,
+            "(Promise.reject(new Error(\"unhandled in test\")), \"bad done\")".into(),
+        )
+        .await
+    })
+    .await;
+    assert_eq!(bad.expect("the call answers").trim(), "bad done");
+
+    let behind = within(Duration::from_secs(10), "the call behind", async {
+        handle
+            .execute("(globalThis.__log.push(\"behind\"), \"behind\")".into())
+            .await
+    })
+    .await;
+    assert_eq!(behind.expect("the call behind answers").trim(), "behind");
+
+    let ordered = within(Duration::from_secs(10), "the ordered call", ordered)
+        .await
+        .unwrap();
+    assert_eq!(ordered.expect("the ordered call answers").trim(), "ordered");
+
+    let log = handle
+        .execute("JSON.stringify(globalThis.__log)".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        log.trim(),
+        r#"["ordered","behind"]"#,
+        "the call behind ran before the ordered call ended: the event-loop error freed its slot"
+    );
+}
+
+/// The generated bundle of `tests/rust-languages/test-wasm-language`, when
+/// `bash tests/rust-languages/build.sh` has run — the JS suite
+/// (`flat-language.test.ts`) gates on the same file.
+fn wasm_language_bundle() -> Option<String> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tests/rust-languages/test-wasm-language/build/bundle.js");
+    std::fs::read_to_string(path).ok()
+}
+
+/// A Rust/ALDK (wasm-bindgen) language runs every call ordered, a `CallKind::Concurrent`
+/// one included: wasm-bindgen-futures polls all of a module's futures from one queue that
+/// does not restore each task's async context, and ALDK's async exports hold the instance's
+/// lock across their awaits — a call beside another's reads would sign as the wrong agent,
+/// and a sync export like `interactions()` would see the busy instance. Below, the read sent
+/// concurrent still runs 600 ms when the create and the interactions() call behind it are
+/// sent; both must wait for it, and the create must still sign as the managed user, not the
+/// main agent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wasm_language_runs_concurrent_calls_in_order_as_their_agents() {
+    let Some(bundle) = wasm_language_bundle() else {
+        eprintln!(
+            "test-wasm-language bundle missing; run `bash tests/rust-languages/build.sh` — skipping"
+        );
+        return;
+    };
+
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+    let alice =
+        crate::test_utils::create_test_user(&format!("alice.{}@example.org", uuid::Uuid::new_v4()));
+
+    let address = "QmTestWasmOrdered".to_string();
+    let (handle, dir) = spawn_runtime(&address);
+    let context = LanguageContext::new(
+        crate::agent::did(),
+        crate::agent::signing_key_id(),
+        None,
+        dir.path().to_path_buf(),
+        address.clone(),
+    );
+    handle
+        .load_module(bundle, context.clone())
+        .await
+        .expect("the WASM bundle loads");
+    handle
+        .load_language(context.to_json())
+        .await
+        .expect("the language's init() runs");
+
+    // Sent concurrent: would run beside the calls below on a JS language.
+    let read = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            concurrent(
+                &handle,
+                "JSON.stringify(await globalThis.__ad4m_language_instance__.expressionGet(\"slow:600:x\"))"
+                    .into(),
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // A sync export. Overlapping the read it would see the instance's lock
+    // held (`try_with` → null); ordered, it runs after it and answers for real.
+    let interactions = within(Duration::from_secs(10), "interactions", async {
+        concurrent(
+            &handle,
+            "JSON.stringify(globalThis.__ad4m_language_instance__.interactions(\"expr://x\"))"
+                .into(),
+        )
+        .await
+    })
+    .await;
+    let interactions = interactions.expect("the interactions call answers");
+    assert!(
+        interactions.contains("echo"),
+        "interactions() overlapped the read's lock and answered busy: {interactions}"
+    );
+
+    // Alice's create, sent while the read still runs, runs after it — and
+    // signs as Alice, never as the agent whose call preceded it.
+    let created = within(Duration::from_secs(10), "the create", async {
+        handle
+            .call(
+                "globalThis.__ad4m_language_instance__.expressionCreate({note: \"from alice\"})"
+                    .into(),
+                AgentContext::managed(alice.clone()),
+                CallKind::Concurrent,
+            )
+            .await
+    })
+    .await
+    .expect("the create answers");
+    let addr = created.trim().trim_matches('"').to_string();
+    assert!(
+        addr.starts_with("test:"),
+        "unexpected expression address: {addr}"
+    );
+
+    let read = within(Duration::from_secs(10), "the slow read", read)
+        .await
+        .unwrap();
+    read.expect("the read answers");
+
+    let expression = handle
+        .execute(format!(
+            "JSON.stringify(await globalThis.__ad4m_language_instance__.expressionGet({}))",
+            serde_json::to_string(&addr).unwrap()
+        ))
+        .await
+        .expect("the get answers");
+
+    let author = serde_json::from_str::<serde_json::Value>(&expression)
+        .unwrap()
+        .pointer("/author")
+        .and_then(|a| a.as_str())
+        .expect("the stored expression has an author")
+        .to_string();
+    assert_eq!(
+        author, alice,
+        "the create signed as {author}, not the managed user"
+    );
+}
+
+/// A concurrent-marked call on a WASM language runs ordered, so its caller's
+/// deadline is the ordered one: behind a running call already past the
+/// deadline it is refused at once (not queued to wait out the concurrent
+/// deadline); behind one approaching it, it gets the busy error when that
+/// call passes the deadline — the error names the running call, not "did not
+/// start". `set_wasm` plays `load_module`'s share of the flag.
+#[tokio::test]
+async fn a_concurrent_call_on_wasm_gets_the_ordered_deadline() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let handle = LanguageRuntimeHandle::from_channel("QmWasmDeadline".into(), tx)
+        .with_call_deadline(Duration::from_millis(500));
+    handle.set_wasm();
+    let running = handle.running_request();
+
+    // Already past the deadline: refused at once, never queued.
+    running.lock().unwrap().ordered = Some((u64::MAX, Instant::now() - Duration::from_secs(1)));
+    let refused = within(Duration::from_secs(1), "the refused call", async {
+        concurrent(&handle, "1 + 1".into()).await
+    })
+    .await;
+    assert!(refused
+        .expect_err("the running call is past the deadline")
+        .contains("is busy"));
+    assert!(rx.try_recv().is_err(), "the refused call was queued");
+
+    // Approaching it: the wait ends at the running call's deadline with the
+    // busy error, not at the concurrent deadline with "did not start".
+    running.lock().unwrap().ordered = Some((u64::MAX, Instant::now() - Duration::from_millis(450)));
+    let queued = within(Duration::from_secs(1), "the queued call", async {
+        concurrent(&handle, "1 + 1".into()).await
+    })
+    .await;
+    assert!(queued
+        .expect_err("the running call passed the deadline")
+        .contains("is busy"));
 }
 
 // ---------------------------------------------------------------------------
@@ -677,4 +1659,44 @@ async fn call_deadline_bench_f_identity() {
         let _ = handle.teardown().await;
     }
     println!("BENCH F | n={RUNS} | signed as alice {as_alice} | as bob {as_bob} | other {other}");
+}
+
+/// H: a fast call sent 100 ms into a 2 s call to the same language: its latency as an ordered
+/// call (the path every call took before reads) and as a read.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn call_deadline_bench_h_fast_read_beside_a_slow_call() {
+    let mut as_ordered = Vec::new();
+    let mut as_read = Vec::new();
+    for run in 0..RUNS {
+        for read in [false, true] {
+            let (handle, _dir) = spawn_runtime(&format!("QmBenchH{run}{read}"));
+            let slow = {
+                let handle = handle.clone();
+                tokio::spawn(async move {
+                    handle
+                        .execute(format!("({}, \"slow\")", sleep_js(2000)))
+                        .await
+                })
+            };
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let t = Instant::now();
+            let fast = if read {
+                concurrent(&handle, "1 + 1".into()).await
+            } else {
+                handle.execute("1 + 1".into()).await
+            };
+            let latency = t.elapsed();
+            assert_eq!(fast.unwrap().trim(), "2");
+            slow.await.unwrap().unwrap();
+            if read {
+                as_read.push(latency);
+            } else {
+                as_ordered.push(latency);
+            }
+            let _ = handle.teardown().await;
+        }
+    }
+    report("H", "fast call beside a 2 s call, ordered", as_ordered);
+    report("H", "fast call beside a 2 s call, read", as_read);
 }

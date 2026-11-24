@@ -1,8 +1,9 @@
-import { PerspectiveProxy, QuerySubscriptionProxy } from './PerspectiveProxy';
+import { PerspectiveProxy } from './PerspectiveProxy';
 import { Link, LinkExpression } from '../links/Links';
 import { LinkQuery } from './LinkQuery';
 import { Literal } from '../Literal';
 import { SHACLFlow } from '../shacl/SHACLFlow';
+import { TextContent } from './TextContent';
 
 function createProxy(client: any): PerspectiveProxy {
   return new PerspectiveProxy(
@@ -11,54 +12,65 @@ function createProxy(client: any): PerspectiveProxy {
   );
 }
 
-describe('QuerySubscriptionProxy', () => {
-  function liveClient(subscribeQuery: jest.Mock) {
+describe('perspective.liveSparql', () => {
+  function liveClient(subscribe: jest.Mock) {
+    const reconnects = new Set<() => void>();
     const client = {
-      subscribeQuery,
+      subscribe,
       onQueryUpdate: () => () => {},
-      onReconnect: () => () => {},
+      onReconnect: (cb: () => void) => { reconnects.add(cb); return () => reconnects.delete(cb); },
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     } as any;
-    return { client };
+    return { client, reconnects };
   }
 
-  it('resolves initialized with the first result', async () => {
+  it('opens through perspective.subscribe and resolves `first` with the rows, marked initial', async () => {
     const { client } = liveClient(jest.fn().mockResolvedValue({ subscriptionId: 'sub-1', result: [{ s: 'a' }], revision: 0 }));
-    const subscription = new QuerySubscriptionProxy('perspective-1', 'SELECT * WHERE { ?s ?p ?o }', client);
-    await subscription.subscribe();
-    await expect(subscription.initialized).resolves.toBe(true);
-    expect(subscription.result).toEqual([{ s: 'a' }]);
-    expect(subscription.id).toBe('sub-1');
-    expect(client.subscribeQuery).toHaveBeenCalledWith('perspective-1', 'SELECT * WHERE { ?s ?p ?o }', { signal: expect.any(AbortSignal) });
+    const live = createProxy(client).liveSparql('SELECT * WHERE { ?s ?p ?o }');
+    await expect(live.first).resolves.toEqual([{ s: 'a' }]);
+    expect(live.getSnapshot()).toMatchObject({ status: 'ready', data: [{ s: 'a' }], initial: true });
+    expect(client.subscribe).toHaveBeenCalledWith(
+      'test-uuid', { sparql: 'SELECT * WHERE { ?s ?p ?o }' }, { signal: expect.any(AbortSignal), timeoutMs: undefined });
+    live.dispose();
+    expect(client.disposeQuerySubscription).toHaveBeenCalledWith('test-uuid', 'sub-1');
   });
 
-  it('opens a model query over a class when given one', async () => {
-    const modelSubscribe = jest.fn().mockResolvedValue({ subscriptionId: 'sub-2', result: { instances: [{ id: 'a' }], totalCount: 1 }, revision: 0 });
-    const { client } = liveClient(jest.fn());
-    client.modelSubscribe = modelSubscribe;
-    const subscription = new QuerySubscriptionProxy('perspective-1', '{"limit":1}', client, 'ad4m://TextContent');
-    await subscription.subscribe();
-    expect(modelSubscribe).toHaveBeenCalledWith('perspective-1', 'ad4m://TextContent', '{"limit":1}', { signal: expect.any(AbortSignal) });
-    expect(client.subscribeQuery).not.toHaveBeenCalled();
-    expect(subscription.result).toEqual({ instances: [{ id: 'a' }], totalCount: 1 });
+  it('publishes a copy of the rows, so changing `data` does not corrupt later diffs', async () => {
+    const { client } = liveClient(jest.fn().mockResolvedValue({ subscriptionId: 'sub-1', result: [{ s: 'a' }], revision: 0 }));
+    let push!: (u: any) => void;
+    client.onQueryUpdate = (cb: any) => { push = cb; return () => {}; };
+    const live = createProxy(client).liveSparql('SELECT * WHERE { ?s ?p ?o }');
+    const rows = await live.first;
+    rows.push({ s: 'x' });
+    rows[0].s = 'changed';
+    push({ subscriptionId: 'sub-1', revision: 1, added: [{ s: 'b' }], removed: [] });
+    expect(live.getSnapshot().data).toEqual([{ s: 'a' }, { s: 'b' }]);
+    live.dispose();
   });
 
-  it('rejects initialized when the subscribe call fails', async () => {
+  it('passes the timeout to the open call', async () => {
+    const { client } = liveClient(jest.fn().mockResolvedValue({ subscriptionId: 'sub-1', result: [], revision: 0 }));
+    const live = createProxy(client).liveSparql('SELECT ?x WHERE { ?x ?p ?o }', { timeoutMs: 5000 });
+    await live.first;
+    expect(client.subscribe.mock.calls[0][2]).toMatchObject({ timeoutMs: 5000 });
+    live.dispose();
+  });
+
+  it('rejects `first` and sets the error snapshot when the subscribe call fails', async () => {
     const { client } = liveClient(jest.fn().mockRejectedValue(new Error('locked')));
-    const subscription = new QuerySubscriptionProxy('p', 'SELECT ?x WHERE { ?x ?p ?o }', client);
-    const initialized = subscription.initialized;
-    await expect(subscription.subscribe()).rejects.toThrow('locked');
-    await expect(initialized).rejects.toThrow('locked');
+    const live = createProxy(client).liveSparql('SELECT ?x WHERE { ?x ?p ?o }');
+    await expect(live.first).rejects.toThrow('locked');
+    expect(live.getSnapshot()).toMatchObject({ status: 'error' });
   });
 
-  it('leaves no unhandled rejection when the caller never reads initialized', async () => {
+  it('leaves no unhandled rejection when the caller never reads `first`', async () => {
     const unhandled: unknown[] = [];
     const record = (reason: unknown) => unhandled.push(reason);
     process.on('unhandledRejection', record);
     try {
       const { client } = liveClient(jest.fn().mockRejectedValue(new Error('refused')));
-      const subscription = new QuerySubscriptionProxy('p', 'not sparql', client);
-      await expect(subscription.subscribe()).rejects.toThrow('refused');
+      createProxy(client).liveSparql('not sparql');
+      await new Promise(resolve => setImmediate(resolve));
       await new Promise(resolve => setImmediate(resolve));
       expect(unhandled).toEqual([]);
     } finally {
@@ -66,22 +78,17 @@ describe('QuerySubscriptionProxy', () => {
     }
   });
 
-  it('perspective.subscribeQuery leaves nothing re-opening when the first subscribe fails', async () => {
-    const reconnects = new Set<() => void>();
-    const subscribeQuery = jest.fn().mockRejectedValue(new Error('Prolog live queries are not supported'));
-    const client = {
-      subscribeQuery,
-      onQueryUpdate: () => () => {},
-      onReconnect: (cb: () => void) => { reconnects.add(cb); return () => reconnects.delete(cb); },
-      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
-    } as any;
+  it('leaves nothing re-opening when the first subscribe fails', async () => {
+    const subscribe = jest.fn().mockRejectedValue(new Error('Prolog live queries are not supported'));
+    const { client, reconnects } = liveClient(subscribe);
     const errors = jest.spyOn(console, 'error').mockImplementation(() => {});
     try {
-      await expect(createProxy(client).subscribeQuery('a Prolog query')).rejects.toThrow('not supported');
-      // The caller never got a proxy to dispose: a reconnect must not open the query again.
+      const live = createProxy(client).liveSparql('a Prolog query');
+      await expect(live.first).rejects.toThrow('not supported');
+      // A reconnect must not open the failed query again.
       for (const reconnect of [...reconnects]) reconnect();
       await new Promise(resolve => setImmediate(resolve));
-      expect(subscribeQuery).toHaveBeenCalledTimes(1);
+      expect(subscribe).toHaveBeenCalledTimes(1);
       expect(reconnects.size).toBe(0);
     } finally {
       errors.mockRestore();
@@ -89,76 +96,44 @@ describe('QuerySubscriptionProxy', () => {
   });
 });
 
-describe('PerspectiveProxy.subjectClassTargetClasses', () => {
-  function mockLink(source: string) {
-    return { data: { source, predicate: 'rdf://type', target: 'ad4m://SubjectClass' } };
+describe('PerspectiveProxy resolves a template object to a registered class', () => {
+  function shapeJson(targetClass: string, properties: any[]) {
+    return { target_class: targetClass, properties };
   }
 
-  function proxyWithLinks(links: any[]): PerspectiveProxy {
-    const mockClient: any = {
-      queryLinks: jest.fn().mockResolvedValue(links),
+  function proxyWithShapes(shapes: any[]) {
+    const client: any = {
+      shapes: jest.fn().mockResolvedValue(shapes),
+      createSubject: jest.fn().mockResolvedValue(undefined),
     };
-    return createProxy(mockClient);
+    return { client, proxy: createProxy(client) };
   }
 
-  it('returns full URIs, not stripped names', async () => {
-    const proxy = proxyWithLinks([
-      mockLink('we://Space'),
-      mockLink('flux://Channel'),
-      mockLink('recipe://Recipe'),
+  it('matches property names and collection names as the shapes declare them', async () => {
+    const { client, proxy } = proxyWithShapes([
+      // Same property, but `tags` is no collection: not a match.
+      { name: 'Card', hash: 'h1', shape: shapeJson('app://Card', [
+        { path: 'app://title', name: 'title' },
+        { path: 'app://tag', name: 'tags' },
+      ]) },
+      { name: 'Post', hash: 'h2', shape: shapeJson('app://Post', [
+        // A name the path's local part does not give.
+        { path: 'app://title', name: 'geo.title' },
+        { path: 'app://tag', name: 'tags', collection: true },
+      ]) },
     ]);
 
-    const result = await proxy.subjectClassTargetClasses();
+    await proxy.createSubject({ 'geo.title': '', tags: [] }, 'expr://1', undefined, 'batch-1');
 
-    expect(result).toContain('we://Space');
-    expect(result).toContain('flux://Channel');
-    expect(result).toContain('recipe://Recipe');
-    expect(result).toHaveLength(3);
+    expect(client.createSubject).toHaveBeenCalledWith(
+      'test-uuid', JSON.stringify({ className: 'Post' }), 'expr://1', undefined, 'batch-1');
   });
 
-  it('deduplicates URIs', async () => {
-    const proxy = proxyWithLinks([
-      mockLink('we://Space'),
-      mockLink('we://Space'),
-    ]);
+  it('refuses a template object no registered class fits', async () => {
+    const { client, proxy } = proxyWithShapes([]);
 
-    expect(await proxy.subjectClassTargetClasses()).toEqual(['we://Space']);
-  });
-
-  it('filters out empty sources', async () => {
-    const proxy = proxyWithLinks([
-      mockLink('we://Space'),
-      mockLink(''),
-    ]);
-
-    expect(await proxy.subjectClassTargetClasses()).toEqual(['we://Space']);
-  });
-
-  it('returns an empty array when no classes are registered', async () => {
-    const proxy = proxyWithLinks([]);
-    expect(await proxy.subjectClassTargetClasses()).toEqual([]);
-  });
-
-  it('rejects when the lookup fails, rather than answering that nothing is registered', async () => {
-    const mockClient: any = {
-      queryLinks: jest.fn().mockRejectedValue(new Error('network error')),
-    };
-    const proxy = createProxy(mockClient);
-
-    await expect(proxy.subjectClassTargetClasses()).rejects.toThrow('network error');
-    await expect(proxy.subjectClasses()).rejects.toThrow('network error');
-  });
-
-  it('still lets subjectClassesByTemplate fall back to property matching when the lookup fails', async () => {
-    const mockClient: any = {
-      queryLinks: jest.fn().mockRejectedValue(new Error('network error')),
-    };
-    const proxy = createProxy(mockClient);
-    const byProperties = jest.spyOn(proxy as any, 'findClassByProperties').mockResolvedValue('Recipe' as never);
-
-    // A className sends it to the subjectClasses() lookup first, which now rejects.
-    await expect(proxy.subjectClassesByTemplate({ className: 'Recipe' })).resolves.toEqual(['Recipe']);
-    expect(byProperties).toHaveBeenCalled();
+    await expect(proxy.createSubject({ title: '' }, 'expr://1')).rejects.toThrow('Could not resolve subject class name');
+    expect(client.createSubject).not.toHaveBeenCalled();
   });
 });
 
@@ -471,6 +446,31 @@ describe('PerspectiveProxy.addFlow replace', () => {
   });
 });
 
+describe('PerspectiveProxy.getSingleTarget', () => {
+  it('queries without the target and leaves its argument unchanged', async () => {
+    const found = LinkExpression.fromWire({
+      author: 'did:test', timestamp: '2026-01-01T00:00:00Z',
+      data: { source: 's://1', predicate: 'p://name', target: 'literal://found' },
+      proof: { key: 'k', signature: 's' },
+    } as any);
+    const client = { queryLinks: jest.fn().mockResolvedValue([found]) } as any;
+    const query = new LinkQuery({ source: 's://1', predicate: 'p://name', target: 'literal://old' });
+
+    await expect(createProxy(client).getSingleTarget(query)).resolves.toBe('literal://found');
+    expect(client.queryLinks.mock.calls[0][1].target).toBeUndefined();
+    expect(query.target).toBe('literal://old');
+  });
+
+  it('passes an explicit limit of 0 on to the executor', async () => {
+    // The executor answers limit 0 with no links, as Perspective.get does.
+    const client = { queryLinks: jest.fn().mockResolvedValue([]) } as any;
+    const query = new LinkQuery({ source: 's://1', predicate: 'p://name', limit: 0 });
+
+    await expect(createProxy(client).getSingleTarget(query)).resolves.toBeNull();
+    expect(client.queryLinks.mock.calls[0][1].limit).toBe(0);
+  });
+});
+
 // A read right after an awaited write sees the write: `updateSubject` and
 // `removeSubject` through an abstract class (#1435) write in the executor,
 // and querySparql keeps no result once its call settles.
@@ -510,8 +510,7 @@ describe('PerspectiveProxy reads after write RPCs are fresh', () => {
     const c = client();
     const proxy = createProxy(c);
     expect(await proxy.querySparql(query)).toEqual([{ v: 'old' }]);
-    const row = { constructor: { builtinUri: 'ad4m://TextContent' } };
-    await proxy.removeSubject(row, 'ad4m://m/1');
+    await proxy.removeSubject(new TextContent(proxy, 'ad4m://m/1'), 'ad4m://m/1');
     expect(c.removeSubject).toHaveBeenCalledWith('test-uuid', 'ad4m://TextContent', 'ad4m://m/1', undefined);
     expect(await proxy.querySparql(query)).toEqual([{ v: 'new' }]);
   });

@@ -53,6 +53,99 @@ const named = (id: string) => row(id, 'hi Data!');
 /** A model subscription's result. */
 const result = (...rows: any[]) => ({ instances: rows, totalCount: rows.length });
 
+/** What a {@link FakeLive}'s opening does: answer at once, never answer, answer after this many ms, or fail. */
+type FakeOpen = 'open' | 'hang' | number | Error;
+
+/**
+ * A stand-in for the `LiveQuery` the manager opens (its `openLive`): the same surface
+ * (`first`, `getSnapshot`, `subscribe`, `onStatus`, `dispose`), driven by hand. `opening` is the
+ * value it holds once open (a snapshot with `initial`); `emit` gives it a later one, as the
+ * executor's update would, and returns once the manager's listener has had its microtasks.
+ * `LiveQuery.test.ts` covers the real class.
+ */
+class FakeLive {
+  /** One entry per `dispose()` call. */
+  disposed: string[] = [];
+  at = Date.now();
+  disposedAt?: number;
+  /** Set once the manager listens. */
+  deliver?: (result: any) => Promise<void>;
+  readonly first: Promise<void>;
+  #snapshot: any = { status: 'loading', initial: false, reopening: false };
+  #listeners = new Set<(snapshot: any) => void>();
+  #reject: (error: Error) => void = () => {};
+  #timer?: ReturnType<typeof setTimeout>;
+
+  constructor(
+    readonly path: string,
+    private options: {
+      open?: FakeOpen;
+      opening?: any;
+      /** Whether the opening value is marked `initial` (default); `false` is a handle that already applied an update. */
+      initial?: boolean;
+      onListen?: (emit: (result: any) => Promise<void>) => void;
+      onStatus?: (listener: (status: any) => void) => void;
+      onDispose?: () => void;
+    } = {},
+  ) {
+    const open = options.open ?? 'open';
+    let resolve: () => void = () => {};
+    this.first = new Promise<void>((res, rej) => { resolve = res; this.#reject = rej; });
+    this.first.catch(() => {});
+    const ready = () => {
+      this.#snapshot = { status: 'ready', data: options.opening ?? result(), initial: options.initial ?? true, reopening: false };
+      resolve();
+    };
+    if (open === 'open') ready();
+    else if (typeof open === 'number') this.#timer = setTimeout(ready, open);
+    else if (open instanceof Error) {
+      this.#snapshot = { status: 'error', error: open, initial: false, reopening: false };
+      this.#reject(open);
+    }
+  }
+
+  getSnapshot = () => this.#snapshot;
+
+  subscribe = (listener: (snapshot: any) => void) => {
+    if (this.#snapshot.status !== 'loading') listener(this.#snapshot);
+    this.#listeners.add(listener);
+    this.deliver = this.emit;
+    this.options.onListen?.(this.emit);
+    return () => { this.#listeners.delete(listener); };
+  };
+
+  onStatus = (listener: (status: any) => void) => {
+    this.options.onStatus?.(listener);
+    return () => {};
+  };
+
+  emit = async (result: any): Promise<void> => {
+    this.#snapshot = { status: 'ready', data: result, initial: false, reopening: false };
+    for (const listener of [...this.#listeners]) listener(this.#snapshot);
+    for (let i = 0; i < 100; i++) await Promise.resolve();
+  };
+
+  dispose = () => {
+    this.disposed.push('disposed');
+    this.disposedAt ??= Date.now();
+    this.options.onDispose?.();
+    clearTimeout(this.#timer);
+    if (this.#snapshot.status === 'loading') this.#reject(new Error('disposed before it opened'));
+    this.#listeners.clear();
+  };
+}
+
+/** A manager whose opened live queries come from `live` (the options' test-only key), when given. */
+function makeManager(options: any): WakerSubscriptionManager {
+  const { live, ...rest } = options;
+  const manager = new WakerSubscriptionManager(rest);
+  if (live) (manager as any).openLive = live;
+  return manager;
+}
+
+/** Which of a mention subscription's two queries a class name is. */
+const pathOf = (className?: string | string[]) => (className === 'ad4m://Mentioning' ? 'mentions' : 'text');
+
 /**
  * Regression guard for the fork that used to exist between this file and
  * plugins/ad4m/wakerSubscriptionManager.ts: the plugin copy learned to report
@@ -89,53 +182,38 @@ describe('WakerSubscriptionManager', () => {
   };
 
   /**
-   * A QuerySubscriptionProxy stand-in that answers at once. It keeps each proxy's `onResult`
-   * callback in `delivers`, the mention query's (over Mentioning) as `mentions`, the text query's
-   * as `text`, and each constructor call in `opened`; `initial` is each one's `result`.
+   * Live queries that answer at once. Each one's `emit` is kept in `delivers`, the mention
+   * query's (over Mentioning) as `mentions`, the text query's as `text`, and each open in
+   * `opened` (`[uuid, query, className]`); `initial` is each one's opening value.
    */
-  function answeringProxyClass(
+  function answeringLive(
     delivers: Record<string, (result: any) => Promise<void>>,
     opened: any[][] = [],
     initial: { text?: any; mentions?: any } = {},
   ) {
-    return function (...args: any[]) {
-      opened.push(args);
-      const path = args[3] === 'ad4m://Mentioning' ? 'mentions' : 'text';
-      return {
-        initialized: Promise.resolve(true),
-        subscribe: () => Promise.resolve(),
-        dispose: () => {},
-        result: initial[path],
-        onResult: (cb: (result: any) => Promise<void>) => { delivers[path] = cb; },
-      };
+    return (uuid: string, query: string, className?: string | string[]) => {
+      opened.push([uuid, query, className]);
+      const path = pathOf(className);
+      return new FakeLive(path, { opening: initial[path], onListen: (emit) => { delivers[path] = emit; } });
     };
   }
 
-  /** Hand `delivery` to the proxy it is for: {@link toMentions}'s to the mention query's, else the text query's. */
+  /** Hand `delivery` to the query it is for: {@link toMentions}'s to the mention query's, else the text query's. */
   const deliverTo = (delivers: Record<string, (result: any) => Promise<void>>, delivery: any) =>
     delivery?.mentions ? delivers.mentions(delivery.mentions) : delivers.text(delivery);
 
-  /** A QuerySubscriptionProxy stand-in whose registration the executor rejects. */
-  function rejectingProxyClass(error: Error, disposed: { count: number }) {
-    return function () {
-      return {
-        initialized: Promise.reject(error),
-        subscribe: () => Promise.reject(error),
-        dispose: () => {
-          disposed.count += 1;
-        },
-        onResult: () => {},
-      };
-    };
+  /** Live queries whose opening the executor rejects. */
+  function rejectingLive(error: Error, disposed: { count: number }) {
+    return () => new FakeLive('text', { open: error, onDispose: () => { disposed.count += 1; } });
   }
 
   it('rejects when the executor refuses the subscription, and keeps it pending', async () => {
     const disposed = { count: 0 };
     const persisted: { subs: any[] } = { subs: [{ placeholder: true }] };
-    const manager = new WakerSubscriptionManager({
+    const manager = makeManager({
       perspectiveClient,
       logger: noopLogger(),
-      QuerySubscriptionProxy: rejectingProxyClass(
+      live: rejectingLive(
         new Error('RPC error 403: main key not found'),
         disposed,
       ),
@@ -163,26 +241,9 @@ describe('WakerSubscriptionManager', () => {
     expect(manager.getPending()).toHaveLength(0);
   });
 
-  /**
-   * A QuerySubscriptionProxy stand-in whose handshake never answers: the
-   * executor accepted the socket but nothing ever comes back (#1016).
-   */
-  function hangingProxyClass(
-    disposed: { count: number },
-    hangOn: 'subscribe' | 'initialized' = 'subscribe',
-  ) {
-    return function () {
-      return {
-        initialized:
-          hangOn === 'initialized' ? new Promise<boolean>(() => {}) : Promise.resolve(true),
-        subscribe: () =>
-          hangOn === 'subscribe' ? new Promise<void>(() => {}) : Promise.resolve(),
-        dispose: () => {
-          disposed.count += 1;
-        },
-        onResult: () => {},
-      };
-    };
+  /** Live queries whose opening never answers: the executor accepted the socket but nothing comes back (#1016). */
+  function hangingLive(disposed: { count: number }) {
+    return () => new FakeLive('text', { open: 'hang', onDispose: () => { disposed.count += 1; } });
   }
 
   async function waitUntil(cond: () => boolean, ms = 2000): Promise<void> {
@@ -194,10 +255,10 @@ describe('WakerSubscriptionManager', () => {
 
   it('times out a subscribe handshake the executor never answers, and keeps it pending', async () => {
     const disposed = { count: 0 };
-    const manager = new WakerSubscriptionManager({
+    const manager = makeManager({
       perspectiveClient,
       logger: noopLogger(),
-      QuerySubscriptionProxy: hangingProxyClass(disposed),
+      live: hangingLive(disposed),
       debounceMs: 10,
       subscribeTimeoutMs: 50,
       retryPendingMs: 60_000,
@@ -219,42 +280,17 @@ describe('WakerSubscriptionManager', () => {
     manager.disposeAll();
   });
 
-  it('times out when subscribe() answers but initialized never settles', async () => {
-    const disposed = { count: 0 };
-    const manager = new WakerSubscriptionManager({
-      perspectiveClient,
-      logger: noopLogger(),
-      QuerySubscriptionProxy: hangingProxyClass(disposed, 'initialized'),
-      debounceMs: 10,
-      subscribeTimeoutMs: 50,
-      retryPendingMs: 60_000,
-      onWake: () => {},
-    });
-
-    await expect(manager.subscribe(sub)).rejects.toThrow(/timed out after 50ms/);
-    expect(manager.getActive()).toHaveLength(0);
-    expect(manager.getPending().map((s) => s.id)).toEqual([sub.id]);
-
-    manager.disposeAll();
-  });
-
   it('re-attempts a timed-out subscription and enrolls it once the executor answers', async () => {
-    // A mention subscription opens two proxies per attempt: its text and mention queries.
+    // A mention subscription opens two live queries per attempt: its text and mention queries.
     let opened = 0;
-    const ProxyClass = function () {
+    const live = () => {
       opened += 1;
-      const answers = opened > 2;
-      return {
-        initialized: Promise.resolve(true),
-        subscribe: () => (answers ? Promise.resolve() : new Promise<void>(() => {})),
-        dispose: () => {},
-        onResult: () => {},
-      };
+      return new FakeLive('text', { open: opened > 2 ? 'open' : 'hang' });
     };
-    const manager = new WakerSubscriptionManager({
+    const manager = makeManager({
       perspectiveClient,
       logger: noopLogger(),
-      QuerySubscriptionProxy: ProxyClass,
+      live,
       debounceMs: 10,
       subscribeTimeoutMs: 30,
       retryPendingMs: 30,
@@ -273,19 +309,11 @@ describe('WakerSubscriptionManager', () => {
   });
 
   it('cancels the subscribe call of a handshake it gives up on (#1595)', async () => {
-    const disposeArgs: any[] = [];
-    const ProxyClass = function () {
-      return {
-        initialized: Promise.resolve(true),
-        subscribe: () => new Promise<void>(() => {}),
-        dispose: (options?: any) => { disposeArgs.push(options); },
-        onResult: () => {},
-      };
-    };
-    const manager = new WakerSubscriptionManager({
+    const disposed = { count: 0 };
+    const manager = makeManager({
       perspectiveClient,
       logger: noopLogger(),
-      QuerySubscriptionProxy: ProxyClass,
+      live: hangingLive(disposed),
       subscribeTimeoutMs: 30,
       retryPendingMs: 60_000,
       onWake: () => {},
@@ -294,7 +322,7 @@ describe('WakerSubscriptionManager', () => {
     await expect(manager.subscribe(sub)).rejects.toThrow(/timed out after 30ms/);
     // Both queries of the mention subscription: otherwise the executor keeps
     // computing their first results for nobody.
-    expect(disposeArgs).toEqual([{ cancelOpening: true }, { cancelOpening: true }]);
+    expect(disposed.count).toBe(2);
 
     manager.disposeAll();
   });
@@ -304,31 +332,28 @@ describe('WakerSubscriptionManager', () => {
     try {
       let opened = 0;
       const openedAt: number[] = [];
-      const ProxyClass = function () {
+      const ProxyClass = () => {
         opened += 1;
         openedAt.push(Date.now());
-        const error = new Error('Perspective fake-uuid not found');
-        const initialized = Promise.reject(error);
-        initialized.catch(() => {});
-        return { initialized, subscribe: () => Promise.reject(error), dispose: () => {}, onResult: () => {} };
+        return new FakeLive('text', { open: new Error('Perspective fake-uuid not found') });
       };
-      const manager = new WakerSubscriptionManager({
+      const manager = makeManager({
         perspectiveClient,
         logger: noopLogger(),
-        QuerySubscriptionProxy: ProxyClass,
+        live: ProxyClass,
         subscribeTimeoutMs: 0,
         retryPendingMs: 1000,
         maxRetryPendingMs: 4000,
         onWake: () => {},
       });
       await expect(manager.subscribe(sub)).rejects.toThrow(/re-attempting within 1s, then less often \(at most every 4s\)/);
-      // Two proxies per attempt (text and mention query).
+      // Two live queries per attempt (text and mention query).
       const attempts = () => opened / 2;
       expect(attempts()).toBe(1);
 
       await jest.advanceTimersByTimeAsync(1000 + 2000 + 4000 + 4000);
       expect(attempts()).toBeGreaterThanOrEqual(5);
-      // One timestamp per attempt (each opens two proxies at once); the first five.
+      // One timestamp per attempt (each opens two live queries at once); the first five.
       const at = openedAt.filter((_, i) => i % 2 === 0).slice(0, 5);
       const waits = at.slice(1).map((t, i) => t - at[i]);
       // Each wait is between half and all of 1 s, 2 s, 4 s, then the 4 s cap.
@@ -349,23 +374,18 @@ describe('WakerSubscriptionManager', () => {
 
   it('reports a subscription whose live query is re-opening as pending, and active again once it re-opened (#1595)', async () => {
     const statusListeners: ((status: any) => void)[] = [];
-    const disposeArgs: any[] = [];
-    const ProxyClass = function () {
-      return {
-        initialized: Promise.resolve(true),
-        subscribe: () => Promise.resolve(),
-        dispose: (options?: any) => { disposeArgs.push(options); },
-        result: { instances: [], totalCount: 0 },
-        onResult: () => {},
-        onStatus: (listener: (status: any) => void) => { statusListeners.push(listener); },
-      };
-    };
+    let disposals = 0;
+    const ProxyClass = () =>
+      new FakeLive('text', {
+        onDispose: () => { disposals += 1; },
+        onStatus: (listener) => { statusListeners.push(listener); },
+      });
     const persisted: string[][] = [];
     const warnings: string[] = [];
-    const manager = new WakerSubscriptionManager({
+    const manager = makeManager({
       perspectiveClient,
       logger: { ...noopLogger(), warn: (msg: string) => { warnings.push(msg); } },
-      QuerySubscriptionProxy: ProxyClass,
+      live: ProxyClass,
       retryPendingMs: 60_000,
       onWake: () => {},
       onPersist: (subs) => { persisted.push(subs.map((s) => s.id)); },
@@ -387,7 +407,7 @@ describe('WakerSubscriptionManager', () => {
 
     // The queries retry themselves: the manager does not open new ones.
     await manager.retryPending();
-    expect(disposeArgs).toHaveLength(0);
+    expect(disposals).toBe(0);
 
     // Still persisted, so a restart in the meantime restores it.
     (manager as any).persist();
@@ -411,26 +431,22 @@ describe('WakerSubscriptionManager', () => {
   it('offers a wake held back while re-opening once the live query is open again, once (#1595)', async () => {
     const statusListeners: ((status: any) => void)[] = [];
     const delivers: Record<string, (result: any) => Promise<void>> = {};
-    const ProxyClass = function (...args: any[]) {
-      const path = args[3] === 'ad4m://Mentioning' ? 'mentions' : 'text';
-      return {
-        initialized: Promise.resolve(true),
-        subscribe: () => Promise.resolve(),
-        dispose: () => {},
-        result: undefined,
-        onResult: (cb: (result: any) => Promise<void>) => { delivers[path] = cb; },
-        onStatus: (listener: (status: any) => void) => { statusListeners.push(listener); },
-      };
+    const ProxyClass = (_uuid: string, _query: string, className?: string | string[]) => {
+      const path = pathOf(className);
+      return new FakeLive(path, {
+        onListen: (emit) => { delivers[path] = emit; },
+        onStatus: (listener) => { statusListeners.push(listener); },
+      });
     };
     const wakes: string[][] = [];
     let taken = false;
-    const manager = new WakerSubscriptionManager({
+    const manager = makeManager({
       perspectiveClient: {
         querySparql: () => Promise.resolve([]),
         modelQuery: () => Promise.resolve({ instances: [], totalCount: 0 }),
       },
       logger: noopLogger(),
-      QuerySubscriptionProxy: ProxyClass,
+      live: ProxyClass,
       debounceMs: 10,
       retryPendingMs: 60_000,
       retryWakeMs: 20,
@@ -463,19 +479,12 @@ describe('WakerSubscriptionManager', () => {
     jest.useFakeTimers();
     try {
       let refuse = true;
-      const ProxyClass = function () {
-        if (!refuse) {
-          return { initialized: Promise.resolve(true), subscribe: () => Promise.resolve(), dispose: () => {}, onResult: () => {} };
-        }
-        const error = new Error('Perspective fake-uuid not found');
-        const initialized = Promise.reject(error);
-        initialized.catch(() => {});
-        return { initialized, subscribe: () => Promise.reject(error), dispose: () => {}, onResult: () => {} };
-      };
-      const manager = new WakerSubscriptionManager({
+      const ProxyClass = () =>
+        new FakeLive('text', { open: refuse ? new Error('Perspective fake-uuid not found') : 'open' });
+      const manager = makeManager({
         perspectiveClient,
         logger: noopLogger(),
-        QuerySubscriptionProxy: ProxyClass,
+        live: ProxyClass,
         subscribeTimeoutMs: 0,
         retryPendingMs: 1000,
         maxRetryPendingMs: 8000,
@@ -497,49 +506,25 @@ describe('WakerSubscriptionManager', () => {
   });
 
   /**
-   * A QuerySubscriptionProxy stand-in for #1735: the mention query (over Mentioning) answers
-   * as `mention` says, each text query (over TextContent) as the next of `text` says, the last
-   * one for every attempt after. `hang` never answers the handshake, `open` answers at once with
-   * `result`, a number answers that many ms after the handshake starts. Every proxy is kept in
-   * `made` with when it was made (`at`), its dispose calls (and when, `disposedAt`) and its
-   * `onResult` callback.
+   * Live queries for #1735: the mention query (over Mentioning) answers as `mention` says,
+   * each text query (over TextContent) as the next of `text` says, the last one for every
+   * attempt after. `hang` never answers the opening, `open` answers at once with `textResult`,
+   * a number answers that many ms after the opening starts. Every one is kept in `made` (a
+   * {@link FakeLive}: `at`, `disposed`, `disposedAt`, `deliver`).
    */
   function slowTextProxyClass(
     text: ('hang' | 'open' | number)[],
     mention: 'hang' | 'open' = 'open',
     textResult?: any,
   ) {
-    const made: {
-      path: string;
-      at: number;
-      disposed: any[];
-      disposedAt?: number;
-      deliver?: (result: any) => Promise<void>;
-    }[] = [];
+    const made: FakeLive[] = [];
     let textAttempts = 0;
-    const ProxyClass = function (...args: any[]) {
-      const path = args[3] === 'ad4m://Mentioning' ? 'mentions' : 'text';
+    const ProxyClass = (_uuid: string, _query: string, className?: string | string[]) => {
+      const path = pathOf(className);
       const behaviour = path === 'mentions' ? mention : text[Math.min(textAttempts++, text.length - 1)];
-      const entry: (typeof made)[number] = { path, at: Date.now(), disposed: [] };
+      const entry = new FakeLive(path, { open: behaviour, opening: path === 'text' ? textResult : undefined });
       made.push(entry);
-      let answered: Promise<void> | undefined;
-      const answer = () =>
-        (answered ??=
-          behaviour === 'open'
-            ? Promise.resolve()
-            : behaviour === 'hang'
-              ? new Promise<void>(() => {})
-              : new Promise<void>((resolve) => setTimeout(resolve, behaviour)));
-      return {
-        get initialized() { return answer().then(() => true); },
-        subscribe: answer,
-        dispose: (options?: any) => {
-          entry.disposed.push(options);
-          entry.disposedAt ??= Date.now();
-        },
-        result: path === 'text' && behaviour !== 'hang' ? textResult : undefined,
-        onResult: (cb: (result: any) => Promise<void>) => { entry.deliver = cb; },
-      };
+      return entry;
     };
     const texts = () => made.filter((p) => p.path === 'text');
     const mentions = () => made.filter((p) => p.path === 'mentions');
@@ -556,7 +541,7 @@ describe('WakerSubscriptionManager', () => {
     const infos: string[] = [];
     const debugs: string[] = [];
     const persisted: { subs: any[]; seen: Record<string, string[]> } = { subs: [], seen: {} };
-    const manager = new WakerSubscriptionManager({
+    const manager = makeManager({
       previousSeenMessages,
       onPersist: (subs, seen) => {
         persisted.subs = subs.map((s) => ({ ...s }));
@@ -571,7 +556,7 @@ describe('WakerSubscriptionManager', () => {
         warn: (msg: string) => { warnings.push(msg); },
         debug: (msg: string) => { debugs.push(msg); },
       },
-      QuerySubscriptionProxy: ProxyClass,
+      live: ProxyClass,
       debounceMs: 10,
       subscribeTimeoutMs: 1000,
       retryPendingMs: 5000,
@@ -595,11 +580,11 @@ describe('WakerSubscriptionManager', () => {
 
       expect(manager.getActive().map((s) => s.id)).toEqual([sub.id]);
       expect(manager.getPending()).toHaveLength(0);
-      expect(proxies.texts()[0].disposed).toEqual([{ cancelOpening: true }]);
+      expect(proxies.texts()[0].disposed).toEqual(['disposed']);
       expect(proxies.mentions()[0].disposed).toEqual([]);
       expect(warnings.filter((w) => w.includes('listening through the mention query only'))).toEqual([
         expect.stringMatching(
-          new RegExp(`^\\[waker\\] ${sub.id}: text query failed \\(subscribe handshake timed out after 1000ms\\); listening through the mention query only, re-attempting the text query in \\d+s$`),
+          new RegExp(`^\\[waker\\] ${sub.id}: text query failed \\(subscription opening timed out after 1000ms\\); listening through the mention query only, re-attempting the text query in \\d+s$`),
         ),
       ]);
 
@@ -625,7 +610,7 @@ describe('WakerSubscriptionManager', () => {
       // The second attempt starts within 5 s and times out a second later.
       await jest.advanceTimersByTimeAsync(5000 + 1000);
       expect(proxies.texts()).toHaveLength(2);
-      expect(proxies.texts()[1].disposed).toEqual([{ cancelOpening: true }]);
+      expect(proxies.texts()[1].disposed).toEqual(['disposed']);
       // The third, within 10 s (the wait doubled), opens.
       await jest.advanceTimersByTimeAsync(10_000);
       expect(proxies.texts()).toHaveLength(3);
@@ -648,7 +633,7 @@ describe('WakerSubscriptionManager', () => {
 
       // Disposing the subscription disposes the text query that joined.
       manager.dispose(sub.id);
-      expect(proxies.texts()[2].disposed).toEqual([{ cancelOpening: true }]);
+      expect(proxies.texts()[2].disposed).toEqual(['disposed']);
     });
 
     it('stops re-attempting the text query once disposed, while waiting and while an attempt is in flight', async () => {
@@ -673,11 +658,11 @@ describe('WakerSubscriptionManager', () => {
       while (inFlight.texts().length < 2) await jest.advanceTimersByTimeAsync(100);
       expect(inFlight.texts()[1].disposed).toEqual([]);
       second.manager.disposeAll();
-      expect(inFlight.texts()[1].disposed).toEqual([{ cancelOpening: true }]);
+      expect(inFlight.texts()[1].disposed).toEqual(['disposed']);
       await jest.advanceTimersByTimeAsync(60_000);
       expect(inFlight.texts()).toHaveLength(2);
       // Each proxy disposed once, with its opening cancelled: none left behind.
-      for (const p of inFlight.made) expect(p.disposed).toEqual([{ cancelOpening: true }]);
+      for (const p of inFlight.made) expect(p.disposed).toEqual(['disposed']);
       expect(jest.getTimerCount()).toBe(0);
     });
 
@@ -741,7 +726,7 @@ describe('WakerSubscriptionManager', () => {
       await subscribed;
       await jest.advanceTimersByTimeAsync(5000 + 1000 + 10_000 + 2000);
       expect(slow.texts()).toHaveLength(3);
-      expect(slow.texts()[1].disposed).toEqual([{ cancelOpening: true }]);
+      expect(slow.texts()[1].disposed).toEqual(['disposed']);
       expect(slow.texts()[2].disposed).toEqual([]);
       expect(first.infos.some((i) => i.includes('text query opened'))).toBe(true);
       first.manager.disposeAll();
@@ -754,12 +739,12 @@ describe('WakerSubscriptionManager', () => {
       await again;
       await jest.advanceTimersByTimeAsync(400_000);
       const budgets = second.debugs
-        .map((d) => /text query failed again \(subscribe handshake timed out after (\d+)ms\)/.exec(d)?.[1])
+        .map((d) => /text query failed again \(subscription opening timed out after (\d+)ms\)/.exec(d)?.[1])
         .filter((b) => b !== undefined)
         .map(Number);
       expect(budgets.slice(0, 8)).toEqual([1000, 2000, 4000, 8000, 16_000, 20_000, 20_000, 20_000]);
       // One attempt in flight at a time, each given up with its opening cancelled.
-      for (const t of never.texts().slice(0, -1)) expect(t.disposed).toEqual([{ cancelOpening: true }]);
+      for (const t of never.texts().slice(0, -1)) expect(t.disposed).toEqual(['disposed']);
       second.manager.disposeAll();
     });
 
@@ -796,19 +781,19 @@ describe('WakerSubscriptionManager', () => {
 
       const resubscribed = manager.subscribe(sub);
       // Cancelled at once.
-      expect(inFlight.disposed).toEqual([{ cancelOpening: true }]);
+      expect(inFlight.disposed).toEqual(['disposed']);
       await jest.advanceTimersByTimeAsync(1000);
       await resubscribed;
       // It answered meanwhile, and never joined: nothing listens to it.
       expect(inFlight.deliver).toBeUndefined();
-      expect(inFlight.disposed).toEqual([{ cancelOpening: true }]);
+      expect(inFlight.disposed).toEqual(['disposed']);
       expect(infos.some((i) => i.includes('text query opened'))).toBe(false);
       expect(manager.getActive().map((s) => s.id)).toEqual([sub.id]);
 
       manager.disposeAll();
       await jest.advanceTimersByTimeAsync(60_000);
       expect(jest.getTimerCount()).toBe(0);
-      for (const p of proxies.made) expect(p.disposed).toEqual([{ cancelOpening: true }]);
+      for (const p of proxies.made) expect(p.disposed).toEqual(['disposed']);
     });
 
     it('fails the subscription, as before, when the mention query does not open', async () => {
@@ -818,10 +803,10 @@ describe('WakerSubscriptionManager', () => {
       const subscribed = manager.subscribe(sub);
       subscribed.catch(() => {});
       await jest.advanceTimersByTimeAsync(1000);
-      await expect(subscribed).rejects.toThrow(/subscribe handshake timed out after 1000ms/);
+      await expect(subscribed).rejects.toThrow(/subscription opening timed out after 1000ms/);
       expect(manager.getActive()).toHaveLength(0);
       expect(manager.getPending().map((s) => s.id)).toEqual([sub.id]);
-      for (const p of proxies.made) expect(p.disposed).toEqual([{ cancelOpening: true }]);
+      for (const p of proxies.made) expect(p.disposed).toEqual(['disposed']);
 
       manager.disposeAll();
     });
@@ -841,7 +826,7 @@ describe('WakerSubscriptionManager', () => {
   ) {
     const delivers: Record<string, (result: any) => Promise<void>> = {};
     const opened: any[][] = [];
-    const ProxyClass = answeringProxyClass(delivers, opened);
+    const ProxyClass = answeringLive(delivers, opened);
     const queries: [string, any][] = [];
     const warnings: string[] = [];
     const client = {
@@ -856,10 +841,10 @@ describe('WakerSubscriptionManager', () => {
       },
     };
     const wakes: any[] = [];
-    const manager = new WakerSubscriptionManager({
+    const manager = makeManager({
       perspectiveClient: client,
       logger: { ...noopLogger(), warn: (msg: string) => { warnings.push(msg); } },
-      QuerySubscriptionProxy: ProxyClass,
+      live: ProxyClass,
       debounceMs: 10,
       retryPendingMs: 60_000,
       ...(ancestorDepth !== undefined ? { ancestorDepth } : {}),
@@ -879,16 +864,16 @@ describe('WakerSubscriptionManager', () => {
   it('opens a mention subscription as two model queries, over TextContent and over Mentioning', async () => {
     const { opened } = await wakeWith(() => []);
     expect(opened).toEqual([
-      [sub.perspective, sub.query, expect.anything(), 'ad4m://TextContent'],
-      [sub.perspective, sub.mentionQuery, expect.anything(), 'ad4m://Mentioning'],
+      [sub.perspective, sub.query, 'ad4m://TextContent'],
+      [sub.perspective, sub.mentionQuery, 'ad4m://Mentioning'],
     ]);
   });
 
   it('refuses a mention subscription without its TextContent class, terms, DID or Mentioning query', async () => {
-    const manager = new WakerSubscriptionManager({
+    const manager = makeManager({
       perspectiveClient,
       logger: noopLogger(),
-      QuerySubscriptionProxy: function () { throw new Error('never opened'); },
+      live: () => { throw new Error('never opened'); },
       onWake: () => {},
     });
     // What older executors saved: SPARQL over `we://mention` links, a TextContent query over the
@@ -1082,19 +1067,19 @@ describe('WakerSubscriptionManager', () => {
     },
   ) {
     const delivers: Record<string, (result: any) => Promise<void>> = {};
-    const ProxyClass = answeringProxyClass(delivers, [], {
+    const ProxyClass = answeringLive(delivers, [], {
       text: opening?.initial,
       mentions: opening?.initialMentions && result(...opening.initialMentions),
     });
     const wakes: any[] = [];
     const persistedSeen: string[][] = [];
-    const manager = new WakerSubscriptionManager({
+    const manager = makeManager({
       perspectiveClient: {
         querySparql: () => Promise.resolve([]),
         modelQuery: opening?.modelQuery ?? (() => Promise.resolve({ instances: [], totalCount: 0 })),
       },
       logger: noopLogger(),
-      QuerySubscriptionProxy: ProxyClass,
+      live: ProxyClass,
       debounceMs,
       retryPendingMs: 60_000,
       retryWakeMs: 20,
@@ -1165,7 +1150,7 @@ describe('WakerSubscriptionManager', () => {
     let resolveFirst: (rows: any) => void = () => {};
     const delivers: Record<string, (result: any) => Promise<void>> = {};
     const wakes: string[][] = [];
-    const manager = new WakerSubscriptionManager({
+    const manager = makeManager({
       perspectiveClient: {
         modelQuery: () =>
           ++lookups === 1
@@ -1173,7 +1158,7 @@ describe('WakerSubscriptionManager', () => {
             : Promise.resolve({ instances: [], totalCount: 0 }),
       },
       logger: noopLogger(),
-      QuerySubscriptionProxy: answeringProxyClass(delivers),
+      live: answeringLive(delivers),
       debounceMs: 10,
       retryPendingMs: 60_000,
       onWake: (_sub, _result, mentions) => { wakes.push(mentions!.map((m) => m.address)); },
@@ -1319,23 +1304,146 @@ describe('WakerSubscriptionManager', () => {
     expect(wakes[0][0]).toEqual({ address, parents: [], ancestors: [], ...byOther, via: 'text' });
   });
 
+  // The one test over the real LiveQuery: the executor's reply is the opening value (`initial`,
+  // history), and only a later update wakes.
+  it('takes the executor\'s opening values as history, through a real LiveQuery, and wakes on a later change', async () => {
+    const updates: ((update: any) => void)[] = [];
+    const replies: Record<string, any> = {
+      'ad4m://TextContent': result(named('test://old')),
+      'ad4m://Mentioning': result(),
+    };
+    const ids: Record<string, string> = {};
+    const client = {
+      modelQuery: () => Promise.resolve({ instances: [], totalCount: 0 }),
+      onQueryUpdate: (cb: (update: any) => void) => { updates.push(cb); return () => {}; },
+      onReconnect: () => () => {},
+      disposeQuerySubscription: () => Promise.resolve(),
+      resyncSubscription: () => Promise.resolve(),
+      subscribe: (_uuid: string, target: any) => {
+        const subscriptionId = `s-${Object.keys(ids).length}`;
+        ids[target.className] = subscriptionId;
+        return Promise.resolve({ subscriptionId, revision: 0, result: replies[target.className] });
+      },
+    };
+    const wakes: string[][] = [];
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: client,
+      logger: noopLogger(),
+      debounceMs: 10,
+      retryPendingMs: 60_000,
+      onWake: (_sub, _result, mentions) => { wakes.push(mentions!.map((m) => m.address)); },
+    } as any);
+    await manager.subscribe(sub);
+    await new Promise((r) => setTimeout(r, 50));
+    // The opening value held test://old: history, no wake.
+    expect(wakes).toEqual([]);
+
+    for (const update of updates) {
+      update({ subscriptionId: ids['ad4m://TextContent'], revision: 1, result: result(named('test://old'), named('test://new')) });
+    }
+    await waitUntil(() => wakes.length > 0, 1000);
+    manager.disposeAll();
+    expect(wakes).toEqual([['test://new']]);
+  });
+
+  // A handle that applied an update before the manager listened delivers a snapshot that is not
+  // `initial`; the manager still reads it as the opening result, as history.
+  it('takes a result the handle already updated to before listening as history', async () => {
+    const delivers: Record<string, (result: any) => Promise<void>> = {};
+    const wakes: string[][] = [];
+    const manager = makeManager({
+      perspectiveClient: { querySparql: () => Promise.resolve([]), modelQuery: () => Promise.resolve({ instances: [], totalCount: 0 }) },
+      logger: noopLogger(),
+      live: (_uuid: string, _query: string, className?: string | string[]) => {
+        const path = pathOf(className);
+        return new FakeLive(path, {
+          opening: path === 'text' ? result(named('test://old')) : result(),
+          initial: false,
+          onListen: (emit) => { delivers[path] = emit; },
+        });
+      },
+      debounceMs: 10,
+      retryPendingMs: 60_000,
+      onWake: (_sub: any, _result: any, mentions: any) => { wakes.push(mentions!.map((m: any) => m.address)); },
+    });
+    await manager.subscribe({ ...sub, id: 'mention-history' });
+    await new Promise((r) => setTimeout(r, 50));
+    manager.disposeAll();
+    expect(wakes).toEqual([]);
+  });
+
+  // After a restart the mention query's opening result is news, and its parent lookups take a
+  // while; the text query is read after them. A change the text query delivers meanwhile is
+  // part of its opening result, history until it has read its history once.
+  it('takes a result the handle delivers before its opening read as history', async () => {
+    const delivers: Record<string, (result: any) => Promise<void>> = {};
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    const wakes: string[][] = [];
+    let lookups = 0;
+    const manager = makeManager({
+      perspectiveClient: {
+        querySparql: () => { lookups++; return held.then(() => []); },
+        modelQuery: () => { lookups++; return held.then(() => ({ instances: [], totalCount: 0 })); },
+      },
+      logger: noopLogger(),
+      live: answeringLive(delivers, [], { text: undefined, mentions: result(mentionRow('test://seen')) }),
+      debounceMs: 10,
+      retryPendingMs: 60_000,
+      onWake: (_sub: any, _result: any, mentions: any) => { wakes.push(mentions!.map((m: any) => m.address)); },
+      previousSeenMessages: { 'mention-window': [] },
+    } as any);
+    const subscribed = manager.subscribe({ ...sub, id: 'mention-window', textHistoryRead: false });
+    // The mention query's opening read is waiting on its lookups.
+    await waitUntil(() => !!delivers.text && lookups > 0, 1000);
+    await delivers.text(result(named('test://old')));
+    release();
+    await subscribed;
+    await new Promise((r) => setTimeout(r, 50));
+    manager.disposeAll();
+    expect(wakes).toEqual([['test://seen']]);
+  });
+
+  // A failed re-open republishes the same data with `reopening` set, and recovery again: not news.
+  it('does not wake on a snapshot that holds the data it already read', async () => {
+    let deliver: ((result: any) => Promise<void>) | undefined;
+    const wakes: any[] = [];
+    const manager = makeManager({
+      perspectiveClient,
+      logger: noopLogger(),
+      live: () => new FakeLive('text', { onListen: (emit) => { deliver = emit; } }),
+      debounceMs: 10,
+      onWake: (_sub: any, result: any) => { wakes.push(result); },
+    });
+    await manager.subscribe({
+      id: 'channel-status',
+      type: 'channel-messages',
+      perspective: 'fake-uuid',
+      channel: 'test://call',
+      query: '{}',
+      className: 'ad4m://Container',
+    });
+    const rows = { instances: [{ id: 'test://call', children: ['test://block'] }], totalCount: 1 };
+    for (let i = 0; i < 3; i++) {
+      await deliver!(rows);
+      await new Promise((r) => setTimeout(r, 40));
+    }
+    manager.disposeAll();
+    expect(wakes).toHaveLength(1);
+  });
+
   it('reads a model subscription by row id', async () => {
     let deliver: ((result: any) => Promise<void>) | undefined;
     const constructed: any[][] = [];
-    const ProxyClass = function (...args: any[]) {
-      constructed.push(args);
-      return {
-        initialized: Promise.resolve(true),
-        subscribe: () => Promise.resolve(),
-        dispose: () => {},
-        onResult: (cb: (result: any) => Promise<void>) => { deliver = cb; },
-      };
+    const ProxyClass = (uuid: string, query: string, className?: string | string[]) => {
+      constructed.push([uuid, query, className]);
+      return new FakeLive('text', { onListen: (emit) => { deliver = emit; } });
     };
     const wakes: any[] = [];
-    const manager = new WakerSubscriptionManager({
+    const manager = makeManager({
       perspectiveClient,
       logger: noopLogger(),
-      QuerySubscriptionProxy: ProxyClass,
+      live: ProxyClass,
       debounceMs: 10,
       onWake: (_sub, result) => { wakes.push(result); },
     });
@@ -1348,7 +1456,7 @@ describe('WakerSubscriptionManager', () => {
       query,
       className: 'ad4m://Container',
     });
-    expect(constructed[0]).toEqual(['fake-uuid', query, perspectiveClient, 'ad4m://Container']);
+    expect(constructed[0]).toEqual(['fake-uuid', query, 'ad4m://Container']);
     await deliver!({ instances: [{ id: 'test://call', children: ['test://block'] }], totalCount: 1 });
     await waitUntil(() => wakes.length > 0);
     expect(wakes[0].instances[0].children).toEqual(['test://block']);
@@ -1390,12 +1498,12 @@ describe('holdsAWholeWordTerm', () => {
 
   it('reads a bounded prefix, so a long run of unclosed openers cannot stall the waker', () => {
     const bot = ['Data', 'did:key:zBot'];
-    // Unbounded, each of these took seconds: every unclosed opener scans to the end.
+    // Unbounded, each of these took seconds: every unclosed opener scans to the end. The bound
+    // itself is pinned below without a clock ("past it, it does not"), so a busy runner
+    // cannot fail this test.
     for (const opener of ['<script>', '<style>', '<!--']) {
-      const started = Date.now();
       expect(holdsAWholeWordTerm('the metadata ' + opener.repeat(125_000), bot)).toBe(false);
       expect(holdsAWholeWordTerm('hey Data ' + opener.repeat(125_000), bot)).toBe(true);
-      expect(Date.now() - started).toBeLessThan(1000);
     }
     // Within the limit a long message still wakes, by name and by DID target.
     const filler = 'lorem ipsum '.repeat(1000);

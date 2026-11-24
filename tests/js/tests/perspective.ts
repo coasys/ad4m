@@ -1,8 +1,8 @@
-import { Ad4mClient, Ad4mModel, HasMany, Link, LinkQuery, Literal, MentionMessage, Mentioning, Model, PerspectiveProxy, PerspectiveState, Property, QuerySubscriptionProxy, TextContent, WakerSubscriptionManager } from "@coasys/ad4m";
+import { Ad4mClient, Ad4mModel, HasMany, Link, LinkQuery, Literal, MentionMessage, Mentioning, Model, PerspectiveProxy, PerspectiveState, Property, TextContent, WakerSubscriptionManager } from "@coasys/ad4m";
 import { TestContext } from './test-context'
 import { expect } from "chai";
 import * as sinon from "sinon";
-import { pollUntil } from "../utils/utils";
+import { pollUntil, sleep } from "../utils/utils";
 
 /** A note that takes part in TextContent and Mentioning, as an app's message would. */
 @Model({ name: "WakerNote", implements: [TextContent, Mentioning] })
@@ -314,7 +314,6 @@ export default function perspectiveTests(testContext: TestContext) {
                 const manager = new WakerSubscriptionManager({
                     perspectiveClient: ad4mClient.perspective,
                     logger: quiet,
-                    QuerySubscriptionProxy,
                     debounceMs: 50,
                     onWake: (_sub, _result, mentions) => { wakes.push(mentions) },
                 })
@@ -322,7 +321,7 @@ export default function perspectiveTests(testContext: TestContext) {
                 // the links here, since the agent's own links never mention it.
                 const me = 'did:test:me'
                 try {
-                    await p.ensureSubjectClass(WakerNote)
+                    await WakerNote.register(p)
                     await manager.subscribe({
                         id: 'waker-mention-parents',
                         type: 'mention',
@@ -374,9 +373,11 @@ export default function perspectiveTests(testContext: TestContext) {
             it('a SPARQL live query follows a link that is added, then removed', async () => {
                 const ad4mClient: Ad4mClient = testContext.ad4mClient!
                 const p = await ad4mClient.perspective.add("live sparql rows")
-                const subscription = await p.subscribeQuery('SELECT ?target WHERE { <test://live-source> <test://live-predicate> ?target . }')
-                const rows = () => subscription.result as unknown as any[]
+                const live = p.liveSparql('SELECT ?target WHERE { <test://live-source> <test://live-predicate> ?target . }')
+                const rows = () => (live.getSnapshot().data ?? []) as any[]
                 try {
+                    await live.first
+                    expect(live.getSnapshot().initial).to.equal(true)
                     expect(rows()).to.eql([])
 
                     const link = await p.add(new Link({ source: 'test://live-source', predicate: 'test://live-predicate', target: 'test://live-target' }))
@@ -386,7 +387,7 @@ export default function perspectiveTests(testContext: TestContext) {
                     await p.remove(link)
                     await pollUntil(() => rows().length === 0, { label: 'live query row removed with the link' })
                 } finally {
-                    subscription.dispose()
+                    live.dispose()
                     await ad4mClient.perspective.remove(p.uuid)
                 }
             })
@@ -440,6 +441,79 @@ export default function perspectiveTests(testContext: TestContext) {
                 await pollUntil(() => linkRemoved.called, { timeoutMs: 5000, label: "linkRemoved callback fires" });
                 expect(linkRemoved.called).to.be.true;
                 //expect(linkRemoved.getCall(0).args[0]).to.eql(copiedUpdatedLinkExpression)
+            })
+
+            // Updates a link inside Ad4mModel.transaction() (createBatch,
+            // update(..., batchId), commitBatch) and returns what the
+            // link-added / link-removed / link-updated listeners saw for it.
+            async function updateLinkInTransaction(status: 'shared' | 'local') {
+                const ad4mClient: Ad4mClient = testContext.ad4mClient!
+                const p = await ad4mClient.perspective.add(`batched update (${status})`)
+                const source = `test://batched-update-${status}`
+                const oldTarget = `test://old-target-${status}`
+                const newTarget = `test://new-target-${status}`
+
+                const added: any[] = []
+                const removed: any[] = []
+                const updated: { oldLink: any, newLink: any }[] = []
+                const unsubscribe = [
+                    ad4mClient.on('link-added', ({ link }) => { if (link.data.source === source) added.push(link) }, { perspective: p.uuid }),
+                    ad4mClient.on('link-removed', ({ link }) => { if (link.data.source === source) removed.push(link) }, { perspective: p.uuid }),
+                    ad4mClient.on('link-updated', ({ oldLink, newLink }) => {
+                        if (oldLink.data.source === source || newLink.data.source === source) updated.push({ oldLink, newLink })
+                    }, { perspective: p.uuid }),
+                ]
+
+                try {
+                    const original = await p.add(new Link({ source, predicate: 'test://predicate', target: oldTarget }), status)
+                    await pollUntil(() => added.length === 1, { timeoutMs: 5000, label: 'link-added for the original link' })
+                    added.length = 0
+
+                    await Ad4mModel.transaction(p, async (tx) => {
+                        await p.update(original, new Link({ source, predicate: 'test://predicate', target: newTarget }), tx.batchId)
+                    })
+
+                    await pollUntil(() => updated.length >= 1, { timeoutMs: 5000, label: 'link-updated for the batched update' })
+                    // Give any stray link-added / link-removed (the old
+                    // removal + addition shape) time to arrive.
+                    await sleep(1000)
+
+                    const stored = await p.get(new LinkQuery({ source }))
+                    return { added, removed, updated, stored, oldTarget, newTarget }
+                } finally {
+                    unsubscribe.forEach(off => off())
+                    await ad4mClient.perspective.remove(p.uuid)
+                }
+            }
+
+            it('publishes a link updated inside a transaction as one link-updated', async () => {
+                const { added, removed, updated, stored, oldTarget, newTarget } = await updateLinkInTransaction('shared')
+
+                expect(updated.length).to.equal(1)
+                expect(updated[0].oldLink.data.target).to.equal(oldTarget)
+                expect(updated[0].newLink.data.target).to.equal(newTarget)
+                expect(added, 'no link-added for a batched update').to.eql([])
+                expect(removed, 'no link-removed for a batched update').to.eql([])
+
+                expect(stored.length).to.equal(1)
+                expect(stored[0].data.target).to.equal(newTarget)
+                expect(String(stored[0].status).toLowerCase()).to.equal('shared')
+            })
+
+            it('keeps a Local link Local when it is updated inside a transaction', async () => {
+                const { added, removed, updated, stored, oldTarget, newTarget } = await updateLinkInTransaction('local')
+
+                expect(updated.length).to.equal(1)
+                expect(updated[0].oldLink.data.target).to.equal(oldTarget)
+                expect(updated[0].newLink.data.target).to.equal(newTarget)
+                expect(String(updated[0].oldLink.status).toLowerCase()).to.equal('local')
+                expect(String(updated[0].newLink.status).toLowerCase()).to.equal('local')
+                expect(added, 'no link-added for a batched update').to.eql([])
+                expect(removed, 'no link-removed for a batched update').to.eql([])
+
+                expect(stored.length).to.equal(1)
+                expect(stored[0].data.target).to.equal(newTarget)
+                expect(String(stored[0].status).toLowerCase()).to.equal('local')
             })
 
             // SdnaOnly doesn't load links into prolog engine
@@ -955,11 +1029,11 @@ export default function perspectiveTests(testContext: TestContext) {
             it('refuses a Prolog live query with 400', async () => {
                 let error: any
                 try {
-                    await ad4mClient.perspective.subscribeQuery(proxy.uuid, 'triple(X, _, "todo-ontology://is-todo").')
+                    await ad4mClient.perspective.subscribe(proxy.uuid, { sparql: 'triple(X, _, "todo-ontology://is-todo").' })
                 } catch (e) {
                     error = e
                 }
-                expect(error, 'subscribeQuery rejects').to.exist
+                expect(error, 'subscribe rejects').to.exist
                 expect(error.status).to.equal(400)
                 expect(error.body).to.include('Prolog live queries are no longer supported')
             })

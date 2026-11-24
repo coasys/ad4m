@@ -295,3 +295,73 @@ async fn send_friend_message_is_not_implemented_and_stores_nothing() {
         .unwrap_err();
     assert_eq!(err.code, 501, "{}", err.message);
 }
+
+/// `runtime.setLogFilter` turns `ws_rpc=debug` on for its ttl, and `runtime.logFilter`
+/// reports it and when it reverts; after the ttl the startup filter is back by itself. Only
+/// the operator may do either: an app, a user, even with every capability, gets 403.
+#[tokio::test]
+async fn the_operator_sets_a_log_filter_for_a_while_and_nobody_else_may() {
+    let mut map = HandlerMap::new();
+    register_ws_handlers(&mut map);
+    let debug_ws_rpc = || {
+        crate::log_filter::state().enabled(
+            &log::Metadata::builder()
+                .target("rust_executor::api::ws_rpc")
+                .level(log::Level::Debug)
+                .build(),
+        )
+    };
+    let set = json!({ "filter": "ws_rpc=debug", "ttlSeconds": 1 });
+
+    for ctx in [
+        RequestContext::app_for_test(vec![]),
+        RequestContext::app_for_test(vec![crate::agent::capabilities::ALL_CAPABILITY.clone()]),
+        RequestContext::user_for_test("did:key:log-filter-user", vec![]),
+    ] {
+        let ctx = Arc::new(ctx);
+        for (method, params) in [
+            ("runtime.setLogFilter", set.clone()),
+            ("runtime.logFilter", json!({})),
+        ] {
+            let refused = map.dispatch(method, params, ctx.clone()).await.unwrap_err();
+            assert_eq!(refused.code, 403, "{method}: {}", refused.message);
+        }
+    }
+    assert!(!debug_ws_rpc(), "a refused call changed the filter");
+
+    let operator = Arc::new(RequestContext::operator_for_test());
+    let reply = map
+        .dispatch("runtime.setLogFilter", set, operator.clone())
+        .await
+        .unwrap();
+    // The in-force filter, with the rule that keeps MCP session ids out of the log.
+    assert_eq!(reply["overrideFilter"], "ws_rpc=debug,rmcp=warn");
+    assert!(reply["revertsAt"].is_string(), "{reply}");
+    assert!(debug_ws_rpc());
+    let status = map
+        .dispatch("runtime.logFilter", json!({}), operator.clone())
+        .await
+        .unwrap();
+    assert_eq!(status["overrideFilter"], "ws_rpc=debug,rmcp=warn");
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    assert!(!debug_ws_rpc(), "the filter did not revert after its ttl");
+    let status = map
+        .dispatch("runtime.logFilter", json!({}), operator.clone())
+        .await
+        .unwrap();
+    assert_eq!(status["overrideFilter"], serde_json::Value::Null);
+    assert_eq!(status["revertsAt"], serde_json::Value::Null);
+
+    for bad in [
+        json!({ "filter": "ws_rpc=loud" }),
+        json!({ "filter": "ws_rpc=debug", "ttlSeconds": 0 }),
+        json!({ "filter": "ws_rpc=debug", "ttlSeconds": 14401 }),
+    ] {
+        let refused = map
+            .dispatch("runtime.setLogFilter", bad.clone(), operator.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, 400, "{bad}");
+    }
+}

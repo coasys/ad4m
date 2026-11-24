@@ -69,7 +69,7 @@ impl PerspectiveInstance {
             if queries.contains_key(&id) {
                 return Err(SubscriptionIdTaken(id).into());
             }
-            log::info!(
+            log::debug!(
                 "🔗 subscription {} created for connection {} [{}]",
                 id,
                 query.connection,
@@ -138,7 +138,7 @@ impl PerspectiveInstance {
         payload.insert("revision".into(), json!(revision));
         let main = || did_for_context(&AgentContext::main_agent()).ok();
         let subscriber = subscriber.or_else(main);
-        let audience = super::super::event_recipients(&*self.persisted.lock().await)
+        let audience = super::super::event_recipients(&self.persisted.snapshot())
             .into_iter()
             .filter(|owner| Some(owner) == subscriber.as_ref())
             .collect();
@@ -149,6 +149,17 @@ impl PerspectiveInstance {
         )
         .for_connection(connection_id);
         get_global_pubsub().await.publish_event(event);
+    }
+
+    /// The subscriber of each live subscription (a managed agent's DID; `None` for the main
+    /// agent), for the gauges of `GET /metrics`.
+    pub(crate) async fn subscription_subscribers(&self) -> Vec<Option<String>> {
+        self.subscribed_queries
+            .lock()
+            .await
+            .values()
+            .map(|q| q.subscriber.clone())
+            .collect()
     }
 
     /// End one subscription that `connection_id` opened. `false` when there
@@ -177,7 +188,7 @@ impl PerspectiveInstance {
             before - queries.len()
         };
         if removed > 0 {
-            log::info!("🔗 {} subscription(s) dropped [{}]", removed, self.uuid);
+            log::debug!("🔗 {} subscription(s) dropped [{}]", removed, self.uuid);
         }
         removed
     }
@@ -382,11 +393,7 @@ pub(super) async fn run_rechecks<T: Send + 'static>(
             .acquire_owned()
             .await
             .expect("the re-check semaphore is never closed");
-        let runtime = runtime.clone();
-        running.spawn_blocking(move || {
-            let _permit = permit;
-            runtime.block_on(check)
-        });
+        running.spawn_blocking(blocking_check(runtime.clone(), permit, check));
     }
     while let Some(joined) = running.join_next().await {
         match joined {
@@ -395,6 +402,19 @@ pub(super) async fn run_rechecks<T: Send + 'static>(
         }
     }
     outputs
+}
+
+/// One check as the closure a blocking-pool thread runs: it drives `check` on
+/// `runtime` and holds `permit` until the check ends.
+pub(super) fn blocking_check<T: Send + 'static>(
+    runtime: tokio::runtime::Handle,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    check: BoxFuture<'static, T>,
+) -> impl FnOnce() -> T + Send + 'static {
+    move || {
+        let _permit = permit;
+        runtime.block_on(check)
+    }
 }
 
 #[cfg(test)]

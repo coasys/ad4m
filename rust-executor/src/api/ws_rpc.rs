@@ -51,6 +51,13 @@ pub struct WsAuthQuery {
 
 // ── Entry point ─────────────────────────────────────────────────────────────
 
+/// Socket peer recorded by `into_make_service_with_connect_info`.
+///
+/// `Option<ConnectInfo<_>>` is not an extractor (`ConnectInfo` rejects when the
+/// extension is missing). `Extension` is optional, so a listener that did not record
+/// a peer yields `None` instead of rejecting the upgrade.
+type PeerExtension = axum::extract::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>;
+
 /// Axum handler for the `/api/v1/ws` upgrade.
 ///
 /// The `HandlerMap` is built once at server startup and shared via `Arc`.
@@ -60,13 +67,177 @@ pub async fn ws_rpc(
     Query(query): Query<WsAuthQuery>,
     axum::extract::Extension(handler_map): axum::extract::Extension<Arc<HandlerMap>>,
     reach: ListenerReach,
+    headers: axum::http::HeaderMap,
+    connect: Option<PeerExtension>,
 ) -> impl IntoResponse {
+    let origin = crate::call_diag::model::bounded(
+        headers
+            .get("origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-"),
+        512,
+    );
     let token = query.token.unwrap_or_default();
+    let remote = match connect {
+        Some(axum::extract::Extension(axum::extract::ConnectInfo(peer))) => {
+            client_ip(peer, &headers, &trusted_proxies_from_env())
+        }
+        // No socket peer: a forwarding header has nothing to be checked against.
+        None => "-".to_string(),
+    };
     match connection_context(&token, &state.admin_credential, reach) {
-        Ok(ctx) => ws.on_upgrade(move |socket| handle_ws(socket, handler_map, ctx)),
+        Ok(ctx) => ws.on_upgrade(move |socket| handle_ws(socket, handler_map, ctx, remote, origin)),
         Err(e) => {
             let code = e.close_code();
             ws.on_upgrade(move |socket| close_refused(socket, code, e.to_string()))
+        }
+    }
+}
+
+/// Address for the `ip` field of a socket's open and close lines.
+///
+/// The socket peer is that address. A loopback peer, or a peer listed in `trusted`
+/// (`AD4M_TRUSTED_PROXIES`, comma-separated IP addresses), may name the client with
+/// `X-Forwarded-For` or `X-Real-IP`. The value used is the last `X-Forwarded-For` entry,
+/// else `X-Real-IP`, and only when that value is a single IP address. A missing or
+/// malformed header leaves the socket peer.
+fn client_ip(
+    peer: std::net::SocketAddr,
+    headers: &axum::http::HeaderMap,
+    trusted: &[std::net::IpAddr],
+) -> String {
+    if is_proxy_peer(peer.ip(), trusted) {
+        if let Some(ip) = forwarding_ip(headers) {
+            return ip.to_string();
+        }
+    }
+    peer.ip().to_canonical().to_string()
+}
+
+fn is_proxy_peer(peer: std::net::IpAddr, trusted: &[std::net::IpAddr]) -> bool {
+    let peer = peer.to_canonical();
+    peer.is_loopback() || trusted.iter().any(|ip| ip.to_canonical() == peer)
+}
+
+/// The last `X-Forwarded-For` entry when that header is present, else `X-Real-IP`.
+/// `None` when the chosen header is absent or not one IP address.
+fn forwarding_ip(headers: &axum::http::HeaderMap) -> Option<std::net::IpAddr> {
+    if let Some(value) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        return last_ip(value);
+    }
+    headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .and_then(first_ip)
+}
+
+fn last_ip(value: &str) -> Option<std::net::IpAddr> {
+    value.split(',').next_back().and_then(parse_ip)
+}
+
+fn first_ip(value: &str) -> Option<std::net::IpAddr> {
+    value.split(',').next().and_then(parse_ip)
+}
+
+fn parse_ip(value: &str) -> Option<std::net::IpAddr> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        value.parse().ok()
+    }
+}
+
+/// `AD4M_TRUSTED_PROXIES`: comma-separated IP addresses. Anything that is not an IP is skipped.
+fn trusted_proxies_from_env() -> Vec<std::net::IpAddr> {
+    match std::env::var("AD4M_TRUSTED_PROXIES") {
+        Ok(spec) => parse_trusted_proxies(&spec),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn parse_trusted_proxies(spec: &str) -> Vec<std::net::IpAddr> {
+    spec.split(',').filter_map(parse_ip).collect()
+}
+
+/// Who a connection's caller is, for its log lines: the user's DID, `main` (a grant on the
+/// main agent), `admin` (the operator) or `anon`.
+pub(crate) fn caller_label(ctx: &RequestContext) -> String {
+    if ctx.is_operator() {
+        "admin".to_string()
+    } else if !ctx.session.is_authenticated() {
+        "anon".to_string()
+    } else {
+        ctx.user_did().unwrap_or("main").to_string()
+    }
+}
+
+/// What a connection's writer and reader count for its log lines (`[call-diag]`, see
+/// `call_diag`): bytes and frames written, and when each app-level ping (`{"type":"ping"}`)
+/// arrived, so the writer can tell how late its pong left.
+#[derive(Debug, Default)]
+pub(crate) struct ConnStats {
+    bytes_sent: std::sync::atomic::AtomicU64,
+    frames_sent: std::sync::atomic::AtomicU64,
+    /// Arrival time of each ping whose pong is still queued, and the bytes written by then.
+    /// Pongs leave in the order their pings came: the queue is one FIFO.
+    pings: std::sync::Mutex<std::collections::VecDeque<(Instant, u64)>>,
+}
+
+/// The reply to an app-level ping, as the reader queues it.
+const PONG: &str = r#"{"type":"pong"}"#;
+
+/// A pong that leaves the writer later than this after its ping arrived is logged.
+const LATE_PONG: Duration = Duration::from_secs(1);
+
+/// An RPC that takes longer than this from its arrival to its reply is logged.
+pub(crate) const SLOW_RPC: Duration = Duration::from_secs(2);
+
+impl ConnStats {
+    fn sent(&self, bytes: usize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.bytes_sent.fetch_add(bytes as u64, Relaxed);
+        self.frames_sent.fetch_add(1, Relaxed);
+    }
+
+    fn bytes_sent(&self) -> u64 {
+        self.bytes_sent.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn frames_sent(&self) -> u64 {
+        self.frames_sent.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn ping_arrived(&self, at: Instant) {
+        let bytes = self.bytes_sent();
+        self.pings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back((at, bytes));
+    }
+
+    /// The pong of the oldest ping left the writer now: log it when it was late, with the
+    /// bytes written between the ping's arrival and the pong (the pong not counted).
+    fn pong_left(&self, ctx: Option<&RequestContext>, queued: usize) {
+        let Some((arrived, bytes_then)) = self
+            .pings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop_front()
+        else {
+            return;
+        };
+        let late = arrived.elapsed();
+        if late > LATE_PONG {
+            crate::call_diag!(
+                log::Level::Warn,
+                "ws.pong-late",
+                "did" => ctx.map_or("-".to_string(), caller_label),
+                "conn" => ctx.and_then(|c| c.connection_id.clone()).unwrap_or_default(),
+                "delay_ms" => late.as_millis(),
+                "bytes_before" => self.bytes_sent().saturating_sub(bytes_then),
+                "queued_after" => queued,
+            );
         }
     }
 }
@@ -148,7 +319,22 @@ fn close_reason(reason: &str) -> String {
 
 // ── Connection handler ──────────────────────────────────────────────────────
 
-async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<RequestContext>) {
+async fn handle_ws(
+    socket: WebSocket,
+    handler_map: Arc<HandlerMap>,
+    ctx: Arc<RequestContext>,
+    remote: String,
+    origin: String,
+) {
+    let opened = Instant::now();
+    crate::call_diag!(
+        log::Level::Debug,
+        "ws.open",
+        "origin" => origin,
+        "did" => caller_label(&ctx),
+        "conn" => ctx.connection_id.clone().unwrap_or_default(),
+        "ip" => remote,
+    );
     // Track last_seen at connect time (also updated on each RPC call below)
     if let Some(did) = ctx.user_did() {
         track_last_seen(did).await;
@@ -157,7 +343,9 @@ async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<Req
     let (ws_sink, ws_stream) = socket.split();
     let (tx, rx) = mpsc::unbounded_channel::<String>();
 
-    let conn = Connection::new(handler_map, ctx.clone(), tx);
+    let mut conn = Connection::new(handler_map, ctx.clone(), tx);
+    conn.origin = origin;
+    let stats = conn.stats.clone();
     // An anonymous socket (no token, for example on an executor that has an admin credential)
     // gets no events: a stream that never yields. The stream carries the updates of the live
     // queries this connection opens, watched or not.
@@ -174,18 +362,45 @@ async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<Req
 
     // ── Writer task ─────────────────────────────────────────────────────
     let liveness = Arc::new(std::sync::Mutex::new(Liveness::new(Instant::now())));
+    let session_over = conn.session_over.clone();
     let mut write_handle = tokio::spawn(write_to(
         ws_sink,
         rx,
         conn.session_over.clone(),
         liveness.clone(),
+        WriterDiag {
+            stats: stats.clone(),
+            ctx: Some(ctx.clone()),
+        },
     ));
 
+    // How the socket ended, for its close line: the client's close frame, a read error,
+    // silence, or the end of the stream.
+    let ended = Arc::new(std::sync::Mutex::new(None::<(String, String, String)>));
+    let silent = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let note_end = ended.clone();
     // Text frames until the socket closes, errors or goes silent; pongs, pings
     // and binary frames count as heard and are skipped.
-    let incoming = until_silent(ws_stream, liveness)
-        .take_while(|msg| {
-            futures::future::ready(matches!(msg, Ok(m) if !matches!(m, Message::Close(_))))
+    let incoming = until_silent(ws_stream, liveness, silent.clone())
+        .take_while(move |msg| {
+            let end = match msg {
+                Ok(Message::Close(frame)) => Some((
+                    "client".to_string(),
+                    frame
+                        .as_ref()
+                        .map_or("1005".to_string(), |f| f.code.to_string()),
+                    frame
+                        .as_ref()
+                        .map_or(String::new(), |f| f.reason.to_string()),
+                )),
+                Err(e) => Some(("error".to_string(), "1006".to_string(), e.to_string())),
+                Ok(_) => None,
+            };
+            let more = end.is_none();
+            if let Some(end) = end {
+                *note_end.lock().unwrap_or_else(|e| e.into_inner()) = Some(end);
+            }
+            futures::future::ready(more)
         })
         .filter_map(|msg| {
             futures::future::ready(match msg {
@@ -198,11 +413,58 @@ async fn handle_ws(socket: WebSocket, handler_map: Arc<HandlerMap>, ctx: Arc<Req
     // The writer ends once calls still in flight drop their senders and what
     // they queued is sent. A client that went silent takes nothing, and the
     // send would wait until TCP gives up on it: close the socket instead.
+    let mut writer_note = "";
     match tokio::time::timeout(SILENCE_LIMIT, &mut write_handle).await {
         Ok(Err(e)) => log::error!("WS RPC writer task failed: {}", e),
         Ok(Ok(())) => {}
-        Err(_) => write_handle.abort(),
+        Err(_) => {
+            write_handle.abort();
+            writer_note = "writer-aborted";
+        }
     }
+
+    let (by, code, reason) = ended
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .unwrap_or_else(|| {
+            if session_over.is_cancelled() {
+                let frame = token_ended_frame();
+                (
+                    "server".into(),
+                    frame.code.to_string(),
+                    frame.reason.to_string(),
+                )
+            } else if silent.load(std::sync::atomic::Ordering::Relaxed) {
+                ("server".into(), "1006".into(), "client silent".into())
+            } else {
+                (
+                    "client".into(),
+                    "1006".into(),
+                    "stream ended without a close frame".into(),
+                )
+            }
+        });
+    crate::call_diag!(
+        log::Level::Debug,
+        "ws.close",
+        "did" => caller_label(&ctx),
+        "conn" => ctx.connection_id.clone().unwrap_or_default(),
+        "ip" => remote,
+        "lifetime_s" => opened.elapsed().as_secs(),
+        "bytes_sent" => stats.bytes_sent(),
+        "frames_sent" => stats.frames_sent(),
+        "by" => by,
+        "code" => code,
+        "reason" => reason,
+        "note" => writer_note,
+    );
+}
+
+/// What the writer needs for the connection's log lines.
+pub(crate) struct WriterDiag {
+    pub(crate) stats: Arc<ConnStats>,
+    pub(crate) ctx: Option<Arc<RequestContext>>,
 }
 
 /// How often the executor sends its client a WebSocket ping. Every client answers
@@ -286,6 +548,7 @@ async fn write_to<S>(
     mut rx: mpsc::UnboundedReceiver<String>,
     session_over: CancellationToken,
     liveness: Arc<std::sync::Mutex<Liveness>>,
+    diag: WriterDiag,
 ) where
     S: futures::Sink<Message> + Unpin,
 {
@@ -324,10 +587,16 @@ async fn write_to<S>(
             }
             msg = rx.recv() => match msg {
                 Some(msg) => {
-                    liveness.lock().unwrap().wrote(msg.len(), Instant::now());
+                    let len = msg.len();
+                    let pong = msg == PONG;
+                    liveness.lock().unwrap().wrote(len, Instant::now());
                     if sink.send(Message::Text(msg.into())).await.is_err() {
                         return;
                     }
+                    if pong {
+                        diag.stats.pong_left(diag.ctx.as_deref(), rx.len());
+                    }
+                    diag.stats.sent(len);
                 }
                 None => return,
             },
@@ -340,21 +609,24 @@ async fn write_to<S>(
 fn until_silent<S>(
     frames: S,
     liveness: Arc<std::sync::Mutex<Liveness>>,
+    silent: Arc<std::sync::atomic::AtomicBool>,
 ) -> impl futures::Stream<Item = S::Item>
 where
     S: futures::Stream + Unpin,
 {
     futures::stream::unfold(frames, move |mut frames| {
         let liveness = liveness.clone();
+        let silent = silent.clone();
         async move {
             loop {
                 let deadline = liveness.lock().unwrap().deadline();
                 if Instant::now() >= deadline {
                     let heard_at = liveness.lock().unwrap().heard_at;
-                    log::info!(
+                    log::debug!(
                         "WS RPC: client silent for {:?}; ending the connection",
                         deadline - heard_at
                     );
+                    silent.store(true, std::sync::atomic::Ordering::Relaxed);
                     return None;
                 }
                 // Woken at the deadline, check it again: more may have been written.
@@ -371,6 +643,8 @@ type EventStream = std::pin::Pin<Box<dyn futures::Stream<Item = String> + Send>>
 
 /// Per-connection state: what the reader needs to answer a message.
 pub(crate) struct Connection {
+    /// Bounded Origin header: evidence, never authentication.
+    origin: String,
     handler_map: Arc<HandlerMap>,
     /// Carries the session that every request checks again.
     ctx: Arc<RequestContext>,
@@ -399,12 +673,13 @@ pub(crate) struct Connection {
     opening: Arc<tokio::sync::Semaphore>,
     /// Bounds how many query-running calls one connection evaluates at once (#1736):
     /// `perspective.querySparql`, `perspective.getLinks`, `perspective.modelQuery`,
-    /// `perspective.evaluateGetters`, `perspective.subscribeQuery` and
-    /// `perspective.modelSubscribe`. A call acquires one slot in
+    /// `perspective.evaluateGetters` and `perspective.subscribe`. A call acquires one slot in
     /// `sparql_store::query_gate`, which hangs the permit on the eval's stop:
     /// the slot frees only when the blocking evaluation has actually ended,
     /// not when the call's future ends.
     queries: Arc<tokio::sync::Semaphore>,
+    /// What the connection's log lines count (`[call-diag]`).
+    pub(crate) stats: Arc<ConnStats>,
 }
 
 /// How many calls that open a live query one connection runs at once (see
@@ -429,6 +704,7 @@ impl Connection {
         let session_over = ctx.session.ended();
         let closed = session_over.child_token();
         Self {
+            origin: "-".into(),
             handler_map,
             ctx,
             session_over,
@@ -441,6 +717,7 @@ impl Connection {
             queries: Arc::new(tokio::sync::Semaphore::new(
                 MAX_RUNNING_QUERIES_PER_CONNECTION,
             )),
+            stats: Default::default(),
         }
     }
 
@@ -452,6 +729,7 @@ impl Connection {
     /// Handle one text message from the client.
     pub(crate) async fn handle_text(&self, text: &str) {
         let tx = &self.tx;
+        let received = Instant::now();
 
         // Parse JSON
         let parsed: Value = match serde_json::from_str(text) {
@@ -464,7 +742,8 @@ impl Connection {
 
         // Handle ping/pong keepalive
         if parsed.get("type").and_then(|v| v.as_str()) == Some("ping") {
-            let _ = tx.send(json!({"type":"pong"}).to_string());
+            self.stats.ping_arrived(received);
+            let _ = tx.send(PONG.to_string());
             return;
         }
 
@@ -571,6 +850,7 @@ impl Connection {
         let refused = super::identity_ws::duplicate_member_refusal(&msg_type, text);
         let handler_map = self.handler_map.clone();
         let base_ctx = self.ctx.clone();
+        let origin = self.origin.clone();
         let inflight = self.inflight.clone();
         let session_over = self.session_over.clone();
         let tx = tx.clone();
@@ -608,6 +888,7 @@ impl Connection {
             req_ctx.cancel_token = Some(ctx_token.clone());
             req_ctx.query_slots = Some(queries);
             let req_ctx = Arc::new(req_ctx);
+            let handler_started = std::sync::OnceLock::new();
 
             // Race the handler against a `request.cancel` or the session
             // ending.  On cancel, we drop the handler future — its eval
@@ -617,7 +898,8 @@ impl Connection {
             // A socket that merely closed does not fire `drop_token`:
             // `ctx_token` still stops the call's eval, and the call ends
             // with it.
-            let response = tokio::select! {
+            let (response, model_fields) = crate::call_diag::model::collect(async {
+                tokio::select! {
                 biased;
                 _ = drop_token.cancelled() => {
                     if session_over.is_cancelled() {
@@ -649,6 +931,7 @@ impl Connection {
                         },
                         None => None,
                     };
+                    let _ = handler_started.set(Instant::now());
                     match refused {
                         // The access answer first: a caller the guard refuses learns nothing
                         // of its frame.
@@ -664,7 +947,8 @@ impl Connection {
                         Err(e) => json!({"id": id, "error": e.to_wire()}),
                     }
                 }
-            };
+                }
+            }).await;
             // Clean up the registry entry BEFORE sending the response —
             // otherwise a late `request.cancel` arriving between the send
             // and the remove would find the token, cancel it, and report
@@ -672,9 +956,72 @@ impl Connection {
             let mut guard = inflight.lock().await;
             guard.remove(&id);
             drop(guard);
-            let _ = tx.send(response.to_string());
+            let response = response.to_string();
+            let done = Instant::now();
+            let total = done.saturating_duration_since(received);
+            if let Some(reason) = rpc_trigger(total, response.len()) {
+                let (queued_ms, handler_ms, total_ms) =
+                    rpc_timing(received, handler_started.get().copied(), done);
+                let mut fields = vec![
+                    ("method", msg_type), ("did", caller_label(&base_ctx)),
+                    ("conn", base_ctx.connection_id.clone().unwrap_or_default()),
+                    ("origin", origin), ("reason", reason.to_string()),
+                    ("kind", if opens_live_query { "initial" } else { "response" }.into()),
+                    ("queued_ms", queued_ms.to_string()), ("handler_ms", handler_ms.to_string()),
+                    ("total_ms", total_ms.to_string()), ("response_bytes", response.len().to_string()),
+                    ("outcome", outcome(&response)),
+                ];
+                fields.extend(model_fields);
+                crate::call_diag::emit(log::Level::Warn, module_path!(), "rpc.slow", &fields);
+            }
+            let _ = tx.send(response);
         });
     }
+}
+
+/// Strict thresholds: exactly 1 MB or 2 s alone do not trigger.
+fn rpc_trigger(total: Duration, bytes: usize) -> Option<&'static str> {
+    match (total > SLOW_RPC, bytes > 1_000_000) {
+        (true, true) => Some("slow,size"),
+        (true, false) => Some("slow"),
+        (false, true) => Some("size"),
+        (false, false) => None,
+    }
+}
+#[cfg(test)]
+mod size_trigger_tests {
+    use super::*;
+    #[test]
+    fn strict_size_and_latency_thresholds() {
+        assert_eq!(rpc_trigger(SLOW_RPC, 1_000_000), None);
+        assert_eq!(rpc_trigger(Duration::ZERO, 1_000_001), Some("size"));
+        assert_eq!(
+            rpc_trigger(SLOW_RPC + Duration::from_nanos(1), 0),
+            Some("slow")
+        );
+        assert_eq!(
+            rpc_trigger(SLOW_RPC + Duration::from_nanos(1), 1_000_001),
+            Some("slow,size")
+        );
+    }
+}
+
+/// Milliseconds queued before the handler, inside the handler, and in total, all measured
+/// at one completion instant `done`. `started` is `None` when the call was cancelled before
+/// dispatch: the handler time is then zero and the whole wait is queued.
+fn rpc_timing(received: Instant, started: Option<Instant>, done: Instant) -> (u128, u128, u128) {
+    let total = done.saturating_duration_since(received);
+    let handler = started.map_or(Duration::ZERO, |at| done.saturating_duration_since(at));
+    let queued = started.map_or(total, |at| at.saturating_duration_since(received));
+    (queued.as_millis(), handler.as_millis(), total.as_millis())
+}
+
+/// `ok`, or `error:<code>`, from a reply's JSON text.
+fn outcome(response: &str) -> String {
+    serde_json::from_str::<Value>(response)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.get("code")).cloned())
+        .map_or("ok".to_string(), |code| format!("error:{code}"))
 }
 
 /// Serve one connection until `incoming` ends or the token stops working:
@@ -690,8 +1037,27 @@ where
 {
     let tx_events = conn.tx.clone();
     let event_session_over = conn.session_over.clone();
+    let event_ctx = conn.ctx.clone();
+    let event_origin = conn.origin.clone();
     let event_task = tokio::spawn(async move {
         while let Some(msg) = events.next().await {
+            if rpc_trigger(Duration::ZERO, msg.len()).is_some() {
+                // Inspect routing metadata only, never update payloads.
+                if let Ok(value) = serde_json::from_str::<Value>(&msg) {
+                    if value["type"] == "query-subscription-update" {
+                        crate::call_diag!(log::Level::Warn, "rpc.slow",
+                            "reason" => "size", "kind" => "update",
+                            "method" => "query-subscription-update",
+                            "did" => caller_label(&event_ctx),
+                            "conn" => event_ctx.connection_id.as_deref().unwrap_or_default(),
+                            "origin" => event_origin,
+                            "perspective" => crate::call_diag::model::bounded(value["uuid"].as_str().unwrap_or("-"), 128),
+                            "subscription" => crate::call_diag::model::bounded(value["subscriptionId"].as_str().unwrap_or("-"), 64),
+                            "response_bytes" => msg.len(),
+                        );
+                    }
+                }
+            }
             if tx_events.send(msg).is_err() {
                 return;
             }
@@ -913,7 +1279,14 @@ mod socket_tests {
         let app = crate::api::api_router(AppState {
             admin_credential: Some(ADMIN.into()),
         });
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap()
+        });
         addr
     }
 
@@ -1350,6 +1723,72 @@ mod socket_tests {
 
     // With an admin credential set, a socket with no token used to get the main agent's
     // event stream.
+    /// A socket's open and close are each one `[call-diag]` line: the caller, the connection,
+    /// the client address, and on close its lifetime, the bytes the executor sent and the
+    /// close code and reason the client gave. This client connects to the loopback listener,
+    /// so the last `X-Forwarded-For` entry is that address.
+    #[tokio::test]
+    async fn a_socket_logs_its_open_and_its_close_with_the_close_code() {
+        use crate::call_diag::capture;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
+
+        let addr = start_server().await;
+        // A documentation address no other test uses, to find this socket's lines.
+        let ip = format!("198.51.100.{}", rand::random::<u8>());
+        let mut request = format!("ws://{addr}/api/v1/ws?token={ADMIN}")
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            "x-forwarded-for",
+            format!("192.0.2.1, {ip}").parse().unwrap(),
+        );
+        let mut ws = tokio_tungstenite::connect_async(request).await.unwrap().0;
+        let reply = call(&mut ws, "s", "agent.status").await;
+        assert!(reply.get("result").is_some(), "{reply}");
+        let ip_field = format!("ip={ip}");
+        let opened = capture::lines("ws.open", &[&ip_field]);
+        assert_eq!(opened.len(), 1, "{opened:?}");
+        assert_eq!(opened[0].level, log::Level::Debug);
+        capture::assert_format(&opened[0].line);
+        assert_eq!(
+            capture::field(&opened[0].line, "did").as_deref(),
+            Some("admin")
+        );
+        let conn = capture::field(&opened[0].line, "conn").unwrap();
+        assert!(!conn.is_empty());
+
+        ws.close(Some(CloseFrame {
+            code: CloseCode::Library(4001),
+            reason: "leaving the call".into(),
+        }))
+        .await
+        .unwrap();
+        let closed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let lines = capture::lines("ws.close", &[&ip_field]);
+                if !lines.is_empty() {
+                    return lines;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a close line");
+        assert_eq!(closed.len(), 1, "{closed:?}");
+        let line = &closed[0].line;
+        assert_eq!(closed[0].level, log::Level::Debug);
+        capture::assert_format(line);
+        let field = |key| capture::field(line, key).unwrap_or_else(|| panic!("no {key} in {line}"));
+        assert_eq!(field("conn"), conn);
+        assert_eq!(field("did"), "admin");
+        assert_eq!(field("by"), "client");
+        assert_eq!(field("code"), "4001");
+        assert_eq!(field("reason"), "leaving the call");
+        assert!(field("bytes_sent").parse::<u64>().unwrap() > 0, "{line}");
+        assert!(field("lifetime_s").parse::<u64>().is_ok(), "{line}");
+    }
+
     #[tokio::test]
     async fn a_socket_without_a_token_gets_no_events() {
         let addr = start_server().await;
@@ -1418,6 +1857,13 @@ mod liveness_tests {
         Arc::new(std::sync::Mutex::new(Liveness::new(Instant::now())))
     }
 
+    fn test_diag() -> WriterDiag {
+        WriterDiag {
+            stats: Default::default(),
+            ctx: None,
+        }
+    }
+
     fn secs(s: f64) -> Duration {
         Duration::from_secs_f64(s)
     }
@@ -1449,7 +1895,11 @@ mod liveness_tests {
     #[tokio::test(start_paused = true)]
     async fn a_silent_client_is_let_go_after_the_limit() {
         let start = Instant::now();
-        let frames = until_silent(futures::stream::pending::<()>(), fresh());
+        let frames = until_silent(
+            futures::stream::pending::<()>(),
+            fresh(),
+            Default::default(),
+        );
         assert_eq!(ended_after(Box::pin(frames), start).await, SILENCE_LIMIT);
     }
 
@@ -1457,7 +1907,11 @@ mod liveness_tests {
     async fn every_frame_restarts_the_limit() {
         let start = Instant::now();
         let step = SILENCE_LIMIT.as_secs_f64() - 1.0;
-        let frames = until_silent(frames_at(vec![step, 2.0 * step, 3.0 * step]), fresh());
+        let frames = until_silent(
+            frames_at(vec![step, 2.0 * step, 3.0 * step]),
+            fresh(),
+            Default::default(),
+        );
         assert_eq!(
             ended_after(Box::pin(frames), start).await,
             secs(3.0 * step) + SILENCE_LIMIT
@@ -1471,7 +1925,7 @@ mod liveness_tests {
         let liveness = fresh();
         let start = Instant::now();
         liveness.lock().unwrap().wrote(3_200_000, start);
-        let frames = until_silent(frames_at(vec![1.0]), liveness);
+        let frames = until_silent(frames_at(vec![1.0]), liveness, Default::default());
         assert_eq!(
             ended_after(Box::pin(frames), start).await,
             secs(200.0) + PONG_RETURN
@@ -1483,7 +1937,11 @@ mod liveness_tests {
     async fn a_late_write_is_given_its_time_from_when_it_was_written() {
         let liveness = fresh();
         let start = Instant::now();
-        let frames = until_silent(futures::stream::pending::<()>(), liveness.clone());
+        let frames = until_silent(
+            futures::stream::pending::<()>(),
+            liveness.clone(),
+            Default::default(),
+        );
         tokio::spawn(async move {
             tokio::time::sleep(secs(50.0)).await;
             liveness.lock().unwrap().wrote(1_600_000, Instant::now());
@@ -1502,7 +1960,11 @@ mod liveness_tests {
         let liveness = fresh();
         let start = Instant::now();
         liveness.lock().unwrap().wrote(1_600_000, start);
-        let frames = until_silent(futures::stream::pending::<()>(), liveness.clone());
+        let frames = until_silent(
+            futures::stream::pending::<()>(),
+            liveness.clone(),
+            Default::default(),
+        );
         tokio::spawn(async move {
             for t in 1.. {
                 tokio::time::sleep_until(start + secs(t as f64)).await;
@@ -1535,9 +1997,10 @@ mod liveness_tests {
             rx,
             CancellationToken::new(),
             liveness.clone(),
+            test_diag(),
         ));
         tx.send("x".repeat(3_200_000)).unwrap();
-        let frames = until_silent(frames_at(vec![1.0, 200.5]), liveness);
+        let frames = until_silent(frames_at(vec![1.0, 200.5]), liveness, Default::default());
         assert_eq!(
             ended_after(Box::pin(frames), start).await,
             secs(200.5) + SILENCE_LIMIT
@@ -1566,7 +2029,13 @@ mod liveness_tests {
         for _ in 0..100 {
             tx.send("reply".to_string()).unwrap();
         }
-        let writer = tokio::spawn(write_to(sink, rx, CancellationToken::new(), fresh()));
+        let writer = tokio::spawn(write_to(
+            sink,
+            rx,
+            CancellationToken::new(),
+            fresh(),
+            test_diag(),
+        ));
         tokio::time::sleep(PING_INTERVAL + Duration::from_secs(2)).await;
         let first_ping = sent
             .lock()
@@ -1581,5 +2050,162 @@ mod liveness_tests {
         );
         drop(tx);
         writer.abort();
+    }
+
+    /// A pong that waits behind a large write leaves the writer late: one `ws.pong-late`
+    /// warning with the delay and the bytes written before it. An answered-at-once pong
+    /// gives none.
+    #[tokio::test(start_paused = true)]
+    async fn a_pong_queued_behind_a_slow_write_is_logged_as_late() {
+        use crate::call_diag::capture;
+        // A sink that takes 1.2 s per frame, as a slow link does for a large one.
+        let sink = futures::sink::unfold((), |(), _msg: Message| async {
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            Ok::<(), std::convert::Infallible>(())
+        });
+        let sink = Box::pin(sink);
+        let stats = Arc::new(ConnStats::default());
+        let (tx, rx) = mpsc::unbounded_channel::<String>();
+        let writer = tokio::spawn(write_to(
+            sink,
+            rx,
+            CancellationToken::new(),
+            fresh(),
+            WriterDiag {
+                stats: stats.clone(),
+                ctx: None,
+            },
+        ));
+        // A large live-query result is queued, then the client's ping arrives.
+        let big = "r".repeat(77_777);
+        tx.send(big).unwrap();
+        stats.ping_arrived(Instant::now());
+        tx.send(PONG.to_string()).unwrap();
+        drop(tx);
+        writer.await.unwrap();
+
+        let late = capture::lines("ws.pong-late", &["bytes_before=77777"]);
+        assert_eq!(late.len(), 1, "{late:?}");
+        assert_eq!(late[0].level, log::Level::Warn);
+        capture::assert_format(&late[0].line);
+        assert_eq!(
+            capture::field(&late[0].line, "delay_ms").as_deref(),
+            Some("2400")
+        );
+        assert_eq!(stats.bytes_sent(), 77_777 + PONG.len() as u64);
+        assert_eq!(stats.frames_sent(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pong_sent_at_once_is_not_logged() {
+        use crate::call_diag::capture;
+        use crate::types::RequestContext;
+        // This connection's id, so a late pong from another test is not this one's.
+        let ctx = RequestContext::operator_for_test().on_connection("pong-on-time");
+        let conn = "conn=pong-on-time";
+        let stats = ConnStats::default();
+        let before = capture::lines("ws.pong-late", &[conn]).len();
+        stats.ping_arrived(Instant::now());
+        tokio::time::advance(Duration::from_millis(900)).await;
+        stats.pong_left(Some(&ctx), 0);
+        assert_eq!(capture::lines("ws.pong-late", &[conn]).len(), before);
+        // A pong without a ping (a client that sent none) is not counted either.
+        stats.pong_left(Some(&ctx), 0);
+        assert_eq!(capture::lines("ws.pong-late", &[conn]).len(), before);
+    }
+}
+
+#[cfg(test)]
+mod client_ip_tests {
+    use super::{client_ip, parse_trusted_proxies};
+    use axum::http::HeaderMap;
+    use std::net::{IpAddr, SocketAddr};
+
+    fn peer(addr: &str) -> SocketAddr {
+        addr.parse().unwrap()
+    }
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (name, value) in pairs {
+            headers.insert(*name, value.parse().unwrap());
+        }
+        headers
+    }
+
+    /// A peer that is not loopback and not configured keeps its own address.
+    #[test]
+    fn a_forwarding_header_from_a_non_proxy_peer_stays_the_socket_peer() {
+        let peer = peer("203.0.113.50:40000");
+        let headers = headers(&[
+            ("x-forwarded-for", "198.51.100.9, 192.0.2.8"),
+            ("x-real-ip", "198.51.100.8"),
+        ]);
+        assert_eq!(client_ip(peer, &headers, &[]), "203.0.113.50");
+    }
+
+    #[test]
+    fn a_loopback_proxy_uses_the_last_forwarded_address() {
+        let peer = peer("127.0.0.1:1234");
+        let headers = headers(&[("x-forwarded-for", "198.51.100.9, 192.0.2.8")]);
+        assert_eq!(client_ip(peer, &headers, &[]), "192.0.2.8");
+    }
+
+    #[test]
+    fn a_loopback_proxy_without_forwarded_for_uses_x_real_ip() {
+        let peer = peer("[::1]:1234");
+        let headers = headers(&[("x-real-ip", "192.0.2.8")]);
+        assert_eq!(client_ip(peer, &headers, &[]), "192.0.2.8");
+    }
+
+    #[test]
+    fn a_malformed_forwarding_header_from_a_proxy_stays_the_socket_peer() {
+        let peer = peer("127.0.0.1:1234");
+        let headers = headers(&[("x-forwarded-for", "not-an-ip"), ("x-real-ip", "192.0.2.8")]);
+        assert_eq!(client_ip(peer, &headers, &[]), "127.0.0.1");
+        assert_eq!(client_ip(peer, &HeaderMap::new(), &[]), "127.0.0.1");
+    }
+
+    #[test]
+    fn a_configured_proxy_may_set_the_forwarded_address() {
+        let peer = peer("192.0.2.10:443");
+        let trusted = parse_trusted_proxies("192.0.2.10, not-an-ip, ::1");
+        assert_eq!(
+            trusted,
+            vec![
+                "192.0.2.10".parse::<IpAddr>().unwrap(),
+                "::1".parse().unwrap()
+            ]
+        );
+        let headers = headers(&[("x-forwarded-for", "198.51.100.7")]);
+        assert_eq!(client_ip(peer, &headers, &trusted), "198.51.100.7");
+        assert_eq!(client_ip(peer, &headers, &[]), "192.0.2.10");
+    }
+}
+
+#[cfg(test)]
+mod rpc_timing_tests {
+    use super::rpc_timing;
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    #[test]
+    fn both_durations_come_from_one_completion_instant() {
+        let received = Instant::now();
+        let started = received + Duration::from_millis(40);
+        let done = started + Duration::from_millis(2100);
+        let (queued, handler, total) = rpc_timing(received, Some(started), done);
+        assert_eq!(queued, 40);
+        assert_eq!(handler, 2100);
+        assert_eq!(total, 2140);
+        assert!(total >= handler);
+        assert_eq!(queued + handler, total);
+
+        // Cancelled before dispatch: the handler never started.
+        let (queued, handler, total) =
+            rpc_timing(received, None, received + Duration::from_millis(15));
+        assert_eq!(handler, 0);
+        assert_eq!(queued, 15);
+        assert_eq!(total, 15);
     }
 }

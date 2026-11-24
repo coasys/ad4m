@@ -34,6 +34,12 @@ references:
 #   Rust (fmt). More runners, with small working dirs.
 # Only `build` gates the integration tests. clippy and rust-tests start after it and run
 # next to the integration tests. fmt, js-unit-tests and plugin-ad4m-tests start at once.
+# The heavy jobs (rust-tests, rust-client-tests, the integration suites) start with
+# `heavy_gate`: on a draft PR, a PR whose base is not dev, or a branch with no PR they halt
+# green at once (.circleci/scripts/should-run-heavy.sh). The full-ci label or [full-ci] in
+# the commit message runs them anyway. The GitHub workflow heavy-suites.yml shows a halt as
+# the pending status ci/heavy-suites; it turns success only once a pipeline of the commit runs
+# the heavy jobs, and starts one when the PR gets ready or is retargeted to dev without a push.
 
 commands:
   fix_workdir:
@@ -54,6 +60,13 @@ commands:
             # removes a file as well. No runner workdir is a gitlink today.
             if [ -e .git ] && ! git rev-parse --git-dir >/dev/null 2>&1; then
               heal "corrupted .git (git rev-parse fails)"
+            fi
+            # A .git that opens but has no origin remote fails checkout with "No such remote
+            # 'origin'" (seen 2026-11-20, after the runner's disk filled during checkout). Checkout
+            # sets origin's URL but never adds the remote, so add it back here.
+            if [ -e .git ] && ! git remote get-url origin >/dev/null 2>&1; then
+              echo "fix_workdir: no origin remote -- adding it"
+              git remote add origin "$CIRCLE_REPOSITORY_URL"
             fi
             # A .git that opens but lacks objects its refs reach passes the check above and then
             # fails checkout with "pack has N unresolved deltas": checkout offers the local refs as
@@ -96,6 +109,14 @@ commands:
             if [ -e .git ]; then
               if head_sha="$(git rev-parse --verify -q HEAD)"; then
                 git update-ref --no-deref HEAD "$head_sha"
+                # Every build output and cache is gitignored, so an untracked file that no
+                # .gitignore covers is left from a checkout that stopped part way (seen 2026-11-20,
+                # after the disk filled: another branch's core/src/host/HostClient.ts broke tsc).
+                # git clean without -x keeps the ignored caches.
+                cleaned="$(git clean -fd)"
+                if [ -n "$cleaned" ]; then
+                  echo "fix_workdir: removed $(wc -l \<<<"$cleaned") untracked path(s) no .gitignore covers"
+                fi
               fi
               # Records after the first are the linked worktrees (the first is this one).
               held="$(git worktree list --porcelain | awk -v RS= 'NR > 1' | sed -n 's/^branch //p')"
@@ -133,6 +154,32 @@ commands:
               | grep -vxF -f <(printf '%s\n' $in_use /nonexistent) \
               | xargs -r -d '\n' rm -rf || true
             df -h /tmp | tail -1
+
+  heavy_gate:
+    description: "Halt a heavy job (green) on a draft PR, a PR whose base is not dev, or a branch with no PR"
+    steps:
+      - run:
+          # A stack of PRs pays the heavy suites once, at the PR that targets dev; the
+          # branches below it get fmt, build and clippy. dev, staging, main, tags and the
+          # nightly always run; so do a PR with the `full-ci` label and a head commit
+          # with [full-ci] in its message. The decision is in the script (tested in
+          # `build`); anything but its "skip" answer runs the suite, so a GitHub API
+          # failure costs a full run, never a skipped one. A halted job is green; the
+          # GitHub workflow heavy-suites.yml keeps the status ci/heavy-suites pending
+          # until a pipeline of the commit runs the heavy jobs, and starts one when the
+          # PR gets ready, is reopened, retargeted to dev or labeled full-ci without a
+          # push. Its script tells a halted job from one that ran by this step's name
+          # (it starts with "Stack gate") and whether a step follows it: keep both.
+          name: Stack gate (heavy suites only for non-draft PRs to dev)
+          environment:
+            HEAVY_GATE_FORCE: << pipeline.parameters.run-nightly-llm >>
+          command: |
+            rc=0
+            bash .circleci/scripts/should-run-heavy.sh || rc=$?
+            if [ "$rc" = 10 ]; then
+              circleci-agent step halt
+            fi
+            exit 0
 
   setup_env:
     description: "Set up build environment (Node, Rust, Deno, Go, pnpm)"
@@ -433,6 +480,7 @@ commands:
       - fix_workdir
       - checkout
       - test_artifacts_dir
+      - heavy_gate
       - when:
           condition: << parameters.local >>
           steps:
@@ -530,6 +578,15 @@ jobs:
           # feed-scale job's skip, data dir and calls to the performance history.
           name: Test feed-scale.sh
           command: bash scripts/feed-scale.test.sh
+      - run:
+          # Fake curl with fixture PRs, no network; about a second. The heavy_gate decision.
+          name: Test should-run-heavy.sh
+          command: bash .circleci/scripts/should-run-heavy.test.sh
+      - run:
+          # Fake curl for the GitHub and CircleCI APIs, no network; about 15 seconds. The
+          # ci/heavy-suites status: CircleCI reads, the new pipeline, every pending (heavy-suites.yml).
+          name: Test heavy-suites-pr.sh
+          command: bash .github/scripts/heavy-suites-pr.test.sh
       - build_adam
       - build_integration_inputs
       - run:
@@ -753,14 +810,56 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - heavy_gate
       - setup_env
       - restore_rust_compile_inputs
+      - run:
+          # The WASM language the runtime's ordering tests load; without the bundle they skip.
+          name: Build test WASM language
+          command: bash tests/rust-languages/build.sh && test -f tests/rust-languages/test-wasm-language/build/bundle.js
       - run:
           # Unit tests, the crate's integration tests and doc-tests; the same command as
           # the crate's `pnpm test` script.
           name: rust-executor tests
           command: cd rust-executor && cargo test --release -- --test-threads=1
           no_output_timeout: 30m
+
+  # Trial, not a required check: the same suite under cargo-nextest, one process per
+  # test, in parallel (.config/nextest.toml, profile `ci`). On one box it took about 30 s
+  # against about 6 min for rust-tests. It runs beside rust-tests for a few days so the
+  # two can be compared on these runners; rust-tests stays the gate. nextest runs no
+  # doc-tests (rust-executor has 9, all ignored). The JUnit report gives
+  # per-test times in the job's Tests tab. nextest is a pinned release, checked against
+  # its SHA-256, kept in the runner's workdir (not the shared ~/.cargo/bin).
+  rust-tests-nextest:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - fix_workdir
+      - checkout
+      - heavy_gate
+      - setup_env
+      - restore_rust_compile_inputs
+      - run:
+          name: Install cargo-nextest 0.9.152
+          command: |
+            set -euo pipefail
+            bin="$PWD/target/nextest-bin"
+            if ! "$bin/cargo-nextest" nextest --version 2>/dev/null | grep -q '^cargo-nextest 0.9.152 '; then
+              dir=$(mktemp -d)
+              curl -fsSL -o "$dir/nextest.tar.gz" https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.152/cargo-nextest-0.9.152-x86_64-unknown-linux-gnu.tar.gz
+              echo "d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a  $dir/nextest.tar.gz" | sha256sum -c -
+              mkdir -p "$bin"
+              tar -xzf "$dir/nextest.tar.gz" -C "$bin"
+              rm -rf "$dir"
+            fi
+            echo "export PATH=\"$bin:\$PATH\"" >> "$BASH_ENV"
+      - run:
+          name: rust-executor tests (nextest, profile ci)
+          command: cd rust-executor && cargo nextest run --release --profile ci
+          no_output_timeout: 30m
+      - store_test_results:
+          path: target/nextest/ci/junit.xml
 
   # The Rust client: unit tests plus its real-executor integration test.
   # ad4m-executor comes from the build job's stash; AD4M_REQUIRE_EXECUTOR
@@ -780,6 +879,7 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - heavy_gate
       - setup_env
       - restore_binaries
       - run:
@@ -1285,6 +1385,55 @@ jobs:
           path: test-artifacts
           destination: sfu-test-logs
 
+  # Agent harness scenarios (tests/agent-harness): A2 provision & connect, A4
+  # waker and A5 mocked A/V loop, each route in its own Docker pod (executor +
+  # mock LLM + the real OpenClaw / Hermes / Sovereign harness). Nightly only:
+  # the harness images are third-party and large, and a run takes tens of
+  # minutes. Like integration-tests-sfu it builds its own binaries, then wraps
+  # them in a thin executor image. Sovereign needs a privately built image and
+  # skips here; every OpenClaw and Hermes route is required, so a failure or a
+  # skip (e.g. an image that cannot be pulled) fails the job.
+  integration-tests-agent-harness:
+    machine: true
+    resource_class: coasys/marvin
+    environment:
+      AD4M_EXEC_IMAGE: ad4m-agent-harness-executor:nightly
+      AGENT_HARNESS_REQUIRED: a2/external-native,a2/external-plugin,a2/managed,a2/hermes,a4/openclaw,a4/hermes,a5/hermes,a5/openclaw
+    steps:
+      - run:
+          name: Clear results and artifacts from earlier runs on this host
+          command: rm -rf /tmp/agent-harness-results /tmp/agent-harness-artifacts
+      - setup_integration_test_environment:
+          build_binaries: true
+      - run:
+          name: Check Docker
+          command: docker info --format 'Docker {{.ServerVersion}}, {{.NCPU}} CPUs'
+      - run:
+          name: Build the executor image from this commit's binaries
+          command: bash tests/agent-harness/interop/executor/build-image.sh
+      - run:
+          name: Install, typecheck and unit-test the agent harness
+          command: cd tests/agent-harness && pnpm install --ignore-workspace --frozen-lockfile && pnpm run build && pnpm test
+      - run:
+          name: Run agent harness scenarios
+          command: |
+            cd tests/agent-harness && ./node_modules/.bin/tsx src/main.ts --results-dir /tmp/agent-harness-results
+          no_output_timeout: 30m
+      - run:
+          name: Remove this run's harness images
+          when: always
+          command: docker image rm "$AD4M_EXEC_IMAGE" ad4m-agent-harness-openclaw-node:local ad4m-agent-harness-mockllm:local >/dev/null 2>&1 || true
+      - run:
+          name: Collect results and pod logs on failure
+          when: on_fail
+          command: |
+            mkdir -p /tmp/agent-harness-artifacts
+            cp -r /tmp/agent-harness-results/agent-harness /tmp/agent-harness-artifacts/ 2>/dev/null || true
+      - store_artifacts:
+          when: on_fail
+          path: /tmp/agent-harness-artifacts
+          destination: agent-harness
+
   # The Coasys product path in WE, end to end, on this commit: a space, a call, its
   # transcript, extraction into the social DNA's classes, and the flows on what was found
   # (WE apps/we-web/tests/live/coasys-spaces/, `test:spaces`). The suite lives in WE because
@@ -1594,6 +1743,10 @@ workflows:
       - rust-tests:
           requires:
             - build
+      # Trial beside rust-tests; not a required check (see the job).
+      - rust-tests-nextest:
+          requires:
+            - build
       - rust-client-tests:
           requires:
             - build
@@ -1629,15 +1782,14 @@ workflows:
   # `run-nightly-llm`. In-config cron does not reach this project.
   # Same resource class (Marvin). llm-e2e and coasys-spaces both prompt
   # staging's llama-server, which already holds the GPU, and neither loads
-  # a model. llm-e2e's embeddings stay on Ollama (:11434). llm-e2e, the SFU
-  # wind tunnel and coasys-spaces start together and do not build on each
-  # other's result: an llm-e2e failure must not skip the tunnel, and a tunnel
-  # failure must not skip llm-e2e. feed-scale needs no model and has a group of its own.
-  # Three API triggers fire this pipeline every night on
-  # one host. Each job has its own serial group, so a second trigger waits
-  # instead of sharing ports, DIDs and the GPU with the first. llm-e2e and
-  # coasys-spaces share one group (`nightly-llm`) so they do not run at once
-  # on that one slot.
+  # a model. llm-e2e's embeddings stay on Ollama (:11434). The agent harness
+  # uses its own mock LLM. feed-scale needs no model. llm-e2e, the SFU wind
+  # tunnel, coasys-spaces, the agent harness and feed-scale start together
+  # and do not build on each other's result: one failing must not skip the
+  # others. Three API triggers fire this pipeline every night on one host.
+  # Each job has its own serial group, so a second trigger waits instead of
+  # sharing ports, DIDs and the GPU with the first. llm-e2e and coasys-spaces
+  # share one group (`nightly-llm`) so they do not run at once on that one slot.
   nightly-llm-e2e:
     when: << pipeline.parameters.run-nightly-llm >>
     jobs:
@@ -1652,5 +1804,7 @@ workflows:
           serial-group: << pipeline.project.slug >>/nightly-sfu-browsers
       - coasys-spaces:
           serial-group: << pipeline.project.slug >>/nightly-llm
+      - integration-tests-agent-harness:
+          serial-group: << pipeline.project.slug >>/nightly-agent-harness
       - feed-scale:
           serial-group: << pipeline.project.slug >>/nightly-feed-scale

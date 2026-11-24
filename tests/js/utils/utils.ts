@@ -455,6 +455,21 @@ export function sleep(ms: number) {
 }
 
 /**
+ * Register a signal handler and wait until the executor applied its
+ * subscription. `addSignalHandler` returns at once: the watch goes out ahead
+ * of the next call on the same client, and the executor applies it before it
+ * reads that call's frame, so the reply to a cheap call (`otherAgents`) proves
+ * a signal another agent sends from here on reaches the handler.
+ */
+export async function listenForSignals(
+    proxy: import("@coasys/ad4m").NeighbourhoodProxy,
+    handler: (signal: any) => void,
+): Promise<void> {
+    proxy.addSignalHandler(handler);
+    await proxy.otherAgents();
+}
+
+/**
  * Poll a predicate until it returns true, or throw with `label` after
  * `timeoutMs`.
  *
@@ -553,11 +568,6 @@ export async function wipePerspective(
   if (links.length > 0) {
     await perspective.removeLinks(links);
   }
-  // Clear the per-instance SHACL registration cache so that
-  // subsequent register() calls re-add SHACL definitions.
-  if (typeof perspective.clearEnsuredSubjectClasses === 'function') {
-    perspective.clearEnsuredSubjectClasses();
-  }
 }
 
 /**
@@ -566,10 +576,12 @@ export async function wipePerspective(
  * Use this in after() hooks as a safety net.
  */
 export function killByPorts(ports: number[]): void {
+    // Only the process that listens on a port: `lsof -ti:<port>` also lists every process with a
+    // connection to it, and a test that still holds a client connection would kill itself.
     for (const port of ports) {
         try {
             // First try SIGTERM for graceful shutdown
-            execSync(`lsof -ti:${port} | xargs -r kill -TERM`, { stdio: 'ignore' });
+            execSync(`lsof -ti TCP:${port} -s TCP:LISTEN | xargs -r kill -TERM`, { stdio: 'ignore' });
         } catch (e) {
             // Port not in use — fine
         }
@@ -579,7 +591,7 @@ export function killByPorts(ports: number[]): void {
     for (const port of ports) {
         try {
             // SIGKILL anything still lingering
-            execSync(`lsof -ti:${port} | xargs -r kill -9`, { stdio: 'ignore' });
+            execSync(`lsof -ti TCP:${port} -s TCP:LISTEN | xargs -r kill -9`, { stdio: 'ignore' });
         } catch (e) {
             // Port not in use — fine
         }

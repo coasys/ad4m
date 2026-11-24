@@ -1,7 +1,7 @@
 import {ApiClient, CallOptions } from '../apiClient'
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import { RuntimeInfo, SentMessage, NotificationInput, NotificationUpdate, Notification, ImportResult, UserStatistics } from "./RuntimeTypes"
-import type { HostRate, LogTail, RuntimeConfig, RuntimeImportPerspectiveResult, SetConfigResult, UnytVersionInfo } from "../generated/api"
+import type { HostRate, LogFilter, LogTail, RuntimeConfig, RuntimeImportPerspectiveResult, SetConfigResult, UnytVersionInfo } from "../generated/api"
 import { LanguageMeta } from "../language/LanguageMeta"
 
 export class RuntimeClient {
@@ -32,6 +32,21 @@ export class RuntimeClient {
     /** The newest lines (at most 2000) of the executor's log file (`--log-dir`). */
     async logTail(lines: number): Promise<LogTail> {
         return this.#apiClient.call('runtime.logTail', { lines })
+    }
+
+    /**
+     * Logs `filter` (directives like `ws_rpc=debug,sfu=debug`) over the executor's startup
+     * filter for `ttlSeconds` (default 1800, at most 14400), then the startup filter is back by
+     * itself. A directive name matches whole module path segments of a log target; targets it
+     * does not name keep their level. An empty filter reverts at once. Only the operator.
+     */
+    async setLogFilter(filter: string, ttlSeconds?: number): Promise<LogFilter> {
+        return this.#apiClient.call('runtime.setLogFilter', ttlSeconds === undefined ? { filter } : { filter, ttlSeconds })
+    }
+
+    /** The executor's startup log filter, the override in force and when it reverts. Only the operator. */
+    async logFilter(): Promise<LogFilter> {
+        return this.#apiClient.call('runtime.logFilter', {})
     }
 
     /** The executor's config file: its values, every key with its class, and whether a write waits for a restart. */

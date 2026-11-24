@@ -1,10 +1,10 @@
 /**
  * Cross-peer SHACL shape sync — one executor registers a subject class
- * via `addSdna`, another executor never registers the class locally
+ * via `registerShapes`, another executor never registers the class locally
  * but still queries it after joining the neighbourhood. Under the old
  * behaviour the query threw `RpcError 500: No SHACL shape stored for
  * class 'X'` because the joining peer's in-memory shape store was
- * populated only by a LOCAL `addSdna` call — even though the SHACL
+ * populated only by a LOCAL registration — even though the SHACL
  * triples themselves ARE part of the shared graph and would have
  * arrived over p-diff-sync eventually.
  *
@@ -73,7 +73,7 @@ export default function crossPeerShapeSyncTests(
         const bobP = (await bob.perspective.byUUID(bobHandle.uuid)) as PerspectiveProxy;
 
         // Alice registers the SHACL and creates one instance. Registration
-        // writes `LinkStatus::Shared` links (see `add_sdna_inner`) which
+        // writes `LinkStatus::Shared` links (see `register_shapes`) which
         // the link language delivers to Bob.
         await CrossPeerNote.register(aliceP);
         const note = new CrossPeerNote(aliceP);

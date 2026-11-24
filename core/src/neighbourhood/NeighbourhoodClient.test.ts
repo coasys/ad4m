@@ -45,8 +45,8 @@ describe("NeighbourhoodClient signal routing", () => {
 
     const receivedA: PerspectiveExpression[] = [];
     const receivedB: PerspectiveExpression[] = [];
-    await client.addSignalHandler("uuid-A", (s) => { receivedA.push(s) });
-    await client.addSignalHandler("uuid-B", (s) => { receivedB.push(s) });
+    client.addSignalHandler("uuid-A", (s) => { receivedA.push(s) });
+    client.addSignalHandler("uuid-B", (s) => { receivedB.push(s) });
     expect(api.watchedEvents()).toEqual({ signal: ["uuid-A", "uuid-B"] });
 
     FakeWebSocket.last.push(signalEvent("uuid-A"));
@@ -72,21 +72,23 @@ describe("NeighbourhoodClient SFU calls", () => {
     FakeWebSocket.sent = [];
     await client.sfuCallJoin(url, "r", "{}", "laptop", "K1");
     await client.sfuCallLeave(url, "r", "P1");
-    await client.sfuCallAnswerServerOffer(url, "r", "P1", "{}");
+    await client.sfuCallAnswerServerOffer(url, "r", "P1", "offer-9", "{}");
     await client.sfuAddIceCandidate(url, "r", "P1", "candidate:1");
     await client.sfuCallSetQualityPreference(url, "r", "P1", "low");
     await client.sfuSendData(url, "r", "P1", "chat", "hi");
     await client.sfuCallRestartIce(url, "r", "P1");
+    await client.sfuCallResume(url, "r", "P1");
 
     const sfu = FakeWebSocket.sent.filter((m) => m.type.startsWith("sfu."));
     expect(sfu).toEqual([
       { type: "sfu.callJoin", params: { neighbourhoodUrl: url, roomName: "r", sdpOffer: "{}", deviceId: "laptop", sessionKey: "K1" } },
       { type: "sfu.callLeave", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1" } },
-      { type: "sfu.callAnswerServerOffer", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1", sdpAnswer: "{}" } },
+      { type: "sfu.callAnswerServerOffer", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1", offerId: "offer-9", sdpAnswer: "{}" } },
       { type: "sfu.addIceCandidate", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1", candidate: "candidate:1" } },
       { type: "sfu.callSetQualityPreference", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1", preference: "low" } },
       { type: "sfu.sendData", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1", channelLabel: "chat", data: "hi", binary: false } },
       { type: "sfu.callRestartIce", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1" } },
+      { type: "sfu.callResume", params: { neighbourhoodUrl: url, roomName: "r", participantId: "P1" } },
     ]);
   });
 
@@ -101,17 +103,9 @@ describe("NeighbourhoodClient SFU calls", () => {
 
     const notice = { targetDid: "did:me", neighbourhoodUrl: url, roomName: "r", participantId: "P1" };
     FakeWebSocket.last.push({ type: "sfu-session-replaced", ...notice });
-    FakeWebSocket.last.push({ type: "sfu-call-renegotiation-offer", targetDid: "did:me", participantId: "P2", neighbourhoodUrl: url, roomName: "r", sdpOffer: "{}" });
+    FakeWebSocket.last.push({ type: "sfu-call-renegotiation-offer", targetDid: "did:me", participantId: "P2", offerId: "offer-3", neighbourhoodUrl: url, roomName: "r", sdpOffer: "{}" });
 
     expect(replaced).toEqual([expect.objectContaining(notice)]);
-    expect(offers).toEqual([expect.objectContaining({ participantId: "P2" })]);
-  });
-
-  it("checks the client's socket through its ApiClient", () => {
-    const check = jest.spyOn(api, "checkConnection");
-    const client = new NeighbourhoodClient("http://localhost:0", undefined, api);
-    client.checkConnection();
-    expect(check).toHaveBeenCalledTimes(1);
-    check.mockRestore();
+    expect(offers).toEqual([expect.objectContaining({ participantId: "P2", offerId: "offer-3" })]);
   });
 });
