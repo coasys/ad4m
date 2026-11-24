@@ -520,15 +520,16 @@ async fn require_instance(
 
 /// What the earlier ops of one `mutate` call did to which instances, which the committed store
 /// does not show yet: a later op reads an instance created in this call as present and one removed
-/// in it as gone. Empty for a single write.
+/// in it as gone. Empty for a single write. Each fact is about one class of an id: an id the call
+/// did not touch as a class is whatever the store says it is.
 #[derive(Default)]
 pub(crate) struct Pending {
     /// Instances this call created: id to every class it gave the id, as the shape's
     /// `target_class` (what names a class however the op spelled it) and the key the class was
     /// resolved under.
     created: std::collections::HashMap<String, Vec<(String, String)>>,
-    /// Ids this call removed.
-    removed: std::collections::HashSet<String>,
+    /// The `(target_class, id)` pairs this call removed.
+    removed: std::collections::HashSet<(String, String)>,
     /// A string property takes a JSON object whole (an object-typed field of an SDK model is
     /// stored so). Set by `perspective.mutate`, the SDK's call; the MCP tools, whose callers
     /// write prose for a string property, refuse an object.
@@ -538,37 +539,66 @@ pub(crate) struct Pending {
 impl Pending {
     /// `id` was created as the class `target_class`, resolved under the key `class_name`.
     pub(crate) fn created(&mut self, target_class: &str, class_name: &str, id: &str) {
-        self.removed.remove(id);
+        self.removed
+            .remove(&(target_class.to_string(), id.to_string()));
         let classes = self.created.entry(id.to_string()).or_default();
         if !classes.iter().any(|(target, _)| target == target_class) {
             classes.push((target_class.to_string(), class_name.to_string()));
         }
     }
 
-    pub(crate) fn removed(&mut self, id: &str) {
-        self.created.remove(id);
-        self.removed.insert(id.to_string());
+    /// `id` was removed as the class `target_class`: the call's created record of that class is
+    /// gone, its other classes are not touched.
+    pub(crate) fn removed(&mut self, target_class: &str, id: &str) {
+        if let Some(classes) = self.created.get_mut(id) {
+            classes.retain(|(target, _)| target != target_class);
+            if classes.is_empty() {
+                self.created.remove(id);
+            }
+        }
+        self.removed
+            .insert((target_class.to_string(), id.to_string()));
     }
 
-    /// The keys of the classes this call created `id` as, if it did and has not removed it since.
-    pub(crate) fn created_classes(&self, id: &str) -> Vec<&str> {
+    /// The classes this call created `id` as and has not removed it from since: the shape's
+    /// `target_class` and the key it was resolved under.
+    pub(crate) fn created_classes(&self, id: &str) -> Vec<(&str, &str)> {
         self.created
             .get(id)
-            .map(|classes| classes.iter().map(|(_, name)| name.as_str()).collect())
+            .map(|classes| {
+                classes
+                    .iter()
+                    .map(|(target, name)| (target.as_str(), name.as_str()))
+                    .collect()
+            })
             .unwrap_or_default()
+    }
+
+    /// The target class IRIs this call created `id` as: what an abstract write adds to the
+    /// classes the store shows for it.
+    pub(crate) fn created_targets(&self, id: &str) -> Vec<String> {
+        self.created_classes(id)
+            .into_iter()
+            .map(|(target, _)| target.to_string())
+            .collect()
     }
 
     /// Whether `id` exists as the class `target_class` (the shape's own, whatever name the op
     /// used) as far as this call knows: `Some(true)` when the call created it as that class,
-    /// `Some(false)` when it removed it or created it only as other classes, `None` when the call
-    /// has not touched it (the committed store decides).
+    /// `Some(false)` when it removed it as that class, `None` when the call has not touched that
+    /// class of the id (the committed store decides).
     pub(crate) fn lookup(&self, target_class: &str, id: &str) -> Option<bool> {
-        if self.removed.contains(id) {
+        if self
+            .removed
+            .contains(&(target_class.to_string(), id.to_string()))
+        {
             return Some(false);
         }
         self.created
-            .get(id)
-            .map(|classes| classes.iter().any(|(target, _)| target == target_class))
+            .get(id)?
+            .iter()
+            .any(|(target, _)| target == target_class)
+            .then_some(true)
     }
 }
 

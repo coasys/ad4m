@@ -115,7 +115,11 @@ pub struct ValidatedWrite {
 
 impl ValidationError {
     /// An error about `info`, carrying its type, cardinality and allowed values.
-    fn on(info: &PropView<'_>, problem: ValidationProblem, received: Option<&Value>) -> Self {
+    pub(super) fn on(
+        info: &PropView<'_>,
+        problem: ValidationProblem,
+        received: Option<&Value>,
+    ) -> Self {
         ValidationError {
             property: info.name().to_string(),
             problem,

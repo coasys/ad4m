@@ -424,7 +424,7 @@ function jsonToModelInstance<T extends Ad4mModel>(
  * instance an earlier one created. When the call or the callback fails,
  * the undos run, so no instance looks saved that was not.
  */
-const transactionOps = new Map<string, { ops: MutateOp[]; undo: (() => void)[] }>();
+const transactionOps = new Map<string, { perspective: PerspectiveProxy; ops: MutateOp[]; undo: (() => void)[] }>();
 
 /**
  * Writes `ops` as one `perspective.mutate` call: into the open batch `batchId`
@@ -435,12 +435,20 @@ const transactionOps = new Map<string, { ops: MutateOp[]; undo: (() => void)[] }
 async function writeOps(perspective: PerspectiveProxy, ops: MutateOp[], batchId?: string, undo?: () => void): Promise<void> {
   const queued = batchId ? transactionOps.get(batchId) : undefined;
   if (queued) {
+    if (queued.perspective.uuid !== perspective.uuid) {
+      throw new Error(
+        `The batch ${batchId} belongs to perspective ${queued.perspective.uuid}, not ${perspective.uuid}`,
+      );
+    }
     queued.ops.push(...ops);
     if (undo) queued.undo.push(undo);
     return;
   }
   await perspective.mutate(ops, batchId ? { batch: batchId } : {});
 }
+
+/** The parent of the create that `Model.create()` is writing, by instance (see `persist`). */
+const createParents = new WeakMap<object, ParentRef>();
 
 /**
  * The `parent` of a create op for `create(…, { parent })`. Resolving it first
@@ -1752,8 +1760,8 @@ export class Ad4mModel {
    * await recipe.save();
    * ```
    */
-  async save(batchId?: string, options?: { parent?: ParentRef; readBack?: boolean }) {
-    await this.persist(batchId, options?.parent);
+  async save(batchId?: string, options?: { readBack?: boolean }) {
+    await this.persist(batchId);
     // With a caller's batch nothing is committed yet: reading would fetch
     // stale data and overwrite in-memory values.
     if (!batchId && options?.readBack !== false) await this.getData();
@@ -1766,15 +1774,21 @@ export class Ad4mModel {
    * `save()` diffs against what was written and updates instead of creating
    * again.
    */
-  private async persist(batchId?: string, parent?: ParentRef): Promise<void> {
+  private async persist(batchId?: string): Promise<void> {
+    const parent = createParents.get(this);
     const op = this._snapshot ? this.updateOp() : this.createOp(parent);
     const before = this._snapshot;
     // The snapshot holds what the op carries: take it before the await, so a field
     // changed while the call is pending stays dirty for the next save.
     this.takeSnapshot();
     if (!op) return;
+    const provisional = this._snapshot;
     try {
-      await writeOps(this._perspective, [op], batchId, () => { this._snapshot = before; });
+      // The undo restores the snapshot only while this write's is the current one: a
+      // later save that was written has set its own, which matches the store.
+      await writeOps(this._perspective, [op], batchId, () => {
+        if (this._snapshot === provisional) this._snapshot = before;
+      });
     } catch (e) {
       this._snapshot = before;
       throw e;
@@ -1874,8 +1888,12 @@ export class Ad4mModel {
       if (metadata.relations[key]) {
         if (!this.writableRelation(key)) continue;
         const members = this.relationMembers(value);
-        // An envelope that is not an adder or a remover sets, as `set<Rel>` does.
-        if (value?.action === "adder" || value?.action === "remover") {
+        // An envelope that is not an adder or a remover sets, as `set<Rel>` does;
+        // an adder of a single-valued relation points it at the member, as
+        // `add<Rel>` does (the executor refuses `add` on a relation that is not a collection).
+        if (value?.action === "adder" && metadata.relations[key].maxCount === 1) {
+          if (members.length > 0) set[key] = this.relationWrite(key, members);
+        } else if (value?.action === "adder" || value?.action === "remover") {
           if (members.length > 0) (value.action === "adder" ? add : remove)[key] = members;
         } else if (value?.action || Array.isArray(value) || members.length > 0 || metadata.relations[key].maxCount === 1) {
           set[key] = this.relationWrite(key, members);
@@ -2133,7 +2151,15 @@ export class Ad4mModel {
     // Through save(), the one public write: code that wraps it (a write
     // check) sees every create. The create has no read-back of its own; the
     // row is read below when the caller asks for it.
-    await instance.save(options?.batchId, { parent, readBack: false });
+    // The parent rides on the instance, not through save()'s arguments, so a
+    // subclass whose save(batchId) override forwards only the batch id still
+    // creates the child under it.
+    if (parent) createParents.set(instance, parent);
+    try {
+      await instance.save(options?.batchId, { readBack: false });
+    } finally {
+      createParents.delete(instance);
+    }
     if (options?.batchId) return instance;
 
     // The instance holds what it wrote and its snapshot is taken (persist()
@@ -2316,7 +2342,7 @@ export class Ad4mModel {
     fn: (tx: { batchId: string }) => Promise<R>,
   ): Promise<R> {
     const batchId = await perspective.createBatch();
-    const queue = { ops: [] as MutateOp[], undo: [] as (() => void)[] };
+    const queue = { perspective, ops: [] as MutateOp[], undo: [] as (() => void)[] };
     transactionOps.set(batchId, queue);
     try {
       const result = await fn({ batchId });

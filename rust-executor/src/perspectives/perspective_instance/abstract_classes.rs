@@ -284,6 +284,18 @@ impl PerspectiveInstance {
         Ok(found)
     }
 
+    /// [`Self::own_classes`] plus the classes `staged` for `base` (a `perspective.mutate` call's
+    /// earlier creates, not committed yet), each once.
+    fn effective_classes(&self, base: &str, staged: &[String]) -> Result<Vec<String>, AnyError> {
+        let mut classes = self.own_classes(base)?;
+        for class in staged {
+            if !classes.contains(class) {
+                classes.push(class.clone());
+            }
+        }
+        Ok(classes)
+    }
+
     /// The classes `base` is an instance of, by target class IRI: two
     /// classes of one name are told apart, as the resolution tells them.
     fn own_classes(&self, base: &str) -> Result<Vec<String>, AnyError> {
@@ -301,9 +313,14 @@ impl PerspectiveInstance {
     /// The classes of `base` a write through `abstract_class` reaches: those
     /// it is, among those the abstract class reads, by target class IRI.
     /// Never empty.
-    fn write_targets(&self, abstract_class: &str, base: &str) -> Result<Vec<String>, AnyError> {
+    fn write_targets(
+        &self,
+        abstract_class: &str,
+        base: &str,
+        staged: &[String],
+    ) -> Result<Vec<String>, AnyError> {
         let resolution = self.resolve_abstract(abstract_class)?;
-        let own = self.own_classes(base)?;
+        let own = self.effective_classes(base, staged)?;
         let targets: Vec<String> = resolution
             .classes
             .iter()
@@ -328,11 +345,12 @@ impl PerspectiveInstance {
         abstract_class: &str,
         base: &str,
         name: &str,
+        staged: &[String],
     ) -> Result<Vec<(String, String)>, AnyError> {
         let (alias_key, _) = self.abstract_shape(abstract_class)?;
         let index = self.abstract_index()?;
         let mut found = Vec::new();
-        for class in self.write_targets(abstract_class, base)? {
+        for class in self.write_targets(abstract_class, base, staged)? {
             let shape = self.get_shape(&class)?;
             if let Some(own) = index.own_name(&class, &shape, name, &alias_key) {
                 found.push((class, own.to_string()));
@@ -359,11 +377,12 @@ impl PerspectiveInstance {
         abstract_class: &str,
         base: &str,
         values: &Value,
+        staged: &[String],
         context: &AgentContext,
     ) -> Result<Vec<Run>, AnyError> {
         let mut has_child = Vec::new();
         if abstract_class == CONTAINER_URI {
-            if let Some(write) = self.has_child_write(base, values).await? {
+            if let Some(write) = self.has_child_write(base, values, staged).await? {
                 if !write.beside_own {
                     return Ok(vec![Run {
                         commands: write.commands,
@@ -400,7 +419,7 @@ impl PerspectiveInstance {
             .chain(shape.include_relations.iter().map(|r| r.name.as_str()))
             .collect();
         let index = self.abstract_index()?;
-        let targets = self.write_targets(abstract_class, base)?;
+        let targets = self.write_targets(abstract_class, base, staged)?;
         let mut commands = Vec::new();
         let mut runs = Vec::new();
         for (name, value) in values {
@@ -641,7 +660,7 @@ impl PerspectiveInstance {
             .subject_class_option_to_class_name(subject_class, context)
             .await?;
         let classes = if self.is_abstract_class(&class_name)? {
-            self.write_targets(&class_name, &base)?
+            self.write_targets(&class_name, &base, &[])?
         } else {
             vec![class_name]
         };
@@ -660,7 +679,9 @@ impl PerspectiveInstance {
                         .await?
                         .unwrap_or_default()
                         .into_iter()
-                        .filter(|command| matches!(command.action, Action::AddLink))
+                        .filter(|command| {
+                            matches!(command.action, Action::AddLink | Action::SetSingleTarget)
+                        })
                         .map(|command| Command {
                             action: Action::RemoveLink,
                             ..command
@@ -669,6 +690,10 @@ impl PerspectiveInstance {
                         .get_shape(class)?
                         .properties
                         .iter()
+                        // A reverse property is stored on the other node: its predicate here
+                        // may be another class's outgoing link, and the incoming cascade
+                        // removes the links that point at this node.
+                        .filter(|property| property.direction.as_deref() != Some("reverse"))
                         .map(|property| Command {
                             source: Some("this".to_string()),
                             predicate: Some(property.predicate.clone()),
@@ -701,12 +726,13 @@ impl PerspectiveInstance {
         &mut self,
         parent: &str,
         child: &str,
+        staged: &[String],
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<(), AnyError> {
         let value = serde_json::json!({ "children": { "action": "adder", "value": [child] } });
         let runs = self
-            .update_through_abstract(CONTAINER_URI, parent, &value, context)
+            .update_through_abstract(CONTAINER_URI, parent, &value, staged, context)
             .await?;
         self.execute_runs(runs, parent.to_string(), batch_id, context)
             .await
@@ -728,6 +754,7 @@ impl PerspectiveInstance {
         &self,
         base: &str,
         values: &Value,
+        staged: &[String],
     ) -> Result<Option<HasChildWrite>, AnyError> {
         let Some(children) = values.get("children") else {
             return Ok(None);
@@ -742,7 +769,7 @@ impl PerspectiveInstance {
             return Ok(None);
         }
         let resolution = self.resolve_abstract(CONTAINER_URI)?;
-        let own = self.own_classes(base)?;
+        let own = self.effective_classes(base, staged)?;
         let index = self.abstract_index()?;
         let alias_key = builtin(CONTAINER_URI)
             .map(|b| b.name)

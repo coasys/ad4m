@@ -167,6 +167,7 @@ impl PerspectiveInstance {
         let fork = TimestampedBatch {
             diff: base.diff.clone(),
             updates: base.updates.clone(),
+            reads: Vec::new(),
             created_at: source.created_at,
         };
         let fork_id = uuid::Uuid::new_v4().to_string();
@@ -178,7 +179,8 @@ impl PerspectiveInstance {
     /// private batch: one step under the batch store's lock. The merge is conditional: when
     /// `into` is not exactly `base` any more (its additions, removals or updates changed since
     /// the fork), the fork's result may no longer follow from it (two calls replacing the same
-    /// single-valued relation, a raw update of a link the fork replaced), so nothing is merged
+    /// single-valued relation, a raw update of a link the fork replaced, a staged addition
+    /// restaged with another status), so nothing is merged
     /// and the fork is dropped.
     pub(crate) async fn merge_batch(
         &self,
@@ -196,7 +198,10 @@ impl PerspectiveInstance {
         let pair = |(old, new): &(LinkExpression, LinkExpression)| {
             (link_identity(old), link_identity(new))
         };
-        if !(same_items(&base.diff.additions, &target.diff.additions, link_identity)
+        // A staged addition's status is part of what it is: restaging it as another status
+        // changes what a commit publishes, though not its identity.
+        let staged = |e: &LinkExpression| (link_identity(e), e.status.clone());
+        if !(same_items(&base.diff.additions, &target.diff.additions, staged)
             && same_items(&base.diff.removals, &target.diff.removals, link_identity)
             && same_items(&base.updates, &target.updates, pair))
         {
@@ -231,5 +236,17 @@ impl PerspectiveInstance {
             .additions
             .retain(|addition| link_identity(addition) != link_identity(link));
         staged != batch.diff.additions.len()
+    }
+
+    /// How many batches are open.
+    #[cfg(test)]
+    pub(crate) async fn open_batch_count(&self) -> usize {
+        self.batch_store.read().await.len()
+    }
+
+    /// Hold the batch store's write lock until the guard drops: a test makes a call wait for it.
+    #[cfg(test)]
+    pub(crate) async fn hold_batch_store(&self) -> Box<dyn std::any::Any + Send> {
+        Box::new(self.batch_store.clone().write_owned().await)
     }
 }

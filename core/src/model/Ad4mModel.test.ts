@@ -3843,6 +3843,52 @@ describe("Ad4mModel.transaction()", () => {
     expect(perspective.mutate.mock.calls[0][0][0].op).toBe("create");
   });
 
+  it("a write for a model of another perspective is refused, not queued on the transaction's", async () => {
+    const { perspective } = makePerspective();
+    perspective.uuid = "perspective-a";
+    const other = makePerspective().perspective;
+    other.uuid = "perspective-b";
+    await expect(
+      Ad4mModel.transaction(perspective, async (tx) => {
+        const card = new TxCard(other, "tx://c1");
+        card.title = "one";
+        await card.save(tx.batchId);
+      }),
+    ).rejects.toThrow(/belongs to perspective perspective-a, not perspective-b/);
+    expect(perspective.mutate).not.toHaveBeenCalled();
+    expect(other.mutate).not.toHaveBeenCalled();
+  });
+
+  it("a failed transaction does not restore a snapshot over a later save outside it", async () => {
+    const { perspective } = makePerspective();
+    const card = new TxCard(perspective, "tx://c1");
+    jest.spyOn(card as any, "getData").mockResolvedValue(card);
+    card.title = "A";
+    await card.save();
+    perspective.mutate.mockClear();
+
+    await expect(
+      Ad4mModel.transaction(perspective, async (tx) => {
+        card.title = "B";
+        await card.save(tx.batchId);
+        // A save outside the transaction commits at once.
+        card.title = "C";
+        await card.save();
+        throw new Error("callback failed");
+      }),
+    ).rejects.toThrow("callback failed");
+    expect(perspective.mutate).toHaveBeenCalledTimes(1);
+    perspective.mutate.mockClear();
+
+    // The store holds "C": setting "A" again is a change, so it is sent.
+    card.title = "A";
+    await card.save();
+    expect(perspective.mutate).toHaveBeenCalledWith(
+      [{ op: "update", class: "tx://TxCard", id: "tx://c1", set: { title: "A" } }],
+      {},
+    );
+  });
+
   it("a flush that succeeds keeps the snapshot: a later save updates", async () => {
     const { perspective } = makePerspective();
     const card = new TxCard(perspective, "tx://c1");
@@ -4080,6 +4126,37 @@ describe("relation cardinality in mutate ops", () => {
     ]);
   });
 
+  it("saving an adder envelope on a HasOne is a set of one id; on a HasMany it stays an add", async () => {
+    const perspective = makePerspective();
+    const holder = new CardHolder(perspective, "card://h1");
+    holder.owner = "card://a";
+    holder.tags = ["card://t1"];
+    await holder.save("b");
+    perspective.mutate.mockClear();
+
+    holder.owner = { action: "adder", value: "card://b" } as any;
+    holder.tags = { action: "adder", value: "card://t2" } as any;
+    await holder.save("b");
+    expect(ops(perspective)).toEqual([
+      {
+        op: "update", class: "card://CardHolder", id: "card://h1",
+        set: { owner: "card://b" }, add: { tags: ["card://t2"] },
+      },
+    ]);
+  });
+
+  it("saving an adder envelope with several members on a HasOne is not truncated", async () => {
+    const perspective = makePerspective();
+    const holder = new CardHolder(perspective, "card://h1");
+    holder.owner = "card://a";
+    await holder.save("b");
+    perspective.mutate.mockClear();
+
+    holder.owner = { action: "adder", value: ["card://b", "card://c"] } as any;
+    await holder.save("b");
+    expect(ops(perspective)[0].set).toEqual({ owner: ["card://b", "card://c"] });
+  });
+
   it("setOwner sends one id, not an array", async () => {
     const perspective = makePerspective();
     const holder = new CardHolder(perspective, "card://h1");
@@ -4236,6 +4313,26 @@ describe("save() create path and its own batch", () => {
     } finally {
       save.mockRestore();
     }
+  });
+
+  it("create() with a parent still sends it when a subclass's save() forwards only the batch id", async () => {
+    @Model({ name: "OverridingCard" })
+    class OverridingCard extends Ad4mModel {
+      @Flag({ through: "sb://okind", value: "sb://ocard" })
+      kind: string = "";
+
+      async save(batchId?: string) {
+        return super.save(batchId);
+      }
+    }
+    const perspective = { uuid: "p", mutate: jest.fn(async () => ({ ids: [] })) } as any;
+
+    await OverridingCard.create(perspective, {}, { parent: { id: "sb://parent" }, batchId: "caller-batch" });
+
+    expect(perspective.mutate).toHaveBeenCalledWith(
+      [expect.objectContaining({ op: "create", parent: { id: "sb://parent" } })],
+      { batch: "caller-batch" },
+    );
   });
 
   it("create() with a parent rethrows the executor's refusal", async () => {

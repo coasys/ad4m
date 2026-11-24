@@ -884,6 +884,42 @@ async fn a_batch_that_is_not_open_is_refused_before_writing() {
     assert_eq!(world.link_count().await, before);
 }
 
+/// A projection applies to an update that survives the call too: its row carries the asked
+/// properties and not the stored `rank` it left alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn returns_rows_projects_the_row_of_a_surviving_update() {
+    let world = World::new().await;
+    let existing = world.create(json!({ "title": "old", "rank": 2 })).await;
+    let done = world
+        .ok(
+            "perspective.mutate",
+            json!({
+                "ops": [update_op(&existing, json!({ "set": { "title": "newer" } }))],
+                "returns": { "kind": "rows", "properties": ["title"] },
+            }),
+        )
+        .await;
+    let rows = done["rows"].as_array().expect("rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["title"], "newer", "{rows:?}");
+    assert_eq!(rows[0]["id"], existing, "{rows:?}");
+    assert!(
+        rows[0].get("rank").is_none(),
+        "rank was not asked for: {rows:?}"
+    );
+    // The stored rank is untouched.
+    let full = world
+        .ok(
+            "perspective.mutate",
+            json!({
+                "ops": [update_op(&existing, json!({ "set": { "title": "newer" } }))],
+                "returns": { "kind": "rows" },
+            }),
+        )
+        .await;
+    assert_eq!(full["rows"][0]["rank"], 2, "{full}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn returns_rows_reads_back_each_created_and_updated_instance() {
     let world = World::new().await;

@@ -218,6 +218,22 @@ const OWNED_SDNA: &str = r#"{
   ]
 }"#;
 
+/// A single-valued relation beside a required property, so an instance stays found with the
+/// relation empty.
+const OWNED_TITLED_SDNA: &str = r#"{
+  "target_class": "ns://OwnedTitled",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://OwnedTitled"}
+  ],
+  "properties": [
+    {"path":"ns://ot_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://ot_title","target":"value"}]},
+    {"path":"ns://ot_owner","name":"owner","node_kind":"IRI","relation_kind":"hasOne","max_count":1,
+     "target_class_name":"OwnedTitled","writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://ot_owner","target":"value"}]}
+  ]
+}"#;
+
 /// A `@HasOne` as the SDK registers it: an adder and a remover, no setter.
 const OWNED_ADDER_SDNA: &str = r#"{
   "target_class": "ns://OwnedByAdder",
@@ -1581,9 +1597,17 @@ mod caller_batch {
             }
         }
         // The guard discards the private batch on a task: wait for the one open batch.
-        while p.open_batch_count().await != 1 {
-            tokio::task::yield_now().await;
-        }
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while p.open_batch_count().await != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(
+            settled.is_ok(),
+            "the private batch was not discarded: {} batches open, expected 1",
+            p.open_batch_count().await
+        );
         p.commit_batch(batch, &ctx).await.expect("commit");
         assert!(stored_targets(&p, "ns://a", "rdf://type").await.is_empty());
     }
@@ -1719,6 +1743,642 @@ mod caller_batch {
         assert_eq!(
             stored_targets(&p, "ns://n", "ns://note_title").await,
             vec!["literal:string:C"]
+        );
+    }
+}
+
+/// A second class with a `children` relation, on its own predicate.
+const BOARD_SDNA: &str = r#"{
+  "target_class": "ns://Board",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Board"}
+  ],
+  "properties": [
+    {"path":"ns://board_child","name":"children","collection":true,"writable":true,
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://board_child","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://board_child","target":"value"}]}
+  ]
+}"#;
+
+/// A single-valued literal property whose setter only appends a link.
+const SLOT_SDNA: &str = r#"{
+  "target_class": "ns://Slot",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Slot"}
+  ],
+  "properties": [
+    {"path":"ns://slot_value","name":"value","resolve_language":"literal","max_count":1,"writable":true,
+     "setter":[{"action":"addLink","source":"this","predicate":"ns://slot_value","target":"value"}]}
+  ]
+}"#;
+
+/// A collection whose setter writes the same predicate at two sources.
+const MIRRORED_SDNA: &str = r#"{
+  "target_class": "ns://Mirrored",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Mirrored"}
+  ],
+  "properties": [
+    {"path":"ns://mirror_tag","name":"tags","collection":true,"resolve_language":"literal","writable":true,
+     "setter":[{"action":"addLink","source":"this","predicate":"ns://mirror_tag","target":"value"},
+               {"action":"addLink","source":"ns://mirror","predicate":"ns://mirror_tag","target":"value"}]}
+  ]
+}"#;
+
+/// No destructor; its constructor sets its marker with `setSingleTarget`.
+const SET_FLAG_SDNA: &str = r#"{
+  "target_class": "ns://SetFlag",
+  "constructor_actions": [
+    {"action":"setSingleTarget","source":"this","predicate":"ns://flag_marker","target":"ns://SetFlag"}
+  ],
+  "properties": []
+}"#;
+
+/// No destructor; reads `ns://shared` from another node (a `belongsToOne`).
+const REVERSED_SDNA: &str = r#"{
+  "target_class": "ns://Reversed",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Reversed"}
+  ],
+  "properties": [
+    {"path":"ns://shared","name":"parent","node_kind":"IRI","relation_kind":"belongsToOne","max_count":1,
+     "target_class_name":"Reversed"}
+  ]
+}"#;
+
+/// No destructor; writes `ns://shared` from its own node.
+const FORWARD_SDNA: &str = r#"{
+  "target_class": "ns://Forward",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Forward"}
+  ],
+  "properties": [
+    {"path":"ns://shared","name":"link","max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://shared","target":"value"}]}
+  ]
+}"#;
+
+/// Anything with `tags`: an abstract class.
+const TAGGED_ABSTRACT_SDNA: &str = r#"{
+  "target_class":"ns://Tagged",
+  "abstract":true,
+  "properties":[{"path":"ns://tags","name":"tags","collection":true,"resolve_language":"literal",
+    "adder":[{"action":"addLink","source":"this","predicate":"ns://tags","target":"value"}]}]
+}"#;
+
+/// A class whose own `held` relation answers to `Container`'s `children`.
+const HOLDER_SDNA: &str = r#"{
+  "target_class": "ns://Holder",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Holder"}
+  ],
+  "properties": [
+    {"path":"ns://held","name":"held","node_kind":"IRI","relation_kind":"hasMany","collection":true,"writable":true,"alias":{"Container":"children"},
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://held","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://held","target":"value"}]}
+  ]
+}"#;
+
+/// A concrete class the abstract `Tagged` reads, with its own predicate for `tags`.
+const TAGGY_SDNA: &str = r#"{
+  "target_class": "ns://Taggy",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Taggy"}
+  ],
+  "properties": [
+    {"path":"ns://taggy_tag","name":"tags","collection":true,"resolve_language":"literal","writable":true,
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://taggy_tag","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://taggy_tag","target":"value"}]}
+  ]
+}"#;
+
+/// Review round 4: what one `mutate` call knows about the classes of an id, the
+/// private batch, and the writes beside it.
+mod review_round_4 {
+    use super::*;
+    use crate::perspectives::instances::InstanceError;
+    use crate::types::{Link, LinkExpression, LinkStatus};
+
+    async fn ok(p: &mut PerspectiveInstance, ctx: &AgentContext, ops: serde_json::Value) {
+        run(p, ctx, ops)
+            .await
+            .unwrap_or_else(|e| panic!("op {:?}: {:?}", e.op_index, e.error));
+    }
+
+    async fn refused(
+        p: &mut PerspectiveInstance,
+        ctx: &AgentContext,
+        ops: serde_json::Value,
+    ) -> InstanceError {
+        run(p, ctx, ops)
+            .await
+            .err()
+            .expect("the call is refused")
+            .error
+    }
+
+    /// A class the call did not touch stays as the store has it: `Listed` created beside a
+    /// committed `Note` leaves the `Note` found, and a second `Note` is a duplicate.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_class_the_call_did_not_touch_is_read_from_the_store() {
+        let (mut p, _s, ctx) =
+            setup_perspective_no_llm(&[("Note", NOTE_SDNA), ("Listed", LISTED_SDNA)]).await;
+        ok(
+            &mut p,
+            &ctx,
+            json!([{"op":"create","class":"Note","id":"ns://n","values":{"title":"a"}}]),
+        )
+        .await;
+        ok(
+            &mut p,
+            &ctx,
+            json!([
+                {"op":"create","class":"Listed","id":"ns://n","values":{}},
+                {"op":"update","class":"Note","id":"ns://n","set":{"title":"z"}}
+            ]),
+        )
+        .await;
+        assert_eq!(
+            stored_targets(&p, "ns://n", "ns://note_title").await,
+            vec!["literal:string:z"]
+        );
+        let again = refused(
+            &mut p,
+            &ctx,
+            json!([
+                {"op":"create","class":"Listed","id":"ns://m","values":{}},
+                {"op":"create","class":"Note","id":"ns://n","values":{"title":"b"}}
+            ]),
+        )
+        .await;
+        assert!(
+            matches!(again, InstanceError::AlreadyExists { .. }),
+            "{again:?}"
+        );
+    }
+
+    /// A delete removes the class it names: the node's other class is still found.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_delete_leaves_the_nodes_other_class_found() {
+        let (mut p, _s, ctx) =
+            setup_perspective_no_llm(&[("Note", NOTE_SDNA), ("Counted", COUNTED_SDNA)]).await;
+        ok(
+            &mut p,
+            &ctx,
+            json!([
+                {"op":"create","class":"Counted","id":"ns://both","values":{"title":"t"}},
+                {"op":"create","class":"Note","id":"ns://both","values":{"title":"n"}}
+            ]),
+        )
+        .await;
+        let gone = refused(
+            &mut p,
+            &ctx,
+            json!([
+                {"op":"delete","class":"Note","id":"ns://both"},
+                {"op":"update","class":"Note","id":"ns://both","set":{"title":"x"}}
+            ]),
+        )
+        .await;
+        assert!(matches!(gone, InstanceError::NotFound { .. }), "{gone:?}");
+        ok(
+            &mut p,
+            &ctx,
+            json!([
+                {"op":"delete","class":"Note","id":"ns://both"},
+                {"op":"update","class":"Counted","id":"ns://both","set":{"title":"u"}}
+            ]),
+        )
+        .await;
+        assert_eq!(
+            stored_targets(&p, "ns://both", "ns://counted_title").await,
+            vec!["literal:string:u"]
+        );
+    }
+
+    /// A relation no class of the staged parent declares is `ParentClassUnresolved`, not a pick.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_staged_parent_without_the_relation_is_unresolved() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Note", NOTE_SDNA)]).await;
+        let err = refused(
+            &mut p,
+            &ctx,
+            json!([
+                {"op":"create","class":"Note","id":"ns://p","values":{"title":"p"}},
+                {"op":"create","class":"Note","id":"ns://c","values":{"title":"c"},
+                 "parent":{"id":"ns://p","relation":"nope"}}
+            ]),
+        )
+        .await;
+        assert!(
+            matches!(err, InstanceError::ParentClassUnresolved { .. }),
+            "{err:?}"
+        );
+    }
+
+    /// The candidates of an ambiguous staged parent are target class IRIs, as for a stored one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_ambiguous_staged_parent_names_target_class_iris() {
+        let (mut p, _s, ctx) =
+            setup_perspective_no_llm(&[("Note", NOTE_SDNA), ("Board", BOARD_SDNA)]).await;
+        let err = refused(
+            &mut p,
+            &ctx,
+            json!([
+                {"op":"create","class":"Note","id":"ns://p","values":{"title":"p"}},
+                {"op":"create","class":"Board","id":"ns://p","values":{}},
+                {"op":"create","class":"Note","id":"ns://c","values":{"title":"c"},
+                 "parent":{"id":"ns://p","relation":"children"}}
+            ]),
+        )
+        .await;
+        let InstanceError::ParentClassUnresolved { mut candidates, .. } = err else {
+            panic!("{err:?}");
+        };
+        candidates.sort();
+        assert_eq!(candidates, vec!["ns://Board", "ns://Note"]);
+    }
+
+    /// A contained child goes under the staged parent's own `children` relation.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_contained_child_of_a_staged_parent_uses_its_children_relation() {
+        let (mut p, _s, ctx) =
+            setup_perspective_no_llm(&[("Note", NOTE_SDNA), ("Holder", HOLDER_SDNA)]).await;
+        ok(
+            &mut p,
+            &ctx,
+            json!([
+                {"op":"create","class":"Holder","id":"ns://p","values":{}},
+                {"op":"create","class":"Note","id":"ns://c","values":{"title":"c"},
+                 "parent":{"id":"ns://p"}}
+            ]),
+        )
+        .await;
+        assert_eq!(
+            stored_targets(&p, "ns://p", "ns://held").await,
+            vec!["ns://c"]
+        );
+        assert!(stored_targets(&p, "ns://p", "ad4m://has_child")
+            .await
+            .is_empty());
+    }
+
+    /// An add through an abstract class reaches a concrete class the call staged.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_abstract_add_reaches_a_class_staged_in_the_call() {
+        let (mut p, _s, ctx) =
+            setup_perspective_no_llm(&[("Tagged", TAGGED_ABSTRACT_SDNA), ("Taggy", TAGGY_SDNA)])
+                .await;
+        ok(
+            &mut p,
+            &ctx,
+            json!([
+                {"op":"create","class":"Taggy","id":"ns://p","values":{}},
+                {"op":"update","class":"Tagged","id":"ns://p","add":{"tags":["x"]}}
+            ]),
+        )
+        .await;
+        assert_eq!(
+            stored_targets(&p, "ns://p", "ns://taggy_tag").await.len(),
+            1
+        );
+    }
+
+    /// `remove` may not leave a required collection empty, but may replace its last member in
+    /// the same op.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_remove_does_not_empty_a_required_collection() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Labelled", LABELLED_SDNA)]).await;
+        ok(
+            &mut p,
+            &ctx,
+            json!([{"op":"create","class":"Labelled","id":"ns://l","values":{"labels":["ns://a"]}}]),
+        )
+        .await;
+        let err = refused(
+            &mut p,
+            &ctx,
+            json!([{"op":"update","class":"Labelled","id":"ns://l","remove":{"labels":["ns://a"]}}]),
+        )
+        .await;
+        assert!(matches!(err, InstanceError::Validation { .. }), "{err:?}");
+        assert_eq!(
+            stored_targets(&p, "ns://l", "ns://label").await,
+            vec!["ns://a"]
+        );
+        ok(
+            &mut p,
+            &ctx,
+            json!([{"op":"update","class":"Labelled","id":"ns://l",
+                    "remove":{"labels":["ns://a"]},"add":{"labels":["ns://b"]}}]),
+        )
+        .await;
+        assert_eq!(
+            stored_targets(&p, "ns://l", "ns://label").await,
+            vec!["ns://b"]
+        );
+    }
+
+    /// An add to an ordered collection with no batch writes the member and its ordering entry
+    /// together, in one commit: when that commit fails, the member is not left behind.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_add_with_no_batch_does_not_leave_a_member_without_its_order() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Note", NOTE_SDNA)]).await;
+        note(&mut p, &ctx, "ns://n").await;
+        let first = |item: &str| InstanceAddToCollection {
+            class_name: "Note".into(),
+            base_uri: "ns://n".into(),
+            collection: "children".into(),
+            item_uri: item.into(),
+            batch_id: None,
+        };
+        super::add_to_collection(&mut p, &ctx, first("ns://first"))
+            .await
+            .expect("the first child");
+        p.fail_next_commit_batch();
+        let failed = super::add_to_collection(&mut p, &ctx, first("ns://c")).await;
+        assert!(
+            failed.is_err(),
+            "the one commit of the member and its entry fails"
+        );
+        assert_eq!(
+            stored_targets(&p, "ns://n", "ns://note_child").await,
+            vec!["ns://first"]
+        );
+    }
+
+    async fn note(p: &mut PerspectiveInstance, ctx: &AgentContext, id: &str) {
+        ok(
+            p,
+            ctx,
+            json!([{"op":"create","class":"Note","id":id,"values":{"title":"t"}}]),
+        )
+        .await;
+    }
+
+    /// An array on a single-valued property stays one value.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_array_on_a_single_valued_property_is_not_expanded() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Slot", SLOT_SDNA)]).await;
+        ok(
+            &mut p,
+            &ctx,
+            json!([{"op":"create","class":"Slot","id":"ns://s","values":{"value":"one"}}]),
+        )
+        .await;
+        ok(
+            &mut p,
+            &ctx,
+            json!([{"op":"update","class":"Slot","id":"ns://s","set":{"value":["x","y"]}}]),
+        )
+        .await;
+        // The setter only adds: "one" stays, and the array is one more link,
+        // not one link for "x" and one for "y".
+        let targets = stored_targets(&p, "ns://s", "ns://slot_value").await;
+        assert_eq!(targets.len(), 2, "{targets:?}");
+        let array: Vec<_> = targets
+            .iter()
+            .filter(|t| t.contains("%5B%22x%22%2C%22y%22%5D"))
+            .collect();
+        assert_eq!(array.len(), 1, "{targets:?}");
+    }
+
+    /// A setter that writes one predicate at two sources clears both when it replaces.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_setter_replaces_at_every_source_it_writes() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Mirrored", MIRRORED_SDNA)]).await;
+        ok(
+            &mut p,
+            &ctx,
+            json!([{"op":"create","class":"Mirrored","id":"ns://m","values":{"tags":["A"]}}]),
+        )
+        .await;
+        ok(
+            &mut p,
+            &ctx,
+            json!([{"op":"update","class":"Mirrored","id":"ns://m","set":{"tags":["B"]}}]),
+        )
+        .await;
+        for source in ["ns://m", "ns://mirror"] {
+            assert_eq!(
+                stored_targets(&p, source, "ns://mirror_tag").await.len(),
+                1,
+                "{source} holds one tag"
+            );
+        }
+        ok(
+            &mut p,
+            &ctx,
+            json!([{"op":"update","class":"Mirrored","id":"ns://m","set":{"tags":null}}]),
+        )
+        .await;
+        assert!(stored_targets(&p, "ns://mirror", "ns://mirror_tag")
+            .await
+            .is_empty());
+    }
+
+    /// A class with no destructor loses the constructor's `setSingleTarget` link too.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_delete_removes_a_set_single_target_constructor_link() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("SetFlag", SET_FLAG_SDNA)]).await;
+        ok(
+            &mut p,
+            &ctx,
+            json!([{"op":"create","class":"SetFlag","id":"ns://f","values":{}}]),
+        )
+        .await;
+        assert_eq!(
+            stored_targets(&p, "ns://f", "ns://flag_marker").await.len(),
+            1
+        );
+        ok(
+            &mut p,
+            &ctx,
+            json!([{"op":"delete","class":"SetFlag","id":"ns://f"}]),
+        )
+        .await;
+        assert!(stored_targets(&p, "ns://f", "ns://flag_marker")
+            .await
+            .is_empty());
+    }
+
+    /// Deleting a class with a reverse property leaves another class's outgoing link on that
+    /// predicate.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_delete_keeps_outgoing_links_of_a_reverse_properties_predicate() {
+        let (mut p, _s, ctx) =
+            setup_perspective_no_llm(&[("Reversed", REVERSED_SDNA), ("Forward", FORWARD_SDNA)])
+                .await;
+        ok(
+            &mut p,
+            &ctx,
+            json!([
+                {"op":"create","class":"Forward","id":"ns://n","values":{"link":"ns://t"}},
+                {"op":"create","class":"Reversed","id":"ns://n","values":{}}
+            ]),
+        )
+        .await;
+        ok(
+            &mut p,
+            &ctx,
+            json!([{"op":"delete","class":"Reversed","id":"ns://n"}]),
+        )
+        .await;
+        assert_eq!(
+            stored_targets(&p, "ns://n", "ns://shared").await,
+            vec!["ns://t"]
+        );
+    }
+
+    /// A staged addition whose status changed under the call is a conflict, not a merge that
+    /// restores the old status.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_status_change_of_a_staged_addition_is_a_conflict() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Note", NOTE_SDNA)]).await;
+        note(&mut p, &ctx, "ns://n").await;
+        let batch = p.create_batch().await;
+        let staged: LinkExpression = p
+            .add_link(
+                Link {
+                    source: "ns://s".into(),
+                    predicate: Some("ns://p".into()),
+                    target: "ns://t".into(),
+                },
+                LinkStatus::Shared,
+                Some(batch.clone()),
+                &ctx,
+            )
+            .await
+            .expect("stage")
+            .into();
+        let (mut other, id) = (p.clone(), batch.clone());
+        *p.mutate_gap_hook.lock().unwrap() = Some(Box::new(move || {
+            Box::pin(async move {
+                assert!(other.cancel_batch_addition(&id, &staged).await);
+                other
+                    .add_link_expression(staged, LinkStatus::Local, Some(id))
+                    .await
+                    .expect("restage as local");
+            })
+        }));
+        let result = super::super::mutate(
+            &mut p,
+            &ctx,
+            serde_json::from_value(json!([
+                {"op":"update","class":"Note","id":"ns://n","set":{"title":"B"}}
+            ]))
+            .expect("ops"),
+            Some(batch),
+        )
+        .await;
+        let err = result
+            .err()
+            .expect("the batch changed under the call")
+            .error;
+        assert!(
+            matches!(err, InstanceError::BatchConflict { .. }),
+            "{err:?}"
+        );
+    }
+
+    /// Two calls without a batch replace the same single-valued property: the one that commits
+    /// second read a value that is gone, so it is refused and the property keeps one value.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_standalone_calls_replacing_one_property_do_not_both_commit() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Note", NOTE_SDNA)]).await;
+        note(&mut p, &ctx, "ns://n").await;
+        let (mut other, other_ctx) = (p.clone(), ctx.clone());
+        *p.mutate_gap_hook.lock().unwrap() = Some(Box::new(move || {
+            Box::pin(async move {
+                ok(
+                    &mut other,
+                    &other_ctx,
+                    json!([{"op":"update","class":"Note","id":"ns://n","set":{"title":"C"}}]),
+                )
+                .await;
+            })
+        }));
+        let result = run(
+            &mut p,
+            &ctx,
+            json!([{"op":"update","class":"Note","id":"ns://n","set":{"title":"B"}}]),
+        )
+        .await;
+        assert!(result.is_err(), "the second commit is refused");
+        assert_eq!(
+            stored_targets(&p, "ns://n", "ns://note_title").await,
+            vec!["literal:string:C"]
+        );
+    }
+
+    /// The same race on a single-valued property with no value yet: the setter stages no
+    /// removal, so what the commit expects is what the setter read (nothing), not its removals.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_standalone_calls_setting_one_empty_property_do_not_both_commit() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Note", NOTE_SDNA)]).await;
+        note(&mut p, &ctx, "ns://n").await;
+        assert!(stored_targets(&p, "ns://n", "ns://note_body")
+            .await
+            .is_empty());
+        let (mut other, other_ctx) = (p.clone(), ctx.clone());
+        *p.mutate_gap_hook.lock().unwrap() = Some(Box::new(move || {
+            Box::pin(async move {
+                ok(
+                    &mut other,
+                    &other_ctx,
+                    json!([{"op":"update","class":"Note","id":"ns://n","set":{"body":"C"}}]),
+                )
+                .await;
+            })
+        }));
+        let result = run(
+            &mut p,
+            &ctx,
+            json!([{"op":"update","class":"Note","id":"ns://n","set":{"body":"B"}}]),
+        )
+        .await;
+        assert!(result.is_err(), "the second commit is refused");
+        assert_eq!(
+            stored_targets(&p, "ns://n", "ns://note_body").await,
+            vec!["literal:string:C"]
+        );
+    }
+
+    /// The same for a single-valued relation (`@HasOne`) with no target yet.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_standalone_calls_setting_one_empty_relation_do_not_both_commit() {
+        let (mut p, _s, ctx) =
+            setup_perspective_no_llm(&[("OwnedTitled", OWNED_TITLED_SDNA)]).await;
+        ok(
+            &mut p,
+            &ctx,
+            json!([{"op":"create","class":"OwnedTitled","id":"ns://o1","values":{"title":"t"}}]),
+        )
+        .await;
+        assert!(stored_targets(&p, "ns://o1", "ns://ot_owner")
+            .await
+            .is_empty());
+        let (mut other, other_ctx) = (p.clone(), ctx.clone());
+        *p.mutate_gap_hook.lock().unwrap() = Some(Box::new(move || {
+            Box::pin(async move {
+                ok(
+                    &mut other,
+                    &other_ctx,
+                    json!([{"op":"update","class":"OwnedTitled","id":"ns://o1","set":{"owner":"ns://c"}}]),
+                )
+                .await;
+            })
+        }));
+        let result = run(
+            &mut p,
+            &ctx,
+            json!([{"op":"update","class":"OwnedTitled","id":"ns://o1","set":{"owner":"ns://b"}}]),
+        )
+        .await;
+        assert!(result.is_err(), "the second commit is refused");
+        assert_eq!(
+            stored_targets(&p, "ns://o1", "ns://ot_owner").await,
+            vec!["ns://c"]
         );
     }
 }

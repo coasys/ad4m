@@ -15,7 +15,8 @@
 //! - An update op writes its `set` properties, then its `remove` items, then its `add` items.
 
 use super::write::{
-    add_to_collection_with, create_with, remove_from_collection_with, remove_with, update_with,
+    add_to_collection_with, create_with, remove_from_collection_with, remove_with,
+    require_members_left, update_with,
 };
 use super::{
     class_properties, find_property, instance_uri, link_target, resolve_class,
@@ -23,7 +24,7 @@ use super::{
     InstanceRemoveFromCollection, InstanceUpdate, Pending, WriteStep,
 };
 use crate::agent::AgentContext;
-use crate::perspectives::perspective_instance::{MergeOutcome, PerspectiveInstance};
+use crate::perspectives::perspective_instance::{LinksChanged, MergeOutcome, PerspectiveInstance};
 use crate::types::{Link, LinkStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -201,9 +202,27 @@ pub(crate) async fn mutate(
                     let class_name = done.first().map(|m| m.class_name.clone());
                     // Disarmed once the commit has returned, whatever it answered: a
                     // cancel while it waits for the batch store still discards the batch.
-                    let committed = perspective.commit_batch(batch_id, agent).await;
+                    // What the ops replaced must still be what they read (an empty property
+                    // included), or two calls setting one single-valued property would both
+                    // commit and leave two values: the commit checks it under the store's
+                    // write lock.
+                    let committed = match perspective.expected_by_batch(&batch_id).await {
+                        Ok(Some(expected)) => {
+                            perspective
+                                .commit_batch_if(batch_id.clone(), agent, &expected)
+                                .await
+                        }
+                        Ok(None) => Err(anyhow::anyhow!("No batch found with given UUID")),
+                        Err(error) => {
+                            perspective.discard_batch(&batch_id).await;
+                            Err(error)
+                        }
+                    };
                     guard.disarm();
                     committed.map_err(|error| {
+                        if error.is::<LinksChanged>() {
+                            return call_error(InstanceError::ConcurrentWrite);
+                        }
                         call_error(InstanceError::Failed {
                             class_name: class_name.unwrap_or_default(),
                             step: WriteStep::Commit,
@@ -280,7 +299,13 @@ async fn run_ops(
                 error,
             })?;
         if mutated.deleted {
-            pending.removed(&mutated.id);
+            let (_, shape) = resolve_class(perspective, &mutated.class_name)
+                .await
+                .map_err(|error| MutateError {
+                    op_index: Some(index),
+                    error,
+                })?;
+            pending.removed(&shape.target_class, &mutated.id);
         }
         done.push(mutated);
         #[cfg(test)]
@@ -304,13 +329,13 @@ fn parent_class(
 ) -> Result<String, InstanceError> {
     let parent_id = instance_uri("parent", id)?;
     // An instance this call created, as one class or several: the one that declares the
-    // relation (the only one, when it is only one).
+    // relation. None, or several, is not a pick: the caller names the class.
     let created = pending.created_classes(&parent_id);
     if !created.is_empty() {
-        let declaring: Vec<&str> = created
+        let declaring: Vec<(&str, &str)> = created
             .iter()
             .copied()
-            .filter(|class| {
+            .filter(|(_, class)| {
                 perspective.get_shape(class).is_ok_and(|shape| {
                     class_properties(&shape)
                         .iter()
@@ -318,16 +343,17 @@ fn parent_class(
                 })
             })
             .collect();
-        match (declaring.as_slice(), created.as_slice()) {
-            ([class], _) | ([], [class]) => return Ok(class.to_string()),
-            _ => {
-                return Err(InstanceError::ParentClassUnresolved {
-                    parent: id.to_string(),
-                    relation: relation.to_string(),
-                    candidates: declaring.iter().map(|c| c.to_string()).collect(),
-                })
-            }
-        }
+        return match declaring.as_slice() {
+            [(_, class)] => Ok(class.to_string()),
+            _ => Err(InstanceError::ParentClassUnresolved {
+                parent: id.to_string(),
+                relation: relation.to_string(),
+                candidates: declaring
+                    .iter()
+                    .map(|(target, _)| target.to_string())
+                    .collect(),
+            }),
+        };
     }
     let parent = link_target(&parent_id);
     let mut candidates = perspective
@@ -355,6 +381,7 @@ fn collection_targets(
     class: &str,
     id: &str,
     collection: &str,
+    pending: &Pending,
 ) -> Result<Vec<(String, String)>, InstanceError> {
     let failed = |error| InstanceError::Failed {
         class_name: class.to_string(),
@@ -368,7 +395,7 @@ fn collection_targets(
     }
     let base = link_target(&instance_uri("base_uri", id)?);
     let targets = perspective
-        .collection_targets(class, &base, collection)
+        .collection_targets(class, &base, collection, &pending.created_targets(&base))
         .map_err(failed)?;
     if targets.is_empty() {
         return Err(failed(anyhow::anyhow!(
@@ -514,10 +541,14 @@ async fn run_op(
                 class_name = updated.class_name;
                 base_uri = updated.base_uri;
             }
+            let mut emptied = Vec::new();
             for (collection, items) in remove {
                 for (target_class, own) in
-                    collection_targets(perspective, &class, &id, &collection)?
+                    collection_targets(perspective, &class, &id, &collection, pending)?
                 {
+                    if !items.is_empty() {
+                        emptied.push((target_class.clone(), own.clone()));
+                    }
                     for item in &items {
                         let removed = remove_from_collection_with(
                             perspective,
@@ -541,7 +572,7 @@ async fn run_op(
             }
             for (collection, items) in add {
                 for (target_class, own) in
-                    collection_targets(perspective, &class, &id, &collection)?
+                    collection_targets(perspective, &class, &id, &collection, pending)?
                 {
                     for item in &items {
                         let added = add_to_collection_with(
@@ -563,6 +594,18 @@ async fn run_op(
                         base_uri = added.base_uri;
                     }
                 }
+            }
+            // After the additions: replacing the last member in one update is not emptying.
+            for (target_class, own) in emptied {
+                require_members_left(
+                    perspective,
+                    &target_class,
+                    &own,
+                    &id,
+                    batch.as_deref(),
+                    pending,
+                )
+                .await?;
             }
             Ok(Mutated {
                 class_name,

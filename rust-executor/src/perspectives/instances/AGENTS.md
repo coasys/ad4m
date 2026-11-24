@@ -35,9 +35,18 @@ Invariants:
   stored expression, so both can hold); removal drops the staged copies
   (`cancel_batch_addition`) and stages the committed copy's (`remove_link`). Instance
   existence (`fetch_instance`, `require_instance`) reads committed state, overlaid by `Pending`
-  (the ids this `mutate` call created or removed) when the call passes one. `Pending` lives
-  for one call: an instance an earlier call staged into the caller's batch is not found, and
+  (the ids this `mutate` call created or removed, each as a fact about one class of the id: an
+  id the call did not touch as that class is whatever the store says) when the call passes
+  one. `Pending` lives for one call: an instance an earlier call staged into the caller's batch is not found, and
   the single writes (`create`, `update`, ...) called alone pass none.
+- With no caller's batch, `mutate` commits its own batch with `commit_batch_if`, expecting
+  (`expected_by_batch`) what the batch's replacing commands read — a single-valued setter, a
+  collection setter, a clear: each records the `(source, predicate)` links it read, an empty
+  read included (`record_read`, the batch's `reads`) — plus, for removals by id that no such
+  read covers (`remove`), what the store holds now, a removal no longer held failing at once.
+  Links are compared in full (author, timestamp, target). Another writer that changed them
+  meanwhile makes the call fail with `ConcurrentWrite` (409, retryable): two calls that set one
+  single-valued property or relation cannot both commit, whether it had a value or not.
 - `mutate` applies all ops or none. Its own batch is discarded on failure. With a caller's
   batch it works in a private fork of it (`fork_batch`: a copy, so its reads see the caller's
   work plus its own) and, when every op succeeded, merges what the fork changed into the

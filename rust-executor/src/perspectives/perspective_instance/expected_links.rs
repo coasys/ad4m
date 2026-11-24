@@ -56,6 +56,95 @@ impl PerspectiveInstance {
         })
     }
 
+    /// Note that a replacing command staged into `batch_id` read `links` from `source` along
+    /// `predicate`, for [`Self::expected_by_batch`]. The first read of a pair stands: it is what
+    /// the batch's decisions rest on. No batch, or one that is not open, records nothing.
+    pub(super) async fn record_read(
+        &self,
+        batch_id: &Option<String>,
+        source: &str,
+        predicate: &Option<String>,
+        links: &[DecoratedLinkExpression],
+    ) {
+        let (Some(batch_id), Some(predicate)) = (batch_id, predicate) else {
+            return;
+        };
+        let mut batches = self.batch_store.write().await;
+        let Some(batch) = batches.get_mut(batch_id) else {
+            return;
+        };
+        if batch
+            .reads
+            .iter()
+            .any(|e| e.source == source && &e.predicate == predicate)
+        {
+            return;
+        }
+        let mut links: Vec<HeldLink> = links
+            .iter()
+            .map(|l| (l.author.clone(), l.timestamp.clone(), l.data.target.clone()))
+            .collect();
+        links.sort();
+        batch.reads.push(ExpectedLinks {
+            source: source.to_string(),
+            predicate: predicate.clone(),
+            links,
+        });
+    }
+
+    /// What `batch_uuid` expects of the store when it commits, for [`Self::commit_batch_if`]:
+    ///
+    /// - what its replacing commands read (a setter on an empty property read nothing, and
+    ///   expects nothing to appear), and
+    /// - for each `(source, predicate)` it removes from that no such read covers (a member
+    ///   removed by id), what the store holds now. A removal that is not held any more
+    ///   (another write took it since this batch read it) is [`LinksChanged`] at once.
+    ///
+    /// `None` when the batch is not open.
+    pub(crate) async fn expected_by_batch(
+        &self,
+        batch_uuid: &str,
+    ) -> Result<Option<Vec<ExpectedLinks>>, AnyError> {
+        let (mut expected, removals): (Vec<ExpectedLinks>, Vec<LinkExpression>) = {
+            let batches = self.batch_store.read().await;
+            let Some(batch) = batches.get(batch_uuid) else {
+                return Ok(None);
+            };
+            let removals = batch
+                .diff
+                .removals
+                .iter()
+                .cloned()
+                .chain(batch.updates.iter().map(|(old, _)| old.clone()))
+                .collect();
+            (batch.reads.clone(), removals)
+        };
+        for removal in removals {
+            let Some(predicate) = removal.data.predicate.as_deref() else {
+                continue;
+            };
+            let position = match expected
+                .iter()
+                .position(|e| e.source == removal.data.source && e.predicate == predicate)
+            {
+                Some(position) => position,
+                None => {
+                    expected.push(self.expect_links(&removal.data.source, predicate)?);
+                    expected.len() - 1
+                }
+            };
+            let held = (
+                removal.author.clone(),
+                removal.timestamp.clone(),
+                removal.data.target.clone(),
+            );
+            if !expected[position].links.contains(&held) {
+                return Err(LinksChanged.into());
+            }
+        }
+        Ok(Some(expected))
+    }
+
     fn links_held(&self, source: &str, predicate: &str) -> Result<Vec<HeldLink>, AnyError> {
         let mut links: Vec<HeldLink> = self
             .sparql_store

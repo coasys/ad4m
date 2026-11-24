@@ -155,6 +155,12 @@ pub(crate) fn instance_error(error: InstanceError) -> WsRpcError {
                  Send the call again"
             ),
         ),
+        InstanceError::ConcurrentWrite => (
+            409,
+            "Another write changed the links this call replaced while it ran; nothing was \
+             written. Send the call again"
+                .to_string(),
+        ),
         InstanceError::AlreadyExists {
             class_name,
             base_uri,

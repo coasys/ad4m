@@ -807,6 +807,17 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(currentLinks.length).to.equal(0)
             })
 
+        })
+
+        // Not under the skipped block above: these are the batch tests of
+        // `perspective.mutate`, and they run.
+        describe('Batch operations of mutate', () => {
+            let ad4mClient: Ad4mClient
+
+            beforeEach(() => {
+                ad4mClient = testContext.ad4mClient!
+            })
+
             describe("mutate in a batch", () => {
                 @Model({ name: "BatchedNote" })
                 class BatchedNote extends Ad4mModel {

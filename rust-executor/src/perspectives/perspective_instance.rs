@@ -90,6 +90,8 @@ pub use persisted_handle::PersistedHandle;
 // Committing a batch only if the links it expects still stand.
 mod expected_links;
 pub use expected_links::{ExpectedLinks, LinksChanged};
+// The ordering entry for members just appended to a collection.
+mod order_appended;
 // A batch's effective view of the graph for the validated write core.
 mod batch_view;
 pub(crate) use batch_view::MergeOutcome;
@@ -527,6 +529,10 @@ struct TimestampedBatch {
     /// `diff`, so batch-aware reads see it; `commit_batch` publishes a pair
     /// whose halves are both still there as one update.
     updates: Vec<(LinkExpression, LinkExpression)>,
+    /// What the replacing commands of this batch (a single-valued setter, a collection setter,
+    /// a clear) read from the store, as they read it: [`Self::commit_batch_if`] can expect it
+    /// still to stand, an empty read included.
+    reads: Vec<ExpectedLinks>,
     created_at: Instant,
 }
 
@@ -3739,33 +3745,6 @@ impl PerspectiveInstance {
         out
     }
 
-    /// Write the ordering entry for `added` members just appended to `source`'s `predicate`
-    /// collection, whose members before the append were `members` (target, timestamp). A
-    /// collection whose class declares no ordering gets nothing. The members keep their order
-    /// and the new ones follow, so this is `apply_collection_ordering` for an append.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn order_appended(
-        &mut self,
-        source: &str,
-        predicate: &str,
-        members: &[(String, String)],
-        added: &[String],
-        status: LinkStatus,
-        batch_id: Option<String>,
-        context: &AgentContext,
-    ) -> Result<(), AnyError> {
-        let mut desired: Vec<String> = members.iter().map(|(target, _)| target.clone()).collect();
-        for target in added {
-            if !desired.contains(target) {
-                desired.push(target.clone());
-            }
-        }
-        self.apply_collection_ordering(
-            source, predicate, members, &desired, true, status, batch_id, context,
-        )
-        .await
-    }
-
     /// Write the ordering entries that turn the collection's current order into
     /// the desired one. With `appended`, `desired` only names the members to put after the
     /// current order.
@@ -5149,6 +5128,16 @@ impl PerspectiveInstance {
                             limit: None,
                         })
                         .await?;
+                    // A clear (`*`) read all there was; one named target read only that one.
+                    if remove_target.is_none() {
+                        self.record_read(
+                            &batch_id,
+                            &remove_source,
+                            &remove_predicate,
+                            &link_expressions,
+                        )
+                        .await;
+                    }
                     for link_expression in link_expressions {
                         self.remove_link(link_expression.into(), batch_id.clone())
                             .await?;
@@ -5187,6 +5176,8 @@ impl PerspectiveInstance {
                             limit: None,
                         })
                         .await?;
+                    self.record_read(&batch_id, &source, &predicate, &link_expressions)
+                        .await;
                     for link_expression in link_expressions {
                         self.remove_link(link_expression.into(), batch_id.clone())
                             .await?;
@@ -5235,6 +5226,8 @@ impl PerspectiveInstance {
                             limit: None,
                         })
                         .await?;
+                    self.record_read(&batch_id, &source, &predicate, &persisted)
+                        .await;
 
                     let desired: Vec<String> = parameters
                         .iter()
@@ -5835,7 +5828,7 @@ impl PerspectiveInstance {
         // reads writes the value with its own setter.
         if self.is_abstract_class(&class_name)? {
             let runs = self
-                .update_through_abstract(&class_name, &expression_address, &values, context)
+                .update_through_abstract(&class_name, &expression_address, &values, &[], context)
                 .await?;
             return self
                 .execute_runs(runs, expression_address, batch_id, context)
@@ -5924,7 +5917,10 @@ impl PerspectiveInstance {
             }
             let mut cleared: Vec<Command> = Vec::new();
             for setter_cmd in setter {
-                if !cleared.iter().any(|c| c.predicate == setter_cmd.predicate) {
+                if !cleared
+                    .iter()
+                    .any(|c| c.predicate == setter_cmd.predicate && c.source == setter_cmd.source)
+                {
                     cleared.push(Command {
                         target: Some("*".to_string()),
                         local: None,
@@ -5935,7 +5931,14 @@ impl PerspectiveInstance {
             }
             return Ok(cleared);
         }
-        let expand_collection = matches!(value, serde_json::Value::Array(_))
+        // An array is the members of a collection; on a single-valued property it is one value.
+        let is_collection = self
+            .get_shape(class_name)?
+            .properties
+            .iter()
+            .any(|p| p.name == prop && p.is_collection);
+        let expand_collection = is_collection
+            && matches!(value, serde_json::Value::Array(_))
             && setter.iter().all(|c| c.action == Action::AddLink);
         let elements: Vec<serde_json::Value> = match (expand_collection, value) {
             (true, serde_json::Value::Array(items)) => items.clone(),
@@ -5946,10 +5949,9 @@ impl PerspectiveInstance {
         // first (in the batch's effective graph), then the new members go in, in the order given.
         if expand_collection {
             for setter_cmd in setter {
-                if !commands
-                    .iter()
-                    .any(|c: &Command| c.predicate == setter_cmd.predicate)
-                {
+                if !commands.iter().any(|c: &Command| {
+                    c.predicate == setter_cmd.predicate && c.source == setter_cmd.source
+                }) {
                     commands.push(Command {
                         target: Some("*".to_string()),
                         local: None,
@@ -7131,6 +7133,7 @@ impl PerspectiveInstance {
                     removals: Vec::new(),
                 },
                 updates: Vec::new(),
+                reads: Vec::new(),
                 created_at: now,
             },
         );
@@ -7145,18 +7148,6 @@ impl PerspectiveInstance {
     /// waiting on the next `create_batch` sweep to prune it.
     pub async fn discard_batch(&self, batch_uuid: &str) -> bool {
         self.batch_store.write().await.remove(batch_uuid).is_some()
-    }
-
-    /// How many batches are open.
-    #[cfg(test)]
-    pub(crate) async fn open_batch_count(&self) -> usize {
-        self.batch_store.read().await.len()
-    }
-
-    /// Hold the batch store's write lock until the guard drops: a test makes a call wait for it.
-    #[cfg(test)]
-    pub(crate) async fn hold_batch_store(&self) -> Box<dyn std::any::Any + Send> {
-        Box::new(self.batch_store.clone().write_owned().await)
     }
 
     pub async fn commit_batch(

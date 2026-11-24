@@ -246,6 +246,11 @@ pub(super) fn common_error(error: &InstanceError) -> Option<String> {
         InstanceError::BatchConflict { batch_id } => error_json(format!(
             "Batch '{batch_id}' was written to meanwhile — nothing was written; try again."
         )),
+        InstanceError::ConcurrentWrite => error_json(
+            "Another write changed the links this call replaced meanwhile — nothing was \
+             written; try again."
+                .to_string(),
+        ),
         _ => return None,
     })
 }

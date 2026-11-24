@@ -21,7 +21,7 @@ handlers), `runtime`, `config` (`runtime.config`, `runtime.setConfig`), `users`,
 an ordered list of validated instance writes over `perspectives/instances/`, the same
 functions as the MCP `instance_*` tools; a refused write is a `WsRpcError` with the
 `InstanceError` plus the failing op's `opIndex` as `data`: 422 for a shape violation, see the
-module doc; the guard is `perspective:UPDATE`, and a call with `returns: "rows"` also needs
+module doc; the guard is `perspective:UPDATE`, and a call with `returns: { kind: "rows" }` also needs
 `perspective:READ`, so a write-only caller is refused before anything is written).
 Each exposes `register_ws_handlers(&mut HandlerMap)`
 called from `ws_handler::build_handler_map`.

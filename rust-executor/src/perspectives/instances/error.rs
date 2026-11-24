@@ -46,6 +46,10 @@ pub enum InstanceError {
     /// this call ran, so the call's result no longer follows from it. Nothing was written; the
     /// call can be sent again.
     BatchConflict { batch_id: String },
+    /// A call with no batch read links that another write changed before this call's commit
+    /// (two calls replacing the same single-valued property). Nothing was written; the call
+    /// can be sent again.
+    ConcurrentWrite,
     /// The write breaks the class's shape. Validation runs before any link write, so the call
     /// staged and wrote nothing.
     Validation {

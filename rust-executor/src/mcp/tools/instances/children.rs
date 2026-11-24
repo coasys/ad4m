@@ -69,7 +69,7 @@ impl Ad4mMcpHandler {
         }
         let (parent, child) = (link_target(parent), link_target(child));
         match perspective
-            .add_to_container(&parent, &child, None, &agent_context)
+            .add_to_container(&parent, &child, &[], None, &agent_context)
             .await
         {
             Ok(()) => pretty(&json!({

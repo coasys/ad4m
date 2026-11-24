@@ -13,12 +13,13 @@
 //! not this write's, to throw away. Reads the write does of the links it manages see the
 //! batch's staged work (`get_links_effective`); instance existence reads committed state
 //! only, except in a `mutate` call, which overlays the instances its own earlier ops created or
-//! removed ([`super::Pending`]). Called alone, create-then-update of a new instance in one batch
-//! fails `notFound`.
+//! removed ([`super::Pending`]), so create-then-update of a new instance in one call works.
+//! In separate calls into one batch, the later call fails `notFound`: the earlier one only
+//! staged the instance, and the store does not show it before the commit.
 
 use super::validate::{resolve_collection, value_text};
 use super::{
-    check_setters, class_properties, coerce_scalar, decoded_literal, fetch_instance,
+    check_setters, class_properties, coerce_scalar, decoded_literal, fetch_instance, find_property,
     generate_instance_uri, instance_uri, link_target, property_target, property_value_target,
     remove_incoming_links_of, require_instance, resolve_class, resolve_writable_class,
     subject_class, validate_properties, InstanceError, Pending, WriteMode, WriteStep,
@@ -476,10 +477,12 @@ pub(crate) async fn create_with(
 
     let parent = params.parent.filter(|s| !s.trim().is_empty());
     if let Some(parent) = &parent {
+        let parent_id = link_target(parent.trim());
         if let Err(e) = perspective
             .add_to_container(
-                &link_target(parent.trim()),
+                &parent_id,
                 &base_uri,
+                &pending.created_targets(&parent_id),
                 Some(batch.id()),
                 agent,
             )
@@ -812,41 +815,37 @@ pub(crate) async fn add_to_collection_with(
     } else {
         LinkStatus::Shared
     };
-    perspective
-        .add_link(link, status.clone(), params.batch_id.clone(), agent)
+    // The member and its ordering entry go in one batch: with no caller's, they commit
+    // together or not at all.
+    let batch = Batch::open(perspective, params.batch_id.clone()).await?;
+    let step = || WriteStep::AddCollectionItem {
+        collection: collection.clone(),
+        item: params.item_uri.clone(),
+    };
+    if let Err(e) = perspective
+        .add_link(link, status.clone(), Some(batch.id()), agent)
         .await
-        .map_err(|e| {
-            failed(
-                &class_name,
-                WriteStep::AddCollectionItem {
-                    collection: collection.clone(),
-                    item: params.item_uri.clone(),
-                },
-                e,
-            )
-        })?;
+    {
+        batch.abandon(perspective).await;
+        return Err(failed(&class_name, step(), e));
+    }
     // An ordered relation also needs the entry that places the new member.
-    perspective
+    if let Err(e) = perspective
         .order_appended(
             &stored,
             &predicate,
             &members,
             &[target],
             status,
-            params.batch_id,
+            Some(batch.id()),
             agent,
         )
         .await
-        .map_err(|e| {
-            failed(
-                &class_name,
-                WriteStep::AddCollectionItem {
-                    collection: collection.clone(),
-                    item: params.item_uri.clone(),
-                },
-                e,
-            )
-        })?;
+    {
+        batch.abandon(perspective).await;
+        return Err(failed(&class_name, step(), e));
+    }
+    batch.finish(perspective, agent, &class_name).await?;
     Ok(CollectionItemAdded {
         class_name,
         base_uri,
@@ -855,6 +854,74 @@ pub(crate) async fn add_to_collection_with(
         links_added: 1,
         already_member: false,
     })
+}
+
+/// A required collection keeps a member: after the removals and additions of one update, an
+/// instance whose `collection` has none left is refused, as `set: []` is. Replacing the last
+/// member in the same update passes. Reads the batch's effective graph.
+pub(super) async fn require_members_left(
+    perspective: &PerspectiveInstance,
+    class_name: &str,
+    collection: &str,
+    base_uri: &str,
+    batch_id: Option<&str>,
+    pending: &Pending,
+) -> Result<(), InstanceError> {
+    let (class_name, shape) = resolve_writable_class(perspective, class_name).await?;
+    let infos = class_properties(&shape);
+    let Some(info) = find_property(&infos, collection).filter(|info| info.required()) else {
+        return Ok(());
+    };
+    let base_uri = instance_uri("base_uri", base_uri)?;
+    let stored = require_instance(
+        perspective,
+        &class_name,
+        &shape.target_class,
+        &base_uri,
+        pending,
+    )
+    .await?;
+    let predicate = shacl::resolve_property_predicate(perspective, &class_name, info.name())
+        .await
+        .map_err(|e| {
+            failed(
+                &class_name,
+                WriteStep::ResolveCollection {
+                    collection: collection.to_string(),
+                },
+                anyhow!(e),
+            )
+        })?;
+    let left = perspective
+        .get_links_effective(
+            &LinkQuery {
+                source: Some(stored),
+                predicate: Some(predicate),
+                ..Default::default()
+            },
+            batch_id,
+        )
+        .await
+        .map_err(|e| {
+            failed(
+                &class_name,
+                WriteStep::ReadCollection {
+                    collection: collection.to_string(),
+                },
+                e,
+            )
+        })?;
+    if left.is_empty() {
+        return Err(invalid(
+            &class_name,
+            vec![super::ValidationError::on(
+                info,
+                super::ValidationProblem::MissingRequired,
+                None,
+            )],
+        ));
+    }
+    Ok(())
 }
 
 /// Remove an item from a collection property of an instance: only the membership link, the item
