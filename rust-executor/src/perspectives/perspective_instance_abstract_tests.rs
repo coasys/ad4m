@@ -350,7 +350,7 @@ async fn a_collection_setter_through_an_abstract_class_sets_the_members() {
     assert!(targets_on(&p, "ad4m://f1", "ns://children").is_empty());
 }
 
-/// The same on the concrete class, which `perspective.updateSubject`
+/// The same on the concrete class, which a `perspective.mutate` update op
 /// reaches: an update sets exactly the members given, and so does a create.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_collection_setter_on_a_concrete_class_sets_the_members() {

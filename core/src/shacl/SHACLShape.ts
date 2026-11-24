@@ -487,7 +487,7 @@ export class SHACLShape {
     }
 
     // Constructor and destructor actions, always, as the executor writes
-    // them: an empty `[]` still tells `createSubject` the class exists.
+    // them: an empty `[]` still tells a `create` op the class exists.
     for (const [predicate, actions] of [
       ["ad4m://constructor", this.constructor_actions],
       ["ad4m://destructor", this.destructor_actions],

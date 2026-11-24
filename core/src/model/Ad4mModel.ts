@@ -1,19 +1,17 @@
-import { Literal } from "../Literal";
-import { Link } from "../links/Links";
-import { LinkQuery } from "../perspectives/LinkQuery";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { CallOptions } from "../apiClient";
 import { makeRandomId } from "./util";
 import { getPropertiesMetadata, getRelationsMetadata, setPropertyRegistryEntry, setRelationRegistryEntry, Model } from "./decorators";
 import type { PropertyOptions, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
 import { formatQueryValue, compileWhereClause } from "./query-utils";
-import { requireSingleParent, requireTotalCount, resolveParentPredicate } from "./query-common";
+import { requireSingleParent, requireTotalCount, resolveParentPredicate, resolveParentRelation } from "./query-common";
 import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
 import type { SHACLShape } from "../shacl/SHACLShape";
 import type { RegisterResult } from "../generated/api/RegisterResult";
+import type { MutateOp, ParentRef } from "../generated/api";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 
-import { buildSPARQLQuery, valueToLiteralIri, effectiveLiteralStorage } from "./query-sparql";
+import { buildSPARQLQuery } from "./query-sparql";
 import { LiveQuery } from "../perspectives/LiveQuery";
 import type { LiveOptions } from "../perspectives/LiveQuery";
 import {
@@ -418,41 +416,45 @@ function jsonToModelInstance<T extends Ad4mModel>(
   return instance;
 }
 
-/** One field write: the commands and parameters of one `executeAction`. */
-interface FieldWrite {
-  commands: any[];
-  parameters: { name: string; value: any }[];
-}
-
-/** The most writes `sendWrites` joins into one `executeAction` call. */
-const MAX_WRITES_PER_CALL = 200;
+/**
+ * The ops of each open {@link Ad4mModel.transaction}, by the id of the batch it
+ * opened. A model write that names such a batch is queued here and sent with
+ * the others as one `perspective.mutate` call, so a later write of the
+ * transaction finds an instance an earlier one created.
+ */
+const transactionOps = new Map<string, MutateOp[]>();
 
 /**
- * Resolves the parent→child link of `create(…, { parent })` now, and returns the
- * write for a child id. Resolving first means a parent that names no single
- * instance or no relation to `childCtor` throws before anything is staged.
- * A containment scope `{ id }` writes through the built-in `Container` (#1446):
- * the executor runs the adder of the parent's own `children` relation when its
- * class has one (a block's `we://child`), else writes `ad4m://has_child`. The
- * other forms write their one predicate.
+ * Writes `ops` as one `perspective.mutate` call: into the open batch `batchId`
+ * when given (the caller commits), else committed at once. In a transaction's
+ * batch they are queued instead; the transaction sends them.
  */
-function parentLinkWriter(
-  scope: Scope,
-  childCtor: Function,
-): (perspective: PerspectiveProxy, childId: string, batchId?: string) => Promise<unknown> {
-  const parent = requireSingleParent(scope);
-  if (isContainedScope(parent)) {
-    return (perspective, childId, batchId) =>
-      perspective.updateSubject(
-        "ad4m://Container",
-        parent.id,
-        { children: { action: "adder", value: [childId] } },
-        batchId,
-      );
+async function writeOps(perspective: PerspectiveProxy, ops: MutateOp[], batchId?: string): Promise<void> {
+  const queued = batchId ? transactionOps.get(batchId) : undefined;
+  if (queued) {
+    queued.push(...ops);
+    return;
   }
-  const predicate = resolveParentPredicate(parent, childCtor);
-  return (perspective, childId, batchId) =>
-    perspective.add(new Link({ source: parent.id, predicate, target: childId }), 'shared', batchId);
+  await perspective.mutate(ops, batchId ? { batch: batchId } : {});
+}
+
+/**
+ * The `parent` of a create op for `create(…, { parent })`. Resolving it first
+ * means a parent that names no single instance or no relation to `childCtor`
+ * throws before anything is written. `{ id }` (containment, #1446) has the
+ * executor use the parent's own `children` relation, else `ad4m://has_child`;
+ * `{ model, id }` names the parent's relation to the child class, written
+ * through its adder (with ordering); `{ id, predicate }` is one plain link.
+ */
+function parentRef(scope: Scope, childCtor: Function): ParentRef {
+  const parent = requireSingleParent(scope);
+  if (isContainedScope(parent)) return { id: parent.id };
+  if ('predicate' in parent) return { id: parent.id, predicate: parent.predicate };
+  return {
+    id: parent.id,
+    relation: resolveParentRelation(parent, childCtor),
+    model: parent.model.queriedAs(),
+  };
 }
 
 /**
@@ -570,10 +572,6 @@ export class Ad4mModel {
   private _baseExpression: string;
   private _perspective: PerspectiveProxy;
   private _snapshot: Record<string, any> | null = null;
-  /** True when the constructor minted the id: no record can hold links yet. */
-  private _idMinted: boolean = false;
-  /** Predicates this instance has already written relation links under (`add*`/`set*`), so they may hold links. */
-  private _relationsWritten = new Set<string>();
   author: string;
   createdAt: any;
   updatedAt: any;
@@ -803,7 +801,6 @@ export class Ad4mModel {
     // IRIs, so relation links like `<post> --has_comment--> <comment-id>`
     // round-trip correctly through the SPARQL store.
     this._baseExpression = baseExpression ? baseExpression : `ad4m://obj/${makeRandomId(24)}`;
-    this._idMinted = !baseExpression;
     this._perspective = perspective;
   }
 
@@ -840,74 +837,6 @@ export class Ad4mModel {
     const ctor = this.constructor;
     const rels = getRelationsMetadata(ctor);
     return rels[key];
-  }
-
-  /**
-   * Generate property setter action from metadata.
-   * @private
-   */
-  private generatePropertySetterAction(key: string, metadata: PropertyMetadataEntry): any[] {
-    // Flags are always immutable — throw a clear error
-    if (metadata.flag) {
-      throw new Error(
-        `Property "${key}" is a @Flag and cannot be written. ` +
-        `Flags are immutable type markers set at creation time.`
-      );
-    }
-
-    // Check if property is read-only
-    if (metadata.readOnly) {
-      throw new Error(`Property "${key}" is read-only and cannot be written`);
-    }
-
-    if (metadata.prologSetter) {
-      // Custom Prolog setter - throw error for now (Phase 2)
-      throw new Error(
-        `Custom Prolog setter for property "${key}" not yet supported without Prolog. ` +
-        `Use standard @Property decorator or enable Prolog for custom setters.`
-      );
-    }
-
-    if (!metadata.through) {
-      throw new Error(`Property "${key}" has no 'through' predicate defined`);
-    }
-
-    return [{
-      action: "setSingleTarget",
-      source: "this",
-      predicate: metadata.through,
-      target: "value",
-      ...(metadata.local && { local: true })
-    }];
-  }
-
-  /**
-   * Generate relation action from metadata.
-   * @private
-   */
-  private generateRelationAction(key: string, actionType: 'adder' | 'remover' | 'setter'): any[] {
-    const metadata = this.getRelationOptions(key);
-    if (!metadata) {
-      throw new Error(`Relation "${key}" has no metadata defined`);
-    }
-
-    if (!metadata.predicate) {
-      throw new Error(`Relation "${key}" has no predicate defined`);
-    }
-
-    const actionMap = {
-      adder: "addLink",
-      remover: "removeLink",
-      setter: "collectionSetter"
-    };
-
-    return [{
-      action: actionMap[actionType],
-      source: "this",
-      predicate: metadata.predicate,
-      target: "value",
-      ...(metadata.local && { local: true })
-    }];
   }
 
   // ──────────────────────────────────────────────────────────
@@ -1022,7 +951,7 @@ export class Ad4mModel {
       // Without this guard, a relation populated by hydrateFromLinks with
       // raw string IDs would appear "dirty" against a missing snapshot
       // entry and trigger an unnecessary (and potentially destructive)
-      // setRelationValues call during innerUpdate.
+      // relation write on save().
       if (!(field in this._snapshot)) continue;
 
       const current = normalizeValue((this as any)[field]);
@@ -1743,116 +1672,6 @@ export class Ad4mModel {
     return requireTotalCount(await this.executeModelQuery(perspective, { ...countQuery, limit: 0, count: true }, undefined, options));
   }
 
-  /** The write that sets property `key` to `value`; for `null` or `""`, a `removeLink` of every link on it (throws on a required property); none for `undefined`. */
-  private async planProperty(key: string, value: any): Promise<FieldWrite[]> {
-    const metadata = this.getPropertyMetadata(key);
-    if (!metadata) {
-      console.warn(`Property "${key}" has no metadata, skipping`);
-      return [];
-    }
-
-    // Generate actions from metadata (replaces Prolog query)
-    const actions = this.generatePropertySetterAction(key, metadata);
-
-    if (value === undefined) return [];
-    // An empty value is no value: the property has no links, and no empty
-    // literal (`literal:string:`) is stored.
-    if (value === null || value === "") {
-      // A required property's link is part of what makes the record an
-      // instance of its class: clearing it would drop the record from the
-      // class's queries with no error.
-      if (metadata.required) {
-        throw new Error(`Property "${key}" is required and cannot be cleared`);
-      }
-      // The executor's `removeLink` with target `*` removes every stored link
-      // on the property and prunes what this batch staged for it.
-      return [{ commands: [{ action: "removeLink", source: "this", predicate: metadata.through, target: "*" }], parameters: [] }];
-    }
-
-    const mode = effectiveLiteralStorage(metadata);
-    if (mode.kind === "custom") {
-      // Custom language: route through expression_create on that language.
-      value = await this._perspective.createExpression(value, mode.language);
-    } else if (mode.kind === "envelope") {
-      // Built-in literal language: signed-envelope expression (provenance).
-      value = await this._perspective.createExpression(value, "literal");
-    } else {
-      // Deterministic literal: IRI (POS-index friendly).
-      value = valueToLiteralIri(value);
-    }
-
-    return [{ commands: actions, parameters: [{ name: "value", value }] }];
-  }
-
-  /**
-   * The `executeAction` writes of a relation change: one for a set (its
-   * `collectionSetter` takes every value), one per value for an add or remove.
-   */
-  private planRelation(key: string, kind: 'setter' | 'adder' | 'remover', value: any): FieldWrite[] {
-    const metadata = this.getRelationOptions(key);
-    if (!metadata) {
-      console.warn(`Relation "${key}" has no metadata, skipping`);
-      return [];
-    }
-
-    // Generate actions from metadata (replaces Prolog query)
-    const actions = this.generateRelationAction(key, kind);
-
-    if (value == null) return [];
-    const values = Array.isArray(value) ? value : [value];
-    const param = (v: any) => ({ name: "value", value: this.resolveRelationId(v) });
-    if (kind === 'setter') return [{ commands: actions, parameters: values.map(param) }];
-    return values.map(v => ({ commands: actions, parameters: [param(v)] }));
-  }
-
-  /**
-   * Sends writes in as few `executeAction` calls as keep their links: the
-   * executor runs a call's commands in order, so consecutive writes share one
-   * call, each with its own parameter names. A `collectionSetter` takes every
-   * parameter of its call as a member, so it goes in a call of its own. A
-   * command's `local` flag is per command, so Local and Shared links mix. The
-   * executor tries every parameter name at each position of each command, so
-   * a call holds at most `MAX_WRITES_PER_CALL` writes.
-   */
-  private async sendWrites(writes: FieldWrite[], batchId?: string): Promise<void> {
-    let group: FieldWrite[] = [];
-    const flush = async () => {
-      if (group.length === 1) {
-        await this._perspective.executeAction(group[0].commands, this._baseExpression, group[0].parameters, batchId);
-      } else if (group.length > 1) {
-        const commands: any[] = [];
-        const parameters: { name: string; value: any }[] = [];
-        group.forEach((write, i) => {
-          // The executor substitutes a parameter name wherever it occurs in a
-          // command's source, predicate or target; rename `value` the same way.
-          const name = `ad4m-model-write-${i}-value`;
-          const rename = (s: any) => (typeof s === "string" && write.parameters.length ? s.split("value").join(name) : s);
-          for (const c of write.commands) {
-            commands.push({ ...c, source: rename(c.source), predicate: rename(c.predicate), target: rename(c.target) });
-          }
-          for (const p of write.parameters) parameters.push({ name, value: p.value });
-        });
-        await this._perspective.executeAction(commands, this._baseExpression, parameters, batchId);
-      }
-      group = [];
-    };
-    for (const write of writes) {
-      if (write.commands.some((c: any) => c.action === "collectionSetter")) {
-        await flush();
-        group = [write];
-        await flush();
-      } else {
-        group.push(write);
-        if (group.length >= MAX_WRITES_PER_CALL) await flush();
-      }
-    }
-    await flush();
-  }
-
-  private async setProperty(key: string, value: any, batchId?: string) {
-    await this.sendWrites(await this.planProperty(key, value), batchId);
-  }
-
   /** Resolve a relation argument to a plain string ID. Accepts either a raw
    * string ID or an Ad4mModel instance (in which case `.id` is used). */
   private resolveRelationId(value: any): string {
@@ -1861,69 +1680,55 @@ export class Ad4mModel {
     return String(value);
   }
 
-  /** A relation write on a row read through an abstract class (#1435). The
-   *  relation's predicate is the abstract class's, which no record's class
-   *  reads: the executor runs the adder, remover or setter of each of the
-   *  record's classes for the relation answering to `key`. */
-  private async relationThroughAbstract(
-    abstractName: string,
-    key: string,
-    action: 'adder' | 'remover' | 'setter',
-    value: any,
-    batchId?: string
-  ) {
-    const ids = (Array.isArray(value) ? value : [value]).map((v) => this.resolveRelationId(v));
-    await this._perspective.updateSubject(abstractName, this._baseExpression, { [key]: { action, value: ids } }, batchId);
-  }
-
   private async setRelationValues(key: string, value: any, batchId?: string) {
-    await this.writeRelation(key, 'setter', value, batchId);
+    await this.writeRelation(key, 'set', value, batchId);
   }
 
   private async addRelationValue(key: string, value: any, batchId?: string) {
-    await this.writeRelation(key, 'adder', value, batchId);
+    await this.writeRelation(key, 'add', value, batchId);
   }
 
   private async removeRelationValue(key: string, value: any, batchId?: string) {
-    await this.writeRelation(key, 'remover', value, batchId);
+    await this.writeRelation(key, 'remove', value, batchId);
   }
 
-  /** A relation setter, adder or remover call: on a row read through an
-   *  abstract class it dispatches through the executor (see
-   *  {@link relationThroughAbstract}); otherwise its writes go out in as few
-   *  `executeAction` calls as {@link sendWrites} allows. */
-  private async writeRelation(key: string, kind: 'setter' | 'adder' | 'remover', value: any, batchId?: string) {
-    const predicate = this.getRelationOptions(key)?.predicate;
-    if (predicate && kind !== 'remover') this._relationsWritten.add(predicate);
-    const abstractName = this.abstractName();
-    if (!abstractName) {
-      await this.sendWrites(this.planRelation(key, kind, value), batchId);
-      return;
-    }
+  /** One update op that sets (`set`: an array sets the members), adds or removes the members of relation `key`. */
+  private async writeRelation(key: string, kind: 'set' | 'add' | 'remove', value: any, batchId?: string) {
     if (!this.getRelationOptions(key)) {
       console.warn(`Relation "${key}" has no metadata, skipping`);
       return;
     }
-    if (value != null) await this.relationThroughAbstract(abstractName, key, kind, value, batchId);
+    if (value == null) return;
+    const ids = (Array.isArray(value) ? value : [value]).map((v) => this.resolveRelationId(v));
+    const members = { [key]: ids };
+    const change = kind === 'set' ? { set: members } : { [kind]: members };
+    await writeOps(this._perspective, [{ op: 'update', class: this.mutateClass(), id: this._baseExpression, ...change }], batchId);
   }
 
   /**
    * Saves the model instance to the perspective.
    *
-   * **New instances** (no snapshot yet): creates the subject via
-   * `createSubject` with initial scalar values, then sets relations
-   * via `innerUpdate`, then (without a `batchId`) refreshes from the
-   * perspective. To create without that read, use `Model.create()`.
+   * Every save is one `perspective.mutate` call.
+   *
+   * **New instances** (no snapshot yet): one `create` op with every
+   * property that has a value and every relation that has members, then
+   * (without a `batchId`) a refresh from the perspective. To create
+   * without that read, use `Model.create()`.
    *
    * **Existing instances** (snapshot present, i.e. fetched via `get()`
-   * or a query): updates only dirty fields via `innerUpdate`, then
-   * refreshes from the perspective.
+   * or a query): one `update` op with the dirty fields only, then a
+   * refresh from the perspective.
    *
    * A property set to `null` or `''` has no links after the write: an
    * existing instance's links are removed, a new instance gets none.
    * `undefined` writes nothing.
    * 
-   * @param batchId - Optional batch ID for batch operations
+   * @param batchId - Optional batch ID for batch operations. In a batch you
+   *   opened with `createBatch()`, a `save()` of a new instance stages it;
+   *   a later `save()` of it in the same batch fails `notFound` (the
+   *   executor finds an instance an earlier call staged only after the
+   *   commit). Inside `Ad4mModel.transaction` the writes are one call, so
+   *   they see each other.
    * @throws Will throw if instance creation, linking, or updating fails
    * 
    * @example
@@ -1939,129 +1744,128 @@ export class Ad4mModel {
    * ```
    */
   async save(batchId?: string) {
-    // Existing instance → update path (has been fetched / hydrated before)
-    if (this._snapshot) {
-      const abstractName = this.abstractName();
-      if (abstractName) {
-        await this.perspective.updateSubject(abstractName, this._baseExpression, this.changedValuesForDispatch(), batchId);
-      } else {
-        await this.innerUpdate(true, batchId);
-      }
-      // Snapshot what was written, so further saves diff correctly.
-      this.takeSnapshot();
-      // With a caller's batch nothing is committed yet: reading would fetch
-      // stale data and overwrite in-memory values.
-      if (!batchId) await this.getData();
-      return;
-    }
+    await this.persist(batchId);
+    // With a caller's batch nothing is committed yet: reading would fetch
+    // stale data and overwrite in-memory values.
+    if (!batchId) await this.getData();
+  }
 
-    // New instance → create path. The executor refuses an abstract class
-    // too; refusing here keeps the error ahead of the batch.
-    if (this.abstractName()) {
-      const name = (this.constructor as typeof Ad4mModel).getClassName();
+  /**
+   * Writes this instance with one `perspective.mutate` op: an update of the
+   * changed fields for an instance with a snapshot, a create (with `parent`
+   * when given) for one without. Then takes the snapshot, so a further
+   * `save()` diffs against what was written and updates instead of creating
+   * again.
+   */
+  private async persist(batchId?: string, parent?: ParentRef): Promise<void> {
+    const op = this._snapshot ? this.updateOp() : this.createOp(parent);
+    if (op) await writeOps(this._perspective, [op], batchId);
+    this.takeSnapshot();
+  }
+
+  /** The class the executor writes this instance as. */
+  private mutateClass(): string {
+    return (this.constructor as typeof Ad4mModel).queriedAs();
+  }
+
+  /** The metadata of relation `key`, or `null` when the relation is not written: a getter, read-only, or a filtered view of a base relation. */
+  private writableRelation(key: string): RelationMetadata | null {
+    const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
+    const relMeta = metadata.relations[key];
+    if (relMeta.getter || relMeta.readOnly) return null;
+    // A target+filter relation is a filtered *view* of a base relation when
+    // another relation claims the same predicate: writing it would collide.
+    if (relMeta.target && relMeta.filter !== false) {
+      const collides = Object.entries(metadata.relations).some(
+        ([otherName, other]) => otherName !== key && (other as RelationMetadata).predicate === relMeta.predicate,
+      );
+      if (collides) return null;
+    }
+    return relMeta;
+  }
+
+  /** A relation field's value as the member ids to write: an array, a single member, or a `{ action, value }` envelope. */
+  private relationMembers(value: any): string[] {
+    const members = value?.action ? value.value : value;
+    if (members == null || members === "") return [];
+    return (Array.isArray(members) ? members : [members]).map((v) => this.resolveRelationId(v));
+  }
+
+  /** The create op of this instance: every property with a value and every relation with members. */
+  private createOp(parent?: ParentRef): MutateOp {
+    const ctor = this.constructor as typeof Ad4mModel;
+    // The executor refuses an abstract class too; refusing here keeps the
+    // error ahead of the call.
+    if ((ctor as typeof Ad4mModel & { isAbstract?: boolean }).isAbstract) {
+      const name = ctor.getClassName();
       throw new Error(
         `'${name}' is an abstract class and cannot be created. Create an instance of ` +
         `a class that has its properties; querying '${name}' reads it.`
       );
     }
-
-    // With a caller's batch, the caller commits; take a snapshot so a later
-    // save() in the same batch updates instead of creating again (two
-    // competing "title" values).
-    if (batchId) {
-      await this.createIn(batchId);
-      this.takeSnapshot();
-      return;
-    }
-
-    // Otherwise the create gets its own batch, discarded if any step fails.
-    await Ad4mModel.transaction(this.perspective, ({ batchId }) => this.createIn(batchId));
-    // The record now exists: snapshot first, so if the re-read below fails a
-    // retried save() updates instead of creating a second copy.
-    this.takeSnapshot();
-    await this.getData();
-  }
-
-  /** Stage the writes that create this instance in `batchId`. */
-  private async createIn(batchId: string) {
-    const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
-
-    // Track properties resolved through expression_create — a signed literal
-    // envelope or a custom (non-"literal") resolveLanguage. These may fail
-    // inside a batch context, so defer them to setProperty after createSubject.
-    const deferredExpressionProps: string[] = [];
-
-    const initialValues = {};
+    const metadata = ctor.getModelMetadata();
+    const values: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(this)) {
-      if (value !== undefined && value !== null && value !== "" && !(Array.isArray(value) && value.length > 0) && !value?.action) {
-        const propMeta = metadata.properties[key];
-        // Only offer keys with a declared, settable model property. This
-        // excludes ORM bookkeeping fields (_baseExpression, _perspective —
-        // enumerable instance fields, not model properties), relations
-        // (@HasOne also registers a property, but innerUpdate writes it as a
-        // relation), and read-only properties/flags (readOnly: true). None of
-        // these have an `ad4m://setter` on the Rust side, which otherwise logs
-        // a "declares no setter" warning per key on every save().
-        if (!propMeta || propMeta.readOnly || metadata.relations[key]) {
-          continue;
-        }
-        if (effectiveLiteralStorage(propMeta).kind !== "deterministic") {
-          deferredExpressionProps.push(key);
-          continue;
-        }
-        initialValues[key] = value;
+      if (value === undefined || value === null || value === "") continue;
+      if (metadata.relations[key]) {
+        if (!this.writableRelation(key)) continue;
+        // A remover has nothing to remove from a new instance.
+        if (value?.action === "remover") continue;
+        const members = this.relationMembers(value);
+        if (members.length > 0) values[key] = members;
+        continue;
       }
-    }
-
-    await this.perspective.createSubject(
-      this,
-      this._baseExpression,
-      initialValues,
-      batchId
-    );
-
-    // Relations via innerUpdate; createSubject wrote the scalar properties.
-    const writes = await this.updateWrites(false);
-
-    for (const key of deferredExpressionProps) {
-      const value = (this as any)[key];
-      if (value !== undefined && value !== null) {
-        writes.push(...await this.planProperty(key, value));
+      // Only a declared, settable property: not ORM bookkeeping, a read-only
+      // property or a flag (the executor writes the flags itself).
+      const propMeta = metadata.properties[key];
+      if (!propMeta || propMeta.readOnly || propMeta.flag) continue;
+      if (Array.isArray(value)) {
+        console.warn(`Property "${key}" holds an array and is not a relation, skipping`);
+        continue;
       }
+      values[key] = value;
     }
-    await this.sendWrites(writes, batchId);
+    return { op: "create", class: this.mutateClass(), id: this._baseExpression, values, ...(parent && { parent }) };
   }
 
-  /** The name the executor knows the class by when it is abstract (#1435):
-   *  a built-in's URI (#1446). Through an abstract class, the executor
-   *  writes to the record's own classes. */
-  private abstractName(): string | undefined {
-    const ctor = this.constructor as typeof Ad4mModel & { isAbstract?: boolean };
-    return ctor.isAbstract ? ctor.queriedAs() : undefined;
-  }
-
-  private changedValues(): Record<string, any> {
-    return Object.fromEntries(this.changedFields().map((key) => [key, (this as any)[key]]));
-  }
-
-  /** `changedValues()` with each relation's members as IDs, as the relation
-   *  helpers send them: a member may be a model instance. An action envelope
-   *  (`{ action: "adder", value }`) keeps its action, as `innerUpdate()` runs
-   *  it; an action it does not know is a setter there, so it is one here. */
-  private changedValuesForDispatch(): Record<string, any> {
-    const relations = (this.constructor as typeof Ad4mModel).getModelMetadata().relations;
-    const ids = (value: any) =>
-      Array.isArray(value) ? value.map((v) => this.resolveRelationId(v)) : this.resolveRelationId(value);
-    return Object.fromEntries(
-      Object.entries(this.changedValues()).map(([key, value]) => {
-        if (!relations[key] || value == null) return [key, value];
-        if (value.action) {
-          const action = ["adder", "remover", "setter"].includes(value.action) ? value.action : "setter";
-          return [key, { action, value: ids(value.value) }];
+  /**
+   * The update op of the fields changed since the snapshot, or `undefined`
+   * when none is. A property set to `null` or `""` is cleared; an array sets
+   * a relation's members; a `{ action, value }` envelope adds, removes or sets.
+   */
+  private updateOp(): MutateOp | undefined {
+    const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
+    const dirty = new Set(this.changedFields());
+    const set: Record<string, unknown> = {};
+    const add: Record<string, string[]> = {};
+    const remove: Record<string, string[]> = {};
+    for (const [key, value] of Object.entries(this)) {
+      if (value === undefined || !dirty.has(key)) continue;
+      if (metadata.relations[key]) {
+        if (!this.writableRelation(key)) continue;
+        const members = this.relationMembers(value);
+        // An envelope that is not an adder or a remover sets, as `set<Rel>` does.
+        if (value?.action === "adder" || value?.action === "remover") {
+          if (members.length > 0) (value.action === "adder" ? add : remove)[key] = members;
+        } else if (value?.action || Array.isArray(value) || members.length > 0) {
+          set[key] = members;
         }
-        return [key, ids(value)];
-      })
+        continue;
+      }
+      const propMeta = metadata.properties[key];
+      // Flags are immutable after creation.
+      if (!propMeta || propMeta.flag) continue;
+      if (Array.isArray(value)) {
+        console.warn(`Property "${key}" holds an array and is not a relation, skipping`);
+        continue;
+      }
+      set[key] = value === "" ? null : value;
+    }
+    const changes = Object.fromEntries(
+      Object.entries({ set, add, remove }).filter(([, change]) => Object.keys(change).length > 0),
     );
+    if (Object.keys(changes).length === 0) return undefined;
+    return { op: "update", class: this.mutateClass(), id: this._baseExpression, ...changes };
   }
 
   private cleanCopy() {
@@ -2084,127 +1888,6 @@ export class Ad4mModel {
       }
     }
     return cleanCopy;
-  }
-
-  private async innerUpdate(setProperties: boolean = true, batchId?: string) {
-    await this.sendWrites(await this.updateWrites(setProperties), batchId);
-  }
-
-  /** The writes of the changed fields, in field order (see {@link sendWrites}). */
-  private async updateWrites(setProperties: boolean = true): Promise<FieldWrite[]> {
-    const writes: FieldWrite[] = [];
-    const ctor = this.constructor as typeof Ad4mModel;
-
-    // Determine which fields actually changed (skip unchanged when snapshot exists)
-    const dirty = this._snapshot ? new Set(this.changedFields()) : null;
-
-    // Only iterate schema-declared fields, not internal ORM properties
-    const metadata = ctor.getModelMetadata();
-    const schemaFields = new Set([
-      ...Object.keys(metadata.properties),
-      ...Object.keys(metadata.relations),
-    ]);
-
-    const entries = Object.entries(this);
-    for (const [key, value] of entries) {
-      // Only process schema-declared fields
-      if (!schemaFields.has(key)) continue;
-      // Skip unchanged fields when a snapshot is available
-      if (dirty && !dirty.has(key)) continue;
-
-      // Skip read-only relations — explicit getters never write links, and
-      // neither does a relation declared `readOnly`.
-      // For target+filter relations, skip only when another relation on this
-      // model claims the same predicate (i.e., this is a filtered *view* of a
-      // base relation and writing would collide).
-      const relMeta = metadata.relations[key];
-      if (relMeta) {
-        if (relMeta.getter || relMeta.readOnly) continue;
-        if (relMeta.target && relMeta.filter !== false) {
-          // Check for predicate collision with a sibling relation
-          const hasCollision = Object.entries(metadata.relations).some(
-            ([otherName, otherMeta]) =>
-              otherName !== key &&
-              (otherMeta as RelationMetadata).predicate === relMeta.predicate
-          );
-          if (hasCollision) continue;
-        }
-      }
-
-      if (value !== undefined) {
-        if (value?.action) {
-          const envelopePredicate = this.getRelationOptions(key)?.predicate;
-          if (envelopePredicate && value.action !== "remover") this._relationsWritten.add(envelopePredicate);
-          switch (value.action) {
-            case "setter":
-              writes.push(...this.planRelation(key, 'setter', value.value));
-              break;
-            case "adder":
-              writes.push(...this.planRelation(key, 'adder', value.value));
-              break;
-            case "remover":
-              writes.push(...this.planRelation(key, 'remover', value.value));
-              break;
-            default:
-              writes.push(...this.planRelation(key, 'setter', value.value));
-              break;
-          }
-        } else if (Array.isArray(value)) {
-          // Handle all arrays as relations, including empty ones (which clears the relation).
-          // A record being created under an id minted here has no links to
-          // clear, so an empty relation there costs a round trip and writes nothing.
-          const predicate = this.getRelationOptions(key)?.predicate ?? key;
-          if (value.length === 0 && !this._snapshot && this._idMinted && !this._relationsWritten.has(predicate)) continue;
-          this._relationsWritten.add(predicate);
-          writes.push(...this.planRelation(key, 'setter', value));
-        } else {
-          // A scalar handed to a relation field is a single-member relation.
-          //
-          // This used to `continue` — "Skip, it's a relation, not a regular
-          // property" — so `Model.create(p, { source: 'uri://x' })` typechecked,
-          // ran, resolved, and wrote no link. The record was created with the
-          // relation empty and nothing anywhere said so, which surfaces later as
-          // a *reader* complaining about a malformed instance: a Relationship
-          // with no endpoints, a Placement pointing at nothing. Both look like
-          // rendering bugs from the outside, because the record exists and the
-          // thing that should reference it does not.
-          //
-          // The array form is the documented path and stays correct; the problem
-          // is that the scalar form is plausible, typechecks against a field
-          // declared `string`, and fails silently. Coercing matches what a caller
-          // reaching for it meant. A value `setRelationValues` cannot use now
-          // fails there, loudly, instead of vanishing here.
-          //
-          // Deliberately outside the `setProperties` gate, mirroring the array
-          // branch above. `create` passes `setProperties: false` when the class
-          // has a constructor, because `create_subject` writes the values map —
-          // but a relation carries `ad4m://adder`, not `ad4m://setter`, so
-          // `create_subject` drops it (see the warning added in 3ee2b5bc6).
-          // Relations have to be written here in both cases or they are lost by
-          // both paths at once.
-          const relationMeta = this.getRelationOptions(key);
-          if (relationMeta) {
-            // `null` and `""` are not relation members; relations empty with `[]`.
-            if (value !== null && value !== "") {
-              this._relationsWritten.add(relationMeta.predicate);
-              writes.push(...this.planRelation(key, 'setter', [value]));
-            }
-            continue;
-          }
-
-          if (setProperties) {
-            // Skip flag properties — they are immutable after creation
-            const propMeta = this.getPropertyMetadata(key);
-            if (propMeta?.flag) {
-              continue;
-            }
-
-            writes.push(...await this.planProperty(key, value));
-          }
-        }
-      }
-    }
-    return writes;
   }
 
   /**
@@ -2326,11 +2009,11 @@ export class Ad4mModel {
   /**
    * Deletes the model instance from the perspective.
    *
-   * Also removes every incoming link (any link whose target is this
-   * instance, e.g. a parent's `@HasMany` link to it), so no reference to the
-   * deleted instance is left behind. Incoming links are read from committed
-   * state: a link to this instance added earlier in the same batch is not
-   * removed.
+   * One `delete` op: the executor runs the class's destructor, else removes
+   * the links of the properties and relations the class declares, then
+   * removes every incoming link (any link whose target is this instance,
+   * e.g. a parent's `@HasMany` link to it), so no reference to the deleted
+   * instance is left behind.
    * 
    * @param batchId - Optional batch ID for batch operations
    * @throws Will throw if removing the instance's links or its incoming links fails
@@ -2347,58 +2030,7 @@ export class Ad4mModel {
    * ```
    */
   async delete(batchId?: string) {
-    const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
-    // Through an abstract class (#1435), `removeSubject` runs the destructors
-    // of the record's own classes.
-    const hasDestructor = !!this.abstractName() || Object.values(metadata.properties).some(
-      (p) => p.required || p.flag || p.initial !== undefined
-    );
-
-    if (hasDestructor) {
-      // Remove the subject itself (destructor actions)
-      await this._perspective.removeSubject(this, this._baseExpression, batchId);
-    } else {
-      // No destructor (all-optional model).
-      // SAFETY: We must NOT remove all outgoing links because another model
-      // class may be instantiated on the same base expression.  Removing
-      // everything would silently destroy that other instance's data — and
-      // if that instance has a destructor, it can no longer be called
-      // cleanly, leaving link debris.
-      //
-      // Instead we only remove outgoing links whose predicate is declared
-      // by THIS model's schema (properties + relations).
-      const knownPredicates = new Set<string>();
-      for (const p of Object.values(metadata.properties)) {
-        if (p.predicate) knownPredicates.add(p.predicate);
-      }
-      for (const r of Object.values(metadata.relations)) {
-        if (r.predicate) knownPredicates.add(r.predicate);
-      }
-
-      const outgoingLinks = await this._perspective.get(new LinkQuery({ source: this._baseExpression }));
-      const ownLinks = outgoingLinks.filter(
-        (link) => link.data.predicate && knownPredicates.has(link.data.predicate)
-      );
-
-      if (ownLinks.length > 0) {
-        await this._perspective.removeLinks(ownLinks, batchId);
-      }
-    }
-
-    // Remove every incoming link — any link that points **to** this instance,
-    // whatever model or relation it belongs to (including polymorphic
-    // relations, which name no single target class, e.g. a parent's child
-    // link). Unlike outgoing links (scoped above), incoming links have OTHER
-    // subjects as their source. Removing them doesn't damage sibling models
-    // on this base expression; leaving them would leave dangling references.
-    // A failed read or removal rejects delete(): a delete that silently leaves
-    // references behind is worse than one that reports its failure.
-    // The read sees committed links only: links staged earlier in the same
-    // batch (`batchId`) are not returned by `get()` and so are not removed.
-    const incomingLinks = await this._perspective.get(new LinkQuery({ target: this._baseExpression }));
-    if (incomingLinks.length > 0) {
-      await this._perspective.removeLinks(incomingLinks, batchId);
-    }
+    await writeOps(this._perspective, [{ op: "delete", class: this.mutateClass(), id: this._baseExpression }], batchId);
   }
 
   // ──────────────────────────────────────────────────────────
@@ -2462,27 +2094,17 @@ export class Ad4mModel {
     }
     const instance = new this(perspective) as T;
     Object.assign(instance, data);
-    // Resolved before any write, so an invalid parent stages nothing.
-    const linkParent = options?.parent ? parentLinkWriter(options.parent, this) : undefined;
+    // Resolved before any write, so an invalid parent writes nothing.
+    const parent = options?.parent ? parentRef(options.parent, this) : undefined;
 
-    // In a caller's batch, the caller commits.
-    if (options?.batchId) {
-      await instance.save(options.batchId);
-      await linkParent?.(perspective, instance.id, options.batchId);
-      return instance;
-    }
+    // One create op, with the parent: the executor commits the instance and
+    // its parent link together, or writes nothing. In a caller's batch, the
+    // caller commits.
+    await instance.persist(options?.batchId, parent);
+    if (options?.batchId) return instance;
 
-    // Otherwise open a batch so that the instance and the parent→child link
-    // are committed together. If any step throws, the batch is discarded
-    // (nothing is written, and it does not stay open on the executor) and the
-    // original error is rethrown.
-    await Ad4mModel.transaction(perspective, async ({ batchId }) => {
-      await instance.save(batchId);
-      await linkParent?.(perspective, instance.id, batchId);
-    });
-
-    // The instance holds what it wrote and its snapshot is taken (save() did
-    // that), so nothing is read back unless the caller asked for the row.
+    // The instance holds what it wrote and its snapshot is taken (persist()
+    // did that), so nothing is read back unless the caller asked for the row.
     if (options?.returns === 'row') {
       const failed = (cause?: unknown) =>
         Object.assign(new Error(`${this.name}.create(): ${instance.id} was created, but reading it back failed`), { cause });
@@ -2628,9 +2250,14 @@ export class Ad4mModel {
    * Executes a set of model operations inside a single batch (transaction).
    *
    * All `save`, `update`, and `delete` calls made via the provided `batchId`
-   * are buffered and flushed atomically when the callback completes.
-   * If the callback throws, the batch is discarded, not committed, and the
-   * error is rethrown: no partial writes.
+   * are queued as ops and sent as one `perspective.mutate` call, then
+   * committed atomically, when the callback completes. The ops see each
+   * other (a `save()` of a new instance, then an update of it). A refused op
+   * fails the call, so the validation errors surface when the callback
+   * returns, not at the `save()`. If the callback throws, nothing is sent,
+   * the batch is discarded, and the error is rethrown: no partial writes.
+   * The `batchId` also takes raw link writes (`perspective.add(link, 'shared',
+   * tx.batchId)`), which stage at once.
    *
    * @param perspective - The perspective to operate on
    * @param fn - Async callback that receives a `TransactionContext` object.
@@ -2656,14 +2283,22 @@ export class Ad4mModel {
     fn: (tx: { batchId: string }) => Promise<R>,
   ): Promise<R> {
     const batchId = await perspective.createBatch();
+    const ops: MutateOp[] = [];
+    transactionOps.set(batchId, ops);
     try {
       const result = await fn({ batchId });
+      // The model writes of the callback go out as one call, so a later op
+      // finds an instance an earlier one created, and a refused op fails all.
+      transactionOps.delete(batchId);
+      if (ops.length > 0) await perspective.mutate(ops, { batch: batchId });
       await perspective.commitBatch(batchId);
       return result;
     } catch (e) {
       // A failed discard must not hide the original error.
       await perspective.discardBatch(batchId).catch(() => {});
       throw e;
+    } finally {
+      transactionOps.delete(batchId);
     }
   }
 

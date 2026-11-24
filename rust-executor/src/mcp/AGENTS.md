@@ -55,7 +55,6 @@ causes no side effect.
 | `query_links`, `get_flows` | `perspective.queryLinks` |
 | `add_model` | `perspective.registerShapes` |
 | `add_flow` | `perspective.addLinks` (the flow's links and its `ad4m://has_flow` name link) |
-| `execute_commands` | `perspective.executeCommands` |
 | `flow_proposal_accept`, `flow_proposal_reject`, `flow_valid_outputs` | `perspective.acceptFlowProposal`, `.rejectFlowProposal`, `.flowValidOutputs` |
 | `language_meta` | `language.meta` |
 | `list_link_language_templates` | `runtime.linkLanguageTemplates` |
@@ -85,7 +84,9 @@ causes no side effect.
   (`perspectives/instances/`), not the method: they keep their own text, worded from
   the shared typed results and errors, and their own guard (below, the same rule as the
   methods'), so the MCP matrix lists them with the perspective tools.
-- Tools with no RPC method keep their own logic: `describe_perspective`, `instance_query` /
+- Tools with no RPC method keep their own logic: `describe_perspective`, `execute_commands`
+  (`PerspectiveInstance::execute_commands` after the `get_writable_perspective` guard),
+  `instance_query` /
   `instance_get`, `instance_transcript`, `add_child` and `get_children` (the built-in `Container`),
   `flow_state`, `flow_actions`, `generate_waker_query`, `get_mention_waker_config`, `get_documentation`, `auth_status`, and the dynamic per-class
   tools. Those that take a perspective get it through `get_readable_perspective` /

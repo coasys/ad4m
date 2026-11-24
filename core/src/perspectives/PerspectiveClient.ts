@@ -549,31 +549,6 @@ export class PerspectiveClient {
         return this.#apiClient.call('perspective.shapes', { uuid, names })
     }
 
-    async executeCommands(uuid: string, commands: string, expression: string, parameters: string, batchId?: string): Promise<boolean> {
-        return this.#wrote(uuid, this.#apiClient.call(
-            'perspective.executeCommands', { uuid, commands, expression, parameters, batchId }
-        ))
-    }
-
-    async createSubject(uuid: string, subjectClass: string, expressionAddress: string, initialValues?: string, batchId?: string): Promise<boolean> {
-        return this.#wrote(uuid, this.#apiClient.call(
-            'perspective.createSubject', { uuid, subjectClass, expressionAddress, initialValues, batchId }
-        ))
-    }
-
-    /** Through an abstract class (#1435), the executor writes to the record's own classes. */
-    async updateSubject(uuid: string, subjectClass: string, expressionAddress: string, values: string, batchId?: string): Promise<boolean> {
-        return this.#wrote(uuid, this.#apiClient.call(
-            'perspective.updateSubject', { uuid, subjectClass, expressionAddress, values, batchId }
-        ))
-    }
-
-    async removeSubject(uuid: string, subjectClass: string, expressionAddress: string, batchId?: string): Promise<boolean> {
-        return this.#wrote(uuid, this.#apiClient.call(
-            'perspective.removeSubject', { uuid, subjectClass, expressionAddress, batchId }
-        ))
-    }
-
     /**
      * Validated writes (`perspective.mutate`): an ordered list of create, update and delete
      * ops. The executor checks each against the class's SHACL shape (each property's type,

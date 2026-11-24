@@ -533,7 +533,7 @@ export function buildSHACL(
     }
 
     // Empty lists are valid: the executor stores them as `literal:string:[]`,
-    // so `createSubject` works for all-optional models without a @Flag.
+    // so a `create` op works for all-optional models without a @Flag.
     shape.setConstructorActions(constructorActions);
     shape.setDestructorActions(destructorActions);
 

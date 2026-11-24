@@ -477,17 +477,6 @@ pub struct NotificationGrantRequest {
 
 // ── Commands / Subjects ──
 
-#[derive(Deserialize, TS)]
-#[ts(optional_fields)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct ExecuteCommandsRequest {
-    pub commands: String,
-    pub expression: String,
-    pub parameters: Option<String>,
-    pub batch_id: Option<String>,
-}
-
 // ── Hosting ──
 
 // ── Verify Signature ──
@@ -720,42 +709,6 @@ pub struct ResyncSubscriptionRequest {
 #[ts(export)]
 pub struct DisposeQueryRequest {
     pub subscription_id: String,
-}
-
-#[derive(Deserialize, TS)]
-#[ts(optional_fields)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct CreateSubjectRequest {
-    pub subject_class: String,
-    pub expression_address: String,
-    pub initial_values: Option<String>,
-    pub batch_id: Option<String>,
-}
-
-/// Through an abstract class (#1435), dispatched to the record's own classes.
-#[derive(Deserialize, TS)]
-#[ts(optional_fields)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct UpdateSubjectRequest {
-    pub subject_class: String,
-    pub expression_address: String,
-    /// A JSON object: property name → value.
-    pub values: String,
-    pub batch_id: Option<String>,
-}
-
-/// Runs the class's destructor; through an abstract class (#1435), that of
-/// each of the record's classes it reads.
-#[derive(Deserialize, TS)]
-#[ts(optional_fields)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct RemoveSubjectRequest {
-    pub subject_class: String,
-    pub expression_address: String,
-    pub batch_id: Option<String>,
 }
 
 #[derive(Deserialize, TS)]

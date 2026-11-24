@@ -2624,22 +2624,27 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
 
   const makePerspective = () =>
     ({
-      executeAction: jest.fn().mockResolvedValue(undefined),
-      createSubject: jest.fn().mockResolvedValue(undefined),
+      mutate: jest.fn().mockResolvedValue({ ids: [] }),
       createBatch: jest.fn().mockResolvedValue("batch-generated"),
       commitBatch: jest.fn().mockResolvedValue(undefined),
       uuid: "test-perspective-uuid",
     }) as any;
 
-  /** Targets written by `executeAction`, across every call. */
+  /** The ops of every `mutate` call, in order. */
+  const sentOps = (perspective: any): any[] =>
+    perspective.mutate.mock.calls.flatMap((call: any[]) => call[0]);
+
+  /** Targets written by `mutate`: the members of every relation, across every op. */
   const writtenTargets = (perspective: any): string[] =>
-    perspective.executeAction.mock.calls.flatMap((call: any[]) =>
-      (call[2] ?? []).map((param: any) => param.value)
+    sentOps(perspective).flatMap((op: any) =>
+      [op.values, op.set, op.add, op.remove].flatMap((group) =>
+        Object.values(group ?? {}).flatMap((v) => (Array.isArray(v) ? v : [])) as string[]
+      )
     );
 
-  /** The batchId argument of each `executeAction` call. */
+  /** The batch of each `mutate` call. */
   const batchIds = (perspective: any): unknown[] =>
-    perspective.executeAction.mock.calls.map((call: any[]) => call[3]);
+    perspective.mutate.mock.calls.map((call: any[]) => call[1]?.batch);
 
   describe("a scalar handed to a relation field", () => {
     it("writes a link instead of being silently dropped", async () => {
@@ -2659,12 +2664,7 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
       );
     });
 
-    it("writes it even when a constructor consumed the properties", async () => {
-      // `create` passes `setProperties: false` when the class has a SHACL
-      // constructor, because `createSubject` writes the values map. A relation
-      // carries `ad4m://adder` rather than `ad4m://setter`, so `createSubject`
-      // drops it — meaning the relation write has to happen here regardless of
-      // that flag, or both paths discard it at once.
+    it("puts the relation into the same create op as the properties", async () => {
       const perspective = makePerspective();
 
       await TestRelationship.create(
@@ -2673,8 +2673,13 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
         { batchId: "batch-1" }
       );
 
-      expect(perspective.createSubject).toHaveBeenCalled();
-      expect(writtenTargets(perspective)).toContain("we://block/a");
+      expect(perspective.mutate).toHaveBeenCalledTimes(1);
+      expect(sentOps(perspective)).toEqual([
+        expect.objectContaining({
+          op: "create",
+          values: { label: "contradicts", source: ["we://block/a"] },
+        }),
+      ]);
     });
 
     it("agrees with the documented array form", async () => {
@@ -2711,8 +2716,8 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
   // The failure this closes: every `save()` of a new instance logged one
   // Rust-side "declares no setter" warning per ORM-internal field, per flag,
   // and per empty HasMany relation — none of which are real model data, so
-  // none of them should ever have been offered to `createSubject` at all.
-  describe("initialValues sent to createSubject", () => {
+  // none of them should ever have been offered to the create op at all.
+  describe("values sent in the create op", () => {
     @Model({ name: "TestNoisyPost" })
     class TestNoisyPost extends Ad4mModel {
       @Flag({ through: "test://post_type", value: "test://post" })
@@ -2733,9 +2738,8 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
 
       await TestNoisyPost.create(perspective, { title: "hello", channel: "test://channel/1" }, { batchId: "batch-1" });
 
-      expect(perspective.createSubject.mock.calls[0][2]).toEqual({ title: "hello" });
-      // The @HasOne value is still written, as a relation.
-      expect(writtenTargets(perspective)).toContain("test://channel/1");
+      // The @HasOne value is written as a relation; the flag and the empty tags are not sent.
+      expect(sentOps(perspective)[0].values).toEqual({ title: "hello", channel: ["test://channel/1"] });
     });
   });
 
@@ -2759,10 +2763,10 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
       tags: string[] = [];
     }
 
-    /** Predicates written by `executeAction`, across every call. */
+    /** Properties and relations written by `mutate`, across every op. */
     const writtenPredicates = (perspective: any): string[] =>
-      perspective.executeAction.mock.calls.flatMap((call: any[]) =>
-        (call[0] ?? []).map((action: any) => action.predicate)
+      sentOps(perspective).flatMap((op: any) =>
+        [op.values, op.set, op.add, op.remove].flatMap((group) => Object.keys(group ?? {}))
       );
 
     it("are not written by create(), not even as the empty initialiser", async () => {
@@ -2774,9 +2778,9 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
         { batchId: "batch-1" }
       );
 
-      expect(writtenPredicates(perspective)).toContain("test://has_tag");
-      expect(writtenPredicates(perspective)).not.toContain("test://voted_by");
-      expect(writtenPredicates(perspective)).not.toContain("test://resolved_by");
+      expect(writtenPredicates(perspective)).toContain("tags");
+      expect(writtenPredicates(perspective)).not.toContain("votedBy");
+      expect(writtenPredicates(perspective)).not.toContain("resolvedBy");
     });
 
     it("are not written by save() even when the caller sets them", async () => {
@@ -2789,9 +2793,9 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
 
       await instance.save("batch-1");
 
-      expect(writtenPredicates(perspective)).toContain("test://has_tag");
-      expect(writtenPredicates(perspective)).not.toContain("test://voted_by");
-      expect(writtenPredicates(perspective)).not.toContain("test://resolved_by");
+      expect(writtenPredicates(perspective)).toContain("tags");
+      expect(writtenPredicates(perspective)).not.toContain("votedBy");
+      expect(writtenPredicates(perspective)).not.toContain("resolvedBy");
       expect(writtenTargets(perspective)).not.toContain("did:key:a");
       expect(writtenTargets(perspective)).not.toContain("did:key:b");
     });
@@ -3614,8 +3618,7 @@ describe("save() on an instance pushed by a subscription", () => {
     const h = liveHarness({ instances: initial, totalCount: initial.length });
     const perspective = {
       ...h.perspective,
-      executeAction: jest.fn().mockResolvedValue(undefined),
-      createSubject: jest.fn().mockResolvedValue(undefined),
+      mutate: jest.fn().mockResolvedValue({ ids: [] }),
       createBatch: jest.fn().mockResolvedValue("batch-1"),
       commitBatch: jest.fn().mockResolvedValue(undefined),
       stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue("PushedTask"),
@@ -3623,9 +3626,9 @@ describe("save() on an instance pushed by a subscription", () => {
     return { perspective, push: (instances: any[]) => h.push({ result: { instances, totalCount: instances.length } }) };
   };
 
-  /** The value each executeAction call wrote. */
+  /** The ops each `mutate` call sent. */
   const written = (perspective: any) =>
-    perspective.executeAction.mock.calls.map((call: any[]) => call[2]?.[0]?.value);
+    perspective.mutate.mock.calls.map((call: any[]) => call[0]);
 
   it("updates the instance rather than creating a second one", async () => {
     const { perspective, push } = makePerspective([{ id: "push://t1", kind: "push://task", title: "v1" }]);
@@ -3644,8 +3647,9 @@ describe("save() on an instance pushed by a subscription", () => {
     expect(task.changedFields()).toEqual(["title"]);
     await task.save("batch-1");
 
-    expect(perspective.createSubject).not.toHaveBeenCalled();
-    expect(written(perspective)).toEqual(["literal:string:v3"]);
+    expect(written(perspective)).toEqual([
+      [{ op: "update", class: "push://PushedTask", id: "push://t1", set: { title: "v3" } }],
+    ]);
   });
 
   it("updates an instance pushed to a queryOf() live query", async () => {
@@ -3664,8 +3668,9 @@ describe("save() on an instance pushed by a subscription", () => {
     note.body = "b2";
     await note.save("batch-1");
 
-    expect(perspective.createSubject).not.toHaveBeenCalled();
-    expect(written(perspective)).toEqual(["literal:string:b2"]);
+    expect(written(perspective)).toEqual([
+      [{ op: "update", class: "push://PushedNote", id: "push://n1", set: { body: "b2" } }],
+    ]);
   });
 });
 
@@ -3766,9 +3771,75 @@ describe("Ad4mModel.transaction()", () => {
       createBatch: jest.fn(async () => { const id = `batch-${++next}`; open.add(id); return id; }),
       commitBatch: jest.fn(async (id: string) => { open.delete(id); return {}; }),
       discardBatch: jest.fn(async (id: string) => open.delete(id)),
+      mutate: jest.fn(async () => ({ ids: [] })),
     } as any;
     return { perspective, open };
   };
+
+  @Model({ name: "TxCard" })
+  class TxCard extends Ad4mModel {
+    @Property({ through: "tx://title" })
+    title: string = "";
+  }
+
+  it("sends the callback's model writes as one mutate call in the batch, then commits", async () => {
+    const { perspective } = makePerspective();
+    await Ad4mModel.transaction(perspective, async (tx) => {
+      const card = new TxCard(perspective, "tx://c1");
+      card.title = "one";
+      await card.save(tx.batchId);
+      card.title = "two";
+      await card.save(tx.batchId);
+      await new TxCard(perspective, "tx://c2").delete(tx.batchId);
+      // Nothing is sent until the callback returns.
+      expect(perspective.mutate).not.toHaveBeenCalled();
+    });
+    expect(perspective.mutate).toHaveBeenCalledTimes(1);
+    expect(perspective.mutate).toHaveBeenCalledWith(
+      [
+        { op: "create", class: "tx://TxCard", id: "tx://c1", values: { title: "one" } },
+        { op: "update", class: "tx://TxCard", id: "tx://c1", set: { title: "two" } },
+        { op: "delete", class: "tx://TxCard", id: "tx://c2" },
+      ],
+      { batch: "batch-1" },
+    );
+    expect(perspective.commitBatch).toHaveBeenCalledWith("batch-1");
+    expect(perspective.mutate.mock.invocationCallOrder[0]).toBeLessThan(perspective.commitBatch.mock.invocationCallOrder[0]);
+  });
+
+  it("sends nothing when the callback writes no model", async () => {
+    const { perspective } = makePerspective();
+    await Ad4mModel.transaction(perspective, async () => {});
+    expect(perspective.mutate).not.toHaveBeenCalled();
+  });
+
+  it("discards the batch and rethrows when the mutate call is refused", async () => {
+    const { perspective, open } = makePerspective();
+    const refusal = new Error("missingRequired");
+    perspective.mutate.mockRejectedValue(refusal);
+    await expect(
+      Ad4mModel.transaction(perspective, async (tx) => {
+        const card = new TxCard(perspective, "tx://c1");
+        card.title = "one";
+        await card.save(tx.batchId);
+      }),
+    ).rejects.toBe(refusal);
+    expect(perspective.discardBatch).toHaveBeenCalledWith("batch-1");
+    expect(perspective.commitBatch).not.toHaveBeenCalled();
+    expect(open.size).toBe(0);
+  });
+
+  it("does not queue a write that names another batch", async () => {
+    const { perspective } = makePerspective();
+    await Ad4mModel.transaction(perspective, async () => {
+      await new TxCard(perspective, "tx://c3").delete("other-batch");
+    });
+    expect(perspective.mutate).toHaveBeenCalledTimes(1);
+    expect(perspective.mutate).toHaveBeenCalledWith(
+      [{ op: "delete", class: "tx://TxCard", id: "tx://c3" }],
+      { batch: "other-batch" },
+    );
+  });
 
   it("commits the batch and returns the callback's value", async () => {
     const { perspective, open } = makePerspective();
@@ -3851,45 +3922,38 @@ describe("delete() and incoming links", () => {
 
   // No getAllShacl: the cascade must not depend on registered shapes.
   const makePerspective = () => ({
-    removeSubject: jest.fn(async () => {}),
-    get: jest.fn(async (q: any) => (q.target === "del://t1" ? incoming : [])),
-    removeLinks: jest.fn(async () => []),
+    mutate: jest.fn(async () => ({ ids: [] })),
   }) as any;
 
-  it("removes every incoming link (other models, polymorphic relations) in the delete's batch", async () => {
+  // The executor's delete op removes the own links and every incoming link,
+  // so the SDK sends one op and reads nothing.
+  it("is one delete op in the delete's batch, whatever links point at the instance", async () => {
     // The declared models are only there to make the links realistic.
     expect([DelOwner, DelOther, DelContainer].every((M) => M.generateSHACL())).toBe(true);
     const perspective = makePerspective();
     await new DelTarget(perspective, "del://t1").delete("batch-1");
 
-    expect(perspective.removeSubject).toHaveBeenCalledWith(expect.anything(), "del://t1", "batch-1");
-    expect(perspective.get).toHaveBeenCalledWith(expect.objectContaining({ target: "del://t1" }));
-    expect(perspective.removeLinks).toHaveBeenCalledTimes(1);
-    expect(perspective.removeLinks).toHaveBeenCalledWith(incoming, "batch-1");
+    expect(perspective.mutate).toHaveBeenCalledTimes(1);
+    expect(perspective.mutate).toHaveBeenCalledWith(
+      [{ op: "delete", class: "del://DelTarget", id: "del://t1" }],
+      { batch: "batch-1" },
+    );
   });
 
-  it("rejects when removing the incoming links fails", async () => {
+  it("sends no batch without one", async () => {
     const perspective = makePerspective();
-    const failure = new Error("remove failed");
-    perspective.removeLinks.mockRejectedValue(failure);
+    await new DelOptional(perspective, "del://t1").delete();
+    expect(perspective.mutate).toHaveBeenCalledWith(
+      [{ op: "delete", class: "del://DelOptional", id: "del://t1" }],
+      {},
+    );
+  });
+
+  it("rejects with the executor's error", async () => {
+    const perspective = makePerspective();
+    const failure = new Error("delete refused");
+    perspective.mutate.mockRejectedValue(failure);
     await expect(new DelTarget(perspective, "del://t1").delete()).rejects.toBe(failure);
-  });
-
-  it("rejects when reading the incoming links fails", async () => {
-    const perspective = makePerspective();
-    const failure = new Error("read failed");
-    perspective.get.mockRejectedValue(failure);
-    await expect(new DelTarget(perspective, "del://t1").delete()).rejects.toBe(failure);
-  });
-
-  it("rejects when removing an all-optional model's own links fails", async () => {
-    const own = { author: "a", timestamp: "1", data: { source: "del://t1", predicate: "del://note", target: "literal://string:x" } };
-    const perspective = makePerspective();
-    perspective.get.mockImplementation(async (q: any) => (q.source === "del://t1" ? [own] : []));
-    const failure = new Error("remove failed");
-    perspective.removeLinks.mockRejectedValue(failure);
-    await expect(new DelOptional(perspective, "del://t1").delete()).rejects.toBe(failure);
-    expect(perspective.removeLinks).toHaveBeenCalledWith([own], undefined);
   });
 });
 
@@ -3900,126 +3964,123 @@ describe("save() create path and its own batch", () => {
     kind: string = "";
   }
 
-  it("discards the batch it opened and rethrows when createSubject fails", async () => {
-    const failure = new Error("createSubject failed");
+  it("a create is one mutate call, with no batch of its own", async () => {
     const perspective = {
       uuid: "p",
-      createBatch: jest.fn(async () => "batch-1"),
-      commitBatch: jest.fn(async () => ({})),
-      discardBatch: jest.fn(async () => true),
-      stringOrTemplateObjectToSubjectClassName: jest.fn(async () => "SaveBatchCard"),
-      createSubject: jest.fn(async () => { throw failure; }),
+      mutate: jest.fn(async () => ({ ids: [] })),
+      createBatch: jest.fn(),
+      commitBatch: jest.fn(),
     } as any;
+    const card = new SaveBatchCard(perspective);
+    jest.spyOn(card as any, "getData").mockResolvedValue(card);
+    await card.save();
 
-    await expect(new SaveBatchCard(perspective).save()).rejects.toBe(failure);
-    expect(perspective.discardBatch).toHaveBeenCalledWith("batch-1");
+    expect(perspective.mutate).toHaveBeenCalledTimes(1);
+    expect(perspective.mutate).toHaveBeenCalledWith(
+      [{ op: "create", class: expect.stringContaining("SaveBatchCard"), id: card.id, values: {} }],
+      {},
+    );
+    expect(perspective.createBatch).not.toHaveBeenCalled();
     expect(perspective.commitBatch).not.toHaveBeenCalled();
+  });
+
+  it("rethrows the executor's refusal and writes no snapshot when the create fails", async () => {
+    const failure = new Error("refused");
+    const perspective = { uuid: "p", mutate: jest.fn(async () => { throw failure; }) } as any;
+    const card = new SaveBatchCard(perspective);
+
+    await expect(card.save()).rejects.toBe(failure);
+    // The retry creates again: the first call wrote nothing.
+    await expect(card.save()).rejects.toBe(failure);
+    expect(perspective.mutate).toHaveBeenCalledTimes(2);
+    expect(perspective.mutate.mock.calls.map((c: any[]) => c[0][0].op)).toEqual(["create", "create"]);
   });
 
   it("updates on a retried save() when the re-read after a committed create fails", async () => {
     const perspective = {
       uuid: "p",
-      createBatch: jest.fn(async () => "batch-1"),
-      commitBatch: jest.fn(async () => ({})),
-      discardBatch: jest.fn(async () => true),
-      stringOrTemplateObjectToSubjectClassName: jest.fn(async () => "SaveBatchCard"),
-      createSubject: jest.fn(async () => {}),
+      mutate: jest.fn(async () => ({ ids: [] })),
     } as any;
     const card = new SaveBatchCard(perspective);
     const reread = new Error("read failed");
     jest.spyOn(card as any, "getData").mockRejectedValueOnce(reread).mockResolvedValue(card);
-    jest.spyOn(card as any, "innerUpdate").mockResolvedValue(undefined);
 
     await expect(card.save()).rejects.toBe(reread);
     await card.save();
 
     // The retry took the update path: the record was created once.
-    expect(perspective.createSubject).toHaveBeenCalledTimes(1);
+    expect(perspective.mutate.mock.calls.filter((c: any[]) => c[0][0].op === "create")).toHaveLength(1);
   });
 
-  it("leaves a caller's batch open when createSubject fails", async () => {
-    const failure = new Error("createSubject failed");
+  it("leaves a caller's batch open when the create fails", async () => {
+    const failure = new Error("create failed");
     const perspective = {
       uuid: "p",
       createBatch: jest.fn(async () => "own"),
       discardBatch: jest.fn(async () => true),
-      stringOrTemplateObjectToSubjectClassName: jest.fn(async () => "SaveBatchCard"),
-      createSubject: jest.fn(async () => { throw failure; }),
+      mutate: jest.fn(async () => { throw failure; }),
     } as any;
 
     await expect(new SaveBatchCard(perspective).save("caller-batch")).rejects.toBe(failure);
+    expect(perspective.mutate).toHaveBeenCalledWith(expect.anything(), { batch: "caller-batch" });
     expect(perspective.createBatch).not.toHaveBeenCalled();
     expect(perspective.discardBatch).not.toHaveBeenCalled();
   });
 
   it("create() in a caller's batch refuses a parent scope that is not one instance before it writes", async () => {
-    const perspective = {
-      uuid: "p",
-      createBatch: jest.fn(async () => "own"),
-      stringOrTemplateObjectToSubjectClassName: jest.fn(async () => "SaveBatchCard"),
-      createSubject: jest.fn(async () => true),
-    } as any;
+    const perspective = { uuid: "p", mutate: jest.fn(async () => ({ ids: [] })) } as any;
     const traverse = { ids: ["ad4m://a", "ad4m://b"] } as any;
 
     await expect(
       SaveBatchCard.create(perspective, {}, { parent: traverse, batchId: "caller-batch" }),
     ).rejects.toThrow(/traverse scope/);
-    expect(perspective.createSubject).not.toHaveBeenCalled();
+    expect(perspective.mutate).not.toHaveBeenCalled();
   });
 
   it("create() in a caller's batch refuses a parent model with no relation to it before it writes", async () => {
     @Model({ name: "UnrelatedParent" })
     class UnrelatedParent extends Ad4mModel {}
-    const perspective = {
-      uuid: "p",
-      createBatch: jest.fn(async () => "own"),
-      stringOrTemplateObjectToSubjectClassName: jest.fn(async () => "SaveBatchCard"),
-      createSubject: jest.fn(async () => true),
-    } as any;
+    const perspective = { uuid: "p", mutate: jest.fn(async () => ({ ids: [] })) } as any;
 
     await expect(
       SaveBatchCard.create(perspective, {}, { parent: { model: UnrelatedParent, id: "ad4m://p" }, batchId: "caller-batch" }),
     ).rejects.toThrow();
-    expect(perspective.createSubject).not.toHaveBeenCalled();
+    expect(perspective.mutate).not.toHaveBeenCalled();
   });
 
-  it("create() with a parent discards the batch it opened and rethrows when the parent link fails", async () => {
-    const failure = new Error("add failed");
-    const perspective = {
-      uuid: "p",
-      createBatch: jest.fn(async () => "batch-1"),
-      commitBatch: jest.fn(async () => ({})),
-      discardBatch: jest.fn(async () => true),
-      stringOrTemplateObjectToSubjectClassName: jest.fn(async () => "SaveBatchCard"),
-      createSubject: jest.fn(async () => {}),
-      add: jest.fn(async () => { throw failure; }),
-    } as any;
+  it("create() with a parent is one create op that carries the parent", async () => {
+    const perspective = { uuid: "p", mutate: jest.fn(async () => ({ ids: [] })), createBatch: jest.fn(), add: jest.fn() } as any;
 
-    await expect(
-      SaveBatchCard.create(perspective, {}, { parent: { id: "sb://parent", predicate: "sb://child" } }),
-    ).rejects.toBe(failure);
-    expect(perspective.add).toHaveBeenCalledWith(expect.objectContaining({ source: "sb://parent", predicate: "sb://child" }), "shared", "batch-1");
-    expect(perspective.discardBatch).toHaveBeenCalledWith("batch-1");
-    expect(perspective.commitBatch).not.toHaveBeenCalled();
-  });
+    await SaveBatchCard.create(perspective, {}, { parent: { id: "sb://parent", predicate: "sb://child" } });
 
-  it("create() with a parent keeps the create's error when the discard fails too", async () => {
-    const failure = new Error("createSubject failed");
-    const perspective = {
-      uuid: "p",
-      createBatch: jest.fn(async () => "batch-1"),
-      commitBatch: jest.fn(async () => ({})),
-      discardBatch: jest.fn(async () => { throw new Error("discard failed"); }),
-      stringOrTemplateObjectToSubjectClassName: jest.fn(async () => "SaveBatchCard"),
-      createSubject: jest.fn(async () => { throw failure; }),
-      add: jest.fn(async () => {}),
-    } as any;
-
-    await expect(
-      SaveBatchCard.create(perspective, {}, { parent: { id: "sb://parent", predicate: "sb://child" } }),
-    ).rejects.toBe(failure);
-    expect(perspective.discardBatch).toHaveBeenCalledWith("batch-1");
+    expect(perspective.mutate).toHaveBeenCalledTimes(1);
+    expect(perspective.mutate).toHaveBeenCalledWith(
+      [expect.objectContaining({ op: "create", parent: { id: "sb://parent", predicate: "sb://child" } })],
+      {},
+    );
+    expect(perspective.createBatch).not.toHaveBeenCalled();
     expect(perspective.add).not.toHaveBeenCalled();
+  });
+
+  it("create() with a parent rethrows the executor's refusal", async () => {
+    const failure = new Error("parent refused");
+    const perspective = { uuid: "p", mutate: jest.fn(async () => { throw failure; }) } as any;
+
+    await expect(
+      SaveBatchCard.create(perspective, {}, { parent: { id: "sb://parent", predicate: "sb://child" } }),
+    ).rejects.toBe(failure);
+  });
+
+  it("create() in a caller's batch with a parent sends the parent in the op and returns without a read", async () => {
+    const perspective = { uuid: "p", mutate: jest.fn(async () => ({ ids: [] })), modelQuery: jest.fn() } as any;
+
+    await SaveBatchCard.create(perspective, {}, { parent: { id: "sb://parent" }, batchId: "caller-batch" });
+
+    expect(perspective.mutate).toHaveBeenCalledWith(
+      [expect.objectContaining({ op: "create", parent: { id: "sb://parent" } })],
+      { batch: "caller-batch" },
+    );
+    expect(perspective.modelQuery).not.toHaveBeenCalled();
   });
 
   // create() returns what it wrote and reads nothing after the commit, unless
@@ -4036,14 +4097,9 @@ describe("save() create path and its own batch", () => {
     const reread = new Error("read failed");
     const makePerspective = () => ({
       uuid: "p",
+      mutate: jest.fn(async () => ({ ids: [] })),
       createBatch: jest.fn(async () => "batch-1"),
       commitBatch: jest.fn(async () => ({})),
-      discardBatch: jest.fn(async () => true),
-      stringOrTemplateObjectToSubjectClassName: jest.fn(async () => "ReadBackCard"),
-      createSubject: jest.fn(async () => {}),
-      executeAction: jest.fn(async () => {}),
-      setSingleTarget: jest.fn(async () => {}),
-      add: jest.fn(async () => {}),
       modelQuery: jest.fn(async () => { throw reread; }),
     }) as any;
 
@@ -4052,7 +4108,7 @@ describe("save() create path and its own batch", () => {
 
       const card = await ReadBackCard.create(perspective, { title: "written" });
 
-      expect(perspective.commitBatch).toHaveBeenCalledWith("batch-1");
+      expect(perspective.mutate).toHaveBeenCalledTimes(1);
       expect(perspective.modelQuery).not.toHaveBeenCalled();
       expect(card.id).toBeTruthy();
       expect(card.title).toBe("written");
@@ -4066,11 +4122,10 @@ describe("save() create path and its own batch", () => {
         instances: [{ id: "rb://row", author: "did:key:alice", createdAt: 1700000000000, title: "stored" }],
         totalCount: 1,
       }));
-      perspective.createSubject.mockImplementation(async (instance: any) => { instance._baseExpression = "rb://row"; });
 
       const card = await ReadBackCard.create(perspective, { title: "written" }, { returns: "row" });
 
-      expect(perspective.commitBatch.mock.invocationCallOrder[0])
+      expect(perspective.mutate.mock.invocationCallOrder[0])
         .toBeLessThan(perspective.modelQuery.mock.invocationCallOrder[0]);
       expect(card.author).toBe("did:key:alice");
       expect(card.createdAt).toBe(1700000000000);
@@ -4082,7 +4137,7 @@ describe("save() create path and its own batch", () => {
 
       const err = await ReadBackCard.create(perspective, { title: "written" }, { returns: "row" }).catch((e) => e);
 
-      expect(perspective.commitBatch).toHaveBeenCalledWith("batch-1");
+      expect(perspective.mutate).toHaveBeenCalledTimes(1);
       expect(err.message).toMatch(/was created, but reading it back failed/);
       expect(err.cause).toBe(reread);
     });
@@ -4093,52 +4148,42 @@ describe("save() create path and its own batch", () => {
       await expect(
         ReadBackCard.create(perspective, { title: "written" }, { returns: "row", batchId: "caller-batch" }),
       ).rejects.toThrow(/returns: 'row'.*batchId/);
-      expect(perspective.createSubject).not.toHaveBeenCalled();
+      expect(perspective.mutate).not.toHaveBeenCalled();
     });
 
     it("then save() updates: the snapshot is set, no second create", async () => {
       const perspective = makePerspective();
-      perspective.stringOrTemplateObjectToSubjectClassName.mockResolvedValue("ReadBackCard");
-      perspective.updateSubject = jest.fn(async () => {});
-
       const card = await ReadBackCard.create(perspective, { title: "written" });
-      perspective.createSubject.mockClear();
+      perspective.mutate.mockClear();
       card.title = "changed";
       jest.spyOn(card as any, "getData").mockResolvedValue(card);
-      jest.spyOn(card as any, "innerUpdate").mockResolvedValue(undefined);
       await card.save();
 
-      expect(perspective.createSubject).not.toHaveBeenCalled();
-      expect((card as any).innerUpdate).toHaveBeenCalled();
+      expect(perspective.mutate).toHaveBeenCalledTimes(1);
+      expect(perspective.mutate).toHaveBeenCalledWith(
+        [{ op: "update", class: expect.stringContaining("ReadBackCard"), id: card.id, set: { title: "changed" } }],
+        {},
+      );
     });
 
-    it("writes the parent link in the create's own batch, and reads nothing", async () => {
+    it("writes the parent in the create op, and reads nothing", async () => {
       const perspective = makePerspective();
 
       await ReadBackCard.create(
         perspective, { title: "written" }, { parent: { id: "rb://parent", predicate: "rb://child" } },
       );
 
-      expect(perspective.add).toHaveBeenCalledWith(
-        expect.objectContaining({ source: "rb://parent", predicate: "rb://child" }), "shared", "batch-1");
-      expect(perspective.commitBatch).toHaveBeenCalledWith("batch-1");
+      expect(perspective.mutate).toHaveBeenCalledWith(
+        [expect.objectContaining({ op: "create", parent: { id: "rb://parent", predicate: "rb://child" } })],
+        {},
+      );
       expect(perspective.modelQuery).not.toHaveBeenCalled();
     });
 
-    it("discards its batch when a write fails", async () => {
+    it("rejects with the executor's refusal and does not read", async () => {
       const perspective = makePerspective();
-      const failure = new Error("createSubject failed");
-      perspective.createSubject.mockRejectedValue(failure);
-
-      await expect(ReadBackCard.create(perspective, { title: "written" })).rejects.toBe(failure);
-      expect(perspective.discardBatch).toHaveBeenCalledWith("batch-1");
-      expect(perspective.commitBatch).not.toHaveBeenCalled();
-    });
-
-    it("still rejects when the commit fails, and does not read", async () => {
-      const perspective = makePerspective();
-      const failure = new Error("commit failed");
-      perspective.commitBatch.mockRejectedValue(failure);
+      const failure = new Error("create refused");
+      perspective.mutate.mockRejectedValue(failure);
 
       await expect(ReadBackCard.create(perspective, { title: "written" })).rejects.toBe(failure);
       expect(perspective.modelQuery).not.toHaveBeenCalled();
@@ -4158,11 +4203,9 @@ describe("get() and update() on a missing instance", () => {
   const makePerspective = (instances: any[]) => ({
     uuid: "p",
     modelQuery: jest.fn().mockResolvedValue({ instances, totalCount: instances.length }),
+    mutate: jest.fn(async () => ({ ids: [] })),
     createBatch: jest.fn(async () => "batch-1"),
     commitBatch: jest.fn(async () => ({})),
-    createSubject: jest.fn(async () => {}),
-    executeAction: jest.fn(async () => {}),
-    setSingleTarget: jest.fn(async () => {}),
     add: jest.fn(async () => {}),
   }) as any;
 
@@ -4189,7 +4232,7 @@ describe("get() and update() on a missing instance", () => {
   it("update() rejects for a missing ID and writes nothing", async () => {
     const perspective = makePerspective([]);
     await expect(MissCard.update(perspective, "miss://none", { title: "x" })).rejects.toThrow(/not found/);
-    for (const write of ["createBatch", "createSubject", "executeAction", "setSingleTarget", "add"]) {
+    for (const write of ["createBatch", "mutate", "add"]) {
       expect(perspective[write]).not.toHaveBeenCalled();
     }
   });
@@ -4211,7 +4254,7 @@ describe("get() and update() on a missing instance", () => {
     note.note = "new";
     await note.save();
 
-    expect(perspective.executeAction).toHaveBeenCalledTimes(1);
+    expect(perspective.mutate).toHaveBeenCalledTimes(1);
     expect(note.isDirty()).toBe(false);
   });
 });
@@ -4273,7 +4316,7 @@ describe("live query by class name", () => {
 
 import { valueToLiteralIri } from "./query-sparql";
 
-describe("Model writes: one executeAction call per write (P4)", () => {
+describe("Model writes: one mutate op per write", () => {
   @Model({ name: "P4Card" })
   class P4Card extends Ad4mModel {
     @Optional({ through: "p4://title" })
@@ -4294,37 +4337,9 @@ describe("Model writes: one executeAction call per write (P4)", () => {
 
   const makePerspective = () =>
     ({
-      executeAction: jest.fn().mockResolvedValue(undefined),
+      mutate: jest.fn().mockResolvedValue({ ids: [] }),
       uuid: "test-perspective-uuid",
     }) as any;
-
-  /**
-   * The links each `executeAction` call writes, resolved as the executor's
-   * `execute_commands` resolves them: one left-to-right pass, longest
-   * parameter name first; `this` is the instance; `collectionSetter` takes
-   * every parameter of its call as a member.
-   */
-  const resolved = (perspective: any) =>
-    perspective.executeAction.mock.calls.flatMap(([commands, expression, parameters]: any[]) => {
-      const names = [...(parameters ?? [])].sort((a: any, b: any) => b.name.length - a.name.length);
-      const sub = (input?: string) => {
-        if (input == null) return input;
-        let out = "";
-        for (let i = 0; i < input.length;) {
-          const p = names.find((p: any) => p.name && input.startsWith(p.name, i));
-          if (p) { out += p.value; i += p.name.length; } else { out += input[i]; i += 1; }
-        }
-        return out;
-      };
-      const self = (s?: string) => (s === "this" ? expression : s);
-      return commands.map((c: any) => ({
-        action: c.action,
-        source: self(sub(c.source)),
-        predicate: self(sub(c.predicate)),
-        target: c.action === "collectionSetter" ? (parameters ?? []).map((p: any) => p.value) : sub(c.target),
-        local: !!c.local,
-      }));
-    });
 
   const edited = (perspective: any) => {
     const card = new P4Card(perspective, "p4://card/1") as any;
@@ -4335,67 +4350,96 @@ describe("Model writes: one executeAction call per write (P4)", () => {
     return card;
   };
 
-  it("an update of three scalar fields makes one call with each field's link and status", async () => {
+  it("an update of three scalar fields is one call with one update op, sending the raw values", async () => {
     const perspective = makePerspective();
     await edited(perspective).save("batch-1");
 
-    expect(perspective.executeAction).toHaveBeenCalledTimes(1);
-    expect(perspective.executeAction.mock.calls[0][3]).toBe("batch-1");
-    expect(resolved(perspective)).toEqual([
-      { action: "setSingleTarget", source: "p4://card/1", predicate: "p4://title", target: "literal:string:Hello", local: false },
-      { action: "setSingleTarget", source: "p4://card/1", predicate: "p4://note", target: "literal:string:private", local: true },
-      { action: "setSingleTarget", source: "p4://card/1", predicate: "p4://rank", target: valueToLiteralIri(3), local: false },
+    expect(perspective.mutate.mock.calls).toEqual([[
+      [{ op: "update", class: "p4://P4Card", id: "p4://card/1", set: { title: "Hello", note: "private", rank: 3 } }],
+      { batch: "batch-1" },
+    ]]);
+  });
+
+  it("sends only the changed fields", async () => {
+    const perspective = makePerspective();
+    const card = new P4Card(perspective, "p4://card/1") as any;
+    card.title = "Old";
+    card.takeSnapshot();
+    card.rank = 4;
+    await card.save("batch-1");
+
+    expect(perspective.mutate.mock.calls[0][0]).toEqual([
+      { op: "update", class: "p4://P4Card", id: "p4://card/1", set: { rank: 4 } },
     ]);
   });
 
-  it("adder and remover values join the scalar writes; each collection set is a call of its own", async () => {
-    const perspective = makePerspective();
-    // No snapshot: every field is written, in field order (tags, links, then the scalars).
-    const card = new P4Card(perspective, "p4://card/1") as any;
-    card.tags = { action: "adder", value: ["t1", "t2"] };
-    card.links = ["l1", "l2"];
-    card.title = "Hello";
-    card.note = "private";
-    card.rank = 3;
-    await card.innerUpdate(true, "batch-1");
-
-    // tags (two adds) in one call; links (collectionSetter) alone; the three scalars in one.
-    expect(perspective.executeAction).toHaveBeenCalledTimes(3);
-    expect(resolved(perspective)).toEqual([
-      { action: "addLink", source: "p4://card/1", predicate: "p4://tag", target: "t1", local: false },
-      { action: "addLink", source: "p4://card/1", predicate: "p4://tag", target: "t2", local: false },
-      { action: "collectionSetter", source: "p4://card/1", predicate: "p4://link", target: ["l1", "l2"], local: false },
-      { action: "setSingleTarget", source: "p4://card/1", predicate: "p4://title", target: "literal:string:Hello", local: false },
-      { action: "setSingleTarget", source: "p4://card/1", predicate: "p4://note", target: "literal:string:private", local: true },
-      { action: "setSingleTarget", source: "p4://card/1", predicate: "p4://rank", target: valueToLiteralIri(3), local: false },
-    ]);
-  });
-
-  it("a long run of writes is split into calls of at most 200 writes, in order", async () => {
-    const perspective = makePerspective();
-    const card = new P4Card(perspective, "p4://card/1") as any;
-    const tags = Array.from({ length: 450 }, (_, i) => `t${i}`);
-    card.tags = { action: "adder", value: tags };
-    await card.innerUpdate(true, "batch-1");
-
-    const tagCalls = perspective.executeAction.mock.calls.filter(([commands]: any[]) => commands[0].action === "addLink");
-    expect(tagCalls.map((call: any[]) => call[2].length)).toEqual([200, 200, 50]);
-    const added = resolved(perspective).filter((c: any) => c.action === "addLink");
-    expect(added.map((c: any) => c.target)).toEqual(tags);
-  });
-
-  it("a single write is sent as before, with its `value` parameter", async () => {
+  it("sends nothing when nothing changed", async () => {
     const perspective = makePerspective();
     const card = new P4Card(perspective, "p4://card/1") as any;
     card.takeSnapshot();
-    card.title = "Only";
+    await card.save("batch-1");
+    expect(perspective.mutate).not.toHaveBeenCalled();
+  });
+
+  it("a cleared property is null in set", async () => {
+    const perspective = makePerspective();
+    const card = new P4Card(perspective, "p4://card/1") as any;
+    card.title = "Old";
+    card.rank = 1;
+    card.takeSnapshot();
+    card.title = "";
+    card.rank = null;
     await card.save("batch-1");
 
-    expect(perspective.executeAction.mock.calls).toEqual([[
-      [{ action: "setSingleTarget", source: "this", predicate: "p4://title", target: "value" }],
-      "p4://card/1",
-      [{ name: "value", value: "literal:string:Only" }],
-      "batch-1",
+    expect(perspective.mutate.mock.calls[0][0]).toEqual([
+      { op: "update", class: "p4://P4Card", id: "p4://card/1", set: { title: null, rank: null } },
+    ]);
+  });
+
+  it("adders, removers and a set of the relations and the scalars share one update op", async () => {
+    const perspective = makePerspective();
+    const card = new P4Card(perspective, "p4://card/1") as any;
+    card.tags = ["t0"];
+    card.links = ["l0"];
+    card.takeSnapshot();
+    card.tags = { action: "adder", value: ["t1", "t2"] };
+    card.links = ["l1", "l2"];
+    card.title = "Hello";
+    await card.save("batch-1");
+
+    expect(perspective.mutate).toHaveBeenCalledTimes(1);
+    expect(perspective.mutate.mock.calls[0][0]).toEqual([{
+      op: "update",
+      class: "p4://P4Card",
+      id: "p4://card/1",
+      set: { links: ["l1", "l2"], title: "Hello" },
+      add: { tags: ["t1", "t2"] },
+    }]);
+  });
+
+  it("a new instance is one create op with the values and the members, and no empty relation", async () => {
+    const perspective = makePerspective();
+    const card = new P4Card(perspective, "p4://card/1") as any;
+    card.title = "Hello";
+    card.tags = ["t1"];
+    await card.save("batch-1");
+
+    expect(perspective.mutate.mock.calls).toEqual([[
+      [{ op: "create", class: "p4://P4Card", id: "p4://card/1", values: { title: "Hello", tags: ["t1"] } }],
+      { batch: "batch-1" },
     ]]);
+  });
+
+  it("a long run of members is one op, in order", async () => {
+    const perspective = makePerspective();
+    const card = new P4Card(perspective, "p4://card/1") as any;
+    card.tags = ["t0"];
+    card.takeSnapshot();
+    const tags = Array.from({ length: 450 }, (_, i) => `t${i}`);
+    card.tags = { action: "adder", value: tags };
+    await card.save("batch-1");
+
+    expect(perspective.mutate).toHaveBeenCalledTimes(1);
+    expect(perspective.mutate.mock.calls[0][0][0].add.tags).toEqual(tags);
   });
 });

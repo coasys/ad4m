@@ -227,7 +227,7 @@ impl PerspectiveInstance {
     /// in, and wrong for one the agent itself just started: its first settle
     /// would never be reported. `mint_flow_instance` seeds the row itself; a
     /// client mint (`FlowInstance.start` in the TS SDK writes the row's links
-    /// through `createSubject`) only reaches the executor as this diff, so
+    /// through `perspective.mutate`) only reaches the executor as this diff, so
     /// it is seeded here. Before #1424 the client wrote a `Local` cache link
     /// in the same call, which did the same job.
     ///

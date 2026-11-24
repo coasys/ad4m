@@ -510,7 +510,7 @@ async fn targets(p: &PerspectiveInstance, source: &str, predicate: &str) -> Vec<
 
 /// Writes through `Container` (open question 5): under a Block its own
 /// adder runs (`we://child`); under a node no class describes, and under a
-/// FluxChannel (not a Container), one `has_child` link. `updateSubject` on
+/// FluxChannel (not a Container), one `has_child` link. an update op on
 /// `ad4m://Container` is the same write, adder and remover.
 #[tokio::test(flavor = "multi_thread")]
 async fn writes_under_a_parent_go_through_its_own_relation_or_has_child() {

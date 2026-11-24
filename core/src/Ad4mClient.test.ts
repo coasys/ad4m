@@ -119,8 +119,6 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'perspective.queryProlog': JSON.stringify([{ X: 'test' }]),
     'perspective.querySparql': JSON.stringify([{ id: '1' }]),
     'perspective.registerShapes': { unchanged: [], written: ['test://TestClass'], generation: 1 },
-    'perspective.executeCommands': true,
-    'perspective.createSubject': true,
     // A `colour` property is refused as the executor refuses an unknown property: 422 with the
     // InstanceError as data.
     'perspective.mutate': (p: Record<string, unknown>) =>

@@ -44,8 +44,8 @@ Invariants:
   failing op's index travels with the error (`MutateError`) and the RPC puts it in the
   message and in `data.opIndex`.
 
-Write rules (one set, for the MCP tools, `perspective.mutate` and the old `createSubject` /
-`updateSubject` / `removeSubject` RPCs, whose handlers call these functions):
+Write rules (one set, for the MCP tools and `perspective.mutate`, whose handlers call these
+functions):
 - Create: a property must be declared by the class (`unknownProperty` otherwise). `null` or
   `""` writes nothing. An array on a relation writes one link per member, and for an
   ordered relation the ordering entries its strategy needs (`PerspectiveInstance::order_appended`,

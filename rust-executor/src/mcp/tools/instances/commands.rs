@@ -7,8 +7,8 @@
 //! the only way over MCP to run an action the class declares but no
 //! `instance_*` tool models (custom actions, local-only links, …).
 //!
-//! It calls the RPC method `perspective.executeCommands` through the handler map, so the
-//! method's guard applies.
+//! It calls `PerspectiveInstance::execute_commands` directly, after the guard of the
+//! perspective RPC methods that write (`get_writable_perspective`).
 
 use super::{error_json, pretty, Ad4mMcpHandler};
 use crate::perspectives::perspective_instance::{Command, Parameter};
@@ -38,34 +38,39 @@ impl Ad4mMcpHandler {
     pub async fn execute_commands(&self, params: Parameters<ExecuteCommandsParams>) -> String {
         let p = &params.0;
 
-        // The method parses both again; parsing here keeps the tool's own messages.
-        if let Err(e) = serde_json::from_str::<Vec<Command>>(&p.commands) {
-            return error_json(format!("Error parsing commands JSON: {e}"));
-        }
-        if let Some(parameters) = &p.parameters {
-            if let Err(e) = serde_json::from_str::<Vec<Parameter>>(parameters) {
-                return error_json(format!("Error parsing parameters JSON: {e}"));
-            }
-        }
+        let commands = match serde_json::from_str::<Vec<Command>>(&p.commands) {
+            Ok(commands) => commands,
+            Err(e) => return error_json(format!("Error parsing commands JSON: {e}")),
+        };
+        let parameters = match &p.parameters {
+            Some(parameters) => match serde_json::from_str::<Vec<Parameter>>(parameters) {
+                Ok(parameters) => parameters,
+                Err(e) => return error_json(format!("Error parsing parameters JSON: {e}")),
+            },
+            None => Vec::new(),
+        };
 
-        let params = json!({
-            "uuid": p.perspective_id,
-            "commands": p.commands,
-            "expression": p.expression_address,
-            "parameters": p.parameters,
-        });
-        let executed = self
-            .call::<serde_json::Value>("perspective.executeCommands", params, |e| {
-                error_json(format!("Error executing commands: {}", e.message))
-            })
-            .await;
-        match executed {
-            Ok(_) => pretty(&json!({
+        let (mut perspective, agent_context) =
+            match self.get_writable_perspective(&p.perspective_id).await {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+        match perspective
+            .execute_commands(
+                commands,
+                p.expression_address.clone(),
+                parameters,
+                None,
+                &agent_context,
+            )
+            .await
+        {
+            Ok(()) => pretty(&json!({
                 "executed": true,
                 "perspective_id": p.perspective_id,
                 "expression_address": p.expression_address
             })),
-            Err(e) => e,
+            Err(e) => error_json(format!("Error executing commands: {e}")),
         }
     }
 }

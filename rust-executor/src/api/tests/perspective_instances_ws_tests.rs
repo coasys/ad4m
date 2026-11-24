@@ -3,7 +3,7 @@
 //! Written from the method contract: a valid write lands and reads back, a write that breaks the
 //! class's shape is refused with the errors as data (422) and the failing op's index, a call
 //! writes all its ops or none, a later op sees the earlier ones, `batch` keeps the writes
-//! invisible until the caller's commit, and the guard is `perspective.createSubject`'s.
+//! invisible until the caller's commit, and the guard is the perspective UPDATE guard.
 
 use serde_json::{json, Value};
 

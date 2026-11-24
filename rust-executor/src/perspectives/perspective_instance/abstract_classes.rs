@@ -663,7 +663,7 @@ impl PerspectiveInstance {
 
     /// Put `child` under `parent` through `Container` (#1446): what MCP's
     /// `add_child` and `instance_create(parent)` do, and what the SDK's
-    /// `create({ parent: { id } })` asks `updateSubject` for. See
+    /// `create({ parent: { id } })` asks a `perspective.mutate` create op for. See
     /// [`Self::has_child_write`] for which link it writes.
     pub(crate) async fn add_to_container(
         &mut self,

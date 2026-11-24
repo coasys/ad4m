@@ -258,7 +258,7 @@ This runs all four nightly jobs.
   (`setNetemOnPorts`: executor API and SFU UDP), and skips without
   passwordless `sudo -n tc`. Never impair the whole of `lo` in a PR job:
   machine runners on one host share it, and every other job's localhost
-  RPC times out (seen as `executeCommands`/`otherAgents` 30 s timeouts).
+  RPC times out (seen as `otherAgents` 30 s timeouts).
 - E14 runs the SFU behind a simulated NAT: the executor binds 127.0.0.1 on a
   fixed port and advertises 127.0.0.2 (`executorEnv` in the world spec);
   `reachOnlyThrough` DNATs 127.0.0.2:P to 127.0.0.1:P and drops direct UDP

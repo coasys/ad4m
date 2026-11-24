@@ -36,6 +36,8 @@ await Ad4mModel.transaction(perspective, async (tx) => {
 
 If any operation inside the callback throws, the batch is never committed and no changes are persisted.
 
+The model writes of a transaction (`create`, `save`, `update`, `delete` and the relation methods called with `tx.batchId`) are queued in the order you call them and sent as ONE `perspective.mutate` call when the callback returns, just before the commit. So the ops see each other: a `save` can update an instance an earlier `create` of the same transaction made. The executor validates them then, so a refused write (a missing required property, a value of the wrong type) rejects `Ad4mModel.transaction()` after the callback finished, not at the `save()` that queued it; the batch is discarded and nothing is persisted. Raw link calls that take `tx.batchId` (`perspective.add(link, 'shared', tx.batchId)`) stage at once.
+
 ### Complex Data Models
 
 When your application needs to maintain relationships between multiple entities:
@@ -175,7 +177,7 @@ fails `notFound`. Put create and follow-up ops in one call, or commit the create
 (The link reads a write does — collection membership, the remove cascade — do see the
 batch's own staged work.) A refused call leaves the batch as it was.
 
-Under the hood, `Ad4mModel.transaction()` calls `createBatch()` and `commitBatch()` for you.
+Under the hood, `Ad4mModel.transaction()` calls `createBatch()`, then one `perspective.mutate(ops, { batch })` with the queued model writes, then `commitBatch()` for you. Outside a transaction, a model write given a `batchId` is one `perspective.mutate` call into that batch at once.
 
 ## Technical Details
 

@@ -24,7 +24,7 @@
 //! rejection names the property, the expected type and the cardinality —
 //! the agent gets less schema up front than with per-property tool
 //! parameters, so the error has to carry it instead. Accepted writes go
-//! through the same `create_subject` / `update_subject` / link paths the
+//! through the same instance writers (`perspectives/instances/`) the
 //! per-class tools use. The dynamic generators themselves are untouched and
 //! keep feeding the in-process interpretation harness.
 //!

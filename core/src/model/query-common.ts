@@ -63,24 +63,36 @@ export function resolveParentPredicate(
   }
 
   // Model form — resolve from relation metadata
+  const name = resolveParentRelation(parent, childCtor);
+  return getRelationsMetadata(parent.model)[name].predicate;
+}
+
+/**
+ * The name of the relation of a model-form parent (`{ model, id, field? }`)
+ * that holds `childCtor`: `field` when given, else the one relation whose
+ * `target()` is `childCtor`.
+ */
+export function resolveParentRelation(
+  parent: { model: any; field?: string },
+  childCtor: Function,
+): string {
   const { model } = parent;
   const relMeta = getRelationsMetadata(model);
 
   // Direct lookup by field name when provided
   if (parent.field) {
-    const entry = relMeta[parent.field];
-    if (!entry) {
+    if (!relMeta[parent.field]) {
       throw new Error(
         `parent(): field "${parent.field}" is not a registered relation on ${model.name}`,
       );
     }
-    return entry.predicate;
+    return parent.field;
   }
 
   // Fallback: scan for a relation whose target matches the child class
-  for (const [, entry] of Object.entries(relMeta)) {
+  for (const [name, entry] of Object.entries(relMeta)) {
     if (entry.target && entry.target() === childCtor) {
-      return entry.predicate;
+      return name;
     }
   }
   throw new Error(

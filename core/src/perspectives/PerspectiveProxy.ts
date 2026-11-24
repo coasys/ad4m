@@ -55,10 +55,6 @@ function extractNamespaceFromUri(uri: string): string {
 /** Link status argument. The executor accepts either case and returns links
  *  with the upper-case form (`LinkExpression.status`). */
 export type LinkStatus = "shared" | "local" | "SHARED" | "LOCAL"
-interface Parameter {
-    name: string
-    value: string
-}
 
 /**
  * PerspectiveProxy provides a high-level interface for working with AD4M Perspectives - agent-centric semantic graphs
@@ -91,7 +87,7 @@ interface Parameter {
  * 
  * // Use Social DNA
  * await Todo.register(perspective);
- * const todo = await perspective.createSubject("Todo", "expression://123");
+ * const todo = await Todo.create(perspective, { title: "Write" });
  * 
  * // Subscribe to changes
  * perspective.on("link-added", ({ link }) => {
@@ -161,70 +157,6 @@ export class PerspectiveProxy {
         this.sharedUrl = handle.sharedUrl;
         this.neighbourhood = handle.neighbourhood;
         this.state = handle.state;
-    }
-
-    /**
-     * Executes a set of actions on an expression with optional parameters.
-     * Used internally by Social DNA flows and subject class operations.
-     * 
-     * Actions are specified as an array of commands that modify links in the perspective.
-     * Each action is an object with the following format:
-     * ```typescript
-     * {
-     *   action: "addLink" | "removeLink" | "setSingleTarget" | "collectionSetter",
-     *   source: string,    // Usually "this" to reference the current expression
-     *   predicate: string, // The predicate URI
-     *   target: string     // The target value or "value" for parameters
-     * }
-     * ```
-     * 
-     * Available commands:
-     * - `addLink`: Creates a new link
-     * - `removeLink`: Removes an existing link
-     * - `setSingleTarget`: Removes all existing links with the same source/predicate and adds a new one
-     * - `collectionSetter`: Special command for setting relation properties
-     * 
-     * When used with parameters, the special value "value" in the target field will be 
-     * replaced with the actual parameter value.
-     * 
-     * @example
-     * ```typescript
-     * // Add a state link and remove an old one
-     * await perspective.executeAction([
-     *   {
-     *     action: "addLink",
-     *     source: "this",
-     *     predicate: "todo://state", 
-     *     target: "todo://doing"
-     *   },
-     *   {
-     *     action: "removeLink",
-     *     source: "this",
-     *     predicate: "todo://state",
-     *     target: "todo://ready"
-     *   }
-     * ], "expression://123");
-     * 
-     * // Set a property using a parameter
-     * await perspective.executeAction([
-     *   {
-     *     action: "setSingleTarget",
-     *     source: "this",
-     *     predicate: "todo://title",
-     *     target: "value"
-     *   }
-     * ], "expression://123", [
-     *   { name: "title", value: "New Title" }
-     * ]);
-     * ```
-     * 
-     * @param actions - Array of action objects to execute
-     * @param expression - Target expression address (replaces "this" in actions)
-     * @param parameters - Optional parameters that replace "value" in actions
-     * @param batchId - Optional batch ID to group this operation with others
-     */
-    async executeAction(actions, expression, parameters: Parameter[], batchId?: string) {
-        return this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters), batchId)
     }
 
     /**
@@ -1202,54 +1134,6 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Creates a new subject instance of the given subject class
-     * 
-     * @param subjectClass Either a string with the name of the subject class, or an object
-     * with the properties of the subject class.
-     * @param exprAddr The address of the expression to be turned into a subject instance
-     * @param initialValues Optional initial values for properties. If provided, these will be
-     * merged with constructor actions for better performance. A collection property accepts
-     * an array value and stores one entry per element; scalar properties store arrays/objects
-     * as a single JSON value.
-     * @param batchId Optional batch ID for grouping operations. If provided, returns the expression address
-     * instead of the subject proxy since the subject won't exist until the batch is committed.
-     * @returns A proxy object for the created subject, or just the expression address if in batch mode
-     */
-    async createSubject<T, B extends string | undefined = undefined>(
-        subjectClass: T, 
-        exprAddr: string,
-        initialValues?: Record<string, any>,
-        batchId?: B
-    ): Promise<B extends undefined ? T : string> {
-        await this.#client.createSubject(
-            this.#handle.uuid,
-            JSON.stringify({
-                className: await this.#className(subjectClass),
-                initialValues
-            }),
-            exprAddr,
-            initialValues ? JSON.stringify(initialValues) : undefined,
-            batchId
-        );
-
-        // Skip subject proxy creation when in batch mode since the subject won't exist until batch is committed
-        if (batchId) {
-            return exprAddr as B extends undefined ? T : string;
-        }
-
-        // Return the expression address directly — callers should use Ad4mModel or
-        // getSubjectData() to interact with the created instance.
-        return exprAddr as unknown as B extends undefined ? T : string;
-    }
-
-    /** Sets properties of an existing instance in the executor. Through an
-     *  abstract class (#1435), each value is written by every class of the
-     *  record that the abstract class reads, under its own name. */
-    async updateSubject(className: string, exprAddr: string, values: Record<string, any>, batchId?: string) {
-        await this.#client.updateSubject(this.#handle.uuid, className, exprAddr, JSON.stringify(values), batchId);
-    }
-
-    /**
      * Writes instances of subject classes with an ordered list of create, update and delete
      * ops, validated by the executor against each class's SHACL shape: the same check as the
      * MCP `instance_*` tools. All ops apply or none do, and a later op sees what an earlier
@@ -1273,24 +1157,6 @@ export class PerspectiveProxy {
     async getSubjectData<T>(subjectClass: T, exprAddr: string): Promise<T> {
         const className = await this.#className(subjectClass);
         return JSON.parse(await this.#client.getSubjectData(this.#handle.uuid, JSON.stringify({className}), exprAddr))
-    }
-
-    /** Removes a subject instance by running its (SDNA defined) destructor,
-     * which means removing links around the given expression address
-     *
-     * @param subjectClass Either a string with the name of the subject class, or an object
-     * with the properties of the subject class. In the latter case, the first subject class
-     * that matches the given properties will be used.
-     * @param exprAddr The address of the expression to be turned into a subject instance
-     * @param batchId Optional batch ID for grouping operations. If provided, the removal will be part of the batch
-     * and won't be executed until the batch is committed.
-     */
-    async removeSubject<T>(subjectClass: T, exprAddr: string, batchId?: string) {
-        // The executor runs the class's destructor: for an abstract class
-        // (#1435), the destructors of the record's classes it reads. A
-        // built-in one (`TextContent`, #1446) goes by its URI.
-        const className = await this.#className(subjectClass);
-        await this.#client.removeSubject(this.#handle.uuid, className, exprAddr, batchId);
     }
 
     /** Checks if the given expression is a subject instance of the given subject class

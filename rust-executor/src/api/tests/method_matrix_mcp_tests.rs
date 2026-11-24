@@ -307,25 +307,6 @@ fn tools() -> Vec<Tool> {
             },
         ),
         tool(
-            "execute_commands",
-            AsCaller,
-            vec![m(
-                "perspective.executeCommands",
-                |uuid| json!({ "uuid": uuid, "commands": COMMANDS, "expression": "matrix://e", "parameters": null }),
-            )],
-            |h, uuid| {
-                Box::pin(async move {
-                    h.execute_commands(Parameters(instances::ExecuteCommandsParams {
-                        perspective_id: uuid,
-                        commands: COMMANDS.into(),
-                        expression_address: "matrix://e".into(),
-                        parameters: None,
-                    }))
-                    .await
-                })
-            },
-        ),
-        tool(
             "language_meta",
             AsCaller,
             vec![m("language.meta", |_| json!({ "address": "QmMatrix" }))],
@@ -611,6 +592,7 @@ const NOT_WRAPPED: &[&str] = &[
     "add_child",
     "auth_status",
     "describe_perspective",
+    "execute_commands",
     "flow_actions",
     "flow_state",
     "generate_waker_query",
@@ -808,9 +790,9 @@ async fn every_wrapping_tool_allows_and_refuses_as_its_methods_guards_do() {
     }
     world.remove().await;
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    // 12 perspective tools × 15 rows, 17 others × 5 rows: the walk reached them all.
+    // 11 perspective tools × 15 rows, 17 others × 5 rows: the walk reached them all.
     assert!(
-        checked >= 12 * perspective_rows().len() + 17 * 5,
+        checked >= 11 * perspective_rows().len() + 17 * 5,
         "only {checked} rows checked"
     );
 }
@@ -931,6 +913,17 @@ fn perspective_tools() -> Vec<PerspectiveTool> {
                     properties: None,
                     base_uri: None,
                     parent: None,
+                }))
+                .await
+            })
+        }),
+        tool("execute_commands", Write, |h, uuid| {
+            Box::pin(async move {
+                h.execute_commands(Parameters(instances::ExecuteCommandsParams {
+                    perspective_id: uuid,
+                    commands: COMMANDS.into(),
+                    expression_address: "matrix://e".into(),
+                    parameters: None,
                 }))
                 .await
             })

@@ -650,7 +650,7 @@ describe("Multi-User Simple integration tests", () => {
 
 
             // User 1 creates a subject instance
-            await p1.createSubject(new TestSubject(), "test://subject1", {name: "Test Subject 1"});
+            await p1.mutate([{ op: "create", class: TestSubject.generateSHACL().shape.targetClass, id: "test://subject1", values: { name: "Test Subject 1" } }]);
 
             // Get all links from the perspective to check authors
             const links1 = await p1.get(new LinkQuery({}));
@@ -671,7 +671,7 @@ describe("Multi-User Simple integration tests", () => {
             await p2.registerShapes([TestSubject.generateSHACL().shape]);
 
             // User 2 creates a subject instance
-            await p2.createSubject(new TestSubject(), "test://subject2", {name: "Test Subject 2"});
+            await p2.mutate([{ op: "create", class: TestSubject.generateSHACL().shape.targetClass, id: "test://subject2", values: { name: "Test Subject 2" } }]);
 
             // Get all links from user2's perspective
             const links2 = await p2.get(new LinkQuery({}));

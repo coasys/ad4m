@@ -572,22 +572,6 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     ("perspective.registerShapes", || json!({ "shapes": [] })),
     (
-        "perspective.executeCommands",
-        || json!({ "commands": "[]", "expression": "e" }),
-    ),
-    (
-        "perspective.createSubject",
-        || json!({ "subjectClass": "C", "expressionAddress": "e" }),
-    ),
-    (
-        "perspective.updateSubject",
-        || json!({ "subjectClass": "C", "expressionAddress": "e", "values": "{}" }),
-    ),
-    (
-        "perspective.removeSubject",
-        || json!({ "subjectClass": "C", "expressionAddress": "e" }),
-    ),
-    (
         "perspective.mutate",
         || json!({ "ops": [{ "op": "delete", "class": "C", "id": "ad4m://e" }] }),
     ),

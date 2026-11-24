@@ -218,7 +218,7 @@ for link in links {
 - [x] `get_collection_adder_actions()` - Try SHACL first, fallback to Prolog
 - [x] `get_collection_remover_actions()` - Try SHACL first, fallback to Prolog
 - [x] `resolve_property_value()` - Try SHACL for resolve language
-- [x] TypeScript `removeSubject()` - Try SHACL for destructor actions
+- [x] `perspective.mutate` delete op - Try SHACL for destructor actions
 
 ### Phase 3: Remove Prolog Fallbacks ✅ (Completed in this PR)
 

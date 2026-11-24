@@ -397,10 +397,6 @@ describe('PerspectiveProxy.querySparql shares in-flight calls', () => {
             () => client.addLinkExpression('u', stored),
             () => client.updateLink('u', stored, link),
             () => client.removeLink('u', stored),
-            () => client.executeCommands('u', '[]', 'expr', '[]'),
-            () => client.createSubject('u', 'C', 'expr'),
-            () => client.updateSubject('u', 'C', 'expr', '{}'),
-            () => client.removeSubject('u', 'C', 'expr'),
             () => client.commitBatch('u', 'b'),
             // Executor methods whose handlers write links themselves (shape
             // links, overlays, flow proposals, votes, fired marks, receipts,

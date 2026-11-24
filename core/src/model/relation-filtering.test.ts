@@ -1030,18 +1030,13 @@ class SavesReadOnly extends Ad4mModel {
 
 describe("readOnly relations when saving", () => {
   it("are skipped by save() and create(), even without a getter", async () => {
-    const proto = SavesReadOnly.prototype as any;
-    const plan = jest.spyOn(proto, "planRelation").mockReturnValue([]);
-    try {
-      const instance = new SavesReadOnly({ uuid: "p" } as any, "test://instance");
-      await (instance as any).innerUpdate(true);
+    const perspective = { uuid: "p", mutate: jest.fn(async () => ({ ids: [] })) } as any;
+    const instance = new SavesReadOnly(perspective, "test://instance");
+    await instance.save("batch");
 
-      const touched = plan.mock.calls.map((call) => call[0]);
-      expect(touched).toContain("writableLinks");
-      expect(touched).not.toContain("readOnlyLinks");
-    } finally {
-      plan.mockRestore();
-    }
+    expect(perspective.mutate).toHaveBeenCalledTimes(1);
+    const [op] = perspective.mutate.mock.calls[0][0];
+    expect(op.values).toEqual({ writableLinks: ["test://b"] });
   });
 
   it("refuse `through` with `getter` on @HasOne, where the getter would be dropped", () => {

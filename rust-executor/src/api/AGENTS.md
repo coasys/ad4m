@@ -21,8 +21,7 @@ handlers), `runtime`, `config` (`runtime.config`, `runtime.setConfig`), `users`,
 an ordered list of validated instance writes over `perspectives/instances/`, the same
 functions as the MCP `instance_*` tools; a refused write is a `WsRpcError` with the
 `InstanceError` plus the failing op's `opIndex` as `data`: 422 for a shape violation, see the
-module doc). The old `perspective.createSubject`, `updateSubject` and `removeSubject`
-(`perspectives_ws.rs`) call the same functions and word a refusal the same way.
+module doc).
 Each exposes `register_ws_handlers(&mut HandlerMap)`
 called from `ws_handler::build_handler_map`.
 
@@ -176,7 +175,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-233 methods: Cap 83, CapAnyPointer 1, Executor 43, Open 5, Operator 30, Owns 69, UserOrOperator 2. Local only (the operator on this machine): 5.
+229 methods: Cap 83, CapAnyPointer 1, Executor 43, Open 5, Operator 30, Owns 65, UserOrOperator 2. Local only (the operator on this machine): 5.
 
 | Method | Guard |
 |---|---|
@@ -294,11 +293,9 @@ the guard checked:
 | `perspective.commitBatch` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.create` | `Cap(perspective:CREATE)` |
 | `perspective.createBatch` | `Owns(Perspective uuid, perspective:UPDATE)` |
-| `perspective.createSubject` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.discardBatch` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.disposeQuery` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.evaluateGetters` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.executeCommands` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.flowFired` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.flowStates` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.flowValidOutputs` | `Owns(Perspective uuid, perspective:READ)` |
@@ -321,7 +318,6 @@ the guard checked:
 | `perspective.removeAutoProcessor` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.removeLink` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.removeLinks` | `Owns(Perspective uuid, perspective:UPDATE)` |
-| `perspective.removeSubject` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.resyncSubscription` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.runAgent` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.runInterpretation` | `Owns(Perspective uuid, perspective:UPDATE)` |
@@ -332,7 +328,6 @@ the guard checked:
 | `perspective.subscribe` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.update` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.updateLink` | `Owns(Perspective uuid, perspective:UPDATE)` |
-| `perspective.updateSubject` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.verifyFlowReceipt` | `Owns(Perspective uuid, perspective:READ)` |
 | `runtime.addFriends` | `Executor(runtime.friends:CREATE)` |
 | `runtime.addHcAgentInfos` | `Executor(runtime.hc_agent_info:CREATE)` |
