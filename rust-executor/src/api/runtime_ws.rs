@@ -367,7 +367,7 @@ async fn check_notification_perspectives(
             Err(e) if e.code == 404 && owner_did == dids.main_agent => continue,
             Err(e) => return Err(e),
         };
-        let handle = perspective.persisted.lock().await.clone();
+        let handle = perspective.persisted.snapshot();
         if !owner_may_read(owner_did, &dids.main_agent, &handle) {
             return Err(WsRpcError::forbidden(format!(
                 "Access denied: the notification owner cannot read perspective {}",
