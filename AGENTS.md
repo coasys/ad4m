@@ -98,9 +98,13 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
 - States: `unknown | loading | fresh | stale | error`. A read of an unknown,
   stale or failed entry sends one request; concurrent reads share it. A value
   push (`entry.push`) replaces the value and notifies unless it is equal; an
-  invalidation, a reconnect (`ApiClient._onOpen` after the first open) or the
-  `lagged` marker (`{"type":"query-subscription-update","lagged":true}`) calls
-  `invalidate`: the entry is stale and reloads only if it has subscribers.
+  invalidation, a reconnect (`ApiClient._onOpen` after the first open), the
+  `lagged` marker (`{"type":"query-subscription-update","lagged":true}`) or a
+  refused token (`ApiClient._failAuth`: close code 1008 or a 401, after which no
+  reconnect comes) calls `invalidate`: the entry is stale and reloads only if it
+  has subscribers. After a refused token every read fails with 401. Until the
+  1008 close arrives, a client whose token was revoked still answers from its
+  stored values.
 - An answer is kept only if nothing changed the entry since its request went
   out: one sent before a reconnect reaches its readers once and is dropped. A
   failure is never kept.

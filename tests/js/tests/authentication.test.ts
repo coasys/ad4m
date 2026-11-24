@@ -433,8 +433,12 @@ describe("Authentication integration tests", () => {
             let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort), jwt)
             expect((await authenticatedAppAd4mClient!.agent.status()).isUnlocked).to.be.true;
 
+            // The executor closes the revoked token's socket. The client serves its stored
+            // values until that close arrives, which can be after the admin's reply.
+            const refused = new Promise<string>(resolve => authenticatedAppAd4mClient.onAuthFailed(resolve))
             let oldApps = await adminAd4mClient!.agent.getApps();
             let newApps = await adminAd4mClient!.agent.revokeToken(requestId);
+            expect(await refused).to.include("Unauthorized access");
             // revoking token should not change the number of apps
             expect(newApps.length).to.be.equal(oldApps.length);
             newApps.forEach((app, i) => {

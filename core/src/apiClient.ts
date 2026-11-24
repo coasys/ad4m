@@ -537,6 +537,8 @@ export class ApiClient {
         this._authFailed = reason
         const error = new RpcError(401, reason)
         for (const pending of this._pendingCalls.values()) pending.reject(error)
+        // No reconnect will mark the mirror stale: a read must reach the refusal, not a stored value.
+        this.mirror.markAllStale()
         this._closeWs()
         for (const cb of [...this._authFailedCallbacks]) callSafely(cb, 'Error in auth-failed callback:', reason)
     }

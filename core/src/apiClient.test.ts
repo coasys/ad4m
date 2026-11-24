@@ -1619,6 +1619,20 @@ describe('ApiClient when the executor refuses the token', () => {
         expect(TestSocket.instances).toHaveLength(1)
     })
 
+    it('makes every mirror value stale: a later read fails with 401, not the stored value', async () => {
+        open()
+        socket(0).open()
+        const status = client.mirror.entry({ method: 'agent.status', load: () => call('agent.status') })
+        const first = status.read()
+        await Promise.resolve()
+        const req = socket(0).sent.find((m) => m.type === 'agent.status')!
+        socket(0).reply({ id: req.id, result: { isUnlocked: true } })
+        await first
+        expect(status.getSnapshot().state).toBe('fresh')
+        socket(0).drop(1008, REASON)
+        await expect(status.read()).rejects.toMatchObject({ status: 401, body: REASON })
+    })
+
     it('fails every later call with 401 without opening a socket', async () => {
         open()
         socket(0).drop(1008, REASON)
