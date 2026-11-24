@@ -1525,6 +1525,7 @@ describe("subscriptions never send a cursor (P8)", () => {
       }),
       onQueryUpdate: jest.fn(() => () => {}),
       onReconnect: jest.fn(() => () => {}),
+      onSubscriptionEnded: jest.fn(() => () => {}),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
     return {
@@ -3948,6 +3949,7 @@ describe("save() on an instance pushed by a subscription", () => {
         return () => {};
       }),
       onReconnect: jest.fn(() => () => {}),
+      onSubscriptionEnded: jest.fn(() => () => {}),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
     const perspective = {
@@ -4077,6 +4079,7 @@ describe("includeAll", () => {
       modelSubscribe: jest.fn().mockResolvedValue({ subscriptionId: "s", revision: 0, result: { instances: [row], totalCount: 1 } }),
       onQueryUpdate: jest.fn(() => () => {}),
       onReconnect: jest.fn(() => () => {}),
+      onSubscriptionEnded: jest.fn(() => () => {}),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
     const perspective = {
@@ -4589,6 +4592,7 @@ describe("querying by class name (overrideModelClassName)", () => {
       }),
       onQueryUpdate: jest.fn(() => () => {}),
       onReconnect: jest.fn(() => () => {}),
+      onSubscriptionEnded: jest.fn(() => () => {}),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
     return {
