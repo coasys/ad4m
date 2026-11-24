@@ -191,7 +191,7 @@ fn the_generated_contract_is_fresh_enough_to_name_new_methods() {
         "perspective.instanceAddToCollection",
         "perspective.instanceRemoveFromCollection",
         "perspective.modelQuery",
-        "perspective.modelSubscribe",
+        "perspective.subscribe",
         "perspective.resyncSubscription",
         "perspective.disposeQuery",
         "perspective.createBatch",
