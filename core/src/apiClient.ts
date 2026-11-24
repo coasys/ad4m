@@ -203,7 +203,7 @@ export class ApiClient {
      */
     readonly mirror = new Mirror(() => {
         try { return new URL(this.baseUrl).origin } catch { return this.baseUrl }
-    }, (name, handler) => this.on(name, handler), () => agentStatusEntry(this).getSnapshot().value?.did || null)
+    }, (name, handler) => this._addHandler(name, handler), () => agentStatusEntry(this).getSnapshot().value?.did || null)
 
     getBaseUrl(): string { return this.baseUrl }
     getToken(): string | undefined { return this.token }
@@ -217,6 +217,8 @@ export class ApiClient {
 
     /** The connecting or open socket; null otherwise. */
     private _ws: WebSocket | null = null
+    /** The socket that opened and has not been lost since: the one that keeps the mirror fresh. */
+    private _liveWs: WebSocket | null = null
     /** `on()` handlers by event type; a type with none has no entry. */
     private _handlers = new Map<string, Set<Registration>>()
     private _reconnectCallbacks = new Set<() => void>()
@@ -348,6 +350,7 @@ export class ApiClient {
     private _onOpen(ws: WebSocket): void {
         // A socket closed by _closeWs() must not take the calls queued for its successor.
         if (this._ws !== ws) return
+        this._liveWs = ws
         this._wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
         this._startPing(ws)
         // The watch goes out before the queued calls, so the events they cause reach listeners.
@@ -518,6 +521,11 @@ export class ApiClient {
         if (this._ws !== ws) return
         this._stopPing()
         this._ws = null
+        // Events from now until the next socket are lost: what the mirror holds may be old.
+        if (this._liveWs === ws) {
+            this._liveWs = null
+            this.mirror.markAllStale()
+        }
         for (const pending of this._pendingCalls.values()) {
             if (!pending.sent && ++pending.failedConnects < MAX_CONNECT_ATTEMPTS) continue
             if (pending.sent && pending.retry) {
@@ -822,6 +830,14 @@ export class ApiClient {
      * handler for the same type and perspective again changes nothing.
      */
     on<K extends EventName>(type: K, handler: (event: EventMap[K]) => void, filter?: EventFilter): () => void {
+        const remove = this._addHandler(type, handler, filter)
+        // A client whose token was refused keeps the handler but opens no socket.
+        if (this._authFailed === null) this._ensureWs()
+        return remove
+    }
+
+    /** {@link on} without dialling: the mirror's handlers must be registered again after `closeAll()` with no socket left open. */
+    private _addHandler<K extends EventName>(type: K, handler: (event: EventMap[K]) => void, filter?: EventFilter): () => void {
         const perspective = filter?.perspective
         let regs = this._handlers.get(type)
         if (!regs) this._handlers.set(type, regs = new Set())
@@ -831,8 +847,6 @@ export class ApiClient {
             regs.add(reg)
             this._scheduleWatch()
         }
-        // A client whose token was refused keeps the handler but opens no socket.
-        if (this._authFailed === null) this._ensureWs()
 
         return () => {
             const regs = this._handlers.get(type)
@@ -1017,11 +1031,14 @@ export class ApiClient {
 
     /** Close the WebSocket and reject pending calls. */
     closeAll(): void {
+        this._handlers.clear()
+        // Before the pending calls are rejected: the reads and disposals this starts fail with them.
+        this.mirror.reset()
         for (const pending of this._pendingCalls.values()) {
             pending.reject(new RpcError(503, 'Client closed'))
         }
+        this._liveWs = null
         this._closeWs()
-        this._handlers.clear()
         this._reconnectCallbacks.clear()
         this._authFailedCallbacks.clear()
         this._networkCallbacks.clear()

@@ -199,7 +199,11 @@ export class KeyedCache<V> {
             (loaded) => {
                 if (finish()) {
                     if (loaded.value === null) {
-                        if (!this.#slots.has(key)) this.#storedUsed.delete(key);
+                        // Found before, missing now: the value held and the stored one are gone.
+                        this.#forget(key);
+                        this.#errors.delete(key);
+                        this.#storedUsed.delete(key);
+                        this.#opts.persistent?.delete(key); // fire-and-forget
                         if (this.#listeners.get(key)?.size) this.#missing.add(key);
                         this.#notify(key);
                     } else {
@@ -215,9 +219,12 @@ export class KeyedCache<V> {
             },
             (error) => {
                 if (finish()) {
-                    this.#errors.set(key, error);
+                    // An error is kept only while a view watches the key.
+                    if (this.#listeners.get(key)?.size) this.#errors.set(key, error);
+                    else this.#errors.delete(key);
                     if (!this.#slots.has(key)) this.#storedUsed.delete(key);
                     this.#notify(key);
+                    this.#prune(key);
                 }
                 throw error;
             },

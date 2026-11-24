@@ -34,6 +34,7 @@ function setup() {
     const client = new PerspectiveClient('http://localhost:0', undefined, api as any)
     return {
         client,
+        mirror,
         call,
         calls: (type: string) => call.mock.calls.filter(c => c[0] === type).length,
         /** The id the first subscribe call minted: the one an update names. */
@@ -208,6 +209,46 @@ describe('live entries of the mirror', () => {
         expect({ opening, reopened: call.mock.calls.length - opening }).toEqual({ opening: 1, reopened: 0 })
     })
 
+    it('a handle opened after an update has the current result as `first`', async () => {
+        const { client, push, subscriptionId } = setup()
+        const a = client.liveQuery('p1', model, project)
+        expect(await a.first).toEqual(['a'])
+        push({ subscriptionId: subscriptionId(), revision: 1, ids: ['a', 'b'], upsert: [{ id: 'b' }], totalCount: 2 })
+        const b = client.liveQuery('p1', model, project)
+        expect(b.getSnapshot().data).toEqual(['a', 'b'])
+        expect(await b.first).toEqual(['a', 'b'])
+    })
+
+    it('a handle remounted within the grace has the current result as `first`', async () => {
+        const { client, push, subscriptionId } = setup()
+        const a = client.liveQuery('p1', model, project)
+        await a.first
+        a.dispose()
+        push({ subscriptionId: subscriptionId(), revision: 1, ids: ['a', 'b'], upsert: [{ id: 'b' }], totalCount: 2 })
+        await jest.advanceTimersByTimeAsync(1000)
+        expect(await client.liveQuery('p1', model, project).first).toEqual(['a', 'b'])
+    })
+
+    it('handles with one key and different projections each get their own shape, from one subscription', async () => {
+        const { client, push, subscriptionId, calls } = setup()
+        const ids = client.liveQuery('p1', model, project)
+        const count = client.liveQuery('p1', model, (raw: any) => raw.instances.length as number)
+        expect(await ids.first).toEqual(['a'])
+        expect(await count.first).toBe(1)
+        expect(count.getSnapshot().data).toBe(1)
+        // the snapshot is the same object until something changes
+        expect(ids.getSnapshot()).toBe(ids.getSnapshot())
+        const heard = jest.fn()
+        count.subscribe(heard)
+        heard.mockClear()
+        push({ subscriptionId: subscriptionId(), revision: 1, ids: ['a', 'b'], upsert: [{ id: 'b' }], totalCount: 2 })
+        expect(ids.getSnapshot().data).toEqual(['a', 'b'])
+        expect(count.getSnapshot().data).toBe(2)
+        expect(heard).toHaveBeenCalledTimes(1)
+        expect(heard.mock.calls[0][0].data).toBe(2)
+        expect(calls('perspective.subscribe')).toBe(1)
+    })
+
     describe('one-shot reads', () => {
         it('a model query with the key of a ready live query answers from it, with no request', async () => {
             const { client, calls } = setup()
@@ -253,6 +294,21 @@ describe('live entries of the mirror', () => {
             push({ subscriptionId: subscriptionId(), revision: 1, ids: ['a', 'b'], upsert: [{ id: 'b' }], totalCount: 2 })
             const answer = await client.modelQuery('p1', model.className, model.queryJson)
             expect(answer.instances.map((i: any) => i.id)).toEqual(['a', 'b'])
+            expect(calls('perspective.modelQuery')).toBe(1)
+        })
+
+        it('asks the executor once the mirror is marked stale, until the resync delivers a result', async () => {
+            const { client, mirror, calls, reconnect } = setup()
+            const live = client.liveQuery('p1', model, project)
+            await live.first
+            mirror.markAllStale()
+            await client.modelQuery('p1', model.className, model.queryJson)
+            expect(calls('perspective.modelQuery')).toBe(1)
+            // the live snapshot stays for display
+            expect(live.getSnapshot()).toMatchObject({ status: 'ready', data: ['a'] })
+            reconnect()
+            await flush()
+            await client.modelQuery('p1', model.className, model.queryJson)
             expect(calls('perspective.modelQuery')).toBe(1)
         })
 

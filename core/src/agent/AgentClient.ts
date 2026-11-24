@@ -73,8 +73,14 @@ export class AgentClient {
       load: async () => toAgent(await this.#apiClient.call('agent.get', {})) as Agent,
       on: {
         'agent-updated': (event, entry) => {
-          const agent = Agent.fromWire(event.agent);
-          if (agent.did && agent.did === this.#ownDid()) entry.push(agent);
+          const own = this.#ownDid();
+          // Cold: the event cannot be matched to the own agent yet. Whatever the entry
+          // read meanwhile may be older than it, so that answer is used once and not kept.
+          if (!own) entry.invalidate();
+          else {
+            const agent = Agent.fromWire(event.agent);
+            if (agent.did === own) entry.push(agent);
+          }
         },
       },
     });

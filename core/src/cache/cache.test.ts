@@ -422,8 +422,11 @@ describe('AgentClient Cache', () => {
         };
 
         try {
+            const view = ad4m.agent.live.byDID('did:test:fail');
+            const off = view.subscribe(() => {});
             await expect(ad4m.agent.byDID('did:test:fail')).rejects.toMatchObject({ status: 500 });
-            expect(ad4m.agent.live.byDID('did:test:fail').getSnapshot().state).toBe('error');
+            expect(view.getSnapshot().state).toBe('error');
+            off();
 
             const agent = await ad4m.agent.byDID('did:test:fail');
             expect(agent.did).toBe('did:test:fail');

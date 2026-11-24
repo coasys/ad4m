@@ -2,7 +2,11 @@ import { KeyedCache, StoredEntry } from './KeyedCache';
 import { PersistentCache } from './PersistentCache';
 
 async function until(condition: () => boolean): Promise<void> {
-    while (!condition()) await new Promise(r => setTimeout(r, 1));
+    const deadline = Date.now() + 2000;
+    while (!condition()) {
+        if (Date.now() > deadline) throw new Error('condition not met within 2s');
+        await new Promise(r => setTimeout(r, 1));
+    }
 }
 
 function deferred<T>() {
@@ -130,6 +134,45 @@ describe('KeyedCache', () => {
         await until(() => live.getSnapshot().state === 'error');
         off();
         expect(live.getSnapshot()).toMatchObject({ state: 'unknown', error: undefined });
+    });
+
+    test('a failed read of an unwatched key keeps no error', async () => {
+        const cache = new KeyedCache<string>({ loadMany: async keys => keys.map(() => new Error('boom')) });
+        for (let i = 0; i < 20; i++) await expect(cache.get(`k${i}`)).rejects.toThrow('boom');
+        for (let i = 0; i < 20; i++) expect(cache.live(`k${i}`).getSnapshot()).toMatchObject({ state: 'unknown', error: undefined });
+    });
+
+    test('a refresh that finds nothing drops the value held, and the stored one', async () => {
+        const persistent = new MapStore<string>();
+        let answer: string | null = 'there';
+        const loadMany = jest.fn(async (keys: string[]) => keys.map(() => answer));
+        // Age 0: a reload reads the source, not the stored value.
+        const cache = new KeyedCache<string>({ loadMany, persistent, persistentMaxAgeMs: () => 0 });
+        const live = cache.live('k');
+        const off = live.subscribe(() => {});
+        await until(() => live.getSnapshot().state === 'fresh');
+        expect(live.getSnapshot().value).toBe('there');
+        expect(persistent.entries.has('k')).toBe(true);
+
+        answer = null;
+        cache.markStale();
+        await until(() => loadMany.mock.calls.length === 2 && live.getSnapshot().state === 'fresh');
+        expect(live.getSnapshot()).toMatchObject({ state: 'fresh', value: null });
+        expect(persistent.entries.has('k')).toBe(false);
+        off();
+        expect(await cache.get('k')).toBeNull();
+    });
+
+    test('a refresh that finds nothing clears the error of an earlier failure', async () => {
+        const answers: (string | null | Error)[] = [new Error('boom'), null];
+        const cache = new KeyedCache<string>({ loadMany: async keys => keys.map(() => answers.shift()!) });
+        const live = cache.live('k');
+        const off = live.subscribe(() => {});
+        await until(() => live.getSnapshot().state === 'error');
+        await live.read().catch(() => {});
+        await until(() => live.getSnapshot().state === 'fresh');
+        expect(live.getSnapshot()).toMatchObject({ value: null, error: undefined });
+        off();
     });
 
     test('a set() while a read is in flight wins over the read', async () => {

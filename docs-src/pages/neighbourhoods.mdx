@@ -305,7 +305,7 @@ browser. An app that is neither (Electron, a test harness) passes its own as
 `createSession` reads the caller's DID (`client.agent.did()`) and the SFU
 status (`client.runtime.sfuStatus()`) together. The client keeps both: a later
 session reads them locally, `agent-status-changed` updates the DID, and a
-reconnect makes the next session ask the executor again.
+lost socket makes the next session ask the executor again.
 
 - **Another device joins beside it.** The same agent on a phone and a laptop
   is two participants: everyone, the agent's other device included, hears

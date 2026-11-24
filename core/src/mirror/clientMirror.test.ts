@@ -216,3 +216,81 @@ describe('the caller DID and the SFU status, per client', () => {
         expect(asks('agent.status')).toBe(2)
     })
 })
+
+const profile = (did: string, directMessageLanguage: string | null) => ({ did, directMessageLanguage, perspective: null })
+const lastSock = () => Sock.instances[Sock.instances.length - 1]
+
+describe('values and events across a lost socket, a close and a cold start', () => {
+    it('an agent-updated that arrives before the first agent.get answer is not lost', async () => {
+        const answers: ((v: unknown) => void)[] = []
+        Sock.handle = (msg) => {
+            if (msg.type === 'agent.get') return new Promise((resolve) => { answers.push(resolve) })
+            return {}
+        }
+        const first = ad4m.agent.me()
+        await settle()
+        expect(answers.length).toBe(1)
+        // the own DID is not known yet: the event cannot be matched to the own agent
+        lastSock().reply({ type: 'agent-updated', agent: profile('did:test:me', 'lang://new') })
+        answers[0](profile('did:test:me', 'lang://old'))
+        expect((await first).directMessageLanguage).toBe('lang://old') // used once
+        Sock.handle = (msg) => (msg.type === 'agent.get' ? profile('did:test:me', 'lang://new') : {})
+        expect((await ad4m.agent.me()).directMessageLanguage).toBe('lang://new')
+    })
+
+    it('a scalar read after the socket dropped goes to the executor, not to the stored value', async () => {
+        await ad4m.agent.did()
+        expect(asks('agent.status')).toBe(1)
+        lastSock().drop()
+        const read = ad4m.agent.did()
+        await jest.advanceTimersByTimeAsync(500) // the client redials
+        expect(await read).toBe('did:test:me')
+        expect(asks('agent.status')).toBe(2)
+    })
+
+    it('a one-shot query after the socket dropped goes to the executor, not to the live result', async () => {
+        Sock.handle = (msg) => {
+            if (msg.type === 'perspective.subscribe') return { subscriptionId: msg.params.subscriptionId, revision: 0, result: [{ s: 'live' }] }
+            if (msg.type === 'perspective.querySparql') return JSON.stringify([{ s: 'one-shot' }])
+            return {}
+        }
+        const live = ad4m.perspective.liveQuery('p1', { sparql: 'SELECT ?s WHERE { ?s ?p ?o }' }, (rows) => rows)
+        expect(await live.first).toEqual([{ s: 'live' }])
+        expect(await ad4m.perspective.querySparql('p1', 'SELECT ?s WHERE { ?s ?p ?o }')).toEqual([{ s: 'live' }])
+        expect(asks('perspective.querySparql')).toBe(0)
+
+        lastSock().drop()
+        const rows = ad4m.perspective.querySparql('p1', 'SELECT ?s WHERE { ?s ?p ?o }')
+        await jest.advanceTimersByTimeAsync(500)
+        expect(await rows).toEqual([{ s: 'one-shot' }])
+        expect(asks('perspective.querySparql')).toBe(1)
+        // the live snapshot stayed for display
+        expect(live.getSnapshot()).toMatchObject({ status: 'ready', data: [{ s: 'live' }] })
+    })
+
+    it('a client reused after close() reads from the executor again and hears events', async () => {
+        Sock.handle = (msg) => {
+            if (msg.type === 'perspective.subscribe') return { subscriptionId: msg.params.subscriptionId, revision: 0, result: [] }
+            return status('did:test:me')
+        }
+        expect(await ad4m.agent.did()).toBe('did:test:me')
+        const live = ad4m.perspective.liveQuery('p1', { sparql: 'q' }, (rows) => rows)
+        await live.first
+        ad4m.close()
+        await settle()
+
+        Sock.handle = (msg) => {
+            if (msg.type === 'perspective.subscribe') return { subscriptionId: msg.params.subscriptionId, revision: 0, result: [] }
+            return status('did:test:again')
+        }
+        expect(await ad4m.agent.did()).toBe('did:test:again')
+        expect(asks('agent.status')).toBe(2)
+        // the entry hears events again
+        lastSock().reply({ type: 'agent-status-changed', agent: status('did:test:pushed') })
+        expect(await ad4m.agent.did()).toBe('did:test:pushed')
+        expect(asks('agent.status')).toBe(2)
+        // a pooled live query of the closed socket is not served
+        await ad4m.perspective.liveQuery('p1', { sparql: 'q' }, (rows) => rows).first
+        expect(asks('perspective.subscribe')).toBe(2)
+    })
+})

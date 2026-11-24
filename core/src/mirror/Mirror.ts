@@ -27,13 +27,15 @@ export interface EntrySpec<T> {
 export class Mirror {
     #entries = new Map<string, Entry<unknown>>()
     #caches = new Map<string, { staleOnReconnect: boolean; cache: KeyedCache<any> }>()
-    #lives = new Map<string, SharedLive<any>>()
+    #lives = new Map<string, SharedLive>()
     #flights = new Map<string, Promise<any>>()
     /** Per perspective, how many writes of this client have settled (see {@link wrote}). */
     #writes = new Map<string, number>()
     #origin: () => string
     #listen: <K extends EventName>(name: K, handler: (event: EventMap[K]) => void) => unknown
     #actingDid: () => string | null
+    /** Every event handler an entry or cache registered, to register again after {@link reset}. */
+    #registrations: [EventName, (event: any) => void][] = []
 
     /**
      * `origin` names the executor: persisted values are keyed by it, the acting DID and the key.
@@ -72,7 +74,7 @@ export class Mirror {
             held = { staleOnReconnect: spec.staleOnReconnect !== false, cache: created }
             this.#caches.set(spec.method, held)
             for (const [name, handler] of Object.entries(spec.on ?? {}) as [EventName, (event: any, cache: KeyedCache<V>) => void][]) {
-                this.#listen(name, (event) => handler(event, created))
+                this.#register(name, (event) => handler(event, created))
             }
         }
         return held.cache as KeyedCache<V>
@@ -109,30 +111,36 @@ export class Mirror {
             entry = created as Entry<unknown>
             this.#entries.set(key, entry)
             for (const [name, handler] of Object.entries(spec.on ?? {}) as [EventName, (event: any, entry: Entry<T>) => void][]) {
-                this.#listen(name, (event) => handler(event, created))
+                this.#register(name, (event) => handler(event, created))
             }
         }
         return entry as Entry<T>
     }
 
+    #register(name: EventName, handler: (event: any) => void): void {
+        this.#registrations.push([name, handler])
+        this.#listen(name, handler)
+    }
+
     /**
      * A handle on the `live` entry for this key. The first call opens the subscription with
-     * `open`; every later call with the same key, while it is open, shares it: one executor
-     * subscription, a handle of its own each. The subscription resyncs itself on `lagged` and
-     * after a reconnect, so the mirror does not mark it stale. After the last handle is
-     * disposed it stays open `keepAliveMs` (default 30 s), so a handle opened again answers at once.
+     * `open`, which holds the executor's raw result; every later call with the same key, while
+     * it is open, shares it: one executor subscription, a handle of its own each, and each
+     * handle shapes the raw result with its own `project`. The subscription resyncs itself on
+     * `lagged` and after a reconnect. After the last handle is disposed it stays open
+     * `keepAliveMs` (default 30 s), so a handle opened again answers at once.
      */
-    live<T>(spec: { perspective: string; method: string; params: unknown; keepAliveMs?: number; open: () => LiveSubscription<T> }): LiveQuery<T> {
+    live<T>(spec: { perspective: string; method: string; params: unknown; keepAliveMs?: number; open: () => LiveSubscription<any>; project: (raw: any) => T }): LiveQuery<T> {
         const key = keyOf(spec)
         let shared = this.#lives.get(key)
         if (!shared?.usable) {
-            const created: SharedLive<T> = new SharedLive(spec.open(), spec.perspective, () => {
+            const created: SharedLive = new SharedLive(spec.open(), spec.perspective, () => {
                 if (this.#lives.get(key) === created) this.#lives.delete(key)
             })
             shared = created
             this.#lives.set(key, shared)
         }
-        return (shared as SharedLive<T>).view(spec.keepAliveMs)
+        return shared.view(spec.project, spec.keepAliveMs)
     }
 
     /**
@@ -158,13 +166,27 @@ export class Mirror {
     }
 
     /**
-     * The socket reconnected or the executor said it dropped events: whatever was pushed
-     * meanwhile is lost, so every entry is stale, and those with subscribers load again.
-     * A cache with `staleOnReconnect: false` stays.
+     * The socket was lost or reconnected, or the executor said it dropped events: whatever
+     * was pushed meanwhile is lost, so every entry is stale, and those with subscribers load
+     * again. A cache with `staleOnReconnect: false` stays. The live results answer no
+     * one-shot read until their resync delivers a result; their snapshots keep the last value.
      */
     markAllStale(): void {
         for (const entry of this.#entries.values()) entry.invalidate()
         for (const { staleOnReconnect, cache } of this.#caches.values()) if (staleOnReconnect) cache.markStale()
+        for (const shared of this.#lives.values()) shared.stale()
+    }
+
+    /**
+     * The client closed its socket and handlers and may be used again: every value is stale,
+     * the pooled live subscriptions end (their executor side died with the socket), and the
+     * events the entries and caches listen to are registered again.
+     */
+    reset(): void {
+        for (const shared of this.#lives.values()) shared.close()
+        this.#lives.clear()
+        this.markAllStale()
+        for (const [name, handler] of this.#registrations) this.#listen(name, handler)
     }
 
     /**

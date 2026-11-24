@@ -341,14 +341,17 @@ describe('KeyedCache views', () => {
         expect(stored.get('k').value).toBe('new');
     });
 
-    test('a failed read is an error snapshot that keeps nothing; the next read retries', async () => {
+    test('a failed read is an error snapshot while a view watches it, and keeps nothing; the next read retries', async () => {
         let fail = true;
         const cache = new KeyedCache<string>({
             loadMany: async keys => keys.map(k => (fail ? new Error('boom') : k)),
         });
         const live = cache.live('k');
+        const off = live.subscribe(() => {});
         await expect(live.read()).rejects.toThrow('boom');
         expect(live.getSnapshot()).toMatchObject({ state: 'error', value: undefined });
+        off();
+        expect(live.getSnapshot()).toMatchObject({ state: 'unknown', error: undefined });
 
         fail = false;
         expect(await live.read()).toBe('k');

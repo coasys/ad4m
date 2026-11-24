@@ -112,7 +112,7 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
   it listens to (`on`) and its `load`. An `Entry` is keyed by its RPC name
   (`mirror.entry({ method, load, on })`: one entry per method per client); the
   perspective uuid in a key belongs only to live queries and one-shot reads
-  (`live`, `liveResult`, `oneShot`, `wrote`). A reconnect or `lagged` makes every
+  (`live`, `liveResult`, `oneShot`, `wrote`). The loss of the socket, a reconnect or `lagged` makes every
   entry stale, and every keyed cache except the expressions (`staleOnReconnect: false`). Entries (see the sections below and the code for each one's events):
   - `agent.status`: pushed by `agent-status-changed` and the results of
     `agent.unlock/lock/generate/import`; read through `client.agent.status()` and
@@ -132,11 +132,14 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
 - A keyed cache answers `null` for an unknown key and does not keep it (the next
   `get()` asks again), but a key with a subscriber shows it as `{ state: 'fresh',
   value: null }`. Its maps hold only keys with a value, a read in flight or a
-  subscriber (a failed read's error stays until the next read, a reconnect, or the
-  last subscriber leaving); `storedUsed` follows the held values.
+  subscriber (a failed read's error is kept only while a view watches the key, until
+  its next read, a reconnect, or the last subscriber leaving); a read that finds
+  nothing for a key that had a value drops the value and its persisted copy;
+  `storedUsed` follows the held values.
 - Profiles and expressions. The own agent (`agent.get`, read through
   `client.agent.me()` / `client.agent.live.me()`) is pushed: `agent-updated`
-  for the own DID and the result of `updatePublicPerspective` /
+  for the own DID (while the own DID is not known yet, the event only makes the entry
+  stale: a read in flight is used once and not kept) and the result of `updatePublicPerspective` /
   `updateDirectMessageLanguage` (read-your-writes) replace it. Other agents
   (`agent.byDIDs`, `client.agent.byDID(did)` / `live.byDID(did)`) are
   keyed: fresh for `AgentClient.REMOTE_AGENT_TTL_MS` (5 min), replaced at
@@ -175,13 +178,23 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
   is used as fresh while younger than `persistentMaxAgeMs`. `markAllStale()` skips caches
   with `staleOnReconnect: false`.
 - The Mirror registers an entry's events itself: the spec's `on` map (event name to
-  `(event, entry) => void`) is registered once, when the Mirror creates the entry.
+  `(event, entry) => void`) is registered once, when the Mirror creates the entry. The
+  mirror registers them without dialling. `ApiClient.closeAll()` clears the handlers and
+  calls `mirror.reset()`: every value is stale, the pooled live subscriptions end, and the
+  handlers are registered again, so a client used after `closeAll()` reads from the executor
+  and hears events (the lazy `Entry` fields of `AgentClient` stay valid: entries are kept).
 - Live queries (`core/src/mirror/live.ts`). `mirror.live` keeps one
   `LiveSubscription` per perspective + RPC + canonical params; each caller gets its own
-  `LiveQuery` view (own `first`, listeners; `dispose()` releases only that view). After
+  `LiveQuery` view (own `first`, own projection, own listeners; `dispose()` releases only that
+  view). The subscription holds the executor's raw result; each view applies its own `project`
+  (model hydration) to it, so views with one key and different projections share one executor
+  subscription. A view's `first` is the current result when the view opens. After
   the last view is released the subscription stays open `keepAliveMs` (default 30000,
   `LiveOptions`), then is disposed; a view in the grace answers at once with no request.
-  `LiveSubscription` resyncs itself on `lagged` and reconnect, the mirror does not.
+  `LiveSubscription` resyncs itself on `lagged` and reconnect. The mirror marks the live
+  results stale when the socket is lost (`ApiClient._onClose`), on `lagged` and on reconnect
+  (`markAllStale`): snapshots keep the last value for display, but one-shot reads go to the
+  executor until the resync delivers a result.
   `PerspectiveClient.modelQuery` / `querySparql` answer from a ready live handle with the
   same key (no `after` cursor). After an own write (`mirror.wrote`) they ask the executor
   until an update changes the result, because the executor sends updates 250 ms or more
