@@ -932,30 +932,53 @@ fn busy_js(label: &str, ms: u64) -> String {
     )
 }
 
-/// How long [`hold_the_thread`] holds it.
-const BLOCKER_MS: u64 = 100;
-
-/// Sends an ordered call that holds the thread for `BLOCKER_MS` and waits until it runs, so
-/// the requests sent in the next `BLOCKER_MS` are all in the channel when the runtime next
-/// receives: it admits them in one burst.
+/// Sends an ordered call that holds the thread until the test opens the gate (writes the file
+/// at the returned path), and waits until it runs. Every request sent before the gate opens
+/// is in the channel when the runtime next receives: it admits them in one burst. The call
+/// gives up after 10 s, which only bounds a failing test.
 async fn hold_the_thread(
     handle: &LanguageRuntimeHandle,
-) -> tokio::task::JoinHandle<Result<String, String>> {
+    dir: &std::path::Path,
+) -> (
+    tokio::task::JoinHandle<Result<String, String>>,
+    std::path::PathBuf,
+) {
+    let gate = dir.join("gate");
+    let js = format!(
+        r#"(() => {{
+            globalThis.__ran.push("blocker");
+            const end = Date.now() + 10000;
+            while (Date.now() < end) {{
+                try {{ Deno.statSync({path}); return "blocker"; }} catch {{}}
+            }}
+            return "the gate did not open";
+        }})()"#,
+        path = serde_json::to_string(gate.to_str().unwrap()).unwrap()
+    );
     let blocker = {
         let handle = handle.clone();
-        tokio::spawn(async move { handle.execute(busy_js("blocker", BLOCKER_MS)).await })
+        tokio::spawn(async move { handle.execute(js).await })
     };
     ordered_call_started(handle).await;
-    blocker
+    (blocker, gate)
+}
+
+/// Waits for the blocker [`hold_the_thread`] sent, once its gate is open.
+async fn blocker_ends(blocker: tokio::task::JoinHandle<Result<String, String>>) {
+    let answer = within(Duration::from_secs(10), "the blocker", blocker)
+        .await
+        .unwrap()
+        .expect("the blocker answers");
+    assert_eq!(answer.trim(), "blocker");
 }
 
 /// Two reads admitted together: the first to start holds the thread past the deadline. The
 /// other has not started, so its caller gets the deadline error, and it never runs.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_read_admitted_beside_a_read_that_holds_the_thread_gets_an_error_at_the_deadline() {
-    // The blocker ends 100 ms into the 300 ms the reads have to start in; it is sent on the
+    // The blocker holds the thread until both reads are in the channel; it is sent on the
     // default deadline, and only the reads carry the short one.
-    let (handle, _dir) = spawn_warm_runtime("QmReadBurstDeadline").await;
+    let (handle, dir) = spawn_warm_runtime("QmReadBurstDeadline").await;
     let reads = handle
         .clone()
         .with_call_deadline(Duration::from_millis(300));
@@ -964,7 +987,7 @@ async fn a_read_admitted_beside_a_read_that_holds_the_thread_gets_an_error_at_th
         .await
         .unwrap();
 
-    let blocker = hold_the_thread(&handle).await;
+    let (blocker, gate) = hold_the_thread(&handle, dir.path()).await;
     let read = |label: &'static str| {
         let handle = reads.clone();
         tokio::spawn(async move {
@@ -974,24 +997,17 @@ async fn a_read_admitted_beside_a_read_that_holds_the_thread_gets_an_error_at_th
         })
     };
     let (first, second) = (read("first"), read("second"));
-    // Both are in the runtime's channel, and the blocker still holds the thread: the runtime
-    // admits them in one burst when it ends. A blocker already over means the reads reached
-    // the channel too late for that, and the test would prove plain queued expiry instead.
+    // Both are in the runtime's channel while the blocker holds the thread: the runtime
+    // admits them in one burst when it ends.
     calls_waiting(&handle, 2).await;
-    assert!(
-        handle.running_request().lock().unwrap().ordered.is_some(),
-        "the blocker ended before both reads were sent: the reads were not admitted together"
-    );
+    std::fs::write(&gate, b"").unwrap();
     let first = within(Duration::from_secs(10), "the first read", first)
         .await
         .unwrap();
     let second = within(Duration::from_secs(10), "the second read", second)
         .await
         .unwrap();
-    within(Duration::from_secs(10), "the blocker", blocker)
-        .await
-        .unwrap()
-        .expect("the blocker answers");
+    blocker_ends(blocker).await;
 
     // Either read may start first; the other one must not run.
     let (started, refused) = if first.2.is_ok() {
@@ -1027,43 +1043,30 @@ async fn a_read_admitted_beside_a_read_that_holds_the_thread_gets_an_error_at_th
 /// read ahead of it holds the thread), is never run.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_read_whose_caller_left_before_it_started_is_not_run() {
-    let (handle, _dir) = spawn_runtime("QmReadCallerLeft");
+    let (handle, dir) = spawn_runtime("QmReadCallerLeft");
     handle
         .execute("(globalThis.__ran = [], 0)".into())
         .await
         .unwrap();
 
-    let blocker = hold_the_thread(&handle).await;
+    let (blocker, gate) = hold_the_thread(&handle, dir.path()).await;
     // Sent while the blocker holds the thread, ahead of the read below: both are admitted when
     // it ends, and the holder starts first and holds the thread for 300 ms.
     let holder = {
         let handle = handle.clone();
         tokio::spawn(async move { concurrent(&handle, busy_js("holder", 300)).await })
     };
-    // In the channel (or already started, if the blocker ended first), so the read below is
-    // sent after it.
-    let running = handle.running_request();
-    until("the holder to be sent", || {
-        handle.queue_snapshot().is_some() || !running.lock().unwrap().concurrent.is_empty()
-    })
-    .await;
-    let holder_started = || !running.lock().unwrap().concurrent.is_empty();
+    calls_waiting(&handle, 1).await;
     let left = {
         let handle = handle.clone();
         tokio::spawn(async move {
             concurrent(&handle, "(globalThis.__ran.push(\"left\"), 0)".into()).await
         })
     };
-    // The read itself must be in the channel before its caller gives up, or the abort could
-    // land before the task first runs and no request would ever be sent. Two requests are
-    // waiting (the holder and the read), or the holder has started and one is. The holder's
-    // state is read first: a holder seen started has left the report by the depth read.
-    until("the read to be sent", || {
-        let holder_running = holder_started();
-        let depth = handle.queue_snapshot().map_or(0, |q| q.depth);
-        depth >= 2 || (holder_running && depth >= 1)
-    })
-    .await;
+    // The read itself is in the channel before its caller gives up: otherwise the abort could
+    // land before the task first runs, and no request would ever be sent.
+    calls_waiting(&handle, 2).await;
+    std::fs::write(&gate, b"").unwrap();
     // Its caller gives up once the holder runs: after the admission, before the read can start.
     concurrent_calls_started(&handle, 1).await;
     left.abort();
@@ -1075,10 +1078,7 @@ async fn a_read_whose_caller_left_before_it_started_is_not_run() {
         .await
         .unwrap()
         .expect("the holder answers");
-    within(Duration::from_secs(10), "the blocker", blocker)
-        .await
-        .unwrap()
-        .expect("the blocker answers");
+    blocker_ends(blocker).await;
 
     let ran = handle
         .execute("JSON.stringify(globalThis.__ran)".into())
