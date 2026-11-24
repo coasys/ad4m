@@ -100,6 +100,21 @@ describe('live entries of the mirror', () => {
         expect(calls('perspective.disposeQuery')).toBe(0)
     })
 
+    it('a handle disposed from its own first subscribe callback gets no later update', async () => {
+        const { client, push, subscriptionId } = setup()
+        const a = client.liveQuery('p1', model, project)
+        const b = client.liveQuery('p1', { ...model }, project)
+        await a.first
+        const seen: unknown[] = []
+        // The subscription is ready: the callback runs inside subscribe(), before it returns its remover.
+        a.subscribe((snap) => { seen.push(snap.data); a.dispose() })
+        expect(seen).toHaveLength(1)
+        push({ subscriptionId: subscriptionId(), perspectiveUuid: 'p1', revision: 1, result: { instances: [{ id: 'z' }], totalCount: 1 } } as any)
+        await flush()
+        expect(seen).toHaveLength(1)
+        expect(await b.first).toEqual(['a'])
+    })
+
     it('a handle disposed before the first result rejects its own `first` only', async () => {
         const { client } = setup()
         const a = client.liveQuery('p1', model, project)
@@ -302,6 +317,18 @@ describe('live entries of the mirror', () => {
             expect(calls('perspective.querySparql')).toBe(0)
         })
 
+        it('a call whose signal is already aborted does not take the live answer', async () => {
+            const { client, calls } = setup()
+            const text = 'SELECT ?s WHERE { ?s ?p ?o }'
+            await client.liveQuery('p1', { sparql: text }, (rows) => rows).first
+            await client.liveQuery('p1', model, project).first
+            const signal = AbortSignal.abort()
+            await client.querySparql('p1', text, { signal })
+            await client.modelQuery('p1', model.className, model.queryJson, { signal })
+            expect(calls('perspective.querySparql')).toBe(1)
+            expect(calls('perspective.modelQuery')).toBe(1)
+        })
+
         it('asks the executor while the live query is not ready, for another query, perspective or cursor', async () => {
             const { client, calls } = setup()
             const live = client.liveQuery('p1', model, project)
@@ -362,5 +389,66 @@ describe('live entries of the mirror', () => {
             await client.modelQuery('p1', model.className, model.queryJson)
             expect(calls('perspective.modelQuery')).toBe(1)
         })
+    })
+})
+
+describe('live results around a loss, a resync and a write', () => {
+    beforeEach(() => jest.useFakeTimers())
+    afterEach(() => jest.useRealTimers())
+    const text = 'SELECT ?s WHERE { ?s ?p ?o }'
+
+    it('a subscriber that reads from the notice of the loss gets a request, not the old live result', async () => {
+        const { client, mirror, calls } = setup()
+        await client.liveQuery('p1', { sparql: text }, (rows) => rows).first
+        const entry = mirror.entry<string>({ method: 'agent.status', load: () => Promise.resolve('s') })
+        await entry.read()
+        entry.subscribe((snapshot) => {
+            if (snapshot.state === 'stale') client.querySparql('p1', text).catch(() => {})
+        })
+        mirror.markAllStale(false)
+        expect(calls('perspective.querySparql')).toBe(1)
+    })
+
+    it('a reader called while the resync result and its buffered updates are applied gets a request', async () => {
+        const { client, calls, push, subscriptionId } = setup()
+        const live = client.liveQuery('p1', model, project)
+        await live.first
+        const asked: number[] = []
+        live.subscribe(() => {
+            client.modelQuery('p1', model.className, model.queryJson).catch(() => {})
+            asked.push(calls('perspective.modelQuery'))
+        })
+        asked.length = 0
+        push({ lagged: true })
+        push({ subscriptionId: subscriptionId(), revision: 6, ids: ['a', 'b'], upsert: [{ id: 'b' }], totalCount: 2 })
+        await flush()
+        // every notice of the replay, the first one included, asked the executor
+        expect(asked.length).toBeGreaterThan(0)
+        expect(asked[0]).toBe(1)
+    })
+
+    it('a write during a resync keeps the result closed past the updates buffered before it', async () => {
+        const { client, call, calls, push, subscriptionId } = setup()
+        const live = client.liveQuery('p1', model, project)
+        await live.first
+        const impl = call.getMockImplementation()!
+        let resolveResync!: (v: any) => void
+        call.mockImplementation((type: string, params: any) => type === 'perspective.resyncSubscription'
+            ? new Promise((resolve) => { resolveResync = resolve })
+            : impl(type, params))
+        push({ lagged: true })
+        // an update from before the write
+        push({ subscriptionId: subscriptionId(), revision: 6, ids: ['a', 'b'], upsert: [{ id: 'b' }], totalCount: 2 })
+        await client.addLinks('p1', [])
+        resolveResync({ revision: 5, result: { instances: [{ id: 'a' }], totalCount: 1 } })
+        await flush()
+        expect(live.getSnapshot().data).toEqual(['a', 'b'])
+        await client.modelQuery('p1', model.className, model.queryJson)
+        expect(calls('perspective.modelQuery')).toBe(1)
+        // the update after the write opens it
+        push({ subscriptionId: subscriptionId(), revision: 7, ids: ['a', 'b', 'c'], upsert: [{ id: 'c' }], totalCount: 3 })
+        const answer = await client.modelQuery('p1', model.className, model.queryJson)
+        expect(calls('perspective.modelQuery')).toBe(1)
+        expect(answer.instances.map((i: any) => i.id)).toEqual(['a', 'b', 'c'])
     })
 })

@@ -17,6 +17,7 @@ import { AGENT_KIND } from "./AgentKind";
 import { LinkMutations, LinkExpression, LinkInput, linkEqual } from "../links/Links";
 import { VerificationRequestResult } from "../runtime/RuntimeTypes";
 import type { KeyedCache, StoredEntry } from "../cache/KeyedCache";
+import type { PersistentCache } from "../cache/PersistentCache";
 import type { Agent as AgentData } from "../generated/api/Agent";
 import type { HostingUserInfo as HostingUserInfoData } from "../generated/api/HostingUserInfo";
 import type { AgentSignature } from "../generated/api/AgentSignature";
@@ -31,6 +32,32 @@ export interface InitializeArgs {
 
 function toAgent(data: AgentData | AgentWithIdentity | null): Agent | null {
   return data ? Agent.fromWire(data) : null;
+}
+
+/**
+ * A store of agents whose reads return `Agent` instances: IndexedDB keeps what structured clone
+ * leaves, plain objects, so the perspective's and links' methods are rebuilt on every read.
+ */
+function revivingAgents(store: PersistentCache<StoredEntry<Agent>>): PersistentCache<StoredEntry<Agent>> {
+  return {
+    get: async (key) => {
+      const entry = await store.get(key);
+      return entry?.value ? { ...entry, value: Agent.fromWire(entry.value as unknown as AgentData) } : entry;
+    },
+    put: (key, value) => store.put(key, value),
+    delete: (key) => store.delete(key),
+    clear: (prefix) => store.clear(prefix),
+  };
+}
+
+/**
+ * Replaces the own agent an entry holds. `agent.get` gives the identity the device key speaks
+ * for; a profile update or an `agent-updated` event carries none, so the one held stays.
+ */
+function pushAgent(entry: Entry<Agent>, agent: Agent): void {
+  const held = entry.getSnapshot().value;
+  if (agent.identity === undefined && held?.did === agent.did && held.identity !== undefined) agent.identity = held.identity;
+  entry.push(agent);
 }
 
 /** Most DIDs the executor takes in one `agent.byDIDs` call. */
@@ -79,7 +106,7 @@ export class AgentClient {
           if (!own) entry.invalidate();
           else {
             const agent = Agent.fromWire(event.agent);
-            if (agent.did === own) entry.push(agent);
+            if (agent.did === own) pushAgent(entry, agent);
           }
         },
       },
@@ -100,7 +127,7 @@ export class AgentClient {
       options: () => ({
         loadMany: (dids) => this.#loadAgents(dids),
         maxBatch: MAX_DIDS_PER_CALL,
-        persistent: this.#apiClient.mirror.persistent<StoredEntry<Agent>>('ad4m-agent-cache', 'agents'),
+        persistent: revivingAgents(this.#apiClient.mirror.persistent<StoredEntry<Agent>>('ad4m-agent-cache', 'agents')),
         persistentStale: true,
         maxAgeMs: () => AgentClient.REMOTE_AGENT_TTL_MS,
         limits: () => ({ entries: AgentClient.MAX_MEM_ENTRIES, bytes: AgentClient.MAX_MEM_BYTES }),
@@ -204,7 +231,7 @@ export class AgentClient {
   #cacheAgent(agent: Agent | null, own = false): void {
     if (!agent?.did) return;
     this.#agents().set(agent.did, agent);
-    if (own || agent.did === this.#ownDid()) this.#meEntry().push(agent);
+    if (own || agent.did === this.#ownDid()) pushAgent(this.#meEntry(), agent);
   }
 
   /** The own DID as far as the mirror knows it, without a request. */

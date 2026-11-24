@@ -11,7 +11,7 @@ import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
 import { PerspectiveHandle } from "./PerspectiveHandle";
-import { forgetPerspective, keepPerspective, perspectiveList } from "./perspectiveList";
+import { forgetPerspective, heldPerspective, keepPerspective, keepUpdatedPerspective, perspectiveList } from "./perspectiveList";
 import type { Live } from "../mirror/Mirror";
 import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
@@ -154,7 +154,7 @@ export class PerspectiveClient {
      * RPC may have been answered before the write (see `#wrote`).
      */
     async querySparql<T = any>(uuid: string, query: string, options?: CallOptions): Promise<T> {
-        const live = this.#liveAnswer(uuid, { sparql: query })
+        const live = options?.signal?.aborted ? undefined : this.#liveAnswer(uuid, { sparql: query })
         if (live) return live.result as T
         const params = { uuid, engine: 'sparql' as const, query }
         if (options) return JSON.parse(await this.#apiClient.call('perspective.querySparql', params, options)) as T
@@ -203,7 +203,8 @@ export class PerspectiveClient {
 
     /**
      * The result of an open live query with this text, while it is ready and live: what a
-     * one-shot read of the same question answers, so it needs no request. The one-shot's
+     * one-shot read of the same question answers, so it needs no request (a call whose signal
+     * is already aborted takes no answer: it goes to the RPC, which rejects it). The one-shot's
      * params are the live query's: a one-shot with a cursor (`after`) differs in its
      * `queryJson`, so it is no match.
      */
@@ -264,7 +265,7 @@ export class PerspectiveClient {
 
     /** `className` may name several classes: one query over their union (#1238). */
     async modelQuery(uuid: string, className: string | string[], queryJson: string, options?: CallOptions): Promise<any> {
-        const live = this.#liveAnswer(uuid, { className, queryJson })
+        const live = options?.signal?.aborted ? undefined : this.#liveAnswer(uuid, { className, queryJson })
         if (live) return live.result
         const params = { uuid, ...classParams(className), query_json: queryJson }
         if (options) return JSON.parse(await this.#apiClient.call('perspective.modelQuery', params, options))
@@ -306,8 +307,9 @@ export class PerspectiveClient {
     }
 
     async update(uuid: string, name: string): Promise<PerspectiveProxy> {
+        const was = heldPerspective(this.#apiClient, uuid)
         const handle = PerspectiveHandle.fromWire(await this.#apiClient.call('perspective.update', { uuid, name }))
-        keepPerspective(this.#apiClient, handle)
+        keepUpdatedPerspective(this.#apiClient, handle, was)
         return new PerspectiveProxy(handle, this)
     }
 

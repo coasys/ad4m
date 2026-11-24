@@ -210,3 +210,87 @@ describe('Mirror.oneShot', () => {
         expect(await Promise.all([after, again])).toEqual(['new', 'new'])
     })
 })
+
+describe('Mirror entry review round', () => {
+    it('a subscriber that reads from its loading callback joins the read in flight', async () => {
+        const { entry, load, asks } = setup<string>()
+        let joined: Promise<string> | undefined
+        let reading = false
+        entry.subscribe((snapshot) => { if (snapshot.state === 'loading' && !reading) { reading = true; joined = entry.read() } })
+        expect(load).toHaveBeenCalledTimes(1)
+        asks[0].resolve('a')
+        expect(await joined).toBe('a')
+        expect(entry.getSnapshot()).toMatchObject({ state: 'fresh', value: 'a' })
+    })
+
+    it('a loader that throws before it returns a promise fails the read, and the next read retries', async () => {
+        const mirror = new Mirror(() => '', () => {}, () => null)
+        let attempts = 0
+        const entry = mirror.entry<string>({ method: 'agent.status', load: () => {
+            if (++attempts === 1) throw new Error('sync boom')
+            return Promise.resolve('ok')
+        } })
+        const unsubscribe = entry.subscribe(() => {})
+        expect(typeof unsubscribe).toBe('function')
+        await new Promise((r) => setTimeout(r, 0))
+        expect(entry.getSnapshot()).toMatchObject({ state: 'error' })
+        await expect(entry.read()).resolves.toBe('ok')
+        expect(entry.getSnapshot().state).toBe('fresh')
+    })
+
+    it('a retry shows no error while it loads, and keeps the last value', async () => {
+        const { entry, asks } = setup<string>()
+        const first = entry.read()
+        asks[0].resolve('a')
+        await first
+        entry.invalidate()
+        const failing = entry.read()
+        asks[1].reject(new Error('down'))
+        await expect(failing).rejects.toThrow('down')
+        expect(entry.getSnapshot()).toMatchObject({ state: 'error', value: 'a' })
+        const retry = entry.read()
+        expect(entry.getSnapshot()).toMatchObject({ state: 'loading', value: 'a', error: undefined })
+        asks[2].resolve('b')
+        await retry
+    })
+
+    it('a watched entry whose read failed while the socket was down reads once when the socket opens', async () => {
+        const { mirror, entry, load, asks } = setup<string>()
+        const seen: string[] = []
+        entry.subscribe((snapshot) => seen.push(snapshot.state))
+        asks[0].reject(new Error('no socket'))
+        await Promise.resolve(); await Promise.resolve()
+        expect(entry.getSnapshot().state).toBe('error')
+        mirror.reloadWatched()
+        expect(load).toHaveBeenCalledTimes(2)
+        mirror.reloadWatched()
+        expect(load).toHaveBeenCalledTimes(2)
+        asks[1].resolve('a')
+        await Promise.resolve(); await Promise.resolve()
+        expect(entry.getSnapshot()).toMatchObject({ state: 'fresh', value: 'a' })
+    })
+
+    it('an unwatched entry that failed is not read when a socket opens', async () => {
+        const { mirror, entry, load, asks } = setup<string>()
+        const read = entry.read()
+        asks[0].reject(new Error('no socket'))
+        await expect(read).rejects.toThrow('no socket')
+        mirror.reloadWatched()
+        expect(load).toHaveBeenCalledTimes(1)
+    })
+
+    it('a one-shot made right after reset() sends its own request', async () => {
+        const mirror = new Mirror(() => '', () => {}, () => null)
+        const { load, asks } = loader<string>()
+        const spec = () => mirror.oneShot({ perspective: 'p', method: 'perspective.querySparql', params: {}, request: load })
+        const before = spec()
+        before.catch(() => {})
+        mirror.reset()
+        asks[0].reject(new Error('Client closed'))
+        const after = spec()
+        expect(load).toHaveBeenCalledTimes(2)
+        asks[1].resolve('fresh')
+        expect(await after).toBe('fresh')
+        await expect(before).rejects.toThrow('Client closed')
+    })
+})

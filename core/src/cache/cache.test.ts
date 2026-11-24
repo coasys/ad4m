@@ -1,6 +1,6 @@
 import { Ad4mClient } from '../Ad4mClient';
 import { Perspective } from '../perspectives/Perspective';
-import { NullCache } from '../cache/PersistentCache';
+import { NullCache, prefixEnd } from '../cache/PersistentCache';
 import { AgentClient } from '../agent/AgentClient';
 import { ExpressionClient } from '../expression/ExpressionClient';
 
@@ -167,6 +167,28 @@ beforeEach(() => {
 });
 
 // ===================== NULLCACHE TESTS =====================
+
+describe('prefixEnd', () => {
+    const inRange = (key: string, prefix: string) => {
+        const end = prefixEnd(prefix);
+        return key >= prefix && (end === undefined || key < end);
+    };
+
+    test('every key that starts with the prefix is in the range, and no other key is', () => {
+        expect(inRange('o|did|a', 'o|did|')).toBe(true);
+        expect(inRange('o|did|￿x', 'o|did|')).toBe(true);
+        expect(inRange('o|did|￿￿', 'o|did|')).toBe(true);
+        expect(inRange('o|did}', 'o|did|')).toBe(false);
+        expect(inRange('o|dic|a', 'o|did|')).toBe(false);
+    });
+
+    test('a prefix of U+FFFF units has no end; a trailing U+FFFF is skipped', () => {
+        expect(prefixEnd('￿￿')).toBeUndefined();
+        expect(prefixEnd('')).toBeUndefined();
+        expect(prefixEnd('a￿')).toBe('b');
+        expect(inRange('a￿z', 'a￿')).toBe(true);
+    });
+});
 
 describe('NullCache', () => {
     test('get() always returns undefined', async () => {

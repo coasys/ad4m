@@ -5,6 +5,8 @@
  */
 import { Ad4mClient } from '../Ad4mClient';
 import { AgentClient } from '../agent/AgentClient';
+import { Agent } from '../agent/Agent';
+import { LinkQuery } from '../perspectives/LinkQuery';
 import { ExpressionClient } from '../expression/ExpressionClient';
 import { KeyedCache } from '../cache/KeyedCache';
 import { Mirror } from './Mirror';
@@ -120,6 +122,21 @@ describe('two clients share nothing', () => {
         expect(reads()).toEqual(['bob', 'alice']);
         alice.close();
         bob.close();
+    });
+
+    test('a stored profile comes back as an Agent whose perspective has its query helpers', async () => {
+        const alice = new Ad4mClient(ORIGIN, 'alice');
+        // IndexedDB's structured clone leaves plain objects: no prototypes.
+        const link = { author: 'did:x', timestamp: 't', data: { source: 's', predicate: 'p', target: 't' }, proof: { key: 'k', signature: 'sig' } };
+        databases.set('ad4m-agent-cache/agents', new Map([
+            [`${ORIGIN}|did:test:alice|did:test:friend`, { ts: Date.now(), value: { did: 'did:test:friend', directMessageLanguage: 'lang://stored', perspective: { links: [link] } } }],
+        ]));
+        await alice.agent.status();
+        const stored = await alice.agent.byDID('did:test:friend');
+        expect(stored).toBeInstanceOf(Agent);
+        expect(stored.perspective!.get(new LinkQuery({ predicate: 'p' }))).toHaveLength(1);
+        expect(stored.perspective!.links[0].hash()).toEqual(expect.any(Number));
+        alice.close();
     });
 
     test('another executor origin is another key', async () => {

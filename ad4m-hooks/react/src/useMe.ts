@@ -21,7 +21,7 @@ export function useMe<T>(client: Ad4mClient | undefined, formatter: (links: Link
   const perspective = me?.value?.perspective;
   const profile = useMemo(
     () => (perspective && formatter ? formatter(perspective.links) : null),
-    [perspective]
+    [perspective, formatter]
   );
   const failure = me?.error ?? status?.error;
 

@@ -107,12 +107,14 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
   (`Mirror.reset`) mark every value stale and send **no request**
   (`markAllStale(false)`, `invalidate(false)`, `markStale(false)`). Every socket
   open (`ApiClient._onOpen`, a reused client's first open included) then calls
-  `Mirror.reloadWatched()`: each stale value with a subscriber loads once; fresh
-  values and reads in flight are left alone. So a watched value never dials a
+  `Mirror.reloadWatched()`: each value with a subscriber that is stale or failed (a read
+  made while the socket was down ends in `error`) loads once; fresh values and reads in
+  flight are left alone. So a watched value never dials a
   socket by itself, and a reconnect reads each watched value once, after the
   socket is back. A read the app started before `closeAll()` and that a keyed
-  cache had only queued (the tick's batch) can still dial once after it. After a
-  refused token every read fails with 401. Until the
+  cache had only queued (the tick's batch) can still dial once after it. A refused
+  token (`Mirror.refuse`) also makes the expression cache stale and blocks its
+  persistent tier, so after it every read fails with 401. Until the
   1008 close arrives, a client whose token was revoked still answers from its
   stored values.
 - An answer is kept only if nothing changed the entry since its request went
@@ -176,7 +178,8 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
   per RPC name (`mirror.cache({method, staleOnReconnect?, options, on?})`; the first
   call's spec wins), so two clients share nothing. It has its own per-key state (same
   states and rules as `Entry`) and adds tick batching through `loadMany` (50 `byDID`
-  misses in one tick = one `agent.byDIDs`; a failed batch retries per key; a failure is
+  misses in one tick = one `agent.byDIDs`; the per-key retry applies only to an `RpcError`
+  500 with more than one DID, any other failure rejects the whole shared batch; a failure is
   never kept), `maxAgeMs`, the memory limits and the persistent tier. The limits never
   evict a key a view is subscribed to (its view would go blank): while views hold them,
   watched keys may take a cache past its limits.
@@ -193,6 +196,8 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
   calls `mirror.reset()`: every value is stale, the pooled live subscriptions end, and the
   handlers are registered again, so a client used after `closeAll()` reads from the executor
   and hears events (the lazy `Entry` fields of `AgentClient` stay valid: entries are kept).
+  The expressions survive `closeAll()` (`staleOnReconnect: false`): only their age, `clearCache()`,
+  an `interact` or a refused token expires them.
 - Live queries (`core/src/mirror/live.ts`). `mirror.live` keeps one
   `LiveSubscription` per perspective + RPC + canonical params; each caller gets its own
   `LiveQuery` view (own `first`, own projection, own listeners; `dispose()` releases only that
@@ -210,7 +215,9 @@ share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
   `PerspectiveClient.modelQuery` / `querySparql` answer from a ready live handle with the
   same key (no `after` cursor). After an own write (`mirror.wrote`) they ask the executor
   until an update changes the result, because the executor sends updates 250 ms or more
-  after the write's reply. A live SPARQL result is a multiset: row order can differ from a
+  after the write's reply. A write made while a result is on its way (a resync, an open) also
+  keeps them closed past the updates already buffered behind it: those came before the write.
+  While a resync's result and its buffered updates are applied, the result answers nothing. A live SPARQL result is a multiset: row order can differ from a
   fresh query with no `ORDER BY`. The Waker keeps its own unshared subscription.
   The write counter lives in `Mirror.wrote(scope)` only. Its cost: a write that does not
   change a query's result sends every later one-shot of that query to the executor until

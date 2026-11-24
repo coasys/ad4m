@@ -99,6 +99,22 @@ describe('perspective.all, a pushed entry', () => {
         expect(asks('perspective.all')).toBe(1)
     })
 
+    it('the reply of an own update does not overwrite a newer perspective-updated event that arrived before it', async () => {
+        await names(ad4m)
+        const before = Sock.handle
+        let release!: () => void
+        Sock.handle = (msg, sock) => msg.type === 'perspective.update'
+            ? new Promise((resolve) => { release = () => resolve(handle(msg.params.uuid, msg.params.name)) })
+            : before(msg, sock)
+        const write = ad4m.perspective.update('a', 'mine')
+        await settle()
+        emit({ type: 'perspective-updated', perspectiveUuid: 'a', perspective: handle('a', 'theirs') })
+        release()
+        await write
+        expect(await names(ad4m)).toEqual(['a:theirs', 'b:b'])
+        expect(asks('perspective.all')).toBe(1)
+    })
+
     it('a write before the first read does not make the list wrong', async () => {
         await ad4m.perspective.add('mine')
         stored = [handle('a'), handle('b'), handle('c', 'mine')]
@@ -155,5 +171,24 @@ describe('hosting.info, a pushed entry', () => {
         await settle()
         await jest.advanceTimersByTimeAsync(10 * 60_000)
         expect(asks('hosting.info')).toBe(1)
+    })
+})
+
+describe('agent.get, a pushed entry', () => {
+    const wire = (identity?: string) => ({ did: 'did:test:me', perspective: null, directMessageLanguage: null, ...(identity ? { identity } : {}) })
+
+    it('keeps the identity agent.get gave when agent-updated or updatePublicPerspective replace the agent', async () => {
+        const before = Sock.handle
+        Sock.handle = (msg, sock) => {
+            if (msg.type === 'agent.get') return wire('did:scid:coasys:1:abc')
+            if (msg.type === 'agent.updateProfile') return wire()
+            return before(msg, sock)
+        }
+        expect((await ad4m.agent.me()).identity).toBe('did:scid:coasys:1:abc')
+        emit({ type: 'agent-updated', agent: wire() })
+        expect((await ad4m.agent.me()).identity).toBe('did:scid:coasys:1:abc')
+        await ad4m.agent.updatePublicPerspective({ links: [] })
+        expect((await ad4m.agent.me()).identity).toBe('did:scid:coasys:1:abc')
+        expect(asks('agent.get')).toBe(1)
     })
 })

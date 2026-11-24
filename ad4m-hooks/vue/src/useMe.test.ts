@@ -46,6 +46,16 @@ describe("useMe", () => {
 });
 
 describe("useAgent", () => {
+  it("keeps the DID in the profile when the caller passes a getter", async () => {
+    const client = new Ad4mClient("http://127.0.0.1:12000", "alice");
+    const scope = effectScope();
+    const { profile } = scope.run(() => useAgent(client.agent, () => "did:test:friend", (links) => ({ name: nameOf(links) })))!;
+    await until(() => profile.value !== null);
+    expect(profile.value).toMatchObject({ did: "did:test:friend" });
+    scope.stop();
+    client.close();
+  });
+
   it("shows another agent and re-renders when agent-updated refreshes it", async () => {
     const client = new Ad4mClient("http://127.0.0.1:12000", "alice");
     const scope = effectScope();

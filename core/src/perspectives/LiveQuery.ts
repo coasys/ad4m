@@ -182,6 +182,9 @@ export class LiveSubscription {
     #generation = 0
     // Updates that arrive while a subscribe or resync reply is outstanding.
     #buffer: (QueryUpdate | QueryLagged)[] | null = null
+    // True while a resync or open result and the updates buffered behind it are applied:
+    // a listener told of the first must not take the result as current.
+    #replaying = false
     #unlisten: () => void
     #unreconnect: () => void
     // Aborts the subscribe call still in flight, for `dispose()`.
@@ -237,9 +240,16 @@ export class LiveSubscription {
      *  the caller must not change `result`. */
     liveResult(): { result: any; changes: number } | undefined {
         const { status, reopening } = this.#snapshot
-        return status === 'ready' && !reopening && !this.#disposed && !this.#buffer
+        return status === 'ready' && !reopening && !this.#disposed && !this.#buffer && !this.#replaying
             ? { result: this.#result, changes: this.#changes }
             : undefined
+    }
+
+    /** How many results are on their way, as an upper bound: the one a resync, open or
+     *  re-open will deliver and the updates buffered behind it. 0 while the result is live. */
+    get pending(): number {
+        if (this.#buffer) return 1 + this.#buffer.length
+        return this.liveResult() ? 0 : 1
     }
 
     /** Call `fn` with the current snapshot at once when the query is no longer
@@ -398,9 +408,14 @@ export class LiveSubscription {
         this.#changes++
         const buffered = this.#buffer ?? []
         this.#buffer = null
-        this.#show(result)
-        // A listener may have disposed the handle: nothing more is applied.
-        for (const update of buffered) this.#receive(update)
+        this.#replaying = true
+        try {
+            this.#show(result)
+            // A listener may have disposed the handle: nothing more is applied.
+            for (const update of buffered) this.#receive(update)
+        } finally {
+            this.#replaying = false
+        }
     }
 
     #receive(update: QueryUpdate | QueryLagged) {

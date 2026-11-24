@@ -6,7 +6,7 @@ import { LinkExpression, AgentClient, type Live, type Agent } from "@coasys/ad4m
  * at once by an `agent-updated` event, read again after a reconnect. Two clients share nothing.
  */
 export function useAgent<T>(client: AgentClient, did: string | Function, formatter: (links: LinkExpression[]) => T) {
-  const didRef = typeof did === "function" ? (did as any) : ref(did);
+  const didRef = typeof did === "function" ? computed(() => (did as () => string)()) : ref(did);
   const snapshot = shallowRef<{ state?: string; value?: Agent | null; error?: unknown }>({});
 
   let unsubscribe: (() => void) | undefined;

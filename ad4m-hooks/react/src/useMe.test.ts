@@ -27,7 +27,12 @@ async function render<T>(use: () => T) {
   };
   const root = createRoot(document.createElement("div"));
   await act(async () => root.render(createElement(Component)));
-  return { renders, last: () => renders[renders.length - 1], unmount: () => act(async () => root.unmount()) };
+  return {
+    renders,
+    last: () => renders[renders.length - 1],
+    rerender: () => act(async () => root.render(createElement(Component))),
+    unmount: () => act(async () => root.unmount()),
+  };
 }
 
 const settle = (fn: () => void) => act(async () => fn());
@@ -47,6 +52,20 @@ describe("useMe", () => {
     await settle(() => emit("alice", { type: "agent-updated", agent: profileOf("did:test:alice", "Alice") }));
     expect(view.last().profile).toBe("Alice");
     expect(rpcLog.filter((c) => c.type === "agent.get")).toHaveLength(1);
+    await view.unmount();
+    client.close();
+  });
+
+  it("computes the profile again when only the formatter changes", async () => {
+    const client = new Ad4mClient("http://127.0.0.1:12000", "alice");
+    let format = nameOf;
+    const view = await render(() => useMe(client, format));
+    await rendered(() => view.last().profile === "none");
+    await settle(() => emit("alice", { type: "agent-updated", agent: profileOf("did:test:alice", "Alice") }));
+    expect(view.last().profile).toBe("Alice");
+    format = (links) => nameOf(links).toUpperCase();
+    await view.rerender();
+    expect(view.last().profile).toBe("ALICE");
     await view.unmount();
     client.close();
   });

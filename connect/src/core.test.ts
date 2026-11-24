@@ -43,6 +43,16 @@ const { mockAgent, mockRuntime, mockClientInstance, hosting } = vi.hoisted(() =>
       this.snapshot = { state: 'fresh', value, error: undefined, initial: false };
       this.listeners.forEach((fn) => fn(this.snapshot));
     },
+    /** The request failed: the entry is in `error` and its subscribers are told. */
+    fail(error: unknown) {
+      this.snapshot = { state: 'error', value: undefined, error, initial: false };
+      this.listeners.forEach((fn) => fn(this.snapshot));
+    },
+    /** A read of an entry that is not fresh sends one request. */
+    read() {
+      this.snapshot = { ...this.snapshot, state: 'loading' };
+      return mockAgent.hostingUserInfo().then((value: unknown) => { this.push(value); return value; });
+    },
     getSnapshot() { return this.snapshot; },
     subscribe(fn: (s: unknown) => void) {
       this.listeners.add(fn);
@@ -867,6 +877,67 @@ describe('Ad4mConnect', () => {
       await conn.disconnect();
       expect(hosting.listeners.size).toBe(0);
       expect(conn.userInfo).toBeNull();
+    });
+
+    it('follows the credits to the client that replaces the first', async () => {
+      const conn = new Ad4mConnect(defaultOptions);
+      await conn.connect();
+      conn.startCreditSubscription();
+      await vi.waitFor(() => expect(conn.userInfo).not.toBeNull());
+      expect(hosting.listeners.size).toBe(1);
+
+      // The next client has its own entry.
+      const second = Object.create(hosting, {
+        listeners: { value: new Set() },
+        snapshot: { value: { state: 'fresh', value: undefined, error: undefined, initial: false }, writable: true },
+      });
+      const original = mockAgent.live;
+      mockAgent.live = { hostingUserInfo: () => second };
+      try {
+        (conn as any).buildClient();
+        expect(hosting.listeners.size).toBe(0);
+        expect(second.listeners.size).toBe(1);
+        const events: any[] = [];
+        conn.addEventListener('userinfochange', (e: any) => events.push(e.detail));
+        second.push({ email: 'new@test.com', remainingCredits: '7', hotWalletAddress: null, freeAccess: false });
+        expect(events).toHaveLength(1);
+        expect(events[0]).toMatchObject({ email: 'new@test.com', remainingCredits: 7 });
+      } finally {
+        mockAgent.live = original;
+      }
+    });
+
+    it('does not start the credit subscription for a client replaced before it was asked for', async () => {
+      const conn = new Ad4mConnect(defaultOptions);
+      await conn.connect();
+      (conn as any).buildClient();
+      expect(hosting.listeners.size).toBe(0);
+    });
+
+    it('reads again 30 s after a failed hosting.info read, and stops when released', async () => {
+      const conn = new Ad4mConnect(defaultOptions);
+      await conn.connect();
+      vi.useFakeTimers();
+      try {
+        conn.startCreditSubscription();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(mockAgent.hostingUserInfo).toHaveBeenCalledTimes(1);
+
+        hosting.fail(new Error('down'));
+        await vi.advanceTimersByTimeAsync(29_000);
+        expect(mockAgent.hostingUserInfo).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(mockAgent.hostingUserInfo).toHaveBeenCalledTimes(2);
+        expect(hosting.getSnapshot().state).toBe('fresh');
+
+        // A second failure, then a disconnect: no further read.
+        hosting.fail(new Error('down'));
+        await conn.disconnect();
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(mockAgent.hostingUserInfo).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('sends no hosting.info request after the first in 10 idle minutes', async () => {

@@ -42,6 +42,8 @@ interface Loaded<V> {
     value: V | null;
     /** Came from the persistent store, so it is not written back. */
     stored: boolean;
+    /** When a stored value was written: it keeps that age in memory. */
+    ts?: number;
 }
 
 /** A value the cache holds; only found values are held. */
@@ -98,6 +100,8 @@ export class KeyedCache<V> {
      * evicted, deleted) leaves this set.
      */
     #storedUsed = new Set<string>();
+    /** The executor refused the client's token: nothing is served from the persistent tier any more. */
+    #refused = false;
 
     constructor(opts: KeyedCacheOptions<V>) {
         this.#opts = opts;
@@ -143,12 +147,24 @@ export class KeyedCache<V> {
             this.#cancel(key);
             this.#errors.delete(key);
             this.#missing.delete(key);
+            // A cancelled read of the persistent tier leaves no value: the next read may use it.
+            if (!this.#slots.has(key)) this.#storedUsed.delete(key);
             const slot = this.#slots.get(key);
             if (slot) slot.stale = true;
             if (refetch && this.#listeners.get(key)?.size) again.push(key);
             else this.#notify(key);
         }
         for (const key of again) this.#read(key, this.#loader(key)).catch(() => {});
+    }
+
+    /**
+     * The executor refused the client's token: every value is stale (shown, never served again
+     * as current, whatever `staleOnReconnect` says), and the persistent tier is not read, so
+     * the next read reaches the source and fails there.
+     */
+    refuse(): void {
+        this.#refused = true;
+        this.markStale(false);
     }
 
     /** A socket opened: each watched key that is not fresh and not loading reads once, the misses of this tick in one call. */
@@ -174,6 +190,8 @@ export class KeyedCache<V> {
                     listeners!.delete(fn);
                     if (listeners!.size === 0 && this.#listeners.get(key) === listeners) this.#listeners.delete(key);
                     this.#prune(key);
+                    // Watched keys may have taken the cache past its limits: this one is no longer protected.
+                    if (!this.#listeners.get(key)?.size) this.#trim();
                 };
             },
             read: () => this.get(key),
@@ -218,7 +236,7 @@ export class KeyedCache<V> {
                     } else {
                         const stored = loaded.stored;
                         const stale = stored && !!this.#opts.persistentStale;
-                        this.#keep(key, loaded.value, stored, stale);
+                        this.#keep(key, loaded.value, stored, stale, loaded.ts);
                         // The stored value is shown now, the source read once in the background.
                         if (stale) this.#read(key, this.#loader(key)).catch(() => {});
                     }
@@ -279,7 +297,7 @@ export class KeyedCache<V> {
      * the limits and tells the key's subscribers. An equal value stays the same object
      * while someone subscribes: they compare snapshots by identity.
      */
-    #keep(key: string, value: V, stored: boolean, stale: boolean): void {
+    #keep(key: string, value: V, stored: boolean, stale: boolean, ts = Date.now()): void {
         const limits = this.#opts.limits?.();
         const listening = (this.#listeners.get(key)?.size ?? 0) > 0;
         const text = limits || listening ? canonical(value) : undefined;
@@ -301,12 +319,22 @@ export class KeyedCache<V> {
         }
         this.#slots.set(key, {
             value: same ? prev!.value : value,
-            ts: Date.now(),
+            ts,
             stale,
             size,
         });
         this.#bytes += size;
         this.#notify(key);
+    }
+
+    /** Evicts the oldest unwatched values while the cache holds more than its limits allow. */
+    #trim(): void {
+        const limits = this.#opts.limits?.();
+        if (!limits) return;
+        for (const oldest of [...this.#slots.keys()]) {
+            if (this.#slots.size <= limits.entries && this.#bytes <= limits.bytes) break;
+            if (!this.#listeners.get(oldest)?.size) this.#evict(oldest);
+        }
     }
 
     /** The memory limits took a value out; the persistent store keeps it. */
@@ -332,7 +360,7 @@ export class KeyedCache<V> {
             this.#snapshots.delete(key);
             return UNKNOWN as Snapshot<V | null>;
         }
-        const next: Snapshot<V | null> = { state, value: slot ? slot.value : missing ? null : undefined, error: this.#errors.get(key) };
+        const next: Snapshot<V | null> = { state, value: slot ? slot.value : missing ? null : undefined, error: state === 'error' ? this.#errors.get(key) : undefined };
         if (prev && prev.state === next.state && prev.value === next.value && prev.error === next.error) return prev;
         this.#snapshots.set(key, next);
         return next;
@@ -389,6 +417,7 @@ export class KeyedCache<V> {
     }
 
     async #stored(key: string): Promise<Loaded<V> | null> {
+        if (this.#refused) return null;
         if (this.#opts.persistentStale) {
             if (this.#storedUsed.has(key)) return null;
             this.#storedUsed.add(key);
@@ -396,6 +425,6 @@ export class KeyedCache<V> {
         const entry = await this.#opts.persistent?.get(key);
         // An entry without `value` was written in an older format: a miss.
         if (entry?.value == null || !(Date.now() - (entry.ts ?? 0) < (this.#opts.persistentMaxAgeMs?.() ?? Infinity))) return null;
-        return { value: entry.value, stored: true };
+        return { value: entry.value, stored: true, ts: entry.ts };
     }
 }

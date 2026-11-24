@@ -9,8 +9,8 @@ export class SharedLive {
     readonly subscription: LiveSubscription
     readonly perspective: string
     #views = 0
-    // `changes` when the result may be old: a write of this client settled, or the socket was lost.
-    // Until the result changes, it answers no one-shot read.
+    // A result may be old until `changes` passes this: a write of this client settled, or the socket
+    // was lost. Until then it answers no one-shot read.
     #barrier?: number
     #timer?: ReturnType<typeof setTimeout>
     #ended = false
@@ -30,16 +30,16 @@ export class SharedLive {
      */
     answer(): { result: any } | undefined {
         const held = this.subscription.liveResult()
-        return held && held.changes !== this.#barrier ? held : undefined
+        return held && (this.#barrier === undefined || held.changes > this.#barrier) ? held : undefined
     }
 
     /**
      * A write of this client settled: the result is trusted again once an update arrives.
-     * A result still on its way (first open, resync, re-open) may have been read before
-     * the write, so it does not count.
+     * A result still on its way (first open, resync, re-open) and the updates buffered behind it
+     * came before the write, so they do not count.
      */
     wrote(): void {
-        this.#barrier = this.subscription.changes + (this.subscription.liveResult() ? 0 : 1)
+        this.#barrier = this.subscription.changes + this.subscription.pending
     }
 
     /**
@@ -162,6 +162,11 @@ class LiveView<T> implements LiveQuery<T> {
     }
 
     #hold(remove: Unsubscribe): Unsubscribe {
+        // A callback that ran inside `subscribe` may have disposed the handle before it got its remover.
+        if (this.#disposed) {
+            remove()
+            return () => {}
+        }
         this.#removers.add(remove)
         return () => {
             this.#removers.delete(remove)

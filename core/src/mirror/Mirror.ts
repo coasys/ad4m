@@ -172,9 +172,21 @@ export class Mirror {
      * one-shot read until their resync delivers a result; their snapshots keep the last value.
      */
     markAllStale(refetch = true): void {
+        // The live results first: a subscriber told of the loss may read at once.
+        for (const shared of this.#lives.values()) shared.stale()
         for (const entry of this.#entries.values()) entry.invalidate(refetch)
         for (const { staleOnReconnect, cache } of this.#caches.values()) if (staleOnReconnect) cache.markStale(refetch)
-        for (const shared of this.#lives.values()) shared.stale()
+    }
+
+    /**
+     * The executor refused the client's token, and no reconnect comes: every value is stale
+     * and sends no request, the expression cache included (a refusal ends its reuse), and no
+     * persistent tier is read, so every later read reaches the refusal. Snapshots keep the
+     * last value for display.
+     */
+    refuse(): void {
+        this.markAllStale(false)
+        for (const { cache } of this.#caches.values()) cache.refuse()
     }
 
     /** A socket opened: every stale value with a subscriber loads once. Fresh values and those loading stay. */
@@ -184,13 +196,16 @@ export class Mirror {
     }
 
     /**
-     * The client closed its socket and handlers and may be used again: every value is stale,
+     * The client closed its socket and handlers and may be used again: every value is stale
+     * (except the keyed caches with `staleOnReconnect: false`, the expressions, which only their age expires),
      * the pooled live subscriptions end (their executor side died with the socket), and the
      * events the entries and caches listen to are registered again.
      */
     reset(): void {
         for (const shared of this.#lives.values()) shared.close()
         this.#lives.clear()
+        // The calls in flight are about to be rejected: a one-shot made now sends its own request.
+        this.#flights.clear()
         this.markAllStale(false)
         for (const [name, handler] of this.#registrations) this.#listen(name, handler)
     }
@@ -205,8 +220,11 @@ export class Mirror {
         const key = `${keyOf(spec)}|${this.#writes.get(spec.perspective) ?? 0}`
         let reply = this.#flights.get(key)
         if (!reply) {
-            reply = spec.request().finally(() => this.#flights.delete(key))
-            this.#flights.set(key, reply)
+            const flight: Promise<T> = spec.request().finally(() => {
+                if (this.#flights.get(key) === flight) this.#flights.delete(key)
+            })
+            reply = flight
+            this.#flights.set(key, flight)
         }
         return reply
     }

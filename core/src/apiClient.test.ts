@@ -7,6 +7,7 @@ import { PerspectiveClient } from "./perspectives/PerspectiveClient"
 import { PerspectiveHandle } from "./perspectives/PerspectiveHandle"
 import { PerspectiveProxy } from "./perspectives/PerspectiveProxy"
 import { RuntimeClient } from "./runtime/RuntimeClient"
+import { ExpressionClient } from "./expression/ExpressionClient"
 
 type AnyMsg = Record<string, any>
 
@@ -1631,6 +1632,20 @@ describe('ApiClient when the executor refuses the token', () => {
         expect(status.getSnapshot().state).toBe('fresh')
         socket(0).drop(1008, REASON)
         await expect(status.read()).rejects.toMatchObject({ status: 401, body: REASON })
+    })
+
+    it('does not serve a warm expression after the refusal: the read fails with 401', async () => {
+        open()
+        socket(0).open()
+        const expressions = new ExpressionClient(url, undefined, client)
+        const first = expressions.get('lang://e1')
+        for (let i = 0; i < 10; i++) await Promise.resolve()
+        const req = socket(0).sent.find((m) => m.type === 'expression.get')!
+        socket(0).reply({ id: req.id, result: { author: 'did:test:a', timestamp: 't', data: 'x', proof: {} } })
+        await first
+        await expect(expressions.get('lang://e1')).resolves.toMatchObject({ author: 'did:test:a' })
+        socket(0).drop(1008, REASON)
+        await expect(expressions.get('lang://e1')).rejects.toMatchObject({ status: 401, body: REASON })
     })
 
     it('fails every later call with 401 without opening a socket', async () => {

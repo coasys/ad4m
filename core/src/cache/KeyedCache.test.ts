@@ -303,3 +303,84 @@ describe('KeyedCache', () => {
         expect(store.entries.has('a')).toBe(false);
     });
 });
+
+describe('KeyedCache review round', () => {
+    test('the limits apply again when a key loses its last subscriber', async () => {
+        const cache = new KeyedCache<string>({
+            loadMany: async keys => keys.map(k => k.toUpperCase()),
+            limits: () => ({ entries: 2, bytes: 1_000 }),
+        });
+        const offs = ['a', 'b', 'c'].map(k => cache.live(k).subscribe(() => {}));
+        await until(() => ['a', 'b', 'c'].every(k => cache.live(k).getSnapshot().state === 'fresh'));
+        // Watched keys are never evicted: three held for a limit of two.
+        offs.forEach(off => off());
+        const held = ['a', 'b', 'c'].filter(k => cache.live(k).getSnapshot().state === 'fresh');
+        expect(held).toEqual(['b', 'c']);
+    });
+
+    test('a value restored from the persistent tier keeps its stored age', async () => {
+        const store = new MapStore<string>();
+        const now = Date.now();
+        store.entries.set('k', { value: 'stored', ts: now - 299_000 });
+        const loadMany = jest.fn(async (keys: string[]) => keys.map(k => `loaded:${k}`));
+        const cache = new KeyedCache<string>({
+            loadMany, persistent: store,
+            maxAgeMs: () => 300_000, persistentMaxAgeMs: () => 300_000,
+        });
+        expect(await cache.get('k')).toBe('stored');
+        const spy = jest.spyOn(Date, 'now').mockReturnValue(now + 2_000);
+        try {
+            expect(await cache.get('k')).toBe('loaded:k');
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
+    test('markStale() on an unwatched miss waiting for the persistent tier releases its once-per-session marker', async () => {
+        const gate = deferred<void>();
+        const store = new MapStore<string>();
+        const gets: string[] = [];
+        const get = store.get.bind(store);
+        store.get = async (key: string) => { gets.push(key); await gate.promise; return get(key); };
+        const cache = new KeyedCache<string>({
+            loadMany: async keys => keys.map(k => `loaded:${k}`),
+            persistent: store, persistentStale: true,
+        });
+        const first = cache.get('a');
+        await until(() => gets.length === 1);
+        cache.markStale();
+        gate.resolve();
+        await first;
+        await cache.get('a');
+        expect(gets).toEqual(['a', 'a']);
+    });
+
+    test('a retry of a failed watched key shows no error while it loads', async () => {
+        let fail = true;
+        const load = jest.fn(async (key: string) => { if (fail) throw new Error('down'); return key; });
+        const cache = new KeyedCache<string>({ loadMany: async keys => keys, load });
+        const live = cache.live('k');
+        const off = live.subscribe(() => {});
+        await until(() => live.getSnapshot().state === 'error');
+        fail = false;
+        const retry = cache.get('k');
+        expect(live.getSnapshot()).toMatchObject({ state: 'loading', error: undefined });
+        await retry;
+        off();
+    });
+
+    test('refuse() makes every value stale and blocks the persistent tier, so the next read reaches the source', async () => {
+        const store = new MapStore<string>();
+        store.entries.set('stored', { value: 'from store', ts: Date.now() });
+        const load = jest.fn(async (key: string) => `loaded:${key}`);
+        const cache = new KeyedCache<string>({ loadMany: async keys => keys, load, persistent: store });
+        expect(await cache.get('stored')).toBe('from store');
+        await cache.get('other');
+        cache.refuse();
+        expect(load).toHaveBeenCalledTimes(1);
+        expect(await cache.get('other')).toBe('loaded:other');
+        cache.delete('stored');
+        store.entries.set('stored', { value: 'from store', ts: Date.now() });
+        expect(await cache.get('stored')).toBe('loaded:stored');
+    });
+});

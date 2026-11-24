@@ -62,7 +62,7 @@ function AgentProfile({ agentClient, did }) {
 
 ## useMe
 
-Provides access to the current agent's data and status. It takes the `Ad4mClient` and reads the agent and its status from the client's data mirror: `agent-updated` and `agent-status-changed` events replace them and re-render, and the next open of the socket after a loss reads them again (nothing is sent while there is no socket). Two clients share nothing. `status` and `me` are `undefined` until the first read ends.
+Provides access to the current agent's data and status. It takes the `Ad4mClient` and reads the agent and its status from the client's data mirror: `agent-updated` and `agent-status-changed` events replace them and re-render, and the next open of the socket after a loss reads them again (nothing is sent while there is no socket). Two clients share nothing. `status` and `me` are `undefined` until the first read ends. A read that failed (for example while the socket was down) is read again when the socket opens. `profile` is built again when the `formatter` you pass changes, so keep it stable (`useCallback`) or accept one build per render.
 
 ```typescript
 import { useMe } from '@coasys/ad4m-react-hooks';

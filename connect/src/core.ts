@@ -41,6 +41,8 @@ type ClientOptions = ConstructorParameters<typeof Ad4mClient>[2];
 
 const DEFAULT_INDEX_URL = "https://hosting.ad4m.dev";
 const DEFAULT_LOW_CREDIT_THRESHOLD = 10;
+/** How long after a failed `hosting.info` read the credit subscription reads again. */
+const CREDIT_RETRY_MS = 30_000;
 
 /**
  * Check whether `origin` is permitted by an entry in `allowedOrigins`.
@@ -90,6 +92,8 @@ export default class Ad4mConnect extends EventTarget {
   hostIndexUrl: string;
   lowCreditThreshold: number;
   private releaseCreditListener?: () => void;
+  /** Reads `hosting.info` again after a failed read; cleared with the listener. */
+  private creditRetry?: ReturnType<typeof setTimeout>;
   /** How \`buildClient\` reaches the executor in embedded proxy mode; unset for a direct connection. */
   private proxy?: { baseUrl: string; options: ClientOptions };
 
@@ -300,6 +304,7 @@ export default class Ad4mConnect extends EventTarget {
       this.ad4mClient.close();
     }
     this.ad4mClient = client;
+    this.followCredits();
     this.watchAuth(client);
     this.notifyConnectionChange("connected");
   }
@@ -315,6 +320,7 @@ export default class Ad4mConnect extends EventTarget {
     this.ad4mClient = this.proxy
       ? new Ad4mClient(this.proxy.baseUrl, this.token, this.proxy.options)
       : new Ad4mClient(this.baseUrl, this.token);
+    this.followCredits();
     this.watchAuth(this.ad4mClient);
     this.notifyConnectionChange("connected");
 
@@ -426,8 +432,7 @@ export default class Ad4mConnect extends EventTarget {
     
     // Clear hosting state
     this.connectedHost = null;
-    this.releaseCreditListener?.();
-    this.releaseCreditListener = undefined;
+    this.stopCreditSubscription();
     removeLocal('ad4m-last-host');
 
     // Update connection state
@@ -447,9 +452,19 @@ export default class Ad4mConnect extends EventTarget {
   startCreditSubscription(): void {
     if (!this.ad4mClient) return;
 
-    this.releaseCreditListener?.();
+    this.stopCreditSubscription();
     const live = this.ad4mClient.agent.live.hostingUserInfo();
     const announce = (snapshot: ReturnType<typeof live.getSnapshot>) => {
+      if (snapshot.state === 'error') {
+        // The entry keeps no failure for a later read, so nothing else would ask again until a reconnect.
+        if (!this.creditRetry) {
+          this.creditRetry = setTimeout(() => {
+            this.creditRetry = undefined;
+            live.read().catch(() => {});
+          }, CREDIT_RETRY_MS);
+        }
+        return;
+      }
       if (snapshot.state !== 'fresh' || !snapshot.value) return;
       const userInfo = toUserInfo(snapshot.value);
       this.dispatchEvent(new CustomEvent('userinfochange', { detail: userInfo }));
@@ -464,6 +479,18 @@ export default class Ad4mConnect extends EventTarget {
     // Subscribing makes the entry load when it is not fresh; a fresh one is announced now.
     this.releaseCreditListener = live.subscribe(announce);
     announce(live.getSnapshot());
+  }
+
+  private stopCreditSubscription(): void {
+    this.releaseCreditListener?.();
+    this.releaseCreditListener = undefined;
+    clearTimeout(this.creditRetry);
+    this.creditRetry = undefined;
+  }
+
+  /** A replaced client has its own entry: the credit listener moves to the new one. */
+  private followCredits(): void {
+    if (this.releaseCreditListener) this.startCreditSubscription();
   }
 
   async requestTopUp(amountHOT: number): Promise<{ success: boolean; amountHOT: string }> {

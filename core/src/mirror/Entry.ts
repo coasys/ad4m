@@ -71,8 +71,10 @@ export class Entry<T> implements Live<T> {
         if (this.#state === 'fresh') return Promise.resolve(this.#value as T)
         if (this.#inflight) return this.#inflight
         const version = this.#version
-        this.#set('loading')
-        const request = this.#load().then(
+        // A loader that throws before it returns a promise fails the read like a rejected one.
+        let loading: Promise<T>
+        try { loading = this.#load() } catch (e) { loading = Promise.reject(e) }
+        const request = loading.then(
             (value) => {
                 if (version === this.#version) this.#accept(value)
                 return value
@@ -85,9 +87,12 @@ export class Entry<T> implements Live<T> {
                 throw error
             },
         )
+        // The flight is in place before `loading` is published: a subscriber that reads then joins it.
         this.#inflight = request
         const done = () => { if (this.#inflight === request) this.#inflight = null }
         request.then(done, done)
+        this.#error = undefined
+        this.#set('loading')
         return request
     }
 
@@ -111,9 +116,9 @@ export class Entry<T> implements Live<T> {
         if (refetch && this.#listeners.size > 0) this.#refetch()
     }
 
-    /** A socket opened: a stale entry with subscribers reads once; a fresh or loading one does not. */
+    /** A socket opened: an entry with subscribers that is not fresh (stale, or failed while there was no socket) reads once; a fresh or loading one does not. */
     reloadWatched(): void {
-        if (this.#state === 'stale' && this.#listeners.size > 0) this.#refetch()
+        if (this.#listeners.size > 0 && this.#state !== 'fresh' && this.#state !== 'loading') this.#refetch()
     }
 
     #accept(value: T): void {
@@ -132,7 +137,7 @@ export class Entry<T> implements Live<T> {
     }
 
     #makeSnapshot(): Snapshot<T> {
-        return { state: this.#state, value: this.#value, error: this.#error }
+        return { state: this.#state, value: this.#value, error: this.#state === 'error' ? this.#error : undefined }
     }
 
     #set(state: State): void {

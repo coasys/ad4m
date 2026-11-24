@@ -24,6 +24,20 @@ export interface PersistentCache<T = unknown> {
 
 // ── IndexedDB Implementation ─────────────────────────────────────────
 
+/**
+ * The smallest string above every string that starts with `prefix` (exclusive upper bound
+ * of that range, by UTF-16 code unit as IndexedDB orders keys): the prefix with its last
+ * code unit below U+FFFF raised by one. `undefined` when there is none (every unit is U+FFFF,
+ * or the prefix is empty): the range is then open above.
+ */
+export function prefixEnd(prefix: string): string | undefined {
+  for (let i = prefix.length - 1; i >= 0; i--) {
+    const unit = prefix.charCodeAt(i);
+    if (unit < 0xffff) return prefix.slice(0, i) + String.fromCharCode(unit + 1);
+  }
+  return undefined;
+}
+
 export class IDBCache<T = unknown> implements PersistentCache<T> {
   #dbName: string;
   #storeName: string;
@@ -105,7 +119,10 @@ export class IDBCache<T = unknown> implements PersistentCache<T> {
         const tx = db.transaction(this.#storeName, 'readwrite');
         const store = tx.objectStore(this.#storeName);
         if (prefix === undefined) store.clear();
-        else store.delete(IDBKeyRange.bound(prefix, prefix + '￿'));
+        else {
+          const end = prefixEnd(prefix);
+          store.delete(end === undefined ? IDBKeyRange.lowerBound(prefix) : IDBKeyRange.bound(prefix, end, false, true));
+        }
         tx.oncomplete = () => resolve();
         tx.onerror = () => resolve();
       });
