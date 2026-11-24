@@ -3,7 +3,7 @@
 //!
 //! Where TS ties a model to a decorated class, a [`Model`] is constructed
 //! from a class **name** and carries plain JSON values: `query`/`get`/
-//! `subscribe` run `perspective.modelQuery` / `perspective.modelSubscribe`
+//! `subscribe` run `perspective.modelQuery` / `perspective.subscribe`
 //! and return hydrated instances as `serde_json::Value`s; `create`/`update`/
 //! `delete`/`save` write through the validated `perspective.instance*` RPCs
 //! (never raw links). Batches ([`crate::batch::Batch`]) group writes
@@ -32,6 +32,17 @@ pub enum Classes {
 }
 
 impl Classes {
+    /// The `model` member of `perspective.subscribe`.
+    fn live_params(&self, query_json: &str) -> Value {
+        let mut model = Map::new();
+        match self {
+            Classes::One(name) => model.insert("className".into(), Value::from(name.clone())),
+            Classes::Many(names) => model.insert("classNames".into(), Value::from(names.clone())),
+        };
+        model.insert("queryJson".into(), Value::from(query_json));
+        Value::Object(model)
+    }
+
     fn insert_into(&self, params: &mut Map<String, Value>) {
         match self {
             Classes::One(name) => {
@@ -44,7 +55,7 @@ impl Classes {
     }
 }
 
-/// The options of `perspective.modelQuery`/`modelSubscribe` — the `Query`
+/// The options of `perspective.modelQuery` and a model `perspective.subscribe` — the `Query`
 /// type of the TS SDK (`where`, `order`, `limit`, `offset`, `include`,
 /// `count`, plus `properties`, `links`, `parent`, `deepQuery`, `linkStatus`,
 /// `includeUnverified`). `query_json` serialises like TS
@@ -87,7 +98,7 @@ impl ModelQuery {
         }
     }
 
-    /// The `query_json` string sent to `modelQuery`/`modelSubscribe` —
+    /// The `query_json` string sent to `modelQuery` and `subscribe` —
     /// the `queryInput` of `prepareModelQueryParams`.
     pub fn query_json(&self) -> String {
         let mut q = Map::new();
@@ -311,10 +322,10 @@ impl Model {
         Ok(self.query(&q).await?.total_count.unwrap_or(0))
     }
 
-    /// `perspective.modelSubscribe` — a stream yielding the initial result
-    /// and every later result (full replacement on resync/re-open), like TS
-    /// `modelSubscribe` + `ModelQueryBuilder.subscribe` (which suppresses
-    /// identical fingerprints — as does [`ModelSubscription`]).
+    /// `perspective.subscribe` with a model query — a stream yielding the
+    /// initial result and every later result (full replacement on
+    /// resync/re-open), like TS `Model.live`. A result equal to the last one
+    /// is not yielded again.
     pub async fn subscribe(&self, query: &ModelQuery) -> Result<ModelSubscription> {
         let ws = self.ws.clone();
         let uuid = self.uuid.clone();
@@ -335,13 +346,12 @@ impl Model {
                     let subscription_id = mint_subscription_id();
                     let mut params = Map::new();
                     params.insert("uuid".into(), Value::from(uuid.clone()));
-                    classes.insert_into(&mut params);
-                    params.insert("query_json".into(), Value::from(query_json));
+                    params.insert("model".into(), classes.live_params(&query_json));
                     params.insert(
                         "subscriptionId".into(),
                         Value::from(subscription_id.clone()),
                     );
-                    // The call runs detached: `modelSubscribe` opens a
+                    // The call runs detached: `perspective.subscribe` opens a
                     // server-side resource, so a caller that cancels
                     // `subscribe`/`start` while the call is on the wire must
                     // not strand it — the detached half owns the minted id
@@ -350,7 +360,7 @@ impl Model {
                     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
                     tokio::spawn(async move {
                         match ws
-                            .call::<Value>("perspective.modelSubscribe", Value::Object(params))
+                            .call::<Value>("perspective.subscribe", Value::Object(params))
                             .await
                         {
                             Ok(v) => {
@@ -396,7 +406,7 @@ impl Model {
                     });
                     done_rx
                         .await
-                        .map_err(|_| anyhow!("perspective.modelSubscribe lost its caller"))?
+                        .map_err(|_| anyhow!("perspective.subscribe lost its caller"))?
                 })
             })
         };
@@ -619,9 +629,8 @@ impl Model {
     }
 }
 
-/// The stable-stringify a TS model subscription applies before emitting:
-/// the parsed instance rows — `totalCount` alone changing does not emit
-/// (`subscribe` fingerprints `results` only, `ModelQueryBuilder.ts` L488).
+/// The stable-stringify a model subscription applies before emitting:
+/// the parsed instance rows — `totalCount` alone changing does not emit.
 fn fingerprint_result(raw: &Value) -> String {
     Value::Array(parse_model_result(raw).instances).to_string()
 }
@@ -1860,7 +1869,7 @@ mod tests {
         ws.close().await;
     }
 
-    /// R4: `perspective.modelSubscribe` opens a server-side resource — a
+    /// R4: `perspective.subscribe` opens a server-side resource — a
     /// caller that cancels `subscribe` while the call is on the wire must
     /// not strand it. The detached open owns the minted id and disposes the
     /// subscription once the call lands unanswered-for.
@@ -1875,7 +1884,7 @@ mod tests {
         assert_eq!(watch["type"], "events.watch");
         fake.reply(&watch, json!(true)).await;
         let sub = fake.next_request().await;
-        assert_eq!(sub["type"], "perspective.modelSubscribe");
+        assert_eq!(sub["type"], "perspective.subscribe");
         let minted = sub["params"]["subscriptionId"].clone();
 
         // Cancel mid-open: the caller's future dies with the call in flight.
@@ -1903,7 +1912,7 @@ mod tests {
         ws.close().await;
     }
 
-    /// Drive a `Model::subscribe` by hand to its `modelSubscribe` and answer
+    /// Drive a `Model::subscribe` by hand to its `perspective.subscribe` and answer
     /// it, with `point` armed; drop the caller's future once the open parks
     /// there, release it, then expect the minted subscription released.
     /// `poll_caller`: keep polling the caller while waiting for the park
@@ -1928,7 +1937,7 @@ mod tests {
                 break req;
             }
         };
-        assert_eq!(sub["type"], "perspective.modelSubscribe");
+        assert_eq!(sub["type"], "perspective.subscribe");
         let minted = sub["params"]["subscriptionId"].clone();
         fake.reply(&sub, json!({"result": {"instances": []}, "revision": 0}))
             .await;
@@ -2037,7 +2046,7 @@ mod tests {
         // Answer the watch whenever it arrives; hold the subscribe reply.
         let sub_req = loop {
             let req = fake.next_request().await;
-            if req["type"] == "perspective.modelSubscribe" {
+            if req["type"] == "perspective.subscribe" {
                 break req;
             }
             if req["type"] == "events.watch" {

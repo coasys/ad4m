@@ -20,7 +20,7 @@
   },
   "peerDependencies": {
     "preact": "*",
-    "react": "*"
+    "react": ">=18"
   },
   "repository": {
     "type": "git",
