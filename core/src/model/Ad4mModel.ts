@@ -58,6 +58,11 @@ import { isContainedScope, isContainmentTraversal, isTraverseScope } from "./typ
  */
 const SUBJECT_CLASS_KEY = '__subjectClass';
 
+// Successful setter writes may precede their mirror delta. Share only within
+// one proxy (and class/id/field), so separately fetched rows keep awaited writes.
+// The existing WeakMap registries describe classes, not record write state.
+const pendingMembers = new WeakMap<PerspectiveProxy, Map<string, { added: string[]; removed: string[] }>>();
+
 /**
  * The IRI the executor names `cls` by (`queriedAs`: its target class), or
  * `undefined` for something that is not a declared model class.
@@ -1877,12 +1882,38 @@ export class Ad4mModel {
    *  clears). A caller's batch is passed on: the executor refuses it when a
    *  setter calls a language, since the batch cannot roll the call back. */
   private async instanceUpdate(properties: Record<string, any>, batchId?: string) {
+    const mirrors = new Map<string, string[]>();
+    if (!batchId) {
+      const shape = (this.constructor as typeof Ad4mModel).ownShape();
+      for (const [key, value] of Object.entries(properties)) {
+        const prop = shape?.properties?.find((p: any) => p?.name === key);
+        if (Array.isArray(value) && this.getRelationOptions(key) &&
+            !(prop?.adder?.length || prop?.remover?.length)) {
+          mirrors.set(key, await this.currentMembers(key));
+        }
+      }
+    }
     await this._perspective.instanceUpdate({
       className: (this.constructor as typeof Ad4mModel).queriedAs(),
       baseUri: this._baseExpression,
       properties,
       ...(batchId && { batchId }),
     });
+    // Failed writes and caller-owned batches never become optimistic state.
+    for (const [key, mirror] of mirrors) {
+      const members: string[] = properties[key];
+      const added = members.filter(id => !mirror.includes(id));
+      const removed = mirror.filter(id => !members.includes(id));
+      let pending = pendingMembers.get(this._perspective);
+      if (!pending) pendingMembers.set(this._perspective, pending = new Map());
+      const address = this.memberWriteKey(key);
+      if (added.length || removed.length) pending.set(address, { added, removed });
+      else pending.delete(address);
+    }
+  }
+
+  private memberWriteKey(key: string): string {
+    return JSON.stringify([(this.constructor as typeof Ad4mModel).queriedAs(), this._baseExpression, key]);
   }
 
   /** An add or remove on a call-backed row whose shape declares an adder
@@ -1932,7 +1963,17 @@ export class Ad4mModel {
    *  to the current members. */
   private async membersAfter(key: string, kind: 'setter' | 'adder' | 'remover', ids: string[]): Promise<string[]> {
     if (kind === 'setter') return ids;
-    const current = await this.currentMembers(key);
+    let current = await this.currentMembers(key);
+    const pending = pendingMembers.get(this._perspective);
+    const address = this.memberWriteKey(key);
+    const written = pending?.get(address);
+    if (written) {
+      // Retire each intent once observed. Preserve unrelated mirror changes.
+      written.added = written.added.filter(id => !current.includes(id));
+      written.removed = written.removed.filter(id => current.includes(id));
+      current = [...current.filter(id => !written.removed.includes(id)), ...written.added];
+      if (!written.added.length && !written.removed.length) pending!.delete(address);
+    }
     if (kind === 'adder') return [...current, ...ids.filter((id) => !current.includes(id))];
     return current.filter((id) => !ids.includes(id));
   }
