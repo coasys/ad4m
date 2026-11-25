@@ -169,6 +169,21 @@ export function holdsAWholeWordTerm(text: string, terms: string[]): boolean {
   });
 }
 
+/** How many records' words a mention subscription keeps to tell a part from its holder. */
+const TEXT_MEMORY = 2000;
+
+/**
+ * A row's text as words: what a reader sees of it ({@link readableParts}, up to
+ * {@link MENTION_TEXT_LIMIT} characters), lower case, runs of space as one. `undefined` for a row
+ * with no text, or none but space.
+ */
+export function wordsOf(row: any): string | undefined {
+  const text = Array.isArray(row?.text) ? row.text.join(" ") : row?.text;
+  if (typeof text !== "string") return undefined;
+  const words = readableParts(text.slice(0, MENTION_TEXT_LIMIT)).visible.replace(/\s+/gu, " ").trim().toLowerCase();
+  return words || undefined;
+}
+
 /** Per-message parent resolution result for mention subscriptions. */
 export interface MentionMessage {
   /** The mentioned record's id. */
@@ -477,6 +492,12 @@ export class WakerSubscriptionManager {
    * address. They accumulate across a debounce window, so one wake names all of them.
    */
   private undelivered = new Map<string, Map<string, MentionMessage>>();
+  /**
+   * The words of each record a subscription's results carried text for, read as a mention is
+   * ({@link wordsOf}), newest last, at most {@link TEXT_MEMORY} per subscription. They tell a
+   * part of a record from a record of its own ({@link isPartOfAHolder}).
+   */
+  private texts = new Map<string, Map<string, string>>();
   /** Failed wake attempts in a row per subscription, for the retry backoff. */
   private wakeFailures = new Map<string, number>();
 
@@ -681,7 +702,11 @@ export class WakerSubscriptionManager {
 
         for (const item of rows as any[]) {
           const address = item?.id;
-          if (typeof address !== "string" || !address || currentSeen.has(address)) continue;
+          if (typeof address !== "string" || !address) continue;
+          // Kept for every row, seen or not: a record already woken for may hold a part found later.
+          const words = wordsOf(item);
+          if (words) this.rememberWords(sub.id, address, words);
+          if (currentSeen.has(address)) continue;
           // A mention link as it is; the text, a whole word only.
           const mention = mentionOf(item, sub);
           if (!mention) {
@@ -1025,6 +1050,7 @@ export class WakerSubscriptionManager {
     this.seenMessages.delete(id);
     this.delivered.delete(id);
     this.undelivered.delete(id);
+    this.texts.delete(id);
     this.wakeFailures.delete(id);
     if (persist) this.persist();
   }
@@ -1049,7 +1075,27 @@ export class WakerSubscriptionManager {
   private async deliverMentions(sub: WakerSubscription, result: any): Promise<void> {
     const pending = this.undelivered.get(sub.id);
     if (!pending?.size || !this.activeSubscriptions.has(sub.id)) return;
-    const mentions = Array.from(pending.values());
+    const done = this.delivered.get(sub.id) ?? new Set<string>();
+    const all = Array.from(pending.values());
+    const parts = new Set(all.filter((m) => this.isPartOfAHolder(sub.id, m, pending, done)));
+    const mentions = all.filter((m) => !parts.has(m));
+    if (parts.size) {
+      this.logger.info(
+        `[waker] ${sub.id}: ${parts.size} mention(s) are words their holder already carries, not woken for: ${Array.from(parts, (m) => m.address).join(", ")}`,
+      );
+    }
+    const settle = () => {
+      for (const mention of all) {
+        pending.delete(mention.address);
+        done.add(mention.address);
+      }
+      this.delivered.set(sub.id, done);
+      this.persist();
+    };
+    if (!mentions.length) {
+      settle();
+      return;
+    }
     let delivered: boolean;
     try {
       delivered = (await this.onWake(sub, result, mentions)) !== false;
@@ -1071,13 +1117,44 @@ export class WakerSubscriptionManager {
       return;
     }
     this.wakeFailures.delete(sub.id);
-    const done = this.delivered.get(sub.id) ?? new Set<string>();
-    for (const mention of mentions) {
-      pending.delete(mention.address);
-      done.add(mention.address);
-    }
-    this.delivered.set(sub.id, done);
-    this.persist();
+    settle();
+  }
+
+  /**
+   * Whether `mention` is a part of a record the same wake reports, or an earlier one did: a record
+   * holding it (one of its `parents`) that is itself a mention, pending or delivered, and whose
+   * text already holds the part's words. A composition carries the text of its parts (a document
+   * its paragraphs, a message its blocks), so both match the agent's name, and the words are one
+   * mention: the agent is told about the record, under the parents the record has, and not again
+   * about its part under the record. A holder whose text does not hold them (a channel named after
+   * the agent, and a message in it) is a place, not the same words, and both wake. A record whose
+   * own text or whose holder's text no result carried is never taken for a part: a second wake is
+   * better than a missed one.
+   */
+  private isPartOfAHolder(
+    subId: string,
+    mention: MentionMessage,
+    pending: Map<string, MentionMessage>,
+    done: Set<string>,
+  ): boolean {
+    const texts = this.texts.get(subId);
+    const own = texts?.get(mention.address);
+    if (!own) return false;
+    return mention.parents.some(
+      (holder) =>
+        holder !== mention.address &&
+        (pending.has(holder) || done.has(holder)) &&
+        (texts!.get(holder)?.includes(own) ?? false),
+    );
+  }
+
+  /** Keep `words` as `address`'s text for `subId`, dropping the oldest past {@link TEXT_MEMORY}. */
+  private rememberWords(subId: string, address: string, words: string): void {
+    const texts = this.texts.get(subId) ?? new Map<string, string>();
+    texts.delete(address);
+    texts.set(address, words);
+    while (texts.size > TEXT_MEMORY) texts.delete(texts.keys().next().value!);
+    this.texts.set(subId, texts);
   }
 
   /** Dispose all active subscriptions and drop anything still pending. */

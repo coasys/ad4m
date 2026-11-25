@@ -1280,6 +1280,68 @@ describe('WakerSubscriptionManager', () => {
     ]);
   });
 
+  /**
+   * A composition carries its parts' text (a message its blocks, a document its paragraphs), so a
+   * name in a part matches twice: the record and the part. The agent is told once, about the
+   * record, under the record's own parents.
+   */
+  describe('a mention whose words its holder already carries', () => {
+    const composition = tree({
+      'test://message/text': ['test://message'],
+      'test://message': ['test://call'],
+    });
+    const said = 'Data, can you take the notes?';
+
+    it('wakes once, through the holder', async () => {
+      const { wakes } = await wakeWith(composition, 0, 'test://message', [
+        result(row('test://message/text', said), row('test://message', said)),
+      ]);
+      expect(wakes).toEqual([[{ address: 'test://message', parents: ['test://call'], ancestors: [], ...byOther, via: 'text' }]]);
+    });
+
+    it('wakes for a holder whose text does not hold the words: a place, not the same words', async () => {
+      const { wakes } = await wakeWith(
+        tree({ 'test://message': ['test://channel'] }),
+        0,
+        'test://message',
+        [result(row('test://channel', "Data's room"), row('test://message', 'hi Data!'))],
+      );
+      expect(wakes[0].map((m: any) => m.address).sort()).toEqual(['test://channel', 'test://message']);
+    });
+
+    it('wakes for the part when no result carried the holder', async () => {
+      const { wakes } = await wakeWith(composition, 0, 'test://message', [result(row('test://message/text', said))]);
+      expect(wakes).toEqual([[{ address: 'test://message/text', parents: ['test://message'], ancestors: [], ...byOther, via: 'text' }]]);
+    });
+
+    it('does not wake again for a part that arrives after its holder was woken for', async () => {
+      const containers = (_uuid: string, _class: string, queryJson: string) =>
+        Promise.resolve({ instances: composition(JSON.parse(queryJson).parent).map((id) => ({ id })) });
+      const h = await mentionHarness(10, undefined, { modelQuery: containers });
+      await h.deliver(result(row('test://message', said)));
+      await waitUntil(() => h.wakes.length > 0, 1000);
+      // The holder's row again, beside its part: the text query reports the window it holds.
+      await h.deliver(result(row('test://message', said), row('test://message/text', said), named('test://other')));
+      await waitUntil(() => h.wakes.length > 1, 1000);
+      await new Promise((r) => setTimeout(r, 50));
+      h.manager.disposeAll();
+      expect(h.wakes.map((w: any) => w.map((m: any) => m.address))).toEqual([['test://message'], ['test://other']]);
+      expect(h.persistedSeen.at(-1)).toEqual(expect.arrayContaining(['test://message', 'test://message/text', 'test://other']));
+    });
+
+    it('records a wake made only of parts as delivered, without calling onWake', async () => {
+      const containers = (_uuid: string, _class: string, queryJson: string) =>
+        Promise.resolve({ instances: composition(JSON.parse(queryJson).parent).map((id) => ({ id })) });
+      const h = await mentionHarness(10, undefined, { modelQuery: containers });
+      await h.deliver(result(row('test://message', said)));
+      await waitUntil(() => h.wakes.length > 0, 1000);
+      await h.deliver(result(row('test://message', said), row('test://message/text', said)));
+      await waitUntil(() => h.persistedSeen.some((seen) => seen.includes('test://message/text')), 1000);
+      h.manager.disposeAll();
+      expect(h.wakes).toHaveLength(1);
+    });
+  });
+
   it('bounds the walk by ancestorDepth, and never reports the mention itself', async () => {
     const holders = {
       'test://message': ['test://a'],
