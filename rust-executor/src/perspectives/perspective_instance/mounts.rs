@@ -278,6 +278,7 @@ impl PerspectiveInstance {
         let owner = self.mount_owner().await?;
         let shapes = controller.mount_shapes(lang_address, &owner).await?;
         let snapshot = controller.mount_snapshot(lang_address, &owner).await?;
+        pause(lang_address, MountPoint::InitialSnapshotFetched).await;
 
         let mut slot = self.mount_lifecycles.lock(lang_address).await;
         if slot.generation != generation {

@@ -940,3 +940,59 @@ async fn a_delta_with_no_call_token_reaches_no_mirror() {
         "Alice's mirror changed: {in_alices:?}"
     );
 }
+
+/// A join between the first snapshot read and its writes must not acquire access to
+/// the owner's mirror, even though no mount link has been written yet.
+#[tokio::test]
+async fn joining_during_the_first_mount_snapshot_is_refused() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "private snapshot"})).await;
+    let alice = "did:key:z6MkAliceMountPreparing";
+    let bob = "did:key:z6MkBobJoinsDuringSnapshot";
+    let (p, _shapes, _ctx) =
+        crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
+    let url = format!("neighbourhood://preparing-{}", uuid::Uuid::new_v4());
+    {
+        let mut handle = p.persisted.lock().await;
+        handle.add_owner(alice);
+        handle.shared_url = Some(url.clone());
+        handle.state = PerspectiveState::Synced;
+        crate::db::Ad4mDb::with_global_instance(|db| db.add_perspective(&handle)).unwrap();
+    }
+    crate::perspectives::register_perspective(p.uuid.clone(), p.clone());
+    let gate = gates::arm(&lang, MountPoint::InitialSnapshotFetched);
+    let mut mounting = p.clone();
+    let l = lang.clone();
+    let mount = tokio::spawn(async move { mounting.mount(&l).await });
+    tokio::time::timeout(Duration::from_secs(10), gate.arrived())
+        .await
+        .expect("the first snapshot never reached the gate");
+    assert!(p.mounts().await.unwrap().is_empty());
+    let joined = tokio::time::timeout(
+        Duration::from_secs(5),
+        crate::neighbourhoods::install_neighbourhood_with_context(
+            url,
+            &AgentContext::managed(bob.to_string()),
+        ),
+    )
+    .await;
+    let owners = p.persisted.lock().await.get_owners();
+    gate.release();
+    let mounted = tokio::time::timeout(Duration::from_secs(10), mount)
+        .await
+        .expect("mount deadlocked")
+        .unwrap();
+    crate::perspectives::remove_perspective(&p.uuid).await;
+
+    let error = joined
+        .expect("join waited on the snapshot")
+        .expect_err("Bob became an owner between the private snapshot read and its writes");
+    assert!(
+        error
+            .to_string()
+            .contains("another local agent cannot join"),
+        "{error}"
+    );
+    assert_eq!(owners, vec![alice.to_string()]);
+    mounted.unwrap();
+}

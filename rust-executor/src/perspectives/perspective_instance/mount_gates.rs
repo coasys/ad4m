@@ -8,6 +8,8 @@
 pub(crate) enum MountPoint {
     /// `sync_mount`, after `mountSnapshot()` answered, before the apply.
     SnapshotFetched,
+    /// The first mount, after its snapshot read and before any writes.
+    InitialSnapshotFetched,
     /// A delta (pushed or a call's result), before it is applied.
     DeltaReceived,
     /// The per-record diff, after it read the record's current links and
