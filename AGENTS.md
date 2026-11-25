@@ -509,6 +509,32 @@ answers that with `socketBack` (resend what a fault kept, `sfu.callResume`,
 the socket: ICE `disconnected` is media evidence, and its whole answer is
 the ICE restart.
 
+SFU simulcast layer choice (`rust-executor/src/sfu/simulcast.rs`): each client
+peer (not pipes) runs str0m's bandwidth estimator, started at 800 kbit/s
+(`BWE_START_KBPS`), fed by the caller's transport-wide-cc reports; REMB is
+ignored. The media loop measures every incoming layer's rate per (origin
+participant, mid, rid) over a 1 s window (payload + 32 bytes per packet; a
+layer silent for `LAYER_TIMEOUT` is gone, and an upgrade needs a measured
+target). Per receiver, on an estimate event, a track-set change, a ceiling
+change, a switch committing or a hold deadline (no periodic tick; the earliest
+deadline lowers the loop's timeout), the budget is `0.85 * estimate` minus an
+audio reserve (per forwarded audio track, the larger of 64 kbit/s and its
+measured rate; audio is never touched). Over budget, one video track drops
+one live layer (largest saving first, ties by stable id), one per run. An
+upgrade of one track by one layer needs budget >= 1.20 * (cost sum + the
+layer's extra cost) held 4 s without a dip, ceiling change, track-set change
+or completed switch; each upgrade starts a new hold. No estimate yet, or the
+last one `can_probe: false`, blocks upgrades; a peer that never reports stays
+on the lowest layer. The old layer's cost counts until the switch commits on a
+keyframe, and a pending track is not switched again. New tracks start on the
+lowest live layer, which is also the floor (video is never paused).
+`SetQualityPreference` is a ceiling, not a choice: `high`, `auto` and unset
+let the estimate decide up to high; the receiver gets the best live layer at
+or below the ceiling, else the lowest live one (never black); a lowered
+ceiling applies on the next keyframe. The receiver's probing target
+(`bwe().set_desired_bitrate`) is its demand at the permitted maximum layers
+plus audio.
+
 SFU media addresses (`rust-executor/src/sfu/{hosts,server,reachability}.rs`):
 with no `sfu_bind_addr` (the default, whatever `--localhost` says) the SFU
 binds two sockets on one port: 127.0.0.1 and the LAN address

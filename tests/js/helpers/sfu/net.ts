@@ -68,6 +68,12 @@ export interface NetLease {
    * the host are not touched. Replaces this lease's previous impairment.
    */
   impair(ports: (number | SocketPort)[], opts: NetemOptions): void;
+  /**
+   * Cap the bandwidth of traffic *to* the UDP `ports` (their downlink) at
+   * `rateKbit` with a token bucket filter; traffic from them is untouched, as
+   * is everything else on the host. Replaces this lease's previous impairment.
+   */
+  limitDownlink(ports: SocketPort[], rateKbit: number): void;
   /** Remove the impairment; the lease stays held. */
   clear(): void;
   /** Remove the impairment and let the next run have the interface. */
@@ -129,11 +135,11 @@ export async function leaseNet(
     if (ended) throw new Error(`the network lease on ${iface} has ended`);
   };
   /** Send traffic to or from `ports` through the netem band; a `SocketPort` matches its protocol too. */
-  const filter = (ports: (number | SocketPort)[]) => {
+  const filter = (ports: (number | SocketPort)[], fields = ["sport", "dport"]) => {
     for (const entry of ports) {
       const { port, protocol } = typeof entry === "number" ? { port: entry, protocol: undefined } : entry;
       const match = protocol ? `match ip protocol ${protocol === "tcp" ? 6 : 17} 0xff ` : "";
-      for (const field of ["sport", "dport"]) {
+      for (const field of fields) {
         tc(`filter add dev ${iface} parent ${HANDLE} protocol ip prio 1 u32 ${match}match ip ${field} ${port} 0xffff flowid ${HANDLE}4`);
       }
     }
@@ -160,6 +166,20 @@ export async function leaseNet(
       } catch (e) {
         clear();
         throw new Error(`could not impair ports ${describePorts(ports)} on ${iface}: ${(e as Error).message}`);
+      }
+    },
+    limitDownlink(ports, rateKbit) {
+      held();
+      if (ports.length === 0 || !(rateKbit > 0)) throw new Error("nothing to limit");
+      clear();
+      try {
+        tc(`qdisc add dev ${iface} root handle ${HANDLE} prio bands 4 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1`);
+        // A queue of 100 ms at the rate: past it packets drop, as a real bottleneck's do.
+        tc(`qdisc add dev ${iface} parent ${HANDLE}4 handle 40: tbf rate ${rateKbit}kbit burst 16kb latency 100ms`);
+        filter(ports, ["dport"]);
+      } catch (e) {
+        clear();
+        throw new Error(`could not limit the downlink of ${describePorts(ports)} on ${iface}: ${(e as Error).message}`);
       }
     },
     clear,
