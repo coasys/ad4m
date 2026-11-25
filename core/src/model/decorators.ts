@@ -18,6 +18,38 @@ export interface PropertyMetadataEntry extends PropertyOptions {
     flag?: boolean;
 }
 
+/**
+ * A write action that calls into a language instead of writing links —
+ * the form mount-capable classes use (`mount.classes` in `defineLanguage`)
+ * for a setter, an adder/remover, a constructor or a destructor.
+ *
+ * Emitted into SHACL as the action object the executor's call-action
+ * engine reads:
+ * `{ action: "call", source, predicate: interaction, target }` — `target`
+ * is `params` JSON-stringified, and the executor merges the caller's
+ * values over these defaults.
+ */
+export interface CallActionOptions {
+    /** The language interaction to invoke (the action's `predicate`). */
+    interaction: string;
+    /**
+     * Expression URL to call, or `"this"` for the instance itself —
+     * the default everywhere but a constructor call (there is no
+     * instance yet, so a constructor call must name its `source`).
+     *
+     * The literal text `{language}` anywhere in the URL is a placeholder
+     * resolved to the mounting language's own address when the shape is
+     * built for `mount.classes` — e.g. `"{language}://class/MountThing"`.
+     * Outside a mount it stays literal.
+     */
+    source?: string;
+    /**
+     * Default call parameters — a JSON object the executor merges under
+     * the caller's values. Defaults to `{}` (emitted as `"{}"`).
+     */
+    params?: Record<string, unknown>;
+}
+
 /** Metadata stored for each relation via @HasMany / @HasOne / @BelongsToOne / @BelongsToMany */
 export interface RelationMetadataEntry {
     predicate: string;
@@ -37,6 +69,10 @@ export interface RelationMetadataEntry {
     getter?: string;
     /** No writer for this relation; see `RelationOptions.readOnly`. */
     readOnly?: boolean;
+    /** Language-call adder — see `RelationOptions.adder`. */
+    adder?: CallActionOptions | CallActionOptions[];
+    /** Language-call remover — see `RelationOptions.remover`. */
+    remover?: CallActionOptions | CallActionOptions[];
     /**
      * Whether to auto-generate a conformance filter when `target` is set.
      * Defaults to `true` — set to `false` to opt out of DB-level type filtering
@@ -322,6 +358,31 @@ export interface PropertyOptions {
     resolveLanguage?: string;
 
     /**
+     * Language-call setter: writes to this property invoke the given
+     * language interaction(s) instead of writing a link. Emitted as the
+     * property's `ad4m://setter` action list in place of the generated
+     * `setSingleTarget` link write. `source` defaults to `"this"`.
+     *
+     * This is the form mounted classes use (a language owns the record,
+     * so a write must reach the language, not the link graph). Example:
+     * `@Property({ through: "mounttest://title", setter: { interaction: "update" } })`.
+     *
+     * Call writers run only through the executor's shape actions — the
+     * SDK's own save path refuses to write a call-setter property as a
+     * link (`save()` throws rather than bypass the language).
+     */
+    setter?: CallActionOptions | CallActionOptions[];
+
+    /**
+     * Multi-valued property: the property shape is emitted as an
+     * `ad4m://CollectionShape` with no `sh:maxCount`, and hydration
+     * collects every linked value. Combine with `setter` for a single
+     * write action covering the whole collection (the mount form for
+     * lists, e.g. `mounttest://tag` with `collection: true`).
+     */
+    collection?: boolean;
+
+    /**
      * Custom getter to resolve the property value. Use this for custom graph traversals.
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
      * Example: "SELECT ?target WHERE { <Base> <flux://has_reply> ?target . } LIMIT 1"
@@ -421,6 +482,10 @@ function applyPropertyMetadata(opts: PropertyOptions) {
 
         if (!opts.through && !opts.getter) {
             throw new Error("SubjectProperty requires either 'through' or 'getter' option")
+        }
+
+        if (opts.setter && opts.readOnly) {
+            throw new Error("SubjectProperty: `setter` call actions need a writable property — they cannot combine with `readOnly`")
         }
 
         // Write to WeakMap registry (keyed by constructor)
@@ -606,6 +671,48 @@ export interface ModelConfig {
      * on `ModelShape.interpretation_hint` by the Rust model query.
      */
     interpretationHint?: string;
+
+    /**
+     * A mounted class: its shape describes the records a language projects
+     * into a perspective (`mount.classes` in `defineLanguage`), not
+     * link-backed model storage. Mount mode emits only what the mount
+     * contract reads:
+     *  - no `sh:datatype` inference (an explicit `datatype` still emits),
+     *  - `ad4m://writable` only when the property is actually writable,
+     *  - no link actions anywhere — constructor/destructor/setter/adder/
+     *    remover emit only their declared `call` actions.
+     */
+    mount?: boolean;
+
+    /**
+     * The `sh:targetClass` IRI of the shape — the type the records carry.
+     * Defaults to `{namespace}{name}`. A mounted class whose record type
+     * differs from the name the mount exports it under sets it here (a
+     * `MountThing` mount of `mounttest://Thing` records).
+     */
+    targetClass?: string;
+
+    /**
+     * Language-call constructor actions: a create (`perspective.mutate`, `instance_create`)
+     * on this class invokes the interaction(s) instead of writing links —
+     * the mount form of construction (`{ action: "call", source,
+     * predicate: interaction, target }`). A constructor has no instance
+     * for `"this"`, so each entry needs a `source` — the language's class
+     * URL, e.g. `"{language}://class/MountThing"` (the `{language}`
+     * placeholder resolves at `mountShapes()` time).
+     *
+     * Declaring a call constructor replaces the per-property `addLink`
+     * actions `initial` values would otherwise emit: the executor refuses
+     * action lists that mix `call` and link writes.
+     */
+    constructorActions?: CallActionOptions | CallActionOptions[];
+
+    /**
+     * Language-call destructor actions (`source` defaults to `"this"`).
+     * Same replacement rule as `constructorActions` for the auto
+     * `removeLink` actions.
+     */
+    destructorActions?: CallActionOptions | CallActionOptions[];
 }
 
 /**
@@ -718,6 +825,12 @@ export function Model(opts: ModelConfig) {
                 opts.interpretationHint,
                 !!opts.abstract,
                 opts.namespace,
+                {
+                    mount: !!opts.mount,
+                    targetClass: opts.targetClass,
+                    constructorActions: opts.constructorActions,
+                    destructorActions: opts.destructorActions,
+                },
             ));
         }
 
@@ -920,6 +1033,29 @@ export interface RelationOptions {
      * still be the shape's path, so a subscription re-runs when one lands.
      */
     readOnly?: boolean;
+    /**
+     * Language-call adder: adding a member invokes the given language
+     * interaction(s) instead of writing a link — emitted as the relation's
+     * `ad4m://adder` action list in place of the generated `addLink`.
+     * `source` defaults to `"this"`; the executor hands the call
+     * `{ <relation>: [members] }` merged over `params`.
+     * Mutually exclusive with `readOnly` and with `getter`.
+     *
+     * Declaring either a call `adder` or a call `remover` drops BOTH
+     * generated link lists — the relation has no link-write path at all,
+     * not just the side that was declared. Call writers run only through
+     * the executor's shape actions: the SDK's own save path refuses to
+     * write such a relation as links (`save()`/`add*`/`remove*`/`set*`
+     * throw rather than bypass the language).
+     */
+    adder?: CallActionOptions | CallActionOptions[];
+    /**
+     * Language-call remover: removing a member invokes the given language
+     * interaction(s) — emitted as `ad4m://remover` in place of `removeLink`.
+     * Mutually exclusive with `readOnly` and with `getter`. See
+     * `RelationOptions.adder`: declaring either drops both link lists.
+     */
+    remover?: CallActionOptions | CallActionOptions[];
     /** Whether the link is stored locally (not shared on the network) */
     local?: boolean;
     /**
@@ -1122,6 +1258,16 @@ function resolveRelationArgs(
         );
     }
 
+    // Call adders/removers write through a language interaction; they need
+    // the predicate the call is keyed on and a writable relation. A getter
+    // relation is read-only, and `readOnly` already means "no write".
+    if ((opts.adder || opts.remover) && (opts.getter || opts.readOnly)) {
+        throw new Error(
+            'Relation decorator: `adder`/`remover` call actions need a writable ' +
+            'link predicate — they cannot combine with `getter` or `readOnly`.'
+        );
+    }
+
     // `datatype` makes the relation's values encoded literals; `target` makes
     // them model instances. `buildSHACL` would emit `sh:nodeKind sh:Literal`
     // and `sh:class` on the same property shape, so the executor would decode
@@ -1241,6 +1387,8 @@ export function HasMany(
             kind: 'hasMany',
             local: opts.local,
             ...(opts.getter && { getter: opts.getter }),
+            ...(opts.adder && { adder: opts.adder }),
+            ...(opts.remover && { remover: opts.remover }),
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
             ...(opts.datatype && { datatype: opts.datatype }),
@@ -1320,6 +1468,8 @@ export function HasOne(
             kind: 'hasOne',
             maxCount: 1,
             local: opts.local,
+            ...(opts.adder && { adder: opts.adder }),
+            ...(opts.remover && { remover: opts.remover }),
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
             ...(opts.datatype && { datatype: opts.datatype }),
@@ -1411,6 +1561,8 @@ export function BelongsToOne(
             kind: 'belongsToOne',
             maxCount: 1,
             local: opts.local,
+            ...(opts.adder && { adder: opts.adder }),
+            ...(opts.remover && { remover: opts.remover }),
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
             ...(opts.datatype && { datatype: opts.datatype }),
@@ -1475,6 +1627,8 @@ export function BelongsToMany(
             kind: 'belongsToMany',
             local: opts.local,
             ...(opts.getter && { getter: opts.getter }),
+            ...(opts.adder && { adder: opts.adder }),
+            ...(opts.remover && { remover: opts.remover }),
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
             ...(opts.datatype && { datatype: opts.datatype }),

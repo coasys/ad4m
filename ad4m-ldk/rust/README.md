@@ -102,8 +102,10 @@ thinks your Language can do.
   `PerspectiveCommitCapability`, `PerspectiveSyncCapability`,
   `PerspectiveQueryCapability`, `PeersCapability`,
   `TelepresenceCapability`, `LanguageSourceCapability`,
-  `HolochainSignalHandler`). Implement only the ones your Language
-  actually supports.
+  `MountCapability`, `HolochainSignalHandler`). Implement only the ones
+  your Language actually supports.
+- **`#[derive(Ad4mModel)]`** — describes a mounted class on a struct.
+  See [Mounted classes](#mounted-classes).
 - **Typed Rust wrappers** around every `ad4m:host` import
   (`rt::agent_did()`, `rt::holochain_call()`, `rt::storage_get()`,
   `rt::http_post_json()`, `rt::emit_perspective_diff_typed()`, …).
@@ -117,6 +119,142 @@ thinks your Language can do.
   cleanly onto the executor-side error taxonomy.
 
 See `src/lib.rs` for the public surface.
+
+## Mounted classes
+
+A Language can mount its records into a perspective. The perspective
+then shows them as instances of subject classes, and a write to an
+instance runs one of your interactions. The full feature (mounting,
+sync, how records become links) is in the
+[Languages docs](https://github.com/coasys/ad4m/blob/dev/docs-src/pages/languages.mdx#mounted-languages).
+This section is the author's side. The TypeScript LDK has the same
+feature with the model decorators; the derive emits the same shape JSON
+for the same class.
+
+```rust
+use ad4m_ldk::prelude::*;
+
+#[derive(Ad4mModel)]
+#[ad4m(
+    name = "Thing",
+    namespace = "things://",
+    target_class = "things://Thing",
+    constructor = call("create", source = "{language}://class/Thing"),
+    destructor = call("delete"),
+)]
+struct Thing {
+    #[ad4m_property(through = "rdf://type", flag = "things://Thing")]
+    r#type: String,
+    #[ad4m_property(through = "things://title", setter = call("update"))]
+    title: String,
+    #[ad4m_property(through = "things://tag", collection, setter = call("update"))]
+    tags: Vec<String>,
+}
+
+// ThingStore implements `Language` (with `interactions` and
+// `expression_interact`) and `ExpressionCapability`.
+impl MountCapability for ThingStore {
+    fn mount_shapes(&mut self) -> LanguageResult<MountShapes> {
+        // Change the version when the classes change.
+        Ok(MountShapes::from_classes("1", &[Thing::generate_shacl()]))
+    }
+
+    async fn mount_snapshot(&mut self) -> LanguageResult<MountSnapshot> {
+        Ok(MountSnapshot {
+            entries: vec![MountEntry {
+                class: "Thing".into(),
+                address: "t1".into(),
+                data: serde_json::json!({ "title": "First", "tags": ["a"] }),
+            }],
+        })
+    }
+}
+
+ad4m_language! {
+    language: ThingStore,
+    capabilities: [expression, mount],
+    holochain_signal: false,
+}
+```
+
+The struct's fields only carry the shape. The derive adds no instance
+behaviour. `Thing::generate_shacl()` returns `{ name, shape }`, and
+`MountShapes::from_classes` builds the `mountShapes()` answer from those.
+It replaces `{language}` in a call's `source` or `target` with your
+Language's address (the `language_address()` host import). Tests that
+run outside the runtime use `MountShapes::from_classes_at(version,
+classes, address)`.
+
+### Attributes
+
+- **Class, `#[ad4m(...)]`:** `name`, `namespace` (defaults to the scheme
+  of the first property's `through`, else `ad4m://`), `target_class`,
+  and repeatable `constructor = call(...)` / `destructor = call(...)`.
+- **Property, `#[ad4m_property(...)]`:** `through` (required), `name`,
+  `required`, `collection`, `flag = "iri"` (a fixed value, implies
+  `required`), `read_only`, `writable`, `local`, `datatype`, `node_kind`,
+  `relation_kind`, `alias(Key = "name")`, `setter = call(...)`.
+- **Relation, `#[ad4m_relation(...)]`:** `kind = one | many` (required),
+  `through`, the property options, and `adder = call(...)` /
+  `remover = call(...)`.
+- **`call("interaction", source = "...", params = "...")`:** `source`
+  defaults to `"this"`, but a constructor must name it. `params` is a
+  JSON object as text and defaults to `"{}"`.
+
+### How a call finds your Language
+
+1. The URL of a mounted record is your Language's own expression URL:
+   `<language address>://<expression address>`.
+2. For setters, adders, removers and destructors, `source` defaults to
+   `"this"`, the instance URL. The executor splits it into the language
+   address and the expression address, and runs the interaction on your
+   Language for that expression. So `interactions(address)` must list the
+   interaction for the record's address, and `expression_interact`
+   handles it.
+3. A constructor has no instance yet, so it names its `source`, normally
+   `"{language}://class/<ClassName>"`. `interactions()` must answer for
+   the address `class/<ClassName>`.
+
+The executor merges the caller's values over `params` and passes the
+merged object as the `parameters` of `expression_interact`.
+
+### What an interaction returns
+
+`expression_interact` returns a delta as `Some(json)`:
+
+```rust
+Ok(Some(serde_json::json!({
+    "address": "t2",   // required from a create
+    "changed": [{ "class": "Thing", "address": "t2", "data": { "title": "New" } }],
+    "removed": [],
+})))
+```
+
+The executor applies it at once. For a create, `address` is the new
+record, and the create returns `<language address>://t2`.
+
+### Pushing changes
+
+When a record changes outside a call, send the same delta as a signal:
+
+```rust
+rt::emit_signal_typed(&serde_json::json!({
+    "mountDelta": { "changed": [entry], "removed": [] }
+}));
+```
+
+Signals are best effort. The executor also reads `mount_snapshot()`
+again every 15 seconds, so a missed signal is corrected then.
+
+### Rules
+
+- Calls are not rolled back, and a write that calls your Language cannot
+  run inside a batch.
+- A call runs as the agent who made the write. On a multi-user executor
+  that can be a managed user, so read the agent through the host imports
+  (`rt::agent_did()`) instead of caching it.
+- `mount_snapshot()` runs as the owner of the mounting perspective. A perspective
+  with more than one owner can't mount a Language.
 
 ## Optional extensions
 

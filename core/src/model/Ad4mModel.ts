@@ -869,6 +869,33 @@ export class Ad4mModel {
     return rels[key];
   }
 
+  /**
+   * Refuses a write of field `key` when its class declares a call writer
+   * for it. A call writer is the mount form of a write: the executor runs it
+   * from the shape, and a language owns the record. A `mutate` update would
+   * write the field as links and bypass that language. A create hands the
+   * field on, because the executor runs the shape's constructor and setters.
+   * @private
+   */
+  private refuseCallWriter(key: string): void {
+    if (this.getPropertyMetadata(key)?.setter) {
+      throw new Error(
+        `Property "${key}" declares a call setter — call writers run only through ` +
+        `the executor's shape actions, so Ad4mModel's save path cannot ` +
+        `write it. Declare a plain @Property (no setter) for SDK-written properties.`
+      );
+    }
+    const relation = this.getRelationOptions(key);
+    if (relation?.adder || relation?.remover) {
+      const writers = [relation.adder && "adder", relation.remover && "remover"]
+        .filter(Boolean).join("/");
+      throw new Error(
+        `Relation "${key}" declares a call ${writers} — call writers run only through ` +
+        `the executor's shape actions, so Ad4mModel's save path cannot ` +
+        `write it. Declare a plain relation (no adder/remover) for SDK-written relations.`
+      );
+    }
+  }
   // ──────────────────────────────────────────────────────────
   //  Snapshot / dirty tracking
   // ──────────────────────────────────────────────────────────
@@ -1683,6 +1710,7 @@ export class Ad4mModel {
       console.warn(`Relation "${key}" has no metadata, skipping`);
       return;
     }
+    this.refuseCallWriter(key);
     if (value == null) return;
     const ids = (Array.isArray(value) ? value : [value]).map((v) => this.resolveRelationId(v));
     // A single-valued relation (`@HasOne`) has one member: adding one points the relation at it,
@@ -1923,6 +1951,7 @@ export class Ad4mModel {
     const remove: Record<string, string[]> = {};
     for (const [key, value] of Object.entries(this)) {
       if (value === undefined || !dirty.has(key)) continue;
+      this.refuseCallWriter(key);
       if (metadata.relations[key]) {
         if (!this.writableRelation(key)) continue;
         const members = this.relationMembers(value);

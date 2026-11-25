@@ -4550,3 +4550,67 @@ describe("Model writes: one mutate op per write", () => {
     expect(perspective.mutate.mock.calls[0][0][0].add.tags).toEqual(tags);
   });
 });
+
+describe("call writers on the SDK save path", () => {
+  // A class that declares call writers emits them into its shape, where the
+  // executor runs them. A `mutate` update of such a field would write it as
+  // links and bypass the language the shape says owns it, so the SDK refuses
+  // it (`refuseCallWriter`) before it sends anything.
+  @Model({ name: "CallBackedPost" })
+  class CallBackedPost extends Ad4mModel {
+    @Optional({ through: "cb://title", setter: { interaction: "set_title" } })
+    title?: string;
+
+    @HasMany({ through: "cb://member", adder: { interaction: "add_member" } })
+    members: string[] = [];
+  }
+
+  const makePerspective = () =>
+    ({
+      mutate: jest.fn().mockResolvedValue({ ids: [] }),
+      createBatch: jest.fn().mockResolvedValue("batch-generated"),
+      commitBatch: jest.fn().mockResolvedValue(undefined),
+      uuid: "test-perspective-uuid",
+    }) as any;
+
+  it("a property with a call setter cannot be written by save()", async () => {
+    const perspective = makePerspective();
+    const card = new CallBackedPost(perspective, "cb://post/1") as any;
+    card.takeSnapshot(); // as fetched — save() takes the update path
+    card.title = "new title";
+
+    await expect(card.save("batch-1")).rejects.toThrow(/call setter/);
+    expect(perspective.mutate).not.toHaveBeenCalled();
+  });
+
+  it("a relation with a call adder refuses every write kind", async () => {
+    const perspective = makePerspective();
+    const card = new CallBackedPost(perspective, "cb://post/1") as any;
+
+    // The generated helpers write the relation directly; each refuses.
+    await expect(card.addMembers("cb://m/1")).rejects.toThrow(/call adder/);
+    await expect(card.removeMembers("cb://m/1")).rejects.toThrow(/call adder/);
+    await expect(card.setMembers(["cb://m/1"])).rejects.toThrow(/call adder/);
+
+    // The action envelopes and a whole-list set go through save()'s update.
+    card.members = ["cb://m/1"];
+    card.takeSnapshot();
+    card.members = { action: "adder", value: ["cb://m/2"] };
+    await expect(card.save("batch-1")).rejects.toThrow(/call adder/);
+    card.members = { action: "remover", value: ["cb://m/1"] };
+    await expect(card.save("batch-1")).rejects.toThrow(/call adder/);
+    card.members = ["cb://m/2"];
+    await expect(card.save("batch-1")).rejects.toThrow(/call adder/);
+
+    expect(perspective.mutate).not.toHaveBeenCalled();
+  });
+
+  it("create() still hands a call-setter property to the executor, which runs the shape's call", async () => {
+    const perspective = makePerspective();
+    await CallBackedPost.create(perspective, { title: "t" }, { batchId: "batch-1" });
+
+    expect(perspective.mutate).toHaveBeenCalledTimes(1);
+    const [ops] = perspective.mutate.mock.calls[0];
+    expect(ops).toEqual([expect.objectContaining({ op: "create", values: { title: "t" } })]);
+  });
+});
