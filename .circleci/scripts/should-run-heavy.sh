@@ -27,7 +27,11 @@
 # per IP; every runner shares one). GITHUB_TOKEN, when set, is sent and raises
 # that limit. Both answers are kept per workflow (CIRCLE_WORKFLOW_ID) in
 # HEAVY_GATE_CACHE_DIR, so the jobs of one workflow, heavy or light, make one
-# request and agree. A rerun is a new workflow and asks again.
+# request and agree. One verdict per workflow, first writer wins: the file is
+# created only if absent, and a job whose write loses answers what the file
+# holds, so jobs that looked up at the same moment still answer alike. A failed lookup is the
+# verdict too ("unsure", exit 11 for every later job). A rerun is a new workflow
+# and asks again.
 #
 #   CIRCLE_BRANCH, CIRCLE_TAG, CIRCLE_WORKFLOW_ID, CIRCLE_REPOSITORY_URL  from CircleCI
 #   HEAVY_GATE_FORCE        "true": always run
@@ -39,8 +43,39 @@
 # Test: bash .circleci/scripts/should-run-heavy.test.sh
 set -uo pipefail
 
+cache=""
+
+# The cache file holds the workflow's one verdict: line 1 answers the heavy jobs,
+# line 2 the light ones. A failed lookup is a verdict too ("unsure: <reason>" on
+# both lines), so every job of the workflow gets the same answer. A file with
+# fewer than two lines (an older format) is a miss.
+read_cache() {
+  [ -n "$cache" ] && [ -s "$cache" ] && [ "$(wc -l < "$cache")" -ge 2 ] || return 0
+  local line
+  if [ "$mode" = light ]; then line="$(sed -n 2p "$cache")"; else line="$(sed -n 1p "$cache")"; fi
+  case "$line" in
+    "run: "*) echo "$line (cached for this workflow)"; exit 0 ;;
+    "skip: "*) echo "$line (cached for this workflow)"; exit 10 ;;
+    "unsure: "*) echo "run: ${line#unsure: } (cached for this workflow)"; exit 11 ;;
+  esac
+}
+# Creates the cache file only if it is absent (ln fails on an existing target, and
+# the file appears complete): the first writer wins. When the write did not
+# happen (another job's file is there, or no cache), callers read_cache and, if
+# it holds no verdict, answer with their own.
+write_cache() { # heavy-line light-line
+  [ -n "$cache" ] || return 1
+  local rc=1
+  printf '%s\n%s\n' "$1" "$2" > "$cache.tmp.$$" && ln "$cache.tmp.$$" "$cache" 2>/dev/null && rc=0
+  rm -f "$cache.tmp.$$"
+  return $rc
+}
+
 run() { echo "run: $*"; exit 0; }
-unsure() { echo "run: $*"; exit 11; }
+unsure() {
+  write_cache "unsure: $*" "unsure: $*" || read_cache # another job may have answered first
+  echo "run: $*"; exit 11
+}
 
 mode="${1:-heavy}"
 case "$mode" in
@@ -62,9 +97,6 @@ case "$msg" in
   *"[full-ci]"*) run "[full-ci] in the commit message" ;;
 esac
 
-command -v curl >/dev/null || unsure "curl not installed"
-command -v jq >/dev/null || unsure "jq not installed"
-
 repo="${HEAVY_GATE_REPO:-}"
 if [ -z "$repo" ]; then
   repo="$(printf '%s' "${CIRCLE_REPOSITORY_URL:-}" | sed -nE 's#^.*github\.com[:/]([^/]+/[^/]+)$#\1#p')"
@@ -73,20 +105,15 @@ if [ -z "$repo" ]; then
 fi
 api="${HEAVY_GATE_API:-https://api.github.com}"
 
-cache=""
 cache_dir="${HEAVY_GATE_CACHE_DIR:-${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}/heavy-gate}"
 if [ -n "${CIRCLE_WORKFLOW_ID:-}" ] && mkdir -p "$cache_dir" 2>/dev/null && [ -w "$cache_dir" ]; then
   find "$cache_dir" -maxdepth 1 -type f -mmin +1440 -delete 2>/dev/null || true
   cache="$cache_dir/${CIRCLE_WORKFLOW_ID}--$(printf '%s' "$branch" | tr -c 'A-Za-z0-9._-' '_')"
-  # Line 1 answers the heavy jobs, line 2 the light ones.
-  if [ -s "$cache" ] && [ "$(wc -l < "$cache")" -ge 2 ]; then
-    if [ "$mode" = light ]; then line="$(sed -n 2p "$cache")"; else line="$(sed -n 1p "$cache")"; fi
-    case "$line" in
-      "run: "*) echo "$line (cached for this workflow)"; exit 0 ;;
-      "skip: "*) echo "$line (cached for this workflow)"; exit 10 ;;
-    esac
-  fi
+  read_cache
 fi
+
+command -v curl >/dev/null || unsure "curl not installed"
+command -v jq >/dev/null || unsure "jq not installed"
 
 # Open PRs whose head is this branch. A fork PR's branch is `pull/<n>`.
 case "$branch" in
@@ -135,9 +162,7 @@ case "$heavy_v:$light_v" in
   "run: "*:"run: "*|"run: "*:"skip: "*|"skip: "*:"run: "*|"skip: "*:"skip: "*) ;;
   *) unsure "could not read the GitHub API answer" ;;
 esac
-if [ -n "$cache" ]; then
-  printf '%s\n%s\n' "$heavy_v" "$light_v" > "$cache.tmp.$$" && mv "$cache.tmp.$$" "$cache"
-fi
+write_cache "$heavy_v" "$light_v" || read_cache # a job that wrote first answers for the workflow
 if [ "$mode" = light ]; then verdict="$light_v"; else verdict="$heavy_v"; fi
 echo "$verdict"
 case "$verdict" in

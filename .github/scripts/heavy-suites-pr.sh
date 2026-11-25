@@ -250,8 +250,9 @@ if [ "$verdict" = skip ]; then
   post pending "Not run: $reason. Runs when the PR is ready and targets dev."
   # The heavy suites are not due, but a ready PR still gets the light jobs. They
   # halted if the commit's pipeline was made while the PR was a draft, and no
-  # push comes when it turns ready. `build` is the light job to look at: it halts
-  # exactly when the others do (one lookup per workflow). It may still be at its
+  # push comes when it turns ready. `build` alone is enough to look at: a workflow has
+  # one verdict, the first job's, failed lookups included (the gate's cache), so
+  # every light job halts or runs exactly as `build` does. It may still be at its
   # Draft gate when the PR turns ready, so it takes the poll below (same wait,
   # reads and retries) until build ran (nothing to start) or halted (start one
   # pipeline, no wait). The status stays pending: the poll posts none.

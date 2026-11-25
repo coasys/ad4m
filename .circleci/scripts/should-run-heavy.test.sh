@@ -10,12 +10,14 @@ FAILED=0
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-# Fake curl: records each URL it is asked for, then prints $FAKE_BODY or fails
+# Fake curl: records each URL it is asked for, runs $FAKE_PRE (what another job
+# of the workflow does while this lookup is in flight), then prints $FAKE_BODY or fails
 # like `curl -f` on an HTTP error when FAKE_FAIL is set.
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 for a in "$@"; do case "$a" in http*) echo "$a" >> "$FAKE_LOG" ;; esac; done
+[ -n "${FAKE_PRE:-}" ] && eval "$FAKE_PRE"
 [ -n "${FAKE_FAIL:-}" ] && exit 22
 printf '%s' "$FAKE_BODY"
 EOF
@@ -97,8 +99,8 @@ else
   echo "  FAIL: jq missing: exit $rc_nojq (want 11), output: $out_nojq"; FAILED=1
 fi
 
-# One request per workflow: the second job reads the first one's answer; a failed
-# lookup is not kept, and another workflow (a rerun) asks again.
+# One verdict per workflow, first writer wins, failures included: the second job
+# reads the first one's answer; another workflow (a rerun) asks again.
 rm -rf "$TMP/cache"
 check "workflow cache: first job asks" 10 '^skip: PR #20 is a draft$' \
   CIRCLE_BRANCH=feat/x CIRCLE_WORKFLOW_ID=wf1 FAKE_BODY="[$(pr 20 true dev)]"
@@ -107,10 +109,29 @@ check "workflow cache: second job reuses, no API call" 10 'cached for this workf
 [ -s "$TMP/curl.log" ] && { echo "  FAIL: cached answer still called the API"; FAILED=1; }
 check "workflow cache: a rerun asks again" 0 '^run: PR #20 targets dev$' \
   CIRCLE_BRANCH=feat/x CIRCLE_WORKFLOW_ID=wf2 FAKE_BODY="[$(pr 20 false dev)]"
-check "workflow cache: a failure is not kept" 11 '^run: GitHub API request failed' \
+check "workflow cache: a failure is kept" 11 '^run: GitHub API request failed' \
   CIRCLE_BRANCH=feat/y CIRCLE_WORKFLOW_ID=wf3 FAKE_FAIL=1
-check "workflow cache: next job after a failure asks again" 10 '^skip: no open PR for this branch$' \
-  CIRCLE_BRANCH=feat/y CIRCLE_WORKFLOW_ID=wf3 FAKE_BODY='[]'
+check "workflow cache: next job after a failure is unsure too, not skip" 11 '^run: GitHub API request failed.*cached' \
+  CIRCLE_BRANCH=feat/y CIRCLE_WORKFLOW_ID=wf3 FAKE_BODY="[$(pr 51 true dev)]"
+light "workflow cache: the light question after a failure is unsure too" 11 '^run: GitHub API request failed.*cached' \
+  CIRCLE_BRANCH=feat/y CIRCLE_WORKFLOW_ID=wf3 FAKE_BODY="[$(pr 51 true dev)]"
+
+# The race: two jobs read the cache (a miss) before either writes. The one that
+# writes second must answer what the first wrote, and leave it in place.
+race_file="$TMP/cache/wfrace--feat_x"
+race_pre="printf 'skip: PR #50 is a draft\\nskip: PR #50 is a draft\\n' > '$race_file'"
+check "workflow race: the loser answers the winner's heavy skip" 10 '^skip: PR #50 is a draft' \
+  CIRCLE_BRANCH=feat/x CIRCLE_WORKFLOW_ID=wfrace FAKE_PRE="$race_pre" FAKE_BODY="[$(pr 50 false dev)]"
+light "workflow race: the loser answers the winner's light skip" 10 '^skip: PR #50 is a draft' \
+  CIRCLE_BRANCH=feat/x CIRCLE_WORKFLOW_ID=wfrace FAKE_BODY="[$(pr 50 false dev)]"
+if [ "$(cat "$race_file")" != "$(printf 'skip: PR #50 is a draft\nskip: PR #50 is a draft')" ]; then
+  echo "  FAIL: race: the cache was replaced: $(cat "$race_file")"; FAILED=1
+fi
+
+# A one-line file (before the second line existed) is a miss: the job asks and answers.
+mkdir -p "$TMP/cache"; printf 'skip: old\n' > "$TMP/cache/wfold--feat_x"
+check "workflow cache: a one-line file is a miss" 0 '^run: PR #52 targets dev$' \
+  CIRCLE_BRANCH=feat/x CIRCLE_WORKFLOW_ID=wfold FAKE_BODY="[$(pr 52 false dev)]"
 
 # `light`: the question of the jobs that run on every PR (build, fmt, clippy, ...).
 # Only a draft halts them; a stacked PR or a branch with no PR still runs them.
