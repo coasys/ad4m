@@ -337,7 +337,7 @@ async fn a_restart_sends_the_diffs_the_language_did_not_accept() {
 
     // The restart: nothing of the old instance or its language survives
     // but the database.
-    let handle = perspective.persisted.lock().await.clone();
+    let handle = perspective.persisted.snapshot();
     drop(perspective);
     let after = Arc::new(FakeLanguage::default());
     let restarted = PerspectiveInstance::new(handle, None);

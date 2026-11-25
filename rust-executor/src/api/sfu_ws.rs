@@ -249,7 +249,10 @@ async fn call_set_quality_preference(
 async fn get_config(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let p: SfuNeighbourhoodParams = parse(params)?;
     member_did(&ctx, &p.neighbourhood_url)?;
-    let cfg = service()?.get_config(&p.neighbourhood_url).await;
+    let cfg = service()?
+        .get_config(&p.neighbourhood_url)
+        .await
+        .map_err(map_room_err)?;
     Ok(serde_json::to_value(cfg)?)
 }
 
@@ -279,7 +282,8 @@ async fn sfu_peer_for_neighbourhood(
     member_did(&ctx, &p.neighbourhood_url)?;
     let peer = service()?
         .sfu_peer_for_neighbourhood(&p.neighbourhood_url)
-        .await;
+        .await
+        .map_err(map_room_err)?;
     Ok(serde_json::to_value(peer)?)
 }
 
@@ -291,7 +295,8 @@ async fn sfu_peers_for_neighbourhood(
     member_did(&ctx, &p.neighbourhood_url)?;
     let peers = service()?
         .sfu_peers_for_neighbourhood(&p.neighbourhood_url)
-        .await;
+        .await
+        .map_err(map_room_err)?;
     Ok(serde_json::to_value(peers)?)
 }
 
@@ -432,8 +437,7 @@ async fn serves_all_members(params: Value, ctx: Arc<RequestContext>) -> Result<V
     let perspective = super::perspectives_ws::guarded_perspective(&params).await?;
     let shared_url = perspective
         .persisted
-        .lock()
-        .await
+        .load()
         .shared_url
         .clone()
         .ok_or_else(|| WsRpcError::bad_request("Not a neighbourhood".to_string()))?;

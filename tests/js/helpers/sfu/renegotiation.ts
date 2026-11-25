@@ -73,6 +73,7 @@ export async function wireRenegotiation(cfg: RenegotiationWireConfig): Promise<R
     await cfg.client.call("sfu.callAnswerServerOffer", {
       neighbourhoodUrl: cfg.neighbourhoodUrl,
       roomName: cfg.roomName,
+      offerId: frame.offerId,
       sdpAnswer: JSON.stringify(answer),
     });
     applied += 1;

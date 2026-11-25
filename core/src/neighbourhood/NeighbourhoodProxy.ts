@@ -95,8 +95,8 @@ export class NeighbourhoodProxy {
     }
 
     /** Register a handler for incoming telepresence signals. */
-    async addSignalHandler(handler: (payload: PerspectiveExpression) => void): Promise<void> {
-        await this.#client.addSignalHandler(this.#pID, handler)
+    addSignalHandler(handler: (payload: PerspectiveExpression) => void): void {
+        this.#client.addSignalHandler(this.#pID, handler)
     }
 
     /** Remove a previously registered signal handler. */

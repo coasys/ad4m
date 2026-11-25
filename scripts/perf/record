@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Append a run's measurements to the job's performance history.
+#   scripts/perf/record --job JOB [--status passed|failed] [--ad4m-sha SHA] [--we-sha SHA]
+#                       [--run-id ID] [--run-at ISO] RESULTS...
+# Contract and every option: the header of scripts/perf/perf.mjs.
+exec node "$(dirname "$0")/perf.mjs" record "$@"
