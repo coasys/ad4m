@@ -3,6 +3,7 @@ import {
   Link,
   Perspective,
   PerspectiveProxy,
+  RpcError,
 } from "@coasys/ad4m";
 import { useContext, useEffect, useMemo, useState } from "react";
 import { sanitizeLink } from "../util";
@@ -213,10 +214,13 @@ const Perspectives = (props: Props) => {
         try {
           await client!.runtime.importPerspective(perspective.uuid, filePath);
         } catch (importError) {
-          // The file was refused or the load failed: do not leave the empty perspective behind.
-          await client!.perspective.remove(perspective.uuid).catch((removeError) => {
-            console.error('Failed to remove the empty perspective:', removeError);
-          });
+          // Only a 400 (the file refused) guarantees that nothing was committed: then the empty
+          // perspective goes. A timeout, a lost reply or a 500 may follow a commit: keep it.
+          if (importError instanceof RpcError && importError.status === 400) {
+            await client!.perspective.remove(perspective.uuid).catch((removeError) => {
+              console.error('Failed to remove the empty perspective:', removeError);
+            });
+          }
           throw importError;
         }
         await fetchPerspective(); // Refresh the list

@@ -267,6 +267,31 @@ test_cleanup_kills_only_this_runs_processes() {
     wait 2>/dev/null
 }
 
+# The executor is matched as the whole program name: a binary whose name only starts with it lives.
+test_cleanup_kills_the_executor_not_a_longer_named_sibling() {
+    make_installed_we
+    local exe="$FEED_SCALE_WORK/ad4m-executor" mine other i
+    # `exec -a` makes the path the program name, so the command line starts with it, as the
+    # executor's does.
+    bash -c 'exec -a "$0" sleep 600' "$exe" &
+    mine=$!
+    bash -c 'exec -a "$0" sleep 600' "$exe-debug" &
+    other=$!
+    sleep 0.3
+    bash "$SCRIPT" cleanup >/dev/null 2>&1 || fail "cleanup failed"
+    for i in $(seq 50); do kill -0 "$mine" 2>/dev/null || break; sleep 0.1; done
+    if kill -0 "$mine" 2>/dev/null; then
+        fail "cleanup left the executor running"
+        kill "$mine" 2>/dev/null
+    fi
+    if kill -0 "$other" 2>/dev/null; then
+        kill "$other" 2>/dev/null
+    else
+        fail "cleanup killed $exe-debug, whose name only starts with the executor's"
+    fi
+    wait 2>/dev/null
+}
+
 test_a_failing_tee_fails_the_step() {
     make_installed_we
     # A tee that writes what it is given but fails on the suite log, as ENOSPC would.

@@ -202,9 +202,11 @@ regex_quote() { printf '%s' "$1" | sed 's/[][\\.^$*+?(){}|]/\\&/g'; }
 
 # What a stopped step can leave on a shared runner: the executor still running, a suite
 # process with its data under $DATA. Killed by command line, this user's processes only, the
-# two paths matched as literal text; no match is not an error. Then the data dir goes.
+# two paths matched as literal text; no match is not an error. The executor's path must be the
+# whole program name (`@we/e2e` starts it by that path), so a sibling binary with a longer name
+# survives. Then the data dir goes.
 cmd_cleanup() {
-    pkill -u "$(id -u)" -f "$(regex_quote "$EXECUTOR")" 2>/dev/null || true
+    pkill -u "$(id -u)" -f "^$(regex_quote "$EXECUTOR")( |\$)" 2>/dev/null || true
     pkill -u "$(id -u)" -f "$(regex_quote "$DATA/")" 2>/dev/null || true
     empty_data
 }
