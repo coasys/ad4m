@@ -101,6 +101,7 @@ import type { LocalAiPlan } from "./LocalAiPlan";
 import type { LocalAiRemoveParams } from "./LocalAiRemoveParams";
 import type { LocalAiStatus } from "./LocalAiStatus";
 import type { LockAgentRequest } from "./LockAgentRequest";
+import type { LogFilter } from "./LogFilter";
 import type { LogParams } from "./LogParams";
 import type { LogTail } from "./LogTail";
 import type { LogTailParams } from "./LogTailParams";
@@ -148,7 +149,6 @@ import type { PerspectiveLinkMutationsParams } from "./PerspectiveLinkMutationsP
 import type { PerspectiveMintFlowReceiptParams } from "./PerspectiveMintFlowReceiptParams";
 import type { PerspectiveMintFlowReceiptResult } from "./PerspectiveMintFlowReceiptResult";
 import type { PerspectiveModelQueryParams } from "./PerspectiveModelQueryParams";
-import type { PerspectiveModelSubscribeParams } from "./PerspectiveModelSubscribeParams";
 import type { PerspectiveProposeFlowTransitionParams } from "./PerspectiveProposeFlowTransitionParams";
 import type { PerspectiveQueryLinksParams } from "./PerspectiveQueryLinksParams";
 import type { PerspectiveQueryParams } from "./PerspectiveQueryParams";
@@ -163,7 +163,7 @@ import type { PerspectiveResynced } from "./PerspectiveResynced";
 import type { PerspectiveShapesParams } from "./PerspectiveShapesParams";
 import type { PerspectiveSparqlParams } from "./PerspectiveSparqlParams";
 import type { PerspectiveSubjectClassesOfParams } from "./PerspectiveSubjectClassesOfParams";
-import type { PerspectiveSubscribeQueryParams } from "./PerspectiveSubscribeQueryParams";
+import type { PerspectiveSubscribeParams } from "./PerspectiveSubscribeParams";
 import type { PerspectiveSubscribed } from "./PerspectiveSubscribed";
 import type { PerspectiveSubscriptionParams } from "./PerspectiveSubscriptionParams";
 import type { PerspectiveUpdateLinkParams } from "./PerspectiveUpdateLinkParams";
@@ -201,6 +201,7 @@ import type { SetConfigParams } from "./SetConfigParams";
 import type { SetConfigResult } from "./SetConfigResult";
 import type { SetHostRatesRequest } from "./SetHostRatesRequest";
 import type { SetHotWalletAddressRequest } from "./SetHotWalletAddressRequest";
+import type { SetLogFilterParams } from "./SetLogFilterParams";
 import type { SetMultiUserRequest } from "./SetMultiUserRequest";
 import type { SetStatusRequest } from "./SetStatusRequest";
 import type { SetUnytMembraneProofRequest } from "./SetUnytMembraneProofRequest";
@@ -367,7 +368,6 @@ export interface RpcMethods {
   "perspective.createSubject": { params: PerspectiveCreateSubjectParams; result: PerspectiveCreateSubjectResult };
   "perspective.discardBatch": { params: PerspectiveDiscardBatchParams; result: boolean };
   "perspective.disposeQuery": { params: PerspectiveSubscriptionParams; result: boolean };
-  "perspective.disposeSparql": { params: PerspectiveSubscriptionParams; result: boolean };
   "perspective.evaluateGetters": { params: PerspectiveEvaluateGettersParams; result: string };
   "perspective.executeCommands": { params: PerspectiveExecuteCommandsParams; result: null };
   "perspective.flowFired": { params: PerspectiveFlowFiredParams; result: Array<FlowFiredEntry> };
@@ -384,7 +384,6 @@ export interface RpcMethods {
   "perspective.linkMutations": { params: PerspectiveLinkMutationsParams; result: PerspectiveLinkDiff };
   "perspective.mintFlowReceipt": { params: PerspectiveMintFlowReceiptParams; result: PerspectiveMintFlowReceiptResult };
   "perspective.modelQuery": { params: PerspectiveModelQueryParams; result: string };
-  "perspective.modelSubscribe": { params: PerspectiveModelSubscribeParams; result: PerspectiveSubscribed };
   "perspective.proposeFlowTransition": { params: PerspectiveProposeFlowTransitionParams; result: ProposeOutcome };
   "perspective.publishSnapshot": { params: PerspectiveUuidParams; result: string };
   "perspective.queryLinks": { params: PerspectiveQueryLinksParams; result: Array<DecoratedLinkExpression> };
@@ -405,8 +404,7 @@ export interface RpcMethods {
   "perspective.shapes": { params: PerspectiveShapesParams; result: Array<ShapeSummary> };
   "perspective.snapshot": { params: PerspectiveUuidParams; result: DecoratedPerspective | null };
   "perspective.subjectClassesOf": { params: PerspectiveSubjectClassesOfParams; result: { [key in string]: Array<string> } };
-  "perspective.subscribeQuery": { params: PerspectiveSubscribeQueryParams; result: PerspectiveSubscribed };
-  "perspective.subscribeSparql": { params: PerspectiveQueryParams; result: PerspectiveSubscribed };
+  "perspective.subscribe": { params: PerspectiveSubscribeParams; result: PerspectiveSubscribed };
   "perspective.update": { params: PerspectiveUpdateParams; result: PerspectiveHandle };
   "perspective.updateLink": { params: PerspectiveUpdateLinkParams; result: DecoratedLinkExpression };
   "perspective.updateSubject": { params: PerspectiveUpdateSubjectParams; result: boolean };
@@ -429,6 +427,7 @@ export interface RpcMethods {
   "runtime.inbox": { params: Record<string, never>; result: Array<PerspectiveExpression> };
   "runtime.info": { params: Record<string, never>; result: RuntimeInfo };
   "runtime.linkLanguageTemplates": { params: Record<string, never>; result: Array<LanguageMeta> };
+  "runtime.logFilter": { params: Record<string, never>; result: LogFilter };
   "runtime.logTail": { params: LogTailParams; result: LogTail };
   "runtime.networkMetrics": { params: Record<string, never>; result: string };
   "runtime.notifications": { params: Record<string, never>; result: Array<Notification> };
@@ -443,6 +442,7 @@ export interface RpcMethods {
   "runtime.setConfig": { params: SetConfigParams; result: SetConfigResult };
   "runtime.setFreeHostingEnabled": { params: RuntimeSetFreeHostingEnabledParams; result: boolean };
   "runtime.setHostRates": { params: SetHostRatesRequest; result: boolean };
+  "runtime.setLogFilter": { params: SetLogFilterParams; result: LogFilter };
   "runtime.setStatus": { params: SetStatusRequest; result: boolean };
   "runtime.setUnytMembraneProof": { params: SetUnytMembraneProofRequest; result: boolean };
   "runtime.tlsDomain": { params: Record<string, never>; result: string | null };
@@ -564,6 +564,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "runtime.inbox",
   "runtime.info",
   "runtime.linkLanguageTemplates",
+  "runtime.logFilter",
   "runtime.logTail",
   "runtime.networkMetrics",
   "runtime.notifications",
@@ -613,6 +614,5 @@ export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
 
 /** Calls that open something on the executor that outlives them (a live query): the client cancels one that timed out, as one it aborted. */
 export const OPENS_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
-  "perspective.modelSubscribe",
-  "perspective.subscribeQuery",
+  "perspective.subscribe",
 ]);

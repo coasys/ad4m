@@ -7,7 +7,7 @@
 //! `query_internal` eval, must return to zero within a second of the stop.
 //!
 //! Covered here: the configured deadline (504 over the wire), `request.cancel`
-//! on `perspective.subscribeQuery` (499), the socket closing, a dropped call
+//! on `perspective.subscribe` (499), the socket closing, a dropped call
 //! future (the gate's own drop), and the per-connection running-query limit.
 
 use std::sync::Arc;
@@ -215,10 +215,10 @@ async fn request_cancel_stops_a_subscribe_evaluation() {
 
     socket.send(json!({
         "id": "s1",
-        "type": "perspective.subscribeQuery",
+        "type": "perspective.subscribe",
         "params": {
             "uuid": uuid,
-            "query": SLOW,
+            "sparql": SLOW,
             "subscriptionId": "sub-1"
         }
     }));

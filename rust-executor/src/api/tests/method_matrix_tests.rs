@@ -495,6 +495,10 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     ("runtime.setHostRates", || json!({ "rates": [] })),
     ("runtime.logTail", || json!({ "lines": 10 })),
+    (
+        "runtime.setLogFilter",
+        || json!({ "filter": "ws_rpc=debug" }),
+    ),
     ("runtime.setUnytMembraneProof", || json!({ "proof": "p" })),
     (
         "runtime.unytSendHot",
@@ -514,12 +518,8 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ("perspective.queryProlog", || json!({ "query": "true." })),
     ("perspective.querySparql", || json!({ "query": "ASK {}" })),
     (
-        "perspective.subscribeQuery",
-        || json!({ "query": "true.", "subscriptionId": "s" }),
-    ),
-    (
-        "perspective.subscribeSparql",
-        || json!({ "query": "ASK {}" }),
+        "perspective.subscribe",
+        || json!({ "sparql": "ASK {}", "subscriptionId": "s" }),
     ),
     (
         "perspective.resyncSubscription",
@@ -530,20 +530,12 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "subscriptionId": "s" }),
     ),
     (
-        "perspective.disposeSparql",
-        || json!({ "subscriptionId": "s" }),
-    ),
-    (
         "perspective.getSubjectData",
         || json!({ "subjectClass": "C", "expressionAddress": "e" }),
     ),
     (
         "perspective.modelQuery",
         || json!({ "class_name": "C", "query_json": "{}" }),
-    ),
-    (
-        "perspective.modelSubscribe",
-        || json!({ "class_name": "C", "query_json": "{}", "subscriptionId": "s" }),
     ),
     (
         "perspective.evaluateGetters",
@@ -1337,12 +1329,14 @@ async fn operator_methods_answer_everyone_else_admin_credential_required() {
             "runtime.config",
             "runtime.grantNotification",
             "runtime.importData",
+            "runtime.logFilter",
             "runtime.logTail",
             "runtime.openLink",
             "runtime.restart",
             "runtime.restartHolochain",
             "runtime.setConfig",
             "runtime.setHostRates",
+            "runtime.setLogFilter",
             "runtime.setUnytMembraneProof",
             "runtime.unytAgentKey",
             "runtime.unytHotAgentPubkey",
