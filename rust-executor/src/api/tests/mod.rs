@@ -27,6 +27,8 @@ pub mod method_matrix_mcp_tests;
 #[cfg(test)]
 pub mod method_matrix_tests;
 #[cfg(test)]
+pub mod mount_ws_tests;
+#[cfg(test)]
 pub(crate) mod multi_user;
 #[cfg(test)]
 pub mod neighbourhood_access_tests;

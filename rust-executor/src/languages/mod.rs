@@ -17,6 +17,7 @@ pub mod language_runtime_handle;
 pub mod literal;
 mod metas;
 mod metrics;
+pub(crate) mod mount_init;
 #[cfg(test)]
 pub(crate) mod mount_tests;
 pub mod mount_types;
@@ -3195,6 +3196,12 @@ impl LanguageController {
     /// Every record a mountable language wants shown in the perspective
     /// (`mountSnapshot()`): class name, address and data per record.
     pub async fn mount_snapshot(&self, lang_address: &str) -> Result<MountSnapshot, LanguageError> {
+        #[cfg(test)]
+        crate::perspectives::perspective_instance::mount_gates::pause(
+            lang_address,
+            crate::perspectives::perspective_instance::mount_gates::MountPoint::SnapshotReading,
+        )
+        .await;
         let result = self
             .call_mount_export(lang_address, "mountSnapshot")
             .await?;

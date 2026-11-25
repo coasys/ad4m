@@ -8,6 +8,7 @@ use ts_rs::TS;
 
 use crate::agent::capabilities::*;
 use crate::helpers::can_access_perspective_with_did;
+use crate::languages::mount_types::MountSyncReport;
 use crate::perspectives::model_query::QueryClasses;
 use crate::perspectives::perspective_instance::{
     is_sparql_query, model_query_sends_cursor, result_json, SubscriptionIdTaken,
@@ -1111,6 +1112,72 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
         }
         Err(e) => Err(query_eval_error_ws(e)),
     }
+}
+
+/// Until ad4m#1775 passes the caller's context to a language, `mountSnapshot`
+/// reads the records as the main agent, in the language instance every agent
+/// shares. So only the main agent may mount or sync a language: a user would
+/// mirror the main agent's records into their own perspective.
+fn refuse_mount_for_users(ctx: &RequestContext) -> Result<(), WsRpcError> {
+    if ctx.acts_as().is_main_agent() {
+        Ok(())
+    } else {
+        Err(WsRpcError::forbidden(
+            "a mount reads the language as the main agent until ad4m#1775, so a user may not \
+             mount or sync one",
+        ))
+    }
+}
+
+/// Preserve the typed first-mount failure across the anyhow/RPC boundary.
+fn mount_error_ws(error: deno_core::error::AnyError) -> WsRpcError {
+    let mut rpc = WsRpcError::internal(error.to_string());
+    if let Some(error) = error.downcast_ref::<crate::languages::mount_init::MountError>() {
+        // All fields are strings/integers; serialization cannot fail.
+        rpc.data = serde_json::to_value(error).ok();
+    }
+    rpc
+}
+
+async fn mount_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    refuse_mount_for_users(&ctx)?;
+    let language_address = params.require_str("languageAddress")?;
+    let mut perspective = guarded_perspective(&params).await?;
+    perspective
+        .mount(&language_address)
+        .await
+        .map_err(mount_error_ws)?;
+    Ok(Value::Bool(true))
+}
+
+async fn unmount_handler(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let language_address = params.require_str("languageAddress")?;
+    let mut perspective = guarded_perspective(&params).await?;
+    perspective
+        .unmount(&language_address)
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::Bool(true))
+}
+
+async fn sync_mount_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    refuse_mount_for_users(&ctx)?;
+    let language_address = params.require_str("languageAddress")?;
+    let mut perspective = guarded_perspective(&params).await?;
+    let report = perspective
+        .sync_mount(&language_address)
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::to_value(report)?)
+}
+
+async fn mounts_handler(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let perspective = guarded_perspective(&params).await?;
+    let langs = perspective
+        .mounts()
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::to_value(langs)?)
 }
 
 async fn evaluate_getters_handler(
@@ -2336,6 +2403,21 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     )
     .read()
     .guard(query());
+    // A first mount fetches and writes the whole snapshot inside the call.
+    map.method::<PerspectiveMountParams, bool>("perspective.mount", mount_handler)
+        .long()
+        .guard(update());
+    map.method::<PerspectiveMountParams, bool>("perspective.unmount", unmount_handler)
+        .guard(update());
+    map.method::<PerspectiveMountParams, MountSyncReport>(
+        "perspective.syncMount",
+        sync_mount_handler,
+    )
+    .long()
+    .guard(update());
+    map.method::<PerspectiveUuidParams, Vec<String>>("perspective.mounts", mounts_handler)
+        .read()
+        .guard(query());
 }
 
 // ── Contracts ──
@@ -2344,6 +2426,14 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
 #[ts(export)]
 pub struct PerspectiveUuidParams {
     pub uuid: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PerspectiveMountParams {
+    pub uuid: String,
+    pub language_address: String,
 }
 
 #[derive(Deserialize, TS)]
@@ -2869,5 +2959,31 @@ mod credit_check_tests {
         // The main agent pays nothing and reads no setting.
         assert!(check_credits(None).is_ok());
         assert!(reserve_credits(None, DEFAULT_LINK_WRITE).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod mount_error_tests {
+    use super::*;
+    use crate::languages::mount_init::MountError;
+
+    #[test]
+    fn mount_init_error_reaches_rpc_as_structured_data() {
+        let error = mount_error_ws(
+            MountError::CellInitTimeout {
+                language_address: "acorn".into(),
+                after_ms: 75000,
+                attempts: 3,
+            }
+            .into(),
+        );
+        assert_eq!(error.code, 500);
+        assert!(error.message.contains("CellError(InitTimeout)"));
+        assert_eq!(
+            error.to_wire()["data"],
+            serde_json::json!({
+                "kind": "cellInitTimeout", "languageAddress": "acorn", "afterMs": 75000, "attempts": 3,
+            })
+        );
     }
 }

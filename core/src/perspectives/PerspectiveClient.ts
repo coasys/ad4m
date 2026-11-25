@@ -19,6 +19,7 @@ import type { AgentMessage } from "../generated/api/AgentMessage";
 import type { AgentReply } from "../generated/api/AgentReply";
 import type { PerspectiveCreateSubjectResult } from "../generated/api/PerspectiveCreateSubjectResult";
 import type { PerspectiveQueryLinksParams } from "../generated/api/PerspectiveQueryLinksParams";
+import type { MountSyncReport } from "../generated/api/MountSyncReport";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 import type { FlowFiredEntry } from "../generated/api/FlowFiredEntry";
 import type {
@@ -219,6 +220,30 @@ export class PerspectiveClient {
     async subjectClassesOf(uuid: string, uris: string[]): Promise<Record<string, string[]>> {
         return await this.#apiClient.call(
             'perspective.subjectClassesOf', { uuid, uris }
+        )
+    }
+
+    async mount(uuid: string, languageAddress: string): Promise<boolean> {
+        return await this.#apiClient.call(
+            'perspective.mount', { uuid, languageAddress }
+        )
+    }
+
+    async unmount(uuid: string, languageAddress: string): Promise<boolean> {
+        return await this.#apiClient.call(
+            'perspective.unmount', { uuid, languageAddress }
+        )
+    }
+
+    async syncMount(uuid: string, languageAddress: string): Promise<MountSyncReport> {
+        return await this.#apiClient.call(
+            'perspective.syncMount', { uuid, languageAddress }
+        )
+    }
+
+    async mounts(uuid: string): Promise<string[]> {
+        return await this.#apiClient.call(
+            'perspective.mounts', { uuid }
         )
     }
 

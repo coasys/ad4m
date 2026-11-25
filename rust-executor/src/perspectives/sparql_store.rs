@@ -9,6 +9,7 @@ use oxigraph::sparql::{QueryResults, SparqlEvaluator};
 use oxigraph::store::{Store, StoreOptions, Transaction};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -348,6 +349,10 @@ const ONT_STATUS: &str = "ad4m://ontology/status";
 /// what [`storage_term_to_target_string`] renders for the stored term. See
 /// [`signed_target_annotation`].
 const ONT_WIRE_TARGET: &str = "ad4m://ontology/wireTarget";
+/// The mounted language that wrote a link (`add_mount_links`): the mount's
+/// ownership ledger. Only the mount engine writes it; a link in this
+/// vocabulary is refused on every write, so no caller can claim it.
+const ONT_MOUNTED_BY: &str = "ad4m://ontology/mountedBy";
 const RDF_REIFIES: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
 /// The vocabulary of the facts the store writes about each link on its
 /// reifier: author, timestamp, proof, verdict, status, signed target.
@@ -1563,6 +1568,62 @@ impl SparqlStore {
         tx.commit()?;
         self.note_write(delta);
         Ok(())
+    }
+
+    /// Store `links` (each with its status) as written by the mount of
+    /// `lang`: one transaction writes each link and marks its reifier with
+    /// [`ONT_MOUNTED_BY`]. The mark goes with the reifier: removing the
+    /// link removes it.
+    pub(crate) fn add_mount_links(
+        &self,
+        links: &[LinkExpression],
+        lang: &str,
+    ) -> Result<(), Error> {
+        for link in links {
+            refuse_link_metadata(link)?;
+        }
+        let _writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
+        let mut tx = self.store.start_transaction()?;
+        let mounted_by = NamedNodeRef::new_unchecked(ONT_MOUNTED_BY);
+        let owner = Literal::new_simple_literal(lang);
+        for link in links {
+            let status = link
+                .status
+                .as_ref()
+                .ok_or_else(|| anyhow!("Refusing to store a mount link without a status"))?;
+            write_link_quads(&mut tx, link, status)?;
+            tx.insert(QuadRef::new(
+                make_reifier_iri(link).as_ref(),
+                mounted_by,
+                owner.as_ref(),
+                GraphNameRef::DefaultGraph,
+            ));
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The reifiers the mount of `lang` wrote ([`Self::add_mount_links`]),
+    /// as [`Self::reifier_of`] names them.
+    pub(crate) fn mount_written(&self, lang: &str) -> Result<HashSet<String>, Error> {
+        let owner = Literal::new_simple_literal(lang);
+        self.store
+            .quads_for_pattern(
+                None,
+                Some(NamedNodeRef::new_unchecked(ONT_MOUNTED_BY)),
+                Some(owner.as_ref().into()),
+                Some(GraphNameRef::DefaultGraph),
+            )
+            .map(|q| q.map(|quad| quad.subject.to_string()).map_err(Error::from))
+            .collect()
+    }
+
+    /// The name of `link`'s reifier, as [`Self::mount_written`] lists it.
+    pub(crate) fn reifier_of(link: &LinkExpression) -> String {
+        make_reifier_iri(link).to_string()
     }
 
     /// Return all links in the store using a SPARQL 1.2 reifier query.

@@ -263,6 +263,7 @@ tower-service = "0.3"
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 
 [dev-dependencies]
+tokio = { version = "1.25.0", features = ["test-util"] }
 tempfile = "3"
 # Already in the lockfile as a transitive dependency; test-only certificate
 # fixtures for the MCP TLS end-to-end test.

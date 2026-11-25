@@ -286,9 +286,12 @@ impl PerspectiveInstance {
         }
         let mut answers = Vec::with_capacity(calls.len());
         for run in calls {
-            let answer = self.execute_call(run, context).await?;
             let (lang, _) = LanguageController::parse_expr_url(&run.source)
                 .map_err(|e| anyhow!("call action source {:?}: {e}", run.source))?;
+            // The mount the call's delta may land in: the one active
+            // before the call went out. An unmount meanwhile wins.
+            let generation = self.active_mount_generation(&lang).await;
+            let answer = self.execute_call(run, context).await?;
             if let Some(why) = &answer.malformed {
                 log::warn!(
                     "call {} on {}: the call succeeded but its result is not a delta ({why}); \
@@ -297,7 +300,11 @@ impl PerspectiveInstance {
                     run.source
                 );
             }
-            self.apply_call_delta(&lang, &answer.delta, context).await;
+            // Ordered as of its return: the delta is at least as new as
+            // anything the language emitted before the call ended.
+            let seq = super::next_mount_seq();
+            self.apply_call_delta(&lang, &answer.delta, generation, seq, context)
+                .await;
             answers.push(answer);
         }
         Ok(answers)
@@ -329,19 +336,35 @@ impl PerspectiveInstance {
         Ok(parse_call_result(result.as_deref()))
     }
 
-    /// Where the delta a `call` returns becomes links. A stub until A4:
-    /// the call is made and the delta parsed, nothing is written.
+    /// Where the delta a `call` returns becomes links: the same per-record
+    /// expansion `sync_mount` runs, so a created record is queryable before
+    /// the call's RPC returns (A4). Only into the mount `generation` names
+    /// (active when the call went out): a language this perspective does
+    /// not mount, or no longer mounts, gets no links. A failure is logged,
+    /// not fatal — the next `sync_mount` converges the store with the
+    /// snapshot anyway.
     async fn apply_call_delta(
         &self,
         lang_address: &str,
         delta: &MountDelta,
+        generation: Option<u64>,
+        seq: u64,
         _context: &AgentContext,
     ) {
-        log::debug!(
-            "call action on {lang_address}: delta of {} changed / {} removed not applied yet (A4)",
-            delta.changed.len(),
-            delta.removed.len()
-        );
+        let Some(generation) = generation else {
+            log::debug!(
+                "call action on {lang_address}: not mounted in perspective {}; its delta is not applied",
+                self.uuid
+            );
+            return;
+        };
+        if let Err(e) = self
+            .clone()
+            .apply_mount_delta(lang_address, delta, generation, seq)
+            .await
+        {
+            log::warn!("call action on {lang_address}: applying its delta failed: {e}");
+        }
     }
 
     /// `create_subject` for a class whose constructor calls into a
