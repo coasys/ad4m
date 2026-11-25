@@ -40,7 +40,7 @@ for lang in "${LANGUAGES[@]}"; do
         fi
     else
         echo "==> wasm-bindgen not installed; skipping JS glue generation." >&2
-        echo "    Install with: cargo install wasm-bindgen-cli --version 0.2.117" >&2
+        echo "    Install with: cargo install wasm-bindgen-cli --version 0.2.118" >&2
     fi
 done
 

@@ -2,7 +2,7 @@
  * Ad4mModel — query API integration tests
  *
  * Covers: findAll() with where / order / limit / offset, findOne(), count(),
- * paginate(), findAllAndCount(), fluent ModelQueryBuilder, IncludeMap eager
+ * paginate(), findAllAndCount(), IncludeMap eager
  * loading, properties field projection, Query<T> composability, and
  * instance.get().
  *
@@ -18,7 +18,7 @@
  *   9.  findAllAndCount
  *   10. paginate
  *   11. instance.get()
- *   12. fluent QueryBuilder
+ *   12. Query objects
  *   13. IncludeMap — @HasMany / @HasOne / @BelongsToOne / @BelongsToMany
  *   14. IncludeMap — sub-queries (where / order / limit / properties)
  *   15. IncludeMap — nested (multi-level)
@@ -664,35 +664,7 @@ describe("Ad4mModel — Query API", function () {
     expect((bare.comments[0] as TestComment).body).to.equal("get-include");
   });
 
-  // ── 12. fluent QueryBuilder ────────────────────────────────────────────────
-
-  it("fluent .query().where().get() matches findAll()", async () => {
-    const json = await TestPost.findAll(perspective, { where: { id: p3.id } });
-    const fluent = await TestPost.query(perspective).where({ id: p3.id }).get();
-    expect(json.length).to.equal(fluent.length);
-    expect(json.every((j, i) => j.id === fluent[i].id)).to.be.true;
-  });
-
-  it("fluent .query().where().include().first() matches findOne() with include", async () => {
-    const comment = await TestComment.create(perspective, { body: "fluent" });
-    await p1.addComments(comment.id);
-
-    const json = await TestPost.findOne(perspective, {
-      where: { id: p1.id },
-      include: { comments: true },
-    });
-    const fluent = await TestPost.query(perspective)
-      .where({ id: p1.id })
-      .include({ comments: true })
-      .first();
-
-    expect(json).to.not.be.null;
-    expect(fluent).to.not.be.null;
-    expect(json!.id).to.equal(fluent!.id);
-    expect(json!.comments.length).to.equal(fluent!.comments.length);
-    expect(json!.comments[0]).to.be.instanceOf(TestComment);
-    expect(fluent!.comments[0]).to.be.instanceOf(TestComment);
-  });
+  // ── 12. Query objects ──────────────────────────────────────────────────────
 
   it("Query<T> objects are composable with spread", async () => {
     const base = { order: { title: "ASC" as const } };

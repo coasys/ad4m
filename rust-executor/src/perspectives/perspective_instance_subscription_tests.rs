@@ -215,7 +215,10 @@ async fn a_rerun_update_reaches_only_its_subscriber() {
     let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
     let u = "did:key:subscriber-u".to_string();
     let v = "did:key:subscriber-v".to_string();
-    perspective.persisted.lock().await.owners = Some(vec![u.clone(), v.clone()]);
+    perspective
+        .persisted
+        .update(|h| h.owners = Some(vec![u.clone(), v.clone()]))
+        .await;
     let query = "SELECT ?s ?o WHERE { ?s <ns://audience-title> ?o . }".to_string();
 
     let (id_u, _, _) = perspective
