@@ -634,6 +634,66 @@ mod instance_writes {
     };
     use serde_json::Map;
 
+    /// A link constructor must not bypass a declared call adder by writing
+    /// initial membership links. Refuse before creating or staging anything.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_refuses_a_call_adder_without_a_setter() {
+        use crate::perspectives::instances::{ReadOnlyReason, ValidationProblem};
+        let lang = load_mount_test_language().await;
+        let shape = json!({
+            "target_class": "mounttest://Mixed",
+            "constructor_actions": [{"action": "addLink", "source": "this", "predicate": "rdf://type", "target": "mounttest://Mixed"}],
+            "properties": [
+                {"path": "rdf://type", "name": "type", "has_value": "mounttest://Mixed", "min_count": 1, "max_count": 1},
+                {"path": "mounttest://tag", "name": "tags", "collection": true, "datatype": "xsd:string", "writable": true,
+                 "adder": [{"action": "call", "source": "this", "predicate": "addTags", "target": "{}"}]}
+            ]
+        });
+        let (mut p, ctx) = super::mounted("Mixed", shape.to_string()).await;
+        let before = link_count(&p).await;
+        for batched in [false, true] {
+            let batch = if batched {
+                Some(p.create_batch().await)
+            } else {
+                None
+            };
+            let result = instance_create(
+                &mut p,
+                &ctx,
+                InstanceCreate {
+                    class_name: "Mixed".into(),
+                    base_uri: Some(format!("{lang}://t1")),
+                    properties: Some(Map::from_iter([("tags".into(), json!(["x"]))])),
+                    batch_id: batch.clone(),
+                    ..Default::default()
+                },
+            )
+            .await;
+            match result {
+                Err(InstanceError::Validation { errors, .. }) => {
+                    assert_eq!(errors.len(), 1);
+                    assert_eq!(errors[0].property, "tags");
+                    assert_eq!(
+                        errors[0].problem,
+                        ValidationProblem::ReadOnly {
+                            reason: ReadOnlyReason::NoSetter
+                        }
+                    );
+                }
+                other => panic!("expected typed refusal, got {other:?}"),
+            }
+            if let Some(batch) = batch {
+                p.commit_batch(batch, &ctx).await.unwrap();
+            }
+            assert_eq!(
+                link_count(&p).await,
+                before,
+                "refusal wrote or staged links"
+            );
+            assert!(calls(&lang).await.is_empty());
+        }
+    }
+
     /// `instanceCreate` on a mounted class calls the language's constructor;
     /// its minted address is the instance's id, every supplied value —
     /// collections too — is a constructor parameter, and the record reads
