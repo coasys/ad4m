@@ -64,21 +64,28 @@ use super::room::ParticipantId;
 
 /// A layer that sent nothing for this long no longer flows. The selector
 /// notices on its next event (a frame of the track), not at its own deadline.
-/// A steady sender's frames come at most 300 ms apart (15 fps, measured on the
-/// test senders' outbound-rtp stats); the longest silence seen was 1.6 s, when
-/// the sending process stalled as a new encoder started. A shorter timeout
-/// dropped the receivers of the other layers a step at such a stall, and a
-/// layer that returns after the timeout is measured and held again before it
-/// is upgraded to.
+/// A steady sender's frames come at most 0.4 s apart (15 fps; 106 000 frame
+/// intervals of the test senders' outbound-rtp stats, none between 0.4 and
+/// 1.5 s). The only longer silences, 10 in 6 e2e runs, lasted 1.5 to 1.6 s, on
+/// every layer of one sender at once: the sending process stalled as a new
+/// encoder started. A 1 s timeout drops the other layers' receivers a step at
+/// each such stall; a layer that returns after the timeout is measured and
+/// held again before it is upgraded to.
 const LAYER_TIMEOUT: Duration = Duration::from_secs(2);
 /// The shortest time between two keyframe requests for one layer. A keyframe
-/// is a few times a steady frame and leaves the sender within a frame or
-/// two, so a request twice a second at most does not stack keyframes.
+/// of the test senders is at most about twice a steady frame and leaves the
+/// sender within a frame or two, so a request twice a second at most does not
+/// stack keyframes: of 1 391 keyframes in 6 e2e runs, 46 came within 500 ms of
+/// the one before (17 at a stream's start, the rest on every layer at once),
+/// and none was followed by a gap in the frames.
 const KEYFRAME_REQUEST_INTERVAL: Duration = Duration::from_millis(500);
 /// A layer's bitrate is the bytes of this long a window. Keyframes count, so
-/// a window must be long enough to smooth one: over 2 s a test encoder's high
-/// layer (1.5 Mbit/s nominal) read 1.50 Mbit/s at p50, 1.61 at p99 and 1.67
-/// at most; over 1 s 1.66 at p99 and 1.80 at most.
+/// a window must be long enough to smooth one and a sender's stall. The test
+/// senders' high layer (1.5 Mbit/s nominal; payload plus 32 bytes a packet; 64
+/// streams in 6 e2e runs) read, over 2 s, 1.54 Mbit/s at p50, 1.68 at p99 and
+/// 1.91 at most (1.88 at the p99 of the worst stream, 1.25 times nominal); over
+/// 1 s 1.73 at p99 but 2.75 at most (2.60 at the p99 of the worst stream, 1.7
+/// times); over 3 s 1.65 at p99 and 1.73 at most.
 const RATE_WINDOW: Duration = Duration::from_secs(2);
 /// Bytes the wire adds to each RTP packet (header and extensions, SRTP tag),
 /// counted into a layer's cost once per packet.
@@ -89,11 +96,13 @@ const BUDGET_FRACTION: f64 = 0.85;
 /// With cost C and fixed traffic F, the receiver steps down when the estimate
 /// E < (C + F) / 0.85 and an upgrade needs E >= (1.20 * C + F) / 0.85: at
 /// F = 0 the upgrade line is 20% above the step-down line, 1.41 times the
-/// cost. On loopback the estimate settles close to the traffic it carries: of
-/// 96 step-downs, 44 came with the budget within 5% of the cost and 66 within
-/// 10%: the estimate hovers at the step-down line. An upgrade line at 1.65 times
-/// the cost (1.40) was reached rarely: in the e2e runs 8 of 9 scenarios failed
-/// with 1.40 against 4 of 9 with 1.20.
+/// cost. On loopback the estimate settles close to the traffic it carries: at
+/// the median step-down the budget was 0.91 to 0.95 of the cost (the estimate
+/// 1.07 to 1.12 times the traffic), and 62 of 72 step-downs in four e2e runs
+/// came within 20 s of an upgrade of the same receiver (median 1 to 7 s
+/// later). The estimate that earned an upgrade (the probe for the demand) falls
+/// back toward the traffic once the upgrade is made, so a receiver can
+/// alternate between a layer and the one below it.
 const UPGRADE_HEADROOM: f64 = 1.20;
 /// How long that headroom must hold, without a dip, before an upgrade.
 const UPGRADE_HOLD: Duration = Duration::from_secs(4);

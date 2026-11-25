@@ -129,8 +129,9 @@ const NOISE = (() => {
  * A moving picture that compresses like camera video and still costs bits:
  * a smooth gradient that drifts, soft discs that move across it, and sensor
  * noise (a different draw each frame, `noise` levels wide). The encoder
- * spends its target on it, a keyframe is a few times a steady frame, and
- * frames are not dropped after one.
+ * spends its target on it, a keyframe is at most about twice a steady frame
+ * (high layer: 17.6 kB steady, up to 32 kB), and frames are not dropped after
+ * one. At 1280x720 a frame costs about 1.5 ms of CPU, 2% of a core at 15 fps.
  */
 export function videoSource(width: number, height: number, fps = 15, noise = 10): Source {
   const source = new wrtc.nonstandard.RTCVideoSource();

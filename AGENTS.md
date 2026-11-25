@@ -517,25 +517,33 @@ ignored. Constants and why:
 - `RATE_WINDOW` 2 s: a layer's rate is the payload plus 32 bytes per RTP packet
   (`seq_range`) over this window, known once the layer has flowed a whole
   window. The e2e video source (`videoSource`, a gradient with moving discs
-  and light noise, compressible like camera video) sends each layer near its
-  `maxBitrate` (high 1.5 Mbit/s) at about 15 fps: over 2 s the high layer read
-  1.50 Mbit/s at p50, 1.61 at p99, 1.67 at most; over 1 s 1.66 at p99, 1.80 at
-  most. Keyframes count: the codec's cadence, loss recovery, a receiver's PLI
-  and the selector's own switches all cross the receiver's link, and the
-  window smooths one burst. Trade-off: video that starts or resumes costs 0
+  and light noise, compressible like camera video; about 1.5 ms of CPU a
+  720p frame) sends each layer near its `maxBitrate` at about 15 fps: high
+  1.47 Mbit/s of payload (1.5 nominal), medium 0.50, low 0.16, a keyframe at
+  most about twice a steady frame (high: steady frame 17.6 kB, keyframe up to
+  32 kB). Windowed rate of the high layer, payload plus 32 bytes a packet (64
+  streams in 6 runs): over 2 s 1.54 Mbit/s at p50, 1.68 at p99, 1.91 at most
+  (1.88 at the p99 of the worst stream, 1.25 times nominal); over 1 s 1.73 at
+  p99 but 2.75 at most (2.60 at the p99 of the worst stream); over 3 s 1.65
+  at p99, 1.73 at most. Keyframes count: the codec's cadence, loss recovery, a
+  receiver's PLI and the selector's own switches all cross the receiver's
+  link, and the window smooths one burst and a sender's stall. Trade-off: video that starts or resumes costs 0
   until it has flowed a whole window, so for up to 2 s a resumed high stream
   can stay high through an estimate drop.
 - `LAYER_TIMEOUT` 2 s: a layer silent this long is gone; the selector notices
   on its next event (the next frame of the track), not at its own deadline.
-  A steady test sender's frames come at most 300 ms apart; the longest
-  silence seen was 1.6 s, when the sending process stalled as a new encoder
-  started. A shorter timeout dropped the receivers of the other layers a step
-  at such a stall.
+  A steady test sender's frames come at most 0.4 s apart (106 000 intervals,
+  none between 0.4 and 1.5 s); the only longer silences, 10 in 6 runs, lasted
+  1.5 to 1.6 s, on every layer of one sender at once, when the sending
+  process stalled as a new encoder started. A 1 s timeout drops the other
+  layers' receivers a step at each such stall.
 - `KEYFRAME_REQUEST_INTERVAL` 500 ms: at most one request per (track, layer),
-  from the selector or a gap. A keyframe of the compressible source is a few
-  times a steady frame and leaves the sender within a frame or two, so two
-  requests a second do not stack keyframes. A receiver's own PLI is not
-  limited.
+  from the selector or a gap. A keyframe of the compressible source is at most
+  about twice a steady frame and leaves the sender within a frame or two, so
+  two requests a second do not stack keyframes: of 1 391 keyframes in 6 runs,
+  46 came within 500 ms of the one before (17 at a stream's start, the rest on
+  every layer at once), and none was followed by a gap in the frames. A
+  receiver's own PLI is not limited.
 - `BUDGET_FRACTION` 0.85 of the estimate minus the fixed traffic (per audio
   track the larger of `AUDIO_RESERVE_BPS` 64 kbit/s and its measured rate, and
   the measured rate of each video without simulcast; fixed traffic is never
@@ -544,10 +552,12 @@ ignored. Constants and why:
   video cost C and fixed traffic F, a receiver steps down when the estimate
   E < (C + F) / 0.85 and an upgrade needs E >= (1.20 * C + F) / 0.85; at F = 0
   the upgrade line is 20% above the step-down line. On loopback the estimate
-  settles close to the traffic it carries: of 96 step-downs, 44 came with the
-  budget within 5% of the cost and 66 within 10%. A headroom of 1.40 was
-  reached rarely: in the e2e runs 8 of 9 scenarios failed with 1.40 against
-  4 of 9 with 1.20.
+  settles close to the traffic it carries: at the median step-down the budget
+  was 0.91 to 0.95 of the cost (the estimate 1.07 to 1.12 times the traffic),
+  and 62 of 72 step-downs in four e2e runs came within 20 s of an upgrade of
+  the same receiver (median 1 to 7 s later). The estimate that earned an
+  upgrade (the probe for the demand) falls back toward the traffic once it is
+  made, so a receiver can alternate between a layer and the one below it.
 
 Rules, per receiver, run on an estimate event, a track-set or ceiling change,
 a committed switch, a change in a track's set of live layers (a layer starts,
