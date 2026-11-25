@@ -54,19 +54,37 @@ use str0m::media::{MediaTime, Mid, Rid};
 
 use super::room::ParticipantId;
 
-/// A layer that sent nothing for this long no longer flows.
-const LAYER_TIMEOUT: Duration = Duration::from_secs(3);
-/// The shortest time between two keyframe requests for one layer.
-const KEYFRAME_REQUEST_INTERVAL: Duration = Duration::from_millis(500);
-/// A layer's bitrate is the bytes of this long a window.
-const RATE_WINDOW: Duration = Duration::from_secs(1);
+/// A layer that sent nothing for this long no longer flows. A sender that
+/// is asked for a keyframe sends none of its layers for 1 to 4 s while the
+/// pacer drains it (measured at 1 Hz in the test senders, whose available
+/// bandwidth stayed at 3 Mbit/s and more); a shorter timeout dropped the
+/// receivers of the other layers a step, and a layer that returns after the
+/// timeout is measured and held again before it is upgraded to.
+const LAYER_TIMEOUT: Duration = Duration::from_secs(5);
+/// The shortest time between two keyframe requests for one layer. A
+/// keyframe is 5 to 10 times a steady frame (600 kB at 720p in the test
+/// encoders) and takes the sender 1 to 3 s to pace out; the layer sends no
+/// other frame meanwhile. A request every 500 ms made the sender produce
+/// one keyframe after another, and the layer was silent for 3 s and more
+/// (receivers fell back and needed 12 s to climb again).
+const KEYFRAME_REQUEST_INTERVAL: Duration = Duration::from_secs(3);
+/// A layer's bitrate is the bytes of this long a window. The test encoders'
+/// frames reach 60 to 97 kB, so a 1 s window read a high layer at up to
+/// 5.2 Mbit/s (p99) against about 1.3 Mbit/s nominal, and receivers stepped
+/// down on the spikes; 3 s and 5 s windows still read 2.0 to 2.5 Mbit/s now
+/// and then. Over 8 s the same layer read at most 1.7 Mbit/s (p99 1.6).
+const RATE_WINDOW: Duration = Duration::from_secs(8);
 /// Bytes the wire adds to each RTP packet (header and extensions, SRTP tag),
 /// counted into a layer's cost once per packet.
 const PACKET_OVERHEAD_BYTES: u64 = 32;
 /// The share of a receiver's estimate the forwarded video and audio may use.
 const BUDGET_FRACTION: f64 = 0.85;
 /// An upgrade needs a budget this many times the cost with the new layer.
-const UPGRADE_HEADROOM: f64 = 1.20;
+/// A budget of exactly the cost is the step-down line, 1 / [`BUDGET_FRACTION`]
+/// = 1.18 times the cost in estimate: at 1.20 an upgrade left a 2% margin, and
+/// a loopback estimate that moved by more (it swung between 2.2 and 4.9
+/// Mbit/s with the traffic unchanged) sent the receiver down again at once.
+const UPGRADE_HEADROOM: f64 = 1.40;
 /// How long that headroom must hold, without a dip, before an upgrade.
 const UPGRADE_HOLD: Duration = Duration::from_secs(4);
 /// What each forwarded audio track is budgeted at least.
@@ -117,9 +135,10 @@ impl Meter {
     /// A frame of `payload` bytes sent as `packets` RTP packets. A keyframe
     /// is not counted: it is a burst the sender makes when a receiver (this
     /// selector's own switches) or a loss asks for one, several times the
-    /// size of the layer's steady frames, and a window it falls in would
-    /// read the layer at two or three times its rate. The upgrade headroom
-    /// covers the burst.
+    /// size of the layer's steady frames. Counting it moved a layer's
+    /// measured rate by 3% at the median and 10 to 17% at p90 and p99 of the
+    /// windows, and each of those bursts is caused by a switch the selector
+    /// just made, so the rate would answer the selector's own decisions.
     ///
     /// True when this frame starts a new stretch (the layer stopped and
     /// resumed): its rate is unknown for a window.
@@ -163,7 +182,7 @@ impl Meter {
             .filter(|(at, _)| now.saturating_duration_since(*at) < RATE_WINDOW)
             .map(|(_, bytes)| bytes)
             .sum();
-        Some(bytes * 8)
+        Some(bytes * 8 * 1000 / RATE_WINDOW.as_millis() as u64)
     }
 }
 
@@ -562,7 +581,7 @@ impl LayerSelector {
             })
             .sum();
         // The estimate whose budget holds the upgrade's headroom over the
-        // highest layers: `0.85 * E - fixed >= 1.20 * highest`.
+        // highest layers: `0.85 * E - fixed >= 1.40 * highest`.
         let demand =
             ((UPGRADE_HEADROOM * highest as f64 + fixed as f64) / BUDGET_FRACTION).ceil() as u64;
 
@@ -982,6 +1001,26 @@ mod tests {
     }
 
     #[test]
+    fn a_keyframe_in_flight_is_not_asked_for_again_while_the_sender_paces_it_out() {
+        // A keyframe takes the sender up to 3 s to send; a second request
+        // inside that time makes it produce another one behind the first.
+        let now = Instant::now();
+        let mut s = selector(now, &["high", "low"]);
+        assert!(route(&mut s, now, "low", false, Some("low"))
+            .request_keyframe
+            .is_some());
+        for ms in (100..3000).step_by(100) {
+            let at = now + Duration::from_millis(ms);
+            assert!(
+                route(&mut s, at, "low", false, Some("low"))
+                    .request_keyframe
+                    .is_none(),
+                "asked again after {ms} ms"
+            );
+        }
+    }
+
+    #[test]
     fn a_codec_without_keyframe_marks_switches_at_once_and_asks_for_one() {
         let now = Instant::now();
         let mut s = selector(now, &["high"]);
@@ -1124,6 +1163,11 @@ mod tests {
     const RATES: [u64; 3] = [200_000, 600_000, 1_500_000];
     const BIG_HIGH: [u64; 3] = [200_000, 600_000, 2_500_000];
     const MS10: Duration = Duration::from_millis(10);
+    /// Time for a layer's rate to be measured: a window and a little more.
+    const WARM_UP_MS: u64 = RATE_WINDOW.as_millis() as u64 + 500;
+    /// A packet every 10 ms: a window's worth, and the same warm-up.
+    const WINDOW_PACKETS: u32 = RATE_WINDOW.as_millis() as u32 / 10;
+    const WARM_UP_PACKETS: u32 = WARM_UP_MS as u32 / 10;
 
     /// A budgeted receiver of some video tracks, every layer sending at a
     /// steady rate (a packet every 10 ms), and a clock only the test moves.
@@ -1151,7 +1195,7 @@ mod tests {
                 audio: Vec::new(),
             };
             // Long enough for every layer's rate to be measured.
-            sim.advance(1_500);
+            sim.advance(WARM_UP_MS);
             sim.commit();
             sim
         }
@@ -1323,7 +1367,7 @@ mod tests {
         let audio = (ParticipantId(30), Mid::from("2"));
         let mut sim = Sim::new(&[RATES]);
         sim.audio.push(audio.clone());
-        sim.advance(1_500);
+        sim.advance(WARM_UP_MS);
         sim.place(1);
         assert_eq!(sim.s.route(sim.now, &RECEIVER, &audio, None, None), FORWARD);
         // 0.85 * 0.72 = 0.612 Mbit/s would hold medium (0.6) without audio;
@@ -1457,26 +1501,27 @@ mod tests {
         let track = track_n(0);
         let (low, medium) = (Rid::from("low"), Rid::from("medium"));
         let start = Instant::now();
-        // Low flows from the start; medium began at packet 130.
+        // Low flows from the start; medium began 20 packets before the end.
         let feed = |s: &mut LayerSelector, from: u32, to: u32| {
             for i in from..to {
                 let at = start + MS10 * i;
                 s.observe(at, &track, Some(&low), 218, 1, false, false);
-                if i >= 130 {
+                if i >= MEDIUM_START {
                     s.observe(at, &track, Some(&medium), 718, 1, false, false);
                 }
             }
         };
-        feed(&mut s, 0, 150);
-        let now = start + MS10 * 149;
+        const MEDIUM_START: u32 = WARM_UP_PACKETS - 20;
+        feed(&mut s, 0, WARM_UP_PACKETS);
+        let now = start + MS10 * (WARM_UP_PACKETS - 1);
         s.route(now, &RECEIVER, &track, Some(&low), Some(true));
         s.set_estimate(now, &RECEIVER, 3_000_000, true);
         // The upgrade cannot be judged yet: the allocator wakes when the
         // medium layer has been measured for a window, not before.
-        let measured = start + MS10 * 130 + RATE_WINDOW;
+        let measured = start + MS10 * MEDIUM_START + RATE_WINDOW;
         assert_eq!(s.receivers[&RECEIVER].hold_since, None);
         assert_eq!(s.next_wake(), Some(measured));
-        feed(&mut s, 150, 231);
+        feed(&mut s, WARM_UP_PACKETS, MEDIUM_START + WINDOW_PACKETS + 1);
         s.run_due(measured);
         assert_eq!(s.next_wake(), Some(measured + UPGRADE_HOLD));
     }
@@ -1579,7 +1624,7 @@ mod tests {
             let mut sim = Sim::new(&[RATES]);
             let audio = (ParticipantId(30), Mid::from("2"));
             sim.audio.push(audio.clone());
-            sim.advance(1_500);
+            sim.advance(WARM_UP_MS);
             sim.s.route(sim.now, &RECEIVER, &audio, None, None);
             sim.place(1);
             sim
@@ -1589,7 +1634,7 @@ mod tests {
         // Audio's measured rate: a 100 byte packet every 10 ms, with overhead.
         let audio = (100 + PACKET_OVERHEAD_BYTES) * 8 * 100;
         let demand = sim.s.take_demands()[&RECEIVER];
-        // `0.85 * E - audio >= 1.20 * high`, and not more than that.
+        // `0.85 * E - audio >= 1.40 * high`, and not more than that.
         let needed = (UPGRADE_HEADROOM * RATES[2] as f64 + audio as f64) / BUDGET_FRACTION;
         assert!(demand as f64 >= needed && (demand as f64) < needed + 1.0);
         // The estimator settles at the demand and stays silent: medium to
@@ -1617,7 +1662,7 @@ mod tests {
         let high = Rid::from("high");
         let start = Instant::now();
         // A frame of 3000 bytes in 3 packets every 10 ms.
-        for i in 0..150 {
+        for i in 0..WARM_UP_PACKETS {
             s.observe(
                 start + MS10 * i,
                 &track,
@@ -1628,7 +1673,7 @@ mod tests {
                 false,
             );
         }
-        let now = start + MS10 * 149;
+        let now = start + MS10 * (WARM_UP_PACKETS - 1);
         let rate = s.meters[&track].layers[&Some(high)].rate(now);
         assert_eq!(rate, Some((3_000 + 3 * PACKET_OVERHEAD_BYTES) * 8 * 100));
     }
@@ -1639,13 +1684,13 @@ mod tests {
         let track = track_n(2);
         let high = Rid::from("high");
         let start = Instant::now();
-        for i in 0..150 {
+        for i in 0..WARM_UP_PACKETS {
             // Every 30th frame is a keyframe 20 times the size.
             let key = i % 30 == 0;
             let size = if key { 60_000 } else { 3_000 };
             s.observe(start + MS10 * i, &track, Some(&high), size, 3, key, false);
         }
-        let now = start + MS10 * 149;
+        let now = start + MS10 * (WARM_UP_PACKETS - 1);
         let rate = s.meters[&track].layers[&Some(high)].rate(now);
         let rate = rate.expect("a rate");
         let per_frame = 3_000 + 3 * PACKET_OVERHEAD_BYTES;
@@ -1707,7 +1752,7 @@ mod tests {
                 }
             }
         };
-        feed(&mut sim, 1_500, true);
+        feed(&mut sim, WARM_UP_MS, true);
         sim.s.route(sim.now, &RECEIVER, &plain, None, None);
         // 1.5 + 1.0 Mbit/s fit the budget: nothing is lowered.
         sim.estimate(3_200_000, false);
@@ -1724,7 +1769,7 @@ mod tests {
         let measured = sim.now + RATE_WINDOW;
         assert_eq!(sim.caps(), [2]);
         assert_eq!(sim.s.next_wake(), Some(measured));
-        feed(&mut sim, 990, true);
+        feed(&mut sim, RATE_WINDOW.as_millis() as u64 - 10, true);
         sim.s.run_due(measured);
         // 1.5 + 1.0 Mbit/s no longer fit 0.85 * 2 Mbit/s: the step-down.
         assert_eq!(sim.caps(), [1]);
@@ -1742,7 +1787,7 @@ mod tests {
         };
         let track = sim.tracks[0].0.clone();
         // Only low flows when the estimate comes: nothing to upgrade to.
-        sim.advance_layers(1_500, &[0]);
+        sim.advance_layers(WARM_UP_MS, &[0]);
         sim.s.route(
             sim.now,
             &RECEIVER,
@@ -1759,7 +1804,7 @@ mod tests {
         let first = sim.now;
         let measured = first + RATE_WINDOW;
         assert_eq!(sim.s.next_wake(), Some(measured));
-        sim.advance(990);
+        sim.advance(RATE_WINDOW.as_millis() as u64 - 10);
         sim.s.run_due(measured);
         assert_eq!(sim.s.next_wake(), Some(measured + UPGRADE_HOLD));
         sim.advance(3_990);

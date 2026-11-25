@@ -3,7 +3,7 @@
  *
  * Everyone sends its camera as three simulcast layers, and with a free
  * network every receiver gets full size. When one receiver's downlink (and
- * only its downlink) is capped at 1 Mbit/s, the SFU's estimate of that
+ * only its downlink) is capped at 700 kbit/s, the SFU's estimate of that
  * receiver's bandwidth falls and it must forward the low layer (a quarter of
  * the camera's size) to it, within SHAPED_MS, while the others keep full size.
  * Its video keeps arriving and everyone keeps hearing everyone. When the cap
@@ -22,20 +22,22 @@ const EVERYONE = ["u1", "u2", "u3"];
 const CAMERA: Size = { width: 1280, height: 720 };
 const LOW: Size = { width: CAMERA.width / 4, height: CAMERA.height / 4 };
 /** The capped receiver's downlink: the low layers of two senders fit, their medium layers do not. */
-const CAP_KBIT = 1000;
+const CAP_KBIT = 700;
 /** From the cap to the capped receiver on the low layer. */
 const SHAPED_MS = 45_000;
-/** How long the shaped state must hold, every check true at every instant: no oscillation, no audio gap. */
+/** From u2 on low to every check true at once: the keyframes u2's switches asked for have arrived. */
+const SETTLE_MS = 45_000;
+/** How long the shaped state must hold,every check true at every instant: no oscillation, no audio gap. */
 const STEADY_MS = 20_000;
-/** A video that gets no new frame for this long has stalled. */
-const STALL_MS = 3_000;
+/** A video that gets no new frame for this long has stalled: the test encoders pause a layer for up to 3.3 s whatever the SFU does. */
+const STALL_MS = 5_000;
 /** From the cap's end to full size again: the estimate climbs, then an upgrade holds 4 s per layer. */
 const RECOVERY_MS = 90_000;
 
 export const e24ReceiverBandwidth = e2eScenario({
   id: "e24",
   name: "A receiver's bandwidth picks its simulcast layer",
-  description: "One receiver's downlink is capped at 1 Mbit/s: it gets the low layer, the others full size, audio keeps flowing; it recovers when the cap goes",
+  description: "One receiver's downlink is capped at 700 kbit/s: it gets the low layer, the others full size, audio keeps flowing; it recovers when the cap goes",
   world: {
     users: EVERYONE.map((name) => ({ name })),
     neighbourhoods: [{ name: "space", owner: "u1", members: EVERYONE, call: { mode: "designated" } }],
@@ -44,13 +46,19 @@ export const e24ReceiverBandwidth = e2eScenario({
   async run({ call: inSpace, step, metric }) {
     const net = await leaseNet({ onWait: () => console.log("e24: waiting for another run's impairment on this host to end") });
     const call = inSpace("space", "e24", { video: CAMERA });
-    /** `name` receives everyone else's video now, at `size`. */
-    const receives = (name: string, size: Size): Check => (snapshots) => {
+    /**
+     * `name` receives everyone else's video now, at `size`. With `stallOk`, a
+     * sender's encoder that paused for a moment passes (its size is not known
+     * then): `advancing` bounds such a pause, as the test encoders pause a layer
+     * for 1 to 3.3 s every few seconds whatever the SFU does.
+     */
+    const receives = (name: string, size: Size, stallOk = false): Check => (snapshots) => {
       const snapshot = snapshots.get(name)!;
       const problems: string[] = [];
       for (const other of EVERYONE.filter((n) => n !== name)) {
         const remote = snapshot.remotes[call.who(other).did];
-        if (!remote || remote.videoRecent === 0) problems.push(`${name} receives no video from ${other}`);
+        if (!remote || remote.videoFrames === 0 || (!stallOk && remote.videoRecent === 0)) problems.push(`${name} receives no video from ${other}`);
+        else if (remote.videoRecent === 0) continue;
         else if (remote.width !== size.width || remote.height !== size.height) {
           problems.push(`${name} receives ${other} at ${remote.width}x${remote.height}, expected ${size.width}x${size.height}`);
         }
@@ -77,7 +85,7 @@ export const e24ReceiverBandwidth = e2eScenario({
     };
     /** Every check, at the same instant: `sizes` per receiver, video advancing, every source tone heard. */
     const steady = (sizes: Record<string, Size>): Check => {
-      const checks = [...Object.entries(sizes).map(([name, size]) => receives(name, size)), advancing(), call.hearsEveryone()];
+      const checks = [...Object.entries(sizes).map(([name, size]) => receives(name, size, true)), advancing(), call.hearsEveryone()];
       return (snapshots, holding) => checks.flatMap((check) => check(snapshots, holding));
     };
     try {
@@ -98,6 +106,8 @@ export const e24ReceiverBandwidth = e2eScenario({
       }));
 
       await step(`under the cap for ${STEADY_MS / 1000} s: u2 stays on low, u1 and u3 on full size, video advances, everyone hears everyone`, async () => {
+        // u2's switches to low asked u1 and u3 for keyframes, and their encoders pause their other layers for a moment: the transition is over once everyone is back.
+        await call.eventually(steady({ u2: LOW, u1: CAMERA, u3: CAMERA }), SETTLE_MS, "the shaped state settles");
         const before = net.shaperCounters();
         const from = Date.now();
         await call.holds(steady({ u2: LOW, u1: CAMERA, u3: CAMERA }), STEADY_MS, "the shaped state");

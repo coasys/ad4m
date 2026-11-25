@@ -509,48 +509,69 @@ answers that with `socketBack` (resend what a fault kept, `sfu.callResume`,
 the socket: ICE `disconnected` is media evidence, and its whole answer is
 the ICE restart.
 
-SFU simulcast layer choice (`rust-executor/src/sfu/simulcast.rs`): each client
+SFU simulcast layer choice (`rust-executor/src/sfu/simulcast.rs`). Each client
 peer (not pipes) runs str0m's bandwidth estimator, started at 800 kbit/s
-(`BWE_START_KBPS`), fed by the caller's transport-wide-cc reports; REMB is
-ignored. The media loop measures every incoming layer's rate per (origin
-participant, mid, rid) over a 1 s window (payload + 32 bytes per RTP packet,
-counted from the frame's `seq_range`; a keyframe adds no bytes, as it is a
-burst the sender makes when asked and would read the layer at two or three
-times its rate; a layer silent for `LAYER_TIMEOUT` (3 s: the test encoders
-stall a layer for 1 to 3.3 s every few seconds, median 1.3 s, and at 1 s each
-stall dropped the receiver a layer) is gone, and an upgrade needs a measured
-target). Per receiver, on an estimate
-event, a track-set change, a ceiling change, a switch committing, a change in
-the set of live layers of one of its tracks (a layer starts, or stops after
-`LAYER_TIMEOUT`; checked per frame, run only on a change), a layer or video
-that resumes after `LAYER_TIMEOUT` (its rate is unknown for a window), or a deadline (no
-periodic tick; the earliest deadline lowers the loop's timeout: the hold's end,
-or the moment the rate of a live layer, or of a video with no layers, is first
-measured, which also refreshes the probing demand and re-checks the budget
-that the unknown rate counted as nothing against), the budget is `0.85 * estimate` minus an
-audio reserve (per forwarded audio track, the larger of 64 kbit/s and its
-measured rate; audio is never touched). Over budget, one video track drops
-one live layer (largest saving first, ties by stable id), one per run. An
-upgrade of one track by one layer needs budget >= 1.20 * (cost sum + the
-layer's extra cost) held 4 s without a dip, ceiling change, track-set change
-or completed switch; each upgrade starts a new hold. No estimate yet, or the
-last one `can_probe: false`, blocks upgrades; a peer that never reports stays
-on the lowest layer. The old layer's cost counts until the switch commits on a
-keyframe, and a pending track is not switched again. New tracks start on the
-lowest live layer, which is also the floor (video is never paused). When a
-switch commits on a layer below the receiver's cap (the layer it wanted
-stopped), the cap drops to that layer: a layer that returns earns its upgrade
-again through the measurement, the hold and `can_probe`. A cap change is logged
-at `debug` (`rust_executor::sfu::simulcast`: receiver, track, old and new
-layer, estimate, budget, spent, the track's layer rates).
-`SetQualityPreference` for a peer the loop no longer holds is dropped (ids are
-never reused, so its state would never be freed). It is a ceiling, not a choice: `high`, `auto` and unset
-let the estimate decide up to high; the receiver gets the best live layer at
-or below the ceiling, else the lowest live one (never black); a lowered
-ceiling applies on the next keyframe. The receiver's probing target
-(`bwe().set_desired_bitrate`) is the estimate that satisfies the upgrade
-condition at the permitted maximum layers:
-`(1.20 * highest + audio) / 0.85`, rounded up.
+(`BWE_START_KBPS`) and fed by the caller's transport-wide-cc reports; REMB is
+ignored. Constants and why:
+
+- `RATE_WINDOW` 8 s: a layer's rate is the payload plus 32 bytes per RTP packet
+  (`seq_range`) over this window, known once the layer has flowed a whole
+  window. The test encoders' frames reach 60 to 97 kB: a 1 s window read a
+  high layer up to 5.2 Mbit/s (p99) against 1.3 nominal, 3 s and 5 s still
+  2.0 to 2.5, 8 s at most 1.7. A keyframe adds no bytes: it is a burst the
+  selector's own switches ask for.
+- `LAYER_TIMEOUT` 5 s: a layer silent this long is gone. A sender asked for a
+  keyframe sends none of its layers for 1 to 4 s while its pacer drains it,
+  with its own bandwidth estimate at 3 Mbit/s and more (so the SFU's request
+  causes the stall, not the sender's network); 3 s dropped the receivers of
+  the other layers a step each time.
+- `KEYFRAME_REQUEST_INTERVAL` 3 s: at most one request per (track, layer),
+  from the selector or a gap. At 500 ms the sender made one keyframe after
+  another and stalled for longer. A receiver's own PLI is not limited.
+- `BUDGET_FRACTION` 0.85 of the estimate minus the audio reserve (per audio
+  track the larger of `AUDIO_RESERVE_BPS` 64 kbit/s and its measured rate;
+  audio is never touched).
+- `UPGRADE_HEADROOM` 1.40 and `UPGRADE_HOLD` 4 s: see the upgrade rule. 1.20
+  left a 2% margin over the step-down line (1 / 0.85 = 1.18), and a loopback
+  estimate that swings between 2.2 and 4.9 Mbit/s sent the receiver down again.
+
+Rules, per receiver, run on an estimate event, a track-set or ceiling change,
+a committed switch, a change in a track's set of live layers (a layer starts,
+or stops after `LAYER_TIMEOUT`), a layer or video that resumes after
+`LAYER_TIMEOUT`, or a deadline. There is no periodic tick: the earliest
+deadline (the hold's end, or the moment a live layer's rate is first measured)
+lowers the loop's timeout.
+
+- Over budget, one video track drops one live layer (largest saving first,
+  ties by stable id), one per run.
+- An upgrade of one track by one layer needs budget >= 1.40 * (cost sum + the
+  layer's extra cost), held 4 s without a dip, ceiling change, track-set change
+  or completed switch; each upgrade starts a new hold. Every layer involved
+  needs a measured rate. No estimate yet, or the last one `can_probe: false`,
+  blocks upgrades; a peer that never reports stays on the lowest layer.
+- A switch commits on a keyframe of the new layer. The old layer's cost counts
+  until then, and a track with a pending switch is not switched again.
+- New tracks start on the lowest live layer, which is also the floor (video is
+  never paused).
+- When a switch commits on a layer below the receiver's cap (the layer it
+  wanted stopped), the cap drops to that layer: a layer that returns is
+  measured again (8 s) and earns its upgrade again (4 s hold, `can_probe`).
+- `SetQualityPreference` is a ceiling, not a choice: `high`, `auto` and unset
+  let the estimate decide up to high; the receiver gets the best live layer at
+  or below the ceiling, else the lowest live one; a lowered ceiling applies on
+  the next keyframe. For a peer the loop no longer holds it is dropped (ids
+  are never reused).
+- The receiver's probing target (`bwe().set_desired_bitrate`) is the estimate
+  that satisfies the upgrade condition at the permitted maximum layers:
+  `(1.40 * highest + audio) / 0.85`, rounded up.
+- A cap change is logged at `debug` (`rust_executor::sfu::simulcast`:
+  receiver, track, old and new layer, estimate, budget, spent, layer rates).
+
+The e2e shaper (`limitDownlink`, `tests/js/helpers/sfu/net.ts`) is a `tbf` with
+a 3 kB burst and a 300 ms queue: a larger burst let str0m's probe clusters
+(about 18 kB) pass at line rate and the estimate read 2.7 to 4.7 Mbit/s on a
+700 kbit/s cap, while a 4 kB burst with a 100 ms queue dropped so much that
+the estimate fell to 16 kbit/s and the shaped receiver saw no new frame for 5 s in 3 of 4 runs.
 
 SFU media addresses (`rust-executor/src/sfu/{hosts,server,reachability}.rs`):
 with no `sfu_bind_addr` (the default, whatever `--localhost` says) the SFU
