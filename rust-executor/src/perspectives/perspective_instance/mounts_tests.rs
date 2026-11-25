@@ -954,6 +954,7 @@ async fn deadline_mount_pair() -> (PerspectiveInstance, AgentContext, String, St
         "{}\n// instance {}\n",
         crate::languages::mount_tests::MOUNT_TEST_SOURCE
             .replace("MountThing", "DeadlineOtherThing")
+            .replace("mounttest://Thing", "deadlineother://DeadlineOtherThing")
             .replace("mounttest://", "deadlineother://"),
         uuid::Uuid::new_v4(),
     );
