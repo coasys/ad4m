@@ -1001,12 +1001,11 @@ async fn pending_sync_read_times_out_and_resync_reaches_next_language() {
     // Exercise the real sequential resync loop, with the first language stuck again.
     let gate = arm(&stuck, MountPoint::SnapshotReading);
     let next = arm(&healthy, MountPoint::SnapshotFetched);
+    super::mounts::set_mount_resync_interval_for_test(Duration::from_millis(1));
     let instance = p.clone();
     let loop_handle = tokio::spawn(async move { instance.mount_resync_loop().await });
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(16)).await;
-    tokio::time::resume();
     expire_mount_read(&gate).await;
+    super::mounts::set_mount_resync_interval_for_test(Duration::from_secs(15));
     tokio::time::timeout(Duration::from_secs(5), next.arrived())
         .await
         .expect("resync must reach the next language in the same pass");
