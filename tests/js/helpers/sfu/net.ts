@@ -74,6 +74,8 @@ export interface NetLease {
    * is everything else on the host. Replaces this lease's previous impairment.
    */
   limitDownlink(ports: SocketPort[], rateKbit: number): void;
+  /** What the `limitDownlink` token bucket has passed and dropped since it was set; null when none is set. */
+  shaperCounters(): { sentBytes: number; sentPackets: number; droppedPackets: number } | null;
   /** Remove the impairment; the lease stays held. */
   clear(): void;
   /** Remove the impairment and let the next run have the interface. */
@@ -181,6 +183,11 @@ export async function leaseNet(
         clear();
         throw new Error(`could not limit the downlink of ${describePorts(ports)} on ${iface}: ${(e as Error).message}`);
       }
+    },
+    shaperCounters() {
+      held();
+      const block = /qdisc tbf 40:[^\n]*\n\s*Sent (\d+) bytes (\d+) pkt \(dropped (\d+)/.exec(tc(`-s qdisc show dev ${iface}`));
+      return block ? { sentBytes: Number(block[1]), sentPackets: Number(block[2]), droppedPackets: Number(block[3]) } : null;
     },
     clear,
     async release() {

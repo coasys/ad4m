@@ -55,13 +55,13 @@ use str0m::media::{MediaTime, Mid, Rid};
 use super::room::ParticipantId;
 
 /// A layer that sent nothing for this long no longer flows.
-const LAYER_TIMEOUT: Duration = Duration::from_secs(1);
+const LAYER_TIMEOUT: Duration = Duration::from_secs(3);
 /// The shortest time between two keyframe requests for one layer.
 const KEYFRAME_REQUEST_INTERVAL: Duration = Duration::from_millis(500);
 /// A layer's bitrate is the bytes of this long a window.
 const RATE_WINDOW: Duration = Duration::from_secs(1);
-/// Bytes the wire adds to each packet's payload (RTP header and extensions,
-/// SRTP tag), counted into a layer's cost.
+/// Bytes the wire adds to each RTP packet (header and extensions, SRTP tag),
+/// counted into a layer's cost once per packet.
 const PACKET_OVERHEAD_BYTES: u64 = 32;
 /// The share of a receiver's estimate the forwarded video and audio may use.
 const BUDGET_FRACTION: f64 = 0.85;
@@ -114,15 +114,29 @@ struct Meter {
 }
 
 impl Meter {
-    fn record(&mut self, now: Instant, payload: usize) {
-        if now.saturating_duration_since(self.last) >= LAYER_TIMEOUT {
+    /// A frame of `payload` bytes sent as `packets` RTP packets. A keyframe
+    /// is not counted: it is a burst the sender makes when a receiver (this
+    /// selector's own switches) or a loss asks for one, several times the
+    /// size of the layer's steady frames, and a window it falls in would
+    /// read the layer at two or three times its rate. The upgrade headroom
+    /// covers the burst.
+    ///
+    /// True when this frame starts a new stretch (the layer stopped and
+    /// resumed): its rate is unknown for a window.
+    fn record(&mut self, now: Instant, payload: usize, packets: u64, keyframe: bool) -> bool {
+        let restarted = now.saturating_duration_since(self.last) >= LAYER_TIMEOUT;
+        if restarted {
             // The layer stopped and resumed: a new stretch.
             self.first = now;
             self.window.clear();
         }
         self.last = now;
-        self.window
-            .push_back((now, payload as u64 + PACKET_OVERHEAD_BYTES));
+        let bytes = if keyframe {
+            0
+        } else {
+            payload as u64 + packets * PACKET_OVERHEAD_BYTES
+        };
+        self.window.push_back((now, bytes));
         while self
             .window
             .front()
@@ -130,6 +144,7 @@ impl Meter {
         {
             self.window.pop_front();
         }
+        restarted
     }
 
     fn flows(&self, now: Instant) -> bool {
@@ -155,9 +170,20 @@ impl Meter {
 struct TrackMeters {
     audio: bool,
     layers: HashMap<Option<Rid>, Meter>,
+    /// Which layers (bit = rank) flowed when the last packet arrived.
+    live: u8,
 }
 
 impl TrackMeters {
+    /// The flowing layers as a bit set by rank.
+    fn live_set(&self, now: Instant) -> u8 {
+        self.flowing(now)
+            .iter()
+            .enumerate()
+            .filter(|(_, meter)| meter.is_some())
+            .fold(0, |set, (rank, _)| set | 1 << rank)
+    }
+
     /// The flowing layers of a simulcast track, by rank.
     fn flowing(&self, now: Instant) -> [Option<&Meter>; LAYERS.len()] {
         std::array::from_fn(|rank| {
@@ -230,6 +256,62 @@ impl Receiver {
     }
 }
 
+/// Set a receiver's cap of a track, and log a change with `why` (`None`: a
+/// fallback committed).
+fn set_cap(
+    receiver: &ParticipantId,
+    state: &mut Receiver,
+    track: &Track,
+    rank: usize,
+    why: Option<CapReason>,
+) {
+    let old = state.cap(track);
+    state.caps.insert(track.clone(), rank);
+    if old != rank {
+        log::debug!(
+            "SFU layers: receiver {} track {}/{}: cap {} -> {} ({})",
+            receiver,
+            track.0,
+            track.1,
+            LAYERS[old],
+            LAYERS[rank],
+            why.map_or_else(
+                || "a fallback committed".to_string(),
+                |w| format!(
+                    "estimate {} bit/s, budget {:.0}, spent {}, layer rates low/medium/high {:?}",
+                    w.estimate, w.budget, w.spent, w.rates
+                )
+            ),
+        );
+    }
+}
+
+/// What a budget decision rests on, for the log.
+struct CapReason {
+    estimate: u64,
+    budget: f64,
+    spent: u64,
+    /// The track's layers' measured rates, by rank.
+    rates: [Option<u64>; LAYERS.len()],
+}
+
+impl CapReason {
+    fn new(
+        estimate: u64,
+        budget: f64,
+        spent: u64,
+        flowing: &[Option<&Meter>],
+        now: Instant,
+    ) -> Self {
+        Self {
+            estimate,
+            budget,
+            spent,
+            rates: std::array::from_fn(|rank| flowing[rank].and_then(|m| m.rate(now))),
+        }
+    }
+}
+
 /// A stable order of tracks, for ties.
 fn track_key(track: &Track) -> (u64, Mid) {
     (track.0 .0, track.1)
@@ -256,24 +338,34 @@ pub(crate) fn is_keyframe(extra: &CodecExtra) -> Option<bool> {
 }
 
 impl LayerSelector {
-    /// Record a packet of `track`: `payload` bytes, on layer `rid`. Call once
-    /// per packet, before [`Self::route`].
+    /// Record a frame of `track`: `payload` bytes in `packets` RTP packets,
+    /// on layer `rid`; `keyframe` when it is a keyframe (see [`Meter::record`]).
+    /// Call once per frame, before [`Self::route`].
+    ///
+    /// A change in the set of flowing layers of the track (one started, or
+    /// one stopped) runs the allocation of the track's receivers: a layer
+    /// that arrives after the last allocation is an upgrade candidate the
+    /// estimator's silence would never reveal.
+    #[allow(clippy::too_many_arguments)]
     pub fn observe(
         &mut self,
         now: Instant,
         track: &Track,
         rid: Option<&Rid>,
         payload: usize,
+        packets: u64,
+        keyframe: bool,
         audio: bool,
     ) {
-        let track = self
+        let meters = self
             .meters
             .entry(track.clone())
             .or_insert_with(|| TrackMeters {
                 audio,
                 layers: HashMap::new(),
+                live: 0,
             });
-        track
+        let restarted = meters
             .layers
             .entry(rid.copied())
             .or_insert_with(|| Meter {
@@ -281,7 +373,38 @@ impl LayerSelector {
                 last: now,
                 window: VecDeque::new(),
             })
-            .record(now, payload);
+            .record(now, payload, packets, keyframe);
+        let live = meters.live_set(now);
+        let before = std::mem::replace(&mut meters.live, live);
+        // A layer that stopped and came back has no rate for a window: the
+        // allocation of its receivers runs now, and arms its wake for then.
+        if live == before {
+            if restarted {
+                self.allocate_track_receivers(now, track);
+            }
+            return;
+        }
+        log::debug!(
+            "SFU layers: track {}/{}: live layers {:03b} -> {:03b} (bit 0 low, 1 medium, 2 high)",
+            track.0,
+            track.1,
+            before,
+            live
+        );
+        self.allocate_track_receivers(now, track);
+    }
+
+    /// Run the allocation of every budgeted receiver of `track`.
+    fn allocate_track_receivers(&mut self, now: Instant, track: &Track) {
+        let affected: Vec<ParticipantId> = self
+            .receivers
+            .iter()
+            .filter(|(_, r)| r.bwe && r.tracks.contains(track))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in affected {
+            self.allocate(now, &id);
+        }
     }
 
     /// `receiver` is a client peer: its transport reports an estimate, and
@@ -387,6 +510,8 @@ impl LayerSelector {
 
         state.wake = None;
         let mut fixed = 0u64;
+        // The earliest first packet of a stretch whose rate is not known yet.
+        let mut unmeasured: Option<Instant> = None;
         let mut videos: Vec<Video> = Vec::new();
         for track in &state.tracks {
             let Some(meters) = self.meters.get(track) else {
@@ -398,7 +523,13 @@ impl LayerSelector {
                     fixed += AUDIO_RESERVE_BPS.max(meter.rate(now).unwrap_or(0));
                 }
             } else if !meters.simulcast() {
-                fixed += cost_of(meters.layers.get(&None)).unwrap_or(0);
+                let meter = meters.layers.get(&None).filter(|m| m.flows(now));
+                fixed += cost_of(meter).unwrap_or(0);
+                // A video of no layers costs nothing until measured.
+                if let Some(meter) = meter.filter(|m| m.rate(now).is_none()) {
+                    unmeasured =
+                        Some(unmeasured.map_or(meter.first, |at: Instant| at.min(meter.first)));
+                }
             } else {
                 let flowing = meters.flowing(now);
                 let Some(current) = pick(&flowing, state.cap(track)) else {
@@ -430,7 +561,31 @@ impl LayerSelector {
                 cost_of(v.flowing[rank]).unwrap_or(0)
             })
             .sum();
-        let demand = (highest as f64 * UPGRADE_HEADROOM / BUDGET_FRACTION) as u64 + fixed;
+        // The estimate whose budget holds the upgrade's headroom over the
+        // highest layers: `0.85 * E - fixed >= 1.20 * highest`.
+        let demand =
+            ((UPGRADE_HEADROOM * highest as f64 + fixed as f64) / BUDGET_FRACTION).ceil() as u64;
+
+        // A layer's rate is known a window after its first packet. Until then
+        // it counts as nothing: run again when the first is measured, so the
+        // demand and the upgrade candidates see it.
+        if state.bwe {
+            let layers = videos.iter().flat_map(|v| {
+                // Up to the layer it forwards now, which a lowered
+                // ceiling may leave above the highest permitted.
+                let top = pick(&v.flowing, state.ceiling)
+                    .unwrap_or(v.current)
+                    .max(v.current);
+                (0..=top).filter_map(|rank| {
+                    let meter = v.flowing[rank]?;
+                    meter.rate(now).is_none().then_some(meter.first)
+                })
+            });
+            state.wake = layers
+                .chain(unmeasured)
+                .min()
+                .map(|first| first + RATE_WINDOW);
+        }
 
         let Some((estimate, can_probe)) = state.estimate.filter(|_| state.bwe) else {
             state.hold_since = None;
@@ -455,7 +610,13 @@ impl LayerSelector {
                 // The largest saving; the first of the stable order on a tie.
                 .reduce(|best, next| if next.0 > best.0 { next } else { best });
             if let Some((_, video, lower)) = lowered {
-                state.caps.insert(video.track.clone(), lower);
+                set_cap(
+                    receiver,
+                    state,
+                    &video.track,
+                    lower,
+                    Some(CapReason::new(estimate, budget, spent, &video.flowing, now)),
+                );
             }
             return demand;
         }
@@ -466,24 +627,17 @@ impl LayerSelector {
             state.hold_since = None;
             return demand;
         }
-        let mut unmeasured: Option<Instant> = None;
         let cheapest = videos
             .iter()
             .filter_map(|v| {
                 let higher = (v.current + 1..=state.ceiling.min(HIGHEST))
                     .find(|&r| v.flowing[r].is_some())?;
                 let meter = v.flowing[higher]?;
-                let Some(cost) = meter.rate(now) else {
-                    // Measured a window after its first packet.
-                    let ready = meter.first + RATE_WINDOW;
-                    unmeasured = Some(unmeasured.map_or(ready, |at| at.min(ready)));
-                    return None;
-                };
+                let cost = meter.rate(now)?;
                 Some((cost.saturating_sub(v.cost), v, higher))
             })
             // The smallest step; the first of the stable order on a tie.
             .reduce(|best, next| if next.0 < best.0 { next } else { best });
-        state.wake = unmeasured;
         let Some((delta, video, higher)) = cheapest else {
             state.hold_since = None;
             return demand;
@@ -496,7 +650,13 @@ impl LayerSelector {
         let due = since + UPGRADE_HOLD;
         if now >= due {
             state.hold_since = None;
-            state.caps.insert(video.track.clone(), higher);
+            set_cap(
+                receiver,
+                state,
+                &video.track,
+                higher,
+                Some(CapReason::new(estimate, budget, spent, &video.flowing, now)),
+            );
         } else {
             state.wake = Some(state.wake.map_or(due, |at| at.min(due)));
         }
@@ -550,6 +710,17 @@ impl LayerSelector {
         // does not mark keyframes switches at once and asks for one.
         if rid == wanted && keyframe != Some(false) {
             self.forwarding.insert(key, wanted);
+            // A fallback below the cap (its layer stopped) lowers the cap to
+            // what flows: the layer that returns earns its upgrade again,
+            // through the measurement, the hold and `can_probe`.
+            if let (Some(state), Some(rank)) = (
+                self.receivers.get_mut(receiver),
+                LAYERS.iter().position(|name| Rid::from(*name) == wanted),
+            ) {
+                if state.bwe && rank < state.cap(track) {
+                    set_cap(receiver, state, track, rank, None);
+                }
+            }
             let request_keyframe = if keyframe.is_none() {
                 self.throttle(now, track, wanted)
             } else {
@@ -685,7 +856,15 @@ mod tests {
     fn selector(now: Instant, layers: &[&str]) -> LayerSelector {
         let mut s = LayerSelector::default();
         for layer in layers {
-            s.observe(now, &track(), Some(&Rid::from(*layer)), 1000, false);
+            s.observe(
+                now,
+                &track(),
+                Some(&Rid::from(*layer)),
+                1000,
+                1,
+                false,
+                false,
+            );
         }
         s
     }
@@ -697,7 +876,7 @@ mod tests {
         keyframe: bool,
         pref: Option<&str>,
     ) -> Route {
-        s.observe(now, &track(), Some(&Rid::from(rid)), 1000, false);
+        s.observe(now, &track(), Some(&Rid::from(rid)), 1000, 1, false, false);
         // The receiver is not budgeted: its ceiling is its preference.
         s.set_ceiling(now, &RECEIVER, pref.unwrap_or("auto"));
         s.route(
@@ -806,7 +985,15 @@ mod tests {
     fn a_codec_without_keyframe_marks_switches_at_once_and_asks_for_one() {
         let now = Instant::now();
         let mut s = selector(now, &["high"]);
-        s.observe(now, &track(), Some(&Rid::from("high")), 1000, false);
+        s.observe(
+            now,
+            &track(),
+            Some(&Rid::from("high")),
+            1000,
+            1,
+            false,
+            false,
+        );
         let routed = s.route(now, &RECEIVER, &track(), Some(&Rid::from("high")), None);
         assert_eq!(
             routed,
@@ -971,16 +1158,25 @@ mod tests {
 
         /// Packets of every layer of every track for `ms`, in steps of 10 ms.
         fn advance(&mut self, ms: u64) {
+            self.advance_layers(ms, &[0, 1, 2]);
+        }
+
+        /// The same, with only the layers of these ranks sending.
+        fn advance_layers(&mut self, ms: u64, ranks: &[usize]) {
             for _ in 0..ms / 10 {
                 self.now += MS10;
                 for track in &self.audio {
-                    self.s.observe(self.now, track, None, 100, true);
+                    self.s.observe(self.now, track, None, 100, 1, false, true);
                 }
                 for (track, rates) in &self.tracks {
                     for (rank, rate) in rates.iter().enumerate() {
+                        if !ranks.contains(&rank) {
+                            continue;
+                        }
                         let payload = (rate / 800 - PACKET_OVERHEAD_BYTES) as usize;
                         let rid = Rid::from(LAYERS[rank]);
-                        self.s.observe(self.now, track, Some(&rid), payload, false);
+                        self.s
+                            .observe(self.now, track, Some(&rid), payload, 1, false, false);
                     }
                 }
             }
@@ -1043,12 +1239,22 @@ mod tests {
         // A layer measured for less than a window has no rate yet.
         let fresh = Instant::now();
         let mut s = LayerSelector::default();
-        s.observe(fresh, &track, Some(&Rid::from("low")), 1000, false);
+        s.observe(
+            fresh,
+            &track,
+            Some(&Rid::from("low")),
+            1000,
+            1,
+            false,
+            false,
+        );
         s.observe(
             fresh + RATE_WINDOW / 2,
             &track,
             Some(&Rid::from("low")),
             1000,
+            1,
+            false,
             false,
         );
         let meter = &s.meters[&track].layers[&Some(Rid::from("low"))];
@@ -1207,8 +1413,15 @@ mod tests {
         // So does another track appearing.
         sim.advance(1_000);
         let other = (ParticipantId(40), Mid::from("1"));
-        sim.s
-            .observe(sim.now, &other, Some(&Rid::from("low")), 100, false);
+        sim.s.observe(
+            sim.now,
+            &other,
+            Some(&Rid::from("low")),
+            100,
+            1,
+            false,
+            false,
+        );
         sim.s.route(
             sim.now,
             &RECEIVER,
@@ -1216,7 +1429,8 @@ mod tests {
             Some(&Rid::from("low")),
             Some(true),
         );
-        assert_eq!(sim.s.next_wake(), Some(sim.now + UPGRADE_HOLD));
+        // (The new track's rate is measured a window on: that wake is sooner.)
+        assert_eq!(sim.s.receivers[&RECEIVER].hold_since, Some(sim.now));
     }
 
     #[test]
@@ -1247,9 +1461,9 @@ mod tests {
         let feed = |s: &mut LayerSelector, from: u32, to: u32| {
             for i in from..to {
                 let at = start + MS10 * i;
-                s.observe(at, &track, Some(&low), 218, false);
+                s.observe(at, &track, Some(&low), 218, 1, false, false);
                 if i >= 130 {
-                    s.observe(at, &track, Some(&medium), 718, false);
+                    s.observe(at, &track, Some(&medium), 718, 1, false, false);
                 }
             }
         };
@@ -1286,8 +1500,16 @@ mod tests {
         // A sender with no low layer: the lowest flowing one, never black.
         let mut s = LayerSelector::default();
         let t = track_n(1);
-        s.observe(sim.now, &t, Some(&Rid::from("medium")), 500, false);
-        s.observe(sim.now, &t, Some(&Rid::from("high")), 500, false);
+        s.observe(
+            sim.now,
+            &t,
+            Some(&Rid::from("medium")),
+            500,
+            1,
+            false,
+            false,
+        );
+        s.observe(sim.now, &t, Some(&Rid::from("high")), 500, 1, false, false);
         s.set_ceiling(sim.now, &RECEIVER, "low");
         let medium = Rid::from("medium");
         assert_eq!(
@@ -1334,7 +1556,7 @@ mod tests {
     }
 
     #[test]
-    fn the_probing_demand_is_the_highest_permitted_layers_with_headroom_and_audio() {
+    fn the_probing_demand_is_the_highest_permitted_layers_with_headroom() {
         let mut sim = Sim::new(&[RATES, BIG_HIGH]);
         sim.estimate(10_000_000, true);
         // (1.5 + 2.5) Mbit/s, with the upgrade headroom, over the budget share.
@@ -1348,6 +1570,209 @@ mod tests {
         sim.s.set_ceiling(sim.now, &RECEIVER, "medium");
         let lower = sim.s.take_demands()[&RECEIVER];
         assert!(lower < demand / 2);
+    }
+
+    #[test]
+    fn an_estimate_at_the_demand_reaches_the_last_upgrade_with_audio_flowing() {
+        /// Medium forwarded, audio flowing, the estimate unknown.
+        fn with_audio() -> Sim {
+            let mut sim = Sim::new(&[RATES]);
+            let audio = (ParticipantId(30), Mid::from("2"));
+            sim.audio.push(audio.clone());
+            sim.advance(1_500);
+            sim.s.route(sim.now, &RECEIVER, &audio, None, None);
+            sim.place(1);
+            sim
+        }
+        let mut sim = with_audio();
+        sim.estimate(10_000_000, true);
+        // Audio's measured rate: a 100 byte packet every 10 ms, with overhead.
+        let audio = (100 + PACKET_OVERHEAD_BYTES) * 8 * 100;
+        let demand = sim.s.take_demands()[&RECEIVER];
+        // `0.85 * E - audio >= 1.20 * high`, and not more than that.
+        let needed = (UPGRADE_HEADROOM * RATES[2] as f64 + audio as f64) / BUDGET_FRACTION;
+        assert!(demand as f64 >= needed && (demand as f64) < needed + 1.0);
+        // The estimator settles at the demand and stays silent: medium to
+        // high happens, after the hold, on that estimate alone.
+        sim.estimate(demand, true);
+        let start = sim.now;
+        sim.advance(3_990);
+        sim.s
+            .run_due(start + UPGRADE_HOLD - Duration::from_millis(1));
+        assert_eq!(sim.caps(), [1]);
+        sim.s.run_due(start + UPGRADE_HOLD);
+        assert_eq!(sim.caps(), [2]);
+        // An estimate 100 bit/s short of it does not.
+        let mut sim = with_audio();
+        sim.estimate(demand - 100, true);
+        sim.advance(4_000);
+        sim.s.run_due(sim.now);
+        assert_eq!(sim.caps(), [1]);
+    }
+
+    #[test]
+    fn a_frame_costs_the_overhead_of_each_of_its_packets() {
+        let mut s = LayerSelector::default();
+        let track = track_n(2);
+        let high = Rid::from("high");
+        let start = Instant::now();
+        // A frame of 3000 bytes in 3 packets every 10 ms.
+        for i in 0..150 {
+            s.observe(
+                start + MS10 * i,
+                &track,
+                Some(&high),
+                3_000,
+                3,
+                false,
+                false,
+            );
+        }
+        let now = start + MS10 * 149;
+        let rate = s.meters[&track].layers[&Some(high)].rate(now);
+        assert_eq!(rate, Some((3_000 + 3 * PACKET_OVERHEAD_BYTES) * 8 * 100));
+    }
+
+    #[test]
+    fn a_keyframe_adds_no_bytes_to_the_layers_rate() {
+        let mut s = LayerSelector::default();
+        let track = track_n(2);
+        let high = Rid::from("high");
+        let start = Instant::now();
+        for i in 0..150 {
+            // Every 30th frame is a keyframe 20 times the size.
+            let key = i % 30 == 0;
+            let size = if key { 60_000 } else { 3_000 };
+            s.observe(start + MS10 * i, &track, Some(&high), size, 3, key, false);
+        }
+        let now = start + MS10 * 149;
+        let rate = s.meters[&track].layers[&Some(high)].rate(now);
+        let rate = rate.expect("a rate");
+        let per_frame = 3_000 + 3 * PACKET_OVERHEAD_BYTES;
+        assert!(rate <= per_frame * 8 * 100, "{rate}");
+        assert!(rate >= per_frame * 8 * 90, "{rate}");
+    }
+
+    #[test]
+    fn a_layer_that_returns_earns_its_upgrade_again() {
+        let mut sim = Sim::new(&[RATES]);
+        sim.place(2);
+        let track = sim.tracks[0].0.clone();
+        let (medium, high) = (Rid::from("medium"), Rid::from("high"));
+        // The estimator cannot probe: no upgrade, however long.
+        sim.estimate(10_000_000, false);
+        // High stops; medium takes over on its keyframe, and the cap with it.
+        sim.advance_layers(LAYER_TIMEOUT.as_millis() as u64 + 500, &[0, 1]);
+        sim.s
+            .route(sim.now, &RECEIVER, &track, Some(&medium), Some(true));
+        assert_eq!((sim.caps(), sim.forwarded()), (vec![1], vec![1]));
+        // High returns: its keyframe is not taken.
+        sim.advance(10_000);
+        sim.s.run_due(sim.now);
+        assert_eq!(
+            sim.s
+                .route(sim.now, &RECEIVER, &track, Some(&high), Some(true)),
+            DROP
+        );
+        assert_eq!((sim.caps(), sim.forwarded()), (vec![1], vec![1]));
+        // Once the transport can probe, it takes the hold, and only then.
+        sim.estimate(10_000_000, true);
+        let start = sim.now;
+        sim.advance(3_990);
+        sim.s
+            .run_due(start + UPGRADE_HOLD - Duration::from_millis(1));
+        assert_eq!(sim.caps(), [1]);
+        sim.s.run_due(start + UPGRADE_HOLD);
+        assert_eq!(sim.caps(), [2]);
+        assert_eq!(
+            sim.s
+                .route(sim.now, &RECEIVER, &track, Some(&high), Some(true)),
+            FORWARD
+        );
+    }
+
+    #[test]
+    fn a_video_that_resumes_is_costed_again_a_window_after_its_first_packet() {
+        let mut sim = Sim::new(&[RATES]);
+        sim.place(2);
+        // A video with no layers, 1 Mbit/s on the wire, beside the simulcast one.
+        let plain = track_n(60);
+        let payload = (1_000_000 / 800 - PACKET_OVERHEAD_BYTES) as usize;
+        let feed = |sim: &mut Sim, ms: u64, plain_flows: bool| {
+            for _ in 0..ms / 10 {
+                sim.advance(10);
+                if plain_flows {
+                    sim.s
+                        .observe(sim.now, &plain, None, payload, 1, false, false);
+                }
+            }
+        };
+        feed(&mut sim, 1_500, true);
+        sim.s.route(sim.now, &RECEIVER, &plain, None, None);
+        // 1.5 + 1.0 Mbit/s fit the budget: nothing is lowered.
+        sim.estimate(3_200_000, false);
+        assert_eq!(sim.caps(), [2]);
+        // The plain video freezes for longer than a layer may be silent, and
+        // the budget falls (an estimate with the video not flowing: nothing
+        // to lower for).
+        feed(&mut sim, LAYER_TIMEOUT.as_millis() as u64 + 500, false);
+        sim.estimate(2_000_000, false);
+        assert_eq!(sim.caps(), [2]);
+        // It resumes: no estimate event follows. Its rate is unknown until a
+        // window has passed, and the loop is told when that is.
+        feed(&mut sim, 10, true);
+        let measured = sim.now + RATE_WINDOW;
+        assert_eq!(sim.caps(), [2]);
+        assert_eq!(sim.s.next_wake(), Some(measured));
+        feed(&mut sim, 990, true);
+        sim.s.run_due(measured);
+        // 1.5 + 1.0 Mbit/s no longer fit 0.85 * 2 Mbit/s: the step-down.
+        assert_eq!(sim.caps(), [1]);
+    }
+
+    #[test]
+    fn layers_that_start_after_the_last_allocation_are_upgrade_candidates() {
+        let mut s = LayerSelector::default();
+        s.set_bwe(&RECEIVER);
+        let mut sim = Sim {
+            s,
+            now: Instant::now(),
+            tracks: vec![(track_n(3), RATES)],
+            audio: Vec::new(),
+        };
+        let track = sim.tracks[0].0.clone();
+        // Only low flows when the estimate comes: nothing to upgrade to.
+        sim.advance_layers(1_500, &[0]);
+        sim.s.route(
+            sim.now,
+            &RECEIVER,
+            &track,
+            Some(&Rid::from("low")),
+            Some(true),
+        );
+        sim.estimate(3_000_000, true);
+        assert_eq!((sim.s.next_wake(), sim.caps()), (None, vec![0]));
+        // Medium and high start. No estimate, no other event: their first
+        // packets are the event, and the loop is told when their rates can
+        // be measured.
+        sim.advance(10);
+        let first = sim.now;
+        let measured = first + RATE_WINDOW;
+        assert_eq!(sim.s.next_wake(), Some(measured));
+        sim.advance(990);
+        sim.s.run_due(measured);
+        assert_eq!(sim.s.next_wake(), Some(measured + UPGRADE_HOLD));
+        sim.advance(3_990);
+        sim.s
+            .run_due(measured + UPGRADE_HOLD - Duration::from_millis(1));
+        assert_eq!(sim.caps(), [0]);
+        sim.s.run_due(measured + UPGRADE_HOLD);
+        assert_eq!(sim.caps(), [1]);
+        // The demand now reaches for the high layer that started late.
+        let demand = sim.s.take_demands()[&RECEIVER];
+        // (The window's last packet is 20 ms old: its rate reads 1 % short.)
+        let high = 0.98 * RATES[2] as f64;
+        assert!(demand as f64 >= UPGRADE_HEADROOM * high / BUDGET_FRACTION);
     }
 
     #[test]

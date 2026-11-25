@@ -1484,10 +1484,14 @@ impl SfuServer {
                             "SFU: peer {} quality preference set to '{}'",
                             participant_id, preference
                         );
-                        // The layer selector switches on the next packets
-                        // and asks the senders for the keyframes it needs.
-                        layers.set_ceiling(Instant::now(), &participant_id, &preference);
-                        quality_preferences.insert(participant_id, preference);
+                        // A peer that has left keeps nothing: ids are never
+                        // reused, so state made for it would never be freed.
+                        if peers.contains_key(&participant_id) {
+                            // The layer selector switches on the next packets
+                            // and asks the senders for the keyframes it needs.
+                            layers.set_ceiling(Instant::now(), &participant_id, &preference);
+                            quality_preferences.insert(participant_id, preference);
+                        }
                     }
                     Ok(SfuCommand::ApplyServerAnswer {
                         participant_id,
@@ -1896,14 +1900,17 @@ impl SfuServer {
                 }
 
                 let track = (origin_pid.clone(), data.mid);
+                let keyframe = is_keyframe(&data.codec_extra);
                 layers.observe(
                     now,
                     &track,
                     data.rid.as_ref(),
                     data.data.len(),
+                    // The frame's RTP packets (extended sequence numbers).
+                    (**data.seq_range.end()).saturating_sub(**data.seq_range.start()) + 1,
+                    keyframe == Some(true),
                     data.params.spec().codec.is_audio(),
                 );
-                let keyframe = is_keyframe(&data.codec_extra);
                 // A gap in the origin's sequence (e.g. after an outage or an
                 // ICE restart): receivers may need a keyframe to decode again.
                 if !data.contiguous
@@ -6400,6 +6407,34 @@ mod tests {
         let target = call_through(&server, ip("127.0.0.3")).await;
         assert!(server.sockets.bound_addrs().contains(&target));
         call_through(&server, ip("127.0.0.1")).await;
+        let _ = server.command_tx.send(SfuCommand::Shutdown).await;
+    }
+
+    #[tokio::test]
+    async fn a_preference_for_a_peer_that_left_leaves_nothing_behind() {
+        let server = SfuServer::start(SfuServerConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let gone = ParticipantId::next();
+        server
+            .command_tx
+            .send(SfuCommand::SetQualityPreference {
+                participant_id: gone,
+                preference: "low".into(),
+            })
+            .await
+            .unwrap();
+        // The loop handles commands in order: the reply follows the set.
+        let (reply, kept) = tokio::sync::oneshot::channel();
+        server
+            .command_tx
+            .send(SfuCommand::GetQualityPreferences { reply })
+            .await
+            .unwrap();
+        assert!(kept.await.unwrap().is_empty());
         let _ = server.command_tx.send(SfuCommand::Shutdown).await;
     }
 

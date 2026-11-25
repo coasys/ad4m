@@ -25,6 +25,10 @@ const LOW: Size = { width: CAMERA.width / 4, height: CAMERA.height / 4 };
 const CAP_KBIT = 1000;
 /** From the cap to the capped receiver on the low layer. */
 const SHAPED_MS = 45_000;
+/** How long the shaped state must hold, every check true at every instant: no oscillation, no audio gap. */
+const STEADY_MS = 20_000;
+/** A video that gets no new frame for this long has stalled. */
+const STALL_MS = 3_000;
 /** From the cap's end to full size again: the estimate climbs, then an upgrade holds 4 s per layer. */
 const RECOVERY_MS = 90_000;
 
@@ -53,6 +57,29 @@ export const e24ReceiverBandwidth = e2eScenario({
       }
       return problems;
     };
+    /** Every receiver gets new frames of everyone else's video, not one a second ago and none since. */
+    const advancing = (): Check => {
+      const last = new Map<string, { frames: number; at: number }>();
+      return (snapshots) => {
+        const now = Date.now();
+        const problems: string[] = [];
+        for (const [name, snapshot] of snapshots) {
+          for (const other of EVERYONE.filter((n) => n !== name)) {
+            const key = `${name}<-${other}`;
+            const frames = snapshot.remotes[call.who(other).did]?.videoFrames ?? 0;
+            const seen = last.get(key);
+            if (!seen || frames > seen.frames) last.set(key, { frames, at: now });
+            else if (now - seen.at > STALL_MS) problems.push(`${name} got no new frame from ${other} for ${now - seen.at} ms`);
+          }
+        }
+        return problems;
+      };
+    };
+    /** Every check, at the same instant: `sizes` per receiver, video advancing, every source tone heard. */
+    const steady = (sizes: Record<string, Size>): Check => {
+      const checks = [...Object.entries(sizes).map(([name, size]) => receives(name, size)), advancing(), call.hearsEveryone()];
+      return (snapshots, holding) => checks.flatMap((check) => check(snapshots, holding));
+    };
     try {
       await step("three join; with a free network everyone receives full size", async () => {
         await call.join(EVERYONE);
@@ -67,24 +94,30 @@ export const e24ReceiverBandwidth = e2eScenario({
         net.limitDownlink(media, CAP_KBIT);
         const capped = Date.now();
         await call.eventually(receives("u2", LOW), SHAPED_MS, "u2 at low");
-        const took = Date.now() - capped;
-        await call.eventually(receives("u1", CAMERA), 10_000, "u1 stays at full size");
-        await call.eventually(receives("u3", CAMERA), 10_000, "u3 stays at full size");
-        return took;
+        return Date.now() - capped;
       }));
 
-      await step("under the cap, video keeps arriving and everyone hears everyone", async () => {
-        // The capped receiver's frames keep advancing: `receives` needs recent video from both senders.
-        await call.eventually(receives("u2", LOW), 10_000, "u2's video under the cap");
-        await call.eventually(call.hearsEveryone(), 30_000, "audio under the cap");
+      await step(`under the cap for ${STEADY_MS / 1000} s: u2 stays on low, u1 and u3 on full size, video advances, everyone hears everyone`, async () => {
+        const before = net.shaperCounters();
+        const from = Date.now();
+        await call.holds(steady({ u2: LOW, u1: CAMERA, u3: CAMERA }), STEADY_MS, "the shaped state");
+        // What u2's downlink carried meanwhile: two low layers and audio fit under the cap.
+        const after = net.shaperCounters();
+        if (before && after) {
+          const seconds = (Date.now() - from) / 1000;
+          metric("shaped_downlink_kbit", Math.round(((after.sentBytes - before.sentBytes) * 8) / 1000 / seconds));
+          metric("shaped_dropped_packets", after.droppedPackets - before.droppedPackets);
+          console.log(`e24: the shaper passed ${after.sentBytes - before.sentBytes} bytes and dropped ${after.droppedPackets - before.droppedPackets} packets in ${seconds.toFixed(1)} s (cap ${CAP_KBIT} kbit/s)`);
+        }
       });
 
-      metric("recovery_to_full_ms", await step("the cap is lifted: u2 receives full size again", async () => {
+      metric("recovery_to_full_ms", await step("the cap is lifted: u2 receives full size again, and stays there", async () => {
         net.clear();
         const lifted = Date.now();
         await call.eventually(receives("u2", CAMERA), RECOVERY_MS, "u2 at full size");
-        await call.eventually(call.hearsEveryone(), 30_000, "audio after the cap");
-        return Date.now() - lifted;
+        const took = Date.now() - lifted;
+        await call.holds(steady({ u1: CAMERA, u2: CAMERA, u3: CAMERA }), STEADY_MS / 2, "full size after the cap");
+        return took;
       }));
     } finally {
       await net.release();
