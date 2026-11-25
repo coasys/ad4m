@@ -26,15 +26,15 @@
 //! receiver, keeps a cap per video track:
 //!
 //! - a new track starts at the lowest flowing layer; low is the floor;
-//! - the budget is [`BUDGET_FRACTION`] of the estimate minus the fixed
-//!   traffic: each audio track ([`AUDIO_RESERVE_BPS`], or its measured rate
-//!   when larger) and each video without simulcast (its measured rate). The
-//!   fixed traffic is never touched;
-//! - when the layers forwarded cost more than the budget, one track steps
-//!   down one flowing layer: the one that saves the most;
-//! - upgrades wait for one hold per receiver: the budget must cover
-//!   [`UPGRADE_HEADROOM`] times the cost with the cheapest step up for
-//!   [`UPGRADE_HOLD`] without a dip, and only once an estimate arrived that
+//! - the fixed traffic is each audio track ([`AUDIO_RESERVE_BPS`], or its
+//!   measured rate when larger) and each video without simulcast (its
+//!   measured rate). It is never touched;
+//! - when the layers forwarded plus the fixed traffic cost more than the
+//!   estimate (the estimate says the path carries less than is sent), one
+//!   track steps down one flowing layer: the one that saves the most;
+//! - upgrades wait for one hold per receiver: the estimate must cover
+//!   [`UPGRADE_HEADROOM`] times the traffic with the cheapest step up (fixed
+//!   traffic included) for [`UPGRADE_HOLD`] without a dip, and only once an estimate arrived that
 //!   can probe. When the hold ends, every step the headroom covers is granted
 //!   in one run, the cheapest first, one layer per track, each checked with
 //!   the ones granted before it; then a new hold starts for further steps.
@@ -90,20 +90,16 @@ const RATE_WINDOW: Duration = Duration::from_secs(2);
 /// Bytes the wire adds to each RTP packet (header and extensions, SRTP tag),
 /// counted into a layer's cost once per packet.
 const PACKET_OVERHEAD_BYTES: u64 = 32;
-/// The share of a receiver's estimate the forwarded video and audio may use.
-const BUDGET_FRACTION: f64 = 0.85;
-/// An upgrade needs a budget this many times the cost with the new layer.
-/// With cost C and fixed traffic F, the receiver steps down when the estimate
-/// E < (C + F) / 0.85 and an upgrade needs E >= (1.20 * C + F) / 0.85: at
-/// F = 0 the upgrade line is 20% above the step-down line, 1.41 times the
-/// cost. On loopback the estimate settles close to the traffic it carries: at
-/// the median step-down the budget was 0.91 to 0.95 of the cost (the estimate
-/// 1.07 to 1.12 times the traffic), and 62 of 72 step-downs in four e2e runs
-/// came within 20 s of an upgrade of the same receiver (median 1 to 7 s
-/// later). The estimate that earned an upgrade (the probe for the demand) falls
-/// back toward the traffic once the upgrade is made, so a receiver can
-/// alternate between a layer and the one below it.
-const UPGRADE_HEADROOM: f64 = 1.20;
+/// An upgrade needs an estimate this many times the traffic with the new
+/// layer. With forwarded cost C and fixed traffic F the receiver steps down
+/// only when C + F > E (the path carries less than is sent), and an upgrade
+/// needs E >= H * (C + F + step): H is the hysteresis band above the
+/// step-down line. On loopback, which has no bottleneck, the app-limited
+/// estimate stays within about 1.5 times the traffic acked (the estimator's
+/// ramp-up bound): at full state it read 1.2 times the traffic at p10 and 1.5
+/// at p50, so a rule that steps down above the traffic is unstable; the line
+/// must be the traffic itself, and H only keeps an upgrade from landing on it.
+const UPGRADE_HEADROOM: f64 = 1.25;
 /// How long that headroom must hold, without a dip, before an upgrade.
 const UPGRADE_HOLD: Duration = Duration::from_secs(4);
 /// What each forwarded audio track is budgeted at least.
@@ -310,8 +306,8 @@ fn set_cap(
             why.map_or_else(
                 || "a fallback committed".to_string(),
                 |w| format!(
-                    "estimate {} bit/s, budget {:.0}, spent {}, layer rates low/medium/high {:?}",
-                    w.estimate, w.budget, w.spent, w.rates
+                    "estimate {} bit/s, fixed {}, spent {}, layer rates low/medium/high {:?}",
+                    w.estimate, w.fixed, w.spent, w.rates
                 )
             ),
         );
@@ -321,7 +317,7 @@ fn set_cap(
 /// What a budget decision rests on, for the log.
 struct CapReason {
     estimate: u64,
-    budget: f64,
+    fixed: u64,
     spent: u64,
     /// The track's layers' measured rates, by rank.
     rates: [Option<u64>; LAYERS.len()],
@@ -330,14 +326,14 @@ struct CapReason {
 impl CapReason {
     fn new(
         estimate: u64,
-        budget: f64,
+        fixed: u64,
         spent: u64,
         flowing: &[Option<&Meter>],
         now: Instant,
     ) -> Self {
         Self {
             estimate,
-            budget,
+            fixed,
             spent,
             rates: std::array::from_fn(|rank| flowing[rank].and_then(|m| m.rate(now))),
         }
@@ -601,10 +597,9 @@ impl LayerSelector {
                 cost_of(v.flowing[rank]).unwrap_or(0)
             })
             .sum();
-        // The estimate whose budget holds the upgrade's headroom over the
-        // highest layers: `0.85 * E - fixed >= 1.20 * highest`.
-        let demand =
-            ((UPGRADE_HEADROOM * highest as f64 + fixed as f64) / BUDGET_FRACTION).ceil() as u64;
+        // The estimate at which the last permitted upgrade passes: the
+        // smallest E with `E >= H * (highest + fixed)`.
+        let demand = (UPGRADE_HEADROOM * (highest + fixed) as f64).ceil() as u64;
 
         // A layer's rate is known a window after its first packet. Until then
         // it counts as nothing: run again when the first is measured, so the
@@ -631,11 +626,11 @@ impl LayerSelector {
             state.hold_since = None;
             return demand;
         };
-        let budget = (estimate as f64 * BUDGET_FRACTION - fixed as f64).max(0.0);
         let spent: u64 = videos.iter().map(|v| v.cost).sum();
 
-        if spent as f64 > budget {
-            // Over budget: one track, one layer down, the largest saving first.
+        if (spent + fixed) as f64 > estimate as f64 {
+            // The traffic exceeds the estimate: one track, one layer down, the
+            // largest saving first.
             state.hold_since = None;
             let lowered = videos
                 .iter()
@@ -655,13 +650,13 @@ impl LayerSelector {
                     state,
                     &video.track,
                     lower,
-                    Some(CapReason::new(estimate, budget, spent, &video.flowing, now)),
+                    Some(CapReason::new(estimate, fixed, spent, &video.flowing, now)),
                 );
             }
             return demand;
         }
 
-        // Within budget: look for an upgrade, never while a switch is pending,
+        // Within the estimate: look for an upgrade, never while a switch is pending,
         // before the transport can probe, or while a forwarded track's cost is
         // unknown (audio, video or a layer not measured yet counts as 0 or as
         // its reserve, so the budget would be judged on too little).
@@ -683,9 +678,9 @@ impl LayerSelector {
         let mut steps = candidates;
         steps.sort_by_key(|(delta, _, _)| *delta);
         // The hold runs while the cheapest step fits the headroom.
-        let cheapest_fits = steps
-            .first()
-            .is_some_and(|(delta, _, _)| budget >= UPGRADE_HEADROOM * (spent + delta) as f64);
+        let cheapest_fits = steps.first().is_some_and(|(delta, _, _)| {
+            estimate as f64 >= UPGRADE_HEADROOM * (spent + fixed + delta) as f64
+        });
         if !cheapest_fits {
             state.hold_since = None;
             return demand;
@@ -701,7 +696,7 @@ impl LayerSelector {
         state.hold_since = None;
         let mut granted = 0u64;
         for (delta, video, higher) in steps {
-            if budget < UPGRADE_HEADROOM * (spent + granted + delta) as f64 {
+            if (estimate as f64) < UPGRADE_HEADROOM * (spent + fixed + granted + delta) as f64 {
                 break;
             }
             granted += delta;
@@ -710,7 +705,7 @@ impl LayerSelector {
                 state,
                 &video.track,
                 higher,
-                Some(CapReason::new(estimate, budget, spent, &video.flowing, now)),
+                Some(CapReason::new(estimate, fixed, spent, &video.flowing, now)),
             );
         }
         demand
@@ -1316,7 +1311,7 @@ mod tests {
     fn a_falling_estimate_lowers_one_track_one_layer_per_run_the_largest_saving_first() {
         let mut sim = Sim::new(&[RATES, BIG_HIGH, RATES]);
         sim.place(2);
-        // 1.5 + 2.5 + 1.5 Mbit/s against 0.85 * 4 = 3.4: over.
+        // 1.5 + 2.5 + 1.5 Mbit/s against an estimate of 4: over.
         sim.estimate(4_000_000, true);
         // The track that saves the most steps down, one layer.
         assert_eq!(sim.caps(), [2, 1, 2]);
@@ -1333,10 +1328,10 @@ mod tests {
     fn the_old_layers_cost_counts_until_the_switch_commits() {
         let mut sim = Sim::new(&[RATES, BIG_HIGH]);
         sim.place(2);
-        // 1.5 + 2.5 = 4.0 against 0.85 * 2.8 = 2.38: the big one steps down.
+        // 1.5 + 2.5 = 4.0 against an estimate of 2.8: the big one steps down.
         sim.estimate(2_800_000, true);
         assert_eq!(sim.caps(), [2, 1]);
-        // With its new cost (1.5 + 0.6 = 2.1) the budget would be met, but
+        // With its new cost (1.5 + 0.6 = 2.1) the estimate would carry it, but
         // its high layer still flows: the other track steps down too.
         sim.estimate(2_800_000, true);
         assert_eq!(sim.caps(), [1, 1]);
@@ -1359,11 +1354,14 @@ mod tests {
         sim.advance(WARM_UP_MS);
         sim.place(1);
         assert_eq!(sim.s.route(sim.now, &RECEIVER, &audio, None, None), FORWARD);
-        // 0.85 * 0.72 = 0.612 Mbit/s would hold medium (0.6) without audio;
-        // audio's rate (105.6 kbit/s, above the 64 kbit/s reserve) leaves 0.506.
+        // 0.72 Mbit/s carries medium (0.6) and the audio's rate (105.6
+        // kbit/s, above the 64 kbit/s reserve): 0.7056.
         sim.estimate(720_000, true);
+        assert_eq!(sim.caps(), [1]);
+        // 0.70 Mbit/s would carry medium alone, not with the audio.
+        sim.estimate(700_000, true);
         assert_eq!(sim.caps(), [0]);
-        // Zero budget: video at the floor, audio still forwarded.
+        // Zero estimate: video at the floor, audio still forwarded.
         sim.estimate(0, true);
         assert_eq!(sim.caps(), [0]);
         assert_eq!(sim.s.route(sim.now, &RECEIVER, &audio, None, None), FORWARD);
@@ -1417,7 +1415,8 @@ mod tests {
         let mut sim = Sim::new(&[RATES]);
         sim.estimate(3_000_000, true);
         sim.advance(2_000);
-        // The budget falls below the headroom: the hold is dropped.
+        // The estimate falls below the headroom (and above the traffic):
+        // the hold is dropped.
         sim.estimate(500_000, true);
         assert_eq!(sim.s.next_wake(), None);
         sim.advance(1_000);
@@ -1521,9 +1520,9 @@ mod tests {
         sim.advance(10);
         let first = sim.now;
         sim.s.route(sim.now, &RECEIVER, &audio, None, None);
-        // 0.85 * 0.8 = 0.68 Mbit/s: medium (0.6) and the reserve (0.064) fit,
-        // medium and the audio's real rate (0.1056) do not.
-        sim.estimate(800_000, true);
+        // 0.68 Mbit/s: medium (0.6) and the reserve (0.064) fit, medium and
+        // the audio's real rate (0.1056) do not.
+        sim.estimate(680_000, true);
         assert_eq!(sim.caps(), [1]);
         // The measurement is the wake: the allocation runs when it is known.
         assert_eq!(sim.s.next_wake(), Some(first + RATE_WINDOW));
@@ -1565,9 +1564,9 @@ mod tests {
     #[test]
     fn a_hold_end_with_headroom_for_three_steps_grants_all_three_in_one_run() {
         let mut sim = Sim::new(&[RATES, RATES, RATES]);
-        // Three low -> medium steps of 400 kbit/s on 600 kbit/s: the budget
-        // 0.85 * 3.2M = 2.72M covers 1.4 * 1.8M = 2.52M.
-        sim.estimate(3_200_000, true);
+        // Three low -> medium steps of 400 kbit/s on 600 kbit/s: the estimate
+        // 2.3M covers 1.25 * 1.8M = 2.25M.
+        sim.estimate(2_300_000, true);
         let start = sim.now;
         assert_eq!(sim.s.next_wake(), Some(start + UPGRADE_HOLD));
         sim.advance(3_990);
@@ -1586,9 +1585,9 @@ mod tests {
         let dear = [200_000, 700_000, 1_500_000];
         let mut sim = Sim::new(&[RATES, dear, RATES]);
         // Spent 600k. Steps: 400k, 400k, 500k. Two cheapest need
-        // 1.4 * 1.4M = 1.96M; all three would need 1.4 * 1.9M = 2.66M.
-        // The budget 0.85 * 2.6M = 2.21M is in between.
-        sim.estimate(2_600_000, true);
+        // 1.25 * 1.4M = 1.75M; all three would need 1.25 * 1.9M = 2.375M.
+        // The estimate 2.0M is in between.
+        sim.estimate(2_000_000, true);
         sim.advance(4_000);
         sim.s.run_due(sim.now);
         assert_eq!(sim.caps(), [1, 0, 1]);
@@ -1600,7 +1599,7 @@ mod tests {
         sim.estimate(3_200_000, true);
         let start = sim.now;
         sim.advance(2_000);
-        // A dip below the headroom (still within the budget): no hold.
+        // A dip below the headroom (still above the traffic): no hold.
         sim.estimate(1_200_000, true);
         assert_eq!(sim.s.next_wake(), None);
         sim.advance(1_000);
@@ -1700,8 +1699,8 @@ mod tests {
     fn the_probing_demand_is_the_highest_permitted_layers_with_headroom() {
         let mut sim = Sim::new(&[RATES, BIG_HIGH]);
         sim.estimate(10_000_000, true);
-        // (1.5 + 2.5) Mbit/s, with the upgrade headroom, over the budget share.
-        let video = (4_000_000.0 * UPGRADE_HEADROOM / BUDGET_FRACTION) as u64;
+        // (1.5 + 2.5) Mbit/s, with the upgrade headroom.
+        let video = (4_000_000.0 * UPGRADE_HEADROOM) as u64;
         let demand = sim.s.take_demands()[&RECEIVER];
         assert!(demand.abs_diff(video) < 120_000, "{demand} vs {video}");
         // Unchanged: nothing to report.
@@ -1730,8 +1729,8 @@ mod tests {
         // Audio's measured rate: a 100 byte packet every 10 ms, with overhead.
         let audio = (100 + PACKET_OVERHEAD_BYTES) * 8 * 100;
         let demand = sim.s.take_demands()[&RECEIVER];
-        // `0.85 * E - audio >= 1.20 * high`, and not more than that.
-        let needed = (UPGRADE_HEADROOM * RATES[2] as f64 + audio as f64) / BUDGET_FRACTION;
+        // `E >= H * (high + audio)`, and not more than that.
+        let needed = UPGRADE_HEADROOM * (RATES[2] + audio) as f64;
         assert!(demand as f64 >= needed && (demand as f64) < needed + 1.0);
         // The estimator settles at the demand and stays silent: medium to
         // high happens, after the hold, on that estimate alone.
@@ -1772,11 +1771,11 @@ mod tests {
         sim.place(2);
         let track = sim.tracks[0].0.clone();
         let high = Rid::from("high");
-        // High's steady frames cost 1.5 Mbit/s, under 0.85 * 2.0 = 1.7.
-        sim.estimate(2_000_000, true);
+        // High's steady frames cost 1.5 Mbit/s, under the estimate 1.8.
+        sim.estimate(1_800_000, true);
         assert_eq!(sim.caps(), [2]);
-        // A 150 kB keyframe every 3 s adds 150 kbit/s per keyframe in the
-        // window: three in 8 s make 1.95 Mbit/s, over the budget.
+        // A 150 kB keyframe every 3 s adds 0.6 Mbit/s to the 2 s window it
+        // is in: the rate goes over the estimate.
         for _ in 0..3 {
             sim.advance(3_000);
             sim.s
@@ -1785,8 +1784,8 @@ mod tests {
         let rate = sim.s.meters[&track].layers[&Some(high)]
             .rate(sim.now)
             .expect("a rate");
-        assert!(rate > 1_700_000, "{rate}");
-        sim.estimate(2_000_000, true);
+        assert!(rate > 1_800_000, "{rate}");
+        sim.estimate(1_800_000, true);
         assert_eq!(sim.caps(), [1]);
     }
 
@@ -1845,11 +1844,11 @@ mod tests {
         };
         feed(&mut sim, WARM_UP_MS, true);
         sim.s.route(sim.now, &RECEIVER, &plain, None, None);
-        // 1.5 + 1.0 Mbit/s fit the budget: nothing is lowered.
+        // 1.5 + 1.0 Mbit/s fit the estimate: nothing is lowered.
         sim.estimate(3_200_000, false);
         assert_eq!(sim.caps(), [2]);
         // The plain video freezes for longer than a layer may be silent, and
-        // the budget falls (an estimate with the video not flowing: nothing
+        // the estimate falls (with the video not flowing: nothing
         // to lower for).
         feed(&mut sim, LAYER_TIMEOUT.as_millis() as u64 + 500, false);
         sim.estimate(2_000_000, false);
@@ -1862,7 +1861,7 @@ mod tests {
         assert_eq!(sim.s.next_wake(), Some(measured));
         feed(&mut sim, RATE_WINDOW.as_millis() as u64 - 10, true);
         sim.s.run_due(measured);
-        // 1.5 + 1.0 Mbit/s no longer fit 0.85 * 2 Mbit/s: the step-down.
+        // 1.5 + 1.0 Mbit/s exceed the estimate of 2 Mbit/s: the step-down.
         assert_eq!(sim.caps(), [1]);
     }
 
@@ -1908,7 +1907,104 @@ mod tests {
         let demand = sim.s.take_demands()[&RECEIVER];
         // (The window's last packet is 20 ms old: its rate reads 1 % short.)
         let high = 0.98 * RATES[2] as f64;
-        assert!(demand as f64 >= UPGRADE_HEADROOM * high / BUDGET_FRACTION);
+        assert!(demand as f64 >= UPGRADE_HEADROOM * high);
+    }
+
+    #[test]
+    fn an_estimate_above_the_traffic_keeps_the_state() {
+        let mut sim = Sim::new(&[RATES, RATES]);
+        sim.place(1);
+        // Two mediums: 1.2 Mbit/s. At the traffic itself and 5 % above it
+        // nothing steps down (the estimate of a link with no bottleneck
+        // settles there), and the headroom for an upgrade is far off.
+        for estimate in [1_260_000, 1_200_000, 1_260_000] {
+            sim.estimate(estimate, true);
+            sim.advance(10_000);
+            sim.s.run_due(sim.now);
+            assert_eq!(sim.caps(), [1, 1], "at {estimate}");
+        }
+    }
+
+    #[test]
+    fn an_estimate_just_below_the_traffic_steps_one_layer_down() {
+        let mut sim = Sim::new(&[RATES, RATES]);
+        sim.place(1);
+        sim.estimate(1_199_999, true);
+        // One track, one layer.
+        assert_eq!(sim.caps(), [0, 1]);
+    }
+
+    #[test]
+    fn a_shaped_link_far_below_the_traffic_steps_down_to_low() {
+        let mut sim = Sim::new(&[RATES, RATES]);
+        sim.place(2);
+        // One track, one layer per run, the first track's high first. A
+        // commit runs the allocation again, so the steps follow quickly.
+        sim.estimate(500_000, true);
+        assert_eq!(sim.caps(), [1, 2]);
+        for _ in 0..4 {
+            sim.commit();
+            sim.estimate(500_000, true);
+        }
+        sim.commit();
+        assert_eq!(sim.caps(), [0, 0]);
+        assert_eq!(sim.forwarded(), [0, 0]);
+        // Low is the floor.
+        sim.estimate(500_000, true);
+        assert_eq!(sim.caps(), [0, 0]);
+    }
+
+    #[test]
+    fn the_upgrade_line_is_exactly_the_headroom_over_the_traffic_with_the_step() {
+        // Low (0.2M) to medium (0.6M): the line is H * 0.6M.
+        let line = (UPGRADE_HEADROOM * 600_000.0) as u64;
+        let mut sim = Sim::new(&[RATES]);
+        sim.estimate(line - 1, true);
+        assert_eq!(sim.s.next_wake(), None);
+        sim.advance(UPGRADE_HOLD.as_millis() as u64);
+        sim.s.run_due(sim.now);
+        assert_eq!(sim.caps(), [0]);
+        sim.estimate(line, true);
+        assert_eq!(sim.s.next_wake(), Some(sim.now + UPGRADE_HOLD));
+        sim.advance(UPGRADE_HOLD.as_millis() as u64);
+        sim.s.run_due(sim.now);
+        assert_eq!(sim.caps(), [1]);
+    }
+
+    #[test]
+    fn each_grant_of_a_run_is_checked_at_exactly_the_headroom() {
+        // Two lows to mediums: the second grant needs H * (0.4 + 0.8)M.
+        let line = (UPGRADE_HEADROOM * 1_200_000.0) as u64;
+        let mut sim = Sim::new(&[RATES, RATES]);
+        sim.estimate(line - 1, true);
+        sim.advance(UPGRADE_HOLD.as_millis() as u64);
+        sim.s.run_due(sim.now);
+        assert_eq!(sim.caps(), [1, 0]);
+        let mut sim = Sim::new(&[RATES, RATES]);
+        sim.estimate(line, true);
+        sim.advance(UPGRADE_HOLD.as_millis() as u64);
+        sim.s.run_due(sim.now);
+        assert_eq!(sim.caps(), [1, 1]);
+    }
+
+    #[test]
+    fn the_probing_demand_is_exactly_the_last_upgrades_line() {
+        // Medium forwarded, high permitted: H * 1.5M, to the bit.
+        let line = (UPGRADE_HEADROOM * RATES[2] as f64) as u64;
+        let mut sim = Sim::new(&[RATES]);
+        sim.place(1);
+        sim.estimate(10_000_000, true);
+        assert_eq!(sim.s.take_demands()[&RECEIVER], line);
+        let at = |estimate: u64| {
+            let mut sim = Sim::new(&[RATES]);
+            sim.place(1);
+            sim.estimate(estimate, true);
+            sim.advance(UPGRADE_HOLD.as_millis() as u64);
+            sim.s.run_due(sim.now);
+            sim.caps()
+        };
+        assert_eq!(at(line - 1), [1]);
+        assert_eq!(at(line), [2]);
     }
 
     #[test]
