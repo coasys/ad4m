@@ -17,7 +17,7 @@
  *
  * Named `model-entry.ts`, not `model.ts`: the root barrel's
  * `export * from "./model"` must keep resolving to the `model/` directory
- * (Ad4mModel, ModelQueryBuilder, hydration, query helpers) — a `model.ts`
+ * (Ad4mModel, the decorators, hydration, query helpers) — a `model.ts`
  * file next to it shadows the directory and takes the root entry's model
  * exports with it.
  */

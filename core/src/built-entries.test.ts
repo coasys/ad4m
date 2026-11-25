@@ -4,7 +4,7 @@
  *
  * 1. The root entry re-exports the model subsystem. `src/index.ts` says
  *    `export * from "./model"`; a `src/model.ts` file next to `src/model/`
- *    shadows the directory barrel, and `Ad4mModel`, `ModelQueryBuilder`,
+ *    shadows the directory barrel, and `Ad4mModel`, the decorators,
  *    hydration and the query helpers vanish from the built root. That is
  *    why the `./model` subpath's source is `src/model-entry.ts`.
  * 2. `index` and `model` come out of ONE Rollup build with a shared chunk
@@ -34,17 +34,17 @@ const REQUIRED = ["index.js", "index.cjs", "model.js", "model.cjs"];
 const libReady = REQUIRED.every((f) => fs.existsSync(libPath(f)));
 
 const EXPORTS_PROBE = `
-import { Ad4mModel, ModelQueryBuilder, Model, Property, Optional, ReadOnly, Flag,
+import { Ad4mModel, Model, Property, Optional, ReadOnly, Flag,
          HasMany, HasOne, getPropertiesMetadata, getRelationsMetadata } from ${JSON.stringify(libUrl("index.js"))};
-const named = { Ad4mModel, ModelQueryBuilder, Model, Property, Optional, ReadOnly, Flag,
+const named = { Ad4mModel, Model, Property, Optional, ReadOnly, Flag,
                 HasMany, HasOne, getPropertiesMetadata, getRelationsMetadata };
 console.log(JSON.stringify({ missing: Object.keys(named).filter(k => named[k] === undefined) }));
 `;
 
 const EXPORTS_PROBE_CJS = `
-const { Ad4mModel, ModelQueryBuilder, Model, Property, Optional, ReadOnly, Flag,
+const { Ad4mModel, Model, Property, Optional, ReadOnly, Flag,
         HasMany, HasOne, getPropertiesMetadata, getRelationsMetadata } = require(${JSON.stringify(libPath("index.cjs"))});
-const named = { Ad4mModel, ModelQueryBuilder, Model, Property, Optional, ReadOnly, Flag,
+const named = { Ad4mModel, Model, Property, Optional, ReadOnly, Flag,
                 HasMany, HasOne, getPropertiesMetadata, getRelationsMetadata };
 console.log(JSON.stringify({ missing: Object.keys(named).filter(k => named[k] === undefined) }));
 `;
