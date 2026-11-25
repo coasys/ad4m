@@ -33,3 +33,22 @@ impl PerspectiveInstance {
         .await
     }
 }
+
+/// The order of a collection after an append: the members in the order the ordering entries
+/// give them now (not the order the links were listed in), then those of `desired` that are
+/// new.
+pub(super) fn appended_order(
+    strategy: &dyn crate::perspectives::ordering::OrderingStrategy,
+    members: &[(String, String)],
+    entries: &[crate::perspectives::ordering::OrderingEntry],
+    desired: &[String],
+) -> Vec<String> {
+    let mut order = strategy.reconstruct(members, entries);
+    let new: Vec<String> = desired
+        .iter()
+        .filter(|t| !order.contains(t))
+        .cloned()
+        .collect();
+    order.extend(new);
+    order
+}

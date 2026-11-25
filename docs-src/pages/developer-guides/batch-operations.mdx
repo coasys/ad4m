@@ -36,7 +36,7 @@ await Ad4mModel.transaction(perspective, async (tx) => {
 
 If any operation inside the callback throws, the batch is never committed and no changes are persisted.
 
-The model writes of a transaction (`create`, `save`, `update`, `delete` and the relation methods called with `tx.batchId`) are queued in the order you call them and sent as ONE `perspective.mutate` call when the callback returns, just before the commit. So the ops see each other: a `save` can update an instance an earlier `create` of the same transaction made. The executor validates them then, so a refused write (a missing required property, a value of the wrong type) rejects `Ad4mModel.transaction()` after the callback finished, not at the `save()` that queued it; the batch is discarded and nothing is persisted. Raw link calls that take `tx.batchId` (`perspective.add(link, 'shared', tx.batchId)`) stage at once.
+The model writes of a transaction (`create`, `save`, `update`, `delete` and the relation methods called with `tx.batchId`) are queued in the order you call them (each op keeps the values the object had when you queued it, even if you change the object afterwards) and sent as ONE `perspective.mutate` call when the callback returns, just before the commit. So the ops see each other: a `save` can update an instance an earlier `create` of the same transaction made. The executor validates them then, so a refused write (a missing required property, a value of the wrong type) rejects `Ad4mModel.transaction()` after the callback finished, not at the `save()` that queued it; the batch is discarded and nothing is persisted. Raw link calls that take `tx.batchId` (`perspective.add(link, 'shared', tx.batchId)`) stage at once.
 
 ### Complex Data Models
 
@@ -183,12 +183,20 @@ call) when the batch changed, `batchNotFound` when it was committed or discarded
 one batch should therefore not run at the same time.
 
 **Ops of one `perspective.mutate` call see each other.** An update, delete or collection
-edit op finds an instance an earlier op of the same call created. A separate call that
+edit op finds an instance an earlier op of the same call created, and no longer finds one an
+earlier op deleted; the same holds through an abstract class (a `set`, `add`, `remove` or
+`delete` through it reaches the record's classes as the call has changed them) and for the
+class a `parent: { id, relation }` is resolved against. A separate call that
 stages into the same batch does not: instance existence reads committed state, so a
 `perspective.mutate` call that updates an instance an earlier call only staged into the batch
 fails `notFound`. Put create and follow-up ops in one call, or commit the create first.
 (The link reads a write does — collection membership, the remove cascade — do see the
 batch's own staged work.) A refused call leaves the batch as it was.
+
+A standalone call (no `batch`) commits only if what it read is still what the store holds:
+every read it made of a record's links, including the absence it saw when it created an id,
+and each read it repeated after the store changed. Two creates of one id, or two writes
+of one property, cannot both commit; the second fails `ConcurrentWrite` and can be retried.
 
 Under the hood, `Ad4mModel.transaction()` calls `createBatch()`, then one `perspective.mutate(ops, { batch })` with the queued model writes, then `commitBatch()` for you. Outside a transaction, a model write given a `batchId` is one `perspective.mutate` call into that batch at once.
 

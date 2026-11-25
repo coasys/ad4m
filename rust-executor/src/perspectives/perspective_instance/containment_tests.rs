@@ -521,7 +521,7 @@ async fn writes_under_a_parent_go_through_its_own_relation_or_has_child() {
     create(&mut p, &ctx, "FluxChannel", flux).await;
 
     for parent in [block, "ad4m://plain/w", flux] {
-        p.add_to_container(parent, "ad4m://c/1", &[], None, &ctx)
+        p.add_to_container(parent, "ad4m://c/1", &Staged::none(), None, &ctx)
             .await
             .unwrap_or_else(|e| panic!("add under {parent}: {e}"));
     }

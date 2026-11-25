@@ -264,14 +264,16 @@ impl PerspectiveInstance {
         Ok(())
     }
 
-    /// The target class IRIs of `base` whose shape declares a property named `property`.
+    /// The target class IRIs of `base` whose shape declares a property named `property`, among
+    /// the classes the store shows for it with `staged` applied.
     pub(crate) fn classes_declaring(
         &self,
         base: &str,
         property: &str,
+        staged: &Staged,
     ) -> Result<Vec<String>, AnyError> {
         let mut found = Vec::new();
-        for class in self.own_classes(base)? {
+        for class in self.effective_classes(base, staged)? {
             if self
                 .get_shape(&class)?
                 .properties
@@ -284,16 +286,10 @@ impl PerspectiveInstance {
         Ok(found)
     }
 
-    /// [`Self::own_classes`] plus the classes `staged` for `base` (a `perspective.mutate` call's
-    /// earlier creates, not committed yet), each once.
-    fn effective_classes(&self, base: &str, staged: &[String]) -> Result<Vec<String>, AnyError> {
-        let mut classes = self.own_classes(base)?;
-        for class in staged {
-            if !classes.contains(class) {
-                classes.push(class.clone());
-            }
-        }
-        Ok(classes)
+    /// [`Self::own_classes`] with what a `perspective.mutate` call staged for `base` applied:
+    /// the classes it created in, the classes it deleted out (not committed yet), each once.
+    fn effective_classes(&self, base: &str, staged: &Staged) -> Result<Vec<String>, AnyError> {
+        Ok(staged.apply(self.own_classes(base)?))
     }
 
     /// The classes `base` is an instance of, by target class IRI: two
@@ -313,11 +309,11 @@ impl PerspectiveInstance {
     /// The classes of `base` a write through `abstract_class` reaches: those
     /// it is, among those the abstract class reads, by target class IRI.
     /// Never empty.
-    fn write_targets(
+    pub(crate) fn write_targets(
         &self,
         abstract_class: &str,
         base: &str,
-        staged: &[String],
+        staged: &Staged,
     ) -> Result<Vec<String>, AnyError> {
         let resolution = self.resolve_abstract(abstract_class)?;
         let own = self.effective_classes(base, staged)?;
@@ -345,7 +341,7 @@ impl PerspectiveInstance {
         abstract_class: &str,
         base: &str,
         name: &str,
-        staged: &[String],
+        staged: &Staged,
     ) -> Result<Vec<(String, String)>, AnyError> {
         let (alias_key, _) = self.abstract_shape(abstract_class)?;
         let index = self.abstract_index()?;
@@ -377,7 +373,7 @@ impl PerspectiveInstance {
         abstract_class: &str,
         base: &str,
         values: &Value,
-        staged: &[String],
+        staged: &Staged,
         context: &AgentContext,
     ) -> Result<Vec<Run>, AnyError> {
         let mut has_child = Vec::new();
@@ -656,14 +652,39 @@ impl PerspectiveInstance {
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<(), AnyError> {
+        self.remove_subject_staged(subject_class, base, &Staged::none(), batch_id, context)
+            .await
+    }
+
+    /// [`Self::remove_subject_raw`] in a `perspective.mutate` call: through an abstract class,
+    /// the record's classes are those the store shows with `staged` applied.
+    pub(crate) async fn remove_subject_staged(
+        &mut self,
+        subject_class: SubjectClassOption,
+        base: String,
+        staged: &Staged,
+        batch_id: Option<String>,
+        context: &AgentContext,
+    ) -> Result<(), AnyError> {
         let class_name = self
             .subject_class_option_to_class_name(subject_class, context)
             .await?;
         let classes = if self.is_abstract_class(&class_name)? {
-            self.write_targets(&class_name, &base, &[])?
+            self.write_targets(&class_name, &base, staged)?
         } else {
             vec![class_name]
         };
+        self.remove_classes(classes, base, batch_id, context).await
+    }
+
+    /// Run the destructor of each of `classes` at `base`, each command once.
+    async fn remove_classes(
+        &mut self,
+        classes: Vec<String>,
+        base: String,
+        batch_id: Option<String>,
+        context: &AgentContext,
+    ) -> Result<(), AnyError> {
         let mut commands: Vec<Command> = Vec::new();
         for class in &classes {
             let destructor = match self
@@ -726,7 +747,7 @@ impl PerspectiveInstance {
         &mut self,
         parent: &str,
         child: &str,
-        staged: &[String],
+        staged: &Staged,
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<(), AnyError> {
@@ -754,7 +775,7 @@ impl PerspectiveInstance {
         &self,
         base: &str,
         values: &Value,
-        staged: &[String],
+        staged: &Staged,
     ) -> Result<Option<HasChildWrite>, AnyError> {
         let Some(children) = values.get("children") else {
             return Ok(None);
@@ -887,6 +908,34 @@ pub(super) struct Run {
     pub(super) commands: Vec<Command>,
     /// The members a `collectionSetter` sets; empty otherwise.
     pub(super) parameters: Vec<Parameter>,
+}
+
+/// What a `perspective.mutate` call changed about the classes of one id, not committed yet:
+/// the target class IRIs it created the id as, and those it removed the id from. The classes of
+/// the id as the call sees them are the store's, plus `created`, minus `removed`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Staged {
+    pub created: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+impl Staged {
+    /// Nothing staged: a write outside a `perspective.mutate` call.
+    pub(crate) fn none() -> Self {
+        Self::default()
+    }
+
+    /// `classes` with what is staged applied: the removed classes out, the created ones in,
+    /// each once.
+    pub(crate) fn apply(&self, mut classes: Vec<String>) -> Vec<String> {
+        classes.retain(|class| !self.removed.contains(class));
+        for class in &self.created {
+            if !classes.contains(class) {
+                classes.push(class.clone());
+            }
+        }
+        classes
+    }
 }
 
 /// The `has_child` links a `children` write through `Container` makes (see

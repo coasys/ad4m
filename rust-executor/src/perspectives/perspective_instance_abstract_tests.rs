@@ -874,7 +874,7 @@ async fn an_abstract_class_writes_two_classes_of_one_name_apart() {
             .unwrap();
         let added = json!({"children": {"action": "adder", "value": ["ad4m://c1"]}});
         update(&mut p, &ctx, "Note", base, added).await.unwrap();
-        p.add_to_container(base, "ad4m://c2", &[], None, &ctx)
+        p.add_to_container(base, "ad4m://c2", &Staged::none(), None, &ctx)
             .await
             .unwrap();
 

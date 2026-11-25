@@ -70,6 +70,7 @@ use uuid::Uuid;
 // `perspective_instance/` layout (see perspectives/AGENTS.md).
 // Abstract classes: resolution cache, queries, subscriptions (#1435).
 mod abstract_classes;
+pub(crate) use abstract_classes::Staged;
 mod containment;
 // Class registration and the registry of shapes.
 mod shapes;
@@ -3821,14 +3822,12 @@ impl PerspectiveInstance {
             // links were listed in) and puts the members that are new after it.
             let appended_order: Vec<String>;
             let desired = if appended {
-                let mut order = strategy.reconstruct(current_members, &current_entries);
-                let new: Vec<String> = desired
-                    .iter()
-                    .filter(|t| !order.contains(t))
-                    .cloned()
-                    .collect();
-                order.extend(new);
-                appended_order = order;
+                appended_order = order_appended::appended_order(
+                    strategy.as_ref(),
+                    current_members,
+                    &current_entries,
+                    desired,
+                );
                 appended_order.as_slice()
             } else {
                 desired
@@ -5831,6 +5830,29 @@ impl PerspectiveInstance {
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<(), AnyError> {
+        self.update_subject_staged(
+            subject_class,
+            expression_address,
+            values,
+            &Staged::none(),
+            batch_id,
+            context,
+        )
+        .await
+    }
+
+    /// [`Self::update_subject_raw`] in a `perspective.mutate` call: through an abstract class,
+    /// the record's classes are those the store shows with `staged` applied (what the call's
+    /// earlier ops created and deleted).
+    pub(crate) async fn update_subject_staged(
+        &mut self,
+        subject_class: SubjectClassOption,
+        expression_address: String,
+        values: serde_json::Value,
+        staged: &Staged,
+        batch_id: Option<String>,
+        context: &AgentContext,
+    ) -> Result<(), AnyError> {
         let class_name = self
             .subject_class_option_to_class_name(subject_class, context)
             .await?;
@@ -5838,7 +5860,7 @@ impl PerspectiveInstance {
         // reads writes the value with its own setter.
         if self.is_abstract_class(&class_name)? {
             let runs = self
-                .update_through_abstract(&class_name, &expression_address, &values, &[], context)
+                .update_through_abstract(&class_name, &expression_address, &values, staged, context)
                 .await?;
             return self
                 .execute_runs(runs, expression_address, batch_id, context)
@@ -6218,7 +6240,7 @@ impl PerspectiveInstance {
         let subscribed_query = SubscribedQuery {
             // Model subscriptions re-run through `trigger`, never through
             // this text or a predicate set; the JSON is kept so the memory
-            // estimate and the heartbeat log still see the query.
+            // estimate still sees the query.
             query: query_json.clone(),
             last_result: String::new(),
             predicates: HashSet::new(),
@@ -6542,14 +6564,10 @@ impl PerspectiveInstance {
                         self.uuid,
                         queries.len()
                     );
-                    for (id, query) in queries.iter() {
-                        // By characters: a model subscription's query is its JSON, which may hold any text.
-                        let query_preview = if query.query.chars().count() > 100 {
-                            format!("{}...", query.query.chars().take(100).collect::<String>())
-                        } else {
-                            query.query.clone()
-                        };
-                        log::debug!("   - 🔗 [{}]: {}", id, query_preview);
+                    // Ids only: a model subscription's query is its JSON, whose `where`
+                    // values may be private.
+                    for id in queries.keys() {
+                        log::debug!("   - 🔗 [{}]", id);
                     }
                 }
             }

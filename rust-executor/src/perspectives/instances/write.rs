@@ -362,6 +362,47 @@ pub(crate) async fn create_with(
             ))
         }
     }
+    // The create rests on the instance being absent. `fetch_instance` finds a record by the
+    // forward links of the class's required properties (flags included) or, when none is
+    // required, of its first property with an initial value (`conformance_patterns` in
+    // `model_query::sparql_builder`). Those links are read as they stand and recorded into the
+    // create's batch, so the commit (`commit_batch_if`, which `mutate` runs for its own batch)
+    // refuses it as `ConcurrentWrite` when a create of the same id landed in between. A caller's
+    // batch commits elsewhere, so the read only travels with it.
+    let required = shape
+        .properties
+        .iter()
+        .filter(|prop| prop.is_required && !prop.predicate.is_empty())
+        .collect::<Vec<_>>();
+    let existence_props = if required.is_empty() {
+        shape
+            .properties
+            .iter()
+            .find(|prop| prop.initial_value.is_some() && !prop.predicate.is_empty())
+            .into_iter()
+            .collect()
+    } else {
+        required
+    };
+    for prop in existence_props {
+        let query = LinkQuery {
+            source: Some(base_uri.clone()),
+            predicate: Some(prop.predicate.clone()),
+            ..Default::default()
+        };
+        let held = perspective.get_links(&query).await.map_err(|e| {
+            failed(
+                &class_name,
+                WriteStep::CheckExisting {
+                    base_uri: base_uri.clone(),
+                },
+                e,
+            )
+        })?;
+        perspective
+            .record_read(&params.batch_id, &base_uri, &query.predicate, &held)
+            .await;
+    }
 
     // Resolve every collection predicate BEFORE creating the subject, so a bad collection name
     // fails the whole call cleanly instead of leaving a live instance with partial collection
@@ -482,7 +523,7 @@ pub(crate) async fn create_with(
             .add_to_container(
                 &parent_id,
                 &base_uri,
-                &pending.created_targets(&parent_id),
+                &pending.staged(&parent_id),
                 Some(batch.id()),
                 agent,
             )
@@ -562,24 +603,34 @@ pub(crate) async fn update_with(
 
     let base_uri = instance_uri("base_uri", &params.base_uri)?;
     // Where it is stored: a legacy-spelled id's node is not the normalised one.
-    let stored = require_instance(
+    let staged = pending.staged(&base_uri);
+    // Through an abstract class the record may be one the call created as a class it reads,
+    // which the store does not show yet; `update_subject_staged` refuses it when it is not.
+    let stored = match require_instance(
         perspective,
         &class_name,
         &shape.target_class,
         &base_uri,
         pending,
     )
-    .await?;
+    .await
+    {
+        Err(InstanceError::NotFound { .. }) if is_abstract && !staged.created.is_empty() => {
+            base_uri.clone()
+        }
+        found => found?,
+    };
 
     // One batch for the whole update so remove-old + add-new per property lands atomically
     // (same reasoning as the per-class setters: without it a peer can observe the property as
     // unset in between).
     let batch = Batch::open(perspective, params.batch_id).await?;
     if let Err(e) = perspective
-        .update_subject_raw(
+        .update_subject_staged(
             subject_class(&class_name),
             stored,
             Value::Object(values.clone()),
+            &staged,
             Some(batch.id()),
             agent,
         )
@@ -655,9 +706,10 @@ pub(crate) async fn remove_with(
         .await
         .map_err(|e| failed(&class_name, WriteStep::ReadInstance, e))?;
     perspective
-        .remove_subject_raw(
+        .remove_subject_staged(
             subject_class(&class_name),
             stored.clone(),
+            &pending.staged(&base_uri),
             params.batch_id.clone(),
             agent,
         )

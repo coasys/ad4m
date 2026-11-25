@@ -3522,9 +3522,9 @@ describe("Ad4mModel.transaction()", () => {
       Ad4mModel.transaction(perspective, async (tx) => {
         note.title = "B";
         await note.save(tx.batchId);
-        // Outside the transaction: writes only the body, and does not read back.
+        // Outside the transaction: writes only the body (getData is stubbed).
         note.body = "Y";
-        await note.save(undefined, { readBack: false });
+        await note.save();
         throw new Error("callback failed");
       }),
     ).rejects.toThrow("callback failed");
@@ -3542,6 +3542,62 @@ describe("Ad4mModel.transaction()", () => {
       [{ op: "update", class: "tx://TxNote", id: "tx://n1", set: { title: "B" } }],
       {},
     );
+  });
+
+  it("a queued write keeps the value it was given when the object changes before the flush", async () => {
+    const { perspective } = makePerspective();
+    await Ad4mModel.transaction(perspective, async (tx) => {
+      const card = new TxCard(perspective, "tx://j1");
+      const config = { enabled: false };
+      (card as any).title = config;
+      await card.save(tx.batchId);
+      config.enabled = true;
+    });
+    expect(perspective.mutate).toHaveBeenCalledWith(
+      [{ op: "create", class: "tx://TxCard", id: "tx://j1", values: { title: { enabled: false } } }],
+      { batch: "batch-1" },
+    );
+  });
+
+  it("a read-back before the commit keeps the queued field in the snapshot, so setting the old value again is a change", async () => {
+    const { perspective } = makePerspective();
+    const note = new TxNote(perspective, "tx://n9");
+    // The store still holds title "A" when the outside save reads back.
+    jest.spyOn(TxNote as any, "executeModelQuery").mockResolvedValue({
+      results: [{ id: "tx://n9", title: "A", body: "Y" }],
+    });
+    note.title = "A";
+    note.body = "X";
+    await note.save();
+
+    await Ad4mModel.transaction(perspective, async (tx) => {
+      note.title = "B";
+      await note.save(tx.batchId);
+      note.body = "Y";
+      await note.save();
+      expect(note.title).toBe("B");
+    });
+
+    // The commit wrote "B": going back to "A" is a change.
+    note.title = "A";
+    expect(note.changedFields()).toEqual(["title"]);
+  });
+
+  it("create() keeps its no-read-back mode through a save(batchId) override", async () => {
+    @Model({ name: "TxOverride" })
+    class TxOverride extends Ad4mModel {
+      @Property({ through: "tx://title" })
+      title: string = "";
+
+      async save(batchId?: string) {
+        return super.save(batchId);
+      }
+    }
+    const { perspective } = makePerspective();
+    const read = jest.spyOn(TxOverride as any, "executeModelQuery").mockResolvedValue({ results: [] });
+    await TxOverride.create(perspective, { title: "x" });
+    expect(perspective.mutate).toHaveBeenCalledTimes(1);
+    expect(read).not.toHaveBeenCalled();
   });
 
   it("a save of another field during a failed transaction does not keep the transaction's relation in the snapshot", async () => {
@@ -3593,9 +3649,9 @@ describe("Ad4mModel.transaction()", () => {
         await item.save(tx.batchId);
         // Outside the transaction: the store ends at the transaction's value.
         item.tags = ["tx://c"];
-        await item.save(undefined, { readBack: false });
+        await item.save();
         item.tags = ["tx://b"];
-        await item.save(undefined, { readBack: false });
+        await item.save();
         throw new Error("callback failed");
       }),
     ).rejects.toThrow("callback failed");
@@ -3621,7 +3677,7 @@ describe("Ad4mModel.transaction()", () => {
         await note.save(tx.batchId);
         // Outside the transaction, and still pending when the transaction fails.
         note.title = "C";
-        outside = note.save(undefined, { readBack: false });
+        outside = note.save();
         await new Promise((r) => setTimeout(r, 0));
         throw new Error("callback failed");
       }),
@@ -3647,7 +3703,7 @@ describe("Ad4mModel.transaction()", () => {
         card.title = "one";
         await card.save(tx.batchId);
         card.title = "two";
-        outside = card.save(undefined, { readBack: false });
+        outside = card.save();
         await new Promise((r) => setTimeout(r, 0));
         throw new Error("callback failed");
       }),

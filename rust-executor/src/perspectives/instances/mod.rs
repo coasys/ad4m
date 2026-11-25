@@ -58,7 +58,7 @@ use crate::perspectives::model_query::is_safe_iri_target;
 use crate::perspectives::model_query::types::{ModelShape, ShapeProperty, ShapeRelation};
 use crate::perspectives::model_query::utils::parse_literal_value;
 use crate::perspectives::perspective_instance::{
-    PerspectiveInstance, ShapeSummary, SubjectClassOption,
+    PerspectiveInstance, ShapeSummary, Staged, SubjectClassOption,
 };
 use crate::perspectives::sparql_store::EvalStop;
 use crate::types::{LinkExpression, LinkQuery};
@@ -574,13 +574,23 @@ impl Pending {
             .unwrap_or_default()
     }
 
-    /// The target class IRIs this call created `id` as: what an abstract write adds to the
-    /// classes the store shows for it.
-    pub(crate) fn created_targets(&self, id: &str) -> Vec<String> {
-        self.created_classes(id)
-            .into_iter()
-            .map(|(target, _)| target.to_string())
-            .collect()
+    /// What this call changed about the classes of `id`: the target class IRIs it created `id`
+    /// as and those it removed `id` from. What an abstract write applies to the classes the
+    /// store shows for the id.
+    pub(crate) fn staged(&self, id: &str) -> Staged {
+        Staged {
+            created: self
+                .created_classes(id)
+                .into_iter()
+                .map(|(target, _)| target.to_string())
+                .collect(),
+            removed: self
+                .removed
+                .iter()
+                .filter(|(_, removed_id)| removed_id == id)
+                .map(|(target, _)| target.clone())
+                .collect(),
+        }
     }
 
     /// Whether `id` exists as the class `target_class` (the shape's own, whatever name the op

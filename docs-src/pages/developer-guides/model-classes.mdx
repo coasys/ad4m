@@ -746,6 +746,8 @@ recipe.changedFields(); // ["name"]
 await recipe.save();    // Only "name" is written
 ```
 
+A write queued in a transaction is not in the store until the transaction commits. A read of the instance in between (another `save()` of it, or `getData()`) keeps the queued value of that field, in the object and in the snapshot, instead of the store's older one: setting the field back to the old value is then still a change. `create()` writes without reading the instance back, also when your own `save(batchId)` override handles the write.
+
 ### Instance Identity
 
 Every model instance has a unique `id` (a URI string):

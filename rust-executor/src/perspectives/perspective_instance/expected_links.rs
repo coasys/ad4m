@@ -57,8 +57,10 @@ impl PerspectiveInstance {
     }
 
     /// Note that a replacing command staged into `batch_id` read `links` from `source` along
-    /// `predicate`, for [`Self::expected_by_batch`]. The first read of a pair stands: it is what
-    /// the batch's decisions rest on. No batch, or one that is not open, records nothing.
+    /// `predicate`, for [`Self::expected_by_batch`]. Every distinct read of a pair is kept: a
+    /// decision made on a later read (the batch saw the store change under it) is covered at
+    /// the commit as much as the first. A read identical to one held adds nothing. No batch, or
+    /// one that is not open, records nothing.
     pub(crate) async fn record_read(
         &self,
         batch_id: &Option<String>,
@@ -73,18 +75,18 @@ impl PerspectiveInstance {
         let Some(batch) = batches.get_mut(batch_id) else {
             return;
         };
-        if batch
-            .reads
-            .iter()
-            .any(|e| e.source == source && &e.predicate == predicate)
-        {
-            return;
-        }
         let mut links: Vec<HeldLink> = links
             .iter()
             .map(|l| (l.author.clone(), l.timestamp.clone(), l.data.target.clone()))
             .collect();
         links.sort();
+        if batch
+            .reads
+            .iter()
+            .any(|e| e.source == source && &e.predicate == predicate && e.links == links)
+        {
+            return;
+        }
         batch.reads.push(ExpectedLinks {
             source: source.to_string(),
             predicate: predicate.clone(),
@@ -123,22 +125,25 @@ impl PerspectiveInstance {
             let Some(predicate) = removal.data.predicate.as_deref() else {
                 continue;
             };
-            let position = match expected
-                .iter()
-                .position(|e| e.source == removal.data.source && e.predicate == predicate)
-            {
-                Some(position) => position,
-                None => {
-                    expected.push(self.expect_links(&removal.data.source, predicate)?);
-                    expected.len() - 1
-                }
-            };
             let held = (
                 removal.author.clone(),
                 removal.timestamp.clone(),
                 removal.data.target.clone(),
             );
-            if !expected[position].links.contains(&held) {
+            // A pair the batch read: the removal must be in each read of it.
+            let reads: Vec<usize> = expected
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.source == removal.data.source && e.predicate == predicate)
+                .map(|(position, _)| position)
+                .collect();
+            if reads.is_empty() {
+                let read = self.expect_links(&removal.data.source, predicate)?;
+                if !read.links.contains(&held) {
+                    return Err(LinksChanged.into());
+                }
+                expected.push(read);
+            } else if reads.iter().any(|&p| !expected[p].links.contains(&held)) {
                 return Err(LinksChanged.into());
             }
         }

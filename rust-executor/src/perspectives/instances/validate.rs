@@ -188,7 +188,7 @@ pub(crate) fn coerce_scalar(info: &PropView<'_>, value: &Value) -> Result<Value,
     // A value signed into the literal language is any JSON value: an object or an array is
     // stored whole, as one `literal:json:` expression.
     if info.relation().is_none() && info.resolve_language() == Some("literal") {
-        return Ok(value.clone());
+        return check_allowed(info, value, value.clone());
     }
     if let Value::Array(items) = value {
         return Err(err(ValidationProblem::ArrayForScalar {
@@ -260,9 +260,10 @@ pub(crate) fn coerce_scalar(info: &PropView<'_>, value: &Value) -> Result<Value,
 }
 
 /// `sh:in`: the coerced value must match one declared entry. Runs after the type coercion so
-/// "42" for an integer property matches entry `42`; the relation and language-stored early
-/// returns of `coerce_scalar` keep it off properties whose values are URIs or language
-/// expressions (no class in WE puts `options` on those). An empty list allows nothing. A JSON
+/// "42" for an integer property matches entry `42`. A value signed into the literal language is
+/// checked too; the relation and language-stored early returns of `coerce_scalar` keep it off
+/// properties whose values are URIs or language expressions (no class in WE puts `options` on
+/// those). An empty list allows nothing. A JSON
 /// object a string property takes whole is checked too, so it never satisfies a list of strings.
 fn check_allowed(
     info: &PropView<'_>,

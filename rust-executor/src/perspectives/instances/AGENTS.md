@@ -37,12 +37,19 @@ Invariants:
   existence (`fetch_instance`, `require_instance`) reads committed state, overlaid by `Pending`
   (the ids this `mutate` call created or removed, each as a fact about one class of the id: an
   id the call did not touch as that class is whatever the store says) when the call passes
-  one. `Pending` lives for one call: an instance an earlier call staged into the caller's batch is not found, and
+  one. `Pending::staged(id)` gives the classes of an id as the call sees them (`Staged`:
+  created and removed target classes); `effective_classes` is the store's classes with it
+  applied, and `parent_class`, abstract `set`/`add`/`remove`/`delete`
+  (`update_subject_staged`, `remove_subject_staged`) and a delete's own bookkeeping in
+  `run_ops` (an abstract delete marks each class it reached as removed) use it. `Pending` lives for one call: an instance an earlier call staged into the caller's batch is not found, and
   the single writes (`create`, `update`, ...) called alone pass none.
 - With no caller's batch, `mutate` commits its own batch with `commit_batch_if`, expecting
   (`expected_by_batch`) what the batch's replacing commands read — a single-valued setter, a
   collection setter, a clear: each records the `(source, predicate)` links it read, an empty
-  read included (`record_read`, the batch's `reads`) — plus the committed members of a
+  read included (`record_read`, the batch's `reads`: every distinct read of a pair is kept, so
+  a decision made on a later read is checked at the commit too; a create reads the links that
+  make the id an instance — flags and required properties — so it expects the id still
+  absent) — plus the committed members of a
   required collection that `require_members_left` counted on (`get_links`, not the batch's
   effective view: two calls each removing a different member must not both commit and
   empty it) — plus, for removals by id that no such read covers (`remove`), what the store

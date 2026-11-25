@@ -292,6 +292,14 @@ async fn run_ops(
     };
     let mut done = Vec::with_capacity(ops.len());
     for (index, op) in ops.into_iter().enumerate() {
+        // What the id's classes were before the op: a delete through an abstract class removes
+        // the classes it reads, which only the state before it can name.
+        let before = match &op {
+            MutateOp::Delete { id, .. } => instance_uri("base_uri", id)
+                .ok()
+                .map(|id| pending.staged(&id)),
+            _ => None,
+        };
         let mutated = run_op(perspective, agent, op, batch_id, &mut pending)
             .await
             .map_err(|error| MutateError {
@@ -299,12 +307,41 @@ async fn run_ops(
                 error,
             })?;
         if mutated.deleted {
-            let (_, shape) = resolve_class(perspective, &mutated.class_name)
+            let at = |error| MutateError {
+                op_index: Some(index),
+                error,
+            };
+            let (class_name, shape) = resolve_class(perspective, &mutated.class_name)
                 .await
-                .map_err(|error| MutateError {
-                    op_index: Some(index),
-                    error,
+                .map_err(at)?;
+            let is_abstract = perspective
+                .is_abstract_class(&class_name)
+                .map_err(|error| {
+                    at(InstanceError::Failed {
+                        class_name: class_name.clone(),
+                        step: WriteStep::ReadShape,
+                        error,
+                    })
                 })?;
+            if is_abstract {
+                // The classes the abstract class reached, each as gone.
+                let reached = perspective
+                    .write_targets(
+                        &class_name,
+                        &link_target(&mutated.id),
+                        &before.unwrap_or_default(),
+                    )
+                    .map_err(|error| {
+                        at(InstanceError::Failed {
+                            class_name: class_name.clone(),
+                            step: WriteStep::RemoveSubject,
+                            error,
+                        })
+                    })?;
+                for target in &reached {
+                    pending.removed(target, &mutated.id);
+                }
+            }
             pending.removed(&shape.target_class, &mutated.id);
         }
         done.push(mutated);
@@ -320,7 +357,8 @@ async fn run_ops(
 }
 
 /// The class of the instance `id` that declares `relation`; one class must, or the caller
-/// names it. An instance this call created is the class the call created it as.
+/// names it. The classes of `id` are those the store shows plus those this call created it as,
+/// less those it deleted it from.
 fn parent_class(
     perspective: &PerspectiveInstance,
     id: &str,
@@ -328,36 +366,9 @@ fn parent_class(
     pending: &Pending,
 ) -> Result<String, InstanceError> {
     let parent_id = instance_uri("parent", id)?;
-    // An instance this call created, as one class or several: the one that declares the
-    // relation. None, or several, is not a pick: the caller names the class.
-    let created = pending.created_classes(&parent_id);
-    if !created.is_empty() {
-        let declaring: Vec<(&str, &str)> = created
-            .iter()
-            .copied()
-            .filter(|(_, class)| {
-                perspective.get_shape(class).is_ok_and(|shape| {
-                    class_properties(&shape)
-                        .iter()
-                        .any(|info| info.name() == relation)
-                })
-            })
-            .collect();
-        return match declaring.as_slice() {
-            [(_, class)] => Ok(class.to_string()),
-            _ => Err(InstanceError::ParentClassUnresolved {
-                parent: id.to_string(),
-                relation: relation.to_string(),
-                candidates: declaring
-                    .iter()
-                    .map(|(target, _)| target.to_string())
-                    .collect(),
-            }),
-        };
-    }
     let parent = link_target(&parent_id);
     let mut candidates = perspective
-        .classes_declaring(&parent, relation)
+        .classes_declaring(&parent, relation, &pending.staged(&parent_id))
         .map_err(|error| InstanceError::Failed {
             class_name: String::new(),
             step: WriteStep::ReadShape,
@@ -395,7 +406,7 @@ fn collection_targets(
     }
     let base = link_target(&instance_uri("base_uri", id)?);
     let targets = perspective
-        .collection_targets(class, &base, collection, &pending.created_targets(&base))
+        .collection_targets(class, &base, collection, &pending.staged(&base))
         .map_err(failed)?;
     if targets.is_empty() {
         return Err(failed(anyhow::anyhow!(

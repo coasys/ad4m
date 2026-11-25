@@ -438,7 +438,8 @@ async function writeOps(perspective: PerspectiveProxy, ops: MutateOp[], batchId?
         `The batch ${batchId} belongs to perspective ${queued.perspective.uuid}, not ${perspective.uuid}`,
       );
     }
-    queued.ops.push(...ops);
+    // A copy: the ops hold the caller's JSON values, which it may change before the flush.
+    queued.ops.push(...ops.map((op) => JSON.parse(JSON.stringify(op)) as MutateOp));
     if (claim) {
       queued.undo.push(claim.undo);
       queued.done.push(claim.done);
@@ -471,8 +472,18 @@ type FieldClaim = { owner: object; had: boolean; before: unknown; unsaved: boole
  */
 const fieldClaims = new WeakMap<object, Map<string, FieldClaim[]>>();
 
-/** The parent of the create that `Model.create()` is writing, by instance (see `persist`). */
-const createParents = new WeakMap<object, ParentRef>();
+/**
+ * The instances whose `save()` is `Model.create()`'s, with the create's parent: it creates under
+ * that parent (see `persist`) and reads nothing back, whatever a `save(batchId)` override forwards.
+ */
+const creating = new WeakMap<object, { parent?: ParentRef }>();
+
+/** The fields of `instance` with a write not settled yet: the store may not hold them, so a read does not own them. */
+function unsettledFields(instance: object): string[] {
+  const claims = fieldClaims.get(instance);
+  if (!claims) return [];
+  return [...claims].filter(([, held]) => held.some((c) => !c.settled)).map(([field]) => field);
+}
 
 /**
  * The `parent` of a create op for `create(…, { parent })`. Resolving it first
@@ -1018,9 +1029,14 @@ export class Ad4mModel {
     );
     if (results.length === 0) return null;
 
+    // A field with a write not settled yet (queued in a transaction, or in flight)
+    // is not the store's to give: it keeps its value and its snapshot, which the
+    // write's claim owns (see `claimFields`).
+    const pending = new Set(unsettledFields(this));
+    const held = this._snapshot;
     // Copy all hydrated values from the executor's result onto this instance
     for (const [key, value] of Object.entries(results[0] as any)) {
-      if (key.startsWith('_')) continue;
+      if (key.startsWith('_') || pending.has(key)) continue;
       // Check for readonly getters
       let isReadonly = false;
       let proto = Object.getPrototypeOf(this);
@@ -1034,6 +1050,9 @@ export class Ad4mModel {
     }
 
     this.takeSnapshot(opts?.include);
+    for (const field of pending) {
+      if (held && field in held && this._snapshot) this._snapshot[field] = held[field];
+    }
     return this;
   }
 
@@ -1712,11 +1731,11 @@ export class Ad4mModel {
    * await recipe.save();
    * ```
    */
-  async save(batchId?: string, options?: { readBack?: boolean }) {
+  async save(batchId?: string) {
     await this.persist(batchId);
     // With a caller's batch nothing is committed yet: reading would fetch
-    // stale data and overwrite in-memory values.
-    if (!batchId && options?.readBack !== false) await this.getData();
+    // stale data and overwrite in-memory values. `create()` reads the row itself.
+    if (!batchId && !creating.has(this)) await this.getData();
   }
 
   /**
@@ -1727,7 +1746,7 @@ export class Ad4mModel {
    * again.
    */
   private async persist(batchId?: string): Promise<void> {
-    const parent = createParents.get(this);
+    const parent = creating.get(this)?.parent;
     const op = this._snapshot ? this.updateOp() : this.createOp(parent);
     // Nothing to write: the snapshot (and an undo that waits on it) stays as it is.
     if (!op) return;
@@ -2172,11 +2191,11 @@ export class Ad4mModel {
     // The parent rides on the instance, not through save()'s arguments, so a
     // subclass whose save(batchId) override forwards only the batch id still
     // creates the child under it.
-    if (parent) createParents.set(instance, parent);
+    creating.set(instance, { parent });
     try {
-      await instance.save(options?.batchId, { readBack: false });
+      await instance.save(options?.batchId);
     } finally {
-      createParents.delete(instance);
+      creating.delete(instance);
     }
     if (options?.batchId) return instance;
 

@@ -256,6 +256,16 @@ async fn run(
     super::mutate(p, ctx, serde_json::from_value(ops).expect("ops"), None).await
 }
 
+/// The call was refused as a whole (`op_index` `None`) because a write landed since it read.
+fn assert_concurrent_write(result: Result<Vec<super::mutate::Mutated>, super::MutateError>) {
+    let failure = result.err().expect("the second commit is refused");
+    assert_eq!(failure.op_index, None, "{failure:?}");
+    assert!(
+        matches!(failure.error, super::InstanceError::ConcurrentWrite { .. }),
+        "{failure:?}"
+    );
+}
+
 async fn link(
     p: &mut PerspectiveInstance,
     ctx: &AgentContext,
@@ -1008,6 +1018,34 @@ mod mutate_rules {
         validate(json!({"meta":"open"})).expect("an allowed value");
         let errors =
             validate(json!({"meta":{"anything":true}})).expect_err("an object is no option");
+        assert_eq!(
+            errors[0].problem,
+            crate::perspectives::instances::ValidationProblem::NotAllowed
+        );
+    }
+
+    /// A value signed into the literal language is checked against the allowed values
+    /// (`sh:in`) too: the literal branch of the coercion does not skip the list.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_literal_language_value_is_checked_against_the_allowed_values() {
+        let (p, _s, _ctx) = setup_perspective_no_llm(&[("Doc", DOC_SDNA)]).await;
+        let mut shape = (*p.get_shape("Doc").expect("shape")).clone();
+        shape
+            .properties
+            .iter_mut()
+            .find(|prop| prop.name == "content")
+            .expect("content")
+            .in_values = Some(vec![json!("open"), json!("done")]);
+        let validate = |values: serde_json::Value| {
+            crate::perspectives::instances::validate_properties(
+                &shape,
+                values.as_object().expect("object"),
+                crate::perspectives::instances::WriteMode::Create,
+                true,
+            )
+        };
+        validate(json!({"content":"open"})).expect("an allowed value");
+        let errors = validate(json!({"content":"other"})).expect_err("not in the list");
         assert_eq!(
             errors[0].problem,
             crate::perspectives::instances::ValidationProblem::NotAllowed
@@ -1852,6 +1890,36 @@ const TAGGY_SDNA: &str = r#"{
   ]
 }"#;
 
+/// `Taggy` with a required title, so the store finds a committed instance of it.
+const TAGGR_SDNA: &str = r#"{
+  "target_class": "ns://Taggr",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Taggr"}
+  ],
+  "properties": [
+    {"path":"ns://taggr_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://taggr_title","target":"value"}]},
+    {"path":"ns://taggr_tag","name":"tags","collection":true,"resolve_language":"literal","writable":true,
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://taggr_tag","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://taggr_tag","target":"value"}]}
+  ]
+}"#;
+
+/// `Holder` with a required title, so the store finds a committed instance of it.
+const HOLDR_SDNA: &str = r#"{
+  "target_class": "ns://Holdr",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Holdr"}
+  ],
+  "properties": [
+    {"path":"ns://holdr_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://holdr_title","target":"value"}]},
+    {"path":"ns://held","name":"held","node_kind":"IRI","relation_kind":"hasMany","collection":true,"writable":true,"alias":{"Container":"children"},
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://held","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://held","target":"value"}]}
+  ]
+}"#;
+
 /// Review round 4: what one `mutate` call knows about the classes of an id, the
 /// private batch, and the writes beside it.
 mod review_round_4 {
@@ -1974,6 +2042,15 @@ mod review_round_4 {
             matches!(err, InstanceError::ParentClassUnresolved { .. }),
             "{err:?}"
         );
+        // The refused call left neither the parent nor the child behind.
+        for id in ["ns://p", "ns://c"] {
+            for predicate in ["rdf://type", "ns://note_title"] {
+                assert!(
+                    stored_targets(&p, id, predicate).await.is_empty(),
+                    "{id} {predicate}"
+                );
+            }
+        }
     }
 
     /// The candidates of an ambiguous staged parent are target class IRIs, as for a stored one.
@@ -2315,7 +2392,7 @@ mod review_round_4 {
             json!([{"op":"update","class":"Note","id":"ns://n","set":{"title":"B"}}]),
         )
         .await;
-        assert!(result.is_err(), "the second commit is refused");
+        assert_concurrent_write(result);
         assert_eq!(
             stored_targets(&p, "ns://n", "ns://note_title").await,
             vec!["literal:string:C"]
@@ -2348,7 +2425,7 @@ mod review_round_4 {
             json!([{"op":"update","class":"Note","id":"ns://n","set":{"body":"B"}}]),
         )
         .await;
-        assert!(result.is_err(), "the second commit is refused");
+        assert_concurrent_write(result);
         assert_eq!(
             stored_targets(&p, "ns://n", "ns://note_body").await,
             vec!["literal:string:C"]
@@ -2386,7 +2463,7 @@ mod review_round_4 {
             json!([{"op":"update","class":"OwnedTitled","id":"ns://o1","set":{"owner":"ns://b"}}]),
         )
         .await;
-        assert!(result.is_err(), "the second commit is refused");
+        assert_concurrent_write(result);
         assert_eq!(
             stored_targets(&p, "ns://o1", "ns://ot_owner").await,
             vec!["ns://c"]
@@ -2433,6 +2510,191 @@ mod review_round_4 {
         assert_eq!(
             stored_targets(&p, "ns://l", "ns://label").await,
             vec!["ns://a"]
+        );
+    }
+
+    /// An abstract delete removes the concrete classes it reached: a later op on one of them
+    /// finds the instance gone, not the committed one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_abstract_delete_removes_the_concrete_classes_it_reached() {
+        let (mut p, _s, ctx) =
+            setup_perspective_no_llm(&[("Tagged", TAGGED_ABSTRACT_SDNA), ("Taggr", TAGGR_SDNA)])
+                .await;
+        ok(
+            &mut p,
+            &ctx,
+            json!([{"op":"create","class":"Taggr","id":"ns://p","values":{"title":"t"}}]),
+        )
+        .await;
+        let err = refused(
+            &mut p,
+            &ctx,
+            json!([
+                {"op":"delete","class":"Tagged","id":"ns://p"},
+                {"op":"update","class":"Taggr","id":"ns://p","add":{"tags":["x"]}}
+            ]),
+        )
+        .await;
+        assert!(matches!(err, InstanceError::NotFound { .. }), "{err:?}");
+    }
+
+    /// The parent's relation is found among the classes the store shows and the call staged:
+    /// a staged `Listed` at a committed `Note`'s id does not hide the `Note`'s `children`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_parent_relation_is_found_on_a_committed_class_beside_a_staged_one() {
+        let (mut p, _s, ctx) =
+            setup_perspective_no_llm(&[("Note", NOTE_SDNA), ("Listed", LISTED_SDNA)]).await;
+        ok(
+            &mut p,
+            &ctx,
+            json!([{"op":"create","class":"Note","id":"ns://p","values":{"title":"p"}}]),
+        )
+        .await;
+        ok(
+            &mut p,
+            &ctx,
+            json!([
+                {"op":"create","class":"Listed","id":"ns://p","values":{}},
+                {"op":"create","class":"Note","id":"ns://c","values":{"title":"c"},
+                 "parent":{"id":"ns://p","relation":"children"}}
+            ]),
+        )
+        .await;
+        assert_eq!(
+            stored_targets(&p, "ns://p", "ns://note_child").await,
+            vec!["ns://c"]
+        );
+    }
+
+    /// A class the call deleted is not one of the parent's classes any more: its relation does
+    /// not take a child created later in the call.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_child_is_not_linked_through_a_class_deleted_in_the_call() {
+        let (mut p, _s, ctx) =
+            setup_perspective_no_llm(&[("Note", NOTE_SDNA), ("Holdr", HOLDR_SDNA)]).await;
+        ok(
+            &mut p,
+            &ctx,
+            json!([{"op":"create","class":"Holdr","id":"ns://p","values":{"title":"t"}}]),
+        )
+        .await;
+        let err = refused(
+            &mut p,
+            &ctx,
+            json!([
+                {"op":"delete","class":"Holdr","id":"ns://p"},
+                {"op":"create","class":"Note","id":"ns://c","values":{"title":"c"},
+                 "parent":{"id":"ns://p","relation":"held"}}
+            ]),
+        )
+        .await;
+        assert!(
+            matches!(err, InstanceError::ParentClassUnresolved { .. }),
+            "{err:?}"
+        );
+    }
+
+    /// An update through an abstract class reaches a class the call staged, as an add does.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_abstract_set_reaches_a_class_staged_in_the_call() {
+        let (mut p, _s, ctx) =
+            setup_perspective_no_llm(&[("Tagged", TAGGED_ABSTRACT_SDNA), ("Taggy", TAGGY_SDNA)])
+                .await;
+        ok(
+            &mut p,
+            &ctx,
+            json!([
+                {"op":"create","class":"Taggy","id":"ns://p","values":{}},
+                {"op":"update","class":"Tagged","id":"ns://p","set":{"tags":["x"]}}
+            ]),
+        )
+        .await;
+        assert_eq!(
+            stored_targets(&p, "ns://p", "ns://taggy_tag").await.len(),
+            1
+        );
+    }
+
+    /// Two reads of one pair in a batch: the commit checks both, so a decision made on the
+    /// later one is covered when the store has gone back to the first.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_later_read_of_a_pair_is_checked_at_the_commit_too() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Labelled", LABELLED_SDNA)]).await;
+        link(&mut p, &ctx, "ns://s", "ns://label", "ns://a").await;
+        link(&mut p, &ctx, "ns://s", "ns://label", "ns://b").await;
+        let query = LinkQuery {
+            source: Some("ns://s".into()),
+            predicate: Some("ns://label".into()),
+            ..Default::default()
+        };
+        let both = p.get_links(&query).await.expect("links");
+        let b = both
+            .iter()
+            .find(|l| l.data.target == "ns://b")
+            .expect("b")
+            .clone();
+        p.remove_link(LinkExpression::from(b), None)
+            .await
+            .expect("remove b");
+        let only_a = p.get_links(&query).await.expect("links");
+        assert_eq!(only_a.len(), 1);
+
+        let batch = p.create_batch().await;
+        let (batch_id, predicate) = (Some(batch.clone()), Some("ns://label".to_string()));
+        p.record_read(&batch_id, "ns://s", &predicate, &only_a)
+            .await;
+        p.record_read(&batch_id, "ns://s", &predicate, &both).await;
+        let expected = p
+            .expected_by_batch(&batch)
+            .await
+            .expect("expected")
+            .expect("open");
+        let err = p
+            .commit_batch_if(batch, &ctx, &expected)
+            .await
+            .expect_err("the store is not what the later read saw");
+        assert!(
+            err.is::<crate::perspectives::perspective_instance::LinksChanged>(),
+            "{err:#}"
+        );
+    }
+
+    /// Two standalone creates of one id, with no values (the constructor writes the flag, and
+    /// no setter records a read): the one that commits second read the instance as absent, so
+    /// it is refused instead of writing its flag on top of the first's.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_standalone_creates_of_one_id_do_not_both_commit() {
+        const KINDED_SDNA: &str = r#"{
+  "target_class": "ns://Kinded",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"ns://kind","target":"ns://thing"}
+  ],
+  "properties": [
+    {"path":"ns://kind","name":"kind","has_value":"ns://thing","min_count":1,"max_count":1}
+  ]
+}"#;
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Kinded", KINDED_SDNA)]).await;
+        let (mut other, other_ctx) = (p.clone(), ctx.clone());
+        *p.mutate_gap_hook.lock().unwrap() = Some(Box::new(move || {
+            Box::pin(async move {
+                ok(
+                    &mut other,
+                    &other_ctx,
+                    json!([{"op":"create","class":"Kinded","id":"ns://l","values":{}}]),
+                )
+                .await;
+            })
+        }));
+        let err = refused(
+            &mut p,
+            &ctx,
+            json!([{"op":"create","class":"Kinded","id":"ns://l","values":{}}]),
+        )
+        .await;
+        assert!(matches!(err, InstanceError::ConcurrentWrite), "{err:?}");
+        assert_eq!(
+            stored_targets(&p, "ns://l", "ns://kind").await,
+            vec!["ns://thing"]
         );
     }
 }
