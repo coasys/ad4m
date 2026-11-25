@@ -320,7 +320,7 @@ async fn a_mount_survives_a_restart() {
         // hold clones of the instance, so hold a handle on the store and
         // wait for their clones to go before reopening (a second store on
         // the path while one is open is a RocksDB LOCK failure).
-        let handle = p.persisted.lock().await.clone();
+        let handle = p.persisted.snapshot();
         let uuid = handle.uuid.clone();
         let store = p.sparql_store.clone();
         crate::perspectives::unregister_mount(&lang, &uuid);

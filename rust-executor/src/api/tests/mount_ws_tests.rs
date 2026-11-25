@@ -31,9 +31,8 @@ async fn a_managed_users_mount_and_sync_read_the_language_as_that_user() {
     crate::perspectives::get_perspective(&p.0)
         .unwrap()
         .persisted
-        .lock()
-        .await
-        .add_owner(alice);
+        .update(|h| h.add_owner(alice))
+        .await;
     let params = json!({ "uuid": p.0, "languageAddress": lang });
 
     for method in ["perspective.mount", "perspective.syncMount"] {
@@ -136,7 +135,7 @@ async fn a_mount_needs_the_caller_to_be_the_single_owner() {
             let p = registered_perspective(&[]).await;
             let perspective = crate::perspectives::get_perspective(&p.0).unwrap();
             for owner in &owners {
-                perspective.persisted.lock().await.add_owner(owner);
+                perspective.persisted.update(|h| h.add_owner(owner)).await;
             }
             let params = json!({ "uuid": p.0, "languageAddress": lang });
             let result = call_as(ctx, "perspective.mount", params).await;

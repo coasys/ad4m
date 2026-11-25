@@ -4,7 +4,7 @@
 // to the executor with is the one from this checkout. node_modules/@coasys/ad4m
 // is the last released tarball: bundling it next to the core-source waker
 // manager shipped two versions of the client in one file, and the old
-// QuerySubscriptionProxy dropped the class argument, so every model-query
+// subscription proxy dropped the class argument, so every model-query
 // subscription (mentions, children) reached the executor as a SPARQL
 // subscribe and was rejected.
 //

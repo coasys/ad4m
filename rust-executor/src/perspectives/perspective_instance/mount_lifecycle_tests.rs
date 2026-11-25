@@ -605,7 +605,7 @@ async fn a_restart_removes_what_an_interrupted_first_mount_wrote() {
         .unwrap();
         assert!(!lang_links(&p, &lang).await.is_empty());
 
-        let handle = p.persisted.lock().await.clone();
+        let handle = p.persisted.snapshot();
         let uuid = handle.uuid.clone();
         let store = p.sparql_store.clone();
         crate::perspectives::unregister_mount(&lang, &uuid);
@@ -689,7 +689,7 @@ async fn a_pushed_delta_reaches_only_the_emitting_agents_perspectives() {
     let lang = load_mount_test_language().await;
     let alice = "did:key:z6MkAliceDeltaOwner";
     let (alices, _) = mounted_and_registered(&lang).await;
-    alices.persisted.lock().await.add_owner(alice);
+    alices.persisted.update(|h| h.add_owner(alice)).await;
     let (mains, _) = mounted_and_registered(&lang).await;
 
     let as_alice = crate::agent::AgentContext::managed(alice.to_string());
@@ -734,7 +734,7 @@ async fn a_mount_reads_the_language_as_the_perspectives_owner() {
     let alice = "did:key:z6MkAliceMountOwner";
     let (mut p, _shapes, _ctx) =
         crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
-    p.persisted.lock().await.add_owner(alice);
+    p.persisted.update(|h| h.add_owner(alice)).await;
     p.mount(&lang).await.unwrap();
     p.sync_mount(&lang).await.unwrap();
 
@@ -786,7 +786,7 @@ async fn a_perspective_with_two_owners_mounts_nothing() {
         let (mut p, _shapes, _ctx) =
             crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
         for owner in &owners {
-            p.persisted.lock().await.add_owner(owner);
+            p.persisted.update(|h| h.add_owner(owner)).await;
         }
         let reads = snapshot_reads(&lang).await;
         let mounted = p.mount(&lang).await;
@@ -815,10 +815,10 @@ async fn a_second_owner_stops_syncs_and_deltas() {
     let bob = "did:key:z6MkBobSecondOwner";
     let (mut p, _shapes, _ctx) =
         crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
-    p.persisted.lock().await.add_owner(alice);
+    p.persisted.update(|h| h.add_owner(alice)).await;
     p.mount(&lang).await.unwrap();
     crate::perspectives::register_perspective(p.uuid.clone(), p.clone());
-    p.persisted.lock().await.add_owner(bob);
+    p.persisted.update(|h| h.add_owner(bob)).await;
 
     interact(
         &format!("{lang}://project"),
@@ -865,13 +865,14 @@ async fn joining_a_mounted_neighbourhood_is_refused() {
     let (p, _shapes, _ctx) =
         crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
     let url = format!("neighbourhood://mounted-{}", uuid::Uuid::new_v4());
-    {
-        let mut handle = p.persisted.lock().await;
-        handle.add_owner(alice);
-        handle.shared_url = Some(url.clone());
-        handle.state = PerspectiveState::Synced;
-        crate::db::Ad4mDb::with_global_instance(|db| db.add_perspective(&handle)).unwrap();
-    }
+    p.persisted
+        .update(|handle| {
+            handle.add_owner(alice);
+            handle.shared_url = Some(url.clone());
+            handle.state = PerspectiveState::Synced;
+            crate::db::Ad4mDb::with_global_instance(|db| db.add_perspective(handle)).unwrap();
+        })
+        .await;
     let mut p = p;
     p.mount(&lang).await.unwrap();
     crate::perspectives::register_perspective(p.uuid.clone(), p.clone());
@@ -884,7 +885,7 @@ async fn joining_a_mounted_neighbourhood_is_refused() {
         &crate::agent::AgentContext::main_agent(),
     )
     .await;
-    let owners = p.persisted.lock().await.get_owners();
+    let owners = p.persisted.load().get_owners();
     let as_alice = crate::agent::AgentContext::managed(alice.to_string());
     let alice_rejoined =
         crate::neighbourhoods::install_neighbourhood_with_context(url.clone(), &as_alice).await;
@@ -907,7 +908,7 @@ async fn a_delta_with_no_call_token_reaches_no_mirror() {
     let lang = load_mount_test_language().await;
     let alice = "did:key:z6MkAliceNoToken";
     let (alices, _) = mounted_and_registered(&lang).await;
-    alices.persisted.lock().await.add_owner(alice);
+    alices.persisted.update(|h| h.add_owner(alice)).await;
     let (mains, _) = mounted_and_registered(&lang).await;
 
     crate::languages::LanguageController::global_instance()
@@ -952,13 +953,14 @@ async fn joining_during_the_first_mount_snapshot_is_refused() {
     let (p, _shapes, _ctx) =
         crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
     let url = format!("neighbourhood://preparing-{}", uuid::Uuid::new_v4());
-    {
-        let mut handle = p.persisted.lock().await;
-        handle.add_owner(alice);
-        handle.shared_url = Some(url.clone());
-        handle.state = PerspectiveState::Synced;
-        crate::db::Ad4mDb::with_global_instance(|db| db.add_perspective(&handle)).unwrap();
-    }
+    p.persisted
+        .update(|handle| {
+            handle.add_owner(alice);
+            handle.shared_url = Some(url.clone());
+            handle.state = PerspectiveState::Synced;
+            crate::db::Ad4mDb::with_global_instance(|db| db.add_perspective(handle)).unwrap();
+        })
+        .await;
     crate::perspectives::register_perspective(p.uuid.clone(), p.clone());
     let gate = gates::arm(&lang, MountPoint::InitialSnapshotFetched);
     let mut mounting = p.clone();
@@ -976,7 +978,7 @@ async fn joining_during_the_first_mount_snapshot_is_refused() {
         ),
     )
     .await;
-    let owners = p.persisted.lock().await.get_owners();
+    let owners = p.persisted.load().get_owners();
     gate.release();
     let mounted = tokio::time::timeout(Duration::from_secs(10), mount)
         .await

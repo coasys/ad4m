@@ -529,7 +529,7 @@ impl PerspectiveInstance {
     /// owners refuses mounts, syncs and deltas: another owner would read the mirror of this
     /// one's snapshot.
     pub(crate) async fn mount_owner(&self) -> Result<AgentContext, AnyError> {
-        let owners = self.persisted.lock().await.get_owners();
+        let owners = self.persisted.load().get_owners();
         let mut agents: Vec<AgentContext> = Vec::new();
         for owner in owners {
             let agent = owner_context_of(Some(owner));

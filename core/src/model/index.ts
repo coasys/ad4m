@@ -14,6 +14,5 @@ export * from "./json-schema";
 export * from "./query-utils";
 export * from "./query-sparql";
 export * from "./hydration";
-export * from "./ModelQueryBuilder";
 export * from "./sdna";
 export * from "./shacl-gen";

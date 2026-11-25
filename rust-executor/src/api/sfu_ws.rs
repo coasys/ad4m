@@ -437,8 +437,7 @@ async fn serves_all_members(params: Value, ctx: Arc<RequestContext>) -> Result<V
     let perspective = super::perspectives_ws::guarded_perspective(&params).await?;
     let shared_url = perspective
         .persisted
-        .lock()
-        .await
+        .load()
         .shared_url
         .clone()
         .ok_or_else(|| WsRpcError::bad_request("Not a neighbourhood".to_string()))?;
