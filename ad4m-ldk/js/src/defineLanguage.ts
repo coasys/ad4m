@@ -166,13 +166,19 @@ export interface LanguageSpec {
     mount?: MountCapability | MountClassesSpec;
 }
 
+/** A link action the placeholder applies to. Other actions stay as written. */
+function isCallAction(action: unknown): action is { source?: unknown; target?: unknown } {
+    return !!action && typeof action === "object" && (action as { action?: unknown }).action === "call";
+}
+
 /**
- * Replace every `{language}` in a call action's `source` (and `target`
- * params text) with the language's own address. Call actions are the only
- * shape field carrying the placeholder — a class is decorated before it
- * knows which language mounts it, so `source: "{language}://class/X"`
- * defers the address to `mountShapes()` time. Returns a new shape; the
- * `generateSHACL()` output (which callers may memoize) is never mutated.
+ * Replace every `{language}` in a call action's `source` and `target`
+ * with the language's own address. A class is decorated before it knows
+ * which language mounts it, so `source: "{language}://class/X"` defers the
+ * address to `mountShapes()` time. An action whose `action` is not `"call"`
+ * is returned unchanged, including literal `{language}` text in `source` or
+ * `target`. Returns a new shape; the `generateSHACL()` output (which callers
+ * may memoize) is never mutated.
  */
 export function resolveMountCallSources<T>(shape: T, languageAddress: string): T {
     const sub = (v: unknown) =>
@@ -181,8 +187,8 @@ export function resolveMountCallSources<T>(shape: T, languageAddress: string): T
             : v;
     const actions = (list: unknown) =>
         Array.isArray(list)
-            ? list.map((a) => (a && typeof a === "object"
-                ? { ...a, source: sub((a as any).source), target: sub((a as any).target) }
+            ? list.map((a) => (isCallAction(a)
+                ? { ...a, source: sub(a.source), target: sub(a.target) }
                 : a))
             : list;
     const s = shape as any;
@@ -209,9 +215,8 @@ function textHasLanguage(value: unknown): boolean {
 }
 
 function actionHasLanguage(action: unknown): boolean {
-    if (!action || typeof action !== "object") return false;
-    const a = action as { source?: unknown; target?: unknown };
-    return textHasLanguage(a.source) || textHasLanguage(a.target);
+    if (!isCallAction(action)) return false;
+    return textHasLanguage(action.source) || textHasLanguage(action.target);
 }
 
 function listHasLanguage(list: unknown): boolean {
