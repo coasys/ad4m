@@ -9,6 +9,7 @@ pub(crate) enum MountPoint {
     /// `sync_mount`, after `mountSnapshot()` answered, before the apply.
     SnapshotFetched,
     /// Inside the snapshot read waiter, before the language answers.
+    #[cfg(test)]
     SnapshotReading,
     /// A delta (pushed or a call's result), before it is applied.
     DeltaReceived,

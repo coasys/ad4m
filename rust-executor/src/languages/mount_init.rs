@@ -1,4 +1,4 @@
-//! Bound the read-only preparation of a first mount, before any mirror writes.
+//! Bound mount reads before any mirror writes (initial mount, sync and restore).
 use std::{future::Future, time::Duration};
 
 use anyhow::Result;
@@ -20,25 +20,22 @@ pub(crate) enum MountError {
         after_ms: u64,
         attempts: usize,
     },
-    #[error("MountReadTimeout: language {language_address} timed out reading the initial mount after {after_ms} ms")]
+    #[error("MountReadTimeout: language {language_address} timed out reading the mount after {after_ms} ms")]
     ReadTimeout {
         language_address: String,
         after_ms: u64,
     },
 }
 
-pub(crate) async fn read_initial_mount<T, F, Fut>(language: &str, read: F) -> Result<T>
+// One end-to-end budget for shapes plus snapshot, on every mount read path.
+const MOUNT_READ_TIMEOUT: Duration = Duration::from_secs(75);
+
+pub(crate) async fn read_mount<T, F, Fut>(language: &str, read: F) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, LanguageError>>,
 {
-    read_with_policy(
-        language,
-        read,
-        Duration::from_secs(75),
-        Duration::from_secs(1),
-    )
-    .await
+    read_with_policy(language, read, MOUNT_READ_TIMEOUT, Duration::from_secs(1)).await
 }
 
 async fn read_with_policy<T, F, Fut>(
@@ -124,17 +121,22 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn pending_cell_read_returns_typed_deadline() {
+        let calls = Cell::new(0);
         let result = timeout(
             Duration::from_secs(2),
             read_with_policy(
                 "acorn",
-                || pending::<Result<(), LanguageError>>(),
+                || {
+                    calls.set(calls.get() + 1);
+                    pending::<Result<(), LanguageError>>()
+                },
                 Duration::from_secs(1),
                 Duration::from_millis(10),
             ),
         )
         .await
         .expect("mount read must settle before the outer watchdog");
+        assert_eq!(calls.get(), 1, "an unsettled call must never be retried");
         assert!(matches!(
             result.unwrap_err().downcast_ref::<MountError>(),
             Some(MountError::ReadTimeout { after_ms: 1000, .. })

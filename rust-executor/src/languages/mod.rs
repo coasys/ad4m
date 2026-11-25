@@ -17,10 +17,10 @@ pub mod language_runtime_handle;
 pub mod literal;
 mod metas;
 mod metrics;
+pub(crate) mod mount_init;
 #[cfg(test)]
 pub(crate) mod mount_tests;
 pub mod mount_types;
-pub(crate) mod mount_init;
 #[cfg(test)]
 mod signing_reach_tests;
 #[cfg(test)]
@@ -3199,7 +3199,8 @@ impl LanguageController {
         crate::perspectives::perspective_instance::mount_gates::pause(
             lang_address,
             crate::perspectives::perspective_instance::mount_gates::MountPoint::SnapshotReading,
-        ).await;
+        )
+        .await;
         let result = self
             .call_mount_export(lang_address, "mountSnapshot")
             .await?;
