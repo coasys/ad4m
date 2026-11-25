@@ -67,8 +67,9 @@ export function buildWakeMessage(
       if (m.ancestors?.length) {
         lines.push(`  Ancestors: ${m.ancestors.join(", ")}`);
       }
-      // Files held by the item: what each is, and where its bytes are, so the agent need not
-      // walk the item's children to learn that it was sent a file. Every field is written by
+      // Files held by the item, directly or in a group among its parts (up to two containment
+      // levels below it): what each is, and where its bytes are, so the agent need not walk the
+      // item's children to learn that it was sent a file. Every field is written by
       // the sender (the mention signature does not vouch for it), so each prints as one quoted,
       // escaped, capped line, and the block has a total budget.
       if (m.attachments.length) {

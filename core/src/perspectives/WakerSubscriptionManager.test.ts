@@ -823,8 +823,9 @@ describe('WakerSubscriptionManager', () => {
     ancestorDepth?: number,
     address = 'test://message',
     deliveries: any[] = [result(named(address))],
-    // The file records a `FileContent` query under the mentioned item answers with.
-    files: any[] = [],
+    // The file records a `FileContent` query under the mentioned item answers with: a list, or a
+    // function of the query's `parent` scope.
+    files: any[] | ((scope: any) => any[]) = [],
   ) {
     const delivers: Record<string, (result: any) => Promise<void>> = {};
     const opened: any[][] = [];
@@ -838,7 +839,8 @@ describe('WakerSubscriptionManager', () => {
         const query = JSON.parse(queryJson);
         if (className === 'ad4m://FileContent') {
           fileQueries.push(query);
-          return Promise.resolve({ instances: files, totalCount: files.length });
+          const found = typeof files === 'function' ? files(query.parent) : files;
+          return Promise.resolve({ instances: found, totalCount: found.length });
         }
         queries.push([className, query]);
         const rows = answer(query.parent);
@@ -1197,9 +1199,11 @@ describe('WakerSubscriptionManager', () => {
       10,
       () => (h.wakes.length === 1 ? new Promise((r) => { landA = r; }) : true),
       {
-        // A's lookups answer at once; B's waits until the test lets it go.
-        modelQuery: (_uuid: string, _className: string, queryJson: string) => {
+        // A's lookups answer at once; B's parent lookup waits until the test lets it go. The
+        // file lookup of either answers at once.
+        modelQuery: (_uuid: string, className: string, queryJson: string) => {
           const empty = { instances: [], totalCount: 0 };
+          if (className === 'ad4m://FileContent') return Promise.resolve(empty);
           if (!JSON.parse(queryJson).parent?.ids?.includes('test://b')) return Promise.resolve(empty);
           bLookupStarted = true;
           return new Promise((r) => { resolveB = () => r(empty); });
@@ -1295,12 +1299,31 @@ describe('WakerSubscriptionManager', () => {
     ];
     const { wakes, fileQueries } = await wakeWith(() => [], 3, 'test://message', undefined, files);
     expect(fileQueries).toEqual([
-      { parent: { id: 'test://message' }, properties: ['name', 'mimeType', 'size', 'url'], limit: 20 },
+      {
+        parent: { ids: 'test://message', transitive: true, maxDepth: 2 },
+        properties: ['name', 'mimeType', 'size', 'url'],
+        limit: 20,
+      },
     ]);
     expect(wakes[0][0].attachments).toEqual([
       { address: 'test://file-1', name: 'plan.pdf', mimeType: 'application/pdf', size: 2048, url: 'QmPlan' },
       { address: 'test://file-2', name: 'shot.png', mimeType: 'image/png', size: 512, url: 'QmShot' },
     ]);
+  });
+
+  it('finds the files of an attachment group one level below the message', async () => {
+    // The executor answers a one-step `{ id }` scope with the direct file only, and the
+    // two-level traversal with the direct file and the group's files.
+    const direct = { id: 'test://direct', name: 'a.txt', mimeType: 'text/plain', size: 1, url: 'QmA' };
+    const grouped = { id: 'test://grouped', name: 'b.txt', mimeType: 'text/plain', size: 2, url: 'QmB' };
+    const { wakes } = await wakeWith(
+      () => [],
+      3,
+      'test://message',
+      undefined,
+      (scope) => (scope.transitive && scope.maxDepth === 2 ? [direct, grouped] : scope.id ? [direct] : []),
+    );
+    expect(wakes[0][0].attachments.map((a: any) => a.address)).toEqual(['test://direct', 'test://grouped']);
   });
 
   it('reports an empty attachments list for an item that holds no files', async () => {

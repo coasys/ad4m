@@ -191,7 +191,9 @@ Two reasons this is not cosmetic:
   built-in TextContent whose text names you: your profile names (username,
   given and family name) and your DID are the terms, matched as whole words.
   The wake lists up to 20 files the record holds (a message's attachments):
-  records under it whose class has `name`, `mimeType`, `size` and `url`, read
+  records up to two containment levels below it (its direct parts, and the
+  parts of a group among them) whose class has `name`, `mimeType`, `size` and
+  `url`, read
   through the built-in FileContent. Best effort: a failed or slow lookup (2 s
   budget) gives none, so no files listed does not prove the message has none.
   The sender writes every field, and it is unverified.

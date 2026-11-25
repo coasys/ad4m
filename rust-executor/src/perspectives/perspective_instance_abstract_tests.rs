@@ -1271,3 +1271,99 @@ async fn the_waker_reads_the_files_a_message_holds_through_file_content() {
         ]
     );
 }
+
+/// The ids of the rows of a model query, sorted.
+async fn row_ids(p: &PerspectiveInstance, class: &str, query: Value) -> Vec<String> {
+    let json = p
+        .model_query_classes(&one(class), &query.to_string())
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_str(&json).unwrap();
+    let mut ids: Vec<String> = result["instances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// WE's composition layout: a message holds its text, then one attachment
+/// group, and the group holds a file record per file. The waker asks with
+/// `parent: { ids, transitive: true, maxDepth: 2 }`, so it finds the files of
+/// the group and a file directly under the message (the earlier layout). The
+/// one-step `{ id }` scope finds only the direct one. A file three levels
+/// down is out of reach, and a file under another message is not found.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_waker_reads_files_one_group_below_the_message() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[
+        ("FileBlock", FILE_BLOCK_SDNA),
+        ("TextBlock", FILE_MESSAGE_SDNA),
+    ])
+    .await;
+    let file = |name: &str| json!({"name": name, "url": format!("Qm{name}"), "mimeType": "application/pdf", "size": 1});
+    for (class, base, props) in [
+        ("TextBlock", "we://msg", json!({})),
+        ("TextBlock", "we://group", json!({})),
+        ("TextBlock", "we://deep-group", json!({})),
+        ("TextBlock", "we://other-msg", json!({})),
+        ("FileBlock", "we://direct", file("direct.pdf")),
+        ("FileBlock", "we://in-group-1", file("a.pdf")),
+        ("FileBlock", "we://in-group-2", file("b.pdf")),
+        ("FileBlock", "we://too-deep", file("deep.pdf")),
+        ("FileBlock", "we://elsewhere", file("other.pdf")),
+    ] {
+        create(&mut p, &ctx, class, base, props).await.unwrap();
+    }
+    for (parent, child) in [
+        ("we://msg", "we://direct"),
+        ("we://msg", "we://group"),
+        ("we://group", "we://in-group-1"),
+        ("we://group", "we://in-group-2"),
+        ("we://group", "we://deep-group"),
+        ("we://deep-group", "we://too-deep"),
+        ("we://other-msg", "we://elsewhere"),
+    ] {
+        p.add_link(
+            Link {
+                source: parent.into(),
+                predicate: Some("ad4m://has_child".into()),
+                target: child.into(),
+            },
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .unwrap();
+    }
+
+    let props = ["name", "mimeType", "size", "url"];
+    let old = row_ids(
+        &p,
+        "ad4m://FileContent",
+        json!({"parent": {"id": "we://msg"}, "properties": props, "limit": 20}),
+    )
+    .await;
+    assert_eq!(old, vec!["we://direct".to_string()]);
+
+    let new = row_ids(
+        &p,
+        "ad4m://FileContent",
+        json!({
+            "parent": {"ids": "we://msg", "transitive": true, "maxDepth": 2},
+            "properties": props,
+            "limit": 20,
+        }),
+    )
+    .await;
+    assert_eq!(
+        new,
+        vec![
+            "we://direct".to_string(),
+            "we://in-group-1".to_string(),
+            "we://in-group-2".to_string(),
+        ]
+    );
+}

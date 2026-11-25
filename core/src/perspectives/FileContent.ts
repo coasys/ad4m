@@ -10,8 +10,11 @@ import { Model, Property } from "../model/decorators";
  * aliased to them, under whatever predicates the app chose:
  *
  * ```typescript
- * // The files a message holds, whatever the app calls its file class:
- * const files = await FileContent.findAll(perspective, { parent: { id: message } });
+ * // The files a message holds, whatever the app calls its file class: its direct parts
+ * // and the parts of a group among them (up to two containment levels below it):
+ * const files = await FileContent.findAll(perspective, {
+ *   parent: { ids: message, transitive: true, maxDepth: 2 },
+ * });
  * ```
  *
  * Built in: the executor declares it (mirrors

@@ -209,8 +209,9 @@ export interface MentionMessage {
    */
   ancestors: string[];
   /**
-   * The files the record holds (a message's attachments): every record under it whose class has a
-   * `name`, `mimeType`, `size` and `url` (`ad4m://FileContent`). Empty when it holds none or the
+   * The files the record holds (a message's attachments): every record up to two containment
+   * levels below it, directly or in a group among its parts, whose class has a `name`,
+   * `mimeType`, `size` and `url` (`ad4m://FileContent`). Empty when it holds none or the
    * lookup failed.
    */
   attachments: MentionAttachment[];
@@ -1179,13 +1180,17 @@ export class WakerSubscriptionManager {
 
   /**
    * The files `address` holds, in one model query over `FileContent`: the executor reads every
-   * record under it whose class has a file's four names, whatever the app calls the class.
-   * Failures count as none.
+   * record up to two containment levels below it (its direct parts, and the parts of a group
+   * among them) whose class has a file's four names, whatever the app calls the class. Failures
+   * count as none.
+   *
+   * Two levels, because a composed message holds its files in one attachment group, while an
+   * earlier message holds them directly.
    */
   private async attachmentsOf(sub: WakerSubscription, address: string): Promise<MentionAttachment[]> {
     try {
       const query = JSON.stringify({
-        parent: { id: address },
+        parent: { ids: address, transitive: true, maxDepth: 2 },
         properties: ["name", "mimeType", "size", "url"],
         limit: MAX_ATTACHMENTS,
       });
