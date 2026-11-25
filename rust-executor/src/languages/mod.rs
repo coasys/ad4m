@@ -20,6 +20,7 @@ mod metrics;
 #[cfg(test)]
 pub(crate) mod mount_tests;
 pub mod mount_types;
+pub(crate) mod mount_init;
 #[cfg(test)]
 mod signing_reach_tests;
 #[cfg(test)]

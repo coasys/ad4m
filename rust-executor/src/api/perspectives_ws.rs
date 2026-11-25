@@ -1098,6 +1098,16 @@ fn refuse_mount_for_users(ctx: &RequestContext) -> Result<(), WsRpcError> {
     }
 }
 
+/// Preserve the typed first-mount failure across the anyhow/RPC boundary.
+fn mount_error_ws(error: deno_core::error::AnyError) -> WsRpcError {
+    let mut rpc = WsRpcError::internal(error.to_string());
+    if let Some(error) = error.downcast_ref::<crate::languages::mount_init::MountError>() {
+        // All fields are strings/integers; serialization cannot fail.
+        rpc.data = serde_json::to_value(error).ok();
+    }
+    rpc
+}
+
 async fn mount_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     refuse_mount_for_users(&ctx)?;
     let language_address = params.require_str("languageAddress")?;
@@ -1105,7 +1115,7 @@ async fn mount_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
     perspective
         .mount(&language_address)
         .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        .map_err(mount_error_ws)?;
     Ok(Value::Bool(true))
 }
 
@@ -2956,5 +2966,31 @@ mod credit_check_tests {
         // The main agent pays nothing and reads no setting.
         assert!(check_credits(None).is_ok());
         assert!(reserve_credits(None, DEFAULT_LINK_WRITE).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod mount_error_tests {
+    use super::*;
+    use crate::languages::mount_init::MountError;
+
+    #[test]
+    fn mount_init_error_reaches_rpc_as_structured_data() {
+        let error = mount_error_ws(
+            MountError::CellInitTimeout {
+                language_address: "acorn".into(),
+                after_ms: 75000,
+                attempts: 3,
+            }
+            .into(),
+        );
+        assert_eq!(error.code, 500);
+        assert!(error.message.contains("CellError(InitTimeout)"));
+        assert_eq!(
+            error.to_wire()["data"],
+            serde_json::json!({
+                "kind": "cellInitTimeout", "languageAddress": "acorn", "afterMs": 75000, "attempts": 3,
+            })
+        );
     }
 }
