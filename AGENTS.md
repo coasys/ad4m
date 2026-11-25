@@ -514,34 +514,40 @@ peer (not pipes) runs str0m's bandwidth estimator, started at 800 kbit/s
 (`BWE_START_KBPS`) and fed by the caller's transport-wide-cc reports; REMB is
 ignored. Constants and why:
 
-- `RATE_WINDOW` 8 s: a layer's rate is the payload plus 32 bytes per RTP packet
+- `RATE_WINDOW` 2 s: a layer's rate is the payload plus 32 bytes per RTP packet
   (`seq_range`) over this window, known once the layer has flowed a whole
-  window. The test encoders' frames reach 60 to 97 kB: a 1 s window read a
-  high layer up to 5.2 Mbit/s (p99) against 1.3 nominal, 3 s and 5 s still
-  2.0 to 2.5, 8 s at most 1.7. Keyframes count: the codec's cadence, loss
-  recovery, a receiver's PLI and the selector's own switches all cross the
-  receiver's link, and the window smooths one burst. Trade-off: video that
-  starts or resumes costs 0 until it has flowed a whole window, so for up to 8 s
-  a resumed high stream can stay high through an estimate drop.
-- `LAYER_TIMEOUT` 5 s: a layer silent this long is gone; the selector notices
-  on its next event (the next frame of the track), not at its own deadline. A sender asked for a
-  keyframe sends none of its layers for 1 to 4 s while its pacer drains it,
-  with its own bandwidth estimate at 3 Mbit/s and more (so the SFU's request
-  causes the stall, not the sender's network); 3 s dropped the receivers of
-  the other layers a step each time.
-- `KEYFRAME_REQUEST_INTERVAL` 3 s: at most one request per (track, layer),
-  from the selector or a gap. At 500 ms the sender made one keyframe after
-  another and stalled for longer. A receiver's own PLI is not limited.
+  window. The e2e video source (`videoSource`, a gradient with moving discs
+  and light noise, compressible like camera video) sends each layer near its
+  `maxBitrate` (high 1.5 Mbit/s) at about 15 fps: over 2 s the high layer read
+  1.50 Mbit/s at p50, 1.61 at p99, 1.67 at most; over 1 s 1.66 at p99, 1.80 at
+  most. Keyframes count: the codec's cadence, loss recovery, a receiver's PLI
+  and the selector's own switches all cross the receiver's link, and the
+  window smooths one burst. Trade-off: video that starts or resumes costs 0
+  until it has flowed a whole window, so for up to 2 s a resumed high stream
+  can stay high through an estimate drop.
+- `LAYER_TIMEOUT` 2 s: a layer silent this long is gone; the selector notices
+  on its next event (the next frame of the track), not at its own deadline.
+  A steady test sender's frames come at most 300 ms apart; the longest
+  silence seen was 1.6 s, when the sending process stalled as a new encoder
+  started. A shorter timeout dropped the receivers of the other layers a step
+  at such a stall.
+- `KEYFRAME_REQUEST_INTERVAL` 500 ms: at most one request per (track, layer),
+  from the selector or a gap. A keyframe of the compressible source is a few
+  times a steady frame and leaves the sender within a frame or two, so two
+  requests a second do not stack keyframes. A receiver's own PLI is not
+  limited.
 - `BUDGET_FRACTION` 0.85 of the estimate minus the fixed traffic (per audio
   track the larger of `AUDIO_RESERVE_BPS` 64 kbit/s and its measured rate, and
   the measured rate of each video without simulcast; fixed traffic is never
   touched).
-- `UPGRADE_HEADROOM` 1.40 and `UPGRADE_HOLD` 4 s: see the upgrade rule. With
+- `UPGRADE_HEADROOM` 1.20 and `UPGRADE_HOLD` 4 s: see the upgrade rule. With
   video cost C and fixed traffic F, a receiver steps down when the estimate
-  E < (C + F) / 0.85 and an upgrade needs E >= (1.40 * C + F) / 0.85; at F = 0
-  the old 1.20 left a 20% gap between the two lines. 1.40 adds hysteresis
-  against the loopback estimate's swings (2.2 to 4.9 Mbit/s with the traffic
-  unchanged), which sent the receiver down again.
+  E < (C + F) / 0.85 and an upgrade needs E >= (1.20 * C + F) / 0.85; at F = 0
+  the upgrade line is 20% above the step-down line. On loopback the estimate
+  settles close to the traffic it carries: of 96 step-downs, 44 came with the
+  budget within 5% of the cost and 66 within 10%. A headroom of 1.40 was
+  reached rarely: in the e2e runs 8 of 9 scenarios failed with 1.40 against
+  4 of 9 with 1.20.
 
 Rules, per receiver, run on an estimate event, a track-set or ceiling change,
 a committed switch, a change in a track's set of live layers (a layer starts,
@@ -552,14 +558,17 @@ lowers the loop's timeout.
 
 - Over budget, one video track drops one live layer (largest saving first,
   ties by stable id), one per run.
-- An upgrade of one track by one layer needs budget >= 1.40 * (cost sum + the
-  layer's extra cost), held 4 s without a dip, ceiling change, track-set change
-  or completed switch; each upgrade starts a new hold. The hold belongs to one
-  (track, target layer): another candidate starts its own 4 s, and a candidate
-  that holds stays the choice while another becomes cheaper. The layer to go
-  to needs a measured rate. While a forwarded video's own cost is not
-  measured yet, or an audio track is still unmeasured (its meter's first
-  packet + 8 s wakes the allocation), upgrades wait; this covers upgrades, not
+- An upgrade step raises one track by one layer. The receiver has one hold
+  (`hold_since`): it starts when the cheapest step fits budget >= 1.20 * (cost
+  sum + the step's extra cost), is re-checked at every run, and any dip,
+  ceiling change, track-set change or completed switch resets it. At the end
+  of the 4 s hold every step the headroom covers is granted in one run,
+  cheapest first, at most one layer per track, each checked cumulatively
+  against the cost of the steps already granted; the hold then starts again.
+  The layer to go to needs a measured rate. While a forwarded video's own
+  cost is not measured yet, or an audio track is still unmeasured (its
+  meter's first packet + `RATE_WINDOW` wakes the allocation), upgrades wait;
+  this covers upgrades, not
   step-downs. No estimate yet, or the last one `can_probe: false`,
   blocks upgrades; a peer that never reports stays on the lowest layer.
 - A switch commits on a keyframe of the new layer. The old layer's cost counts
@@ -568,7 +577,7 @@ lowers the loop's timeout.
   never paused).
 - When a switch commits on a layer below the receiver's cap (the layer it
   wanted stopped), the cap drops to that layer: a layer that returns is
-  measured again (8 s) and earns its upgrade again (4 s hold, `can_probe`).
+  measured again (2 s) and earns its upgrade again (4 s hold, `can_probe`).
 - `SetQualityPreference` is a ceiling, not a choice: `high`, `auto` and unset
   let the estimate decide up to high; the receiver gets the best live layer at
   or below the ceiling, else the lowest live one; a lowered ceiling applies on
@@ -576,7 +585,7 @@ lowers the loop's timeout.
   are never reused).
 - The receiver's probing target (`bwe().set_desired_bitrate`) is the estimate
   that satisfies the upgrade condition at the permitted maximum layers:
-  `(1.40 * highest + fixed) / 0.85`, rounded up (fixed: audio and
+  `(1.20 * highest + fixed) / 0.85`, rounded up (fixed: audio and
   non-simulcast video).
 - A cap change is logged at `debug` (`rust_executor::sfu::simulcast`:
   receiver, track, old and new layer, estimate, budget, spent, layer rates).

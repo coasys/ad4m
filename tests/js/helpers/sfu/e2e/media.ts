@@ -109,18 +109,71 @@ export class PauseWatch {
   }
 }
 
-export function videoSource(width: number, height: number, fps = 15): Source {
+/** The ramp's period, in pixels (a power of two, for the mask). */
+export const RAMP_SIZE = 512;
+/** Smooth luma 48..208: a wide gradient the encoder predicts well. */
+const RAMP = Uint8Array.from({ length: RAMP_SIZE }, (_, i) => Math.round(128 + 80 * Math.sin((2 * Math.PI * i) / RAMP_SIZE)));
+const NOISE_SIZE = 1 << 20;
+/** Random numbers 0..255, drawn once for the process (a seeded generator, so a run repeats). */
+const NOISE = (() => {
+  const noise = new Uint8Array(NOISE_SIZE);
+  let state = 0x9e3779b9;
+  for (let i = 0; i < NOISE_SIZE; i++) {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    noise[i] = state >>> 24;
+  }
+  return noise;
+})();
+
+/**
+ * A moving picture that compresses like camera video and still costs bits:
+ * a smooth gradient that drifts, soft discs that move across it, and sensor
+ * noise (a different draw each frame, `noise` levels wide). The encoder
+ * spends its target on it, a keyframe is a few times a steady frame, and
+ * frames are not dropped after one.
+ */
+export function videoSource(width: number, height: number, fps = 15, noise = 10): Source {
   const source = new wrtc.nonstandard.RTCVideoSource();
   const track = source.createTrack();
   const luma = width * height;
   const chroma = (width / 2) * (height / 2);
+  const discs = [0, 1, 2, 3].map((i) => ({
+    radius: Math.round(height / (5 + i)),
+    gain: i % 2 ? -70 : 70,
+    speedX: 0.011 + 0.004 * i,
+    speedY: 0.007 + 0.003 * i,
+    phase: i * 1.7,
+  }));
   let n = 0;
   const timer = setInterval(() => {
     const data = new Uint8Array(luma + 2 * chroma);
-    // A moving pattern, so the encoder spends real bits on it.
-    const shift = (n++ * 3) & 0xff;
+    // Written through a clamping view: overlapping discs saturate, not wrap.
+    const pixels = new Uint8ClampedArray(data.buffer);
+    const frame = n++;
+    const drift = frame * 2;
+    // Noise in -noise/2 .. noise/2, from a window of the table that moves every frame.
+    const offset = (frame * 7919) & (NOISE_SIZE - 1);
+    const scale = noise / 256;
+    const bias = noise / 2;
     for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) data[y * width + x] = ((x + y + shift) * 7) & 0xff;
+      const row = y * width;
+      for (let x = 0; x < width; x++) {
+        pixels[row + x] = RAMP[(x + y + drift) & (RAMP_SIZE - 1)] + NOISE[(row + x + offset) & (NOISE_SIZE - 1)] * scale - bias;
+      }
+    }
+    for (const d of discs) {
+      const cx = Math.round((0.5 + 0.4 * Math.sin(frame * d.speedX + d.phase)) * width);
+      const cy = Math.round((0.5 + 0.4 * Math.cos(frame * d.speedY + d.phase)) * height);
+      const r = d.radius;
+      for (let y = Math.max(0, cy - r); y < Math.min(height, cy + r); y++) {
+        const dy = y - cy;
+        for (let x = Math.max(0, cx - r); x < Math.min(width, cx + r); x++) {
+          const dx = x - cx;
+          const q = (dx * dx + dy * dy) / (r * r);
+          // A soft edge: the gain falls smoothly to 0 at the rim.
+          if (q < 1) pixels[y * width + x] += d.gain * (1 - q) * (1 - q);
+        }
+      }
     }
     data.fill(128, luma);
     source.onFrame({ width, height, data });
