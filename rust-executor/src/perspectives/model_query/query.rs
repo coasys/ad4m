@@ -464,7 +464,13 @@ pub async fn execute_model_query_stopped(
     query_input: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
 ) -> Result<ModelQueryResult, Error> {
-    execute_model_query_inner(stop, store, shape, query_input, resolver, 0).await
+    let timing = crate::perspectives::sparql_store::query_timing::ModelTiming::start(
+        &shape.target_class,
+        &format!("{query_input:?}"),
+    );
+    let result = execute_model_query_inner(stop, store, shape, query_input, resolver, 0).await;
+    timing.done(result.as_ref().map(|r| r.instances.len()).unwrap_or(0));
+    result
 }
 
 /// Refuse a scope that combines options with no single meaning.

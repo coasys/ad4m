@@ -302,6 +302,71 @@ pub(crate) async fn query_gate(
     gate
 }
 
+/// Where a read spends its time, for profiling a running executor: with
+/// `AD4M_QUERY_TIMING=1` in its environment, every store query logs its time
+/// and text, and every model query its total, so the gap between the two is
+/// the time spent outside the store. Off unless set; the check is one load of
+/// a cached flag.
+pub(crate) mod query_timing {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+
+    fn enabled() -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| std::env::var("AD4M_QUERY_TIMING").is_ok_and(|v| v == "1"))
+    }
+
+    fn one_line(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// One store query, logged when dropped.
+    pub(crate) struct QueryTiming(Option<(Instant, String)>);
+
+    impl QueryTiming {
+        pub(crate) fn start(query: &str) -> Self {
+            Self(enabled().then(|| (Instant::now(), one_line(query))))
+        }
+    }
+
+    impl Drop for QueryTiming {
+        fn drop(&mut self) {
+            if let Some((at, query)) = self.0.take() {
+                let shown: String = query.chars().take(4000).collect();
+                log::warn!(
+                    "query-timing store {}ms len={} q={}",
+                    at.elapsed().as_millis(),
+                    query.len(),
+                    shown
+                );
+            }
+        }
+    }
+
+    /// One model query, from its start to its answer.
+    pub(crate) struct ModelTiming(Option<(Instant, String)>);
+
+    impl ModelTiming {
+        pub(crate) fn start(class: &str, query_json: &str) -> Self {
+            Self(enabled().then(|| {
+                (
+                    Instant::now(),
+                    format!("class={class} query={}", one_line(query_json)),
+                )
+            }))
+        }
+
+        pub(crate) fn done(mut self, rows: usize) {
+            if let Some((at, what)) = self.0.take() {
+                log::warn!(
+                    "query-timing model {}ms rows={rows} {what}",
+                    at.elapsed().as_millis()
+                );
+            }
+        }
+    }
+}
+
 /// The counter the tests use to prove a stopped evaluation actually ended —
 /// incremented while an eval runs, decremented when it ends.
 #[cfg(test)]
@@ -2939,6 +3004,7 @@ impl SparqlStore {
             return Err(err);
         }
         validate_readonly_query(query_string)?;
+        let _timing = query_timing::QueryTiming::start(query_string);
         #[cfg(test)]
         self.query_log
             .lock()
