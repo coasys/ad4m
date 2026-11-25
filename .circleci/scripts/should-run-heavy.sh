@@ -30,7 +30,8 @@
 # request and agree. One verdict per workflow, first writer wins: the file is
 # created only if absent, and a job whose write loses answers what the file
 # holds, so jobs that looked up at the same moment still answer alike. A failed lookup is the
-# verdict too ("unsure", exit 11 for every later job). A rerun is a new workflow
+# verdict too ("unsure", exit 11 for every later job). With no cache to share
+# the verdict, a light job does not halt (exit 11). A rerun is a new workflow
 # and asks again.
 #
 #   CIRCLE_BRANCH, CIRCLE_TAG, CIRCLE_WORKFLOW_ID, CIRCLE_REPOSITORY_URL  from CircleCI
@@ -162,7 +163,14 @@ case "$heavy_v:$light_v" in
   "run: "*:"run: "*|"run: "*:"skip: "*|"skip: "*:"run: "*|"skip: "*:"skip: "*) ;;
   *) unsure "could not read the GitHub API answer" ;;
 esac
-write_cache "$heavy_v" "$light_v" || read_cache # a job that wrote first answers for the workflow
+if ! write_cache "$heavy_v" "$light_v"; then
+  read_cache # a job that wrote first answers for the workflow
+  # No shared verdict (no cache, or the write failed). A light job halts only on
+  # the workflow's verdict, so its light jobs never split into ran and halted.
+  case "$mode:$light_v" in
+    "light:skip: "*) unsure "${light_v#skip: }, but no workflow cache to share the verdict" ;;
+  esac
+fi
 if [ "$mode" = light ]; then verdict="$light_v"; else verdict="$heavy_v"; fi
 echo "$verdict"
 case "$verdict" in

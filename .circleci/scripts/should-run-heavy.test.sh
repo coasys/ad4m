@@ -137,9 +137,15 @@ check "workflow cache: a one-line file is a miss" 0 '^run: PR #52 targets dev$' 
 # Only a draft halts them; a stacked PR or a branch with no PR still runs them.
 echo "should-run-heavy.sh light"
 light "light: draft PR to dev skips" 10 '^skip: PR #30 is a draft' \
-  CIRCLE_BRANCH=feat/x FAKE_BODY="[$(pr 30 true dev)]"
+  CIRCLE_BRANCH=feat/x CIRCLE_WORKFLOW_ID=wfd30 FAKE_BODY="[$(pr 30 true dev)]"
 light "light: draft PR to a stack branch skips" 10 '^skip: PR #31 is a draft' \
-  CIRCLE_BRANCH=feat/x FAKE_BODY="[$(pr 31 true feat/base)]"
+  CIRCLE_BRANCH=feat/x CIRCLE_WORKFLOW_ID=wfd31 FAKE_BODY="[$(pr 31 true feat/base)]"
+# Without a shared verdict, one light job could run (a failed lookup) while the
+# next one halts: a light job halts only on the workflow's cached verdict.
+light "light: draft with no workflow cache runs, unsure" 11 '^run: PR #33 is a draft, but no workflow cache' \
+  CIRCLE_BRANCH=feat/x FAKE_BODY="[$(pr 33 true dev)]"
+check "heavy: draft with no workflow cache still skips" 10 '^skip: PR #33 is a draft' \
+  CIRCLE_BRANCH=feat/x FAKE_BODY="[$(pr 33 true dev)]"
 light "light: ready PR to dev runs" 0 '^run: PR #32 is ready' \
   CIRCLE_BRANCH=feat/x FAKE_BODY="[$(pr 32 false dev)]"
 light "light: ready PR to a stack branch runs" 0 '^run: PR #33 is ready' \
