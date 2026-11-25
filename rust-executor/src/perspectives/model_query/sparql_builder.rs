@@ -30,8 +30,8 @@ use super::link_author::{
     side_by_side_author, side_by_side_scopes, split_leaf, LinkAuthorState,
 };
 use super::types::{
-    ContainedScope, InstanceQueryPlan, ModelQueryInput, ModelShape, OrderDirection, Scope,
-    ScopeDirection, ShapeResolver, SortKey, SparqlPagination, WhereCondition,
+    ContainedScope, IdsFirst, InstanceQueryPlan, ModelQueryInput, ModelShape, OrderDirection,
+    Scope, ScopeDirection, ShapeResolver, SortKey, SparqlPagination, WhereCondition,
 };
 use super::utils::{
     emittable_iri, escape_sparql_string, format_literal_number, looks_like_absolute_iri,
@@ -296,6 +296,7 @@ pub(super) fn build_instance_sparql(
         };
 
     if let Some(pg) = sparql_pagination {
+        let mut ids_first: Option<IdsFirst> = None;
         let subquery_body = match &pg.sort_key {
             SortKey::Timestamp => {
                 // The probe goes first: see `build_timestamp_probe` for why the
@@ -311,6 +312,16 @@ pub(super) fn build_instance_sparql(
             }
             SortKey::CreatedAt => {
                 let links = hydrated_links(shape, query, &predicate_filter);
+                // Only where the ids alone are the answer: a per-anchor page groups by the
+                // anchor too, which the ids query does not return.
+                if !conformance.trim().is_empty() && anchor_select.is_empty() {
+                    ids_first = Some(IdsFirst {
+                        ids_query: format!(
+                            "SELECT DISTINCT ?source WHERE {{\n{conformance}\n{where_extra}\n}}"
+                        ),
+                        replaces: format!("\n{conformance}\n"),
+                    });
+                }
                 format!(
                     r#"SELECT DISTINCT ?source{anchor_select} (MIN(?timestamp) AS ?_first_ts) WHERE {{
 {conformance}
@@ -366,16 +377,39 @@ pub(super) fn build_instance_sparql(
         InstanceQueryPlan::TwoPhase {
             pagination_subquery: subquery_body,
             predicate_filter,
+            ids_first,
         }
     } else {
         let links = hydrated_links(shape, query, &predicate_filter);
-        InstanceQueryPlan::Single(format!(
-            r#"SELECT DISTINCT ?source ?predicate ?target ?author ?timestamp WHERE {{
-{conformance}
+        if conformance.trim().is_empty() {
+            InstanceQueryPlan::Single(format!(
+                r#"SELECT DISTINCT ?source ?predicate ?target ?author ?timestamp WHERE {{
 {where_extra}
 {links}}}"#
-        ))
+            ))
+        } else {
+            InstanceQueryPlan::IdsThenLinks {
+                ids_query: format!(
+                    r#"SELECT DISTINCT ?source WHERE {{
+{conformance}
+{where_extra}
+}}"#
+                ),
+                links,
+            }
+        }
     }
+}
+
+/// The second half of [`InstanceQueryPlan::IdsThenLinks`]: the links of `ids`,
+/// in the single plan's row form.
+pub(super) fn links_of_ids(ids: &[String], links: &str) -> String {
+    let source_constraint = super::utils::values_or_str_filter("source", ids);
+    format!(
+        r#"SELECT DISTINCT ?source ?predicate ?target ?author ?timestamp WHERE {{
+    {source_constraint}
+{links}}}"#
+    )
 }
 
 /// The links the single plan hydrates an instance from, each bound as
@@ -447,8 +481,8 @@ pub(super) fn link_status_filter(status: Option<&LinkStatus>) -> String {
     match status {
         None => String::new(),
         Some(s) => format!(
-            "    ?_reifier <ad4m://ontology/status> \"{}\" .\n",
-            status_str(s)
+            "   {}\n",
+            annotation_is("?_reifier", "status", "_st", status_str(s))
         ),
     }
 }
@@ -490,12 +524,36 @@ pub(super) fn link_status_filter(status: Option<&LinkStatus>) -> String {
 /// `getters::verify_relation_getter`; a hand-written getter runs as written.
 ///
 /// Empty when the query opts in with `includeUnverified`.
-pub(super) fn proof_valid_filter(include_unverified: Option<bool>) -> &'static str {
+pub(super) fn proof_valid_filter(include_unverified: Option<bool>) -> String {
     if include_unverified.unwrap_or(false) {
-        ""
+        String::new()
     } else {
-        "    ?_reifier <ad4m://ontology/proofValid> \"true\" .\n"
+        format!(
+            "   {}\n",
+            annotation_is("?_reifier", "proofValid", "_pv", "true")
+        )
     }
+}
+
+/// One annotation of a link's reifier, required to hold `value`: the reifier's
+/// `<ad4m://ontology/{name}>` read into a variable and compared in a `FILTER`.
+///
+/// Not the constant pattern `?r <…/proofValid> "true"`. Oxigraph plans joins by
+/// how many terms each pattern binds and has no statistics, so a pattern with
+/// two constants looks as cheap to start from as the query's own ids. It then
+/// begins at every verified reifier in the store — every link anyone ever
+/// wrote — and joins the ids last. On a space with 1,531 tasks that took a
+/// kind's fetch from 191 ms to about 820 ms, and the plan it falls into depends
+/// on which other patterns share the query. With the value in a variable the
+/// pattern binds only the reifier, so it is joined after the reifier is known.
+/// Same rows: the reifier has one value per annotation, and the filter keeps
+/// exactly the rows the constant matched.
+///
+/// The variable is the reifier's name with `suffix`, so two guarded reifiers in
+/// one query never share it.
+pub(super) fn annotation_is(reifier: &str, name: &str, suffix: &str, value: &str) -> String {
+    let var = format!("{reifier}{suffix}");
+    format!(" {reifier} <ad4m://ontology/{name}> {var} . FILTER({var} = \"{value}\")")
 }
 
 /// Which links a read may use: the query's `linkStatus` (#1116) and
@@ -544,15 +602,10 @@ impl<'a> LinkGuard<'a> {
     pub(super) fn on_reifier(&self, reifier: &str) -> String {
         let mut out = String::new();
         if let Some(s) = self.status {
-            out.push_str(&format!(
-                " {reifier} <ad4m://ontology/status> \"{}\" .",
-                status_str(s)
-            ));
+            out.push_str(&annotation_is(reifier, "status", "_st", status_str(s)));
         }
         if !self.include_unverified.unwrap_or(false) {
-            out.push_str(&format!(
-                " {reifier} <ad4m://ontology/proofValid> \"true\" ."
-            ));
+            out.push_str(&annotation_is(reifier, "proofValid", "_pv", "true"));
         }
         out
     }
@@ -2007,7 +2060,7 @@ mod tests {
                 pagination_subquery,
                 ..
             } => pagination_subquery,
-            InstanceQueryPlan::Single(_) => panic!("Expected TwoPhase query plan, got Single"),
+            _ => panic!("Expected TwoPhase query plan, got Single"),
         }
     }
 
@@ -2155,6 +2208,7 @@ mod tests {
         let sparql = match plan {
             InstanceQueryPlan::Single(q) => q,
             InstanceQueryPlan::TwoPhase { .. } => panic!("expected Single plan"),
+            InstanceQueryPlan::IdsThenLinks { ids_query, links } => format!("{ids_query}\n{links}"),
         };
         assert!(
             !sparql.contains("<true>"),
@@ -2170,6 +2224,7 @@ mod tests {
         let sparql = match plan {
             InstanceQueryPlan::Single(q) => q,
             InstanceQueryPlan::TwoPhase { .. } => panic!("expected Single plan"),
+            InstanceQueryPlan::IdsThenLinks { ids_query, links } => format!("{ids_query}\n{links}"),
         };
         assert!(
             sparql.contains("<todo://yes>"),
@@ -3359,7 +3414,7 @@ mod traverse_scope_tests {
                 pagination_subquery,
                 ..
             } => pagination_subquery,
-            InstanceQueryPlan::Single(_) => panic!("expected a paged plan"),
+            _ => panic!("expected a paged plan"),
         };
         let order = sparql
             .lines()
@@ -3445,7 +3500,7 @@ mod traverse_scope_tests {
                 pagination_subquery,
                 ..
             } => pagination_subquery,
-            InstanceQueryPlan::Single(_) => panic!("Expected TwoPhase query plan, got Single"),
+            _ => panic!("Expected TwoPhase query plan, got Single"),
         };
 
         assert!(
@@ -3472,7 +3527,7 @@ mod traverse_scope_tests {
                 pagination_subquery,
                 ..
             } => pagination_subquery,
-            InstanceQueryPlan::Single(_) => panic!("Expected TwoPhase query plan, got Single"),
+            _ => panic!("Expected TwoPhase query plan, got Single"),
         };
 
         assert!(

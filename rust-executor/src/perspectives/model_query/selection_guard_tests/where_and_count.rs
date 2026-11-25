@@ -521,19 +521,22 @@ async fn selection_two_passing_links_on_one_triple_do_not_duplicate_an_instance(
     let query: ModelQueryInput =
         serde_json::from_value(json!({ "where": { "name": "x", "members": "sg://a/carol" } }))
             .unwrap();
-    let super::super::types::InstanceQueryPlan::Single(sparql) =
+    // The single plan runs as its two halves here, the ids and then their links,
+    // as the executor runs it for a shape with a membership check.
+    let super::super::types::InstanceQueryPlan::IdsThenLinks { ids_query, links } =
         super::super::sparql_builder::build_instance_sparql(&shape, &query, None, None)
     else {
-        panic!("expected the single plan");
+        panic!("expected the single plan, ids then links");
     };
-    let rows: Vec<Value> = serde_json::from_str(
-        &store
-            .query(
-                &crate::perspectives::sparql_store::EvalStop::none(),
-                &sparql,
-            )
-            .unwrap(),
-    )
-    .unwrap();
+    let stop = crate::perspectives::sparql_store::EvalStop::none();
+    let ids: Vec<String> =
+        serde_json::from_str::<Vec<Value>>(&store.query(&stop, &ids_query).unwrap())
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["source"].as_str().map(str::to_string))
+            .collect();
+    assert_eq!(ids.len(), 1, "one id, however many links pass: {ids:?}");
+    let sparql = super::super::sparql_builder::links_of_ids(&ids, &links);
+    let rows: Vec<Value> = serde_json::from_str(&store.query(&stop, &sparql).unwrap()).unwrap();
     assert_eq!(rows.len(), 6, "one row per link: {rows:?}");
 }

@@ -1116,13 +1116,46 @@ pub trait ShapeResolver: Send + Sync {
 pub(super) enum InstanceQueryPlan {
     /// Single query -- no pagination or non-paginated query.
     Single(String),
+    /// No pagination, and a shape whose membership is checked: the ids first,
+    /// then their links.
+    ///
+    /// One query holding both the conformance patterns and the link fetch lets
+    /// Oxigraph interleave them, and it chooses an order that checks every
+    /// record of the kind against every link: 803 ms for 1,531 tasks, against
+    /// 66 ms for the ids alone and about 215 ms for their links. Run apart, each
+    /// half keeps its own plan.
+    IdsThenLinks {
+        /// `SELECT DISTINCT ?source WHERE { conformance where }`.
+        ids_query: String,
+        /// The link patterns for `?source`, which the executor binds with a
+        /// `VALUES` of the ids the first query found.
+        links: String,
+    },
     /// Two-phase: (pagination_subquery, predicate_filter, conformance, where_extra).
     /// Phase 1: execute pagination_subquery -> get source IRIs.
     /// Phase 2: build property query with VALUES ?source { ... }.
     TwoPhase {
         pagination_subquery: String,
         predicate_filter: String,
+        /// A cheaper way to run `pagination_subquery`, where there is one.
+        ids_first: Option<IdsFirst>,
     },
+}
+
+/// Run the membership check on its own, then `pagination_subquery` with the
+/// ids it found in place of the check (`replaces`).
+///
+/// For the `createdAt` order, whose page query takes `MIN(?timestamp)` over
+/// every hydrated link: with the conformance patterns in the same query,
+/// Oxigraph checks every record of the kind against every link, as the single
+/// plan did (see [`InstanceQueryPlan::IdsThenLinks`]). `pagination_subquery`
+/// itself stays whole and correct, so a reader that ignores this runs the
+/// slower query, never a wrong one.
+pub(super) struct IdsFirst {
+    /// `SELECT DISTINCT ?source WHERE { conformance where }`.
+    pub(super) ids_query: String,
+    /// The text in `pagination_subquery` that the ids' `VALUES` replaces.
+    pub(super) replaces: String,
 }
 
 impl InstanceQueryPlan {
@@ -1132,6 +1165,8 @@ impl InstanceQueryPlan {
     pub(super) fn into_single(self) -> String {
         match self {
             InstanceQueryPlan::Single(s) => s,
+            // Both halves, so a test reading the plan's text sees every pattern it holds.
+            InstanceQueryPlan::IdsThenLinks { ids_query, links } => format!("{ids_query}\n{links}"),
             InstanceQueryPlan::TwoPhase { .. } => {
                 panic!("Expected Single query plan, got TwoPhase")
             }

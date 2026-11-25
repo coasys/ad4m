@@ -24,8 +24,8 @@ use super::sparql_builder::{
     ANCHOR_VAR,
 };
 use super::types::{
-    InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, Scope,
-    ScopeDirection, ShapeResolver, SortKey, SparqlPagination, WhereCondition,
+    IdsFirst, InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection,
+    Scope, ScopeDirection, ShapeResolver, SortKey, SparqlPagination, WhereCondition,
 };
 use super::utils::{validate_iri, values_or_str_filter, MAX_INCLUDE_DEPTH};
 use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
@@ -573,13 +573,40 @@ pub(super) async fn select_ids(
     };
     let InstanceQueryPlan::TwoPhase {
         pagination_subquery,
+        ids_first,
         ..
     } = build_instance_sparql(shape, query_input, Some(&pagination), Some(resolver))
     else {
         return Ok(None);
     };
-    let rows_json = store.query_async(stop, &pagination_subquery).await?;
+    let rows_json = run_page_query(stop, store, &pagination_subquery, ids_first.as_ref()).await?;
     Ok(Some(serde_json::from_str(&rows_json)?))
+}
+
+/// Run a two-phase plan's page query, through its [`IdsFirst`] step where it
+/// has one: the membership check on its own, then the page over the ids it
+/// found. The rows are the page query's either way.
+async fn run_page_query(
+    stop: &EvalStop,
+    store: &SparqlStore,
+    pagination_subquery: &str,
+    ids_first: Option<&IdsFirst>,
+) -> Result<String, Error> {
+    let Some(first) = ids_first else {
+        return store.query_async(stop, pagination_subquery).await;
+    };
+    let id_rows: Vec<Value> =
+        serde_json::from_str(&store.query_async(stop, &first.ids_query).await?)?;
+    let ids: Vec<String> = id_rows
+        .iter()
+        .filter_map(|r| r["source"].as_str().map(str::to_string))
+        .collect();
+    if ids.is_empty() {
+        return Ok("[]".to_string());
+    }
+    let values = values_or_str_filter("source", &ids);
+    let page = pagination_subquery.replacen(&first.replaces, &format!("\n    {values}\n"), 1);
+    store.query_async(stop, &page).await
 }
 
 /// Inner implementation with recursion depth tracking.
@@ -888,9 +915,24 @@ pub(super) async fn execute_model_query_inner(
             let result_json = store.query_async(stop, &sparql).await?;
             serde_json::from_str(&result_json)?
         }
+        InstanceQueryPlan::IdsThenLinks { ids_query, links } => {
+            let id_rows: Vec<Value> =
+                serde_json::from_str(&store.query_async(stop, &ids_query).await?)?;
+            let ids: Vec<String> = id_rows
+                .iter()
+                .filter_map(|r| r["source"].as_str().map(str::to_string))
+                .collect();
+            if ids.is_empty() {
+                vec![]
+            } else {
+                let sparql = super::sparql_builder::links_of_ids(&ids, &links);
+                serde_json::from_str(&store.query_async(stop, &sparql).await?)?
+            }
+        }
         InstanceQueryPlan::TwoPhase {
             pagination_subquery,
             predicate_filter,
+            ids_first,
         } => {
             // Phase one either asks once, or walks a level at a time — the difference being where
             // the ids come from. Phase two is the same either way: one hydration for whatever it
@@ -914,7 +956,9 @@ pub(super) async fn execute_model_query_inner(
                     .await?
                 }
                 _ => {
-                    let page_json = store.query_async(stop, &pagination_subquery).await?;
+                    let page_json =
+                        run_page_query(stop, store, &pagination_subquery, ids_first.as_ref())
+                            .await?;
                     let mut page_results: Vec<Value> = serde_json::from_str(&page_json)?;
                     if let Some(n) = anchor_limit {
                         slice_per_anchor(&mut page_results, n);

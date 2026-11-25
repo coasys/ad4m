@@ -819,7 +819,7 @@ mod verify_relation_getter_tests {
             Some(&LinkStatus::Shared),
             Some(true),
         );
-        assert!(shared.contains("<ad4m://ontology/status> \"Shared\""));
+        assert!(shared.contains("<ad4m://ontology/status> ") && shared.contains("= \"Shared\")"));
         assert_eq!(
             verify_relation_getter(
                 SDK_GETTER,

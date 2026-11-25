@@ -3034,7 +3034,7 @@ async fn test_build_instance_sparql_scalar_only_model_uses_values_clause() {
 async fn test_build_instance_sparql_excludes_getter_backed_collections() {
     // A model like Channel with typed @HasMany relations that have
     // auto-generated getters.  The getter-backed collections (views,
-    // messages) should be EXCLUDED from the VALUES clause.
+    // messages) should be EXCLUDED from the predicate filter.
     let shape = make_shape(vec![
         scalar_prop("type", "flux://entry_type", true, true),
         scalar_prop("name", "flux://name", false, false),
@@ -3072,7 +3072,7 @@ async fn test_build_instance_sparql_excludes_getter_backed_collections() {
 #[tokio::test]
 async fn test_build_instance_sparql_retains_raw_predicate_collections() {
     // A collection without a getter (raw predicate like participants)
-    // should be INCLUDED in the VALUES clause because it's resolved
+    // should be INCLUDED in the predicate filter because it's resolved
     // from the main query results, not by evaluate_getters.
     let shape = make_shape(vec![
         scalar_prop("type", "flux://entry_type", true, true),
@@ -3146,7 +3146,7 @@ async fn test_build_instance_sparql_empty_shape_falls_back_to_wildcard() {
 #[tokio::test]
 async fn test_build_instance_sparql_values_clause_is_deduplicated() {
     // If multiple scalar properties share the same predicate, the
-    // VALUES clause should contain it only once.
+    // predicate filter should contain it only once.
     let shape = make_shape(vec![
         scalar_prop("type", "ns://shared_pred", true, true),
         scalar_prop("alias", "ns://shared_pred", false, false),
