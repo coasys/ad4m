@@ -5,10 +5,14 @@ import type { MentionMessage } from "./wakerSubscriptionManager";
 const MAX_ATTACHMENT_FIELD_CHARS = 200;
 const MAX_ATTACHMENT_BLOCK_CHARS = 2000;
 
-/** One line, quoted and escaped (newlines and control characters become escapes), cut when long. */
-function quoted(value: string): string {
+/**
+ * One line, quoted and escaped (newlines and control characters become escapes). Cut when long,
+ * unless `whole`: an identifier the agent passes on exactly (a record address, a content address)
+ * is useless cut. A line over the block's budget is dropped whole, so a long one never prints in part.
+ */
+function quoted(value: string, whole = false): string {
   const text = String(value ?? "");
-  const cut = text.length > MAX_ATTACHMENT_FIELD_CHARS ? `${text.slice(0, MAX_ATTACHMENT_FIELD_CHARS)}...` : text;
+  const cut = !whole && text.length > MAX_ATTACHMENT_FIELD_CHARS ? `${text.slice(0, MAX_ATTACHMENT_FIELD_CHARS)}...` : text;
   // JSON.stringify escapes control characters, but not these Unicode line breaks.
   return JSON.stringify(cut).replace(/[\u0085\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
 }
@@ -78,7 +82,7 @@ export function buildWakeMessage(
         for (const a of m.attachments) {
           const line =
             `    File: name ${quoted(a.name)}, type ${quoted(a.mimeType)}, ${Number(a.size) || 0} bytes, ` +
-            `record ${quoted(a.address)}, content at ${quoted(a.url)}`;
+            `record ${quoted(a.address, true)}, content at ${quoted(a.url, true)}`;
           if (line.length > budget) {
             lines.push("    (more files omitted)");
             break;

@@ -1764,6 +1764,20 @@ describe("buildWakeMessage", () => {
     expect(msg).toContain("more files omitted");
   });
 
+  it("prints a long record address and content address whole, so the agent can use them", () => {
+    const address = "we://file/" + "a".repeat(300);
+    const url = "QmContent" + "b".repeat(300);
+    const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
+      {
+        address: "msg-1", parents: [], ancestors: [], verified: true,
+        attachments: [{ address, name: "n".repeat(300), mimeType: "a/b", size: 1, url }],
+      },
+    ]);
+    expect(msg).toContain(`record "${address}"`);
+    expect(msg).toContain(`content at "${url}"`);
+    expect(msg).toContain(`name "${"n".repeat(200)}..."`);
+  });
+
   it("lists the ancestors above the parents, and says nothing when there are none", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
       { address: "msg-1", parents: ["thread-1"], ancestors: ["call-1", "space-1"], attachments: [], verified: false },
