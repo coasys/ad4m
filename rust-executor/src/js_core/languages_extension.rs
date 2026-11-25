@@ -354,8 +354,7 @@ mod tests {
         let victim_state = crate::perspectives::get_perspective(&handle.uuid)
             .unwrap()
             .persisted
-            .lock()
-            .await
+            .load()
             .state
             .clone();
         assert_eq!(

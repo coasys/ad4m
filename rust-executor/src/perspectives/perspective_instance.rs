@@ -103,6 +103,8 @@ pub(crate) use subscriptions::{result_json, SubscriptionIdTaken};
 mod subscription_triggers;
 // Registering this executor's owners with the link language.
 mod local_agents;
+mod persisted_handle;
+pub use persisted_handle::PersistedHandle;
 // Committing a batch only if the links it expects still stand.
 mod expected_links;
 pub use expected_links::{ExpectedLinks, LinksChanged};
@@ -142,6 +144,10 @@ mod mount_ownership_tests;
 #[cfg(test)]
 #[path = "perspective_instance_join_tests.rs"]
 mod join_tests;
+
+#[cfg(test)]
+#[path = "perspective_instance_broadcast_diag_tests.rs"]
+mod broadcast_diag_tests;
 
 #[cfg(test)]
 #[path = "perspective_instance_pending_diffs_tests.rs"]
@@ -196,7 +202,7 @@ pub(super) fn touches_shape<'a>(links: impl IntoIterator<Item = &'a Link>) -> bo
 /// The error a live query that is not SPARQL gets. Live queries are SPARQL or
 /// model queries; Prolog live queries were removed (a one-shot Prolog query
 /// still runs through `perspective.queryProlog`).
-pub(crate) const PROLOG_LIVE_QUERY_UNSUPPORTED: &str = "Prolog live queries are no longer supported; subscribe with a SPARQL query or a model query (perspective.modelSubscribe)";
+pub(crate) const PROLOG_LIVE_QUERY_UNSUPPORTED: &str = "Prolog live queries are no longer supported; subscribe with a SPARQL query or a model query (perspective.subscribe with `model`)";
 
 /// The error a model subscription that sends `after` gets. A subscription
 /// re-runs one query on every matching write, so a cursor would re-read the
@@ -669,8 +675,8 @@ const NOTIFICATION_MIN_SPACING: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 pub struct PerspectiveInstance {
-    pub persisted: Arc<Mutex<PerspectiveHandle>>,
-    /// Cached UUID — never changes after construction, avoids locking `persisted`.
+    pub persisted: Arc<PersistedHandle>,
+    /// Cached UUID — never changes after construction, avoids loading `persisted`.
     pub uuid: String,
 
     pub created_from_join: bool,
@@ -845,7 +851,7 @@ impl PerspectiveInstance {
         });
 
         PerspectiveInstance {
-            persisted: Arc::new(Mutex::new(handle.clone())),
+            persisted: Arc::new(PersistedHandle::new(handle.clone())),
             uuid: handle.uuid.clone(),
 
             created_from_join: created_from_join.unwrap_or(false),
@@ -1192,7 +1198,7 @@ impl PerspectiveInstance {
             (count, links)
         };
         let quad_count = self.sparql_store.quad_count();
-        let name = self.persisted.lock().await.name.clone().unwrap_or_default();
+        let name = self.persisted.load().name.clone().unwrap_or_default();
 
         PerspectiveMemoryStats {
             uuid: self.uuid.clone(),
@@ -1227,12 +1233,7 @@ impl PerspectiveInstance {
             (count, links)
         };
         let quad_count = self.sparql_store.quad_count();
-        let name = self
-            .persisted
-            .blocking_lock()
-            .name
-            .clone()
-            .unwrap_or_default();
+        let name = self.persisted.load().name.clone().unwrap_or_default();
 
         PerspectiveMemoryStats {
             uuid: self.uuid.clone(),
@@ -1281,7 +1282,7 @@ impl PerspectiveInstance {
         // One immediate check after an install that worked, rather than a wait.
         let mut just_installed = false;
         while !self.is_teardown.load(Ordering::Acquire) {
-            let Some(nh) = self.persisted.lock().await.neighbourhood.clone() else {
+            let Some(nh) = self.persisted.load().neighbourhood.clone() else {
                 self.wakes.link_language.notified().await;
                 continue;
             };
@@ -1361,14 +1362,15 @@ impl PerspectiveInstance {
         self.register_local_agents(&mut language, registered.as_deref())
             .await;
         // Cache language→perspective mapping for fast signal routing
-        {
-            let handle = self.persisted.lock().await;
-            crate::perspectives::register_link_language_perspective(
-                nh.data.link_language.clone(),
-                handle.clone(),
-            );
-        }
-        if self.persisted.lock().await.state == PerspectiveState::NeighbourhoodCreationInitiated {
+        self.persisted
+            .update(|handle| {
+                crate::perspectives::register_link_language_perspective(
+                    nh.data.link_language.clone(),
+                    handle.clone(),
+                );
+            })
+            .await;
+        if self.persisted.load().state == PerspectiveState::NeighbourhoodCreationInitiated {
             self.share_links_after_publish().await;
         }
         self.update_perspective_state_log_error(
@@ -1783,14 +1785,14 @@ impl PerspectiveInstance {
                 );
             }
 
-            //crate::db_backend::db_backend().add_many_links(&self.persisted.lock().await.uuid, &remote_links).unwrap(); // Assuming add_many_links takes a reference to a Vec<LinkExpression> and returns Result<(), AnyError>
+            //crate::db_backend::db_backend().add_many_links(&self.persisted.load().uuid, &remote_links).unwrap(); // Assuming add_many_links takes a reference to a Vec<LinkExpression> and returns Result<(), AnyError>
             return true;
         }
         false
     }
 
     pub async fn update_perspective_state(&self, state: PerspectiveState) -> Result<(), AnyError> {
-        if self.persisted.lock().await.state != state {
+        if self.persisted.load().state != state {
             let handle = update_perspective_with(&self.uuid, |h| h.state = state.clone())
                 .await
                 .map_err(|e| anyhow!(e))?;
@@ -1823,7 +1825,7 @@ impl PerspectiveInstance {
     }
 
     pub async fn commit(&self, diff: &PerspectiveDiff) -> Result<(), AnyError> {
-        let handle = self.persisted.lock().await.clone();
+        let handle = self.persisted.snapshot();
         if handle.neighbourhood.is_none() {
             log::debug!("commit({}): skipping — no neighbourhood", handle.uuid);
             return Ok(());
@@ -1944,7 +1946,7 @@ impl PerspectiveInstance {
         tokio::spawn(async move {
             if let Err(e) = self_clone.commit(&diff_clone).await {
                 log::error!("PerspectiveInstance::commit() returned error: {:?}\nStoring in pending diffs for later", e);
-                let handle_clone = self_clone.persisted.lock().await.clone();
+                let handle_clone = self_clone.persisted.snapshot();
                 crate::db_backend::db_backend().add_pending_diff(&handle_clone.uuid, &diff_clone).expect("Couldn't write pending diff. DB should be initialized and usable at this point");
             }
         });
@@ -2064,7 +2066,7 @@ impl PerspectiveInstance {
         recipient_did: Option<String>,
     ) {
         signal.verify_signatures();
-        let handle = self.persisted.lock().await.clone();
+        let handle = self.persisted.snapshot();
 
         log::debug!("telepresence_signal_from_link_language: perspective={}, recipient_did={:?}, signal_author={}",
             handle.uuid, recipient_did, signal.author);
@@ -2115,7 +2117,7 @@ impl PerspectiveInstance {
                 .ok_or(anyhow!("Batch not found"))?;
             let diff = &mut batch.diff;
 
-            let _handle = self.persisted.lock().await.clone();
+            let _handle = self.persisted.snapshot();
 
             // Query SPARQL store
             let decorated_link = self
@@ -2137,7 +2139,7 @@ impl PerspectiveInstance {
             diff.removals.push(link_from_db.clone());
             Ok(DecoratedLinkExpression::from((link_from_db, status)))
         } else {
-            let _handle = self.persisted.lock().await.clone();
+            let _handle = self.persisted.snapshot();
 
             // Query SPARQL store
             if let Some(decorated_link) = self.sparql_store.get_link(
@@ -2188,8 +2190,8 @@ impl PerspectiveInstance {
         // once by a propose whose pass must see the row.
         self.seed_minted_flow_instances(decorated_diff).await;
 
-        // Only the recipients come from the handle; the lock is released before publishing.
-        let owners = super::event_recipients(&*self.persisted.lock().await);
+        // Take one snapshot of the recipients before publishing.
+        let owners = super::event_recipients(&self.persisted.snapshot());
 
         // One event per link, to all of the owners.
         let changes = [
@@ -2221,8 +2223,8 @@ impl PerspectiveInstance {
         let (olds, news): (Vec<_>, Vec<_>) = updates.iter().cloned().unzip();
         self.schedule_flow_pass_on_definition_change(&DecoratedPerspectiveDiff::from(news, olds));
 
-        // Only the recipients come from the handle; the lock is released before publishing.
-        let owners = super::event_recipients(&*self.persisted.lock().await);
+        // Take one snapshot of the recipients before publishing.
+        let owners = super::event_recipients(&self.persisted.snapshot());
 
         // One event per update, to all of the owners.
         for (old_link, new_link) in updates {
@@ -2538,7 +2540,7 @@ impl PerspectiveInstance {
         if let Some(agent_did) = context.managed_did() {
             crate::billing::check_compute_credits(agent_did)?;
         }
-        let handle = self.persisted.lock().await.clone();
+        let handle = self.persisted.snapshot();
 
         // Query SPARQL store
         let decorated_link_option = self.sparql_store.get_link(
@@ -2643,7 +2645,7 @@ impl PerspectiveInstance {
         link_expressions: Vec<LinkExpression>,
         batch_id: Option<String>,
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
-        let _handle = self.persisted.lock().await.clone();
+        let _handle = self.persisted.snapshot();
 
         // Filter to only existing links and collect their statuses
         let mut existing_links = Vec::new();
@@ -2924,7 +2926,7 @@ impl PerspectiveInstance {
         // Get service reference and perspective data BEFORE acquiring write lock
         let service = get_prolog_service().await;
         let (uuid, owner_did, neighbourhood_author) = {
-            let persisted = self.persisted.lock().await;
+            let persisted = self.persisted.snapshot();
             let uuid = persisted.uuid.clone();
             let owner_did = persisted.get_primary_owner();
             let neighbourhood_author = persisted.neighbourhood.as_ref().map(|n| n.author.clone());
@@ -3196,7 +3198,7 @@ impl PerspectiveInstance {
 
         // Extract perspective metadata (same for Simple and SdnaOnly)
         let (perspective_uuid, neighbourhood_author) = {
-            let persisted_guard = self.persisted.lock().await;
+            let persisted_guard = self.persisted.snapshot();
             (
                 persisted_guard.uuid.clone(),
                 persisted_guard
@@ -3301,7 +3303,7 @@ impl PerspectiveInstance {
                 // In Simple mode, route to Simple engine which has SDNA facts
                 let service = get_prolog_service().await;
                 let (perspective_uuid, owner_did, neighbourhood_author) = {
-                    let persisted_guard = self.persisted.lock().await;
+                    let persisted_guard = self.persisted.snapshot();
                     let perspective_uuid = persisted_guard.uuid.clone();
                     let owner_did = persisted_guard.get_primary_owner();
                     let neighbourhood_author = persisted_guard
@@ -3330,7 +3332,7 @@ impl PerspectiveInstance {
                 // In SdnaOnly mode, route to Simple engine with only SDNA links
                 let service = get_prolog_service().await;
                 let (perspective_uuid, owner_did, neighbourhood_author) = {
-                    let persisted_guard = self.persisted.lock().await;
+                    let persisted_guard = self.persisted.snapshot();
                     let perspective_uuid = persisted_guard.uuid.clone();
                     let owner_did = persisted_guard.get_primary_owner();
                     let neighbourhood_author = persisted_guard
@@ -3389,7 +3391,7 @@ impl PerspectiveInstance {
                 // IMPORTANT: Use context user's DID as owner_did so their SDNA links are included
                 let service = get_prolog_service().await;
                 let (perspective_uuid, neighbourhood_author) = {
-                    let persisted_guard = self.persisted.lock().await;
+                    let persisted_guard = self.persisted.snapshot();
                     let perspective_uuid = persisted_guard.uuid.clone();
                     let neighbourhood_author = persisted_guard
                         .neighbourhood
@@ -3427,7 +3429,7 @@ impl PerspectiveInstance {
                 // IMPORTANT: Use context user's DID as owner_did so their SDNA links are included
                 let service = get_prolog_service().await;
                 let (perspective_uuid, neighbourhood_author) = {
-                    let persisted_guard = self.persisted.lock().await;
+                    let persisted_guard = self.persisted.snapshot();
                     let perspective_uuid = persisted_guard.uuid.clone();
                     let neighbourhood_author = persisted_guard
                         .neighbourhood
@@ -3494,7 +3496,7 @@ impl PerspectiveInstance {
         }
 
         let (perspective_uuid, neighbourhood_author) = {
-            let persisted_guard = self.persisted.lock().await;
+            let persisted_guard = self.persisted.snapshot();
             let neighbourhood_author = persisted_guard
                 .neighbourhood
                 .as_ref()
@@ -4513,7 +4515,7 @@ impl PerspectiveInstance {
     ) -> Result<BTreeMap<Notification, Vec<serde_json::Value>>, AnyError> {
         let uuid = self.uuid.clone();
 
-        let handle = self.persisted.lock().await.clone();
+        let handle = self.persisted.snapshot();
         // No agent, no owner: nothing fires.
         let Some(main_agent_did) = AgentService::with_global_instance(|a| a.did.clone()) else {
             return Ok(BTreeMap::new());
@@ -4672,7 +4674,7 @@ impl PerspectiveInstance {
     async fn update_prolog_engine_facts(&self) -> Result<(), AnyError> {
         // Get all required data before making service calls
         let (uuid, owner_did) = {
-            let persisted_guard = self.persisted.lock().await;
+            let persisted_guard = self.persisted.snapshot();
             (
                 persisted_guard.uuid.clone(),
                 persisted_guard.get_primary_owner(),
@@ -4682,7 +4684,7 @@ impl PerspectiveInstance {
         let all_links = self.get_links(&LinkQuery::default()).await?;
 
         let neighbourhood_author = {
-            let persisted_guard = self.persisted.lock().await;
+            let persisted_guard = self.persisted.snapshot();
             persisted_guard
                 .neighbourhood
                 .as_ref()
@@ -4716,7 +4718,7 @@ impl PerspectiveInstance {
 
     async fn no_link_language_error(&self) -> AnyError {
         let (uuid, state) = {
-            let handle = self.persisted.lock().await;
+            let handle = self.persisted.snapshot();
             (handle.uuid.clone(), handle.state.clone())
         };
         anyhow!(
@@ -4735,7 +4737,7 @@ impl PerspectiveInstance {
         };
 
         // Add all perspective owners (which includes local managed users)
-        let handle = self.persisted.lock().await.clone();
+        let handle = self.persisted.snapshot();
         if let Some(owners) = &handle.owners {
             log::debug!("🔍 others() - Perspective owners: {:?}", owners);
 
@@ -4798,7 +4800,7 @@ impl PerspectiveInstance {
         let mut agents: Vec<OnlineAgent> = match remote {
             Ok(remote_agents) => {
                 let agents = hosted_status::unpack(remote_agents);
-                if let Some(url) = self.persisted.lock().await.shared_url.clone() {
+                if let Some(url) = self.persisted.load().shared_url.clone() {
                     for agent in &agents {
                         crate::sfu::config_store::saw_member(&url, &agent.did);
                     }
@@ -4820,7 +4822,7 @@ impl PerspectiveInstance {
         // the multi-tenancy (one executor) vs. multi-executor boundary. This is
         // the presence source the auto-processor's `elect_author` reads. Their
         // status is the one each set here (see `hosted_status`), or empty.
-        let handle = self.persisted.lock().await.clone();
+        let handle = self.persisted.snapshot();
         if let Some(neighbourhood) = &handle.shared_url {
             let owners: Vec<String> = handle.owners.clone().unwrap_or_default();
             if !owners.is_empty() {
@@ -4865,7 +4867,7 @@ impl PerspectiveInstance {
     /// The online status `did` last set in this neighbourhood on this
     /// executor, if any.
     pub async fn online_status_of(&self, did: &str) -> Option<PerspectiveExpression> {
-        let neighbourhood = self.persisted.lock().await.shared_url.clone()?;
+        let neighbourhood = self.persisted.load().shared_url.clone()?;
         hosted_status::status_of(&neighbourhood, did)
     }
 
@@ -4884,7 +4886,7 @@ impl PerspectiveInstance {
         let Some(mut link_language) = link_language_clone else {
             return Err(self.no_link_language_error().await);
         };
-        let shared_url = self.persisted.lock().await.shared_url.clone();
+        let shared_url = self.persisted.load().shared_url.clone();
         let Some(neighbourhood) = shared_url else {
             return link_language.set_online_status(status).await;
         };
@@ -4913,7 +4915,7 @@ impl PerspectiveInstance {
 
         // A neighbourhood's owners are this executor's agents that joined it (or the main
         // agent for an unowned perspective): a signal to one of them is delivered here.
-        let handle = self.persisted.lock().await.clone();
+        let handle = self.persisted.snapshot();
         if handle.shared_url.is_some()
             && super::event_recipients(&handle).contains(&remote_agent_did)
         {
@@ -4947,7 +4949,15 @@ impl PerspectiveInstance {
         payload: PerspectiveExpression,
         loopback: bool,
     ) -> Result<(), AnyError> {
-        let current_perspective_handle = self.persisted.lock().await.clone();
+        // Phases for `[call-diag] event=broadcast.slow` (`call_diag::phase`).
+        let mut mark = std::time::Instant::now();
+        let mut phase = |name: &'static str| {
+            let now = std::time::Instant::now();
+            crate::call_diag::phase(name, now - mark);
+            mark = now;
+        };
+        let current_perspective_handle = self.persisted.snapshot();
+        phase("handle_snapshot");
 
         if loopback {
             // send back to all clients through neighbourhood signal subscription
@@ -4975,6 +4985,7 @@ impl PerspectiveInstance {
                 );
             }
         }
+        phase("local_delivery");
 
         // Remote members get the broadcast through the link language, off
         // this RPC's critical path: the language runtime serves one call at
@@ -4982,12 +4993,15 @@ impl PerspectiveInstance {
         // broadcast. The send is queued and drained in the background, or
         // skipped when every member is local; only a full queue fails here.
         let link_language_clone = self.link_language.read().await.clone();
+        phase("link_language_lock");
         if let Some(link_language) = link_language_clone {
-            self.broadcast_remotely(
+            let queued = self.broadcast_remotely(
                 link_language,
                 payload,
                 current_perspective_handle.shared_url.as_deref(),
-            )
+            );
+            phase("language");
+            queued
         } else {
             Err(self.no_link_language_error().await)
         }
@@ -6571,10 +6585,10 @@ impl PerspectiveInstance {
             let should_run = {
                 // Check perspective state first
                 let is_synced_neighbourhood = {
-                    let handle = self.persisted.lock().await;
+                    let handle = self.persisted.snapshot();
                     let result =
                         handle.state == PerspectiveState::Synced && handle.neighbourhood.is_some();
-                    drop(handle); // Release lock immediately
+                    drop(handle);
                     result
                 };
 
@@ -7210,11 +7224,13 @@ mod tests {
             db.import_from_json(serde_json::json!({ "users": rows }), None)
         })
         .expect("seed users");
-        {
-            let mut h = perspective.persisted.lock().await;
-            h.shared_url = Some("test://neighbourhood".into());
-            h.owners = Some(users.iter().map(|(_, did, _)| did.to_string()).collect());
-        }
+        perspective
+            .persisted
+            .update(|h| {
+                h.shared_url = Some("test://neighbourhood".into());
+                h.owners = Some(users.iter().map(|(_, did, _)| did.to_string()).collect());
+            })
+            .await;
 
         let mut online: Vec<String> = perspective
             .online_agents()
@@ -7308,7 +7324,7 @@ mod tests {
     }
 
     async fn state_of(instance: &PerspectiveInstance) -> PerspectiveState {
-        instance.persisted.lock().await.state.clone()
+        instance.persisted.load().state.clone()
     }
 
     #[tokio::test(start_paused = true)]
@@ -7357,8 +7373,10 @@ mod tests {
                 while Instant::now() < deadline {
                     if state_of(&instance).await == PerspectiveState::LinkLanguageFailedToInstall {
                         attempts += 1;
-                        instance.persisted.lock().await.state =
-                            PerspectiveState::NeighbourhoodCreationInitiated;
+                        instance
+                            .persisted
+                            .update(|h| h.state = PerspectiveState::NeighbourhoodCreationInitiated)
+                            .await;
                     }
                     sleep(Duration::from_millis(10)).await;
                 }
@@ -7426,8 +7444,10 @@ mod tests {
 
         // A neighbourhood without a link language: every commit lands in the
         // pending-diff queue, which is exactly what would reach peers.
-        perspective.persisted.lock().await.neighbourhood =
-            Some(DecoratedNeighbourhoodExpression::default());
+        perspective
+            .persisted
+            .update(|h| h.neighbourhood = Some(DecoratedNeighbourhoodExpression::default()))
+            .await;
         let uuid = perspective.uuid.clone();
 
         let input = |l: &DecoratedLinkExpression| {
@@ -7494,8 +7514,10 @@ mod tests {
             .add_link(create_link(), LinkStatus::Shared, None, &context)
             .await
             .unwrap();
-        perspective.persisted.lock().await.neighbourhood =
-            Some(DecoratedNeighbourhoodExpression::default());
+        perspective
+            .persisted
+            .update(|h| h.neighbourhood = Some(DecoratedNeighbourhoodExpression::default()))
+            .await;
         let uuid = perspective.uuid.clone();
 
         let input = |l: &DecoratedLinkExpression| -> serde_json::Value {
@@ -10215,7 +10237,10 @@ mod tests {
             "did:test:owner-a".to_string(),
             "did:test:owner-b".to_string(),
         ];
-        perspective.persisted.lock().await.owners = Some(owners.clone());
+        perspective
+            .persisted
+            .update(|h| h.owners = Some(owners.clone()))
+            .await;
         let old: LinkExpression = perspective
             .add_link(
                 create_link(),
@@ -10323,8 +10348,10 @@ mod tests {
         // A neighbourhood whose link language records what it is sent.
         let sent = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let record = sent.clone();
-        perspective.persisted.lock().await.neighbourhood =
-            Some(DecoratedNeighbourhoodExpression::default());
+        perspective
+            .persisted
+            .update(|h| h.neighbourhood = Some(DecoratedNeighbourhoodExpression::default()))
+            .await;
         *perspective.link_language.write().await = Some(Language::with_test_commit(
             "test-link-language".to_string(),
             Arc::new(move |diff: PerspectiveDiff| {

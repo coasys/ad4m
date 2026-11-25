@@ -158,12 +158,20 @@ export class PerspectiveClient {
         }
     }
 
-    /** Open a live SPARQL query. Updates arrive through {@link onQueryUpdate}. */
-    /** `options.signal` cancels the call, and the executor stops computing the first result. */
-    async subscribeQuery(uuid: string, query: string, options?: CallOptions): Promise<Subscribed> {
+    /** Open a live query: a SPARQL query, or a model query over one class or
+     *  several (#1238). Updates arrive through {@link onQueryUpdate}.
+     *  `options.signal` cancels the call, and the executor stops computing the first result. */
+    async subscribe(
+        uuid: string,
+        query: { sparql: string } | { className: string | string[], queryJson: string },
+        options?: CallOptions,
+    ): Promise<Subscribed> {
         const subscriptionId = mintSubscriptionId()
+        const wire = 'sparql' in query
+            ? { sparql: query.sparql }
+            : { model: { ...(Array.isArray(query.className) ? { classNames: query.className } : { className: query.className }), queryJson: query.queryJson } }
         return this.#released(uuid, subscriptionId, this.#apiClient.call(
-            'perspective.subscribeQuery', { uuid, query, subscriptionId }, options,
+            'perspective.subscribe', { uuid, subscriptionId, ...wire }, options,
         ))
     }
 
@@ -254,16 +262,6 @@ export class PerspectiveClient {
             }
         )
         return JSON.parse(resultJson)
-    }
-
-    /** Open a live model query over one class or several. Updates arrive through {@link onQueryUpdate}. */
-    /** `options.signal` cancels the call, and the executor stops computing the first result. */
-    async modelSubscribe(uuid: string, className: string | string[], queryJson: string, options?: CallOptions): Promise<Subscribed> {
-        const subscriptionId = mintSubscriptionId()
-        return this.#released(uuid, subscriptionId, this.#apiClient.call(
-            'perspective.modelSubscribe', { uuid, ...classParams(className), query_json: queryJson, subscriptionId },
-            options,
-        ))
     }
 
     async add(name: string): Promise<PerspectiveProxy> {

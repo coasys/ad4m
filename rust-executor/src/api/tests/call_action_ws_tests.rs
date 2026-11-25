@@ -29,7 +29,7 @@ async fn mount_thing_perspective(shape: &str) -> Registered {
     )
     .await
     .unwrap();
-    let uuid = p.persisted.lock().await.uuid.clone();
+    let uuid = p.persisted.load().uuid.clone();
     crate::perspectives::register_perspective(uuid.clone(), p);
     Registered(uuid)
 }
@@ -128,9 +128,8 @@ async fn create_subject_rpc_refuses_a_call_for_a_managed_user() {
     crate::perspectives::get_perspective(&p.0)
         .unwrap()
         .persisted
-        .lock()
-        .await
-        .add_owner(alice);
+        .update(|h| h.add_owner(alice))
+        .await;
 
     // Alice owns the perspective and holds every capability a call needs,
     // but the call would run as the main agent.

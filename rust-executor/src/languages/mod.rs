@@ -21,6 +21,7 @@ pub(crate) mod mount_init;
 #[cfg(test)]
 pub(crate) mod mount_tests;
 pub mod mount_types;
+pub mod queue_report;
 #[cfg(test)]
 mod signing_reach_tests;
 #[cfg(test)]
