@@ -589,12 +589,17 @@ impl LayerSelector {
         }
         videos.sort_by_key(|v| track_key(&v.track));
 
-        // What it takes for each track to go to its highest permitted layer.
+        // What it takes for each track to climb to its highest permitted
+        // layer: the most a layer on the way costs, as a middle layer can
+        // measure above the top one.
         let highest: u64 = videos
             .iter()
             .map(|v| {
-                let rank = pick(&v.flowing, state.ceiling).unwrap_or(v.current);
-                cost_of(v.flowing[rank]).unwrap_or(0)
+                let top = pick(&v.flowing, state.ceiling).unwrap_or(v.current);
+                (0..=top)
+                    .filter_map(|rank| cost_of(v.flowing[rank]))
+                    .max()
+                    .unwrap_or(0)
             })
             .sum();
         // The estimate at which the last permitted upgrade passes: the
@@ -1710,6 +1715,26 @@ mod tests {
         sim.s.set_ceiling(sim.now, &RECEIVER, "medium");
         let lower = sim.s.take_demands()[&RECEIVER];
         assert!(lower < demand / 2);
+    }
+
+    #[test]
+    fn the_probing_demand_covers_a_middle_layer_that_costs_more_than_the_top() {
+        // Medium measures above high: the climb passes through medium, so the
+        // demand is sized from it, and an estimate at the demand reaches high.
+        const MIDDLE_HEAVY: [u64; 3] = [200_000, 600_000, 400_000];
+        let mut sim = Sim::new(&[MIDDLE_HEAVY]);
+        sim.estimate(10_000_000, true);
+        let demand = sim.s.take_demands()[&RECEIVER];
+        let video = (600_000.0 * UPGRADE_HEADROOM) as u64;
+        assert!(demand.abs_diff(video) < 60_000, "{demand} vs {video}");
+        let mut sim = Sim::new(&[MIDDLE_HEAVY]);
+        sim.estimate(demand, true);
+        for _ in 0..2 {
+            sim.advance(4_000);
+            sim.s.run_due(sim.now);
+            sim.commit();
+        }
+        assert_eq!(sim.caps(), [2]);
     }
 
     #[test]

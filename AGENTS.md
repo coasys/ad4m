@@ -568,7 +568,8 @@ lowers the loop's timeout.
 - The receiver's probing target (`bwe().set_desired_bitrate`) is the estimate
   that satisfies the upgrade condition at the permitted maximum layers:
   `H * (highest + fixed)`, rounded up (fixed: audio and non-simulcast
-  video).
+  video; highest: per track the most a layer up to its permitted top costs,
+  as a middle layer can measure above the top one).
 - A cap change is logged at `debug` (`rust_executor::sfu::simulcast`:
   receiver, track, old and new layer, estimate, fixed, spent, layer rates).
 

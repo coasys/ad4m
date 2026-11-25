@@ -126,13 +126,16 @@ export const e24ReceiverBandwidth = e2eScenario({
           return read;
         };
         const senders = ["u1", "u3"];
+        // Each rate divides by the time between its own two reads.
         const sentBefore = await call.snapshots();
+        const sentFrom = Date.now();
         const before = counters();
         const from = Date.now();
         await call.holds(steady({ u2: LOW, u1: CAMERA, u3: CAMERA }), STEADY_MS, "the shaped state");
         const after = counters();
-        const sentAfter = await call.snapshots();
         const seconds = (Date.now() - from) / 1000;
+        const sentAfter = await call.snapshots();
+        const sentSeconds = (Date.now() - sentFrom) / 1000;
 
         // What u2's filter passed meanwhile: not zero, or the shaper sat on the wrong ports.
         const passedBytes = after.sentBytes - before.sentBytes;
@@ -146,8 +149,8 @@ export const e24ReceiverBandwidth = e2eScenario({
         const rate = (name: string, pick: (sent: Snapshot["sent"]) => { bytes: number; packets: number } | undefined): number => {
           const a = pick(sentBefore.get(name)!.sent);
           const b = pick(sentAfter.get(name)!.sent);
-          if (!a || !b || b.packets <= a.packets) throw new Error(`${name} sent nothing there in ${seconds.toFixed(1)} s`);
-          return ((b.bytes - a.bytes + (b.packets - a.packets) * PACKET_OVERHEAD_BYTES) * 8) / 1000 / seconds;
+          if (!a || !b || b.packets <= a.packets) throw new Error(`${name} sent nothing there in ${sentSeconds.toFixed(1)} s`);
+          return ((b.bytes - a.bytes + (b.packets - a.packets) * PACKET_OVERHEAD_BYTES) * 8) / 1000 / sentSeconds;
         };
         const offered = Object.fromEntries(
           senders.map((name) => [
