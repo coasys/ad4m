@@ -105,6 +105,9 @@ importers:
 
   ad4m-ldk/js:
     devDependencies:
+      '@coasys/ad4m':
+        specifier: workspace:*
+        version: link:../../core
       tsx:
         specifier: ^4.16.0
         version: 4.21.0
