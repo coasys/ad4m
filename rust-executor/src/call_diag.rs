@@ -7,10 +7,12 @@
 //! |---|---|---|---|
 //! | `ws.open` / `ws.close` | debug | `api::ws_rpc` | every RPC socket |
 //! | `ws.pong-late` | warn | `api::ws_rpc` | a pong left the writer > 1 s after its ping arrived |
-//! | `rpc.slow` | warn | `api::ws_rpc` | an RPC took > 2 s from arrival to reply |
+//! | `rpc.slow` | warn | `api::ws_rpc` | an RPC took > 2 s or its reply / subscription update exceeded 1,000,000 bytes |
 //! | `broadcast.slow` | warn | `perspectives` | `neighbourhood.sendBroadcast` took > 1 s |
 //! | `language.queue` | debug | `languages` | every 30 s per language with calls waiting |
 //! | `log.filter-set` / `log.filter-reverted` | warn / info | `log_filter` | `runtime.setLogFilter` and its end |
+
+pub(crate) mod model;
 
 /// The tag every call-diagnostics line starts with.
 pub const TAG: &str = "[call-diag]";

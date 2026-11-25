@@ -4,12 +4,13 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::runtime::Builder;
 use tokio::sync::{
     mpsc::{self, UnboundedSender},
     oneshot,
 };
+use tokio::time::Instant;
 
 use crate::agent::AgentContext;
 use crate::languages::capability::{parse_capability_list, Capability};
@@ -271,7 +272,10 @@ impl LanguageRuntimeHandle {
             tokio::select! {
                 biased;
                 response = &mut response_rx => return response,
-                _ = tokio::time::sleep_until(check_at.into()) => {}
+                // `Instant` is the tokio clock that this sleep uses: with `std::time::Instant`,
+                // a paused test clock ends the sleep at once but never reaches the limit,
+                // and the loop spins for the real deadline.
+                _ = tokio::time::sleep_until(check_at) => {}
             }
         }
         response_rx.await

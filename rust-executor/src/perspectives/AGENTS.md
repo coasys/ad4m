@@ -32,9 +32,11 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 
 ## Invariants
 
-- Lock order inside `PerspectiveInstance`: `batch_store` → `persisted`. `prolog_update_mutex`
-  write is held across `PrologService` awaits on purpose. Never hold `persisted` across an await;
-  the idiom is `let h = self.persisted.lock().await.clone();`.
+- Handle reads use `persisted.load()` (shared immutable value) or `persisted.snapshot()`
+  (owned clone), never the writer mutex. Keep related fields on one snapshot. Handle writes
+  use `persisted.update(...)`: its synchronous closure serializes mutations and ordered DB/cache
+  writes. Lock order: `batch_store` → handle writer. `prolog_update_mutex` write is held across
+  `PrologService` awaits on purpose.
 - Every link write goes: persist to `SparqlStore` → Prolog facts (no-op when disabled) →
   typed event (`Topic::LinkAdded/LinkRemoved/LinkUpdated`, one event to all owners via
   `publish_to_owners`, the main agent if unowned) → commit to
