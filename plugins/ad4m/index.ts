@@ -240,13 +240,11 @@ export function closeWakerClient(client: any, logger?: any): void {
 }
 
 /**
- * The `@coasys/ad4m` module the waker builds its client and query proxies
- * from. Loaded lazily to avoid load-time issues with @holochain/client
+ * The `@coasys/ad4m` module the waker builds its client from. Loaded lazily to avoid load-time issues with @holochain/client
  * transitive deps; build.mjs bundles it from core source.
  */
 export function loadWakerClientModule(): {
   Ad4mClient: any;
-  QuerySubscriptionProxy: any;
 } {
   return require("@coasys/ad4m");
 }
@@ -1599,7 +1597,7 @@ Notes:
   ): Promise<boolean> {
     const stale = () => generation !== _wakerGeneration;
     logger.info("[ad4m-waker] Loading dependencies...");
-    const { Ad4mClient, QuerySubscriptionProxy } = loadWakerClientModule();
+    const { Ad4mClient } = loadWakerClientModule();
     logger.info("[ad4m-waker] Dependencies loaded OK");
 
     logger.info(`[ad4m-waker] Connecting to ${httpUrl}...`);
@@ -1624,7 +1622,6 @@ Notes:
     const manager = new WakerSubscriptionManager({
       perspectiveClient: client.perspective,
       logger,
-      QuerySubscriptionProxy,
       debounceMs: config.debounceMs,
       subscribeTimeoutMs: config.subscribeTimeoutMs ?? WAKER_SUBSCRIBE_TIMEOUT_MS,
       previousSeenMessages: savedState.seenMessages,

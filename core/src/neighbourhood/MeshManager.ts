@@ -190,19 +190,12 @@ export interface SignallingChannel {
      * "the message has not gone yet" — see {@link MeshManager.outstanding}.
      */
     onPublishResult?(cb: (result: { ok: boolean; ms: number }) => void): () => void
-    /**
-     * Settles once messages published from now on reach `onMessage`.
-     * Optional: a transport that delivers from the moment `onMessage`
-     * returns has nothing to wait for. A peer told about this one before it
-     * listens would offer into the void until a repair resends.
-     */
-    listening?(): Promise<void>
 }
 
 /** Minimal telepresence surface the channel bridge needs. */
 export interface TelepresenceProxy {
     sendBroadcastU(status: PerspectiveUnsignedInput): Promise<boolean>
-    addSignalHandler(handler: (payload: PerspectiveExpression) => void): Promise<void>
+    addSignalHandler(handler: (payload: PerspectiveExpression) => void): void
     removeSignalHandler(handler: (payload: PerspectiveExpression) => void): void
 }
 
@@ -255,7 +248,6 @@ export function createTelepresenceChannel(
 ): SignallingChannel {
     const self = meshPeerId(selfDid, selfDevice)
     const resultListeners = new Set<(result: { ok: boolean; ms: number }) => void>()
-    let subscribed: Promise<void> = Promise.resolve()
     let warnedNoDevice = false
     const report = (result: { ok: boolean; ms: number }) => {
         for (const cb of resultListeners) {
@@ -339,14 +331,10 @@ export function createTelepresenceChannel(
                 cb(from, message)
             }
 
-            subscribed = proxy.addSignalHandler(handler).catch((err) => {
-                console.warn("mesh: signal handler registration failed — inbound traffic will get missed:", err)
-            })
+            proxy.addSignalHandler(handler)
 
             return () => proxy.removeSignalHandler(handler)
         },
-
-        listening: () => subscribed,
 
         onPublishResult(cb) {
             resultListeners.add(cb)
@@ -745,10 +733,9 @@ export class MeshManager {
 
             this.enqueue(from, slot, message)
         })
-        // A session announces itself once `join` returns; peers offer at once.
-        await this.channel.listening?.()
-        // Left or destroyed while the channel came up: start nothing.
-        if (this.closed) return
+        // A session announces itself once `join` returns; peers offer at once. A peer's offer
+        // reaches the handler: the signal subscription is on the wire ahead of the announce, on
+        // the same socket, and the executor applies it before it reads the announce's frame.
 
         /*
          * Spend the transport's first-send cost on something that does not

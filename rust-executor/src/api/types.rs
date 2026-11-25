@@ -711,15 +711,6 @@ pub struct DiscardBatchRequest {
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
-pub struct SubscribeQueryRequest {
-    pub query: String,
-    /// Minted by the client, so it can end the subscription without the reply.
-    pub subscription_id: String,
-}
-
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ResyncSubscriptionRequest {
     pub subscription_id: String,
 }
