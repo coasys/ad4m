@@ -160,9 +160,10 @@ impl PerspectiveInstance {
     /// a dropped `mount` future is cleaned up like a failed mount
     /// (`AbandonedMount`).
     pub async fn mount(&mut self, lang_address: &str) -> Result<(), AnyError> {
-        self.mount_owner().await?;
         self.refuse_mirror_of_an_older_build(lang_address).await?;
         let generation = {
+            let _membership = self.mount_membership_lock().await;
+            self.mount_owner().await?;
             let mut slot = self.mount_lifecycles.lock(lang_address).await;
             match slot.phase {
                 MountPhase::Active => return Ok(()),
@@ -310,8 +311,8 @@ impl PerspectiveInstance {
                 .await?;
             }
             self.remove_pending(lang_address).await?;
-            // A second owner that joined while the snapshot was read or written must not get
-            // it: the join checks for a mount link, this checks after writing one.
+            // Defence in depth for owner mutations outside the join path. Joins cannot
+            // add an owner while this slot is Mounting (even before its first write).
             if self.mount_owner().await.ok().as_ref() != Some(&owner) {
                 let links: Vec<LinkExpression> = self
                     .mount_links(Some(lang_address))
@@ -536,6 +537,17 @@ impl PerspectiveInstance {
                 self.uuid
             )),
         }
+    }
+
+    /// Serialize joining with reserving a first mount, without holding `persisted`
+    /// across awaits or a mount's apply lock across a language call.
+    pub(crate) async fn mount_membership_lock(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.mount_lifecycles.membership.clone().lock_owned().await
+    }
+
+    /// Called under `mount_membership_lock`, including before any mount link exists.
+    pub(crate) async fn mount_is_preparing(&self) -> bool {
+        self.mount_lifecycles.is_preparing().await
     }
 
     /// Whether `agent` is this perspective's single owner ([`Self::mount_owner`]).
