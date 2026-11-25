@@ -151,7 +151,7 @@ A class is addressed by its target class IRI (`flux://Note`). Its name, the last
 - Every SDK call that names a model's class (queries, creates, updates, deletes, includes, getters) sends its target class IRI, so `we://Topic` and `flux://Topic` live side by side in one Perspective, each read and written as its own class.
 - `registerShapes` takes a class whatever name other classes hold. It refuses one target class twice in one call, a shape URI another class holds, and a shape URI that does not end in `{Name}Shape`.
 - Re-registering is the intended pattern at app start: an unchanged call writes nothing and is answered from the executor's cached registry — the stored links are compared exactly, never just the shape's hash.
-- A bare name passed to the executor (`perspective.createSubject("Note", ...)`, an MCP tool) reads the class of that name with the least IRI: `a://Note` over `b://Note`. Pass the IRI to reach any other.
+- A bare name passed to the executor (a `perspective.mutate` op's `class`, an MCP tool) reads the class of that name with the least IRI: `a://Note` over `b://Note`. Pass the IRI to reach any other.
 - `perspective.shapes(["Note"])` lists every class of that name, least IRI first; `perspective.shapes(["b://Note"])` only that one.
 - A relation to another class resolves through the target class of the shape it names, so `sh:class b://NoteShape` reaches `b://Note` even when `a://Note` exists.
 - Answers name a class by its IRI: `registerShapes`' `written` and `unchanged`, `__subjectClass` and `__subjectClasses` on the rows of polymorphic relations, union queries and abstract classes, and the classes an auto-processor config or a flow output lists. A raw `modelQuery` given a name gets that name back as `__subjectClass`.
@@ -662,6 +662,11 @@ const recipe = await Recipe.create(perspective, { name: "Cake" }, {
 });
 ```
 
+The new instance joins the parent's relation to its class (name it with `field` when the parent has several). On a `@HasMany` it is added to the members; on a `@HasOne` it becomes the relation's one member, replacing the one it had.
+
+`Recipe.create(...)` builds the instance, assigns your values and calls `save()` on it, so a
+subclass that overrides `save()` (to add a check or a hook) sees every create, static or not.
+
 `create` returns the instance it built from your values, with its `id`, and reads nothing back
 after the commit. `author`, `createdAt`, `updatedAt`, getters and relations you did not write are
 not set. Pass `returns: 'row'` to read the row after the commit (one more round trip) and fill them:
@@ -706,9 +711,9 @@ await recipe.save();  // Only the name field is updated
 await Recipe.update(perspective, recipe.id, { name: "White Chocolate Cake" });
 ```
 
-**An empty value clears the property.** Setting a property to `null` or `''` on `save()`, `update()` or `create()` leaves it with no links (and no empty literal). On `create()` the property is simply not written. `undefined` writes nothing, and a relation is emptied with `[]`. A required property cannot be cleared: the write throws, because its link is part of what makes the record an instance of the class.
+**An empty value clears the property.** Setting a property to `null` or `''` on `save()`, `update()` or `create()` leaves it with no links (and no empty literal). On `create()` the property is simply not written. `undefined` writes nothing, a collection relation is emptied with `[]`, and a `@HasOne` or `@BelongsToOne` relation is cleared with `null`. A required property, or a required collection, cannot be cleared: the write throws, because its link is part of what makes the record an instance of the class.
 
-The clear is the executor's own `removeLink` with target `*`: it removes every link on that property, also links other agents wrote, and a value staged earlier in the same batch. It holds the same through an abstract class and for `perspective.updateSubject`.
+The clear is the executor's own `removeLink` with target `*`: it removes every link on that property, also links other agents wrote, and a value staged earlier in the same batch. It holds the same through an abstract class and for a `perspective.mutate` update op that sets the property to `null`.
 
 ```typescript
 recipe.category = null; // or ''
@@ -725,11 +730,11 @@ await recipe.delete();
 await Recipe.delete(perspective, recipeId);
 ```
 
-`delete()` also cleans up incoming links: every link whose target is the instance is removed (e.g. a parent's `hasMany` reference to this instance, including polymorphic relations, and links from other models), in the same batch as the rest of the delete. A failed removal rejects `delete()`. Incoming links are read from committed state, so a link to the instance added earlier in the same batch is not removed.
+`delete()` also cleans up incoming links: every link whose target is the instance is removed (e.g. a parent's `hasMany` reference to this instance, including polymorphic relations, and links from other models), in the same batch as the rest of the delete. A failed removal rejects `delete()`. Incoming links are read from the batch's effective graph (committed links plus the batch's staged work), so a link to the instance added earlier in the same batch is removed too. Removing incoming links does not respect a second class on the same node: a node that has more than one class loses the links that point at it.
 
 ### Dirty Tracking
 
-After fetching an instance, AD4M takes a snapshot of all field values. You can inspect what changed:
+After fetching an instance, AD4M takes a snapshot of all field values (an object-valued field is copied, so changing the object later is a change, not a silent edit of the snapshot). You can inspect what changed:
 
 ```typescript
 const recipe = await Recipe.findOne(perspective);
@@ -740,6 +745,8 @@ recipe.changedFields(); // ["name"]
 
 await recipe.save();    // Only "name" is written
 ```
+
+A write queued in a transaction is not in the store until the transaction commits. A read of the instance in between (another `save()` of it, or `getData()`) keeps the queued value of that field, in the object and in the snapshot, instead of the store's older one: setting the field back to the old value is then still a change. `create()` writes without reading the instance back, also when your own `save(batchId)` override handles the write.
 
 ### Instance Identity
 
@@ -772,7 +779,6 @@ Every model instance automatically gets these properties, populated from link me
 | `.author` | `string` | DID of the agent who created the earliest link (e.g. `"did:key:z6Mk..."`) |
 | `.createdAt` | `string \| number` | Timestamp of the earliest link (epoch ms or ISO string) |
 | `.updatedAt` | `string \| number` | Timestamp of the most recent link |
-| `.timestamp` | *(deprecated)* | Alias for `.createdAt` — use `.createdAt` instead |
 
 These are available after any fetch operation (`get()`, `findAll()`, `findOne()`, etc.) and can be used in queries:
 
@@ -1147,7 +1153,7 @@ A query over an abstract class is a [union query](#querying-several-classes-at-o
 | Matching | By name only. A class matches when, for every property of the abstract class, it has a property with that name or an alias for it, and the same for relations. Predicates (`through`), datatypes and directions are not compared, so the abstract class's own `through` values are never used. |
 | Aliases | `alias: { Readable: "text" }` on a property or relation. Read through `Readable`, the row carries `text`, read through this property's predicate, and `where` / `order` use `text`. Read as `Message`, it stays `body`. A class that already has a property named `text` cannot also alias another property to `text`: registering it fails. |
 | Rows | Each row is the record's real class: `__subjectClass` is its target class IRI. Two classes of one name (`a://Task`, `b://Task`) are read apart, each through its own shape and its own aliases. |
-| Creating | Refused: `Readable.create(…)` and `createSubject("Readable", …)` throw. |
+| Creating | Refused: `Readable.create(…)` and a `perspective.mutate` create op of `Readable` throw. |
 | Writing | Dispatched to the record's own classes, like a virtual call. See [Writing Through an Abstract Class](#writing-through-an-abstract-class). |
 | No names | An abstract class with no property and no relation is refused at registration. One that arrives that way anyhow (a sync, raw links) reads no class. |
 | Classifying | An abstract class is never one of a record's classes (`subjectClassesOf`, polymorphic relations, union queries). |
@@ -1209,7 +1215,7 @@ The rules:
 - **Names.** Only the abstract class's own names can be written through it. Through `Readable` that is `text`; the record's other properties are written through its own class.
 - **Values are not converted.** If one class holds HTML and another Markdown, both get exactly what you wrote.
 - **No class.** Writing to a record that is none of `Readable`'s classes is an error.
-- **Raw API.** `perspective.updateSubject("Readable", id, { text })` and `perspective.removeSubject("Readable", id)` dispatch the same way; the model methods above call them.
+- **Raw API.** `perspective.mutate` with `{ op: "update", class: "Readable", id, set: { text } }` and `{ op: "delete", class: "Readable", id }` dispatch the same way; the model methods above send them.
 - **MCP.** `instance_update` and `instance_remove` dispatch the same way. Collection membership and the tools generated for `Readable` (its reads only) go through the record's own class.
 
 ### Unverified Links
@@ -1412,7 +1418,6 @@ For lower-level batch control, see the [Batch Operations Guide](/developer-guide
 | `create` | `create(perspective, data?, options?)` | Create and save in one step. `options` supports `parent` and `batchId` |
 | `update` | `update(perspective, id, data)` | Fetch by ID, merge data, save. Rejects if no instance has this ID |
 | `delete` | `delete(perspective, id)` | Delete by ID with incoming link cleanup |
-| `remove` | `remove(perspective, id)` | *Deprecated* — alias for `delete` |
 | `findAll` | `findAll(perspective, query?)` | Query all matching instances |
 | `findOne` | `findOne(perspective, query?)` | First matching instance or `null` |
 | `findAllAndCount` | `findAllAndCount(perspective, query?)` | Results + total count |
@@ -1423,7 +1428,6 @@ For lower-level batch control, see the [Batch Operations Guide](/developer-guide
 | `query` | `query(perspective, query?, options?)` | A live query: a `LiveQuery` of the current page, updated on each change |
 | `queryOf` | `queryOf(perspective, classes, query?, options?)` | A live query over several classes |
 | `getModelMetadata` | `getModelMetadata()` | Introspect property & relation metadata |
-| `generateSDNA` | `generateSDNA()` | Returns the generated Prolog SDNA rules (injected by `@Model`) |
 | `generateSHACL` | `generateSHACL()` | Returns the generated SHACL shape graph (injected by `@Model`) |
 
 ### Introspection
@@ -1437,7 +1441,7 @@ console.log(meta.properties);  // [{ name: "name", predicate: "recipe://name", .
 console.log(meta.relations);   // [{ name: "comments", predicate: "recipe://comment", ... }, ...]
 ```
 
-`generateSDNA()` and `generateSHACL()` return the raw Prolog rules and SHACL shape respectively — primarily useful for debugging schema registration issues.
+`generateSHACL()` returns the raw SHACL shape — primarily useful for debugging schema registration issues.
 
 ## Relation Filtering
 

@@ -379,11 +379,20 @@ pub(super) async fn sent_tool_call(
     .1
 }
 
+/// The session `id` of the caller's agent, read from `ai.sessionList` (there is no
+/// single-session read call).
+pub(super) fn get(ctx: &RequestContext, id: &str) -> Result<AiSession, SessionError> {
+    service::list(ctx)?
+        .into_iter()
+        .find(|s| s.id == id)
+        .ok_or_else(|| SessionError::NotFound(id.to_string()))
+}
+
 /// Every session method `caller` can name `session` answers not-found — an id that
 /// exists but is not theirs must read exactly like one that does not.
 pub(super) async fn assert_unreachable(caller: &RequestContext, session: &AiSession) {
     for (what, outcome) in [
-        ("get", service::get(caller, &session.id).map(|_| ())),
+        ("get", get(caller, &session.id).map(|_| ())),
         (
             "messages",
             service::messages(caller, &session.id, None, None).map(|_| ()),

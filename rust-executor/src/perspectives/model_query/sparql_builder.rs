@@ -165,6 +165,44 @@ pub(super) fn build_timestamp_probe(shape: &ModelShape, guard: LinkGuard) -> Str
     )
 }
 
+/// The predicates whose links make a record an instance of `shape`, by the tiers of
+/// [`shape_conformance_patterns`]: the required properties (flags included), else the first
+/// property with an initial value, else every declared predicate (the structural fallback).
+/// A write that rests on an instance being absent reads these.
+pub(crate) fn existence_predicates(shape: &ModelShape) -> Vec<&str> {
+    let valid = |p: &&super::types::ShapeProperty| validate_iri(&p.predicate).is_ok();
+    let required: Vec<&str> = shape
+        .properties
+        .iter()
+        .filter(|p| p.is_required)
+        .filter(valid)
+        .map(|p| p.predicate.as_str())
+        .collect();
+    if !required.is_empty() {
+        return required;
+    }
+    match shape
+        .properties
+        .iter()
+        .filter(|p| p.initial_value.is_some())
+        .find(valid)
+    {
+        Some(p) => vec![p.predicate.as_str()],
+        None => structural_predicates(shape),
+    }
+}
+
+/// Any link of a declared, valid predicate: the structural fallback of
+/// [`shape_conformance_patterns`].
+fn structural_predicates(shape: &ModelShape) -> Vec<&str> {
+    shape
+        .properties
+        .iter()
+        .filter(|p| !p.predicate.is_empty() && validate_iri(&p.predicate).is_ok())
+        .map(|p| p.predicate.as_str())
+        .collect()
+}
+
 /// The predicates of the links hydration reads for an instance, deduplicated
 /// and sorted. Empty means every predicate.
 ///
@@ -1163,11 +1201,9 @@ pub(super) fn shape_conformance_patterns(
             "Model class uses structural conformance fallback — no required/flag properties found. \
              This may match instances from other model classes sharing the same predicates."
         );
-        let known_predicates: Vec<String> = shape
-            .properties
-            .iter()
-            .filter(|p| !p.predicate.is_empty() && validate_iri(&p.predicate).is_ok())
-            .map(|p| format!("<{}>", p.predicate))
+        let known_predicates: Vec<String> = structural_predicates(shape)
+            .into_iter()
+            .map(|predicate| format!("<{predicate}>"))
             .collect();
 
         if !known_predicates.is_empty() {

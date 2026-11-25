@@ -417,7 +417,7 @@ pub async fn apply_interpretation_ops(
                 class,
                 values,
             } => perspective
-                .create_subject(
+                .create_subject_raw(
                     SubjectClassOption {
                         class_name: Some(class.clone()),
                         query: None,
@@ -439,7 +439,7 @@ pub async fn apply_interpretation_ops(
                 class,
                 values,
             } => perspective
-                .update_subject(
+                .update_subject_raw(
                     SubjectClassOption {
                         class_name: Some(class.clone()),
                         query: None,

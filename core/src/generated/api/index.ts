@@ -16,10 +16,8 @@ export type { ApplyTemplateRequest } from "./ApplyTemplateRequest";
 export type { CommitBatchRequest } from "./CommitBatchRequest";
 export type { CreateExpressionRequest } from "./CreateExpressionRequest";
 export type { CreatePerspectiveRequest } from "./CreatePerspectiveRequest";
-export type { CreateSubjectRequest } from "./CreateSubjectRequest";
 export type { DiscardBatchRequest } from "./DiscardBatchRequest";
 export type { EmbedRequest } from "./EmbedRequest";
-export type { ExecuteCommandsRequest } from "./ExecuteCommandsRequest";
 export type { ExportRequest } from "./ExportRequest";
 export type { ExpressionManyRequest } from "./ExpressionManyRequest";
 export type { FriendSendMessageRequest } from "./FriendSendMessageRequest";
@@ -156,19 +154,13 @@ export type { ShapeAction } from "./ShapeAction";
 export type { ShapeConformanceCondition } from "./ShapeConformanceCondition";
 export type { ShapeJson } from "./ShapeJson";
 export type { ShapeSummary } from "./ShapeSummary";
-// The validated instance writes (perspective.instance*): bodies, results, and the
-// error data of a refused write (RpcError.data).
-export type { InstanceCreate } from "./InstanceCreate";
-export type { InstanceUpdate } from "./InstanceUpdate";
-export type { InstanceRemove } from "./InstanceRemove";
-export type { InstanceAddToCollection } from "./InstanceAddToCollection";
-export type { InstanceRemoveFromCollection } from "./InstanceRemoveFromCollection";
-export type { InstanceCreated } from "./InstanceCreated";
-export type { InstanceUpdated } from "./InstanceUpdated";
-export type { InstanceRemoved } from "./InstanceRemoved";
-export type { CollectionItemAdded } from "./CollectionItemAdded";
-export type { CollectionItemRemoved } from "./CollectionItemRemoved";
-export type { CollectionItems } from "./CollectionItems";
+// The validated instance write (perspective.mutate): its params, ops and result, and
+// the error data of a refused write (RpcError.data).
+export type { PerspectiveMutateParams } from "./PerspectiveMutateParams";
+export type { PerspectiveMutateResult } from "./PerspectiveMutateResult";
+export type { MutateOp } from "./MutateOp";
+export type { ParentRef } from "./ParentRef";
+export type { Returns } from "./Returns";
 export type { InstanceError } from "./InstanceError";
 export type { ValidationError } from "./ValidationError";
 export type { ValidationProblem } from "./ValidationProblem";

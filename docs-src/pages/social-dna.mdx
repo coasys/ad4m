@@ -348,7 +348,9 @@ const classes = (await perspective.shapes()).map(s => s.name);
 // Returns: ["Todo"]
 
 // Create a new subject instance
-await perspective.createSubject("Todo", "expression://123");
+await perspective.mutate([
+  { op: "create", class: "Todo", id: "expression://123" },
+]);
 
 // Check if an expression is an instance of a class
 const isTodo = await perspective.isSubjectInstance("expression://123", "Todo");
@@ -357,7 +359,9 @@ const isTodo = await perspective.isSubjectInstance("expression://123", "Todo");
 const todoData = await perspective.getSubjectData("Todo", "expression://123");
 
 // Remove a subject (runs destructor if defined)
-await perspective.removeSubject("Todo", "expression://123");
+await perspective.mutate([
+  { op: "delete", class: "Todo", id: "expression://123" },
+]);
 
 // Get all instances of a class
 const allTodos = await perspective.getAllSubjectInstances("Todo");
@@ -569,11 +573,6 @@ const todos = await perspective.querySparql(`
           rdf:object <active> .
   }
 `);
-
-// Option 3: Prolog (for backward compatibility)
-const todos = await perspective.infer(
-  'instance(Todo, "Todo"), property_getter("Todo", Todo, "state", "active")'
-);
 ```
 
 ## Best Practices

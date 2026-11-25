@@ -41,8 +41,6 @@ import type { Apps } from "./Apps";
 import type { CallSessionInfo } from "./CallSessionInfo";
 import type { ClaimOfferParams } from "./ClaimOfferParams";
 import type { ClaimOfferResult } from "./ClaimOfferResult";
-import type { CollectionItemAdded } from "./CollectionItemAdded";
-import type { CollectionItemRemoved } from "./CollectionItemRemoved";
 import type { ComputeLogEntry } from "./ComputeLogEntry";
 import type { CosignInceptParams } from "./CosignInceptParams";
 import type { CreateExpressionRequest } from "./CreateExpressionRequest";
@@ -80,9 +78,6 @@ import type { IdentityLog } from "./IdentityLog";
 import type { IdentityStatus } from "./IdentityStatus";
 import type { ImportAgentRequest } from "./ImportAgentRequest";
 import type { ImportRequest } from "./ImportRequest";
-import type { InstanceCreated } from "./InstanceCreated";
-import type { InstanceRemoved } from "./InstanceRemoved";
-import type { InstanceUpdated } from "./InstanceUpdated";
 import type { InteractionMeta } from "./InteractionMeta";
 import type { JoinNeighbourhoodRequest } from "./JoinNeighbourhoodRequest";
 import type { JoinStatus } from "./JoinStatus";
@@ -126,10 +121,8 @@ import type { PerspectiveAddLinkExpressionParams } from "./PerspectiveAddLinkExp
 import type { PerspectiveAddLinkParams } from "./PerspectiveAddLinkParams";
 import type { PerspectiveAddLinksParams } from "./PerspectiveAddLinksParams";
 import type { PerspectiveCommitBatchParams } from "./PerspectiveCommitBatchParams";
-import type { PerspectiveCreateSubjectParams } from "./PerspectiveCreateSubjectParams";
 import type { PerspectiveDiscardBatchParams } from "./PerspectiveDiscardBatchParams";
 import type { PerspectiveEvaluateGettersParams } from "./PerspectiveEvaluateGettersParams";
-import type { PerspectiveExecuteCommandsParams } from "./PerspectiveExecuteCommandsParams";
 import type { PerspectiveExpression } from "./PerspectiveExpression";
 import type { PerspectiveFlowFiredParams } from "./PerspectiveFlowFiredParams";
 import type { PerspectiveFlowProposalParams } from "./PerspectiveFlowProposalParams";
@@ -138,16 +131,13 @@ import type { PerspectiveFlowStatesParams } from "./PerspectiveFlowStatesParams"
 import type { PerspectiveFlowValidOutputsParams } from "./PerspectiveFlowValidOutputsParams";
 import type { PerspectiveGetSubjectDataParams } from "./PerspectiveGetSubjectDataParams";
 import type { PerspectiveHandle } from "./PerspectiveHandle";
-import type { PerspectiveInstanceAddToCollectionParams } from "./PerspectiveInstanceAddToCollectionParams";
-import type { PerspectiveInstanceCreateParams } from "./PerspectiveInstanceCreateParams";
-import type { PerspectiveInstanceRemoveFromCollectionParams } from "./PerspectiveInstanceRemoveFromCollectionParams";
-import type { PerspectiveInstanceRemoveParams } from "./PerspectiveInstanceRemoveParams";
-import type { PerspectiveInstanceUpdateParams } from "./PerspectiveInstanceUpdateParams";
 import type { PerspectiveLinkDiff } from "./PerspectiveLinkDiff";
 import type { PerspectiveLinkMutationsParams } from "./PerspectiveLinkMutationsParams";
 import type { PerspectiveMintFlowReceiptParams } from "./PerspectiveMintFlowReceiptParams";
 import type { PerspectiveMintFlowReceiptResult } from "./PerspectiveMintFlowReceiptResult";
 import type { PerspectiveModelQueryParams } from "./PerspectiveModelQueryParams";
+import type { PerspectiveMutateParams } from "./PerspectiveMutateParams";
+import type { PerspectiveMutateResult } from "./PerspectiveMutateResult";
 import type { PerspectiveProposeFlowTransitionParams } from "./PerspectiveProposeFlowTransitionParams";
 import type { PerspectiveQueryLinksParams } from "./PerspectiveQueryLinksParams";
 import type { PerspectiveQueryParams } from "./PerspectiveQueryParams";
@@ -156,7 +146,6 @@ import type { PerspectiveRejectFlowProposalResult } from "./PerspectiveRejectFlo
 import type { PerspectiveRemoveAutoProcessorParams } from "./PerspectiveRemoveAutoProcessorParams";
 import type { PerspectiveRemoveLinkParams } from "./PerspectiveRemoveLinkParams";
 import type { PerspectiveRemoveLinksParams } from "./PerspectiveRemoveLinksParams";
-import type { PerspectiveRemoveSubjectParams } from "./PerspectiveRemoveSubjectParams";
 import type { PerspectiveResolveInterpretationParams } from "./PerspectiveResolveInterpretationParams";
 import type { PerspectiveResynced } from "./PerspectiveResynced";
 import type { PerspectiveShapesParams } from "./PerspectiveShapesParams";
@@ -167,7 +156,6 @@ import type { PerspectiveSubscribed } from "./PerspectiveSubscribed";
 import type { PerspectiveSubscriptionParams } from "./PerspectiveSubscriptionParams";
 import type { PerspectiveUpdateLinkParams } from "./PerspectiveUpdateLinkParams";
 import type { PerspectiveUpdateParams } from "./PerspectiveUpdateParams";
-import type { PerspectiveUpdateSubjectParams } from "./PerspectiveUpdateSubjectParams";
 import type { PerspectiveUuidParams } from "./PerspectiveUuidParams";
 import type { PerspectiveVerifyFlowReceiptParams } from "./PerspectiveVerifyFlowReceiptParams";
 import type { PromptRequest } from "./PromptRequest";
@@ -295,7 +283,6 @@ export interface RpcMethods {
   "ai.removeEndpoint": { params: AiRemoveEndpointParams; result: boolean };
   "ai.removeModel": { params: AiIdParams; result: boolean };
   "ai.removeTask": { params: AiIdParams; result: boolean };
-  "ai.session": { params: AiIdParams; result: AISession };
   "ai.sessionCancel": { params: AISessionCancelParams; result: boolean };
   "ai.sessionCreate": { params: AISessionCreate; result: AISession };
   "ai.sessionDelete": { params: AiIdParams; result: boolean };
@@ -364,25 +351,19 @@ export interface RpcMethods {
   "perspective.commitBatch": { params: PerspectiveCommitBatchParams; result: PerspectiveLinkDiff };
   "perspective.create": { params: CreatePerspectiveRequest; result: PerspectiveHandle };
   "perspective.createBatch": { params: PerspectiveUuidParams; result: string };
-  "perspective.createSubject": { params: PerspectiveCreateSubjectParams; result: boolean };
   "perspective.discardBatch": { params: PerspectiveDiscardBatchParams; result: boolean };
   "perspective.disposeQuery": { params: PerspectiveSubscriptionParams; result: boolean };
   "perspective.evaluateGetters": { params: PerspectiveEvaluateGettersParams; result: string };
-  "perspective.executeCommands": { params: PerspectiveExecuteCommandsParams; result: null };
   "perspective.flowFired": { params: PerspectiveFlowFiredParams; result: Array<FlowFiredEntry> };
   "perspective.flowStates": { params: PerspectiveFlowStatesParams; result: Array<FlowStateEntry> };
   "perspective.flowValidOutputs": { params: PerspectiveFlowValidOutputsParams; result: Array<ValidOutput> };
   "perspective.get": { params: PerspectiveUuidParams; result: PerspectiveHandle | null };
   "perspective.getSubjectData": { params: PerspectiveGetSubjectDataParams; result: string };
-  "perspective.instanceAddToCollection": { params: PerspectiveInstanceAddToCollectionParams; result: CollectionItemAdded };
-  "perspective.instanceCreate": { params: PerspectiveInstanceCreateParams; result: InstanceCreated };
-  "perspective.instanceRemove": { params: PerspectiveInstanceRemoveParams; result: InstanceRemoved };
-  "perspective.instanceRemoveFromCollection": { params: PerspectiveInstanceRemoveFromCollectionParams; result: CollectionItemRemoved };
-  "perspective.instanceUpdate": { params: PerspectiveInstanceUpdateParams; result: InstanceUpdated };
   "perspective.interpretationOverlays": { params: PerspectiveUuidParams; result: Array<OverlayView> };
   "perspective.linkMutations": { params: PerspectiveLinkMutationsParams; result: PerspectiveLinkDiff };
   "perspective.mintFlowReceipt": { params: PerspectiveMintFlowReceiptParams; result: PerspectiveMintFlowReceiptResult };
   "perspective.modelQuery": { params: PerspectiveModelQueryParams; result: string };
+  "perspective.mutate": { params: PerspectiveMutateParams; result: PerspectiveMutateResult };
   "perspective.proposeFlowTransition": { params: PerspectiveProposeFlowTransitionParams; result: ProposeOutcome };
   "perspective.publishSnapshot": { params: PerspectiveUuidParams; result: string };
   "perspective.queryLinks": { params: PerspectiveQueryLinksParams; result: Array<DecoratedLinkExpression> };
@@ -395,7 +376,6 @@ export interface RpcMethods {
   "perspective.removeAutoProcessor": { params: PerspectiveRemoveAutoProcessorParams; result: boolean };
   "perspective.removeLink": { params: PerspectiveRemoveLinkParams; result: boolean };
   "perspective.removeLinks": { params: PerspectiveRemoveLinksParams; result: Array<DecoratedLinkExpression> };
-  "perspective.removeSubject": { params: PerspectiveRemoveSubjectParams; result: boolean };
   "perspective.resyncSubscription": { params: PerspectiveSubscriptionParams; result: PerspectiveResynced };
   "perspective.runAgent": { params: RunAgentRequest; result: AgentReply };
   "perspective.runInterpretation": { params: RunInterpretationRequest; result: Array<string> };
@@ -406,7 +386,6 @@ export interface RpcMethods {
   "perspective.subscribe": { params: PerspectiveSubscribeParams; result: PerspectiveSubscribed };
   "perspective.update": { params: PerspectiveUpdateParams; result: PerspectiveHandle };
   "perspective.updateLink": { params: PerspectiveUpdateLinkParams; result: DecoratedLinkExpression };
-  "perspective.updateSubject": { params: PerspectiveUpdateSubjectParams; result: boolean };
   "perspective.verifyFlowReceipt": { params: PerspectiveVerifyFlowReceiptParams; result: PerspectiveFlowReceiptVerdict };
   "runtime.addFriends": { params: FriendsListRequest; result: Array<string> };
   "runtime.addHcAgentInfos": { params: AddAgentInfosRequest; result: boolean };
@@ -511,7 +490,6 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "ai.localStatus",
   "ai.modelStatus",
   "ai.models",
-  "ai.session",
   "ai.sessionList",
   "ai.sessionMessages",
   "ai.tasks",

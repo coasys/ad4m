@@ -11,8 +11,5 @@ export * from "./Ad4mModel";
 export * from "./decorators";
 export * from "./query-common";
 export * from "./json-schema";
-export * from "./query-utils";
-export * from "./query-sparql";
 export * from "./hydration";
-export * from "./sdna";
 export * from "./shacl-gen";

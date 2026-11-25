@@ -152,7 +152,7 @@ pub(crate) async fn mint_flow_instance(
         "subject": base_expression,
     });
     perspective
-        .create_subject(
+        .create_subject_raw(
             SubjectClassOption {
                 class_name: Some(FLOW_INSTANCE_CLASS.to_string()),
                 query: None,
@@ -309,7 +309,7 @@ pub(crate) async fn write_flow_transition_proposal(
     }
 
     perspective
-        .create_subject(
+        .create_subject_raw(
             SubjectClassOption {
                 class_name: Some(FLOW_TRANSITION_PROPOSAL_CLASS.to_string()),
                 query: None,

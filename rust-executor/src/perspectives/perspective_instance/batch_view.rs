@@ -21,9 +21,9 @@
 //! copies are still one link. [`EffectiveLink`] folds one identity to one entry and keeps
 //! the two presences apart.
 
-use super::PerspectiveInstance;
+use super::{PerspectiveInstance, TimestampedBatch};
 use crate::db::link_identity;
-use crate::types::{DecoratedLinkExpression, Link, LinkExpression, LinkQuery};
+use crate::types::{DecoratedLinkExpression, Link, LinkExpression, LinkQuery, PerspectiveDiff};
 use deno_core::error::AnyError;
 use std::collections::{HashMap, HashSet};
 
@@ -39,6 +39,36 @@ pub(crate) struct EffectiveLink {
     pub committed: bool,
     /// The batch holds staged copies of it: they drop through `cancel_batch_addition`.
     pub staged: bool,
+}
+
+/// An open batch's staged work at one moment: what [`PerspectiveInstance::fork_batch`] copied,
+/// for [`PerspectiveInstance::merge_batch`] to tell what the fork changed.
+pub(crate) struct BatchSnapshot {
+    diff: PerspectiveDiff,
+    updates: Vec<(LinkExpression, LinkExpression)>,
+}
+
+/// How [`PerspectiveInstance::merge_batch`] ended.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MergeOutcome {
+    /// The fork's work is now the target's.
+    Merged,
+    /// The target batch is gone (committed, discarded or swept).
+    Gone,
+    /// The target batch changed since the fork: nothing was merged.
+    Conflict,
+}
+
+/// Whether `now` holds the same items as `base`, by `key`, counting copies.
+fn same_items<T, K: std::hash::Hash + Eq>(base: &[T], now: &[T], key: impl Fn(&T) -> K) -> bool {
+    let mut counts: HashMap<K, isize> = HashMap::new();
+    for item in base {
+        *counts.entry(key(item)).or_default() += 1;
+    }
+    for item in now {
+        *counts.entry(key(item)).or_default() -= 1;
+    }
+    counts.values().all(|n| *n == 0)
 }
 
 impl EffectiveLink {
@@ -66,18 +96,29 @@ impl PerspectiveInstance {
         batch_id: Option<&str>,
     ) -> Result<Vec<EffectiveLink>, AnyError> {
         let persisted = self.get_links(query).await?;
+        Ok(self.overlay_batch(persisted, query, batch_id).await)
+    }
+
+    /// [`Self::get_links_effective`] over a committed read the caller already holds (and may
+    /// have recorded), so a decision and the expectation recorded for it come from one read.
+    pub(crate) async fn overlay_batch(
+        &self,
+        persisted: Vec<DecoratedLinkExpression>,
+        query: &LinkQuery,
+        batch_id: Option<&str>,
+    ) -> Vec<EffectiveLink> {
         let Some(bid) = batch_id else {
-            return Ok(persisted
+            return persisted
                 .into_iter()
                 .map(EffectiveLink::committed)
-                .collect());
+                .collect();
         };
         let batches = self.batch_store.read().await;
         let Some(batch) = batches.get(bid) else {
-            return Ok(persisted
+            return persisted
                 .into_iter()
                 .map(EffectiveLink::committed)
-                .collect());
+                .collect();
         };
 
         let relevant = |link: &Link| {
@@ -120,7 +161,67 @@ impl PerspectiveInstance {
                 }
             }
         }
-        Ok(out)
+        out
+    }
+
+    /// Open a private batch seeded with a copy of `batch_id`'s staged work, so the reads of a
+    /// `perspective.mutate` call into `batch_id` see the caller's work plus its own, and the
+    /// call's writes touch only the private batch. Answers the private batch's id and the
+    /// copy it was seeded with; `None` when `batch_id` is not open.
+    pub(crate) async fn fork_batch(&self, batch_id: &str) -> Option<(String, BatchSnapshot)> {
+        let mut batches = self.batch_store.write().await;
+        let source = batches.get(batch_id)?;
+        let base = BatchSnapshot {
+            diff: source.diff.clone(),
+            updates: source.updates.clone(),
+        };
+        let fork = TimestampedBatch {
+            diff: base.diff.clone(),
+            updates: base.updates.clone(),
+            reads: Vec::new(),
+            created_at: source.created_at,
+        };
+        let fork_id = uuid::Uuid::new_v4().to_string();
+        batches.insert(fork_id.clone(), fork);
+        Some((fork_id, base))
+    }
+
+    /// Merge what the private batch `fork_id` staged since `base` into `into`, and drop the
+    /// private batch: one step under the batch store's lock. The merge is conditional: when
+    /// `into` is not exactly `base` any more (its additions, removals or updates changed since
+    /// the fork), the fork's result may no longer follow from it (two calls replacing the same
+    /// single-valued relation, a raw update of a link the fork replaced, a staged addition
+    /// restaged with another status), so nothing is merged
+    /// and the fork is dropped.
+    pub(crate) async fn merge_batch(
+        &self,
+        into: &str,
+        fork_id: &str,
+        base: BatchSnapshot,
+    ) -> MergeOutcome {
+        let mut batches = self.batch_store.write().await;
+        let Some(fork) = batches.remove(fork_id) else {
+            return MergeOutcome::Gone;
+        };
+        let Some(target) = batches.get_mut(into) else {
+            return MergeOutcome::Gone;
+        };
+        let pair = |(old, new): &(LinkExpression, LinkExpression)| {
+            (link_identity(old), link_identity(new))
+        };
+        // A staged addition's status is part of what it is: restaging it as another status
+        // changes what a commit publishes, though not its identity.
+        let staged = |e: &LinkExpression| (link_identity(e), e.status.clone());
+        if !(same_items(&base.diff.additions, &target.diff.additions, staged)
+            && same_items(&base.diff.removals, &target.diff.removals, link_identity)
+            && same_items(&base.updates, &target.updates, pair))
+        {
+            return MergeOutcome::Conflict;
+        }
+        // The target is `base`: the fork's staged work replaces it.
+        target.diff = fork.diff;
+        target.updates = fork.updates;
+        MergeOutcome::Merged
     }
 
     /// Drop the staged additions that are `link` (by `link_identity`), returning whether any
@@ -146,5 +247,17 @@ impl PerspectiveInstance {
             .additions
             .retain(|addition| link_identity(addition) != link_identity(link));
         staged != batch.diff.additions.len()
+    }
+
+    /// How many batches are open.
+    #[cfg(test)]
+    pub(crate) async fn open_batch_count(&self) -> usize {
+        self.batch_store.read().await.len()
+    }
+
+    /// Hold the batch store's write lock until the guard drops: a test makes a call wait for it.
+    #[cfg(test)]
+    pub(crate) async fn hold_batch_store(&self) -> Box<dyn std::any::Any + Send> {
+        Box::new(self.batch_store.clone().write_owned().await)
     }
 }

@@ -1112,21 +1112,18 @@ impl FlowInstance {
         let mut props = Map::new();
         props.insert("flowUri".into(), Value::from(flow.flow_uri()));
         props.insert("subject".into(), Value::from(subject));
-        let created = model
+        let id = model
             .create(props, crate::model::CreateOptions::default())
             .await?;
         // The hydrated record: the create reply carries the URI; fetch the
         // instance for its synthesized fields (`createdAt`).
-        let record = model
-            .get(&created.base_uri, None)
-            .await?
-            .unwrap_or_else(|| {
-                json!({
-                    "id": created.base_uri,
-                    "flowUri": flow.flow_uri(),
-                    "subject": subject,
-                })
-            });
+        let record = model.get(&id, None).await?.unwrap_or_else(|| {
+            json!({
+                "id": id,
+                "flowUri": flow.flow_uri(),
+                "subject": subject,
+            })
+        });
         Ok(Self {
             api: api.clone(),
             state_name: Some(flow.states[0].name.clone()),

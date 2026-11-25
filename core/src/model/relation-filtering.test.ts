@@ -23,7 +23,6 @@ import {
   SHACLPropertyShape,
   ConformanceCondition,
 } from "../shacl/SHACLShape";
-import { compileWhereClause } from "./query-utils";
 
 // ============================================================================
 // Test models
@@ -926,53 +925,6 @@ describe("where clause compilation", () => {
 });
 
 // ============================================================================
-// compileWhereClause() unit tests
-// ============================================================================
-
-describe("compileWhereClause()", () => {
-  it("should compile simple equality to SPARQL condition", () => {
-    const conditions = compileWhereClause(
-      { status: "active" },
-      { properties: { status: { name: "status", predicate: "test://status", required: false, readOnly: false } }, relations: {}, className: "Test" }
-    );
-    expect(conditions).toHaveLength(1);
-    expect(conditions[0]).toContain("test://status");
-    expect(conditions[0]).toContain("active");
-  });
-
-  it("should compile not operator", () => {
-    const conditions = compileWhereClause(
-      { status: { not: "archived" } },
-      { properties: { status: { name: "status", predicate: "test://status", required: false, readOnly: false } }, relations: {}, className: "Test" }
-    );
-    expect(conditions).toHaveLength(1);
-    expect(conditions[0]).toContain("NOT EXISTS");  // negation
-    expect(conditions[0]).toContain("archived");
-  });
-
-  it("should compile array values to IN clause", () => {
-    const conditions = compileWhereClause(
-      { category: ["food", "drink"] },
-      { properties: { category: { name: "category", predicate: "test://category", required: false, readOnly: false } }, relations: {}, className: "Test" }
-    );
-    expect(conditions).toHaveLength(1);
-    expect(conditions[0]).toContain("food");
-    expect(conditions[0]).toContain("drink");
-    expect(conditions[0]).toContain("IN");
-  });
-
-  it("should fall back to raw predicate URIs when metadata is null", () => {
-    const conditions = compileWhereClause(
-      { "test://raw_pred": "value" },
-      null as any
-    );
-    expect(conditions).toHaveLength(1);
-    expect(conditions[0]).toContain("test://raw_pred");
-    expect(conditions[0]).toContain("value");
-  });
-});
-
-// ============================================================================
 // readOnly relations
 // ============================================================================
 
@@ -1030,18 +982,13 @@ class SavesReadOnly extends Ad4mModel {
 
 describe("readOnly relations when saving", () => {
   it("are skipped by save() and create(), even without a getter", async () => {
-    const proto = SavesReadOnly.prototype as any;
-    const plan = jest.spyOn(proto, "planRelation").mockReturnValue([]);
-    try {
-      const instance = new SavesReadOnly({ uuid: "p" } as any, "test://instance");
-      await (instance as any).innerUpdate(true);
+    const perspective = { uuid: "p", mutate: jest.fn(async () => ({ ids: [] })) } as any;
+    const instance = new SavesReadOnly(perspective, "test://instance");
+    await instance.save("batch");
 
-      const touched = plan.mock.calls.map((call) => call[0]);
-      expect(touched).toContain("writableLinks");
-      expect(touched).not.toContain("readOnlyLinks");
-    } finally {
-      plan.mockRestore();
-    }
+    expect(perspective.mutate).toHaveBeenCalledTimes(1);
+    const [op] = perspective.mutate.mock.calls[0][0];
+    expect(op.values).toEqual({ writableLinks: ["test://b"] });
   });
 
   it("refuse `through` with `getter` on @HasOne, where the getter would be dropped", () => {

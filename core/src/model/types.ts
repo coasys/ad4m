@@ -2,7 +2,7 @@
  * Shared type definitions for the Ad4mModel system.
  *
  * Extracted into a standalone module so that utility files
- * (`query-utils.ts`, `decorators.ts`, etc.) can import types without
+ * (`decorators.ts`, `query-common.ts`, etc.) can import types without
  * creating circular runtime dependencies on `Ad4mModel.ts`.
  */
 
@@ -832,10 +832,6 @@ export interface PropertyMetadata {
    *   - `<custom address>`  → expression on that custom language
    */
   resolveLanguage?: string;
-  /** Custom Prolog getter code */
-  prologGetter?: string;
-  /** Custom Prolog setter code */
-  prologSetter?: string;
   /** Custom getter code */
   getter?: string;
   /** Whether stored locally only */
@@ -860,6 +856,8 @@ export interface RelationMetadata {
   readOnly?: boolean;
   /** Whether stored locally only */
   local?: boolean;
+  /** 1 for `@HasOne` / `@BelongsToOne`: the relation holds one member and is written as one id. Unset for a collection. */
+  maxCount?: number;
   /** Link direction: 'forward' for HasMany/HasOne, 'reverse' for BelongsToMany/BelongsToOne */
   direction?: 'forward' | 'reverse';
   /**

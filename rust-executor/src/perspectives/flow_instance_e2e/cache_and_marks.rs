@@ -611,7 +611,7 @@ async fn after_an_upgrade_the_first_pass_is_a_silent_catch_up() {
 // Mint seeding: whoever starts an instance reports its first settle
 // ---------------------------------------------------------------------------
 
-/// A client's `FlowInstance.start` writes the row through `createSubject`;
+/// A client's `FlowInstance.start` writes the row through `perspective.mutate`;
 /// no Rust mint runs. The local write still seeds this agent's row, so its
 /// first pass is not a catch-up and the first settle is reported — which is
 /// what the client's `Local` cache link did before #1424. (That a seeded row
@@ -624,7 +624,7 @@ async fn a_client_minted_instance_is_seeded_for_its_minter() {
     let flow_uri = f.flow_uri.clone();
     let ctx = f.ctx.clone();
     f.perspective
-        .create_subject(
+        .create_subject_raw(
             SubjectClassOption {
                 class_name: Some("FlowInstance".to_string()),
                 query: None,

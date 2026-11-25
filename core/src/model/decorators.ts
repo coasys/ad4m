@@ -1,6 +1,5 @@
 import { capitalize } from "./util";
 import type { Where } from "./types";
-import { buildSDNA } from "./sdna";
 import { buildSHACL } from "./shacl-gen";
 import { escapeQueryString } from "../utils";
 import type { ConformanceCondition } from "../shacl/SHACLShape";
@@ -256,7 +255,6 @@ export interface Ad4mModelLike {
     className?: string;
     /** Set by `@Model({ abstract: true })`. */
     isAbstract?: boolean;
-    generateSDNA?: () => any;
     generateSHACL?: () => any;
 }
 
@@ -358,16 +356,6 @@ export interface PropertyOptions {
      *   - a custom language address → `expression_create` on that language.
      */
     resolveLanguage?: string;
-
-    /**
-     * Custom Prolog getter to get the value of the property. If not provided, the default getter will be used.
-     */
-    prologGetter?: string;
-
-    /**
-     * Custom Prolog setter to set the value of the property. Only available if the property is writable.
-     */
-    prologSetter?: string;
 
     /**
      * Language-call setter: writes to this property invoke the given
@@ -492,16 +480,12 @@ function applyPropertyMetadata(opts: PropertyOptions) {
             throw new Error("SubjectProperty requires an 'initial' option if 'required' is true");
         }
 
-        if (!opts.through && !opts.prologGetter && !opts.getter) {
-            throw new Error("SubjectProperty requires either 'through' or 'prologGetter' or 'getter' option")
+        if (!opts.through && !opts.getter) {
+            throw new Error("SubjectProperty requires either 'through' or 'getter' option")
         }
 
         if (opts.setter && opts.readOnly) {
             throw new Error("SubjectProperty: `setter` call actions need a writable property — they cannot combine with `readOnly`")
-        }
-
-        if (opts.setter && opts.prologSetter) {
-            throw new Error("SubjectProperty: `setter` (language call) and `prologSetter` are mutually exclusive")
         }
 
         // Write to WeakMap registry (keyed by constructor)
@@ -709,7 +693,7 @@ export interface ModelConfig {
     targetClass?: string;
 
     /**
-     * Language-call constructor actions: `createSubject`/`instance_create`
+     * Language-call constructor actions: a create (`perspective.mutate`, `instance_create`)
      * on this class invokes the interaction(s) instead of writing links —
      * the mount form of construction (`{ action: "call", source,
      * predicate: interaction, target }`). A constructor has no instance
@@ -830,15 +814,6 @@ export function Model(opts: ModelConfig) {
             checkImplements(opts.name, target, abstractClass);
         }
 
-        target.generateSDNA = function() {
-            return buildSDNA(
-                opts.name,
-                target.prototype,
-                getPropertiesMetadata(target),
-                getRelationsMetadata(target),
-            );
-        }
-
         target.generateSHACL = function() {
             return getMemoizedSHACL(target, (seed) => buildSHACL(
                 opts.name,
@@ -925,8 +900,6 @@ export function Model(opts: ModelConfig) {
  * @param {boolean} [opts.required=false] - Whether the property is required (adds query filters and sentinel initial value)
  * @param {string} [opts.initial] - Initial value (defaults to "literal:string:uninitialized" when required)
  * @param {string} [opts.resolveLanguage] - Value-resolution language: unset (deterministic typed literal, the perf default), "literal" (signed envelope), or a custom language address
- * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
- * @param {string} [opts.prologSetter] - Custom Prolog code for setting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
 export function Property(opts: PropertyOptions) {
@@ -996,7 +969,6 @@ export function Property(opts: PropertyOptions) {
  * @param {string} opts.through - The predicate URI for the property
  * @param {string} [opts.initial] - Initial value (if property should have one)
  * @param {string} [opts.resolveLanguage] - Value-resolution language: unset (deterministic typed literal, the perf default), "literal" (signed envelope), or a custom language address
- * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
 export function ReadOnly(opts: PropertyOptions) {

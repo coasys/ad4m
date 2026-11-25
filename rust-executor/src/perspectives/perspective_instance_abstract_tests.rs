@@ -118,7 +118,7 @@ async fn create(
     base: &str,
     props: Value,
 ) -> Result<(), AnyError> {
-    p.create_subject(class(name), base.into(), Some(props), None, ctx)
+    p.create_subject_raw(class(name), base.into(), Some(props), None, ctx)
         .await
 }
 
@@ -129,7 +129,7 @@ async fn update(
     base: &str,
     values: Value,
 ) -> Result<(), AnyError> {
-    p.update_subject(class(name), base.into(), values, None, ctx)
+    p.update_subject_raw(class(name), base.into(), values, None, ctx)
         .await
 }
 
@@ -217,7 +217,7 @@ async fn a_setter_two_classes_share_runs_once() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_delete_through_an_abstract_class_runs_each_destructor() {
     let (mut p, ctx) = dispatch_setup().await;
-    p.remove_subject(class("TextContent"), "ad4m://m1".into(), None, &ctx)
+    p.remove_subject_raw(class("TextContent"), "ad4m://m1".into(), None, &ctx)
         .await
         .unwrap();
     let classes = p.subject_classes_of(&["ad4m://m1".to_string()]).unwrap();
@@ -241,7 +241,7 @@ async fn writes_through_an_abstract_class_that_cannot_dispatch_are_refused() {
     let text = json!({"text": "x"});
     let updated = update(&mut p, &ctx, "TextContent", "ad4m://t1", text).await;
     let deleted = p
-        .remove_subject(class("TextContent"), "ad4m://t1".into(), None, &ctx)
+        .remove_subject_raw(class("TextContent"), "ad4m://t1".into(), None, &ctx)
         .await;
     for err in [updated.unwrap_err(), deleted.unwrap_err()] {
         let err = err.to_string();
@@ -350,7 +350,7 @@ async fn a_collection_setter_through_an_abstract_class_sets_the_members() {
     assert!(targets_on(&p, "ad4m://f1", "ns://children").is_empty());
 }
 
-/// The same on the concrete class, which `perspective.updateSubject`
+/// The same on the concrete class, which a `perspective.mutate` update op
 /// reaches: an update sets exactly the members given, and so does a create.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_collection_setter_on_a_concrete_class_sets_the_members() {
@@ -725,7 +725,7 @@ async fn the_builtin_text_content_is_read_by_its_uri() {
     // name the class aliases to `TextContent`; never to the built-in's
     // predicate.
     perspective
-        .update_subject(
+        .update_subject_raw(
             SubjectClassOption {
                 class_name: Some(TEXT_CONTENT_URI.into()),
                 query: None,
@@ -744,7 +744,7 @@ async fn the_builtin_text_content_is_read_by_its_uri() {
     assert_eq!(links_on(&perspective, "ad4m://message/b", "ad4m://text"), 0);
     // A delete through it runs the record's own destructor.
     perspective
-        .remove_subject(
+        .remove_subject_raw(
             SubjectClassOption {
                 class_name: Some(TEXT_CONTENT_URI.into()),
                 query: None,
@@ -874,7 +874,7 @@ async fn an_abstract_class_writes_two_classes_of_one_name_apart() {
             .unwrap();
         let added = json!({"children": {"action": "adder", "value": ["ad4m://c1"]}});
         update(&mut p, &ctx, "Note", base, added).await.unwrap();
-        p.add_to_container(base, "ad4m://c2", None, &ctx)
+        p.add_to_container(base, "ad4m://c2", &Staged::none(), None, &ctx)
             .await
             .unwrap();
 
@@ -1050,7 +1050,7 @@ async fn an_empty_value_clears_the_property_on_update_subject() {
 async fn an_empty_value_clears_a_value_staged_in_the_same_batch() {
     let (mut p, ctx) = dispatch_setup().await;
     let batch = p.create_batch().await;
-    p.update_subject(
+    p.update_subject_raw(
         class("Task"),
         "ad4m://t1".into(),
         json!({"owner": "staged"}),
@@ -1059,7 +1059,7 @@ async fn an_empty_value_clears_a_value_staged_in_the_same_batch() {
     )
     .await
     .unwrap();
-    p.update_subject(
+    p.update_subject_raw(
         class("Task"),
         "ad4m://t1".into(),
         json!({"owner": ""}),
@@ -1136,4 +1136,68 @@ async fn a_required_property_refuses_to_clear() {
             "nothing written"
         );
     }
+}
+
+/// `perspective.mutate` `add` / `remove` on an instance read through an abstract class write
+/// each of the record's classes that has the collection, at its own predicate: `fb` is a Folder
+/// and a Box, `f1` only a Folder. Nothing lands at the abstract predicate.
+#[tokio::test(flavor = "multi_thread")]
+async fn mutate_add_and_remove_through_an_abstract_class_reach_each_classs_collection() {
+    async fn mutate(
+        p: &mut PerspectiveInstance,
+        ctx: &AgentContext,
+        ops: Value,
+    ) -> Result<
+        Vec<crate::perspectives::instances::mutate::Mutated>,
+        crate::perspectives::instances::MutateError,
+    > {
+        crate::perspectives::instances::mutate(p, ctx, serde_json::from_value(ops).unwrap(), None)
+            .await
+    }
+
+    let (mut p, ctx) = relation_setup().await;
+    let children = |p: &PerspectiveInstance, id: &str| {
+        [
+            targets_on(p, id, "ns://folder_child"),
+            targets_on(p, id, "ns://box_child"),
+            targets_on(p, id, "ns://children"),
+        ]
+    };
+
+    mutate(&mut p, &ctx, json!([
+        {"op":"update","class":"Folderish","id":"ad4m://fb","add":{"children":["ad4m://c1","ad4m://c2"]}},
+        {"op":"update","class":"Folderish","id":"ad4m://f1","add":{"children":["ad4m://c1"]}}
+    ]))
+    .await
+    .unwrap_or_else(|e| panic!("add through the abstract class: {:?}", e.error));
+    assert_eq!(
+        children(&p, "ad4m://fb"),
+        [
+            vec!["ad4m://c1".to_string(), "ad4m://c2".to_string()],
+            vec!["ad4m://c1".to_string(), "ad4m://c2".to_string()],
+            vec![]
+        ]
+    );
+    assert_eq!(
+        children(&p, "ad4m://f1"),
+        [vec!["ad4m://c1".to_string()], vec![], vec![]]
+    );
+
+    mutate(
+        &mut p,
+        &ctx,
+        json!([
+            {"op":"update","class":"Folderish","id":"ad4m://fb","remove":{"children":["ad4m://c1"]}}
+        ]),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("remove through the abstract class: {:?}", e.error));
+    assert_eq!(
+        children(&p, "ad4m://fb"),
+        [
+            vec!["ad4m://c2".to_string()],
+            vec!["ad4m://c2".to_string()],
+            vec![]
+        ]
+    );
 }

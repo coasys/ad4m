@@ -59,13 +59,6 @@ async fn session_list(_params: Value, ctx: Arc<RequestContext>) -> Result<Value,
         .and_then(|s| serde_json::to_value(s).map_err(WsRpcError::from))
 }
 
-async fn session_get(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let id = ID_PARAM.require(&params)?;
-    service::get(&ctx, &id)
-        .map_err(session_error)
-        .and_then(|s| serde_json::to_value(s).map_err(WsRpcError::from))
-}
-
 async fn session_update(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: AiSessionUpdateRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {e}")))?;
@@ -112,13 +105,6 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<NoParams, Vec<AiSession>>("ai.sessionList", session_list)
         .read()
         .guard(Guard::Cap(AI_READ_CAPABILITY.clone()));
-    map.method::<AiIdParams, AiSession>("ai.session", session_get)
-        .read()
-        .guard(Guard::Owns {
-            cap: |_| AI_READ_CAPABILITY.clone(),
-            id: ID_PARAM,
-            owner: Owner::AiSession,
-        });
     map.method::<AiSessionUpdateRequest, AiSession>("ai.sessionUpdate", session_update)
         .guard(Guard::Owns {
             cap: |_| AI_CREATE_CAPABILITY.clone(),

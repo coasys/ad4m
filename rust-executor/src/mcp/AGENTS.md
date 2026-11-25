@@ -55,7 +55,6 @@ causes no side effect.
 | `query_links`, `get_flows` | `perspective.queryLinks` |
 | `add_model` | `perspective.registerShapes` |
 | `add_flow` | `perspective.addLinks` (the flow's links and its `ad4m://has_flow` name link) |
-| `execute_commands` | `perspective.executeCommands` |
 | `flow_proposal_accept`, `flow_proposal_reject`, `flow_valid_outputs` | `perspective.acceptFlowProposal`, `.rejectFlowProposal`, `.flowValidOutputs` |
 | `language_meta` | `language.meta` |
 | `list_link_language_templates` | `runtime.linkLanguageTemplates` |
@@ -81,11 +80,13 @@ causes no side effect.
   another perspective, the operator's list, functional round trips). A new tool goes into
   its `tools()` list or its `NOT_WRAPPED` list; `every_tool_is_classified` fails otherwise.
 - The `instance_*` write tools (`_create`, `_update`, `_remove`, `_add_to_collection`,
-  `_remove_from_collection`) call the same functions as the `perspective.instance*` RPC
-  methods (`perspectives/instances/`), not the methods: they keep their own text, worded from
+  `_remove_from_collection`) call the same functions that `perspective.mutate` runs
+  (`perspectives/instances/`), not the method: they keep their own text, worded from
   the shared typed results and errors, and their own guard (below, the same rule as the
   methods'), so the MCP matrix lists them with the perspective tools.
-- Tools with no RPC method keep their own logic: `describe_perspective`, `instance_query` /
+- Tools with no RPC method keep their own logic: `describe_perspective`, `execute_commands`
+  (`PerspectiveInstance::execute_commands` after the `get_writable_perspective` guard),
+  `instance_query` /
   `instance_get`, `instance_transcript`, `add_child` and `get_children` (the built-in `Container`),
   `flow_state`, `flow_actions`, `generate_waker_query`, `get_mention_waker_config`, `get_documentation`, `auth_status`, and the dynamic per-class
   tools. Those that take a perspective get it through `get_readable_perspective` /
@@ -109,7 +110,7 @@ causes no side effect.
 | `mod.rs` | `Ad4mMcpHandler`, dispatch, perspective access helpers (`get_readable_perspective`, `get_writable_perspective`), SHACL link helpers |
 | `auth.rs` | login / capability request flow |
 | `perspectives.rs` | perspective + link CRUD |
-| `instances/` | the static instance surface (the writes word the results of `perspectives/instances/`, shared with the `perspective.instance*` RPC methods): `instance_query` / `_get` / `_create` / `_update` / `_remove`, `instance_add_to_collection` / `_remove_from_collection`, `instance_transcript`, child links, and `describe_perspective`. Class-agnostic — the class is a parameter, not a tool name; `instance_transcript` takes no class at all, it is one model query on the built-in TextContent (#1446). Also `execute_commands` (`commands.rs`), the deliberate raw-SDNA escape hatch: it runs actions directly and does **not** go through the class's SHACL validation, so it is the one tool here that can write a shape the model would reject |
+| `instances/` | the static instance surface (the writes word the results of `perspectives/instances/`, shared with the `perspective.mutate` RPC method): `instance_query` / `_get` / `_create` / `_update` / `_remove`, `instance_add_to_collection` / `_remove_from_collection`, `instance_transcript`, child links, and `describe_perspective`. Class-agnostic — the class is a parameter, not a tool name; `instance_transcript` takes no class at all, it is one model query on the built-in TextContent (#1446). Also `execute_commands` (`commands.rs`), the deliberate raw-SDNA escape hatch: it runs actions directly and does **not** go through the class's SHACL validation, so it is the one tool here that can write a shape the model would reject |
 | `instances/template_tools.rs` | `template_read` / `template_update`: a WE template, edited by WE's own rules (`tool_bundles/builtin.rs`). Their descriptions and arguments are the bundle's (`from_bundle`); the record is read and written here, through the class setters, like `instance_update`. The bundle gets the perspective's models (`models`), so a template may query its own classes; `template_update` holds its record's lock (`lock_record`, one per perspective and record, so a slow read holds up no other template) from reading the record to the commit and re-reads the version before writing. Any other tool the bundle declares is named in `NOT_OFFERED` with the reason (`template_create`, until the executor knows which perspective is a caller's library) |
 | `dynamic.rs` | Generates one tool per SHACL class (`query_<Class>`, `create_<Class>`, …) from `mcp/shacl.rs`. Listed over MCP **only** with `dynamicClassTools` (off by default), and the in-process harness surface (`harness_bridge::list_tool_schemas`) applies the same rule: an AI session follows the operator's flag, an interpretation pass sets it on for its pass. The MCP `tools/call` path (`dispatch_non_router_tool`) refuses a hidden name; the in-process `call_tool_by_name` dispatches one either way |
 | `docs.rs` | `get_documentation` — the executor's own agent docs, one `DocTopic` per markdown file, compiled in via `include_str!`; `template` and the topics under it are served by the template tools' bundle |
@@ -126,7 +127,7 @@ is a second, raw-link parser slated for deletion.
 
 - A tool that does the job of an RPC method calls it (`call`), never the code behind
   it. The one exception is the five `instance_*` write tools: they call the functions in
-  `perspectives/instances/` that the `perspective.instance*` methods call, under the same
+  `perspectives/instances/` that `perspective.mutate` runs, under the same
   guard (above). The other tools call `PerspectiveInstance` directly; keep their semantics
   aligned with the WS handlers (same capability, same `Session::acts_as`).
 - Permission denial on a perspective is 404 from the guard (D6), never 403: don't leak

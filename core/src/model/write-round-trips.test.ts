@@ -2,8 +2,8 @@ import { Ad4mModel } from "./Ad4mModel";
 import { HasMany, Model, Property } from "./decorators";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 
-// Every RPC that save() and delete() send, counted on a client double that
-// keeps the registered classes' shapes like the executor does.
+// Every RPC that save() and delete() send, counted on a client double. A write
+// is one `perspective.mutate` call.
 
 @Model({ name: "RoundTripNote" })
 class RoundTripNote extends Ad4mModel {
@@ -48,63 +48,11 @@ class RoundTripRequired extends Ad4mModel {
   title: string = "";
 }
 
-// Two relations over one predicate.
-@Model({ name: "RoundTripShared" })
-class RoundTripShared extends Ad4mModel {
-  @Property({ through: "rt://title", required: true, initial: "literal://string:untitled" })
-  title: string = "";
-
-  @HasMany({ through: "rt://tag" })
-  tags: string[] = [];
-
-  @HasMany({ through: "rt://tag" })
-  labels: string[] = [];
-}
-
-const link = (source: string, predicate: string, target: string) => ({
-  author: "did:test:agent",
-  timestamp: "1",
-  data: { source, predicate, target },
-});
-
-/** The links the executor stores for `classes`: the class index link and
- *  the shape (`shacl_parser::shape_links`). */
-function shaclLinks(classes: any[]) {
-  return classes.flatMap((cls) => {
-    const { shape } = cls.generateSHACL();
-    return [
-      link(shape.targetClass, "rdf://type", "ad4m://SubjectClass"),
-      link(shape.targetClass, "ad4m://shape", shape.nodeShapeUri),
-      ...shape.toLinks().map((l: any) => link(l.source, l.predicate, l.target)),
-    ];
-  });
-}
-
-function countingProxy(registered: any[], rttMs = 0, stored: any[] = []) {
-  const store = [...shaclLinks(registered), ...stored];
-  const summaries = registered.map((cls) => ({
-    name: cls.getClassName(),
-    shape: cls.generateSHACL().shape.toJSON(),
-    hash: cls.getClassName(),
-  }));
+function countingProxy(rttMs = 0) {
   const calls: string[] = [];
   const sent: any[][] = [];
   const answers: Record<string, (...args: any[]) => any> = {
-    queryLinks: (_uuid: string, q: any) =>
-      store.filter(
-        (l) =>
-          (!q.source || l.data.source === q.source) &&
-          (!q.predicate || l.data.predicate === q.predicate) &&
-          (!q.target || l.data.target === q.target),
-      ),
-    shapes: (_uuid: string, names?: string[]) =>
-      summaries.filter((s) => !names || names.includes(s.name)),
-    createBatch: () => "batch-1",
-    commitBatch: () => ({ additions: [], removals: [] }),
-    createSubject: () => true,
-    removeSubject: () => true,
-    executeCommands: () => true,
-    removeLinks: () => [],
+    mutate: () => ({ ids: [] }),
     modelQuery: () => ({ instances: [], totalCount: 0 }),
   };
   const client = new Proxy({} as any, {
@@ -127,6 +75,9 @@ function countingProxy(registered: any[], rttMs = 0, stored: any[] = []) {
   return { proxy, calls, sent };
 }
 
+/** The ops of every `mutate` call, in order. */
+const opsSent = (sent: any[][]) => sent.filter((c) => c[0] === "mutate").flatMap((c) => c[2]);
+
 async function createNote(proxy: PerspectiveProxy) {
   const note = new RoundTripNote(proxy, "rt://note/1");
   note.title = "hello";
@@ -135,214 +86,98 @@ async function createNote(proxy: PerspectiveProxy) {
 }
 
 describe("RPCs per write", () => {
-  it("create of a decorated model sends no class-list lookup", async () => {
-    const { proxy, calls } = countingProxy([RoundTripNote]);
+  it("create of a decorated model is one mutate, then the refresh read", async () => {
+    const { proxy, calls, sent } = countingProxy();
     await createNote(proxy);
-    expect(calls).toEqual(["createBatch", "createSubject", "commitBatch", "modelQuery"]);
+    expect(calls).toEqual(["mutate", "modelQuery"]);
+    expect(sent[0]).toEqual([
+      "mutate",
+      "rt-uuid",
+      [{ op: "create", class: "rt://RoundTripNote", id: "rt://note/1", values: { title: "hello" } }],
+      {},
+    ]);
   });
 
-  // The commands each executeCommands carried, as one string per call.
-  const commandsSent = (sent: any[][]) =>
-    sent.filter((c) => c[0] === "executeCommands").map((c) => JSON.stringify(c.slice(1)));
-
   it("create sends no setter for an empty relation", async () => {
-    const { proxy, calls } = countingProxy([RoundTripCall]);
+    const { proxy, calls, sent } = countingProxy();
     const call = new RoundTripCall(proxy);
     call.title = "standup";
     await call.save();
-    expect(calls).toEqual(["createBatch", "createSubject", "commitBatch", "modelQuery"]);
+    expect(calls).toEqual(["mutate", "modelQuery"]);
+    expect(opsSent(sent)).toEqual([
+      expect.objectContaining({ op: "create", values: { title: "standup" } }),
+    ]);
   });
 
-  it("Model.create sends no setter for an empty relation", async () => {
-    const { proxy, calls } = countingProxy([RoundTripCall]);
+  it("Model.create sends one mutate and nothing else", async () => {
+    const { proxy, calls } = countingProxy();
     await RoundTripCall.create(proxy, { title: "standup" });
-    expect(calls).toEqual(["createBatch", "createSubject", "commitBatch"]);
+    expect(calls).toEqual(["mutate"]);
   });
 
-  it("Model.create with returns: 'row' reads once after the commit", async () => {
-    const { proxy, calls } = countingProxy([RoundTripCall]);
+  it("Model.create with returns: 'row' reads once after the write", async () => {
+    const { proxy, calls } = countingProxy();
     // This fake's query finds no row, so the create rejects: a row that
     // cannot be read is an error, not a silent half-filled instance.
     await expect(RoundTripCall.create(proxy, { title: "standup" }, { returns: "row" }))
       .rejects.toThrow(/was created, but reading it back failed/);
-    expect(calls).toEqual(["createBatch", "createSubject", "commitBatch", "modelQuery"]);
+    expect(calls).toEqual(["mutate", "modelQuery"]);
   });
 
-  it("create still writes a non-empty relation, and only that one", async () => {
-    const { proxy, calls, sent } = countingProxy([RoundTripCall]);
+  it("create writes a non-empty relation in the same op, and only that one", async () => {
+    const { proxy, calls, sent } = countingProxy();
     await RoundTripCall.create(proxy, { title: "standup", tags: ["rt://tag/a", "rt://tag/b"] });
-    expect(calls).toEqual(["createBatch", "createSubject", "executeCommands", "commitBatch"]);
-    const [tags] = commandsSent(sent);
-    expect(tags).toContain("rt://tag");
-    expect(tags).toContain("rt://tag/a");
-    expect(tags).toContain("rt://tag/b");
+    expect(calls).toEqual(["mutate"]);
+    expect(opsSent(sent)).toEqual([
+      expect.objectContaining({ op: "create", values: { title: "standup", tags: ["rt://tag/a", "rt://tag/b"] } }),
+    ]);
   });
 
-  it("create under a caller-supplied id still clears an empty relation", async () => {
-    // The id may name a record that already has links; [] keeps meaning "clear".
-    const { proxy, sent } = countingProxy([RoundTripCall]);
-    const call = new RoundTripCall(proxy, "rt://call/1");
-    call.title = "standup";
-    await call.save();
-    expect(commandsSent(sent)).toHaveLength(3);
-  });
-
-  it("create still clears an empty relation the instance already wrote to", async () => {
-    // addTags writes its link before save; [] on save must remove it again.
-    const { proxy, sent } = countingProxy([RoundTripCall]);
-    const call = new RoundTripCall(proxy);
-    await (call as any).addTags("rt://tag/a");
-    call.title = "standup";
-    call.tags = [];
-    await call.save();
-    const commands = commandsSent(sent);
-    expect(commands).toHaveLength(2);
-    expect(commands[1]).toContain("collectionSetter");
-    expect(commands[1]).toContain("rt://tag");
-  });
-
-  it("create still clears an empty relation whose predicate a sibling relation wrote to", async () => {
-    // collectionSetter clears by predicate, so a write through `tags` can hold
-    // links that an empty `labels` (same predicate) cleared before.
-    const { proxy, sent } = countingProxy([RoundTripShared]);
-    const shared = new RoundTripShared(proxy);
-    await (shared as any).addTags("rt://tag/a");
-    shared.title = "standup";
-    shared.tags = undefined as any;
-    shared.labels = [];
-    await shared.save();
-    const commands = commandsSent(sent);
-    expect(commands).toHaveLength(2);
-    expect(commands[1]).toContain("collectionSetter");
-  });
-
-  it("create still clears an empty relation whose predicate an adder envelope in the same save wrote to", async () => {
-    // `tags` writes through `{action: 'adder'}` before `labels` (same predicate)
-    // is reached, so `labels: []` has links to clear.
-    const { proxy, sent } = countingProxy([RoundTripShared]);
-    const shared = new RoundTripShared(proxy);
-    shared.title = "standup";
-    shared.tags = { action: "adder", value: ["rt://tag/a"] } as any;
-    shared.labels = [];
-    await shared.save();
-    expect(commandsSent(sent).some((c) => c.includes("collectionSetter") && c.includes("rt://tag"))).toBe(true);
-  });
-
-  it("create still clears an empty relation whose predicate a scalar relation write in the same save wrote to", async () => {
-    // A scalar on `tags` is written as a one-member relation before `labels`
-    // (same predicate) is reached, so `labels: []` has a link to clear. The
-    // scalar's own write is a collectionSetter on rt://tag too, so look for
-    // the clear: the one with no values.
-    const { proxy, sent } = countingProxy([RoundTripShared]);
-    const shared = new RoundTripShared(proxy);
-    shared.title = "standup";
-    shared.tags = "rt://tag/a" as any;
-    shared.labels = [];
-    await shared.save();
-    const clears = sent.filter(
-      ([method, , commands, , params]) =>
-        method === "executeCommands" && commands.includes("collectionSetter") && commands.includes("rt://tag") && params === "[]",
-    );
-    expect(clears).toHaveLength(1);
-  });
-
-  it("update of an existing record with [] still clears the relation", async () => {
-    const { proxy, calls, sent } = countingProxy([RoundTripCall]);
+  it("update of an existing record with [] clears the relation", async () => {
+    const { proxy, calls, sent } = countingProxy();
     const call = new RoundTripCall(proxy, "rt://call/1");
     call.tags = ["rt://tag/a"];
     (call as any).takeSnapshot();
     call.tags = [];
     await call.save("batch-1");
-    expect(calls).toEqual(["executeCommands"]);
-    const [cleared] = commandsSent(sent);
-    expect(cleared).toContain("collectionSetter");
-    expect(cleared).toContain("rt://tag");
+    expect(calls).toEqual(["mutate"]);
+    expect(sent[0]).toEqual([
+      "mutate",
+      "rt-uuid",
+      [{ op: "update", class: "rt://RoundTripCall", id: "rt://call/1", set: { tags: [] } }],
+      { batch: "batch-1" },
+    ]);
   });
 
-  it("delete of a decorated model sends no class-list lookup", async () => {
-    const { proxy, calls } = countingProxy([RoundTripNote]);
+  it("an add of a relation's member is one update op with `add`", async () => {
+    const { proxy, calls, sent } = countingProxy();
+    const call = new RoundTripCall(proxy, "rt://call/1");
+    await (call as any).addTags("rt://tag/a", "batch-1");
+    expect(calls).toEqual(["mutate"]);
+    expect(opsSent(sent)).toEqual([
+      { op: "update", class: "rt://RoundTripCall", id: "rt://call/1", add: { tags: ["rt://tag/a"] } },
+    ]);
+  });
+
+  it("delete of a decorated model is one mutate", async () => {
+    const { proxy, calls, sent } = countingProxy();
     const note = new RoundTripNote(proxy, "rt://note/1");
     await note.delete();
-    // the executor runs the destructor, then incoming links
-    expect(calls).toEqual(["removeSubject", "queryLinks"]);
-  });
-});
-
-describe("class a write addresses", () => {
-  @Model({ name: "RoundTripDerivedNote" })
-  class RoundTripDerivedNote extends RoundTripNote {
-    @Property({ through: "rt://body" })
-    body: string = "";
-  }
-
-  const createdAs = (sent: any[][]) => JSON.parse(sent.find((c) => c[0] === "createSubject")![2]).className;
-
-  async function resolve(registered: any[], subject: any) {
-    const { proxy, sent } = countingProxy(registered);
-    await proxy.createSubject(subject, "rt://note/1");
-    return createdAs(sent);
-  }
-
-  it("is the target class IRI of an instance and of its class", async () => {
-    expect(await resolve([RoundTripNote], new RoundTripNote(undefined as any))).toBe("rt://RoundTripNote");
-    expect(await resolve([RoundTripNote], RoundTripNote)).toBe("rt://RoundTripNote");
+    // The executor runs the destructor, then removes the incoming links.
+    expect(calls).toEqual(["mutate"]);
+    expect(opsSent(sent)).toEqual([{ op: "delete", class: "rt://RoundTripNote", id: "rt://note/1" }]);
   });
 
-  it("is the base class for a base instance when a derived class has its properties too", async () => {
-    const both = [RoundTripDerivedNote, RoundTripNote];
-    expect(await resolve(both, new RoundTripNote(undefined as any))).toBe("rt://RoundTripNote");
-    expect(await resolve(both, new RoundTripDerivedNote(undefined as any))).toBe("rt://RoundTripDerivedNote");
-  });
-
-  it("is the target class IRI even when the class is not registered and another class has its properties", async () => {
-    const { proxy, calls } = countingProxy([]);
-    const byProperties = jest.spyOn(proxy as any, "findClassByProperties").mockResolvedValue("RoundTripTwin" as never);
-    await proxy.createSubject(new RoundTripNote(undefined as any), "rt://note/1");
-    expect(byProperties).not.toHaveBeenCalled();
-    expect(calls).toEqual(["createSubject"]);
-  });
-
-  it("is a template's own className", async () => {
-    expect(await resolve([RoundTripNote], { className: "RoundTripNote" })).toBe("RoundTripNote");
-  });
-
-  it("is the abstract class's IRI for an abstract class", async () => {
-    expect(await resolve([RoundTripReadable], RoundTripReadable)).toBe("rt://RoundTripReadable");
-  });
-
-  it("is a string as given", async () => {
-    expect(await resolve([], "Anything")).toBe("Anything");
-  });
-
-  it("matches an undecorated object by its properties in one shapes read", async () => {
-    const { proxy, calls, sent } = countingProxy([RoundTripCall, RoundTripNote]);
-    await proxy.createSubject({ title: "" }, "rt://note/1");
-    // Both classes have `title`; the first in the registry's order wins.
-    expect(createdAs(sent)).toBe("RoundTripCall");
-    expect(calls).toEqual(["shapes", "createSubject"]);
-  });
-
-  it("creates the record under the model's target class IRI", async () => {
-    const { proxy, sent } = countingProxy([RoundTripNote]);
-    await createNote(proxy);
-    expect(createdAs(sent)).toBe("rt://RoundTripNote");
-  });
-
-  it("deletes an abstract-class record through the executor under the abstract class's IRI", async () => {
-    const { proxy, calls, sent } = countingProxy([RoundTripReadable]);
+  it("deletes an abstract-class record under the abstract class's IRI", async () => {
+    const { proxy, calls, sent } = countingProxy();
     await new RoundTripReadable(proxy, "rt://note/1").delete();
-    expect(sent.find((c) => c[0] === "removeSubject")).toEqual(
-      ["removeSubject", "rt-uuid", "rt://RoundTripReadable", "rt://note/1", undefined],
-    );
-    // removeSubject, incoming links
-    expect(calls).toEqual(["removeSubject", "queryLinks"]);
-  });
-
-  it("createSubject with a decorated instance sends its target class IRI in one RPC", async () => {
-    const { proxy, calls, sent } = countingProxy([RoundTripNote]);
-    await proxy.createSubject(new RoundTripNote(undefined as any), "rt://note/2");
-    expect(calls).toEqual(["createSubject"]);
-    expect(createdAs(sent)).toBe("rt://RoundTripNote");
+    expect(sent[0]).toEqual([
+      "mutate",
+      "rt-uuid",
+      [{ op: "delete", class: "rt://RoundTripReadable", id: "rt://note/1" }],
+      {},
+    ]);
+    expect(calls).toEqual(["mutate"]);
   });
 });
 
@@ -359,7 +194,7 @@ const rtt = Number(process.env.SDK_RTT_MS || 0);
     const ms: number[] = [];
     let rpcs = 0;
     for (let i = 0; i < runs; i++) {
-      const { proxy, calls } = countingProxy([RoundTripNote, RoundTripReadable, RoundTripCall], rtt);
+      const { proxy, calls } = countingProxy(rtt);
       const start = performance.now();
       await write(proxy);
       ms.push(performance.now() - start);
@@ -374,16 +209,12 @@ const rtt = Number(process.env.SDK_RTT_MS || 0);
       "create with 3 empty relations": await time((p) => RoundTripCall.create(p, { title: "standup" })),
       "delete": await time((p) => new RoundTripNote(p, "rt://note/1").delete()),
       "delete through abstract class": await time((p) => new RoundTripReadable(p, "rt://note/1").delete()),
-      "createSubject(decorated instance)": await time((p) => p.createSubject(new RoundTripNote(undefined as any), "rt://n")),
     };
     console.log(`RTT ${rtt} ms, ${runs} runs\n` + Object.entries(rows).map(([k, v]) => `${k}: ${v}`).join("\n"));
   });
 });
 
 describe("an empty value clears a property", () => {
-  const noteLink = link("rt://opt/1", "rt://note", "literal://string:old");
-  const clear = { action: "removeLink", source: "this", predicate: "rt://note", target: "*" };
-  const writes = (sent: any[][]) => sent.filter((c) => c[0] === "executeCommands");
   const existing = async (proxy: PerspectiveProxy, note: string | null | undefined) => {
     const opt = new RoundTripOptional(proxy, "rt://opt/1");
     opt.note = "old";
@@ -392,49 +223,50 @@ describe("an empty value clears a property", () => {
     return opt;
   };
 
-  it.each([[""], [null]])("update with %p sends a removeLink of every link on the property, in the caller's batch", async (empty) => {
-    const { proxy, sent } = countingProxy([RoundTripOptional], 0, [noteLink]);
+  it.each([[""], [null]])("update with %p sets the property to null, in the caller's batch", async (empty) => {
+    const { proxy, sent } = countingProxy();
     const opt = await existing(proxy, empty as any);
     await opt.save("batch-1");
-    expect(sent.map((c) => c[0])).toEqual(["executeCommands"]);
-    expect(JSON.parse(sent[0][2])).toEqual([clear]);
-    expect(sent[0][3]).toBe("rt://opt/1");
-    expect(JSON.parse(sent[0][4])).toEqual([]);
-    expect(sent[0][5]).toBe("batch-1");
+    expect(sent).toEqual([[
+      "mutate",
+      "rt-uuid",
+      [{ op: "update", class: "rt://RoundTripOptional", id: "rt://opt/1", set: { note: null } }],
+      { batch: "batch-1" },
+    ]]);
   });
 
-  it.each([[""], [null]])("Model.create with %p stores no link", async (empty) => {
-    const { proxy, calls, sent } = countingProxy([RoundTripOptional]);
+  it.each([[""], [null]])("Model.create with %p sends no value for it", async (empty) => {
+    const { proxy, calls, sent } = countingProxy();
     await RoundTripOptional.create(proxy, { note: empty as any, rank: "1" });
-    const createSubject = sent.find((c) => c[0] === "createSubject")!;
-    expect(JSON.stringify(createSubject)).not.toContain("note");
-    expect(JSON.stringify(createSubject)).toContain("rank");
-    expect(writes(sent)).toHaveLength(0);
+    expect(calls).toEqual(["mutate"]);
+    expect(opsSent(sent)).toEqual([expect.objectContaining({ op: "create", values: { rank: "1" } })]);
   });
 
   it("an absent value writes nothing", async () => {
-    const { proxy, calls } = countingProxy([RoundTripOptional], 0, [noteLink]);
+    const { proxy, calls } = countingProxy();
     const opt = await existing(proxy, undefined);
     await opt.save("batch-1");
     expect(calls).toEqual([]);
   });
 
-  it("a property already cleared, set to '' again, sends the removeLink and reads nothing", async () => {
-    const { proxy, calls } = countingProxy([RoundTripOptional]);
+  it("a property already cleared, set to '' again, sends the null and reads nothing", async () => {
+    const { proxy, calls } = countingProxy();
     const opt = await existing(proxy, "");
     await opt.save("batch-1");
-    expect(calls).toEqual(["executeCommands"]);
+    expect(calls).toEqual(["mutate"]);
   });
 
-  it.each([[""], [null]])("update with %p on a required property throws and writes nothing", async (empty) => {
-    const titleLink = link("rt://req/1", "rt://title", "literal://string:old");
-    const { proxy, calls } = countingProxy([RoundTripRequired], 0, [titleLink]);
+  // The executor refuses it (`missingRequired`); the SDK does not decide.
+  it.each([[""], [null]])("update with %p on a required property is sent as null for the executor to refuse", async (empty) => {
+    const { proxy, sent } = countingProxy();
     const req = new RoundTripRequired(proxy, "rt://req/1");
     req.title = "old";
     (req as any).takeSnapshot();
     (req as any).title = empty;
-    await expect(req.save("batch-1")).rejects.toThrow('Property "title" is required and cannot be cleared');
-    expect(calls).toEqual([]);
+    await req.save("batch-1");
+    expect(opsSent(sent)).toEqual([
+      { op: "update", class: "rt://RoundTripRequired", id: "rt://req/1", set: { title: null } },
+    ]);
   });
 
   describe("on a class built by fromSHACL", () => {
@@ -447,39 +279,28 @@ describe("an empty value clears a property", () => {
       expect(minCount(RoundTripOptional)).toBeUndefined();
     });
 
-    it.each([[""], [null]])("update with %p on a required scalar throws and sends nothing", async (empty) => {
-      const Req = fromShape(RoundTripRequired) as any;
-      const titleLink = link("rt://req/1", "rt://title", "literal://string:old");
-      const { proxy, calls } = countingProxy([Req], 0, [titleLink]);
-      const req = new Req(proxy, "rt://req/1");
-      req.title = "old";
-      (req as any).takeSnapshot();
-      req.title = empty;
-      await expect(req.save("batch-1")).rejects.toThrow('Property "title" is required and cannot be cleared');
-      expect(calls).toEqual([]);
-    });
-
-    it.each([[""], [null]])("update with %p on a scalar without minCount still clears", async (empty) => {
+    it.each([[""], [null]])("update with %p on a scalar clears through the same op", async (empty) => {
       const Opt = fromShape(RoundTripOptional) as any;
-      const { proxy, sent } = countingProxy([Opt], 0, [noteLink]);
+      const { proxy, sent } = countingProxy();
       const opt = new Opt(proxy, "rt://opt/1");
       opt.note = "old";
       (opt as any).takeSnapshot();
       opt.note = empty;
       await opt.save("batch-1");
-      expect(JSON.parse(sent[0][2])).toEqual([clear]);
+      expect(opsSent(sent)).toEqual([
+        expect.objectContaining({ op: "update", id: "rt://opt/1", set: { note: null } }),
+      ]);
     });
   });
 
-  it("update clears one property and sets another in one batch", async () => {
-    const { proxy, calls, sent } = countingProxy([RoundTripOptional], 0, [noteLink]);
+  it("update clears one property and sets another in one op", async () => {
+    const { proxy, calls, sent } = countingProxy();
     const opt = await existing(proxy, "");
     opt.rank = "2";
     await opt.save("batch-1");
-    expect(calls).toEqual(["executeCommands"]);
-    const commands = JSON.parse(sent[0][2]);
-    expect(commands).toHaveLength(2);
-    expect(commands[0]).toEqual(clear);
-    expect(commands[1]).toMatchObject({ action: "setSingleTarget", predicate: "rt://rank" });
+    expect(calls).toEqual(["mutate"]);
+    expect(opsSent(sent)).toEqual([
+      { op: "update", class: "rt://RoundTripOptional", id: "rt://opt/1", set: { note: null, rank: "2" } },
+    ]);
   });
 });

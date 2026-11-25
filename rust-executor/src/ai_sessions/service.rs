@@ -274,14 +274,6 @@ pub fn list(ctx: &RequestContext) -> Result<Vec<AiSession>, SessionError> {
         .map_err(SessionError::Failed)
 }
 
-/// `ai.session` / the read side: the session `id` of the caller's agent.
-pub fn get(ctx: &RequestContext, id: &str) -> Result<AiSession, SessionError> {
-    ai_session_store()
-        .session(ctx.acts_as().managed_did(), id)
-        .map_err(SessionError::Failed)?
-        .ok_or_else(|| SessionError::NotFound(id.to_string()))
-}
-
 /// `ai.sessionMessages`: the newest `limit` transcript entries of the session, or those older
 /// than `before` (`seq`).
 pub fn messages(
@@ -330,7 +322,10 @@ pub fn update(
     {
         return Err(SessionError::NotFound(id.to_string()));
     }
-    let session = get(ctx, id)?;
+    let session = store
+        .session(owner, id)
+        .map_err(SessionError::Failed)?
+        .ok_or_else(|| SessionError::NotFound(id.to_string()))?;
     publish_session(&ctx.acts_as(), "updated", &session);
     Ok(session)
 }

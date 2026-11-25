@@ -357,6 +357,29 @@ describe("Ad4mModel — Core CRUD", function () {
     expect((updated!.pinnedComment as TestComment).id).to.equal(comment.id);
   });
 
+  it("@HasOne — create, replace and clear go through save() as one id", async () => {
+    const first = await TestComment.create(perspective, { body: "First pin" });
+    const second = await TestComment.create(perspective, { body: "Second pin" });
+    const post = await TestPost.create(perspective, {
+      title: "Post With Saved Pin",
+      body: "",
+      pinnedComment: first.id,
+    } as any);
+    const pinned = async () =>
+      (await TestPost.findOne(perspective, { where: { id: post.id }, include: { pinnedComment: true } }))!
+        .pinnedComment as TestComment | null | undefined;
+
+    expect((await pinned())?.id).to.equal(first.id);
+
+    (post as any).pinnedComment = second.id;
+    await post.save();
+    expect((await pinned())?.id).to.equal(second.id);
+
+    (post as any).pinnedComment = null;
+    await post.save();
+    expect(await pinned()).to.not.be.ok;
+  });
+
   // ── @BelongsToOne ──────────────────────────────────────────────────────────
 
   it("@BelongsToOne — comment.post resolves to a TestPost instance", async () => {

@@ -24,7 +24,6 @@
 
 export * from "./model/types";
 export * from "./model/decorators";
-export * from "./model/sdna";
 export * from "./model/shacl-gen";
 export * from "./shacl/SHACLShape";
 export * from "./shacl/NodeExpression";

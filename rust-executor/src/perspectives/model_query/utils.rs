@@ -87,8 +87,6 @@ pub(crate) fn looks_like_absolute_iri(s: &str) -> bool {
 /// scheme shape) but fail the query-side [`validate_iri`] gate — the
 /// resulting `NamedNode` is invalid, the query only probes the
 /// `xsd:string` arm, and the write becomes a silent no-match.
-///
-/// Mirrors the TypeScript `looksLikeUri` in `core/src/model/query-sparql.ts`.
 pub fn is_safe_iri_target(s: &str) -> bool {
     looks_like_absolute_iri(s)
 }

@@ -390,25 +390,6 @@ fn parse_notification_input_no_icon() {
     assert!(req.app_icon_path.is_none());
 }
 
-// ── Commands ──
-
-#[test]
-fn parse_execute_commands_request() {
-    let json = json!({
-        "commands": "[{\"type\":\"add\",\"data\":{}}]",
-        "expression": "{\"subject\":\"test\"}",
-        "parameters": "[{\"name\":\"value\",\"value\":\"literal:string:abc\"}]",
-        "batchId": "batch-123"
-    });
-    let req: ExecuteCommandsRequest = serde_json::from_value(json).unwrap();
-    assert_eq!(req.commands, "[{\"type\":\"add\",\"data\":{}}]");
-    assert_eq!(
-        req.parameters,
-        Some("[{\"name\":\"value\",\"value\":\"literal:string:abc\"}]".into())
-    );
-    assert_eq!(req.batch_id, Some("batch-123".into()));
-}
-
 // ── Hosting response types ──
 
 // ── Verify Signature ──

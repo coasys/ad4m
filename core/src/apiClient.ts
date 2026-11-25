@@ -17,7 +17,7 @@ export class RpcError extends Error {
     readonly body: string
     /**
      * Structured detail the executor attached (`error.data`), when it did: e.g. the
-     * `InstanceError` of a refused `perspective.instance*` write.
+     * `InstanceError` of a refused `perspective.mutate` write.
      */
     readonly data?: unknown
 

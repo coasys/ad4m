@@ -127,99 +127,85 @@ describe("abstract classes", () => {
     await expect(instance.save()).rejects.toThrow("'Readable' is an abstract class and cannot be created");
   });
 
-  it("save() and delete() through an abstract class go to the executor's dispatch", async () => {
+  const folderPerspective = (calls: any[][], row: any) => new Proxy({}, {
+    get: (_t, key) => async (...args: any[]) => {
+      calls.push([key, ...args]);
+      if (key === "modelQuery") return { instances: [row], totalCount: 1 };
+      return [];
+    },
+  }) as any;
+
+  it("save() and delete() through an abstract class are mutate ops on the abstract class", async () => {
     const calls: any[][] = [];
-    const perspective: any = new Proxy({}, {
-      get: (_t, key) => async (...args: any[]) => {
-        calls.push([key, ...args]);
-        if (key === "modelQuery") {
-          return { instances: [{ id: "ad4m://m/1", __subjectClass: "test://Message", text: "hi" }], totalCount: 1 };
-        }
-        return [];
-      },
-    });
+    const perspective = folderPerspective(calls, { id: "ad4m://m/1", __subjectClass: "test://Message", text: "hi" });
     const [row] = await Readable.findAll(perspective);
     row.text = "edited";
     calls.length = 0;
     await row.save("batch");
-    expect(calls).toEqual([["updateSubject", "test://Readable", "ad4m://m/1", { text: "edited" }, "batch"]]);
+    expect(calls).toEqual([[
+      "mutate",
+      [{ op: "update", class: "test://Readable", id: "ad4m://m/1", set: { text: "edited" } }],
+      { batch: "batch" },
+    ]]);
 
     calls.length = 0;
     await row.delete("batch");
-    expect(calls[0][0]).toBe("removeSubject");
-    expect(calls[0][2]).toBe("ad4m://m/1");
+    expect(calls).toEqual([[
+      "mutate",
+      [{ op: "delete", class: "test://Readable", id: "ad4m://m/1" }],
+      { batch: "batch" },
+    ]]);
   });
 
-  it("add/remove/set of a relation through an abstract class go to the executor's dispatch", async () => {
+  it("add/remove/set of a relation through an abstract class are update ops", async () => {
     const calls: any[][] = [];
-    const perspective: any = new Proxy({}, {
-      get: (_t, key) => async (...args: any[]) => {
-        calls.push([key, ...args]);
-        if (key === "modelQuery") {
-          return { instances: [{ id: "ad4m://folder/1", __subjectClass: "test://Folder", children: [] }], totalCount: 1 };
-        }
-        return [];
-      },
-    });
+    const perspective = folderPerspective(calls, { id: "ad4m://folder/1", __subjectClass: "test://Folder", children: [] });
     const [row]: any[] = await Folderish.findAll(perspective);
     calls.length = 0;
     await row.addChildren("ad4m://child/1", "batch");
     await row.removeChildren(["ad4m://child/1"], "batch");
     await row.setChildren([{ id: "ad4m://child/2" }, "ad4m://child/3"], "batch");
-    // No link at the abstract predicate (test://child): only the dispatch.
+    const update = (change: object) => ["mutate", [{ op: "update", class: "test://Folderish", id: "ad4m://folder/1", ...change }], { batch: "batch" }];
     expect(calls).toEqual([
-      ["updateSubject", "test://Folderish", "ad4m://folder/1", { children: { action: "adder", value: ["ad4m://child/1"] } }, "batch"],
-      ["updateSubject", "test://Folderish", "ad4m://folder/1", { children: { action: "remover", value: ["ad4m://child/1"] } }, "batch"],
-      ["updateSubject", "test://Folderish", "ad4m://folder/1", { children: { action: "setter", value: ["ad4m://child/2", "ad4m://child/3"] } }, "batch"],
+      update({ add: { children: ["ad4m://child/1"] } }),
+      update({ remove: { children: ["ad4m://child/1"] } }),
+      update({ set: { children: ["ad4m://child/2", "ad4m://child/3"] } }),
     ]);
   });
 
   it("save() through an abstract class sends a changed relation's members as IDs", async () => {
     const calls: any[][] = [];
-    const perspective: any = new Proxy({}, {
-      get: (_t, key) => async (...args: any[]) => {
-        calls.push([key, ...args]);
-        if (key === "modelQuery") {
-          return { instances: [{ id: "ad4m://folder/1", __subjectClass: "test://Folder", children: [] }], totalCount: 1 };
-        }
-        return [];
-      },
-    });
+    const perspective = folderPerspective(calls, { id: "ad4m://folder/1", __subjectClass: "test://Folder", children: [] });
     const [row]: any[] = await Folderish.findAll(perspective);
     row.children = [{ id: "ad4m://child/2" }, "ad4m://child/3"];
     calls.length = 0;
     await row.save("batch");
-    expect(calls).toEqual([
-      ["updateSubject", "test://Folderish", "ad4m://folder/1", { children: ["ad4m://child/2", "ad4m://child/3"] }, "batch"],
-    ]);
+    expect(calls).toEqual([[
+      "mutate",
+      [{ op: "update", class: "test://Folderish", id: "ad4m://folder/1", set: { children: ["ad4m://child/2", "ad4m://child/3"] } }],
+      { batch: "batch" },
+    ]]);
   });
 
   it("save() through an abstract class keeps a relation's action envelope", async () => {
     const calls: any[][] = [];
-    const perspective: any = new Proxy({}, {
-      get: (_t, key) => async (...args: any[]) => {
-        calls.push([key, ...args]);
-        if (key === "modelQuery") {
-          return { instances: [{ id: "ad4m://folder/1", __subjectClass: "test://Folder", children: ["ad4m://child/1"] }], totalCount: 1 };
-        }
-        return [];
-      },
-    });
+    const perspective = folderPerspective(calls, { id: "ad4m://folder/1", __subjectClass: "test://Folder", children: ["ad4m://child/1"] });
     const [row]: any[] = await Folderish.findAll(perspective);
     const sent = async (children: any) => {
       row.children = children;
       calls.length = 0;
       await row.save("batch");
-      return calls.find((c) => c[0] === "updateSubject")?.[3];
+      const { op, class: _c, id, ...change } = calls.find((c) => c[0] === "mutate")![1][0];
+      return change;
     };
     expect(await sent({ action: "adder", value: [{ id: "ad4m://child/2" }] })).toEqual({
-      children: { action: "adder", value: ["ad4m://child/2"] },
+      add: { children: ["ad4m://child/2"] },
     });
     expect(await sent({ action: "remover", value: "ad4m://child/1" })).toEqual({
-      children: { action: "remover", value: "ad4m://child/1" },
+      remove: { children: ["ad4m://child/1"] },
     });
     expect(await sent({ action: "other", value: ["ad4m://child/3"] })).toEqual({
-      children: { action: "setter", value: ["ad4m://child/3"] },
+      set: { children: ["ad4m://child/3"] },
     });
   });
 });

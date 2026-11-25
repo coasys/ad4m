@@ -48,7 +48,7 @@ async fn create_subject_roundtrips_soa_instance() {
         setup_interpretation_e2e(&[("Intention", INTENTION_SDNA)]).await;
     let base = "soa://ext/intention/rt-test";
     perspective
-        .create_subject(
+        .create_subject_raw(
             SubjectClassOption {
                 class_name: Some("Intention".into()),
                 query: None,

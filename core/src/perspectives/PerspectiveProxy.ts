@@ -24,11 +24,7 @@ import type { AgentMessage } from "../generated/api/AgentMessage";
 import type { AgentReply } from "../generated/api/AgentReply";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 import type { RegisterResult } from "../generated/api/RegisterResult";
-import type {
-    CollectionItemAdded, CollectionItemRemoved, InstanceAddToCollection, InstanceCreate,
-    InstanceCreated, InstanceRemove, InstanceRemoveFromCollection, InstanceRemoved,
-    InstanceUpdate, InstanceUpdated,
-} from "../generated/api";
+import type { MutateOp, PerspectiveMutateResult, Returns } from "../generated/api";
 
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow } from "../shacl/SHACLFlow";
@@ -59,10 +55,6 @@ function extractNamespaceFromUri(uri: string): string {
 /** Link status argument. The executor accepts either case and returns links
  *  with the upper-case form (`LinkExpression.status`). */
 export type LinkStatus = "shared" | "local" | "SHARED" | "LOCAL"
-interface Parameter {
-    name: string
-    value: string
-}
 
 /**
  * PerspectiveProxy provides a high-level interface for working with AD4M Perspectives - agent-centric semantic graphs
@@ -95,7 +87,7 @@ interface Parameter {
  * 
  * // Use Social DNA
  * await Todo.register(perspective);
- * const todo = await perspective.createSubject("Todo", "expression://123");
+ * const todo = await Todo.create(perspective, { title: "Write" });
  * 
  * // Subscribe to changes
  * perspective.on("link-added", ({ link }) => {
@@ -165,70 +157,6 @@ export class PerspectiveProxy {
         this.sharedUrl = handle.sharedUrl;
         this.neighbourhood = handle.neighbourhood;
         this.state = handle.state;
-    }
-
-    /**
-     * Executes a set of actions on an expression with optional parameters.
-     * Used internally by Social DNA flows and subject class operations.
-     * 
-     * Actions are specified as an array of commands that modify links in the perspective.
-     * Each action is an object with the following format:
-     * ```typescript
-     * {
-     *   action: "addLink" | "removeLink" | "setSingleTarget" | "collectionSetter",
-     *   source: string,    // Usually "this" to reference the current expression
-     *   predicate: string, // The predicate URI
-     *   target: string     // The target value or "value" for parameters
-     * }
-     * ```
-     * 
-     * Available commands:
-     * - `addLink`: Creates a new link
-     * - `removeLink`: Removes an existing link
-     * - `setSingleTarget`: Removes all existing links with the same source/predicate and adds a new one
-     * - `collectionSetter`: Special command for setting relation properties
-     * 
-     * When used with parameters, the special value "value" in the target field will be 
-     * replaced with the actual parameter value.
-     * 
-     * @example
-     * ```typescript
-     * // Add a state link and remove an old one
-     * await perspective.executeAction([
-     *   {
-     *     action: "addLink",
-     *     source: "this",
-     *     predicate: "todo://state", 
-     *     target: "todo://doing"
-     *   },
-     *   {
-     *     action: "removeLink",
-     *     source: "this",
-     *     predicate: "todo://state",
-     *     target: "todo://ready"
-     *   }
-     * ], "expression://123");
-     * 
-     * // Set a property using a parameter
-     * await perspective.executeAction([
-     *   {
-     *     action: "setSingleTarget",
-     *     source: "this",
-     *     predicate: "todo://title",
-     *     target: "value"
-     *   }
-     * ], "expression://123", [
-     *   { name: "title", value: "New Title" }
-     * ]);
-     * ```
-     * 
-     * @param actions - Array of action objects to execute
-     * @param expression - Target expression address (replaces "this" in actions)
-     * @param parameters - Optional parameters that replace "value" in actions
-     * @param batchId - Optional batch ID to group this operation with others
-     */
-    async executeAction(actions, expression, parameters: Parameter[], batchId?: string) {
-        return this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters), batchId)
     }
 
     /**
@@ -543,33 +471,6 @@ export class PerspectiveProxy {
     /** Mint and store the receipt for a completed flow run. */
     async mintFlowReceipt(instanceUri: string): Promise<FlowMintedReceipt> {
         return await this.#client.mintFlowReceipt(this.#handle.uuid, instanceUri)
-    }
-
-    /**
-     * Executes a Prolog query against the perspective's knowledge base.
-     * This is a powerful way to find complex patterns in the graph.
-     * 
-     * @param query - Prolog query string
-     * @returns Query results or false if no results
-     * 
-     * @example
-     * ```typescript
-     * // Find friends of friends
-     * const results = await perspective.infer(`
-     *   triple(A, "knows", B),
-     *   triple(B, "knows", C),
-     *   A \= C
-     * `);
-     * 
-     * // Find all active todos
-     * const todos = await perspective.infer(`
-     *   instance(Todo, "Todo"),
-     *   property_getter("Todo", Todo, "state", "active")
-     * `);
-     * ```
-     */
-    async infer(query: string, options?: CallOptions): Promise<any> {
-        return await this.#client.queryProlog(this.#handle.uuid, query, options)
     }
 
     /**
@@ -897,24 +798,6 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Loads a perspective snapshot, replacing current content.
-     * 
-     * @param snapshot - Perspective snapshot to load
-     */
-    async loadSnapshot(snapshot: Perspective) {
-        //Clean the input data from __typename
-        const cleanedSnapshot = JSON.parse(JSON.stringify(snapshot));
-        delete cleanedSnapshot.__typename;
-        cleanedSnapshot.links.forEach(link => {
-           delete link.data.__typename;
-        });
-
-        for(const link of cleanedSnapshot.links) {
-            await this.addLinkExpression(link)
-        }
-    }
-
-    /**
      * Gets a single target value matching a query.
      * Useful when you expect only one result.
      * 
@@ -1206,114 +1089,29 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Creates a new subject instance of the given subject class
-     * 
-     * @param subjectClass Either a string with the name of the subject class, or an object
-     * with the properties of the subject class.
-     * @param exprAddr The address of the expression to be turned into a subject instance
-     * @param initialValues Optional initial values for properties. If provided, these will be
-     * merged with constructor actions for better performance. A collection property accepts
-     * an array value and stores one entry per element; scalar properties store arrays/objects
-     * as a single JSON value.
-     * @param batchId Optional batch ID for grouping operations. If provided, returns the expression address
-     * instead of the subject proxy since the subject won't exist until the batch is committed.
-     * @returns A proxy object for the created subject, or just the expression address if in batch mode
-     */
-    async createSubject<T, B extends string | undefined = undefined>(
-        subjectClass: T, 
-        exprAddr: string,
-        initialValues?: Record<string, any>,
-        batchId?: B
-    ): Promise<B extends undefined ? T : string> {
-        await this.#client.createSubject(
-            this.#handle.uuid,
-            JSON.stringify({
-                className: await this.#className(subjectClass),
-                initialValues
-            }),
-            exprAddr,
-            initialValues ? JSON.stringify(initialValues) : undefined,
-            batchId
-        );
-
-        // Skip subject proxy creation when in batch mode since the subject won't exist until batch is committed
-        if (batchId) {
-            return exprAddr as B extends undefined ? T : string;
-        }
-
-        // Return the expression address directly — callers should use Ad4mModel or
-        // getSubjectData() to interact with the created instance.
-        return exprAddr as unknown as B extends undefined ? T : string;
-    }
-
-    /** Sets properties of an existing instance in the executor. Through an
-     *  abstract class (#1435), each value is written by every class of the
-     *  record that the abstract class reads, under its own name. */
-    async updateSubject(className: string, exprAddr: string, values: Record<string, any>, batchId?: string) {
-        await this.#client.updateSubject(this.#handle.uuid, className, exprAddr, JSON.stringify(values), batchId);
-    }
-
-    /**
-     * Creates an instance of a subject class, validated by the executor against the class's
-     * SHACL shape before anything is written (each property's type, which are required, which
-     * take a single value, `sh:in`): the same check as the MCP `instance_create` tool. A refused
-     * write rejects with an `RpcError` whose `data` is an `InstanceError` (status 422 and
-     * `kind: 'validation'` for a shape violation, with one `ValidationError` per property) and
-     * stages nothing. With `batchId` a non-validation failure can leave part of the write
-     * staged in the batch — discard it ({@link discardBatch}), don't commit it to keep
-     * earlier calls. An instance created in the same batch is not found — existence reads
-     * committed state only — so a create followed by an update, remove or
-     * `instanceAddToCollection` of the new instance in one batch fails `notFound`; put a new
-     * instance's initial collection items on the create itself.
+     * Writes instances of subject classes with an ordered list of create, update and delete
+     * ops, validated by the executor against each class's SHACL shape: the same check as the
+     * MCP `instance_*` tools. All ops apply or none do, and a later op sees what an earlier
+     * op of the call wrote. A refused call rejects with an `RpcError` whose `data` is an
+     * `InstanceError` (status 422 and `kind: 'validation'` for a shape violation, with one
+     * `ValidationError` per property) plus the `opIndex` of the failing op, and stages nothing.
+     * With `batch` the ops land on that batch's commit.
      *
      * @example
-     * const { baseUri } = await perspective.instanceCreate({ className: "Task", properties: { title: "Write" } });
+     * const { ids } = await perspective.mutate([
+     *     { op: "create", class: "Task", values: { title: "Write" } },
+     * ]);
      */
-    async instanceCreate(body: InstanceCreate): Promise<InstanceCreated> {
-        return this.#client.instanceCreate(this.#handle.uuid, body);
-    }
-
-    /** Sets single-valued properties of an instance, validated; the others stay. See {@link instanceCreate}. */
-    async instanceUpdate(body: InstanceUpdate): Promise<InstanceUpdated> {
-        return this.#client.instanceUpdate(this.#handle.uuid, body);
-    }
-
-    /** Removes an instance and every link to and from it. See {@link instanceCreate}. */
-    async instanceRemove(body: InstanceRemove): Promise<InstanceRemoved> {
-        return this.#client.instanceRemove(this.#handle.uuid, body);
-    }
-
-    /** Adds an item to a collection of an instance, validated. See {@link instanceCreate}. */
-    async instanceAddToCollection(body: InstanceAddToCollection): Promise<CollectionItemAdded> {
-        return this.#client.instanceAddToCollection(this.#handle.uuid, body);
-    }
-
-    /** Removes an item from a collection of an instance. See {@link instanceCreate}. */
-    async instanceRemoveFromCollection(body: InstanceRemoveFromCollection): Promise<CollectionItemRemoved> {
-        return this.#client.instanceRemoveFromCollection(this.#handle.uuid, body);
+    async mutate(
+        ops: MutateOp[],
+        options: { batch?: string, returns?: Returns } = {},
+    ): Promise<PerspectiveMutateResult> {
+        return this.#client.mutate(this.#handle.uuid, ops, options);
     }
 
     async getSubjectData<T>(subjectClass: T, exprAddr: string): Promise<T> {
         const className = await this.#className(subjectClass);
         return JSON.parse(await this.#client.getSubjectData(this.#handle.uuid, JSON.stringify({className}), exprAddr))
-    }
-
-    /** Removes a subject instance by running its (SDNA defined) destructor,
-     * which means removing links around the given expression address
-     *
-     * @param subjectClass Either a string with the name of the subject class, or an object
-     * with the properties of the subject class. In the latter case, the first subject class
-     * that matches the given properties will be used.
-     * @param exprAddr The address of the expression to be turned into a subject instance
-     * @param batchId Optional batch ID for grouping operations. If provided, the removal will be part of the batch
-     * and won't be executed until the batch is committed.
-     */
-    async removeSubject<T>(subjectClass: T, exprAddr: string, batchId?: string) {
-        // The executor runs the class's destructor: for an abstract class
-        // (#1435), the destructors of the record's classes it reads. A
-        // built-in one (`TextContent`, #1446) goes by its URI.
-        const className = await this.#className(subjectClass);
-        await this.#client.removeSubject(this.#handle.uuid, className, exprAddr, batchId);
     }
 
     /** Checks if the given expression is a subject instance of the given subject class

@@ -56,6 +56,100 @@ impl PerspectiveInstance {
         })
     }
 
+    /// Note that a replacing command staged into `batch_id` read `links` from `source` along
+    /// `predicate`, for [`Self::expected_by_batch`]. Every distinct read of a pair is kept: a
+    /// decision made on a later read (the batch saw the store change under it) is covered at
+    /// the commit as much as the first. A read identical to one held adds nothing. No batch, or
+    /// one that is not open, records nothing.
+    pub(crate) async fn record_read(
+        &self,
+        batch_id: &Option<String>,
+        source: &str,
+        predicate: &Option<String>,
+        links: &[DecoratedLinkExpression],
+    ) {
+        let (Some(batch_id), Some(predicate)) = (batch_id, predicate) else {
+            return;
+        };
+        let mut batches = self.batch_store.write().await;
+        let Some(batch) = batches.get_mut(batch_id) else {
+            return;
+        };
+        let mut links: Vec<HeldLink> = links
+            .iter()
+            .map(|l| (l.author.clone(), l.timestamp.clone(), l.data.target.clone()))
+            .collect();
+        links.sort();
+        if batch
+            .reads
+            .iter()
+            .any(|e| e.source == source && &e.predicate == predicate && e.links == links)
+        {
+            return;
+        }
+        batch.reads.push(ExpectedLinks {
+            source: source.to_string(),
+            predicate: predicate.clone(),
+            links,
+        });
+    }
+
+    /// What `batch_uuid` expects of the store when it commits, for [`Self::commit_batch_if`]:
+    ///
+    /// - what its replacing commands read (a setter on an empty property read nothing, and
+    ///   expects nothing to appear), and
+    /// - for each `(source, predicate)` it removes from that no such read covers (a member
+    ///   removed by id), what the store holds now. A removal that is not held any more
+    ///   (another write took it since this batch read it) is [`LinksChanged`] at once.
+    ///
+    /// `None` when the batch is not open.
+    pub(crate) async fn expected_by_batch(
+        &self,
+        batch_uuid: &str,
+    ) -> Result<Option<Vec<ExpectedLinks>>, AnyError> {
+        let (mut expected, removals): (Vec<ExpectedLinks>, Vec<LinkExpression>) = {
+            let batches = self.batch_store.read().await;
+            let Some(batch) = batches.get(batch_uuid) else {
+                return Ok(None);
+            };
+            let removals = batch
+                .diff
+                .removals
+                .iter()
+                .cloned()
+                .chain(batch.updates.iter().map(|(old, _)| old.clone()))
+                .collect();
+            (batch.reads.clone(), removals)
+        };
+        for removal in removals {
+            let Some(predicate) = removal.data.predicate.as_deref() else {
+                continue;
+            };
+            let held = (
+                removal.author.clone(),
+                removal.timestamp.clone(),
+                removal.data.target.clone(),
+            );
+            // A pair the batch read: the removal must be in each read of it.
+            let reads: Vec<usize> = expected
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.source == removal.data.source && e.predicate == predicate)
+                .map(|(position, _)| position)
+                .collect();
+            if reads.is_empty() {
+                let read = self.expect_links(&removal.data.source, predicate)?;
+                if !read.links.contains(&held) {
+                    return Err(LinksChanged.into());
+                }
+                expected.push(read);
+            } else if reads.iter().any(|&p| !expected[p].links.contains(&held)) {
+                return Err(LinksChanged.into());
+            }
+        }
+        Ok(Some(expected))
+    }
+
     fn links_held(&self, source: &str, predicate: &str) -> Result<Vec<HeldLink>, AnyError> {
         let mut links: Vec<HeldLink> = self
             .sparql_store
@@ -222,7 +316,7 @@ impl PerspectiveInstance {
 
             // Publish link-added/-removed/-updated to WS subscribers. The
             // single-mutation paths publish their own diff, and
-            // spawn_prolog_facts_update deliberately does not (no double
+            // record_write deliberately does not (no double
             // delivery there), so a batch must publish here or its links never
             // reach WS subscribers. Updates go out as `link-updated`, not as a
             // removal plus an addition.

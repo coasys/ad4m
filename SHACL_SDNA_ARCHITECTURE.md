@@ -205,8 +205,8 @@ for link in links {
 
 ### Phase 1: SHACL Infrastructure (Complete)
 
-- [x] TypeScript: Generate SHACL JSON with actions in `generateSDNA()`
-- [x] TypeScript: Serialize SHACL to links in `PerspectiveProxy.ensureSdnaLinks()`
+- [x] TypeScript: Generate SHACL JSON with actions in `generateSHACL()`
+- [x] TypeScript: Send SHACL shapes to the executor with `PerspectiveProxy.registerShapes()`; the executor stores them as links
 - [x] Rust: Parse SHACL JSON in `shacl_parser.rs`
 - [x] Rust: Store action links with separate predicates
 
@@ -218,7 +218,7 @@ for link in links {
 - [x] `get_collection_adder_actions()` - Try SHACL first, fallback to Prolog
 - [x] `get_collection_remover_actions()` - Try SHACL first, fallback to Prolog
 - [x] `resolve_property_value()` - Try SHACL for resolve language
-- [x] TypeScript `removeSubject()` - Try SHACL for destructor actions
+- [x] `perspective.mutate` delete op - Try SHACL for destructor actions
 
 ### Phase 3: Remove Prolog Fallbacks ✅ (Completed in this PR)
 
@@ -250,6 +250,6 @@ for link in links {
 | -------------------------------------------------------- | ------------------------------------------------- |
 | `core/src/model/decorators.ts`                           | `generateSHACL()` - Creates SHACL from decorators |
 | `core/src/shacl/SHACLShape.ts`                           | SHACL shape class with `toLinks()`                |
-| `core/src/perspectives/PerspectiveProxy.ts`              | `ensureSdnaLinks()` - Stores SHACL as links       |
+| `core/src/perspectives/PerspectiveProxy.ts`              | `registerShapes()` - Sends shapes to the executor |
 | `rust-executor/src/perspectives/shacl_parser.rs`         | Parses SHACL JSON, generates links                |
 | `rust-executor/src/perspectives/perspective_instance.rs` | Action retrieval with SHACL-first                 |

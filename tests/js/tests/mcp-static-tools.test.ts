@@ -589,8 +589,14 @@ describe("MCP static instance tools (dynamicClassTools off)", function() {
                 perspective_id: perspectiveUuid, class_name: "Channel", base_uri: channelUri,
                 properties: { messages: [msg1Uri] },
             }, mcpSessionId);
-            expect(collection.error).to.include('messages');
-            expect(collection.error).to.include('instance_add_to_collection');
+            expect(collection.success, asText(collection)).to.be.true;
+            expect(collection.updated_properties).to.have.members(['messages']);
+
+            // An array on a collection sets its members: msg2Uri, added earlier, is gone.
+            const afterSet = await callMcpTool(mcpBaseUrl, 'instance_get', {
+                perspective_id: perspectiveUuid, class_name: "Channel", base_uri: channelUri,
+            }, mcpSessionId);
+            expect(afterSet.messages).to.deep.equal([msg1Uri]);
 
             const missing = await callMcpTool(mcpBaseUrl, 'instance_update', {
                 perspective_id: perspectiveUuid, class_name: "Channel", base_uri: "flux://does-not-exist",

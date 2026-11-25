@@ -655,7 +655,7 @@ mod tests {
         // sees exactly what a real run hands it.
         let base = "ad4m://task/onboarding".to_string();
         perspective
-            .create_subject(
+            .create_subject_raw(
                 crate::perspectives::perspective_instance::SubjectClassOption {
                     class_name: Some("Task".to_string()),
                     query: None,
@@ -790,7 +790,7 @@ mod tests {
         seed_flow(&mut perspective, &ctx, &review, "Review").await;
         let base = format!("ad4m://task/{}", uuid::Uuid::new_v4());
         perspective
-            .create_subject(
+            .create_subject_raw(
                 crate::perspectives::perspective_instance::SubjectClassOption {
                     class_name: Some("Task".to_string()),
                     query: None,
@@ -957,7 +957,7 @@ mod tests {
         .await;
         let base = "ad4m://task/selection".to_string();
         perspective
-            .create_subject(
+            .create_subject_raw(
                 crate::perspectives::perspective_instance::SubjectClassOption {
                     class_name: Some("Task".to_string()),
                     query: None,

@@ -343,7 +343,6 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ("ai.removeTask", || json!({ "id": TARGET })),
     ("ai.prompt", || json!({ "taskId": TARGET, "prompt": "p" })),
     // The AI sessions: `id` on the session methods, `sessionId` on the turn calls.
-    ("ai.session", || json!({ "id": TARGET })),
     ("ai.sessionUpdate", || json!({ "id": TARGET })),
     ("ai.sessionDelete", || json!({ "id": TARGET })),
     (
@@ -572,40 +571,8 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ),
     ("perspective.registerShapes", || json!({ "shapes": [] })),
     (
-        "perspective.executeCommands",
-        || json!({ "commands": "[]", "expression": "e" }),
-    ),
-    (
-        "perspective.createSubject",
-        || json!({ "subjectClass": "C", "expressionAddress": "e" }),
-    ),
-    (
-        "perspective.updateSubject",
-        || json!({ "subjectClass": "C", "expressionAddress": "e", "values": "{}" }),
-    ),
-    (
-        "perspective.removeSubject",
-        || json!({ "subjectClass": "C", "expressionAddress": "e" }),
-    ),
-    (
-        "perspective.instanceCreate",
-        || json!({ "className": "C", "properties": {} }),
-    ),
-    (
-        "perspective.instanceUpdate",
-        || json!({ "className": "C", "baseUri": "ad4m://e", "properties": { "p": 1 } }),
-    ),
-    (
-        "perspective.instanceRemove",
-        || json!({ "className": "C", "baseUri": "ad4m://e" }),
-    ),
-    (
-        "perspective.instanceAddToCollection",
-        || json!({ "className": "C", "baseUri": "ad4m://e", "collection": "c", "itemUri": "ad4m://i" }),
-    ),
-    (
-        "perspective.instanceRemoveFromCollection",
-        || json!({ "className": "C", "baseUri": "ad4m://e", "collection": "c", "itemUri": "ad4m://i" }),
+        "perspective.mutate",
+        || json!({ "ops": [{ "op": "delete", "class": "C", "id": "ad4m://e" }] }),
     ),
     ("perspective.commitBatch", || json!({ "batchId": "b" })),
     ("perspective.discardBatch", || json!({ "batchId": "b" })),

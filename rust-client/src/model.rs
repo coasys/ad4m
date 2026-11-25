@@ -5,21 +5,18 @@
 //! from a class **name** and carries plain JSON values: `query`/`get`/
 //! `subscribe` run `perspective.modelQuery` / `perspective.subscribe`
 //! and return hydrated instances as `serde_json::Value`s; `create`/`update`/
-//! `delete`/`save` write through the validated `perspective.instance*` RPCs
+//! `delete`/`save` write through the validated `perspective.mutate` RPC
 //! (never raw links). Batches ([`crate::batch::Batch`]) group writes
 //! atomically; `Model::transaction` mirrors `Ad4mModel.transaction`.
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{Map, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use crate::batch::Batch;
-use crate::instances::{
-    CollectionItemAdded, CollectionItemRemoved, InstanceCollectionItem, InstanceCreate,
-    InstanceCreated, InstanceRemove, InstanceRemoved, InstanceUpdate, InstanceUpdated,
-};
+use crate::instances::{mutate, MutateOp, ParentRef};
 use crate::subscription::{mint_subscription_id, LiveQuery, Subscribed};
 use crate::ws_rpc::WsRpcClient;
 
@@ -182,8 +179,8 @@ pub struct ModelResult {
 pub struct CreateOptions {
     /// The new instance's URI; the executor mints one when absent.
     pub base_uri: Option<String>,
-    /// A node to put the new instance under.
-    pub parent: Option<String>,
+    /// Where to put the new instance.
+    pub parent: Option<ParentRef>,
     /// Write into this open batch instead of the live graph.
     pub batch_id: Option<String>,
 }
@@ -433,108 +430,122 @@ impl Model {
         })
     }
 
-    /// `perspective.instanceCreate` — a validated write.
+    /// A `create` op of `perspective.mutate` — a validated write. The new instance's id.
     pub async fn create(
         &self,
         properties: Map<String, Value>,
         options: CreateOptions,
-    ) -> Result<InstanceCreated> {
-        let mut params = serde_json::to_value(InstanceCreate {
-            class_name: self.class_name()?.to_string(),
-            properties: Some(properties),
-            base_uri: options.base_uri,
-            parent: options.parent,
-            batch_id: options.batch_id,
-        })?;
-        params["uuid"] = Value::from(self.uuid.clone());
-        self.ws.call("perspective.instanceCreate", params).await
+    ) -> Result<String> {
+        let done = self
+            .write(
+                vec![MutateOp::Create {
+                    class: self.class_name()?.to_string(),
+                    id: options.base_uri,
+                    values: properties,
+                    parent: options.parent,
+                }],
+                options.batch_id,
+            )
+            .await?;
+        done.into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("perspective.mutate returned no id for the create"))
     }
 
-    /// `perspective.instanceUpdate` — set the given single-valued properties.
+    /// An `update` op of `perspective.mutate` — set the given single-valued properties.
     pub async fn update(
         &self,
         id: &str,
         properties: Map<String, Value>,
         batch_id: Option<String>,
-    ) -> Result<InstanceUpdated> {
-        let mut params = serde_json::to_value(InstanceUpdate {
-            class_name: self.class_name()?.to_string(),
-            base_uri: id.to_string(),
-            properties,
-            batch_id,
-        })?;
-        params["uuid"] = Value::from(self.uuid.clone());
-        self.ws.call("perspective.instanceUpdate", params).await
+    ) -> Result<()> {
+        self.update_with(id, properties, BTreeMap::new(), BTreeMap::new(), batch_id)
+            .await
     }
 
-    /// `perspective.instanceRemove` — delete the instance (and its incoming
-    /// links executor-side). TS names this `delete`; `remove` is its alias.
-    pub async fn delete(&self, id: &str, batch_id: Option<String>) -> Result<InstanceRemoved> {
-        let mut params = serde_json::to_value(InstanceRemove {
-            class_name: self.class_name()?.to_string(),
-            base_uri: id.to_string(),
+    /// A `delete` op of `perspective.mutate` — delete the instance and every link from and
+    /// to it. TS names this `delete`; `remove` is its alias.
+    pub async fn delete(&self, id: &str, batch_id: Option<String>) -> Result<()> {
+        self.write(
+            vec![MutateOp::Delete {
+                class: self.class_name()?.to_string(),
+                id: id.to_string(),
+            }],
             batch_id,
-        })?;
-        params["uuid"] = Value::from(self.uuid.clone());
-        self.ws.call("perspective.instanceRemove", params).await
+        )
+        .await?;
+        Ok(())
     }
 
     /// TS `remove` — the deprecated alias of `delete`.
-    pub async fn remove(&self, id: &str, batch_id: Option<String>) -> Result<InstanceRemoved> {
+    pub async fn remove(&self, id: &str, batch_id: Option<String>) -> Result<()> {
         self.delete(id, batch_id).await
     }
 
-    /// `perspective.instanceAddToCollection` — add `item_uri` to `collection`.
+    /// An `update` op that adds `item_uri` to `collection`.
     pub async fn add_to_collection(
         &self,
         id: &str,
         collection: &str,
         item_uri: &str,
         batch_id: Option<String>,
-    ) -> Result<CollectionItemAdded> {
-        let mut params = serde_json::to_value(InstanceCollectionItem {
-            class_name: self.class_name()?.to_string(),
-            base_uri: id.to_string(),
-            collection: collection.to_string(),
-            item_uri: item_uri.to_string(),
-            batch_id,
-        })?;
-        params["uuid"] = Value::from(self.uuid.clone());
-        self.ws
-            .call("perspective.instanceAddToCollection", params)
+    ) -> Result<()> {
+        let add = BTreeMap::from([(collection.to_string(), vec![item_uri.to_string()])]);
+        self.update_with(id, Map::new(), add, BTreeMap::new(), batch_id)
             .await
     }
 
-    /// `perspective.instanceRemoveFromCollection`.
+    /// An `update` op that removes `item_uri` from `collection`.
     pub async fn remove_from_collection(
         &self,
         id: &str,
         collection: &str,
         item_uri: &str,
         batch_id: Option<String>,
-    ) -> Result<CollectionItemRemoved> {
-        let mut params = serde_json::to_value(InstanceCollectionItem {
-            class_name: self.class_name()?.to_string(),
-            base_uri: id.to_string(),
-            collection: collection.to_string(),
-            item_uri: item_uri.to_string(),
-            batch_id,
-        })?;
-        params["uuid"] = Value::from(self.uuid.clone());
-        self.ws
-            .call("perspective.instanceRemoveFromCollection", params)
+    ) -> Result<()> {
+        let remove = BTreeMap::from([(collection.to_string(), vec![item_uri.to_string()])]);
+        self.update_with(id, Map::new(), BTreeMap::new(), remove, batch_id)
             .await
+    }
+
+    /// One `update` op: `set` the properties, `remove` items, then `add` items, all in one
+    /// call.
+    async fn update_with(
+        &self,
+        id: &str,
+        set: Map<String, Value>,
+        add: BTreeMap<String, Vec<String>>,
+        remove: BTreeMap<String, Vec<String>>,
+        batch_id: Option<String>,
+    ) -> Result<()> {
+        self.write(
+            vec![MutateOp::Update {
+                class: self.class_name()?.to_string(),
+                id: id.to_string(),
+                set,
+                add,
+                remove,
+            }],
+            batch_id,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// `perspective.mutate`: the ops in one call, all or none. The ids, one per op.
+    async fn write(&self, ops: Vec<MutateOp>, batch_id: Option<String>) -> Result<Vec<String>> {
+        Ok(mutate(&self.ws, &self.uuid, ops, batch_id, None).await?.ids)
     }
 
     /// `save` — create-or-update by whether `base_uri` is given.
     ///
     /// TS `save` on a new instance wraps the write in a fresh batch when no
     /// `batch_id` is supplied (so creation is atomic) and commits it — this
-    /// does the same over `instanceCreate`/`createBatch`/`commitBatch`. It
+    /// does the same over `mutate`/`createBatch`/`commitBatch`. It
     /// returns the instance URI; TS rehydrates the object in place, the Rust
     /// model holds no local state — call `get` for the hydrated instance.
     /// On an existing instance (`base_uri` set) it updates through
-    /// `instanceUpdate`.
+    /// an `update` op.
     pub async fn save(
         &self,
         base_uri: Option<String>,
@@ -547,16 +558,14 @@ impl Model {
         }
         match batch_id {
             Some(batch_id) => {
-                let created = self
-                    .create(
-                        properties,
-                        CreateOptions {
-                            batch_id: Some(batch_id),
-                            ..Default::default()
-                        },
-                    )
-                    .await?;
-                Ok(created.base_uri)
+                self.create(
+                    properties,
+                    CreateOptions {
+                        batch_id: Some(batch_id),
+                        ..Default::default()
+                    },
+                )
+                .await
             }
             None => {
                 // No batch handed in — open one ourselves so the create is
@@ -572,9 +581,9 @@ impl Model {
                     )
                     .await;
                 match created {
-                    Ok(created) => {
+                    Ok(id) => {
                         batch.commit().await?;
-                        Ok(created.base_uri)
+                        Ok(id)
                     }
                     Err(e) => {
                         let _ = batch.discard().await;
@@ -778,13 +787,13 @@ impl Instance {
     /// only the changed properties — nothing at all when the instance is
     /// clean — then refresh the baseline.
     ///
-    /// Collections ride their own RPCs — `instanceUpdate` refuses them
-    /// (`CollectionNotSettable`), so a changed array field is diffed
-    /// against the snapshot and written item by item,
-    /// `instanceRemoveFromCollection` before `instanceAddToCollection`,
-    /// like TS dispatching relation changes separately (R6). A failed
-    /// call aborts the save with the snapshot untouched — a retry
-    /// replays idempotent ops, never a duplicate write. Outside a batch a
+    /// A collection is not set as a whole — the update's `set` refuses
+    /// it — so a changed array field is diffed against the snapshot and
+    /// written as item edits, the `remove` items before the `add` items
+    /// (R6). The scalars and the item edits go in one `update` op, so a
+    /// save lands whole or not at all. A failed call aborts the save with
+    /// the snapshot untouched — a retry replays idempotent ops, never a
+    /// duplicate write. Outside a batch a
     /// write the executor confirmed is recorded as unconfirmed state, and
     /// the next save diffs against it: a later `set` back to the old
     /// value still writes.
@@ -814,18 +823,11 @@ impl Instance {
     /// are already committed (and recorded as unconfirmed), so a retry
     /// replays idempotent ops before re-reading.
     ///
-    /// **Minimum executor for batched saves.** The optimistic snapshot is
-    /// right only if the executor resolves each batched `instance*` write
-    /// against the batch's effective graph: the committed links plus the
-    /// changes already staged in that batch. The executor gained this in
-    /// commits `06cd80b7f`, `c54e7267b` and `258af061c`
-    /// (`feat/validated-write-rpc`). The minimum is an executor built
-    /// from `87ba32b90` or a later commit, or the first release that
-    /// contains it. The version string does not tell them apart: builds
-    /// before and after report `0.13.1-staging.11`. Against an older
-    /// executor, two saves of one collection in one batch (`[]`, then
-    /// `[a]`, then `[]`) both succeed and snapshot clean, but the commit
-    /// writes `[a]`. The client cannot detect this.
+    /// The optimistic snapshot is right because the executor resolves each
+    /// batched `perspective.mutate` write against the batch's effective
+    /// graph: the committed links plus the changes already staged in that
+    /// batch. Two saves of one collection in one batch (`[]`, then `[a]`,
+    /// then `[]`) commit as `[]`.
     pub async fn save(&mut self, batch_id: Option<String>) -> Result<()> {
         let changed = self.changed_fields();
         if changed.is_empty() && batch_id.is_some() {
@@ -874,40 +876,51 @@ impl Instance {
         // record it, so a failure later in this save (or of the re-read)
         // leaves the next diff computed against what the executor holds.
         let live = batch_id.is_none();
-        if !scalars.is_empty() {
-            self.model
-                .update(&self.base_uri, scalars.clone(), batch_id.clone())
-                .await?;
-            if live {
-                self.unconfirmed.extend(scalars);
-            }
-        }
+        // One call writes the scalars and the item edits of every changed collection, all or
+        // none: removals before adds, against the executor's membership — the unconfirmed one
+        // when an earlier save wrote it, else the snapshot's.
+        let mut add: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut remove: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut held_after: Vec<(String, Vec<String>)> = Vec::new();
         for key in collections {
-            // Item ops go against the executor's membership: the
-            // unconfirmed one when an earlier save wrote it, else the
-            // snapshot's.
             let before =
                 collection_items(self.unconfirmed.get(key).or_else(|| self.snapshot.get(key)));
             let after = collection_items(self.current.get(key));
-            let mut held = before.clone();
-            for item in before.iter().filter(|i| !after.contains(i)) {
-                self.model
-                    .remove_from_collection(&self.base_uri, key, item, batch_id.clone())
-                    .await?;
-                if live {
-                    held.retain(|i| i != item);
-                    self.unconfirmed
-                        .insert(key.clone(), Value::from(held.clone()));
-                }
+            let removed: Vec<String> = before
+                .iter()
+                .filter(|i| !after.contains(i))
+                .cloned()
+                .collect();
+            let added: Vec<String> = after
+                .iter()
+                .filter(|i| !before.contains(i))
+                .cloned()
+                .collect();
+            let mut held = before;
+            held.retain(|i| !removed.contains(i));
+            held.extend(added.iter().cloned());
+            if !removed.is_empty() {
+                remove.insert(key.clone(), removed);
             }
-            for item in after.iter().filter(|i| !before.contains(i)) {
-                self.model
-                    .add_to_collection(&self.base_uri, key, item, batch_id.clone())
-                    .await?;
-                if live {
-                    held.push(item.clone());
-                    self.unconfirmed
-                        .insert(key.clone(), Value::from(held.clone()));
+            if !added.is_empty() {
+                add.insert(key.clone(), added);
+            }
+            held_after.push((key.clone(), held));
+        }
+        if !scalars.is_empty() || !add.is_empty() || !remove.is_empty() {
+            self.model
+                .update_with(
+                    &self.base_uri,
+                    scalars.clone(),
+                    add,
+                    remove,
+                    batch_id.clone(),
+                )
+                .await?;
+            if live {
+                self.unconfirmed.extend(scalars);
+                for (key, held) in held_after {
+                    self.unconfirmed.insert(key, Value::from(held));
                 }
             }
         }
@@ -1060,15 +1073,14 @@ mod tests {
             (r, inst)
         });
         let req = fake.next_request().await;
-        assert_eq!(req["type"], "perspective.instanceUpdate");
-        assert_eq!(req["params"]["baseUri"], "recipe://1");
+        assert_eq!(req["type"], "perspective.mutate");
         // Only the dirty property — the hydrated `done`/`id` stay home.
-        assert_eq!(req["params"]["properties"], json!({"name": "Risotto"}));
-        fake.reply(
-            &req,
-            json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["name"]}),
-        )
-        .await;
+        assert_eq!(
+            req["params"]["ops"],
+            json!([{"op": "update", "class": "Recipe", "id": "recipe://1",
+                    "set": {"name": "Risotto"}}])
+        );
+        fake.reply(&req, json!({"ids": ["recipe://1"]})).await;
         // R7: the non-batch save re-reads the row before baselining.
         let req = fake.next_request().await;
         assert_eq!(req["type"], "perspective.modelQuery");
@@ -1102,13 +1114,13 @@ mod tests {
         ws.close().await;
     }
 
-    /// R6: a changed collection field cannot go through `instanceUpdate`
+    /// R6: a changed collection field cannot go through an update's `set`
     /// — the executor rejects it `CollectionNotSettable` — so `save`
-    /// diffs the array against the snapshot and writes item by item
-    /// (`instanceRemoveFromCollection` before `instanceAddToCollection`),
-    /// while scalar changes keep their single update call.
+    /// diffs the array against the snapshot and sends item edits
+    /// (`remove` and `add`), in the same single update op as the scalar
+    /// changes.
     #[tokio::test]
-    async fn save_dispatches_collection_edits_item_by_item() {
+    async fn save_sends_collection_edits_as_item_edits_in_one_op() {
         use crate::testkit::FakeExecutor;
         let fake = FakeExecutor::start().await;
         let ws = Arc::new(WsRpcClient::connect(fake.url(), "").await.unwrap());
@@ -1130,46 +1142,17 @@ mod tests {
             let mut inst = inst;
             (inst.save(None).await, inst)
         });
-        let mut updated = false;
-        let mut removed = false;
-        let mut added = false;
-        for _ in 0..3 {
-            let req = fake.next_request().await;
-            match req["type"].as_str() {
-                Some("perspective.instanceUpdate") => {
-                    // The collection must not ride the scalar update.
-                    assert_eq!(req["params"]["properties"], json!({"name": "Risotto"}));
-                    updated = true;
-                    fake.reply(
-                        &req,
-                        json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["name"]}),
-                    )
-                    .await;
-                }
-                Some("perspective.instanceRemoveFromCollection") => {
-                    assert_eq!(req["params"]["collection"], "tags");
-                    assert_eq!(req["params"]["itemUri"], "tag://a");
-                    removed = true;
-                    fake.reply(
-                        &req,
-                        json!({"className": "Recipe", "baseUri": "recipe://1", "collection": "tags", "itemUri": "tag://a", "linksRemoved": 1}),
-                    )
-                    .await;
-                }
-                Some("perspective.instanceAddToCollection") => {
-                    assert_eq!(req["params"]["collection"], "tags");
-                    assert_eq!(req["params"]["itemUri"], "tag://c");
-                    added = true;
-                    fake.reply(
-                        &req,
-                        json!({"className": "Recipe", "baseUri": "recipe://1", "collection": "tags", "itemUri": "tag://c", "linksAdded": 1, "alreadyMember": false}),
-                    )
-                    .await;
-                }
-                other => panic!("unexpected write on the wire: {other:?}"),
-            }
-        }
-        assert!(updated && removed && added);
+        let req = fake.next_request().await;
+        assert_eq!(req["type"], "perspective.mutate");
+        // The collection must not ride `set`; its edits are one call with the scalar.
+        assert_eq!(
+            req["params"]["ops"],
+            json!([{"op": "update", "class": "Recipe", "id": "recipe://1",
+                    "set": {"name": "Risotto"},
+                    "remove": {"tags": ["tag://a"]},
+                    "add": {"tags": ["tag://c"]}}])
+        );
+        fake.reply(&req, json!({"ids": ["recipe://1"]})).await;
         // R7: the non-batch save closes with its baseline re-read.
         let req = fake.next_request().await;
         assert_eq!(req["type"], "perspective.modelQuery");
@@ -1428,21 +1411,15 @@ mod tests {
             (inst.save(Some("batch-1".to_string())).await, inst)
         });
         let req = fake.next_request().await;
-        assert_eq!(req["type"], "perspective.instanceRemoveFromCollection");
-        assert_eq!(req["params"]["itemUri"], "col://a");
-        fake.reply(
-            &req,
-            json!({"className": "Board", "baseUri": "board://1", "collection": "columns", "itemUri": "col://a", "linksRemoved": 1}),
-        )
-        .await;
-        let req = fake.next_request().await;
-        assert_eq!(req["type"], "perspective.instanceAddToCollection");
-        assert_eq!(req["params"]["itemUri"], "col://c");
-        fake.reply(
-            &req,
-            json!({"className": "Board", "baseUri": "board://1", "collection": "columns", "itemUri": "col://c", "linksAdded": 1, "alreadyMember": false}),
-        )
-        .await;
+        assert_eq!(req["type"], "perspective.mutate");
+        assert_eq!(req["params"]["batch"], "batch-1");
+        assert_eq!(
+            req["params"]["ops"],
+            json!([{"op": "update", "class": "Board", "id": "board://1",
+                    "remove": {"columns": ["col://a"]},
+                    "add": {"columns": ["col://c"]}}])
+        );
+        fake.reply(&req, json!({"ids": ["board://1"]})).await;
         let (res, inst) = save.await.unwrap();
         res.unwrap();
         assert!(!inst.is_dirty());
@@ -1485,14 +1462,9 @@ mod tests {
         fake.reply(&req, json!("batch-7")).await;
         for uri in ["recipe://a", "recipe://b"] {
             let req = fake.next_request().await;
-            assert_eq!(req["type"], "perspective.instanceCreate");
-            assert_eq!(req["params"]["batchId"], "batch-7");
-            fake.reply(
-                &req,
-                json!({"className": "Recipe", "baseUri": uri, "propertiesSet": ["name"],
-                       "collectionsSet": [], "parent": null}),
-            )
-            .await;
+            assert_eq!(req["type"], "perspective.mutate");
+            assert_eq!(req["params"]["batch"], "batch-7");
+            fake.reply(&req, json!({"ids": [uri]})).await;
         }
         let req = fake.next_request().await;
         assert_eq!(req["type"], "perspective.commitBatch");
@@ -1527,14 +1499,13 @@ mod tests {
             (inst.save(None).await, inst)
         });
         let req = fake.next_request().await;
-        assert_eq!(req["type"], "perspective.instanceAddToCollection");
-        assert_eq!(req["params"]["collection"], "columns");
-        assert_eq!(req["params"]["itemUri"], "col://c");
-        fake.reply(
-            &req,
-            json!({"className": "Board", "baseUri": "board://1", "collection": "columns", "itemUri": "col://c", "linksAdded": 1, "alreadyMember": false}),
-        )
-        .await;
+        assert_eq!(req["type"], "perspective.mutate");
+        assert_eq!(
+            req["params"]["ops"],
+            json!([{"op": "update", "class": "Board", "id": "board://1",
+                    "add": {"columns": ["col://c"]}}])
+        );
+        fake.reply(&req, json!({"ids": ["board://1"]})).await;
         let req = fake.next_request().await;
         assert_eq!(req["type"], "perspective.modelQuery");
         fake.reply(
@@ -1580,12 +1551,8 @@ mod tests {
             (inst.save(None).await, inst)
         });
         let req = fake.next_request().await;
-        assert_eq!(req["type"], "perspective.instanceUpdate");
-        fake.reply(
-            &req,
-            json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["name", "done"]}),
-        )
-        .await;
+        assert_eq!(req["type"], "perspective.mutate");
+        fake.reply(&req, json!({"ids": ["recipe://1"]})).await;
         // The baseline refresh is a read, TS `getData` shape.
         let req = fake.next_request().await;
         assert_eq!(req["type"], "perspective.modelQuery");
@@ -1630,12 +1597,8 @@ mod tests {
             (inst.save(None).await, inst)
         });
         let req = fake.next_request().await;
-        assert_eq!(req["type"], "perspective.instanceUpdate");
-        fake.reply(
-            &req,
-            json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["name"]}),
-        )
-        .await;
+        assert_eq!(req["type"], "perspective.mutate");
+        fake.reply(&req, json!({"ids": ["recipe://1"]})).await;
         let req = fake.next_request().await;
         assert_eq!(req["type"], "perspective.modelQuery");
         // The re-read carries the other client's write back to us.
@@ -1656,13 +1619,9 @@ mod tests {
         );
         let save = tokio::spawn(async move { inst.save(None).await });
         let req = fake.next_request().await;
-        assert_eq!(req["type"], "perspective.instanceUpdate");
-        assert_eq!(req["params"]["properties"], json!({"done": false}));
-        fake.reply(
-            &req,
-            json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["done"]}),
-        )
-        .await;
+        assert_eq!(req["type"], "perspective.mutate");
+        assert_eq!(req["params"]["ops"][0]["set"], json!({"done": false}));
+        fake.reply(&req, json!({"ids": ["recipe://1"]})).await;
         let req = fake.next_request().await;
         assert_eq!(req["type"], "perspective.modelQuery");
         fake.reply(
@@ -1698,12 +1657,8 @@ mod tests {
             (inst.save(None).await, inst)
         });
         let req = fake.next_request().await;
-        assert_eq!(req["type"], "perspective.instanceUpdate");
-        fake.reply(
-            &req,
-            json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["name"]}),
-        )
-        .await;
+        assert_eq!(req["type"], "perspective.mutate");
+        fake.reply(&req, json!({"ids": ["recipe://1"]})).await;
         let req = fake.next_request().await;
         assert_eq!(req["type"], "perspective.modelQuery");
         fake.reply_error(&req, 503, "query backend unavailable")
@@ -1724,13 +1679,9 @@ mod tests {
             (inst.save(None).await, inst)
         });
         let req = fake.next_request().await;
-        assert_eq!(req["type"], "perspective.instanceUpdate");
-        assert_eq!(req["params"]["properties"], json!({"name": "B"}));
-        fake.reply(
-            &req,
-            json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["name"]}),
-        )
-        .await;
+        assert_eq!(req["type"], "perspective.mutate");
+        assert_eq!(req["params"]["ops"][0]["set"], json!({"name": "B"}));
+        fake.reply(&req, json!({"ids": ["recipe://1"]})).await;
         let req = fake.next_request().await;
         fake.reply(
             &req,
@@ -1767,20 +1718,10 @@ mod tests {
             (inst.save(None).await, inst)
         });
         let req = fake.next_request().await;
-        assert_eq!(req["type"], "perspective.instanceUpdate");
-        fake.reply(
-            &req,
-            json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["name"]}),
-        )
-        .await;
-        let req = fake.next_request().await;
-        assert_eq!(req["type"], "perspective.instanceAddToCollection");
-        assert_eq!(req["params"]["itemUri"], "t://2");
-        fake.reply(
-            &req,
-            json!({"className": "Recipe", "baseUri": "recipe://1", "collection": "tags", "itemUri": "t://2", "linksAdded": 1, "alreadyMember": false}),
-        )
-        .await;
+        assert_eq!(req["type"], "perspective.mutate");
+        assert_eq!(req["params"]["ops"][0]["set"], json!({"name": "B"}));
+        assert_eq!(req["params"]["ops"][0]["add"], json!({"tags": ["t://2"]}));
+        fake.reply(&req, json!({"ids": ["recipe://1"]})).await;
         let req = fake.next_request().await;
         assert_eq!(req["type"], "perspective.modelQuery");
         fake.reply_error(&req, 503, "query backend unavailable")
@@ -1798,23 +1739,15 @@ mod tests {
         });
         let req = fake.next_request().await;
         assert_eq!(
-            req["type"], "perspective.instanceUpdate",
+            req["type"], "perspective.mutate",
             "the revert must be written, not skipped as clean"
         );
-        assert_eq!(req["params"]["properties"], json!({"name": "A"}));
-        fake.reply(
-            &req,
-            json!({"className": "Recipe", "baseUri": "recipe://1", "updatedProperties": ["name"]}),
-        )
-        .await;
-        let req = fake.next_request().await;
-        assert_eq!(req["type"], "perspective.instanceRemoveFromCollection");
-        assert_eq!(req["params"]["itemUri"], "t://2");
-        fake.reply(
-            &req,
-            json!({"className": "Recipe", "baseUri": "recipe://1", "collection": "tags", "itemUri": "t://2", "linksRemoved": 1}),
-        )
-        .await;
+        assert_eq!(req["params"]["ops"][0]["set"], json!({"name": "A"}));
+        assert_eq!(
+            req["params"]["ops"][0]["remove"],
+            json!({"tags": ["t://2"]})
+        );
+        fake.reply(&req, json!({"ids": ["recipe://1"]})).await;
         let req = fake.next_request().await;
         assert_eq!(req["type"], "perspective.modelQuery");
         fake.reply(

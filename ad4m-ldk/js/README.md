@@ -212,7 +212,7 @@ An interaction that a call runs returns a delta:
 ```
 
 The executor applies it at once. For a create, `address` is the new
-record, and `createSubject` returns `<language address>://t2`.
+record, and the create returns `<language address>://t2`.
 
 ### Pushing changes
 

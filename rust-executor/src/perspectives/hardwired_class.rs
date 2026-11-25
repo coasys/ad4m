@@ -400,7 +400,7 @@ mod tests {
         assert_eq!(triples(&perspective), before, "a read writes nothing");
 
         perspective
-            .create_subject(
+            .create_subject_raw(
                 SubjectClassOption {
                     class_name: Some("FlowInstance".into()),
                     query: None,
@@ -511,7 +511,7 @@ mod tests {
         // A create and a read through the executor's IRI use its class only;
         // the app's IRI reads the app's class only.
         perspective
-            .create_subject(
+            .create_subject_raw(
                 SubjectClassOption {
                     class_name: Some(FLOW_INSTANCE_CLASS.into()),
                     query: None,
@@ -524,7 +524,7 @@ mod tests {
             .await
             .unwrap();
         perspective
-            .create_subject(
+            .create_subject_raw(
                 SubjectClassOption {
                     class_name: Some("app://FlowInstance".into()),
                     query: None,

@@ -264,6 +264,34 @@ impl PerspectiveInstance {
         Ok(())
     }
 
+    /// The target class IRIs of `base` whose shape declares a property named `property`, among
+    /// the classes the store shows for it with `staged` applied.
+    pub(crate) fn classes_declaring(
+        &self,
+        base: &str,
+        property: &str,
+        staged: &Staged,
+    ) -> Result<Vec<String>, AnyError> {
+        let mut found = Vec::new();
+        for class in self.effective_classes(base, staged)? {
+            if self
+                .get_shape(&class)?
+                .properties
+                .iter()
+                .any(|p| p.name == property)
+            {
+                found.push(class);
+            }
+        }
+        Ok(found)
+    }
+
+    /// [`Self::own_classes`] with what a `perspective.mutate` call staged for `base` applied:
+    /// the classes it created in, the classes it deleted out (not committed yet), each once.
+    fn effective_classes(&self, base: &str, staged: &Staged) -> Result<Vec<String>, AnyError> {
+        Ok(staged.apply(self.own_classes(base)?))
+    }
+
     /// The classes `base` is an instance of, by target class IRI: two
     /// classes of one name are told apart, as the resolution tells them.
     fn own_classes(&self, base: &str) -> Result<Vec<String>, AnyError> {
@@ -281,9 +309,14 @@ impl PerspectiveInstance {
     /// The classes of `base` a write through `abstract_class` reaches: those
     /// it is, among those the abstract class reads, by target class IRI.
     /// Never empty.
-    fn write_targets(&self, abstract_class: &str, base: &str) -> Result<Vec<String>, AnyError> {
+    pub(crate) fn write_targets(
+        &self,
+        abstract_class: &str,
+        base: &str,
+        staged: &Staged,
+    ) -> Result<Vec<String>, AnyError> {
         let resolution = self.resolve_abstract(abstract_class)?;
-        let own = self.own_classes(base)?;
+        let own = self.effective_classes(base, staged)?;
         let targets: Vec<String> = resolution
             .classes
             .iter()
@@ -298,6 +331,28 @@ impl PerspectiveInstance {
             ));
         }
         Ok(targets)
+    }
+
+    /// The classes of `base` that a collection write through `abstract_class` reaches, each
+    /// with its own name for the collection `name` of the abstract class: those of the record's
+    /// classes the abstract class reads that have a property or relation answering to `name`.
+    pub(crate) fn collection_targets(
+        &self,
+        abstract_class: &str,
+        base: &str,
+        name: &str,
+        staged: &Staged,
+    ) -> Result<Vec<(String, String)>, AnyError> {
+        let (alias_key, _) = self.abstract_shape(abstract_class)?;
+        let index = self.abstract_index()?;
+        let mut found = Vec::new();
+        for class in self.write_targets(abstract_class, base, staged)? {
+            let shape = self.get_shape(&class)?;
+            if let Some(own) = index.own_name(&class, &shape, name, &alias_key) {
+                found.push((class, own.to_string()));
+            }
+        }
+        Ok(found)
     }
 
     /// `update_subject` through `abstract_class`: each value is written by
@@ -318,11 +373,12 @@ impl PerspectiveInstance {
         abstract_class: &str,
         base: &str,
         values: &Value,
+        staged: &Staged,
         context: &AgentContext,
     ) -> Result<Vec<Run>, AnyError> {
         let mut has_child = Vec::new();
         if abstract_class == CONTAINER_URI {
-            if let Some(write) = self.has_child_write(base, values).await? {
+            if let Some(write) = self.has_child_write(base, values, staged).await? {
                 if !write.beside_own {
                     return Ok(vec![Run {
                         commands: write.commands,
@@ -359,7 +415,7 @@ impl PerspectiveInstance {
             .chain(shape.include_relations.iter().map(|r| r.name.as_str()))
             .collect();
         let index = self.abstract_index()?;
-        let targets = self.write_targets(abstract_class, base)?;
+        let targets = self.write_targets(abstract_class, base, staged)?;
         let mut commands = Vec::new();
         let mut runs = Vec::new();
         for (name, value) in values {
@@ -443,7 +499,7 @@ impl PerspectiveInstance {
     /// The actions of `class` that do `op` to its property `own`. Setting a
     /// relation or collection (`membership`) with no setter falls back to
     /// a `collectionSetter` on each predicate its adder appends to.
-    async fn actions_for(
+    pub(super) async fn actions_for(
         &self,
         class: &str,
         own: &str,
@@ -517,9 +573,20 @@ impl PerspectiveInstance {
         value: &Value,
         context: &AgentContext,
     ) -> Result<Vec<Run>, AnyError> {
-        let parameters: Vec<Parameter> = self
-            .members(class, own, value, context)
-            .await?
+        // `null` clears a single-valued relation (a HasOne): that is how the SDK clears it.
+        // A collection refuses it (see `members`).
+        let clears_scalar = value.is_null()
+            && self.get_shape(class).is_ok_and(|shape| {
+                shape
+                    .properties
+                    .iter()
+                    .any(|p| p.name == own && p.is_scalar_relation)
+            });
+        let members = match clears_scalar {
+            true => Vec::new(),
+            false => self.members(class, own, value, context).await?,
+        };
+        let parameters: Vec<Parameter> = members
             .into_iter()
             .map(|m| Parameter {
                 name: String::new(),
@@ -573,14 +640,29 @@ impl PerspectiveInstance {
         Ok(())
     }
 
-    /// Delete the instance of `subject_class` at `base`: run the class's
-    /// destructor. Through an abstract class, run the destructor of each
-    /// target class, each command once; the record's other classes are left
-    /// as they are.
-    pub async fn remove_subject(
+    /// The class-side half of a delete, behind `instances::remove`: run the destructor of
+    /// `subject_class` at `base`. A class with no destructor loses the links of its own
+    /// declared predicates, and the links its constructor writes, instead. Through an abstract class, each target class does the same,
+    /// each command once; the record's other classes are left as they are. Links that point at
+    /// the instance are not touched here.
+    pub(crate) async fn remove_subject_raw(
         &mut self,
         subject_class: SubjectClassOption,
         base: String,
+        batch_id: Option<String>,
+        context: &AgentContext,
+    ) -> Result<(), AnyError> {
+        self.remove_subject_staged(subject_class, base, &Staged::none(), batch_id, context)
+            .await
+    }
+
+    /// [`Self::remove_subject_raw`] in a `perspective.mutate` call: through an abstract class,
+    /// the record's classes are those the store shows with `staged` applied.
+    pub(crate) async fn remove_subject_staged(
+        &mut self,
+        subject_class: SubjectClassOption,
+        base: String,
+        staged: &Staged,
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<(), AnyError> {
@@ -588,16 +670,62 @@ impl PerspectiveInstance {
             .subject_class_option_to_class_name(subject_class, context)
             .await?;
         let classes = if self.is_abstract_class(&class_name)? {
-            self.write_targets(&class_name, &base)?
+            self.write_targets(&class_name, &base, staged)?
         } else {
             vec![class_name]
         };
+        self.remove_classes(classes, base, batch_id, context).await
+    }
+
+    /// Run the destructor of each of `classes` at `base`, each command once.
+    async fn remove_classes(
+        &mut self,
+        classes: Vec<String>,
+        base: String,
+        batch_id: Option<String>,
+        context: &AgentContext,
+    ) -> Result<(), AnyError> {
         let mut commands: Vec<Command> = Vec::new();
         for class in &classes {
-            let destructor = self
+            let destructor = match self
                 .get_shape_actions_from_shacl(class, "ad4m://destructor")
                 .await?
-                .ok_or_else(|| anyhow!("No destructor found for subject class: {class}."))?;
+            {
+                Some(destructor) if !destructor.is_empty() => destructor,
+                _ => {
+                    // The links the class's constructor writes (its flags) go too: they are
+                    // what makes the record an instance.
+                    let constructor = self
+                        .get_shape_actions_from_shacl(class, "ad4m://constructor")
+                        .await?
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|command| {
+                            matches!(command.action, Action::AddLink | Action::SetSingleTarget)
+                        })
+                        .map(|command| Command {
+                            action: Action::RemoveLink,
+                            ..command
+                        });
+                    let declared = self
+                        .get_shape(class)?
+                        .properties
+                        .iter()
+                        // A reverse property is stored on the other node: its predicate here
+                        // may be another class's outgoing link, and the incoming cascade
+                        // removes the links that point at this node.
+                        .filter(|property| property.direction.as_deref() != Some("reverse"))
+                        .map(|property| Command {
+                            source: Some("this".to_string()),
+                            predicate: Some(property.predicate.clone()),
+                            target: Some("*".to_string()),
+                            local: None,
+                            action: Action::RemoveLink,
+                        })
+                        .collect::<Vec<_>>();
+                    constructor.chain(declared).collect()
+                }
+            };
             for command in destructor {
                 if !commands.contains(&command) {
                     commands.push(command);
@@ -613,18 +741,19 @@ impl PerspectiveInstance {
 
     /// Put `child` under `parent` through `Container` (#1446): what MCP's
     /// `add_child` and `instance_create(parent)` do, and what the SDK's
-    /// `create({ parent: { id } })` asks `updateSubject` for. See
+    /// `create({ parent: { id } })` asks a `perspective.mutate` create op for. See
     /// [`Self::has_child_write`] for which link it writes.
     pub(crate) async fn add_to_container(
         &mut self,
         parent: &str,
         child: &str,
+        staged: &Staged,
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<(), AnyError> {
         let value = serde_json::json!({ "children": { "action": "adder", "value": [child] } });
         let runs = self
-            .update_through_abstract(CONTAINER_URI, parent, &value, context)
+            .update_through_abstract(CONTAINER_URI, parent, &value, staged, context)
             .await?;
         self.execute_runs(runs, parent.to_string(), batch_id, context)
             .await
@@ -646,6 +775,7 @@ impl PerspectiveInstance {
         &self,
         base: &str,
         values: &Value,
+        staged: &Staged,
     ) -> Result<Option<HasChildWrite>, AnyError> {
         let Some(children) = values.get("children") else {
             return Ok(None);
@@ -660,7 +790,7 @@ impl PerspectiveInstance {
             return Ok(None);
         }
         let resolution = self.resolve_abstract(CONTAINER_URI)?;
-        let own = self.own_classes(base)?;
+        let own = self.effective_classes(base, staged)?;
         let index = self.abstract_index()?;
         let alias_key = builtin(CONTAINER_URI)
             .map(|b| b.name)
@@ -737,7 +867,6 @@ impl PerspectiveInstance {
             }
             // No resolution: no longer abstract (re-registered as a concrete
             // class). The re-run reads it as named; watch it as named.
-            let (trigger_sparql, predicates) = self.model_trigger_query(&targets, &query_json);
             let mut queries = self.subscribed_queries.lock().await;
             let Some(query) = queries.get_mut(&id) else {
                 continue;
@@ -748,8 +877,6 @@ impl PerspectiveInstance {
             };
             params.abstract_read = Self::abstract_read(&targets, generation);
             params.trigger = trigger;
-            query.query = trigger_sparql;
-            query.predicates = predicates;
             changed.insert(id);
         }
         changed
@@ -783,6 +910,34 @@ pub(super) struct Run {
     pub(super) parameters: Vec<Parameter>,
 }
 
+/// What a `perspective.mutate` call changed about the classes of one id, not committed yet:
+/// the target class IRIs it created the id as, and those it removed the id from. The classes of
+/// the id as the call sees them are the store's, plus `created`, minus `removed`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Staged {
+    pub created: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+impl Staged {
+    /// Nothing staged: a write outside a `perspective.mutate` call.
+    pub(crate) fn none() -> Self {
+        Self::default()
+    }
+
+    /// `classes` with what is staged applied: the removed classes out, the created ones in,
+    /// each once.
+    pub(crate) fn apply(&self, mut classes: Vec<String>) -> Vec<String> {
+        classes.retain(|class| !self.removed.contains(class));
+        for class in &self.created {
+            if !classes.contains(class) {
+                classes.push(class.clone());
+            }
+        }
+        classes
+    }
+}
+
 /// The `has_child` links a `children` write through `Container` makes (see
 /// `PerspectiveInstance::has_child_write`).
 struct HasChildWrite {
@@ -794,7 +949,7 @@ struct HasChildWrite {
 
 /// What an update through an abstract class does to one name.
 #[derive(Clone, Copy, PartialEq)]
-enum Op {
+pub(super) enum Op {
     Set,
     Add,
     Remove,

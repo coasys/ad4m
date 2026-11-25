@@ -15,9 +15,9 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 | `model_query/` | Typed queries over SHACL shapes: `shape.rs` loads `ModelShape` from SHACL triples → `sparql_builder.rs` → `SparqlStore` → `hydration.rs` → `filtering.rs` → `getters.rs`/`relations.rs`/`projection.rs`. Entry: `execute_model_query` (`query.rs`). `mod.rs` has the pipeline diagram |
 | `shacl_parser.rs` | Writer side: a class's links (`shape_links`; `parse_shacl_to_links` from JSON), which links on a class node are its own (`is_own_link`), links → shape (`shape_from_links`), `canonical_json`; flow JSON ↔ links (`parse_flow_to_links`, `parse_flow_from_links`). Types `SHACLShape`, `SHACLFlow`, `AD4MAction` |
 | `perspective_instance/shapes.rs` | Class registration: `register_shapes` (all-unchanged fast path over the cached registry link sets, otherwise a diff under `sdna_change_mutex`) and `shapes` / `class_names` over the cached registry |
-| `instances/` | Validated instance writes (create, update, remove, collection items) against a class's SHACL shape: the shared core of the MCP `instance_*` tools and the `perspective.instance*` RPC methods. See `instances/AGENTS.md` |
+| `instances/` | Validated instance writes (create, update, remove, collection items) against a class's SHACL shape: the shared core of the MCP `instance_*` tools and the `perspective.mutate` RPC method. See `instances/AGENTS.md` |
 | `subject_classes_of.rs` | Which classes a URI conforms to (SPARQL) |
-| `sdna.rs`, `shacl_to_prolog.rs` | Prolog fact generation from links/SHACL. Only used when Prolog mode ≠ Disabled |
+| `sdna.rs` | Prolog fact generation from links. Only used when Prolog mode ≠ Disabled |
 | `flow_classes.rs`, `flow_evaluator.rs`, `flow_spawn.rs`, `flow_semantic_check.rs`, `flow_context/` | SHACLFlow state machines: hard-wired classes, deterministic transition evaluation, spawn candidates, LLM flow context. Moving to `agentic/` (spec item 7) |
 | `interpretation/` | LLM interpretation: text → typed subjects. `run.rs` orchestrates, `prompt.rs`, `parse.rs`, `dedup.rs`, `graph/{read,write}.rs`, `overlay/` (provenance + human accept). Depends on `ai_service::harness` |
 | `agent_session.rs` | `perspective.runAgent`: a conversation with a model in one perspective over the static MCP tools in `SESSION_READS`, plus the writes the caller names from `SESSION_WRITES`. Both lists are explicit and perspective-scoped (a tool joins only by being added there), and `perspective_id` is forced. Same harness as interpretation, neutral prompt. Tests with a scripted model in `agent_session_tests.rs` |
@@ -91,7 +91,7 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 - Hard-wired classes (`hardwired_class::ensure_subject_classes`) are upgrade-only: written when
   missing or when the stored shape lacks the newest path / declares a removed one
   (`HardwiredClass`), never over a newer stored shape. Only the executor registers them:
-  `create_subject` registers one not stored yet before its first instance
+  `create_subject_raw` registers one not stored yet before its first instance
   (`hardwired_class::ensure_before_write`), and a model query of one not stored yet reads as
   empty without waiting or writing. A stored revision of it (an app's `@Model` copy, a
   newer executor's) is used as it is. The SDK's `@Model` copies (`FlowModels.ts`,

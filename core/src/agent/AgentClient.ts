@@ -19,13 +19,6 @@ import type { Agent as AgentData } from "../generated/api/Agent";
 import type { AgentSignature } from "../generated/api/AgentSignature";
 import type { AgentWithIdentity } from "../generated/api/AgentWithIdentity";
 
-export interface InitializeArgs {
-  did: string;
-  didDocument: string;
-  keystore: string;
-  passphrase: string;
-}
-
 function toAgent(data: AgentData | AgentWithIdentity | null): Agent | null {
   return data ? Agent.fromWire(data) : null;
 }
@@ -71,11 +64,6 @@ export class AgentClient {
    *  `generate` never replaces the existing keys and DID. */
   async generate(passphrase: string, options?: CallOptions): Promise<AgentStatus> {
     const result = await this.#apiClient.call('agent.generate', { passphrase }, options);
-    return new AgentStatus(result);
-  }
-
-  async import(args: InitializeArgs): Promise<AgentStatus> {
-    const result = await this.#apiClient.call('agent.import', { ...args });
     return new AgentStatus(result);
   }
 

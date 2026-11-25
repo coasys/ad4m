@@ -24,7 +24,7 @@
 //! rejection names the property, the expected type and the cardinality —
 //! the agent gets less schema up front than with per-property tool
 //! parameters, so the error has to carry it instead. Accepted writes go
-//! through the same `create_subject` / `update_subject` / link paths the
+//! through the same instance writers (`perspectives/instances/`) the
 //! per-class tools use. The dynamic generators themselves are untouched and
 //! keep feeding the in-process interpretation harness.
 //!
@@ -50,7 +50,7 @@
 //! The writes themselves (`instance_create` / `_update` / `_remove` /
 //! `_add_to_collection` / `_remove_from_collection`) are
 //! [`crate::perspectives::instances`], the same functions the
-//! `perspective.instance*` RPC methods call; the tools here format their
+//! `perspective.mutate` RPC method runs; the tools here format their
 //! results and errors as they always have.
 
 pub mod children;
@@ -243,6 +243,14 @@ pub(super) fn common_error(error: &InstanceError) -> Option<String> {
         InstanceError::BatchNotFound { batch_id } => {
             error_json(format!("No open batch '{batch_id}' — nothing was written."))
         }
+        InstanceError::BatchConflict { batch_id } => error_json(format!(
+            "Batch '{batch_id}' was written to meanwhile — nothing was written; try again."
+        )),
+        InstanceError::ConcurrentWrite => error_json(
+            "Another write changed the links this call replaced meanwhile — nothing was \
+             written; try again."
+                .to_string(),
+        ),
         _ => return None,
     })
 }

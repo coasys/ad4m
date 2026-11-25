@@ -185,11 +185,7 @@ fn the_generated_contract_is_fresh_enough_to_name_new_methods() {
     // The methods this task relies on — a spot check that the compiled-in
     // contract is new enough (a stale one fails loudly here first).
     for method in [
-        "perspective.instanceCreate",
-        "perspective.instanceUpdate",
-        "perspective.instanceRemove",
-        "perspective.instanceAddToCollection",
-        "perspective.instanceRemoveFromCollection",
+        "perspective.mutate",
         "perspective.modelQuery",
         "perspective.subscribe",
         "perspective.resyncSubscription",

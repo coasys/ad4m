@@ -32,8 +32,24 @@ pub enum InstanceError {
     InvalidUri { field: String, value: String },
     /// An update that names no property.
     EmptyProperties,
+    /// A `parent` relation named no `model`, and not exactly one class of the parent instance
+    /// declares that relation: `candidates` lists the target class IRIs that do (none: the
+    /// parent has no class with it). Name the class.
+    ParentClassUnresolved {
+        parent: String,
+        relation: String,
+        candidates: Vec<String>,
+    },
     /// The batch the caller named is not open.
     BatchNotFound { batch_id: String },
+    /// The batch the caller named was written to (by another call or a raw link write) while
+    /// this call ran, so the call's result no longer follows from it. Nothing was written; the
+    /// call can be sent again.
+    BatchConflict { batch_id: String },
+    /// A call with no batch read links that another write changed before this call's commit
+    /// (two calls replacing the same single-valued property). Nothing was written; the call
+    /// can be sent again.
+    ConcurrentWrite,
     /// The write breaks the class's shape. Validation runs before any link write, so the call
     /// staged and wrote nothing.
     Validation {
@@ -82,6 +98,16 @@ pub enum InstanceError {
         #[ts(type = "string")]
         error: AnyError,
     },
+}
+
+impl InstanceError {
+    /// The error as the JSON the RPC sends in `error.data`, for callers inside the executor
+    /// that have no RPC to word it.
+    pub(crate) fn into_anyhow(self) -> AnyError {
+        let json =
+            serde_json::to_string(&self).unwrap_or_else(|_| "instance write refused".to_string());
+        anyhow::anyhow!("{json}")
+    }
 }
 
 /// What a write was doing when the store failed.

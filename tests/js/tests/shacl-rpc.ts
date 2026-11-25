@@ -208,7 +208,7 @@ export default function shaclRpcTests(testContext: TestContext) {
                     expect(await p.get(new LinkQuery({ source: "old://MemoShape" }))).to.deep.equal([]);
 
                     // An all-optional class can be instantiated.
-                    await p.createSubject("Memo", "memo://1", { body: "hi" });
+                    await p.mutate([{ op: "create", class: "Memo", id: "memo://1", values: { body: "hi" } }]);
                     expect(await p.get(new LinkQuery({ source: "memo://1", predicate: "memo://body" }))).to.have.length(1);
                 });
             });
@@ -233,8 +233,10 @@ export default function shaclRpcTests(testContext: TestContext) {
                     expect(b.shape.properties.map((prop) => prop.path)).to.deep.equal(["b://body"]);
 
                     // Each IRI writes its own class.
-                    await p.createSubject("a://Note", "note://a1", { text: "A" });
-                    await p.createSubject("b://Note", "note://b1", { body: "B" });
+                    await p.mutate([
+                        { op: "create", class: "a://Note", id: "note://a1", values: { text: "A" } },
+                        { op: "create", class: "b://Note", id: "note://b1", values: { body: "B" } },
+                    ]);
                     expect(await p.get(new LinkQuery({ source: "note://a1", predicate: "a://text" }))).to.have.length(1);
                     expect(await p.get(new LinkQuery({ source: "note://b1", predicate: "b://body" }))).to.have.length(1);
                     expect(await p.get(new LinkQuery({ source: "note://b1", predicate: "a://text" }))).to.deep.equal([]);

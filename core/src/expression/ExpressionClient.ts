@@ -68,13 +68,6 @@ export class ExpressionClient {
         return this.#expressions.getMany(urls);
     }
 
-    /**
-     * Clear both the memory and the persistent expression caches.
-     */
-    clearCache(): void {
-        this.#expressions.clear(true);
-    }
-
     async getRaw(url: string): Promise<string> {
         return this.#apiClient.call('expression.getRaw', { url })
     }

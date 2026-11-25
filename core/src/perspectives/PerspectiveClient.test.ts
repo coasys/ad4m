@@ -239,17 +239,6 @@ describe('PerspectiveClient RPC operations', () => {
         )
     })
 
-    it('queryProlog forwards options to apiClient.call', async () => {
-        mockCall.mockResolvedValue(JSON.stringify([]))
-        const client = new PerspectiveClient('http://localhost:12000', 'token')
-        const controller = new AbortController()
-        await client.queryProlog('uuid-q', 'foo(X).', { signal: controller.signal })
-        expect(mockCall).toHaveBeenCalledWith(
-            'perspective.queryProlog',
-            expect.objectContaining({ uuid: 'uuid-q', query: 'foo(X).' }),
-            { signal: controller.signal },
-        )
-    })
 })
 
 describe('PerspectiveProxy.querySparql shares in-flight calls', () => {
@@ -397,10 +386,6 @@ describe('PerspectiveProxy.querySparql shares in-flight calls', () => {
             () => client.addLinkExpression('u', stored),
             () => client.updateLink('u', stored, link),
             () => client.removeLink('u', stored),
-            () => client.executeCommands('u', '[]', 'expr', '[]'),
-            () => client.createSubject('u', 'C', 'expr'),
-            () => client.updateSubject('u', 'C', 'expr', '{}'),
-            () => client.removeSubject('u', 'C', 'expr'),
             () => client.commitBatch('u', 'b'),
             // Executor methods whose handlers write links themselves (shape
             // links, overlays, flow proposals, votes, fired marks, receipts,
@@ -417,12 +402,8 @@ describe('PerspectiveProxy.querySparql shares in-flight calls', () => {
             () => client.acceptFlowProposal('u', 'proposal://1'),
             () => client.rejectFlowProposal('u', 'proposal://1'),
             () => client.mintFlowReceipt('u', 'flow://1'),
-            // The validated instance writes.
-            () => client.instanceCreate('u', { className: 'C', properties: {} } as any),
-            () => client.instanceUpdate('u', { className: 'C', baseUri: 'expr', properties: {} } as any),
-            () => client.instanceRemove('u', { className: 'C', baseUri: 'expr' } as any),
-            () => client.instanceAddToCollection('u', { className: 'C', baseUri: 'expr', collection: 'c', itemUri: 'i' } as any),
-            () => client.instanceRemoveFromCollection('u', { className: 'C', baseUri: 'expr', collection: 'c', itemUri: 'i' } as any),
+            // The validated instance write.
+            () => client.mutate('u', [{ op: 'create', class: 'C' }]),
         ]
         for (const write of writes) {
             const executor = executorAnsweringAtSendTime()

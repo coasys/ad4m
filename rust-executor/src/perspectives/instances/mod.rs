@@ -1,17 +1,25 @@
 //! Validated instance writes: the one implementation behind the MCP `instance_*` write tools and
-//! the `perspective.instance*` RPC methods.
+//! the `perspective.mutate` RPC method (through [`mutate`]).
 //!
 //! Every write is checked against the class's SHACL shape before anything is written
 //! ([`validate::validate_properties`]: types, required properties, single- vs multi-valued,
 //! `sh:in`); a rejection carries every [`ValidationError`] as data and writes nothing. Accepted
-//! writes go through the same
-//! `create_subject` / `update_subject` / link paths the per-class tools use, in one batch (the
-//! caller's, when it names one).
+//! writes go through the class-side engine (`create_subject_raw`, `update_subject_raw`,
+//! `remove_subject_raw` on `PerspectiveInstance`), in one batch (the caller's, when it names
+//! one). Those three are the only other writers of instances: the executor's own hard-wired
+//! classes call them directly, everything user-facing comes through here.
+//!
+//! Write rules, the same for every caller: `null` or `""` clears a property (on a create it
+//! writes nothing); an array on a relation sets its members; an undeclared property is refused;
+//! a relation write keeps the relation's ordering entries; a delete runs the class's
+//! destructor, else removes the declared predicates, then every link that points at the
+//! instance.
 //!
 //! The functions here return typed results and a typed [`InstanceError`]; the callers write the
 //! text (MCP its tool strings, the RPC its error message and data).
 //!
 //! - [`write`]: create, update, remove, add to and remove from a collection
+//! - [`mutate`]: an ordered list of those writes as one all-or-nothing call
 //! - [`validate`]: SHACL-derived property validation
 //! - [`error`]: [`InstanceError`] and the step a store failure happened in
 //! - this file: the borrowed [`PropView`] over a class shape, class resolution, instance URIs,
@@ -22,6 +30,7 @@
 #![allow(clippy::result_large_err)]
 
 pub mod error;
+pub mod mutate;
 pub mod validate;
 pub mod write;
 
@@ -29,6 +38,8 @@ pub mod write;
 mod tests;
 
 pub use error::{CascadeStep, InstanceError, WriteStep};
+pub(crate) use mutate::mutate;
+pub use mutate::{MutateError, MutateOp, ParentRef, PerspectiveMutateResult, Returns};
 pub(crate) use validate::coerce_scalar;
 pub use validate::{
     validate_properties, Cardinality, ReadOnlyReason, ValidatedWrite, ValidationError,
@@ -47,7 +58,7 @@ use crate::perspectives::model_query::is_safe_iri_target;
 use crate::perspectives::model_query::types::{ModelShape, ShapeProperty, ShapeRelation};
 use crate::perspectives::model_query::utils::parse_literal_value;
 use crate::perspectives::perspective_instance::{
-    PerspectiveInstance, ShapeSummary, SubjectClassOption,
+    PerspectiveInstance, ShapeSummary, Staged, SubjectClassOption,
 };
 use crate::perspectives::sparql_store::EvalStop;
 use crate::types::{LinkExpression, LinkQuery};
@@ -99,6 +110,12 @@ impl<'a> PropView<'a> {
 
     pub(crate) fn required(&self) -> bool {
         self.prop.is_required
+    }
+
+    /// The constructor writes a value for this property on every create (its `initial`), so a
+    /// create that gives none still holds the link `required` asks for.
+    pub(crate) fn has_initial(&self) -> bool {
+        self.prop.initial_value.is_some()
     }
 
     /// The language the value is stored through as an expression, when it is not a literal — a
@@ -477,14 +494,22 @@ async fn find_instance(
 async fn require_instance(
     perspective: &PerspectiveInstance,
     class_name: &str,
+    target_class: &str,
     base_uri: &str,
+    pending: &Pending,
 ) -> Result<String, InstanceError> {
+    let not_found = || InstanceError::NotFound {
+        class_name: class_name.to_string(),
+        base_uri: base_uri.to_string(),
+    };
+    match pending.lookup(target_class, base_uri) {
+        Some(true) => return Ok(base_uri.to_string()),
+        Some(false) => return Err(not_found()),
+        None => {}
+    }
     match find_instance(&EvalStop::none(), perspective, class_name, base_uri).await {
         Ok(Some((stored, _))) => Ok(stored),
-        Ok(None) => Err(InstanceError::NotFound {
-            class_name: class_name.to_string(),
-            base_uri: base_uri.to_string(),
-        }),
+        Ok(None) => Err(not_found()),
         Err(e) => Err(InstanceError::Failed {
             class_name: class_name.to_string(),
             step: WriteStep::ReadInstance,
@@ -493,19 +518,109 @@ async fn require_instance(
     }
 }
 
-/// Whether the SDNA declares a setter for `prop` on `class_uri`. `create_subject` /
-/// `update_subject` silently skip properties without one (they only log), so the check has to
-/// happen here for the write to be honest about what it did.
+/// What the earlier ops of one `mutate` call did to which instances, which the committed store
+/// does not show yet: a later op reads an instance created in this call as present and one removed
+/// in it as gone. Empty for a single write. Each fact is about one class of an id: an id the call
+/// did not touch as a class is whatever the store says it is.
+#[derive(Default)]
+pub(crate) struct Pending {
+    /// Instances this call created: id to every class it gave the id, as the shape's
+    /// `target_class` (what names a class however the op spelled it) and the key the class was
+    /// resolved under.
+    created: std::collections::HashMap<String, Vec<(String, String)>>,
+    /// The `(target_class, id)` pairs this call removed.
+    removed: std::collections::HashSet<(String, String)>,
+    /// A string property takes a JSON object whole (an object-typed field of an SDK model is
+    /// stored so). Set by `perspective.mutate`, the SDK's call; the MCP tools, whose callers
+    /// write prose for a string property, refuse an object.
+    pub(crate) json_objects: bool,
+}
+
+impl Pending {
+    /// `id` was created as the class `target_class`, resolved under the key `class_name`.
+    pub(crate) fn created(&mut self, target_class: &str, class_name: &str, id: &str) {
+        self.removed
+            .remove(&(target_class.to_string(), id.to_string()));
+        let classes = self.created.entry(id.to_string()).or_default();
+        if !classes.iter().any(|(target, _)| target == target_class) {
+            classes.push((target_class.to_string(), class_name.to_string()));
+        }
+    }
+
+    /// `id` was removed as the class `target_class`: the call's created record of that class is
+    /// gone, its other classes are not touched.
+    pub(crate) fn removed(&mut self, target_class: &str, id: &str) {
+        if let Some(classes) = self.created.get_mut(id) {
+            classes.retain(|(target, _)| target != target_class);
+            if classes.is_empty() {
+                self.created.remove(id);
+            }
+        }
+        self.removed
+            .insert((target_class.to_string(), id.to_string()));
+    }
+
+    /// The classes this call created `id` as and has not removed it from since: the shape's
+    /// `target_class` and the key it was resolved under.
+    pub(crate) fn created_classes(&self, id: &str) -> Vec<(&str, &str)> {
+        self.created
+            .get(id)
+            .map(|classes| {
+                classes
+                    .iter()
+                    .map(|(target, name)| (target.as_str(), name.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// What this call changed about the classes of `id`: the target class IRIs it created `id`
+    /// as and those it removed `id` from. What an abstract write applies to the classes the
+    /// store shows for the id.
+    pub(crate) fn staged(&self, id: &str) -> Staged {
+        Staged {
+            created: self
+                .created_classes(id)
+                .into_iter()
+                .map(|(target, _)| target.to_string())
+                .collect(),
+            removed: self
+                .removed
+                .iter()
+                .filter(|(_, removed_id)| removed_id == id)
+                .map(|(target, _)| target.clone())
+                .collect(),
+        }
+    }
+
+    /// Whether `id` exists as the class `target_class` (the shape's own, whatever name the op
+    /// used) as far as this call knows: `Some(true)` when the call created it as that class,
+    /// `Some(false)` when it removed it as that class, `None` when the call has not touched that
+    /// class of the id (the committed store decides).
+    pub(crate) fn lookup(&self, target_class: &str, id: &str) -> Option<bool> {
+        if self
+            .removed
+            .contains(&(target_class.to_string(), id.to_string()))
+        {
+            return Some(false);
+        }
+        self.created
+            .get(id)?
+            .iter()
+            .any(|(target, _)| target == target_class)
+            .then_some(true)
+    }
+}
+
+/// Whether the SDNA declares a way to set `prop` on `class_uri`: a setter, or, for a relation or
+/// collection, an adder that only appends links (what the relation decorators declare).
+/// `create_subject_raw` / `update_subject_raw` silently skip properties without one (they only
+/// log), so the check has to happen here for the write to be honest about what it did.
 async fn has_setter(perspective: &PerspectiveInstance, class_uri: &str, prop: &str) -> bool {
-    let prop_shape_uri = format!("{class_uri}.{prop}");
     perspective
-        .get_links(&LinkQuery {
-            source: Some(prop_shape_uri),
-            predicate: Some("ad4m://setter".to_string()),
-            ..Default::default()
-        })
+        .get_property_setter_actions(class_uri, prop)
         .await
-        .map(|links| !links.is_empty())
+        .map(|actions| actions.is_some())
         .unwrap_or(false)
 }
 
@@ -715,8 +830,8 @@ pub(crate) struct CascadeFailure {
     pub error: deno_core::anyhow::Error,
 }
 
-/// Remove every link touching `uri` (as source or target), in `batch_id` when given. Same
-/// cascade as `delete_subject` / `{class}_delete`.
+/// Remove every link that targets `uri`, in `batch_id` when given: what still points at a
+/// deleted instance. The links the instance holds are the class's destructor's to remove.
 ///
 /// Enumerates the batch's effective graph (`get_links_effective`): a link the batch has
 /// already staged for removal is not staged again, and one that exists only inside the batch
@@ -726,68 +841,54 @@ pub(crate) struct CascadeFailure {
 ///
 /// Stops at the first `get_links` / `remove_link` error and reports it together with the number
 /// of links already removed. `Ok` means the two queries and every removal succeeded.
-pub(crate) async fn remove_all_links_of(
+pub(crate) async fn remove_incoming_links_of(
     perspective: &mut PerspectiveInstance,
     uri: &str,
     batch_id: Option<&str>,
 ) -> Result<usize, CascadeFailure> {
     let mut removed = 0;
-    let mut seen = std::collections::HashSet::new();
-    for query in [
-        LinkQuery {
-            source: Some(uri.to_string()),
-            ..Default::default()
-        },
-        LinkQuery {
-            target: Some(uri.to_string()),
-            ..Default::default()
-        },
-    ] {
-        let links = match perspective.get_links_effective(&query, batch_id).await {
-            Ok(links) => links,
-            Err(error) => {
+    let query = LinkQuery {
+        target: Some(uri.to_string()),
+        ..Default::default()
+    };
+    let links = perspective
+        .get_links_effective(&query, batch_id)
+        .await
+        .map_err(|error| CascadeFailure {
+            removed,
+            step: CascadeStep::List {
+                uri: uri.to_string(),
+            },
+            error,
+        })?;
+    for effective in links {
+        let link = LinkExpression::from(effective.link);
+        let step = CascadeStep::Remove {
+            source: link.data.source.clone(),
+            predicate: link.data.predicate.clone(),
+            target: link.data.target.clone(),
+        };
+        // Both presences can hold at once (`addLinkExpression` restages the stored
+        // expression verbatim): the staged copies drop, and the committed copy is
+        // staged for removal — one without the other would leave the link behind.
+        if effective.staged {
+            if let Some(batch_id) = batch_id {
+                perspective.cancel_batch_addition(batch_id, &link).await;
+            }
+        }
+        if effective.committed {
+            if let Err(error) = perspective
+                .remove_link(link, batch_id.map(str::to_string))
+                .await
+            {
                 return Err(CascadeFailure {
                     removed,
-                    step: CascadeStep::List {
-                        uri: uri.to_string(),
-                    },
+                    step,
                     error,
-                })
+                });
             }
-        };
-        for effective in links {
-            let link = LinkExpression::from(effective.link);
-            // A link naming `uri` both ways answers both queries; remove it once.
-            if !seen.insert(crate::db::link_identity(&link)) {
-                continue;
-            }
-            let step = CascadeStep::Remove {
-                source: link.data.source.clone(),
-                predicate: link.data.predicate.clone(),
-                target: link.data.target.clone(),
-            };
-            // Both presences can hold at once (`addLinkExpression` restages the stored
-            // expression verbatim): the staged copies drop, and the committed copy is
-            // staged for removal — one without the other would leave the link behind.
-            if effective.staged {
-                if let Some(batch_id) = batch_id {
-                    perspective.cancel_batch_addition(batch_id, &link).await;
-                }
-            }
-            if effective.committed {
-                if let Err(error) = perspective
-                    .remove_link(link, batch_id.map(str::to_string))
-                    .await
-                {
-                    return Err(CascadeFailure {
-                        removed,
-                        step,
-                        error,
-                    });
-                }
-            }
-            removed += 1;
         }
+        removed += 1;
     }
     Ok(removed)
 }

@@ -104,7 +104,7 @@ describe('PerspectiveProxy resolves a template object to a registered class', ()
   function proxyWithShapes(shapes: any[]) {
     const client: any = {
       shapes: jest.fn().mockResolvedValue(shapes),
-      createSubject: jest.fn().mockResolvedValue(undefined),
+      getSubjectData: jest.fn().mockResolvedValue('{}'),
     };
     return { client, proxy: createProxy(client) };
   }
@@ -123,17 +123,17 @@ describe('PerspectiveProxy resolves a template object to a registered class', ()
       ]) },
     ]);
 
-    await proxy.createSubject({ 'geo.title': '', tags: [] }, 'expr://1', undefined, 'batch-1');
+    await proxy.getSubjectData({ 'geo.title': '', tags: [] }, 'expr://1');
 
-    expect(client.createSubject).toHaveBeenCalledWith(
-      'test-uuid', JSON.stringify({ className: 'Post' }), 'expr://1', undefined, 'batch-1');
+    expect(client.getSubjectData).toHaveBeenCalledWith(
+      'test-uuid', JSON.stringify({ className: 'Post' }), 'expr://1');
   });
 
   it('refuses a template object no registered class fits', async () => {
     const { client, proxy } = proxyWithShapes([]);
 
-    await expect(proxy.createSubject({ title: '' }, 'expr://1')).rejects.toThrow('Could not resolve subject class name');
-    expect(client.createSubject).not.toHaveBeenCalled();
+    await expect(proxy.getSubjectData({ title: '' }, 'expr://1')).rejects.toThrow('Could not resolve subject class name');
+    expect(client.getSubjectData).not.toHaveBeenCalled();
   });
 });
 
@@ -471,9 +471,8 @@ describe('PerspectiveProxy.getSingleTarget', () => {
   });
 });
 
-// A read right after an awaited write sees the write: `updateSubject` and
-// `removeSubject` through an abstract class (#1435) write in the executor,
-// and querySparql keeps no result once its call settles.
+// A read right after an awaited write sees the write: `mutate` writes in the
+// executor, and querySparql keeps no result once its call settles.
 describe('PerspectiveProxy reads after write RPCs are fresh', () => {
   const query = 'SELECT ?v WHERE { <ad4m://m/1> <test://text> ?v }';
 
@@ -484,25 +483,18 @@ describe('PerspectiveProxy reads after write RPCs are fresh', () => {
       querySparql: jest.fn()
         .mockResolvedValueOnce([{ v: 'old' }])
         .mockResolvedValueOnce([{ v: 'new' }]),
-      updateSubject: jest.fn().mockResolvedValue(true),
-      removeSubject: jest.fn().mockResolvedValue(true),
+      mutate: jest.fn().mockResolvedValue({ ids: [] }),
       queryLinks: jest.fn().mockResolvedValue([marker]),
     } as any;
   }
 
-  it('after updateSubject', async () => {
-    const proxy = createProxy(client());
-    expect(await proxy.querySparql(query)).toEqual([{ v: 'old' }]);
-    await proxy.updateSubject('Readable', 'ad4m://m/1', { text: 'new' });
-    expect(await proxy.querySparql(query)).toEqual([{ v: 'new' }]);
-  });
-
-  it('after removeSubject through an abstract class', async () => {
+  it('after an update op', async () => {
     const c = client();
     const proxy = createProxy(c);
     expect(await proxy.querySparql(query)).toEqual([{ v: 'old' }]);
-    await proxy.removeSubject('Readable', 'ad4m://m/1');
-    expect(c.removeSubject).toHaveBeenCalledWith('test-uuid', 'Readable', 'ad4m://m/1', undefined);
+    await proxy.mutate([{ op: 'update', class: 'Readable', id: 'ad4m://m/1', set: { text: 'new' } }]);
+    expect(c.mutate).toHaveBeenCalledWith(
+      'test-uuid', [{ op: 'update', class: 'Readable', id: 'ad4m://m/1', set: { text: 'new' } }], {});
     expect(await proxy.querySparql(query)).toEqual([{ v: 'new' }]);
   });
 
@@ -510,14 +502,14 @@ describe('PerspectiveProxy reads after write RPCs are fresh', () => {
     const c = client();
     const proxy = createProxy(c);
     expect(await proxy.querySparql(query)).toEqual([{ v: 'old' }]);
-    await proxy.removeSubject(new TextContent(proxy, 'ad4m://m/1'), 'ad4m://m/1');
-    expect(c.removeSubject).toHaveBeenCalledWith('test-uuid', 'ad4m://TextContent', 'ad4m://m/1', undefined);
+    await new TextContent(proxy, 'ad4m://m/1').delete();
+    expect(c.mutate).toHaveBeenCalledWith(
+      'test-uuid', [{ op: 'delete', class: 'ad4m://TextContent', id: 'ad4m://m/1' }], {});
     expect(await proxy.querySparql(query)).toEqual([{ v: 'new' }]);
   });
 });
 
-// Outside a batch, instanceRemove and instanceRemoveFromCollection remove
-// links one by one: a failure part-way rejects the call after some links are
+// A failure part-way through a write can reject the call after some links are
 // already gone. A read right after must reach the executor.
 describe('PerspectiveProxy reads after a rejected instance write are fresh', () => {
   const query = 'SELECT ?v WHERE { <ad4m://m/1> <test://text> ?v }';
@@ -528,22 +520,14 @@ describe('PerspectiveProxy reads after a rejected instance write are fresh', () 
       querySparql: jest.fn()
         .mockResolvedValueOnce([{ v: 'old' }])
         .mockResolvedValueOnce([]),
-      instanceRemove: jest.fn().mockRejectedValue(partial),
-      instanceRemoveFromCollection: jest.fn().mockRejectedValue(partial),
+      mutate: jest.fn().mockRejectedValue(partial),
     } as any;
   }
 
-  it('after instanceRemove rejects', async () => {
+  it('after mutate rejects', async () => {
     const proxy = createProxy(client());
     expect(await proxy.querySparql(query)).toEqual([{ v: 'old' }]);
-    await expect(proxy.instanceRemove({ className: 'Note', baseUri: 'ad4m://m/1' } as any)).rejects.toBe(partial);
-    expect(await proxy.querySparql(query)).toEqual([]);
-  });
-
-  it('after instanceRemoveFromCollection rejects', async () => {
-    const proxy = createProxy(client());
-    expect(await proxy.querySparql(query)).toEqual([{ v: 'old' }]);
-    await expect(proxy.instanceRemoveFromCollection({ className: 'Note', baseUri: 'ad4m://m/1', collection: 'tags', itemUri: 'x' } as any)).rejects.toBe(partial);
+    await expect(proxy.mutate([{ op: 'delete', class: 'Note', id: 'ad4m://m/1' }])).rejects.toBe(partial);
     expect(await proxy.querySparql(query)).toEqual([]);
   });
 });

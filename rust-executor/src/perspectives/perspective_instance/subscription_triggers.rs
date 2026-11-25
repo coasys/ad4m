@@ -355,55 +355,6 @@ impl super::PerspectiveInstance {
         ModelTrigger::new(rules.unwrap_or_else(TriggerRules::every_write), result)
     }
 
-    /// The trigger SPARQL and predicate set of a model subscription over
-    /// `targets`: the union of each class's trigger set, matched on the
-    /// predicate alone.
-    pub(super) fn model_trigger_query(
-        &self,
-        targets: &super::abstract_classes::ReadTargets,
-        query_json: &str,
-    ) -> (String, HashSet<String>) {
-        // Each class contributes its own trigger set; the matcher is
-        // predicate-only, so the sets meet as their union. A view renames
-        // properties, never their predicates, so the classes' own shapes
-        // give the same set.
-        let mut trigger_predicates: Vec<String> = targets
-            .classes
-            .names()
-            .iter()
-            .flat_map(|class_name| {
-                let mut predicates =
-                    self.build_model_trigger_predicates(class_name, Some(query_json));
-                // A built-in's own rows (`Container`) have no stored shape.
-                if let Some(view) = targets.views.get(class_name) {
-                    predicates.extend(view.predicates());
-                }
-                predicates
-            })
-            .collect();
-        if let Some(edges) = &targets.containment {
-            trigger_predicates.extend(watched_predicates(edges));
-        }
-        trigger_predicates.sort();
-        trigger_predicates.dedup();
-
-        let trigger_sparql = if trigger_predicates.is_empty() {
-            // Fallback: match any triple (always re-check)
-            "SELECT ?s ?p ?o WHERE { ?s ?p ?o . } LIMIT 1".to_string()
-        } else {
-            let patterns: Vec<String> = trigger_predicates
-                .iter()
-                .enumerate()
-                .map(|(i, p)| format!("{{ ?s <{}> ?o{} . }}", p, i))
-                .collect();
-            format!(
-                "SELECT ?s ?p ?o WHERE {{ {} }} LIMIT 1",
-                patterns.join(" UNION ")
-            )
-        };
-        (trigger_sparql, trigger_predicates.into_iter().collect())
-    }
-
     /// Predicates a model query reads beside its classes' shapes, which a
     /// subscription matches on the predicate alone.
     pub(super) fn model_query_side_predicates(

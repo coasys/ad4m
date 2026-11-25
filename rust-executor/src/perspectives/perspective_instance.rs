@@ -70,6 +70,7 @@ use uuid::Uuid;
 // `perspective_instance/` layout (see perspectives/AGENTS.md).
 // Abstract classes: resolution cache, queries, subscriptions (#1435).
 mod abstract_classes;
+pub(crate) use abstract_classes::Staged;
 mod containment;
 // Class registration and the registry of shapes.
 mod shapes;
@@ -90,8 +91,11 @@ pub use persisted_handle::PersistedHandle;
 // Committing a batch only if the links it expects still stand.
 mod expected_links;
 pub use expected_links::{ExpectedLinks, LinksChanged};
+// The ordering entry for members just appended to a collection.
+mod order_appended;
 // A batch's effective view of the graph for the validated write core.
 mod batch_view;
+pub(crate) use batch_view::MergeOutcome;
 // Remote telepresence broadcasts, off the link-language queue's critical path.
 mod language_broadcasts;
 
@@ -526,6 +530,10 @@ struct TimestampedBatch {
     /// `diff`, so batch-aware reads see it; `commit_batch` publishes a pair
     /// whose halves are both still there as one update.
     updates: Vec<(LinkExpression, LinkExpression)>,
+    /// What the replacing commands of this batch (a single-valued setter, a collection setter,
+    /// a clear) read from the store, as they read it: [`Self::commit_batch_if`] can expect it
+    /// still to stand, an empty read included.
+    reads: Vec<ExpectedLinks>,
     created_at: Instant,
 }
 
@@ -637,6 +645,11 @@ const NOTIFICATION_DEBOUNCE: Duration = Duration::from_millis(100);
 /// notification's query.
 const NOTIFICATION_MIN_SPACING: Duration = Duration::from_secs(1);
 
+/// See `PerspectiveInstance::mutate_gap_hook`.
+#[cfg(test)]
+pub(crate) type MutateGapHook =
+    Box<dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send>;
+
 #[derive(Clone)]
 pub struct PerspectiveInstance {
     pub persisted: Arc<PersistedHandle>,
@@ -739,6 +752,17 @@ pub struct PerspectiveInstance {
     /// concurrent local write in that gap deterministically (#1146).
     #[cfg(test)]
     pub(crate) ingest_gap_hook: Arc<std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>>,
+    /// Test-only hook run once by `perspective.mutate` after the first op of a call, so a test
+    /// can land a commit or a raw write on the caller's batch while the call is in flight.
+    #[cfg(test)]
+    pub(crate) mutate_gap_hook: Arc<std::sync::Mutex<Option<MutateGapHook>>>,
+    /// Test-only hook run once by a validated write after it read the committed links its
+    /// decision rests on (a create's existence links, a removal's remaining members) and before
+    /// it decides, so a test can land a competing write between the two.
+    /// A write that decided from a second read would see it; one that decides from the read it
+    /// recorded does not.
+    #[cfg(test)]
+    pub(crate) read_gap_hook: Arc<std::sync::Mutex<Option<MutateGapHook>>>,
     /// Test-only: makes the next [`Self::commit_batch`] fail, dropping the
     /// batch as a real failure does. Compiled out in non-test builds — see
     /// [`Self::fail_next_commit_batch`].
@@ -852,6 +876,10 @@ impl PerspectiveInstance {
             fail_add_link_after: Arc::new(AtomicI64::new(-1)),
             #[cfg(test)]
             ingest_gap_hook: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(test)]
+            mutate_gap_hook: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(test)]
+            read_gap_hook: Arc::new(std::sync::Mutex::new(None)),
             #[cfg(test)]
             fail_next_commit: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
@@ -2324,7 +2352,7 @@ impl PerspectiveInstance {
                 .await?
                 .fold_into(&mut decorated_perspective_diff);
 
-            self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
+            self.record_write(decorated_perspective_diff.clone(), None);
             self.pubsub_publish_diff(&decorated_perspective_diff).await;
 
             if status == LinkStatus::Shared {
@@ -2440,7 +2468,7 @@ impl PerspectiveInstance {
             .await?
             .fold_into(&mut decorated_diff);
 
-        self.spawn_prolog_facts_update(decorated_diff.clone(), None);
+        self.record_write(decorated_diff.clone(), None);
         self.pubsub_publish_diff(&decorated_diff).await;
 
         let shared = |links: &[LinkExpression]| -> Vec<LinkExpression> {
@@ -3135,7 +3163,7 @@ impl PerspectiveInstance {
     async fn update_prolog_engines(&self, diff: DecoratedPerspectiveDiff) {
         // Pooled-mode facts update, then notification and live-query checks
         // (spawned task)
-        self.spawn_prolog_facts_update(diff, None);
+        self.record_write(diff, None);
 
         // Mark query engine dirty for lazy update on next query
         self.mark_prolog_engine_dirty().await;
@@ -3728,7 +3756,8 @@ impl PerspectiveInstance {
     }
 
     /// Write the ordering entries that turn the collection's current order into
-    /// the desired one.
+    /// the desired one. With `appended`, `desired` only names the members to put after the
+    /// current order.
     ///
     /// Additive only: entries are never removed, and a removal writes nothing at
     /// all — dropping the data link is the whole deletion, because the ordering
@@ -3740,6 +3769,7 @@ impl PerspectiveInstance {
         predicate: &str,
         current_members: &[(String, String)],
         desired: &[String],
+        appended: bool,
         status: LinkStatus,
         batch_id: Option<String>,
         context: &AgentContext,
@@ -3797,6 +3827,20 @@ impl PerspectiveInstance {
             // that was unordered until its SHACL said otherwise.
             strategy.generate_full(desired, predicate, &agent_did, now_ms)
         } else {
+            // An append keeps the order the entries give the members now (not the order the
+            // links were listed in) and puts the members that are new after it.
+            let appended_order: Vec<String>;
+            let desired = if appended {
+                appended_order = order_appended::appended_order(
+                    strategy.as_ref(),
+                    current_members,
+                    &current_entries,
+                    desired,
+                );
+                appended_order.as_slice()
+            } else {
+                desired
+            };
             strategy
                 .diff(
                     &current_entries,
@@ -4299,7 +4343,11 @@ impl PerspectiveInstance {
         }
     }
 
-    fn spawn_prolog_facts_update(
+    /// Record a write for the subscription and notification checks: queue a
+    /// notification check, note the diff's predicates and flag the subscription
+    /// check, then signal `completion_sender`. In Pooled Prolog mode it also
+    /// brings the engine's facts up to date first.
+    fn record_write(
         &self,
         diff: DecoratedPerspectiveDiff,
         completion_sender: Option<tokio::sync::oneshot::Sender<()>>,
@@ -5092,6 +5140,16 @@ impl PerspectiveInstance {
                             limit: None,
                         })
                         .await?;
+                    // A clear (`*`) read all there was; one named target read only that one.
+                    if remove_target.is_none() {
+                        self.record_read(
+                            &batch_id,
+                            &remove_source,
+                            &remove_predicate,
+                            &link_expressions,
+                        )
+                        .await;
+                    }
                     for link_expression in link_expressions {
                         self.remove_link(link_expression.into(), batch_id.clone())
                             .await?;
@@ -5130,6 +5188,8 @@ impl PerspectiveInstance {
                             limit: None,
                         })
                         .await?;
+                    self.record_read(&batch_id, &source, &predicate, &link_expressions)
+                        .await;
                     for link_expression in link_expressions {
                         self.remove_link(link_expression.into(), batch_id.clone())
                             .await?;
@@ -5178,6 +5238,8 @@ impl PerspectiveInstance {
                             limit: None,
                         })
                         .await?;
+                    self.record_read(&batch_id, &source, &predicate, &persisted)
+                        .await;
 
                     let desired: Vec<String> = parameters
                         .iter()
@@ -5283,6 +5345,7 @@ impl PerspectiveInstance {
                             pred,
                             &current_members,
                             &desired,
+                            false,
                             status,
                             batch_id.clone(),
                             context,
@@ -5449,12 +5512,16 @@ impl PerspectiveInstance {
             ))
     }
 
-    async fn get_property_setter_actions(
+    /// The actions that set `property`: its `ad4m://setter`, else, for a relation or
+    /// collection whose adder only appends links, a `collectionSetter` on each predicate the
+    /// adder appends to (the SDK's relation decorators declare an adder and a remover, never a
+    /// setter). A property that is neither has none.
+    pub(crate) async fn get_property_setter_actions(
         &self,
         class_name: &str,
         property: &str,
     ) -> Result<Option<Vec<Command>>, AnyError> {
-        self.get_property_actions_from_shacl(class_name, property, "ad4m://setter")
+        self.actions_for(class_name, property, abstract_classes::Op::Set, true)
             .await
     }
 
@@ -5574,7 +5641,10 @@ impl PerspectiveInstance {
     ///     value (a scalar property may legitimately hold a JSON blob).
     ///
     /// Properties with no declared setter are skipped with a warning.
-    pub async fn create_subject(
+    ///
+    /// The class-side half of a create, behind `instances::create`: it runs after that
+    /// function has validated the values. Call [`Self::create_subject`] instead.
+    pub(crate) async fn create_subject_raw(
         &mut self,
         subject_class: SubjectClassOption,
         expression_address: String,
@@ -5632,14 +5702,20 @@ impl PerspectiveInstance {
                         if setter_commands.is_empty() {
                             continue;
                         }
-                        // An array value on a property whose setter actions are all
+                        // An array value on a collection whose setter actions are all
                         // `addLink` is a collection write: one setter execution per
                         // element, accumulating N links. Everywhere else an array
                         // stays a single `literal:json:` value (a scalar property may
-                        // legitimately hold a JSON blob), because expanding over a
+                        // legitimately hold a JSON blob): expanding over a
                         // `setSingleTarget` setter would run last-element-wins and
-                        // silently drop the rest.
+                        // silently drop the rest, and over an `addLink` setter of a
+                        // single-valued property it would write more than one value.
                         let expand_collection = matches!(value, serde_json::Value::Array(_))
+                            && self
+                                .get_shape(&class_name)?
+                                .properties
+                                .iter()
+                                .any(|p| p.name == *prop && p.is_collection)
                             && setter_commands.iter().all(|c| c.action == Action::AddLink);
                         let elements: Vec<serde_json::Value> = match (expand_collection, value) {
                             (true, serde_json::Value::Array(items)) => items.clone(),
@@ -5751,12 +5827,38 @@ impl PerspectiveInstance {
     /// (rename, fill a missing field) rather than mint a duplicate.
     ///
     /// Properties with no declared setter are skipped, exactly as in
-    /// `create_subject`. An empty/absent value set is a no-op.
-    pub async fn update_subject(
+    /// `create_subject_raw`. An empty/absent value set is a no-op.
+    ///
+    /// The class-side half of an update, behind `instances::update`: it runs after that
+    /// function has validated the values. Call [`Self::update_subject`] instead.
+    pub(crate) async fn update_subject_raw(
         &mut self,
         subject_class: SubjectClassOption,
         expression_address: String,
         values: serde_json::Value,
+        batch_id: Option<String>,
+        context: &AgentContext,
+    ) -> Result<(), AnyError> {
+        self.update_subject_staged(
+            subject_class,
+            expression_address,
+            values,
+            &Staged::none(),
+            batch_id,
+            context,
+        )
+        .await
+    }
+
+    /// [`Self::update_subject_raw`] in a `perspective.mutate` call: through an abstract class,
+    /// the record's classes are those the store shows with `staged` applied (what the call's
+    /// earlier ops created and deleted).
+    pub(crate) async fn update_subject_staged(
+        &mut self,
+        subject_class: SubjectClassOption,
+        expression_address: String,
+        values: serde_json::Value,
+        staged: &Staged,
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<(), AnyError> {
@@ -5767,7 +5869,7 @@ impl PerspectiveInstance {
         // reads writes the value with its own setter.
         if self.is_abstract_class(&class_name)? {
             let runs = self
-                .update_through_abstract(&class_name, &expression_address, &values, context)
+                .update_through_abstract(&class_name, &expression_address, &values, staged, context)
                 .await?;
             return self
                 .execute_runs(runs, expression_address, batch_id, context)
@@ -5827,9 +5929,10 @@ impl PerspectiveInstance {
     }
 
     /// The commands `setter` runs to write `value` to `prop` of `class_name`.
-    /// Same collection expansion as `create_subject`: an array on an
-    /// all-`addLink` setter appends one link per element; any other array
-    /// stays a single `literal:json:` value.
+    /// An array on an all-`addLink` setter of a collection replaces the
+    /// members, removing those stored (and staged) and appending one link per
+    /// element; any other array stays a single `literal:json:` value, which
+    /// an all-`addLink` setter of a single-valued property replaces the same way.
     ///
     /// `null` and `""` clear the property instead: a `removeLink` with target
     /// `*` per predicate the setter writes, which removes every stored link
@@ -5856,7 +5959,10 @@ impl PerspectiveInstance {
             }
             let mut cleared: Vec<Command> = Vec::new();
             for setter_cmd in setter {
-                if !cleared.iter().any(|c| c.predicate == setter_cmd.predicate) {
+                if !cleared
+                    .iter()
+                    .any(|c| c.predicate == setter_cmd.predicate && c.source == setter_cmd.source)
+                {
                     cleared.push(Command {
                         target: Some("*".to_string()),
                         local: None,
@@ -5867,13 +5973,40 @@ impl PerspectiveInstance {
             }
             return Ok(cleared);
         }
-        let expand_collection = matches!(value, serde_json::Value::Array(_))
+        // An array is the members of a collection; on a single-valued property it is one value.
+        let is_collection = self
+            .get_shape(class_name)?
+            .properties
+            .iter()
+            .any(|p| p.name == prop && p.is_collection);
+        let expand_collection = is_collection
+            && matches!(value, serde_json::Value::Array(_))
             && setter.iter().all(|c| c.action == Action::AddLink);
         let elements: Vec<serde_json::Value> = match (expand_collection, value) {
             (true, serde_json::Value::Array(items)) => items.clone(),
             _ => vec![value.clone()],
         };
         let mut commands = Vec::new();
+        // Setting replaces: what an appending setter writes to is emptied first (in the
+        // batch's effective graph), then the new members go in, in the order given. A
+        // single-valued property replaces its one value the same way, so `maxCount: 1` holds
+        // even when the setter only adds a link.
+        if expand_collection
+            || (!is_collection && setter.iter().all(|c| c.action == Action::AddLink))
+        {
+            for setter_cmd in setter {
+                if !commands.iter().any(|c: &Command| {
+                    c.predicate == setter_cmd.predicate && c.source == setter_cmd.source
+                }) {
+                    commands.push(Command {
+                        target: Some("*".to_string()),
+                        local: None,
+                        action: Action::RemoveLink,
+                        ..setter_cmd.clone()
+                    });
+                }
+            }
+        }
         for element in &elements {
             let target_value = self
                 .resolve_property_value(class_name, prop, element, context)
@@ -6108,16 +6241,18 @@ impl PerspectiveInstance {
         // that lands while resolving is seen.
         let generation = self.shapes_generation();
         let targets = self.trigger_targets(&classes, &query_json);
-        let (trigger_sparql, predicate_set) = self.model_trigger_query(&targets, &query_json);
         // No result yet: `open_subscription` points the trigger at the
         // nodes of the first result when it stores it.
         let trigger = self.build_model_trigger_for(&targets, &query_json, "");
         let abstract_read = Self::abstract_read(&targets, generation);
 
         let subscribed_query = SubscribedQuery {
-            query: trigger_sparql,
+            // Model subscriptions re-run through `trigger`, never through
+            // this text or a predicate set; the JSON is kept so the memory
+            // estimate still sees the query.
+            query: query_json.clone(),
             last_result: String::new(),
-            predicates: predicate_set,
+            predicates: HashSet::new(),
             model_query_params: Some(ModelSubscriptionParams {
                 classes: classes.clone(),
                 abstract_read,
@@ -6132,45 +6267,6 @@ impl PerspectiveInstance {
             self.run_model_query(stop, &classes, &query_json, MODEL_QUERY_SHAPE_WAIT);
         self.open_subscription(subscription_id, subscribed_query, first_result)
             .await
-    }
-
-    /// Extract predicates from a model shape for subscription trigger matching.
-    /// Reads the shape from the cache (which warms from SHACL triples on miss)
-    /// so subscription re-evaluation matches the same predicate set queries do.
-    fn build_model_trigger_predicates(
-        &self,
-        class_name: &str,
-        query_json: Option<&str>,
-    ) -> Vec<String> {
-        let mut predicates = Vec::new();
-
-        let shape = self.get_shape(class_name).ok();
-        if let Some(shape) = &shape {
-            predicates.extend(shape.predicates());
-        }
-
-        if let Some(qj) = query_json {
-            predicates.extend(self.model_query_side_predicates(shape.as_deref(), qj));
-        }
-
-        // Extract parent predicate from query JSON (parent-scoped subscriptions
-        // must trigger when the parent link is added/removed)
-        if let Some(qj) = query_json {
-            if let Ok(query) = serde_json::from_str::<serde_json::Value>(qj) {
-                if let Some(pred) = query
-                    .get("parent")
-                    .and_then(|p| p.get("predicate"))
-                    .and_then(|p| p.as_str())
-                {
-                    predicates.push(pred.to_string());
-                }
-            }
-        }
-
-        predicates.sort();
-        predicates.dedup();
-
-        predicates
     }
 
     async fn check_subscribed_queries(&self, changed_predicates: ChangedPredicates) {
@@ -6477,13 +6573,10 @@ impl PerspectiveInstance {
                         self.uuid,
                         queries.len()
                     );
-                    for (id, query) in queries.iter() {
-                        let query_preview = if query.query.len() > 100 {
-                            format!("{}...", &query.query[..100])
-                        } else {
-                            query.query.clone()
-                        };
-                        log::debug!("   - 🔗 [{}]: {}", id, query_preview);
+                    // Ids only: a model subscription's query is its JSON, whose `where`
+                    // values may be private.
+                    for id in queries.keys() {
+                        log::debug!("   - 🔗 [{}]", id);
                     }
                 }
             }
@@ -7046,6 +7139,7 @@ impl PerspectiveInstance {
                     removals: Vec::new(),
                 },
                 updates: Vec::new(),
+                reads: Vec::new(),
                 created_at: now,
             },
         );
@@ -8576,7 +8670,7 @@ mod tests {
             .expect("register the shape");
 
         perspective
-            .create_subject(
+            .create_subject_raw(
                 SubjectClassOption {
                     class_name: Some("Memo".to_string()),
                     query: None,
@@ -8640,7 +8734,7 @@ mod tests {
         let ctx = AgentContext::main_agent();
 
         perspective
-            .create_subject(
+            .create_subject_raw(
                 SubjectClassOption {
                     class_name: Some("Item".to_string()),
                     query: None,
@@ -8691,10 +8785,10 @@ mod tests {
             meta_links[0].data.target,
         );
 
-        // update_subject appends further collection elements through the
-        // same expansion.
+        // update_subject replaces the collection: the derived setter removes the
+        // old members, then adds each new element as its own link.
         perspective
-            .update_subject(
+            .update_subject_raw(
                 SubjectClassOption {
                     class_name: Some("Item".to_string()),
                     query: None,
@@ -8707,10 +8801,13 @@ mod tests {
             .await
             .expect("update_subject");
         let tag_links = perspective.get_links(&links_for("t://tag")).await.unwrap();
+        let mut tag_targets: Vec<String> =
+            tag_links.iter().map(|l| l.data.target.clone()).collect();
+        tag_targets.sort();
         assert_eq!(
-            tag_links.len(),
-            4,
-            "update_subject must append each array element as its own link",
+            tag_targets,
+            vec![lit("c"), lit("d")],
+            "update_subject must replace the members, one link per new element",
         );
     }
 
@@ -8780,7 +8877,7 @@ mod tests {
         // 1. Initial value only: the `t://state` link comes from the
         //    constructor action, which the SHACL never marked local.
         perspective
-            .create_subject(
+            .create_subject_raw(
                 SubjectClassOption {
                     class_name: Some("Cache".to_string()),
                     query: None,
@@ -8814,7 +8911,7 @@ mod tests {
         //    command. Same property, same instance — must be local as well,
         //    or one property ends up with two statuses depending on the call.
         perspective
-            .create_subject(
+            .create_subject_raw(
                 SubjectClassOption {
                     class_name: Some("Cache".to_string()),
                     query: None,
@@ -8841,7 +8938,7 @@ mod tests {
 
         // 3. A later setter write on an existing instance.
         perspective
-            .update_subject(
+            .update_subject_raw(
                 SubjectClassOption {
                     class_name: Some("Cache".to_string()),
                     query: None,
@@ -8899,7 +8996,7 @@ mod tests {
             .expect("register the shape");
 
         perspective
-            .create_subject(
+            .create_subject_raw(
                 SubjectClassOption {
                     class_name: Some("Flow".to_string()),
                     query: None,
@@ -8940,7 +9037,7 @@ mod tests {
     //     };
 
     //     // Create subject in batch
-    //     perspective.create_subject(
+    //     perspective.create_subject_raw(
     //         subject_class,
     //         "test://expression1".to_string(),
     //         None,
@@ -9155,81 +9252,6 @@ mod tests {
             ns = namespace,
             class = class
         )
-    }
-
-    /// A subscription's trigger set covers the predicates its `links` read,
-    /// including ones the shape does not declare and ones asked for inside an
-    /// `include` sub-query. Before, it held only the shape's predicates, so a
-    /// subscription asking for a revocation tombstone never re-ran when the
-    /// tombstone landed and kept reporting `[]`.
-    #[tokio::test]
-    async fn test_model_trigger_predicates_cover_links_iris() {
-        let mut perspective = setup().await;
-        perspective
-            .register_shape_json(
-                &cache_test_shacl("Recipe", "ns://"),
-                &AgentContext::main_agent(),
-            )
-            .await
-            .expect("register the shape");
-        let query = r#"{
-            "links": ["name", "ad4m://flow/role_grant_revoked"],
-            "include": { "steps": { "links": ["ns://nested_note"] } }
-        }"#;
-        let predicates = perspective.build_model_trigger_predicates("Recipe", Some(query));
-        for expected in [
-            "ns://name",
-            "ad4m://flow/role_grant_revoked",
-            "ns://nested_note",
-        ] {
-            assert!(
-                predicates.iter().any(|p| p == expected),
-                "trigger set {predicates:?} is missing {expected}"
-            );
-        }
-    }
-
-    /// A `producedByFlow` subscription's answer moves when a receipt lands
-    /// (index entry or body, which sync may deliver separately) or a flow is
-    /// registered — none of them shape predicates. Before, the trigger set
-    /// held only the shape's predicates, so a receipt minted after the
-    /// subscription never re-ran it and the new output never appeared.
-    #[tokio::test]
-    async fn test_model_trigger_predicates_cover_produced_by_flow_reads() {
-        use crate::perspectives::flow_instance::{produced, receipt};
-        let mut perspective = setup().await;
-        perspective
-            .register_shape_json(
-                &cache_test_shacl("Recipe", "ns://"),
-                &AgentContext::main_agent(),
-            )
-            .await
-            .expect("register the shape");
-        let reads = [
-            produced::FLOW_RECEIPT_INDEX_PREDICATE,
-            receipt::FLOW_RECEIPT_CONTENT_PREDICATE,
-            "rdf://type",
-        ];
-
-        let filtered = perspective.build_model_trigger_predicates(
-            "Recipe",
-            Some(r#"{ "where": { "producedByFlow": { "flow": "ns://F", "state": "done" } } }"#),
-        );
-        for expected in reads.iter().copied().chain(["ns://name"]) {
-            assert!(
-                filtered.iter().any(|p| p == expected),
-                "trigger set {filtered:?} is missing {expected}"
-            );
-        }
-
-        // Only the filter pays for them: a plain subscription stays narrow.
-        let plain = perspective.build_model_trigger_predicates("Recipe", Some("{}"));
-        for unexpected in reads {
-            assert!(
-                !plain.iter().any(|p| p == unexpected),
-                "plain trigger set {plain:?} should not carry {unexpected}"
-            );
-        }
     }
 
     #[tokio::test]
@@ -10070,7 +10092,7 @@ mod tests {
     /// Regression: `commit_batch()` must publish `link-added` (and
     /// the corresponding removed/updated topics) so WebSocket subscribers see
     /// batched diffs. The single-mutation paths publish synchronously before
-    /// spawning prolog, and `spawn_prolog_facts_update` deliberately skips
+    /// spawning prolog, and `record_write` deliberately skips
     /// publishing to avoid double-delivery on those paths — so without an
     /// explicit publish in `commit_batch`, batched diffs silently never reach
     /// WS subscribers. Asserts a message lands on the topic within 2s of the

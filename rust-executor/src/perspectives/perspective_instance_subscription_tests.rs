@@ -110,7 +110,7 @@ async fn a_model_subscriber_keeps_its_updates_when_another_disposes() {
 
     // A matching Task lands; the remaining subscriber still gets the update.
     perspective
-        .create_subject(
+        .create_subject_raw(
             SubjectClassOption {
                 class_name: Some("Task".to_string()),
                 query: None,
@@ -353,7 +353,7 @@ async fn union_model_subscription_reruns_on_an_edit_to_either_class() {
         ),
     ] {
         perspective
-            .create_subject(
+            .create_subject_raw(
                 SubjectClassOption {
                     class_name: Some(class.to_string()),
                     query: None,
@@ -408,7 +408,7 @@ async fn union_model_subscription_ignores_a_write_outside_its_classes() {
     let mut rx = get_global_pubsub().await.subscribe_events();
 
     perspective
-        .create_subject(
+        .create_subject_raw(
             SubjectClassOption {
                 class_name: Some("Task".to_string()),
                 query: None,
@@ -565,7 +565,7 @@ async fn identical_subscriptions_share_one_evaluation_per_pass() {
 
     let mut rx = get_global_pubsub().await.subscribe_events();
     perspective
-        .create_subject(
+        .create_subject_raw(
             SubjectClassOption {
                 class_name: Some("Task".to_string()),
                 query: None,

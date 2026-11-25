@@ -347,12 +347,7 @@ export function buildSHACL(
         }
 
         // ── Setter actions ──────────────────────────────────────────────
-        if (propMeta.prologSetter) {
-            console.warn(
-                `[SHACL Generation] Custom Prolog setter for property '${propName}' in class '${subjectName}' is not yet supported. ` +
-                `The property will be created without setter actions. Consider using standard writable properties or provide explicit SHACL JSON.`
-            );
-        } else if (propMeta.setter) {
+        if (propMeta.setter) {
             // Declared language-call setter — the mount form of a write.
             propShape.setter = toCallActions(propMeta.setter, "this", `${subjectName}.${propName}`);
         } else if (mount) {
@@ -651,7 +646,7 @@ export function buildSHACL(
     }
 
     // Empty lists are valid: the executor stores them as `literal:string:[]`,
-    // so `createSubject` works for all-optional models without a @Flag.
+    // so a `create` op works for all-optional models without a @Flag.
     shape.setConstructorActions(constructorActions);
     shape.setDestructorActions(destructorActions);
 

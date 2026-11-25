@@ -37,13 +37,11 @@
  */
 
 import * as chai from "chai";
-import chaiAsPromised from "chai-as-promised";
 import { Ad4mClient, LinkQuery, SHACLShape } from "@coasys/ad4m";
 import type { AISession, AISessionChanged, AISessionMessage } from "@coasys/ad4m";
 import { addE2eLlm, e2eMaxNumCtx, startAgent, waitUntil } from "../../helpers/index.js";
 
 const expect = chai.expect;
-chai.use(chaiAsPromised);
 
 // A turn is a detached task; the reply row settles whenever the model is done.
 // The request may wait behind staging on the one llama-server slot, then generate.
@@ -172,8 +170,7 @@ describeIfLLM("ai.session* — persistent AI sessions (WS + real LLM)", function
     expect(s.defaultPerspective).to.equal(p.uuid);
     expect(s.model).to.equal("not-a-real-model");
 
-    // Reads: by id and in the list.
-    expect((await ad4m.ai.session(s.id)).id).to.equal(s.id);
+    // Reads: in the list.
     expect((await ad4m.ai.sessionList()).map((x) => x.id)).to.include(s.id);
 
     // An update touches only the fields it names.
@@ -192,7 +189,6 @@ describeIfLLM("ai.session* — persistent AI sessions (WS + real LLM)", function
 
     expect(await ad4m.ai.sessionDelete(s.id)).to.equal(true);
     expect((await ad4m.ai.sessionList()).map((x) => x.id)).to.not.include(s.id);
-    await expect(ad4m.ai.session(s.id)).to.be.rejectedWith(/404|not found/i);
   });
 
   it("streams each change as an ai-session-changed event and stops on unsubscribe", async () => {

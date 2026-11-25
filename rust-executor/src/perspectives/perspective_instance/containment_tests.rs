@@ -66,7 +66,7 @@ pub(super) async fn create(
     name: &str,
     base: &str,
 ) {
-    p.create_subject(class(name), base.into(), Some(json!({})), None, ctx)
+    p.create_subject_raw(class(name), base.into(), Some(json!({})), None, ctx)
         .await
         .unwrap_or_else(|e| panic!("create {name} at {base}: {e}"));
 }
@@ -510,7 +510,7 @@ async fn targets(p: &PerspectiveInstance, source: &str, predicate: &str) -> Vec<
 
 /// Writes through `Container` (open question 5): under a Block its own
 /// adder runs (`we://child`); under a node no class describes, and under a
-/// FluxChannel (not a Container), one `has_child` link. `updateSubject` on
+/// FluxChannel (not a Container), one `has_child` link. an update op on
 /// `ad4m://Container` is the same write, adder and remover.
 #[tokio::test(flavor = "multi_thread")]
 async fn writes_under_a_parent_go_through_its_own_relation_or_has_child() {
@@ -521,7 +521,7 @@ async fn writes_under_a_parent_go_through_its_own_relation_or_has_child() {
     create(&mut p, &ctx, "FluxChannel", flux).await;
 
     for parent in [block, "ad4m://plain/w", flux] {
-        p.add_to_container(parent, "ad4m://c/1", None, &ctx)
+        p.add_to_container(parent, "ad4m://c/1", &Staged::none(), None, &ctx)
             .await
             .unwrap_or_else(|e| panic!("add under {parent}: {e}"));
     }
@@ -535,7 +535,7 @@ async fn writes_under_a_parent_go_through_its_own_relation_or_has_child() {
 
     let through =
         |action: &str, child: &str| json!({"children": {"action": action, "value": [child]}});
-    p.update_subject(
+    p.update_subject_raw(
         class(CONTAINER_URI),
         "ad4m://plain/w".into(),
         through("adder", "ad4m://c/2"),
@@ -544,7 +544,7 @@ async fn writes_under_a_parent_go_through_its_own_relation_or_has_child() {
     )
     .await
     .unwrap();
-    p.update_subject(
+    p.update_subject_raw(
         class(CONTAINER_URI),
         "ad4m://plain/w".into(),
         through("remover", "ad4m://c/1"),
@@ -557,7 +557,7 @@ async fn writes_under_a_parent_go_through_its_own_relation_or_has_child() {
         targets(&p, "ad4m://plain/w", HAS_CHILD).await,
         vec!["ad4m://c/2"]
     );
-    p.update_subject(
+    p.update_subject_raw(
         class(CONTAINER_URI),
         block.into(),
         through("remover", "ad4m://c/1"),
@@ -594,7 +594,7 @@ async fn remove_under_a_block(predicates: &[&str]) -> (PerspectiveInstance, &'st
     link(&mut p, &ctx, block, HAS_CHILD, kept).await;
     assert_eq!(held(&p, block).await, vec![kept, child]);
     let remove = json!({"children": {"action": "remover", "value": [child]}});
-    p.update_subject(class(CONTAINER_URI), block.into(), remove, None, &ctx)
+    p.update_subject_raw(class(CONTAINER_URI), block.into(), remove, None, &ctx)
         .await
         .unwrap();
     (p, block)

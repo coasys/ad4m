@@ -1085,7 +1085,7 @@ async fn create_task(
     ctx: &AgentContext,
 ) {
     perspective
-        .create_subject(
+        .create_subject_raw(
             SubjectClassOption {
                 class_name: Some(class.into()),
                 query: None,
@@ -1201,7 +1201,7 @@ async fn two_classes_of_one_name_coexist_by_iri() {
     // The relation reads `b://Task`, the class of its `sh:class`, though
     // the bare name `Task` reads `a://Task`.
     perspective
-        .create_subject(
+        .create_subject_raw(
             SubjectClassOption {
                 class_name: Some("p://Project".into()),
                 query: None,
@@ -1310,7 +1310,7 @@ async fn a_query_and_a_create_by_name_use_the_registered_class() {
         .unwrap();
 
     perspective
-        .create_subject(
+        .create_subject_raw(
             SubjectClassOption {
                 class_name: Some("Task".into()),
                 query: None,
@@ -1387,7 +1387,7 @@ async fn a_name_finds_only_the_class_of_exactly_that_name() {
     let before = all_links(&perspective);
 
     let created = perspective
-        .create_subject(
+        .create_subject_raw(
             SubjectClassOption {
                 class_name: Some("Message".into()),
                 query: None,

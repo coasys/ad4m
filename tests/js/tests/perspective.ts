@@ -516,33 +516,6 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(String(stored[0].status).toLowerCase()).to.equal('local')
             })
 
-            // SdnaOnly doesn't load links into prolog engine
-            it.skip('can run Prolog queries', async () => {
-                const ad4mClient: Ad4mClient = testContext.ad4mClient!
-                const p = await ad4mClient.perspective.add("Prolog test")
-                await p.add(new Link({
-                    source: "ad4m://root",
-                    target: "note-ipfs://Qm123"
-                }))
-                await p.add(new Link({
-                    source: "note-ipfs://Qm123",
-                    target: "todo-ontology://is-todo"
-                }))
-
-                const result = await p.infer('triple(X, _, "todo-ontology://is-todo").')
-                expect(result).not.to.be.false;
-                expect(result.length).to.equal(1)
-                expect(result[0].X).to.equal('note-ipfs://Qm123')
-
-                expect(await p.infer('reachable("ad4m://root", "todo-ontology://is-todo")')).to.be.true;
-
-                const linkResult = await p.infer('link(X, _, "todo-ontology://is-todo", Timestamp, Author).')
-                expect(linkResult).not.to.be.false;
-                expect(linkResult.length).to.equal(1)
-                expect(linkResult[0].X).to.equal('note-ipfs://Qm123');
-                expect(linkResult[0].Timestamp).not.to.be.null;
-                expect(linkResult[0].Author).not.to.be.null;
-            })
         })
 
         describe.skip('Batch Operations', () => {
@@ -807,126 +780,80 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(currentLinks.length).to.equal(0)
             })
 
-            it("should support batch operations with executeCommands", async () => {
-                const perspective = await ad4mClient.perspective.add("test-batch-execute-commands");
-                const batchId = await perspective.createBatch();
+        })
 
-                // Execute commands in batch
-                await perspective.executeAction(
-                    [
-                        {
-                            action: "addLink",
-                            source: "test://source1",
-                            predicate: "test://predicate1",
-                            target: "test://target1"
-                        },
-                        {
-                            action: "addLink",
-                            source: "test://source2",
-                            predicate: "test://predicate2",
-                            target: "test://target2"
-                        }
-                    ],
-                    "test://expression",
-                    [],
-                    batchId
-                );
+        // Not under the skipped block above: these are the batch tests of
+        // `perspective.mutate`, and they run.
+        describe('Batch operations of mutate', () => {
+            let ad4mClient: Ad4mClient
 
-                // Verify links are not visible before commit
-                let links = await perspective.get(new LinkQuery({}));
-                expect(links.length).to.equal(0);
+            beforeEach(() => {
+                ad4mClient = testContext.ad4mClient!
+            })
 
-                // Commit batch and verify links are now visible
-                const diff = await perspective.commitBatch(batchId);
-                expect(diff.additions.length).to.equal(2);
-                expect(diff.removals.length).to.equal(0);
+            describe("mutate in a batch", () => {
+                @Model({ name: "BatchedNote" })
+                class BatchedNote extends Ad4mModel {
+                    @Property({ through: "batchnote://title", resolveLanguage: "literal" })
+                    title: string = "";
+                }
+                const shape = BatchedNote.generateSHACL().shape;
+                const instanceLinks = (perspective: PerspectiveProxy, id: string) =>
+                    perspective.get(new LinkQuery({ source: id, predicate: "batchnote://title" }));
 
-                links = await perspective.get({ isMatch: () => true });
-                expect(links.length).to.equal(2);
+                it("stages the ops of several mutate calls until the commit", async () => {
+                    const perspective = await ad4mClient.perspective.add("test-batch-mutate");
+                    await perspective.registerShapes([shape]);
+                    const batchId = await perspective.createBatch();
 
-                // Verify link contents
-                const link1 = links.find(l => l.data.source === "test://source1");
-                if (!link1) throw new Error("Expected to find link1");
-                expect(link1.data.predicate).to.equal("test://predicate1");
-                expect(link1.data.target).to.equal("test://target1");
+                    await perspective.mutate(
+                        [{ op: "create", class: shape.targetClass, id: "test://note1", values: { title: "one" } }],
+                        { batch: batchId },
+                    );
+                    await perspective.mutate(
+                        [{ op: "create", class: shape.targetClass, id: "test://note2", values: { title: "two" } }],
+                        { batch: batchId },
+                    );
 
-                const link2 = links.find(l => l.data.source === "test://source2");
-                if (!link2) throw new Error("Expected to find link2");
-                expect(link2.data.predicate).to.equal("test://predicate2");
-                expect(link2.data.target).to.equal("test://target2");
-            });
+                    expect(await instanceLinks(perspective, "test://note1")).to.have.length(0);
+                    expect(await instanceLinks(perspective, "test://note2")).to.have.length(0);
 
-            it("should support batch operations with multiple commands", async () => {
-                const perspective = await ad4mClient.perspective.add("test-batch-multiple-commands");
-                
-                // Add a link outside the batch first
-                await perspective.executeAction(
-                    [{
-                        action: "addLink",
-                        source: "test://source0",
-                        predicate: "test://predicate0",
-                        target: "test://target0"
-                    }],
-                    "test://expression",
-                    []
-                );
+                    const diff = await perspective.commitBatch(batchId);
+                    expect(diff.additions.length).to.be.greaterThan(1);
+                    expect(diff.removals.length).to.equal(0);
 
-                const batchId = await perspective.createBatch();
+                    expect(await instanceLinks(perspective, "test://note1")).to.have.length(1);
+                    expect(await instanceLinks(perspective, "test://note2")).to.have.length(1);
+                });
 
-                // Execute multiple commands in batch including a remove
-                await perspective.executeAction(
-                    [
-                        {
-                            action: "removeLink",
-                            source: "test://source0",
-                            predicate: "test://predicate0",
-                            target: "test://target0"
-                        },
-                        {
-                            action: "addLink",
-                            source: "test://source1",
-                            predicate: "test://predicate1",
-                            target: "test://target1"
-                        },
-                        {
-                            action: "setSingleTarget",
-                            source: "test://source2",
-                            predicate: "test://predicate2",
-                            target: "test://target2"
-                        }
-                    ],
-                    "test://expression",
-                    [],
-                    batchId
-                );
+                it("commits an update and a delete staged in one batch", async () => {
+                    const perspective = await ad4mClient.perspective.add("test-batch-mutate-update");
+                    await perspective.registerShapes([shape]);
+                    await perspective.mutate([
+                        { op: "create", class: shape.targetClass, id: "test://keep", values: { title: "old" } },
+                        { op: "create", class: shape.targetClass, id: "test://drop", values: { title: "gone" } },
+                    ]);
 
-                // Verify state before commit
-                let links = await perspective.get(new LinkQuery({}));
-                expect(links.length).to.equal(1); // Only the initial link
-                expect(links[0].data.source).to.equal("test://source0");
+                    const batchId = await perspective.createBatch();
+                    await perspective.mutate(
+                        [
+                            { op: "update", class: shape.targetClass, id: "test://keep", set: { title: "new" } },
+                            { op: "delete", class: shape.targetClass, id: "test://drop" },
+                        ],
+                        { batch: batchId },
+                    );
 
-                // Commit batch and verify final state
-                const diff = await perspective.commitBatch(batchId);
-                expect(diff.additions.length).to.equal(2); // New links
-                expect(diff.removals.length).to.equal(1); // Removed initial link
+                    // Nothing changed before the commit.
+                    let keep = await instanceLinks(perspective, "test://keep");
+                    expect(keep.map((l) => Literal.fromUrl(l.data.target).get().data)).to.deep.equal(["old"]);
+                    expect(await instanceLinks(perspective, "test://drop")).to.have.length(1);
 
-                links = await perspective.get(new LinkQuery({}));
-                expect(links.length).to.equal(2); // Two new links
+                    await perspective.commitBatch(batchId);
 
-                // Verify final link contents
-                const link1 = links.find(l => l.data.source === "test://source1");
-                if (!link1) throw new Error("Expected to find link1");
-                expect(link1.data.predicate).to.equal("test://predicate1");
-                expect(link1.data.target).to.equal("test://target1");
-
-                const link2 = links.find(l => l.data.source === "test://source2");
-                if (!link2) throw new Error("Expected to find link2");
-                expect(link2.data.predicate).to.equal("test://predicate2");
-                expect(link2.data.target).to.equal("test://target2");
-
-                // Verify removed link is gone
-                const removedLink = links.find(l => l.data.source === "test://source0");
-                expect(removedLink).to.be.undefined;
+                    keep = await instanceLinks(perspective, "test://keep");
+                    expect(keep.map((l) => Literal.fromUrl(l.data.target).get().data)).to.deep.equal(["new"]);
+                    expect(await instanceLinks(perspective, "test://drop")).to.have.length(0);
+                });
             });
         })
 

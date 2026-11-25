@@ -55,13 +55,11 @@ pub enum ValidationProblem {
     },
     /// The property cannot be written.
     ReadOnly { reason: ReadOnlyReason },
-    /// An update named a collection: its items change one by one.
-    CollectionNotSettable,
     /// A collection write named a single-valued property.
     NotACollection,
     /// A single-valued property got an array.
     ArrayForScalar { length: usize },
-    /// The value is `null`: omit the property instead.
+    /// A collection item is `null`: an item is a value.
     Null,
     /// A reference needs the URI of an instance of `targetClass`.
     NotAReference { target_class: String },
@@ -69,7 +67,7 @@ pub enum ValidationProblem {
     WrongType,
     /// The value is not one of `allowedValues` (`sh:in`).
     NotAllowed,
-    /// A create left out a required property.
+    /// A create left out a required property, or an update cleared one.
     MissingRequired,
 }
 
@@ -98,9 +96,9 @@ pub struct Cardinality {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteMode {
-    /// All required properties must be present; collections may be given as arrays.
+    /// All required properties must be present. `null` and `""` write nothing.
     Create,
-    /// Partial patch of single-valued properties only.
+    /// A partial patch. `null` and `""` clear a property.
     Update,
 }
 
@@ -109,12 +107,19 @@ pub enum WriteMode {
 #[derive(Debug, Default, PartialEq)]
 pub struct ValidatedWrite {
     pub scalars: Map<String, Value>,
+    /// Update only: the single-valued properties to clear.
+    pub clears: Vec<String>,
+    /// The members a collection is set to, in the order given. An empty list clears it.
     pub collections: Vec<(String, Vec<Value>)>,
 }
 
 impl ValidationError {
     /// An error about `info`, carrying its type, cardinality and allowed values.
-    fn on(info: &PropView<'_>, problem: ValidationProblem, received: Option<&Value>) -> Self {
+    pub(super) fn on(
+        info: &PropView<'_>,
+        problem: ValidationProblem,
+        received: Option<&Value>,
+    ) -> Self {
         ValidationError {
             property: info.name().to_string(),
             problem,
@@ -177,13 +182,18 @@ fn matches_allowed(candidate: &Value, allowed: &Value) -> bool {
 pub(crate) fn coerce_scalar(info: &PropView<'_>, value: &Value) -> Result<Value, ValidationError> {
     let err = |problem: ValidationProblem| ValidationError::on(info, problem, Some(value));
 
+    if value.is_null() {
+        return Err(err(ValidationProblem::Null));
+    }
+    // A value signed into the literal language is any JSON value: an object or an array is
+    // stored whole, as one `literal:json:` expression.
+    if info.relation().is_none() && info.resolve_language() == Some("literal") {
+        return check_allowed(info, value, value.clone());
+    }
     if let Value::Array(items) = value {
         return Err(err(ValidationProblem::ArrayForScalar {
             length: items.len(),
         }));
-    }
-    if value.is_null() {
-        return Err(err(ValidationProblem::Null));
     }
 
     if let Some((_, target)) = info.relation() {
@@ -246,16 +256,30 @@ pub(crate) fn coerce_scalar(info: &PropView<'_>, value: &Value) -> Result<Value,
         _ => Ok(value.clone()),
     }?;
 
-    // `sh:in`: the coerced value must match one declared entry. Runs after the type coercion so
-    // "42" for an integer property matches entry `42`; the relation and language-stored early
-    // returns above keep it off properties whose values are URIs or language expressions (no
-    // class in WE puts `options` on those). An empty list allows nothing.
+    check_allowed(info, value, coerced)
+}
+
+/// `sh:in`: the coerced value must match one declared entry. Runs after the type coercion so
+/// "42" for an integer property matches entry `42`. A value signed into the literal language is
+/// checked too; the relation and language-stored early returns of `coerce_scalar` keep it off
+/// properties whose values are URIs or language expressions (no class in WE puts `options` on
+/// those). An empty list allows nothing. A JSON
+/// object a string property takes whole is checked too, so it never satisfies a list of strings.
+fn check_allowed(
+    info: &PropView<'_>,
+    given: &Value,
+    coerced: Value,
+) -> Result<Value, ValidationError> {
     if let Some(allowed) = info.in_values() {
         if !allowed
             .iter()
             .any(|entry| matches_allowed(&coerced, allowed_value(entry)))
         {
-            return Err(err(ValidationProblem::NotAllowed));
+            return Err(ValidationError::on(
+                info,
+                ValidationProblem::NotAllowed,
+                Some(given),
+            ));
         }
     }
     Ok(coerced)
@@ -271,6 +295,7 @@ pub fn validate_properties(
     shape: &ModelShape,
     props: &Map<String, Value>,
     mode: WriteMode,
+    json_objects: bool,
 ) -> Result<ValidatedWrite, Vec<ValidationError>> {
     let infos = class_properties(shape);
     let mut errors: Vec<ValidationError> = Vec::new();
@@ -310,40 +335,67 @@ pub fn validate_properties(
             continue;
         }
 
+        let clears = value.is_null() || value.as_str() == Some("");
+
         if info.collection() {
-            match mode {
-                WriteMode::Update => errors.push(ValidationError::on(
-                    info,
-                    ValidationProblem::CollectionNotSettable,
-                    Some(value),
-                )),
-                WriteMode::Create => {
-                    let items: Vec<Value> = match value {
-                        Value::Array(items) => items.clone(),
-                        Value::Null => vec![],
-                        other => vec![other.clone()],
-                    };
-                    let mut coerced = Vec::with_capacity(items.len());
-                    let mut bad = false;
-                    for (index, item) in items.iter().enumerate() {
-                        match coerce_scalar(info, item) {
-                            Ok(v) => coerced.push(v),
-                            Err(mut e) => {
-                                e.item = Some(index);
-                                errors.push(e);
-                                bad = true;
-                            }
-                        }
-                    }
-                    if !bad && !coerced.is_empty() {
-                        out.collections.push((info.name().to_string(), coerced));
+            let items: Vec<Value> = match value {
+                _ if clears => vec![],
+                Value::Array(items) => items.clone(),
+                other => vec![other.clone()],
+            };
+            let mut coerced = Vec::with_capacity(items.len());
+            let mut bad = false;
+            for (index, item) in items.iter().enumerate() {
+                match coerce_scalar(info, item) {
+                    Ok(v) => coerced.push(v),
+                    Err(mut e) => {
+                        e.item = Some(index);
+                        errors.push(e);
+                        bad = true;
                     }
                 }
+            }
+            // A required collection is not emptied, as a required scalar is not cleared.
+            if !bad && mode == WriteMode::Update && coerced.is_empty() && info.required() {
+                errors.push(ValidationError::on(
+                    info,
+                    ValidationProblem::MissingRequired,
+                    Some(value),
+                ));
+                continue;
+            }
+            // A create with no members writes nothing; an update sets the collection to none.
+            if !bad && (mode == WriteMode::Update || !coerced.is_empty()) {
+                out.collections.push((info.name().to_string(), coerced));
             }
             continue;
         }
 
-        match coerce_scalar(info, value) {
+        if clears {
+            match mode {
+                WriteMode::Create => {}
+                WriteMode::Update if info.required() => errors.push(ValidationError::on(
+                    info,
+                    ValidationProblem::MissingRequired,
+                    Some(value),
+                )),
+                WriteMode::Update => out.clears.push(info.name().to_string()),
+            }
+            continue;
+        }
+
+        // The SDK stores an object-typed field as one `literal:json:` value on a string
+        // property: `json_objects` lets a string property take the object whole. A write that
+        // does not say so (the MCP tools) still refuses an object for a string.
+        let json_object = json_objects
+            && value.is_object()
+            && info.relation().is_none()
+            && info.type_name() == "string";
+        match if json_object {
+            check_allowed(info, value, value.clone())
+        } else {
+            coerce_scalar(info, value)
+        } {
             Ok(v) => {
                 out.scalars.insert(info.name().to_string(), v);
             }
@@ -352,7 +404,12 @@ pub fn validate_properties(
     }
 
     if mode == WriteMode::Create {
-        for info in infos.iter().filter(|i| i.required() && i.writable()) {
+        // A required property whose class constructor writes an initial value is held by the
+        // constructor when the call gives none.
+        for info in infos
+            .iter()
+            .filter(|i| i.required() && i.writable() && !i.has_initial())
+        {
             let supplied = if info.collection() {
                 out.collections.iter().any(|(n, _)| n == info.name())
             } else {
@@ -377,12 +434,15 @@ pub fn validate_properties(
 }
 
 /// Resolve `collection` to a writable collection property of the class, or the error that says
-/// why it is not one (unknown name, single-valued property, read-only relation).
+/// why it is not one (unknown name, single-valued property, read-only relation). `removing`
+/// also takes a single-valued relation (`@HasOne`): dropping its one member is a removal like
+/// any other, while adding to it is a `set`.
 pub(crate) fn resolve_collection<'a, 'p>(
     class_name: &str,
     infos: &'a [PropView<'p>],
     collection: &str,
     item_uri: &str,
+    removing: bool,
 ) -> Result<&'a PropView<'p>, ValidationError> {
     let Some(info) = find_property(infos, collection) else {
         return Err(ValidationError {
@@ -402,7 +462,7 @@ pub(crate) fn resolve_collection<'a, 'p>(
             item: None,
         });
     };
-    if !info.collection() {
+    if !info.collection() && !(removing && info.relation().is_some()) {
         return Err(ValidationError::on(
             info,
             ValidationProblem::NotACollection,

@@ -452,7 +452,7 @@ async fn validation_names_property_type_and_cardinality() {
     assert!(ok.scalars.contains_key("name"));
     assert!(ok.scalars.contains_key("isPinned"));
 
-    // Update: no required check, collections refused.
+    // Update: no required check, an array on a collection sets its members.
     let ok = validate_properties(
         &shape,
         &props(&[("description", json!("only this"))]),
@@ -460,18 +460,20 @@ async fn validation_names_property_type_and_cardinality() {
     )
     .expect("partial update");
     assert_eq!(ok.scalars.len(), 1);
-    let errs = validate_properties(
+    let set = validate_properties(
         &shape,
         &props(&[("messages", json!(["flux://m1"]))]),
         WriteMode::Update,
     )
-    .expect_err("collection on update must fail");
-    assert!(errs[0].problem.contains("instance_add_to_collection"));
+    .expect("a collection on update sets its members");
+    assert_eq!(set.collections.len(), 1);
+    let errs = validate_properties(&shape, &props(&[("nope", json!(5))]), WriteMode::Update)
+        .expect_err("an undeclared property is refused");
 
     // The error payload carries the summary in `error` too.
     let payload = parse(&validation_failure("Channel", &errs));
-    assert!(payload["error"].as_str().unwrap().contains("messages"));
-    assert_eq!(payload["validation_errors"][0]["property"], "messages");
+    assert!(payload["error"].as_str().unwrap().contains("nope"));
+    assert_eq!(payload["validation_errors"][0]["property"], "nope");
 }
 
 /// A relation may name a `target_class` the perspective never registered
@@ -1306,7 +1308,8 @@ async fn instance_tools_round_trip_typed_data() {
     assert_eq!(got["isPinned"], false);
     assert_eq!(got["rank"], 3, "untouched property must survive the update");
 
-    let bad_upd = parse(
+    // An array on a relation sets its members: the collection holds exactly those.
+    let set_members = parse(
         &handler
             .instance_update(Parameters(InstanceUpdateParams {
                 perspective_id: uuid.clone(),
@@ -1316,10 +1319,17 @@ async fn instance_tools_round_trip_typed_data() {
             }))
             .await,
     );
-    assert!(bad_upd["error"]
-        .as_str()
-        .unwrap()
-        .contains("instance_add_to_collection"));
+    assert_eq!(set_members["success"], true, "{set_members}");
+    let after_set = parse(
+        &handler
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri: channel.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(after_set["messages"], json!([msg1.clone()]), "{after_set}");
 
     // Remove: refuses when the class doesn't match, cascades when it does.
     let wrong = parse(
@@ -2155,7 +2165,7 @@ async fn instance_query_clamps_an_oversized_limit_without_hiding_the_total() {
     let batch_id = perspective.create_batch().await;
     for i in 0..total {
         perspective
-            .create_subject(
+            .create_subject_raw(
                 subject_class("Channel"),
                 format!("ad4m://obj/clamp-{i}"),
                 Some(json!({ "name": format!("channel-{i}") })),
@@ -3940,6 +3950,44 @@ async fn template_update_saves_the_schema_and_its_version_in_one_write() {
     assert!(
         after["schema"].to_string().contains("data_base64"),
         "the schema is written as the file WE stores it as: {after}"
+    );
+}
+
+/// `write_record` writes a property to clear (`null`) as well as the scalars: the values map
+/// `instance_update` builds, not the scalars alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn template_write_record_clears_a_property_the_record_sets_to_null() {
+    let sdna = literal_template_sdna();
+    let (handler, uuid, _guard, base_uri) =
+        template_setup(&sdna, json!(small_template().to_string())).await;
+    let mut properties = Map::new();
+    properties.insert("name".into(), Value::Null);
+    properties.insert("version".into(), json!(2));
+    handler
+        .write_record(&uuid, "Template", &base_uri, properties, Vec::new())
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "{}",
+                match e {
+                    super::template_tools::WriteError::Changed => "changed".to_string(),
+                    super::template_tools::WriteError::Refused(m) => m,
+                }
+            )
+        });
+    let after = parse(
+        &handler
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Template".into(),
+                base_uri: base_uri.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(after["version"], 2, "{after}");
+    assert!(
+        after.get("name").map_or(true, |n| n.is_null() || n == ""),
+        "the name is cleared: {after}"
     );
 }
 

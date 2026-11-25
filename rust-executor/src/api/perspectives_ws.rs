@@ -162,7 +162,7 @@ pub(super) fn check_credits(agent_did: Option<&str>) -> Result<(), WsRpcError> {
     Ok(())
 }
 
-fn reserve_credits(agent_did: Option<&str>, amount: f64) -> Result<(), WsRpcError> {
+pub(super) fn reserve_credits(agent_did: Option<&str>, amount: f64) -> Result<(), WsRpcError> {
     if agent_did.is_none() {
         return Ok(());
     }
@@ -186,7 +186,7 @@ fn reserve_credits(agent_did: Option<&str>, amount: f64) -> Result<(), WsRpcErro
     Ok(())
 }
 
-const DEFAULT_LINK_WRITE: f64 = 0.25;
+pub(super) const DEFAULT_LINK_WRITE: f64 = 0.25;
 
 /// Adapter that implements the harness's `CreditGate` trait against the
 /// per-user credit ledger. Each `check()` (a) refuses if the ledger says
@@ -704,40 +704,6 @@ async fn shapes(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpc
     Ok(serde_json::to_value(shapes)?)
 }
 
-async fn execute_commands(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let body: ExecuteCommandsRequest = serde_json::from_value(params.clone())
-        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-
-    let mut perspective = guarded_perspective(&params).await?;
-    let agent_context = ctx.acts_as();
-
-    let commands: Vec<crate::perspectives::perspective_instance::Command> =
-        serde_json::from_str(&body.commands)
-            .map_err(|e| WsRpcError::bad_request(format!("Invalid commands JSON: {}", e)))?;
-    let parameters: Vec<crate::perspectives::perspective_instance::Parameter> = body
-        .parameters
-        .as_ref()
-        .map(|json| {
-            serde_json::from_str(json)
-                .map_err(|e| WsRpcError::bad_request(format!("Invalid parameters JSON: {}", e)))
-        })
-        .transpose()?
-        .unwrap_or_default();
-
-    let result = perspective
-        .execute_commands(
-            commands,
-            body.expression.clone(),
-            parameters,
-            body.batch_id.clone(),
-            &agent_context,
-        )
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    Ok(serde_json::to_value(result)?)
-}
-
 async fn create_batch(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let perspective = guarded_perspective(&params).await?;
     let batch_id = perspective.create_batch().await;
@@ -936,90 +902,6 @@ async fn dispose_query(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
     ))
 }
 
-async fn create_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let body: CreateSubjectRequest = serde_json::from_value(params.clone())
-        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-
-    let mut perspective = guarded_perspective(&params).await?;
-    let agent_context = ctx.acts_as();
-
-    let (resolved_class_name, parsed_initial_values) =
-        match serde_json::from_str::<serde_json::Value>(&body.subject_class) {
-            Ok(obj) if obj.is_object() && obj.get("className").is_some() => {
-                let cn = obj["className"]
-                    .as_str()
-                    .unwrap_or(&body.subject_class)
-                    .to_string();
-                let iv = obj.get("initialValues").cloned();
-                (cn, iv)
-            }
-            _ => (body.subject_class.clone(), None),
-        };
-
-    let subject_class = crate::perspectives::perspective_instance::SubjectClassOption {
-        class_name: Some(resolved_class_name),
-        query: None,
-    };
-    let initial_values: Option<serde_json::Value> = body
-        .initial_values
-        .as_ref()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .or(parsed_initial_values);
-    perspective
-        .create_subject(
-            subject_class,
-            body.expression_address.clone(),
-            initial_values,
-            body.batch_id.clone(),
-            &agent_context,
-        )
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    Ok(Value::Bool(true))
-}
-
-async fn update_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let body: UpdateSubjectRequest = serde_json::from_value(params.clone())
-        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-    let values: Value = serde_json::from_str(&body.values)
-        .map_err(|e| WsRpcError::bad_request(format!("values: {}", e)))?;
-    let mut perspective = guarded_perspective(&params).await?;
-    perspective
-        .update_subject(
-            crate::perspectives::perspective_instance::SubjectClassOption {
-                class_name: Some(body.subject_class),
-                query: None,
-            },
-            body.expression_address,
-            values,
-            body.batch_id,
-            &ctx.acts_as(),
-        )
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-    Ok(Value::Bool(true))
-}
-
-async fn remove_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let body: RemoveSubjectRequest = serde_json::from_value(params.clone())
-        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-    let mut perspective = guarded_perspective(&params).await?;
-    perspective
-        .remove_subject(
-            crate::perspectives::perspective_instance::SubjectClassOption {
-                class_name: Some(body.subject_class),
-                query: None,
-            },
-            body.expression_address,
-            body.batch_id,
-            &ctx.acts_as(),
-        )
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-    Ok(Value::Bool(true))
-}
-
 async fn get_subject_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: GetSubjectDataRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -1172,7 +1054,7 @@ async fn run_interpretation_handler(
 
     let mut perspective = guarded_perspective(&params).await?;
     let agent_context = ctx.acts_as();
-    // Interpretation writes via `create_subject`, so link status derives from each
+    // Interpretation writes through the instance writers, so link status derives from each
     // class's SDNA `local` flags (same rule as app code) — there is no caller-facing
     // link-status knob on this path.
 
@@ -2190,17 +2072,6 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<PerspectiveShapesParams, Vec<ShapeSummary>>("perspective.shapes", shapes)
         .read()
         .guard(query());
-    map.method::<PerspectiveExecuteCommandsParams, ()>(
-        "perspective.executeCommands",
-        execute_commands,
-    )
-    .guard(update());
-    map.method::<PerspectiveCreateSubjectParams, bool>("perspective.createSubject", create_subject)
-        .guard(update());
-    map.method::<PerspectiveUpdateSubjectParams, bool>("perspective.updateSubject", update_subject)
-        .guard(update());
-    map.method::<PerspectiveRemoveSubjectParams, bool>("perspective.removeSubject", remove_subject)
-        .guard(update());
     map.method::<PerspectiveGetSubjectDataParams, String>(
         "perspective.getSubjectData",
         get_subject_data,
@@ -2484,38 +2355,6 @@ pub struct PerspectiveSparqlParams {
 pub struct PerspectiveRegisterShapesParams {
     pub uuid: String,
     pub shapes: Vec<SHACLShape>,
-}
-
-#[derive(Deserialize, TS)]
-#[ts(export)]
-pub struct PerspectiveExecuteCommandsParams {
-    pub uuid: String,
-    #[serde(flatten)]
-    pub body: ExecuteCommandsRequest,
-}
-
-#[derive(Deserialize, TS)]
-#[ts(export)]
-pub struct PerspectiveCreateSubjectParams {
-    pub uuid: String,
-    #[serde(flatten)]
-    pub body: CreateSubjectRequest,
-}
-
-#[derive(Deserialize, TS)]
-#[ts(export)]
-pub struct PerspectiveUpdateSubjectParams {
-    pub uuid: String,
-    #[serde(flatten)]
-    pub body: UpdateSubjectRequest,
-}
-
-#[derive(Deserialize, TS)]
-#[ts(export)]
-pub struct PerspectiveRemoveSubjectParams {
-    pub uuid: String,
-    #[serde(flatten)]
-    pub body: RemoveSubjectRequest,
 }
 
 #[derive(Deserialize, TS)]

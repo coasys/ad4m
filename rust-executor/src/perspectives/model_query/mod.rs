@@ -145,6 +145,7 @@ pub(crate) use links::{links_rows, links_trigger_predicates};
 pub use query::{execute_model_query, execute_model_query_stopped};
 pub use relations::resolve_reverse_relations;
 pub(crate) use shape::{load_shape_from_store, MissingShape};
+pub(crate) use sparql_builder::existence_predicates;
 pub use types::{
     constrain_ids, take_produced_by_flow, IncludeValue, ModelQueryInput, ModelQueryResult,
     ModelShape, OrderDirection, ProducedByFlowFilter, ProjectionInput, Scope, ShapeResolver,

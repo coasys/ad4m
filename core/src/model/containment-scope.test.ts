@@ -60,15 +60,13 @@ describe("create({ parent: { id } })", () => {
       parent: { id: "ad4m://p" },
       batchId: "b",
     });
-    const writes = calls.filter(([key]) => key === "updateSubject" || key === "addLink");
-    expect(writes).toEqual([
+    // One create op; the executor links it under the parent through the Container.
+    expect(calls).toEqual([
       [
-        "updateSubject",
+        "mutate",
         "p",
-        "ad4m://Container",
-        "ad4m://p",
-        JSON.stringify({ children: { action: "adder", value: [note.id] } }),
-        "b",
+        [{ op: "create", class: expect.stringContaining("ScopedNote"), id: note.id, values: { body: "hi" }, parent: { id: "ad4m://p" } }],
+        { batch: "b" },
       ],
     ]);
   });

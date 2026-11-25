@@ -113,7 +113,7 @@ instance_get(perspective_id, class_name="Message", base_uri="<id>")
 
 instance_update(perspective_id, class_name="Task", base_uri="<id>",
                 properties={"status": "done"})
-  → single-valued properties only. Collections change via
+  → an array on a collection property replaces its members. Single members change via
     instance_add_to_collection / instance_remove_from_collection — removing only
     drops the membership link, the item itself survives.
 

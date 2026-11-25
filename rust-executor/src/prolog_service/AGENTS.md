@@ -32,8 +32,7 @@ for Prolog live queries and are now only reached through `run_query_smart`
 (`is_subscription = false` uses existing filtered pools, never creates one).
 
 Fact generators live in `perspectives/sdna.rs` (`get_data_facts`, `get_sdna_facts`,
-`get_static_infrastructure_facts`) and `perspectives/shacl_to_prolog.rs` (SHACL →
-`subject_class/…` facts). Term → JSON marshalling is in `perspectives/utils.rs`
+`get_static_infrastructure_facts`). Term → JSON marshalling is in `perspectives/utils.rs`
 (moving here as `term_json.rs`).
 
 ## Rules

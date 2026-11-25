@@ -352,10 +352,6 @@ export class AIClient {
         return this.#apiClient.call('ai.sessionList', {});
     }
 
-    async session(id: string): Promise<AISession> {
-        return this.#apiClient.call('ai.session', { id });
-    }
-
     /** A field left out keeps its value; a nullable one (`model`, `defaultPerspective`,
      *  `libraryPerspective`) is cleared with `null`. Capabilities can only be narrowed
      *  to what the caller holds. */

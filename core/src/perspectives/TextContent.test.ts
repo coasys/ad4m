@@ -96,10 +96,18 @@ describe("TextContent", () => {
     row.text = "edited";
     calls.length = 0;
     await row.save("batch");
-    expect(calls).toEqual([["updateSubject", "p", "ad4m://TextContent", "ad4m://m/1", JSON.stringify({ text: "edited" }), "batch"]]);
+    expect(calls).toEqual([[
+      "mutate", "p",
+      [{ op: "update", class: "ad4m://TextContent", id: "ad4m://m/1", set: { text: "edited" } }],
+      { batch: "batch" },
+    ]]);
 
     calls.length = 0;
     await row.delete("batch");
-    expect(calls[0]).toEqual(["removeSubject", "p", "ad4m://TextContent", "ad4m://m/1", "batch"]);
+    expect(calls[0]).toEqual([
+      "mutate", "p",
+      [{ op: "delete", class: "ad4m://TextContent", id: "ad4m://m/1" }],
+      { batch: "batch" },
+    ]);
   });
 });
