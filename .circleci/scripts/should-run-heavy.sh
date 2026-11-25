@@ -99,7 +99,7 @@ case "$branch" in
 esac
 auth=()
 [ -n "${GITHUB_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $GITHUB_TOKEN")
-body="$(curl -fsSL --max-time 20 --retry 2 -H 'Accept: application/vnd.github+json' "${auth[@]}" "$url" 2>/dev/null)" \
+body="$(curl -fsSL --max-time 20 --retry 2 -H 'Accept: application/vnd.github+json' ${auth[@]+"${auth[@]}"} "$url" 2>/dev/null)" \
   || unsure "GitHub API request failed ($url)"
 
 # One verdict per question for all the branch's open PRs: run if any of them

@@ -17,8 +17,9 @@ name: Heavy suites
 #   of the commit's pipelines ran them (e.g. they halted before the PR got ready).
 #   That pipeline runs every job, the light ones too.
 # - for a ready PR whose heavy suites are not due (its base is not dev), it still
-#   starts a pipeline when the commit's pipeline halted `build` on the draft, so
-#   the light jobs run; the status stays pending.
+#   waits (up to the same bound) for the commit's `build` to leave the draft's
+#   Draft gate, and starts a pipeline when it halted there, so the light jobs
+#   run; the status stays pending.
 # - pending with what clears it in every other case. "Re-run" means re-running
 #   this workflow: it looks again and starts what is missing.
 #

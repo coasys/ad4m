@@ -39,6 +39,7 @@ fixture() { # <key> <fail>
   local n f
   n=$(( $(cat "$FAKE_DIR/$1.count" 2>/dev/null || echo 0) + 1 ))
   echo "$n" > "$FAKE_DIR/$1.count"
+  [ -f "$FAKE_DIR/$1.$n.fail" ] && exit 22 # the n-th read fails like an HTTP error
   for f in "$FAKE_DIR/$1.$n" "$FAKE_DIR/$1.after" "$FAKE_DIR/$1"; do
     case "$f" in *.after) grep -q '^POST .*/pipeline/run ' "$FAKE_LOG" || continue ;; esac
     [ -f "$f" ] && { cat "$f"; exit 0; }
@@ -261,6 +262,34 @@ draft_pipeline "$(draft_ran)"
 check "ready stacked PR, light jobs ran: no new pipeline" 0 'build ran' \
   FAKE_PULLS="[$(pr 30 false feat/base)]" "${CCI[@]}"
 not_logged "$RUN_URL" "started a pipeline although the light jobs ran"
+# The PR turns ready while the draft pipeline's `build` is still at its Draft gate:
+# the run waits for it (the heavy path's bounded poll) and decides on its end.
+draft_gate_running() { printf '{"lifecycle":"running","steps":[{"name":"Checkout code"},%s]}' "$DRAFT_GATE"; }
+draft_running_then() { # <final build step json>: the first reads see build at the gate, running
+  fx pipelines "$(pipes p1:8:$SHA)"
+  fx wf_p1.1 "$(wf wf1 running)"; fx wf_p1 "$(wf wf1 success)"
+  fx jobs_wf1.1 "$(jobs build:10:running rust-tests:11:running)"; fx jobs_wf1 "$(jobs build:10:success rust-tests:11:success)"
+  fx job_10.1 "$(draft_gate_running)"; fx job_10 "$1"; fx job_11 "$(step_halted)"
+}
+posts() { grep -cE "$RUN_URL" "$TMP/curl.log"; }
+fx_reset
+event ready_for_review false feat/base
+draft_running_then "$(draft_halted)"
+check "ready stacked PR, build at the Draft gate then halted: waits, one new pipeline" 0 'started CircleCI pipeline 4242' \
+  FAKE_PULLS="[$(pr 30 false feat/base)]" "${CCI[@]}"
+statuses pending
+[ "$(posts)" = 1 ] || { echo "  FAIL: want exactly one pipeline POST, got $(posts)"; FAILED=1; }
+fx_reset
+draft_pipeline "$(draft_halted)"
+: > "$TMP/fx/job_10.1.fail"
+check "ready stacked PR, first build-details read fails then halted: one new pipeline" 0 'started CircleCI pipeline 4242' \
+  FAKE_PULLS="[$(pr 30 false feat/base)]" "${CCI[@]}"
+[ "$(posts)" = 1 ] || { echo "  FAIL: want exactly one pipeline POST, got $(posts)"; FAILED=1; }
+fx_reset
+draft_running_then "$(draft_ran)"
+check "ready stacked PR, build at the Draft gate then ran: no new pipeline" 0 'build ran' \
+  FAKE_PULLS="[$(pr 30 false feat/base)]" "${CCI[@]}"
+not_logged "$RUN_URL" "started a pipeline although build ran past the gate"
 fx_reset
 event ready_for_review false feat/base
 draft_pipeline "$(draft_halted)"

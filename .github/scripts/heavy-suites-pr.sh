@@ -10,9 +10,11 @@
 #
 # - asks the same should-run-heavy.sh the same question. Skip: the commit
 #   status `ci/heavy-suites` goes pending at once. A PR that is ready but
-#   stacked (the heavy suites are not due) still gets its light jobs: when this
-#   commit's newest pipeline halted `build` on the draft, it starts a pipeline
-#   for the branch and does not wait for it.
+#   stacked (the heavy suites are not due) still gets its light jobs: it polls
+#   this commit's newest pipeline's `build` (the same bounded wait and retries)
+#   until it ran past the Draft gate (nothing to start) or halted there (it
+#   starts one pipeline for the branch and does not wait for it). Its status
+#   stays pending.
 # - Run: it watches this commit's newest CircleCI pipeline (the project is
 #   public, so reads need no token) and sets success only when its heavy jobs
 #   are past heavy_gate, running or done. Their ci/circleci checks stay the
@@ -220,7 +222,9 @@ pr_head() {
 }
 
 last=""
+light=0 # 1: only the light jobs are due; the poll below posts no status
 post() { # <state> <description>
+  [ "$light" = 1 ] && return 0
   local desc="${2:0:140}" body
   [ "$1 $desc" = "$last" ] && return 0
   body="$(jq -cn --arg s "$1" --arg c "$CONTEXT" --arg d "$desc" \
@@ -247,28 +251,14 @@ if [ "$verdict" = skip ]; then
   # The heavy suites are not due, but a ready PR still gets the light jobs. They
   # halted if the commit's pipeline was made while the PR was a draft, and no
   # push comes when it turns ready. `build` is the light job to look at: it halts
-  # exactly when the others do (one lookup per workflow). Start a pipeline then;
-  # no wait, the status stays pending either way.
+  # exactly when the others do (one lookup per workflow). It may still be at its
+  # Draft gate when the PR turns ready, so it takes the poll below (same wait,
+  # reads and retries) until build ran (nothing to start) or halted (start one
+  # pipeline, no wait). The status stays pending: the poll posts none.
   lrc=0
   gate light >/dev/null || lrc=$?
-  if [ "$lrc" != 10 ]; then
-    read -r st got <<<"$(ONLY_JOB=build GATE_PREFIX="Draft gate" look)"
-    echo "light jobs: build ${st:-unknown} ${got:+(pipeline $got)}"
-    if [ "$st" = halted ]; then
-      if ! head="$(pr_head)" || [ -z "$head" ] || [ "$head" = "$sha" ]; then
-        if [ -z "${CIRCLECI_API_TOKEN:-}" ]; then
-          echo "::warning::CIRCLECI_API_TOKEN is not set: no new CircleCI pipeline for $branch (its light jobs halted on the draft)."
-        elif started="$(start_pipeline)" && [ -n "$started" ]; then
-          echo "started CircleCI pipeline ${started#* } for $branch: the light jobs halted in pipeline $got while the PR was a draft"
-        else
-          echo "::warning::could not start a CircleCI pipeline for $branch"
-        fi
-      else
-        echo "head of PR #$number is now $head, not $sha: the new commit gets its own pipeline"
-      fi
-    fi
-  fi
-  exit 0
+  [ "$lrc" = 10 ] && exit 0
+  light=1 ONLY_JOB=build GATE_PREFIX="Draft gate"
 fi
 
 # The gate runs the suites (or the PR state is unknown). Success only once the
@@ -283,7 +273,7 @@ while :; do
   i=$(( i + 1 ))
   read -r st got <<<"$(look)"
   [ "$st" = unknown ] || n="$got"
-  echo "poll $i: $st ${got:+(pipeline $got)}"
+  echo "poll $i: ${ONLY_JOB:+$ONLY_JOB }$st ${got:+(pipeline $got)}"
   case "$st" in
     ran)
       post success "Heavy suites running in CircleCI pipeline $n; their ci/circleci checks have the result."
@@ -344,6 +334,7 @@ while :; do
         fi
         read -r mine mine_n <<<"$started"
         echo "started CircleCI pipeline $mine_n for $branch"
+        [ "$light" = 1 ] && exit 0 # the light jobs run in it; nothing waits for them
         post pending "Heavy suites started in CircleCI pipeline $mine_n; waiting for them. $stays"
       fi ;;
   esac
@@ -352,6 +343,10 @@ while :; do
   sleep $(( left < poll_s ? left : poll_s ))
 done
 
+if [ "$light" = 1 ]; then
+  echo "build did not reach a verdict in $(( wait_s / 60 )) min: no pipeline started; re-run the Heavy suites workflow."
+  exit 0
+fi
 if [ "$verdict" = unsure ] && [ -z "$mine" ]; then
   post pending "PR state unknown ($reason). $RERUN"
   exit 0
