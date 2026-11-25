@@ -104,3 +104,25 @@ test("pending removals survive stale reads and retire when mirrored", async () =
     ["y"], ["y", "z"], ["y", "z", "external", "w"], ["x", "y", "external", "w", "last"]
   ]);
 });
+
+test("a failed replace does not become pending membership", async () => {
+  const Thing = Ad4mModel.fromSHACL(callShape("mounttest://Thing"), "MountThing");
+  const { proxy, sent } = proxyWith({ id: MINTED, title: "a", tags: ["x"] });
+  const row = await fetched(Thing, proxy);
+  jest.spyOn(proxy, "instanceUpdate").mockRejectedValueOnce(new Error("refused"));
+  await expect(row.addRelationValue("tags", "z")).rejects.toThrow("refused");
+  await row.addRelationValue("tags", "w");
+  expect(bodies(sent, "instanceUpdate").map((b) => b.properties.tags)).toEqual([["x", "w"]]);
+});
+
+test("a full replace supersedes pending members before another awaited add", async () => {
+  const Thing = Ad4mModel.fromSHACL(callShape("mounttest://Thing"), "MountThing");
+  const { proxy, sent } = proxyWith({ id: MINTED, title: "a", tags: ["x"] });
+  const row = await fetched(Thing, proxy);
+  await row.addRelationValue("tags", "z");
+  await row.setRelationValues("tags", ["q"]);
+  await row.addRelationValue("tags", "w");
+  expect(bodies(sent, "instanceUpdate").map((b) => b.properties.tags)).toEqual([
+    ["x", "z"], ["q"], ["q", "w"]
+  ]);
+});
