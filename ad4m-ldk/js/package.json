@@ -17,7 +17,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "node --experimental-vm-modules --import tsx --test tests/*.test.ts"
+    "test": "TSX_TSCONFIG_PATH=../tsconfig.test.json node --experimental-vm-modules --import tsx --test tests/*.test.ts"
   },
   "license": "CAL-1.0",
   "author": {
@@ -25,6 +25,7 @@
     "email": "info@coasys.org"
   },
   "devDependencies": {
+    "@coasys/ad4m": "workspace:*",
     "tsx": "^4.16.0",
     "typescript": "^5.9.3"
   }
