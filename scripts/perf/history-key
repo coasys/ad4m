@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# The performance history's deploy key on a CI runner that also runs PR jobs.
+#   scripts/perf/history-key use FINGERPRINT     move the key that add_ssh_keys wrote into ~/.ssh
+#                                                to this build's own copy; print its export line
+#   scripts/perf/history-key clean FINGERPRINT   delete the key in ~/.ssh, this build's copy and
+#                                                the ~/.ssh/config lines that name them
+# Both find the files by fixed paths and by the fingerprint, never by a variable an earlier step
+# set, so `clean` (a `when: always` step) also works after any failure in `use`.
+# The copy: $TMPDIR/ad4m-perf-key-$CIRCLE_BUILD_NUM/key. Another nightly job on the host has its
+# own build number, so its cleanup never takes this job's copy.
+# PERF_SSH_DIR replaces ~/.ssh (for the tests).
+set -euo pipefail
+
+cmd="${1:?usage: history-key use|clean FINGERPRINT}"
+want="${2:?usage: history-key use|clean FINGERPRINT}"
+copy="${TMPDIR:-/tmp}/ad4m-perf-key-${CIRCLE_BUILD_NUM:?CIRCLE_BUILD_NUM is not set}"
+ssh_dir="${PERF_SSH_DIR:-$HOME/.ssh}"
+
+# The private keys in ~/.ssh whose fingerprint (SHA256, or MD5 as CircleCI also shows it) is $want.
+matches() {
+    local key hash fp
+    for key in "$ssh_dir"/id_rsa_*; do
+        [ -f "$key" ] && [ "${key%.pub}" = "$key" ] || continue
+        for hash in sha256 md5; do
+            fp=$(ssh-keygen -l -E "$hash" -f "$key" 2>/dev/null | awk '{print $2}') || true
+            if [ "$fp" = "$want" ] || [ "$fp" = "MD5:$want" ]; then
+                echo "$key"
+                break
+            fi
+        done
+    done
+}
+
+# Delete key files and every ~/.ssh/config line that names one of them.
+forget() {
+    local key config="$ssh_dir/config" kept
+    for key in "$@"; do
+        rm -f "$key" "$key.pub"
+        [ -f "$config" ] || continue
+        # The whole file name: `id_rsa_abc` must not take `id_rsa_abc_backup`'s line.
+        kept=$(awk -v k="$(basename "$key")" '!($1 == "IdentityFile" && (n = split($2, p, "/")) && p[n] == k)' "$config")
+        printf '%s\n' "$kept" >"$config"
+    done
+}
+
+# `keys` = matches, one per line (no mapfile: bash 3.2, as on macOS, has none).
+keys=()
+while IFS= read -r key; do keys+=("$key"); done < <(matches)
+
+case "$cmd" in
+use)
+    if [ "${#keys[@]}" -eq 0 ]; then
+        echo "no key file in $ssh_dir matches $want: record pushes with the default keys" >&2
+        exit 0
+    fi
+    rm -rf "$copy"
+    mkdir -m 700 "$copy"
+    # Another nightly job on the host may move the same key out of ~/.ssh between the listing and
+    # the copy: then this job has none, as when no key matched (its push warns; the records stay
+    # in the artifacts).
+    if ! cp "${keys[0]}" "$copy/key" 2>/dev/null; then
+        rm -rf "$copy"
+        echo "the key in $ssh_dir went away before it was copied (another job took it): record pushes with the default keys" >&2
+        exit 0
+    fi
+    chmod 600 "$copy/key"
+    forget ${keys[@]+"${keys[@]}"}
+    echo "history key: $copy/key" >&2
+    echo "export PERF_HISTORY_SSH_KEY=\"$copy/key\""
+    ;;
+clean)
+    forget ${keys[@]+"${keys[@]}"}
+    rm -rf "$copy"
+    ;;
+*)
+    echo "usage: history-key use|clean FINGERPRINT" >&2
+    exit 2
+    ;;
+esac

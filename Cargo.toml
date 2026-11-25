@@ -32,7 +32,7 @@ exclude = [
 # Cargo links="sqlite3" single-owner constraint. Bumping lair's rusqlite pin
 # up aligns the whole chain.
 #
-# The identical [patch] lives in coasys/holochain 0.7.0-space-override-coasys
+# The identical [patch] lives in coasys/holochain 0.7.1-space-override-coasys
 # so HC itself resolves; but cargo [patch.crates-io] does NOT propagate through
 # git deps into the consuming workspace, so AD4M must redeclare it here.
 lair_keystore = { git = "https://github.com/coasys/lair.git", branch = "0.7.1-coasys-rusqlite-0.40" }
