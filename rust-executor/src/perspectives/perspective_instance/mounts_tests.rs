@@ -950,8 +950,13 @@ async fn a_mounted_class_name_gets_one_alias_node() {
 async fn deadline_mount_pair() -> (PerspectiveInstance, AgentContext, String, String) {
     let first = load_mount_test_language().await;
     let controller = crate::languages::LanguageController::global_instance();
-    let source = crate::languages::mount_tests::MOUNT_TEST_SOURCE
-        .replace("MountThing", "DeadlineOtherThing");
+    let source = format!(
+        "{}\n// instance {}\n",
+        crate::languages::mount_tests::MOUNT_TEST_SOURCE
+            .replace("MountThing", "DeadlineOtherThing")
+            .replace("mounttest://", "deadlineother://"),
+        uuid::Uuid::new_v4(),
+    );
     let (_, path) = controller.save_language_bundle(&source, None).unwrap();
     let second = controller.load_language(path, false).await.unwrap();
     let (mut p, ctx) = mounted(&first).await;
