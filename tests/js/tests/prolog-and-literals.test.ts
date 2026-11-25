@@ -793,10 +793,10 @@ describe("Prolog + Literals", () => {
                     await recipe2.get();
 
                     const me = await ad4m!.agent.me();
-                    // @ts-ignore - author and timestamp are added by the system
+                    // @ts-ignore - author and createdAt are added by the system
                     expect(recipe2.author).to.equal(me!.did)
                     // @ts-ignore
-                    expect(recipe2.timestamp).to.not.be.undefined;
+                    expect(recipe2.createdAt).to.be.a('number');
                 })
 
                 it("get() returns all subject entity properties (via getData())", async () => {
@@ -1144,14 +1144,9 @@ describe("Prolog + Literals", () => {
 
                     // 2. Timestamps
                     // Sort recipes by timestamp to ensure consistent ordering
-                    const sortedRecipes = [...allRecipes].sort((a, b) => {
-                        const aTime = typeof a.timestamp === 'number' ? a.timestamp : parseInt(a.timestamp);
-                        const bTime = typeof b.timestamp === 'number' ? b.timestamp : parseInt(b.timestamp);
-                        return aTime - bTime;
-                    });
-                    const recipe2timestamp = typeof sortedRecipes[1].timestamp === 'number' 
-                        ? sortedRecipes[1].timestamp 
-                        : parseInt(sortedRecipes[1].timestamp); // Second recipe by timestamp
+                    const sortedRecipes = [...allRecipes].sort((a, b) => a.createdAt - b.createdAt);
+                    const recipe2timestamp = sortedRecipes[1].createdAt; // Second recipe by timestamp
+                    expect(recipe2timestamp).to.be.a('number');
                     
                     // Test less than (lt) operation on timestamp
                     const recipes5 = await Recipe.findAll(perspective!, { where: { timestamp: { lt: recipe2timestamp } } });
@@ -1648,22 +1643,18 @@ describe("Prolog + Literals", () => {
                     const recipe3Instance = allRecipes.find((r: any) => r.name === "Recipe 3");
                     expect(recipe3Instance).to.not.be.undefined;
                     
-                    if (recipe3Instance && recipe3Instance.timestamp) {
-                        // Convert timestamp to number if it's a string
-                        const recipe3Timestamp = typeof recipe3Instance.timestamp === 'string' 
-                            ? new Date(recipe3Instance.timestamp).getTime() 
-                            : recipe3Instance.timestamp;
-                        
-                        // Count recipes with timestamp greater than recipe3's timestamp
-                        const countAfterRecipe3 = await Recipe.count(perspective!, { 
-                            where: { timestamp: { gt: recipe3Timestamp } } 
-                        });
-                        const findAllAfterRecipe3 = await Recipe.findAll(perspective!, { 
-                            where: { timestamp: { gt: recipe3Timestamp } } 
-                        });
-                        expect(countAfterRecipe3).to.equal(findAllAfterRecipe3.length);
-                        expect(countAfterRecipe3).to.be.at.least(2); // At least recipes 4 and 5
-                    }
+                    const recipe3Timestamp = recipe3Instance!.createdAt;
+                    expect(recipe3Timestamp).to.be.a('number');
+
+                    // Count recipes with timestamp greater than recipe3's timestamp
+                    const countAfterRecipe3 = await Recipe.count(perspective!, {
+                        where: { timestamp: { gt: recipe3Timestamp } }
+                    });
+                    const findAllAfterRecipe3 = await Recipe.findAll(perspective!, {
+                        where: { timestamp: { gt: recipe3Timestamp } }
+                    });
+                    expect(countAfterRecipe3).to.equal(findAllAfterRecipe3.length);
+                    expect(countAfterRecipe3).to.be.at.least(2); // At least recipes 4 and 5
                 })
 
                 it("paginate() and a live page", async () => {
