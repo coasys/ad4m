@@ -146,6 +146,94 @@ test("resolveMountCallSources substitutes {language} in every action list", () =
     assert.equal(shape.properties[0].setter[0].source, "{language}://rec/1");
 });
 
+test("mount.classes: {language} on a non-call action stays byte-identical and does not import the host", async () => {
+    const link = {
+        action: "addLink",
+        source: "this",
+        predicate: "lit://note",
+        target: "literal {language} text",
+    };
+    class LiteralLink {
+        static className = "LiteralLink";
+        static generateSHACL() {
+            return {
+                name: "LiteralLink",
+                shape: {
+                    toJSON: () => ({
+                        node_shape_uri: "lit://LiteralLinkShape",
+                        target_class: "lit://LiteralLink",
+                        constructor_actions: [link],
+                        properties: [],
+                    }),
+                },
+            };
+        }
+    }
+    // No languageAddress: a placeholder on a non-call action must not
+    // reach `import("./imports.js")` (that module loads `ad4m:host`).
+    const lang = defineLanguage({
+        name: "m",
+        async init() {},
+        mount: { classes: [LiteralLink as any], version: "1", snapshot: emptySnapshot },
+    });
+    const shapes = await lang.mountShapes!();
+    const got = (shapes.shapes[0].shape as any).constructor_actions[0];
+    assert.equal(got, link);
+    assert.equal(canonicalJson(got), canonicalJson(link));
+});
+
+test("mount.classes: a call action substitutes source and target; a non-call action stays byte-identical", async () => {
+    const call = {
+        action: "call",
+        source: "{language}://class/X",
+        predicate: "create",
+        target: "see {language}://other",
+    };
+    const link = {
+        action: "setSingleTarget",
+        source: "{language}://stay",
+        predicate: "lit://note",
+        target: "literal {language} text",
+    };
+    let calls = 0;
+    class Mixed {
+        static className = "Mixed";
+        static generateSHACL() {
+            return {
+                name: "Mixed",
+                shape: {
+                    toJSON: () => ({
+                        node_shape_uri: "mix://MixedShape",
+                        target_class: "mix://Mixed",
+                        constructor_actions: [call],
+                        properties: [{ path: "lit://note", setter: [link] }],
+                    }),
+                },
+            };
+        }
+    }
+    const lang = defineLanguage({
+        name: "m",
+        async init() {},
+        mount: {
+            classes: [Mixed as any],
+            version: "1",
+            snapshot: emptySnapshot,
+            languageAddress() {
+                calls += 1;
+                return "langabc";
+            },
+        },
+    });
+    const shapes = await lang.mountShapes!();
+    const shape = shapes.shapes[0].shape as any;
+    assert.equal(calls, 1);
+    assert.equal(shape.constructor_actions[0].source, "langabc://class/X");
+    assert.equal(shape.constructor_actions[0].target, "see langabc://other");
+    assert.equal(shape.properties[0].setter[0], link);
+    assert.equal(canonicalJson(shape.properties[0].setter[0]), canonicalJson(link));
+});
+
 test("mount.classes: {language} only in interpretation_hint does not resolve an address", async () => {
     let called = false;
     class HintOnly {
