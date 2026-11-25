@@ -39,7 +39,7 @@ pub struct InstanceRemoveFromCollectionParams {
 }
 
 /// The collection tools' text for a refused or failed write.
-fn collection_error(error: &InstanceError) -> String {
+pub(super) fn collection_error(error: &InstanceError) -> String {
     if let Some(text) = common_error(error) {
         return text;
     }

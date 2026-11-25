@@ -82,7 +82,7 @@ impl Ad4mMcpHandler {
 }
 
 /// `instance_create`'s text for a refused or failed create.
-fn create_error(error: &InstanceError) -> String {
+pub(super) fn create_error(error: &InstanceError) -> String {
     if let Some(text) = common_error(error) {
         return text;
     }

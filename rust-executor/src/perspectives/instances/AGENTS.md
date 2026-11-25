@@ -7,6 +7,7 @@ The validated instance writes: the one implementation behind the MCP `instance_*
 | File | Role |
 |---|---|
 | `write.rs` | `create`, `update`, `remove`, `add_to_collection`, `remove_from_collection`; their params (`Instance*`, camelCase, also the RPC bodies) and results |
+| `plan.rs` | `apply`: a write plan, several creates and collection adds, each through `create` / `add_to_collection`, in one batch committed at the end or discarded; records the plan makes are named by `ref` (`{ "ref": "…" }` wherever an id goes). Creates and adds only. Used by a bundle tool that answers with `writes` (`mcp/tools/instances/template_tools.rs`) |
 | `validate.rs` | `validate_properties` / `coerce_scalar`: types, cardinality, required, `sh:in`; `ValidationError` (typed: `ValidationProblem`, `Cardinality`, `allowedValues`) |
 | `error.rs` | `InstanceError` (tagged by `kind`, the RPC error's `data`), `WriteStep`, `CascadeStep` |
 | `mod.rs` | `PropView` over a `ModelShape`, class resolution, instance ids, `fetch_instance`, `check_setters`, `property_target`, the remove cascade |

@@ -20,9 +20,12 @@
 //! The two tools' descriptions and arguments are the bundle's own ([`from_bundle`]), so they
 //! follow WE when `build.rs` is pinned to a newer WE release.
 
+use super::collections::collection_error;
+use super::create::create_error;
 use super::{check_setters, class_properties, error_json, fetch_instance, instance_uri};
 use super::{resolve_class, subject_class, validate_properties, Ad4mMcpHandler, WriteMode};
 use crate::agent::did_for_context;
+use crate::perspectives::instances::plan::{self, PlanError, PlannedWrite, MAX_PLANNED_WRITES};
 use crate::perspectives::perspective_instance::{ExpectedLinks, LinksChanged, PerspectiveInstance};
 use crate::tool_bundles::builtin;
 use deno_core::error::AnyError;
@@ -193,6 +196,21 @@ impl Ad4mMcpHandler {
             Err(e) => return error_json(format!("'{name}' failed: {e}")),
         };
         let text = answer["text"].as_str().unwrap_or_default().to_string();
+        if let Some(writes) = answer.get("writes").filter(|w| !w.is_null()) {
+            if !tool.writes {
+                return error_json(format!(
+                    "'{name}' says it writes nothing, yet answered with writes; nothing was written."
+                ));
+            }
+            if answer.get("properties").is_some_and(|p| !p.is_null()) {
+                return error_json(format!(
+                    "'{name}' answered with both properties and writes; nothing was written."
+                ));
+            }
+            return self
+                .apply_tool_writes(&p.perspective_id, name, &text, writes.clone())
+                .await;
+        }
         let properties = match answer.get("properties") {
             Some(Value::Object(map)) if !map.is_empty() => map.clone(),
             _ => return text,
@@ -232,6 +250,53 @@ impl Ad4mMcpHandler {
             Err(WriteError::Refused(e)) => error_json(format!("{e} The tool had said: {text}")),
         }
     }
+    /// Write the records and links a tool answered with (`writes`, a [`plan`] in JSON) as the
+    /// calling agent, all in one batch or none of them. The answer is the tool's text, then what
+    /// each of its refs became.
+    pub(super) async fn apply_tool_writes(
+        &self,
+        perspective_id: &str,
+        name: &str,
+        text: &str,
+        writes: Value,
+    ) -> String {
+        let writes: Vec<PlannedWrite> = match serde_json::from_value(writes) {
+            Ok(writes) => writes,
+            Err(e) => {
+                return error_json(format!(
+                    "'{name}' answered with writes this executor cannot read ({e}); nothing was written."
+                ))
+            }
+        };
+        let kinds: Vec<bool> = writes
+            .iter()
+            .map(|w| matches!(w, PlannedWrite::Create { .. }))
+            .collect();
+        let (mut perspective, agent_context) =
+            match self.get_writable_perspective(perspective_id).await {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+        match plan::apply(&mut perspective, &agent_context, writes).await {
+            Ok(created) => {
+                let made = created
+                    .iter()
+                    .map(|c| format!("{} {} = {}", c.class_name, c.reference, c.base_uri))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if made.is_empty() {
+                    text.to_string()
+                } else {
+                    format!("{text}\nWritten: {made}.")
+                }
+            }
+            Err(e) => error_json(format!(
+                "Nothing was written: {}. The tool had said: {text}",
+                plan_error(&e, &kinds)
+            )),
+        }
+    }
+
     /// Write what a tool answered with through the class's setters, every property in one batch,
     /// committed only if the store still holds `expected`.
     async fn write_record(
@@ -299,6 +364,35 @@ enum WriteError {
 impl From<String> for WriteError {
     fn from(e: String) -> Self {
         WriteError::Refused(e)
+    }
+}
+
+/// Why a plan wrote nothing, as one sentence. `creates[i]` says whether write `i` was a create.
+fn plan_error(error: &PlanError, creates: &[bool]) -> String {
+    match error {
+        PlanError::Empty => "the writes list is empty".into(),
+        PlanError::TooMany { count } => {
+            format!("{count} writes is more than the {MAX_PLANNED_WRITES} one answer may hold")
+        }
+        PlanError::DuplicateRef { index, reference } => {
+            format!("write {index} creates a second record named '{reference}'")
+        }
+        PlanError::UnknownRef { index, reference } => {
+            format!("write {index} names '{reference}', which no create in the writes makes")
+        }
+        PlanError::Write { index, error } => {
+            let worded = if creates.get(*index).copied().unwrap_or(false) {
+                create_error(error)
+            } else {
+                collection_error(error)
+            };
+            let reason = serde_json::from_str::<Value>(&worded)
+                .ok()
+                .and_then(|v| v["error"].as_str().map(str::to_string))
+                .unwrap_or(worded);
+            format!("write {index} was refused: {reason}")
+        }
+        PlanError::Commit { error } => format!("the writes did not commit: {error:#}"),
     }
 }
 
