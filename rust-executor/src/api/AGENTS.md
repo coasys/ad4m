@@ -173,7 +173,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-242 methods: Cap 83, CapAnyPointer 1, Executor 43, Open 5, Operator 28, Owns 80, UserOrOperator 2. Local only (the operator on this machine): 5.
+241 methods: Cap 83, CapAnyPointer 1, Executor 43, Open 5, Operator 30, Owns 77, UserOrOperator 2. Local only (the operator on this machine): 5.
 
 | Method | Guard |
 |---|---|
@@ -294,7 +294,6 @@ the guard checked:
 | `perspective.createSubject` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.discardBatch` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.disposeQuery` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.disposeSparql` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.evaluateGetters` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.executeCommands` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.flowFired` | `Owns(Perspective uuid, perspective:READ)` |
@@ -311,7 +310,6 @@ the guard checked:
 | `perspective.linkMutations` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.mintFlowReceipt` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.modelQuery` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.modelSubscribe` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.mount` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.mounts` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.proposeFlowTransition` | `Owns(Perspective uuid, perspective:UPDATE)` |
@@ -334,8 +332,7 @@ the guard checked:
 | `perspective.shapes` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.snapshot` | `Owns(Perspective uuid, perspective:READ)`, 404 → `null` |
 | `perspective.subjectClassesOf` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.subscribeQuery` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.subscribeSparql` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.subscribe` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.syncMount` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.unmount` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.update` | `Owns(Perspective uuid, perspective:UPDATE)` |
@@ -360,6 +357,7 @@ the guard checked:
 | `runtime.inbox` | `Cap(runtime.messages:READ)` |
 | `runtime.info` | `Open` |
 | `runtime.linkLanguageTemplates` | `Cap(runtime.known_link_languages:READ)` |
+| `runtime.logFilter` | `Operator` |
 | `runtime.logTail` | `Operator` |
 | `runtime.networkMetrics` | `Cap(runtime.hc_agent_info:READ)` |
 | `runtime.notifications` | `Cap(agent:UPDATE)` |
@@ -374,6 +372,7 @@ the guard checked:
 | `runtime.setConfig` | `Operator` |
 | `runtime.setFreeHostingEnabled` | `Executor(*:*)` |
 | `runtime.setHostRates` | `Operator` |
+| `runtime.setLogFilter` | `Operator` |
 | `runtime.setStatus` | `Cap(runtime.my_status:UPDATE)` |
 | `runtime.setUnytMembraneProof` | `Operator` |
 | `runtime.tlsDomain` | `Open` |

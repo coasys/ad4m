@@ -117,7 +117,19 @@ deadline error
 (`a_read_admitted_beside_a_read_that_holds_the_thread_gets_an_error_at_the_deadline`).
 The runtime never
 starts a call whose caller has gone, so a deadline error means the call did
-not run.
+not run. The deadline reads the tokio clock (`tokio::time::Instant`), so a test
+on a paused clock (`start_paused`) reaches it with no real wait
+(`the_deadline_follows_the_paused_tokio_clock`). A test with a real runtime
+thread must not pause the clock: the paused clock advances while the test waits
+on the other thread, and deadlines fire early. `call_deadline_tests.rs` uses a
+200 ms deadline there (`short(&handle)`, a clone of the handle with that
+deadline, only for the call whose expiry the test asserts; the calls that must
+start go on the default deadline) and waits for the runtime's running marker
+(`ordered_call_started`, `concurrent_calls_started`) or the queue report
+(`calls_waiting`) instead of sleeping until a call has probably started.
+`send` inserts the queue report's entry and sends the request under one hold of
+the report's lock, so a depth a reader sees counts requests already in the
+channel.
 
 A call that never returns, by kind. A hung ordered call (an `await` nothing
 settles) blocks the language's ordered calls and its own caller for ever; the

@@ -577,7 +577,7 @@ async fn a_restart_removes_what_an_interrupted_first_mount_wrote() {
         .unwrap();
         assert!(!lang_links(&p, &lang).await.is_empty());
 
-        let handle = p.persisted.lock().await.clone();
+        let handle = p.persisted.snapshot();
         let uuid = handle.uuid.clone();
         let store = p.sparql_store.clone();
         crate::perspectives::unregister_mount(&lang, &uuid);

@@ -31,9 +31,8 @@ async fn a_managed_user_may_not_mount_or_sync() {
     crate::perspectives::get_perspective(&p.0)
         .unwrap()
         .persisted
-        .lock()
-        .await
-        .add_owner(alice);
+        .update(|h| h.add_owner(alice))
+        .await;
     let params = json!({ "uuid": p.0, "languageAddress": lang });
 
     for method in ["perspective.mount", "perspective.syncMount"] {

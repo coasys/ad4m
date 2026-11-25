@@ -131,7 +131,7 @@ async fn setup_with(
     dynamic_class_tools: bool,
 ) -> (Ad4mMcpHandler, String, PerspectiveGuard) {
     let (perspective, _shapes, _ctx) = setup_perspective_no_llm(classes).await;
-    let uuid = perspective.persisted.lock().await.uuid.clone();
+    let uuid = perspective.persisted.load().uuid.clone();
     register_perspective(uuid.clone(), perspective);
     let handler = Ad4mMcpHandler::new(admin_context(dynamic_class_tools));
     let guard = PerspectiveGuard(uuid.clone());
@@ -5374,8 +5374,11 @@ async fn a_users_instance_calls_count_on_its_did() {
     );
 
     let (perspective, _shapes, _ctx) = setup_perspective_no_llm(&[("Message", MESSAGE_SDNA)]).await;
-    perspective.persisted.lock().await.owners = Some(vec![user_did.clone()]);
-    let uuid = perspective.persisted.lock().await.uuid.clone();
+    perspective
+        .persisted
+        .update(|h| h.owners = Some(vec![user_did.clone()]))
+        .await;
+    let uuid = perspective.persisted.load().uuid.clone();
     register_perspective(uuid.clone(), perspective);
     let _guard = PerspectiveGuard(uuid.clone());
 
@@ -5455,7 +5458,7 @@ async fn collection_tools_run_a_call_adder_and_remover() {
     .unwrap();
     let (mut perspective, _shapes, _ctx) = setup_perspective_no_llm(&[]).await;
     perspective.mount(&lang).await.unwrap();
-    let uuid = perspective.persisted.lock().await.uuid.clone();
+    let uuid = perspective.persisted.load().uuid.clone();
     register_perspective(uuid.clone(), perspective);
     let _guard = PerspectiveGuard(uuid.clone());
     let handler = Ad4mMcpHandler::new(admin_context(false));
