@@ -13,6 +13,8 @@
 #   scripts/coasys-spaces.sh build-web   build we-web with the Coasys seed
 #   scripts/coasys-spaces.sh test        run test:spaces, log into the artifacts
 #   scripts/coasys-spaces.sh record      note this commit pair as passed (for preflight)
+#   scripts/coasys-spaces.sh we-sha      print the WE commit the suite ran (the performance history
+#                                        records it beside the ad4m commit)
 #   scripts/coasys-spaces.sh all         every step above, preflight forced
 #
 # Environment (all optional):
@@ -432,14 +434,21 @@ cmd_test() {
         pnpm --filter "$WE_PACKAGE" test:spaces 2>&1 | tee "$ARTIFACTS/test-spaces.log"
 }
 
+# The WE commit `we` cloned, which `test` ran.
+tested_we_sha() {
+    local we_sha
+    we_sha="$(cat "$WORK/we.sha" 2>/dev/null || true)"
+    is_sha "$we_sha" || die "no tested WE commit in $WORK/we.sha"
+    printf '%s\n' "$we_sha"
+}
+
 cmd_record() {
     local we_sha
     if [ -e "$WORK/unrecorded" ]; then
         log "not recorded: the checkout had changes at preflight ($(wc -l <"$WORK/unrecorded") paths)"
         return 0
     fi
-    we_sha="$(cat "$WORK/we.sha")"
-    is_sha "$we_sha" || die "no tested WE commit in $WORK/we.sha"
+    we_sha="$(tested_we_sha)"
     mkdir -p "$STATE"
     run_key "$we_sha" >"$STATE/last-success.tmp"
     mv "$STATE/last-success.tmp" "$STATE/last-success"
@@ -456,6 +465,7 @@ case "${1:-}" in
     build-web) cmd_build_web ;;
     test) cmd_test ;;
     record) cmd_record ;;
+    we-sha) tested_we_sha ;;
     all)
         COASYS_SPACES_FORCE=1 cmd_preflight
         (cmd_executor)

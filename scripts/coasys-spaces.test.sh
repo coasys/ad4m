@@ -187,6 +187,12 @@ test_record_needs_we_sha() {
     [ ! -e "$COASYS_SPACES_STATE/last-success" ] || fail "record wrote a pair without a WE commit"
 }
 
+test_we_sha_prints_the_tested_commit() {
+    bash "$SCRIPT" we-sha >/dev/null 2>&1 && fail "we-sha passed without a cloned WE commit"
+    mkdir -p "$COASYS_SPACES_WORK" && echo "$WE_HEAD" >"$COASYS_SPACES_WORK/we.sha"
+    [ "$(bash "$SCRIPT" we-sha)" = "$WE_HEAD" ] || fail "we-sha did not print $WE_HEAD"
+}
+
 test_we_ref_must_be_a_name() {
     make_we
     for ref in --upload-pack=touch "dev x" 'dev;true'; do
@@ -337,7 +343,7 @@ test_llm_context_window() {
 
 for t in test_executor_from_zst test_executor_from_gz test_executor_missing \
     test_executor_checksum_mismatch test_executor_other_commit test_executor_size_mismatch \
-    test_executor_unknown_file test_preflight test_dirty_checkout_is_not_recorded test_record_needs_we_sha test_we_ref_must_be_a_name \
+    test_executor_unknown_file test_preflight test_dirty_checkout_is_not_recorded test_record_needs_we_sha test_we_sha_prints_the_tested_commit test_we_ref_must_be_a_name \
     test_sdk_needs_the_checkout_at_ad4m_sha test_chromium_package test_test_records_llm_registration \
     test_test_needs_the_suite test_llm_check \
     test_llm_context_window; do
