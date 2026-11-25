@@ -18,10 +18,29 @@
 export function normalizeValue(value: any): any {
   if (Array.isArray(value)) {
     return value.map((v: any) =>
-      v && typeof v === 'object' && typeof v.id === 'string' ? v.id : v,
+      v && typeof v === 'object' && typeof v.id === 'string' ? v.id : copyJson(v),
     );
   }
-  return value;
+  return copyJson(value);
+}
+
+/**
+ * A JSON object value is copied, so a snapshot keeps what the field held when it
+ * was taken even if the caller changes that object afterwards (the write queued
+ * in a transaction is a copy too). Any other value is returned as it is.
+ */
+function copyJson(value: any): any {
+  return isPlainObject(value) ? JSON.parse(JSON.stringify(value)) : value;
+}
+
+function isPlainObject(value: any): boolean {
+  return value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+/** Whether two normalized values are the same: JSON objects by content, anything else by `===`. */
+export function sameValue(a: any, b: any): boolean {
+  if (isPlainObject(a) && isPlainObject(b)) return JSON.stringify(a) === JSON.stringify(b);
+  return a === b;
 }
 
 

@@ -14,6 +14,7 @@ import { LiveQuery } from "../perspectives/LiveQuery";
 import type { LiveOptions } from "../perspectives/LiveQuery";
 import {
   normalizeValue,
+  sameValue,
 } from "./hydration";
 import type {
   Scope, IncludeMap, Query,
@@ -1003,10 +1004,10 @@ export class Ad4mModel {
           a.sort();
           b.sort();
         }
-        if (a.length !== b.length || a.some((v: any, i: number) => v !== b[i])) {
+        if (a.length !== b.length || a.some((v: any, i: number) => !sameValue(v, b[i]))) {
           changed.push(field);
         }
-      } else if (current !== original) {
+      } else if (!sameValue(current, original)) {
         changed.push(field);
       }
     }

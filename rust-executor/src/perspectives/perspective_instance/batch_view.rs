@@ -96,18 +96,29 @@ impl PerspectiveInstance {
         batch_id: Option<&str>,
     ) -> Result<Vec<EffectiveLink>, AnyError> {
         let persisted = self.get_links(query).await?;
+        Ok(self.overlay_batch(persisted, query, batch_id).await)
+    }
+
+    /// [`Self::get_links_effective`] over a committed read the caller already holds (and may
+    /// have recorded), so a decision and the expectation recorded for it come from one read.
+    pub(crate) async fn overlay_batch(
+        &self,
+        persisted: Vec<DecoratedLinkExpression>,
+        query: &LinkQuery,
+        batch_id: Option<&str>,
+    ) -> Vec<EffectiveLink> {
         let Some(bid) = batch_id else {
-            return Ok(persisted
+            return persisted
                 .into_iter()
                 .map(EffectiveLink::committed)
-                .collect());
+                .collect();
         };
         let batches = self.batch_store.read().await;
         let Some(batch) = batches.get(bid) else {
-            return Ok(persisted
+            return persisted
                 .into_iter()
                 .map(EffectiveLink::committed)
-                .collect());
+                .collect();
         };
 
         let relevant = |link: &Link| {
@@ -150,7 +161,7 @@ impl PerspectiveInstance {
                 }
             }
         }
-        Ok(out)
+        out
     }
 
     /// Open a private batch seeded with a copy of `batch_id`'s staged work, so the reads of a

@@ -3552,9 +3552,15 @@ describe("Ad4mModel.transaction()", () => {
       (card as any).title = config;
       await card.save(tx.batchId);
       config.enabled = true;
+      // The snapshot holds a copy too: the field is still a change, and the next save writes it.
+      expect(card.changedFields()).toEqual(["title"]);
+      await card.save(tx.batchId);
     });
     expect(perspective.mutate).toHaveBeenCalledWith(
-      [{ op: "create", class: "tx://TxCard", id: "tx://j1", values: { title: { enabled: false } } }],
+      [
+        { op: "create", class: "tx://TxCard", id: "tx://j1", values: { title: { enabled: false } } },
+        { op: "update", class: "tx://TxCard", id: "tx://j1", set: { title: { enabled: true } } },
+      ],
       { batch: "batch-1" },
     );
   });

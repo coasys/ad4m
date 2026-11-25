@@ -2594,6 +2594,37 @@ mod review_round_4 {
         );
     }
 
+    /// A child created under a parent given by id alone (no relation) goes through the
+    /// container's `children`: a class the call deleted from that parent is not one of its
+    /// classes any more, so the child is linked by `ad4m://has_child`, not by that class's
+    /// `held` adder.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_contained_child_is_linked_by_has_child_when_the_call_deleted_the_holder() {
+        let (mut p, _s, ctx) =
+            setup_perspective_no_llm(&[("Note", NOTE_SDNA), ("Holdr", HOLDR_SDNA)]).await;
+        ok(
+            &mut p,
+            &ctx,
+            json!([{"op":"create","class":"Holdr","id":"ns://p","values":{"title":"t"}}]),
+        )
+        .await;
+        ok(
+            &mut p,
+            &ctx,
+            json!([
+                {"op":"delete","class":"Holdr","id":"ns://p"},
+                {"op":"create","class":"Note","id":"ns://c","values":{"title":"c"},
+                 "parent":{"id":"ns://p"}}
+            ]),
+        )
+        .await;
+        assert_eq!(
+            stored_targets(&p, "ns://p", "ad4m://has_child").await,
+            vec!["ns://c"]
+        );
+        assert!(stored_targets(&p, "ns://p", "ns://held").await.is_empty());
+    }
+
     /// An update through an abstract class reaches a class the call staged, as an add does.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_abstract_set_reaches_a_class_staged_in_the_call() {
@@ -2696,5 +2727,134 @@ mod review_round_4 {
             stored_targets(&p, "ns://l", "ns://kind").await,
             vec!["ns://thing"]
         );
+    }
+
+    /// A create of the same id that commits after this create decided the instance was absent
+    /// but before the links that show an instance were read must not become this create's
+    /// expectation. The links are read first, so the competitor either shows in the existence
+    /// check (`AlreadyExists`, here) or changed what was read (`ConcurrentWrite`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_create_that_lands_between_the_existence_reads_and_the_check_is_seen() {
+        const KINDED_SDNA: &str = r#"{
+  "target_class": "ns://Kinded",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"ns://kind","target":"ns://thing"}
+  ],
+  "properties": [
+    {"path":"ns://kind","name":"kind","has_value":"ns://thing","min_count":1,"max_count":1}
+  ]
+}"#;
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Kinded", KINDED_SDNA)]).await;
+        let (mut other, other_ctx) = (p.clone(), ctx.clone());
+        *p.read_gap_hook.lock().unwrap() = Some(Box::new(move || {
+            Box::pin(async move {
+                ok(
+                    &mut other,
+                    &other_ctx,
+                    json!([{"op":"create","class":"Kinded","id":"ns://l","values":{}}]),
+                )
+                .await;
+            })
+        }));
+        let err = refused(
+            &mut p,
+            &ctx,
+            json!([{"op":"create","class":"Kinded","id":"ns://l","values":{}}]),
+        )
+        .await;
+        assert!(
+            matches!(err, InstanceError::AlreadyExists { .. }),
+            "{err:?}"
+        );
+        assert_eq!(
+            stored_targets(&p, "ns://l", "ns://kind").await,
+            vec!["ns://thing"]
+        );
+    }
+
+    /// A class with only optional properties is recognised by any link of a declared predicate,
+    /// so a create reads all of them: two creates of one id, one setting `a` and one setting
+    /// `b`, do not both commit and merge.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_creates_of_one_id_setting_different_optional_properties_do_not_both_commit() {
+        const OPTIONAL_SDNA: &str = r#"{
+  "target_class": "ns://Optional",
+  "properties": [
+    {"path":"ns://opt_a","name":"a","datatype":"xsd:string","max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://opt_a","target":"value"}]},
+    {"path":"ns://opt_b","name":"b","datatype":"xsd:string","max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://opt_b","target":"value"}]}
+  ]
+}"#;
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Optional", OPTIONAL_SDNA)]).await;
+        let (mut other, other_ctx) = (p.clone(), ctx.clone());
+        *p.mutate_gap_hook.lock().unwrap() = Some(Box::new(move || {
+            Box::pin(async move {
+                ok(
+                    &mut other,
+                    &other_ctx,
+                    json!([{"op":"create","class":"Optional","id":"ns://o","values":{"b":"B"}}]),
+                )
+                .await;
+            })
+        }));
+        let err = refused(
+            &mut p,
+            &ctx,
+            json!([{"op":"create","class":"Optional","id":"ns://o","values":{"a":"A"}}]),
+        )
+        .await;
+        assert!(matches!(err, InstanceError::ConcurrentWrite), "{err:?}");
+        assert!(stored_targets(&p, "ns://o", "ns://opt_a").await.is_empty());
+        assert_eq!(stored_targets(&p, "ns://o", "ns://opt_b").await.len(), 1);
+    }
+
+    /// A required collection holds {a}. A removal of `a` decides whether a member is left from
+    /// the committed read it records, not from a second read: a writer that adds `b` after that
+    /// read, and removes it again before the commit, leaves the store as recorded, so the
+    /// commit accepts. Deciding from the second read would see `b`, pass, and leave the
+    /// collection empty.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_added_after_the_recorded_read_does_not_count_as_left() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[("Labelled", LABELLED_SDNA)]).await;
+        ok(
+            &mut p,
+            &ctx,
+            json!([{"op":"create","class":"Labelled","id":"ns://l","values":{"labels":["ns://a"]}}]),
+        )
+        .await;
+        let (mut adder, adder_ctx) = (p.clone(), ctx.clone());
+        *p.read_gap_hook.lock().unwrap() = Some(Box::new(move || {
+            Box::pin(async move {
+                ok(
+                    &mut adder,
+                    &adder_ctx,
+                    json!([{"op":"update","class":"Labelled","id":"ns://l","add":{"labels":["ns://b"]}}]),
+                )
+                .await;
+            })
+        }));
+        let (mut remover, remover_ctx) = (p.clone(), ctx.clone());
+        *p.mutate_gap_hook.lock().unwrap() = Some(Box::new(move || {
+            Box::pin(async move {
+                ok(
+                    &mut remover,
+                    &remover_ctx,
+                    json!([{"op":"update","class":"Labelled","id":"ns://l","remove":{"labels":["ns://b"]}}]),
+                )
+                .await;
+            })
+        }));
+        let err = refused(
+            &mut p,
+            &ctx,
+            json!([{"op":"update","class":"Labelled","id":"ns://l","remove":{"labels":["ns://a"]}}]),
+        )
+        .await;
+        assert!(matches!(err, InstanceError::Validation { .. }), "{err:?}");
+        // The call was refused at its first op, so `a` stays (and the writer's `b` with it).
+        assert!(stored_targets(&p, "ns://l", "ns://label")
+            .await
+            .contains(&"ns://a".to_string()));
     }
 }

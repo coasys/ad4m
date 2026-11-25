@@ -734,7 +734,7 @@ await Recipe.delete(perspective, recipeId);
 
 ### Dirty Tracking
 
-After fetching an instance, AD4M takes a snapshot of all field values. You can inspect what changed:
+After fetching an instance, AD4M takes a snapshot of all field values (an object-valued field is copied, so changing the object later is a change, not a silent edit of the snapshot). You can inspect what changed:
 
 ```typescript
 const recipe = await Recipe.findOne(perspective);

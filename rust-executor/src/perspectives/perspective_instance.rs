@@ -756,6 +756,13 @@ pub struct PerspectiveInstance {
     /// can land a commit or a raw write on the caller's batch while the call is in flight.
     #[cfg(test)]
     pub(crate) mutate_gap_hook: Arc<std::sync::Mutex<Option<MutateGapHook>>>,
+    /// Test-only hook run once by a validated write after it read the committed links its
+    /// decision rests on (a create's existence links, a removal's remaining members) and before
+    /// it decides, so a test can land a competing write between the two.
+    /// A write that decided from a second read would see it; one that decides from the read it
+    /// recorded does not.
+    #[cfg(test)]
+    pub(crate) read_gap_hook: Arc<std::sync::Mutex<Option<MutateGapHook>>>,
     /// Test-only: makes the next [`Self::commit_batch`] fail, dropping the
     /// batch as a real failure does. Compiled out in non-test builds — see
     /// [`Self::fail_next_commit_batch`].
@@ -871,6 +878,8 @@ impl PerspectiveInstance {
             ingest_gap_hook: Arc::new(std::sync::Mutex::new(None)),
             #[cfg(test)]
             mutate_gap_hook: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(test)]
+            read_gap_hook: Arc::new(std::sync::Mutex::new(None)),
             #[cfg(test)]
             fail_next_commit: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]

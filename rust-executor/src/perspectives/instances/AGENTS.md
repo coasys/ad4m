@@ -48,11 +48,14 @@ Invariants:
   collection setter, a clear: each records the `(source, predicate)` links it read, an empty
   read included (`record_read`, the batch's `reads`: every distinct read of a pair is kept, so
   a decision made on a later read is checked at the commit too; a create reads the links that
-  make the id an instance — flags and required properties — so it expects the id still
-  absent) — plus the committed members of a
-  required collection that `require_members_left` counted on (`get_links`, not the batch's
-  effective view: two calls each removing a different member must not both commit and
-  empty it) — plus, for removals by id that no such read covers (`remove`), what the store
+  make the id an instance — the required properties (flags included), else the first property
+  with an initial value, else every declared predicate (`model_query::existence_predicates`,
+  the same tiers the query matches by) — BEFORE it checks the id is absent, so a create that commits between
+  the two shows in the check or changes what was read) — plus the committed members of a
+  required collection that `require_members_left` counted on (`get_links`, one read: it is
+  recorded and the batch's staged work is overlaid on that same read (`overlay_batch`), so the
+  decision and the expectation agree; two calls each removing a different member must not both
+  commit and empty it) — plus, for removals by id that no such read covers (`remove`), what the store
   holds now, a removal no longer held failing at once.
   Links are compared in full (author, timestamp, target). Another writer that changed them
   meanwhile makes the call fail with `ConcurrentWrite` (409, retryable): two calls that set one

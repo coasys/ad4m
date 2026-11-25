@@ -26,6 +26,7 @@ use super::{
 };
 use crate::agent::AgentContext;
 use crate::mcp::shacl;
+use crate::perspectives::model_query::existence_predicates;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus};
 use deno_core::anyhow::anyhow;
@@ -337,6 +338,46 @@ pub(crate) async fn create_with(
         Some(uri) if !uri.trim().is_empty() => link_target(uri.trim()),
         _ => generate_instance_uri(),
     };
+    // The create rests on the instance being absent. Absence is decided from the store, and
+    // the links that show an instance (below) are what the commit holds this create to, so the
+    // links are read and recorded FIRST: a create of the same id that commits after those reads
+    // either shows in the existence check (`AlreadyExists`) or changed what was read (the
+    // commit refuses with `ConcurrentWrite`). Read after the check, a winner's links committed
+    // in between would be recorded as this call's expectation and both creates would succeed.
+    //
+    // `fetch_instance` finds a record by the links of `existence_predicates` (the tiers of
+    // `shape_conformance_patterns` in `model_query::sparql_builder`). Those links are read as
+    // they stand and recorded into the create's batch, so the commit
+    // (`commit_batch_if`, which `mutate` runs for its own batch) refuses it as `ConcurrentWrite`
+    // when a create of the same id landed in between. A caller's batch commits elsewhere, so the
+    // read only travels with it.
+    for predicate in existence_predicates(&shape) {
+        let query = LinkQuery {
+            source: Some(base_uri.clone()),
+            predicate: Some(predicate.to_string()),
+            ..Default::default()
+        };
+        let held = perspective.get_links(&query).await.map_err(|e| {
+            failed(
+                &class_name,
+                WriteStep::CheckExisting {
+                    base_uri: base_uri.clone(),
+                },
+                e,
+            )
+        })?;
+        perspective
+            .record_read(&params.batch_id, &base_uri, &query.predicate, &held)
+            .await;
+    }
+    #[cfg(test)]
+    {
+        let hook = perspective.read_gap_hook.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook().await;
+        }
+    }
+
     // Three arms, not `if let Ok(Some(_))`: a store/query failure must not read as "no instance
     // found" and let the create land on top of an existing instance, merging its property
     // links.
@@ -361,47 +402,6 @@ pub(crate) async fn create_with(
                 anyhow!(e),
             ))
         }
-    }
-    // The create rests on the instance being absent. `fetch_instance` finds a record by the
-    // forward links of the class's required properties (flags included) or, when none is
-    // required, of its first property with an initial value (`conformance_patterns` in
-    // `model_query::sparql_builder`). Those links are read as they stand and recorded into the
-    // create's batch, so the commit (`commit_batch_if`, which `mutate` runs for its own batch)
-    // refuses it as `ConcurrentWrite` when a create of the same id landed in between. A caller's
-    // batch commits elsewhere, so the read only travels with it.
-    let required = shape
-        .properties
-        .iter()
-        .filter(|prop| prop.is_required && !prop.predicate.is_empty())
-        .collect::<Vec<_>>();
-    let existence_props = if required.is_empty() {
-        shape
-            .properties
-            .iter()
-            .find(|prop| prop.initial_value.is_some() && !prop.predicate.is_empty())
-            .into_iter()
-            .collect()
-    } else {
-        required
-    };
-    for prop in existence_props {
-        let query = LinkQuery {
-            source: Some(base_uri.clone()),
-            predicate: Some(prop.predicate.clone()),
-            ..Default::default()
-        };
-        let held = perspective.get_links(&query).await.map_err(|e| {
-            failed(
-                &class_name,
-                WriteStep::CheckExisting {
-                    base_uri: base_uri.clone(),
-                },
-                e,
-            )
-        })?;
-        perspective
-            .record_read(&params.batch_id, &base_uri, &query.predicate, &held)
-            .await;
     }
 
     // Resolve every collection predicate BEFORE creating the subject, so a bad collection name
@@ -910,7 +910,8 @@ pub(crate) async fn add_to_collection_with(
 
 /// A required collection keeps a member: after the removals and additions of one update, an
 /// instance whose `collection` has none left is refused, as `set: []` is. Replacing the last
-/// member in the same update passes. Reads the batch's effective graph.
+/// member in the same update passes. Reads the committed members once, records that read, and
+/// decides on it overlaid with the batch's staged work.
 pub(super) async fn require_members_left(
     perspective: &PerspectiveInstance,
     class_name: &str,
@@ -970,18 +971,16 @@ pub(super) async fn require_members_left(
             )
             .await;
     }
-    let left = perspective
-        .get_links_effective(&query, batch_id)
-        .await
-        .map_err(|e| {
-            failed(
-                &class_name,
-                WriteStep::ReadCollection {
-                    collection: collection.to_string(),
-                },
-                e,
-            )
-        })?;
+    #[cfg(test)]
+    {
+        let hook = perspective.read_gap_hook.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook().await;
+        }
+    }
+    // Decided from the read just recorded, not a second one: a write that lands between two
+    // reads would be counted here yet be gone at the commit, which accepts the recorded set.
+    let left = perspective.overlay_batch(committed, &query, batch_id).await;
     if left.is_empty() {
         return Err(invalid(
             &class_name,
