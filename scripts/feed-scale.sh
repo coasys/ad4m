@@ -22,16 +22,21 @@
 #                                     million messages) goes to <work>/tmp, emptied before and
 #                                     after — also when the step is stopped: the suite runs in a
 #                                     process group of its own so a kill reaches the executor and
-#                                     the browser too
+#                                     the browser too; a child the launcher leaves behind is
+#                                     ended too. The step clears results.json and metrics.json and
+#                                     writes <artifacts>/build.id first
 #   scripts/feed-scale.sh cleanup     kill what a stopped run left (the executor, a process with
-#                                     its data under <work>/tmp) and empty the data dir
-#   scripts/feed-scale.sh perf        hand metrics.json to the performance history:
+#                                     its data under <work>/tmp; both paths matched as literal
+#                                     text) and empty the data dir
+#   scripts/feed-scale.sh perf        hand metrics.json to the performance history, only for the
+#                                     results of this build's test step (build.id):
 #                                     scripts/perf/record, scripts/perf/report (the trend page),
 #                                     then scripts/perf/check on a passed run (a serious
 #                                     regression fails the step)
 #   scripts/feed-scale.sh record      note this commit pair as measured (for preflight)
 #   scripts/feed-scale.sh summary     print the run's summary line (the job log's last)
-#   scripts/feed-scale.sh all         every step above, preflight forced
+#   scripts/feed-scale.sh all         every step above, preflight forced; test and perf each run as a
+#                                     process of their own, and `all` fails if either fails
 #
 # Environment (all optional):
 #   AD4M_SHA                the ad4m commit (CIRCLE_SHA1, else HEAD)
@@ -88,16 +93,24 @@ is_sha() { printf '%s' "$1" | grep -Eq '^[0-9a-f]{40}$'; }
 # $DATA and $ARTIFACTS get rm -rf, whatever the subcommand. Refuse the values that would make
 # that rm -rf disastrous — a relative path, / or $HOME itself.
 guard_rm_dirs() {
-    local var val
+    local var val norm home
+    home="$(printf '%s' "$HOME" | tr -s /)"
+    home="${home%/}"
     for var in WORK ARTIFACTS; do
         val="${!var}"
         case "$val" in
             /*) ;;
             *) die "$var '$val' is not an absolute path" ;;
         esac
-        # Nothing left without its slashes is / (or //); $HOME with or without a
-        # trailing slash is $HOME.
-        if [ -z "${val//\//}" ] || [ "${val%/}" = "$HOME" ]; then
+        # A `.` or `..` part can name any directory: refuse it, do not resolve it.
+        case "/$val/" in
+            */./* | */../*) die "$var '$val' has a . or .. part" ;;
+        esac
+        # Compare the path as rm -rf sees it: repeated slashes are one slash, a trailing slash
+        # is none. Nothing left is / (also //); $HOME spelled as $HOME// is $HOME.
+        norm="$(printf '%s' "$val" | tr -s /)"
+        norm="${norm%/}"
+        if [ -z "$norm" ] || [ "$norm" = "$home" ]; then
             die "$var is '${!var}'; a run rm -rf's under it"
         fi
     done
@@ -183,12 +196,16 @@ empty_data() {
     mkdir -p "$DATA"
 }
 
+# A literal string as an extended regular expression (pkill -f reads its pattern as one): a `.`
+# in $HOME/.cache must not match any character.
+regex_quote() { printf '%s' "$1" | sed 's/[][\\.^$*+?(){}|]/\\&/g'; }
+
 # What a stopped step can leave on a shared runner: the executor still running, a suite
-# process with its data under $DATA. Killed by command line, this user's processes only;
-# no match is not an error. Then the data dir goes.
+# process with its data under $DATA. Killed by command line, this user's processes only, the
+# two paths matched as literal text; no match is not an error. Then the data dir goes.
 cmd_cleanup() {
-    pkill -u "$(id -u)" -f "$EXECUTOR" 2>/dev/null || true
-    pkill -u "$(id -u)" -f "$DATA/" 2>/dev/null || true
+    pkill -u "$(id -u)" -f "$(regex_quote "$EXECUTOR")" 2>/dev/null || true
+    pkill -u "$(id -u)" -f "$(regex_quote "$DATA/")" 2>/dev/null || true
     empty_data
 }
 
@@ -226,7 +243,10 @@ cmd_test() {
         die "WE $WE_REF has no $WE_PACKAGE with a test:feed-scale script at apps/we-web"
     use_we_pnpm
     mkdir -p "$ARTIFACTS"
-    rm -f "$RESULTS"
+    # Both files are this attempt's or none: perf must not pair a new verdict with the metrics of an
+    # earlier attempt. The marker says the files below belong to this build (see results_status).
+    rm -f "$RESULTS" "$METRICS" "$ARTIFACTS/build.id"
+    build_id >"$ARTIFACTS/build.id"
     {
         echo "ad4m $AD4M_SHA"
         echo "we $(cat "$WORK/we.sha" 2>/dev/null || echo "?") ($WE_REF)"
@@ -235,7 +255,9 @@ cmd_test() {
         echo "data $DATA ($(df -h --output=avail "$WORK" | tail -1 | tr -d ' ') free)"
     } | tee "$ARTIFACTS/run.txt"
     empty_data
-    local free_kb suite_pid rc=0
+    # suite_pid is the script's, not the function's: the EXIT trap (suite_cleanup) runs after
+    # this function returned.
+    local free_kb rc=0
     # A million-message store is ~12 GB on disk, its links file up to 12 GB more; starting under
     # the minimum is a suite that dies half-way, mid-measurement.
     free_kb="$(df -k --output=avail "$WORK" | tail -1 | tr -d ' ')"
@@ -261,14 +283,21 @@ cmd_test() {
         ' -- "$WE_DIR" "$WE_PACKAGE" "$ARTIFACTS/test-feed-scale.log" &
     suite_pid=$!
     wait "$suite_pid" || rc=$?
-    trap - EXIT TERM INT
-    empty_data
+    # Not disarmed: the launcher can return while the suite's group still holds a child. The
+    # EXIT trap, suite_cleanup, ends the group if it is alive, empties the data dir and keeps
+    # this status.
     return "$rc"
 }
 
-# The suite's verdict, from results.json: passed, failed, or none when it wrote no results.
+# What marks this build's files in the artifacts: the CI build number (none by hand) and the ad4m
+# commit. The artifacts dir outlives the job on a runner, so a job that stopped before its test
+# step must not read the files of the job before it.
+build_id() { echo "${CIRCLE_BUILD_NUM:-local} $AD4M_SHA"; }
+
+# The suite's verdict, from results.json: passed, failed, or none when it wrote no results, or
+# when the results are not of this build's test step.
 results_status() {
-    [ -s "$RESULTS" ] || {
+    [ -s "$RESULTS" ] && [ "$(cat "$ARTIFACTS/build.id" 2>/dev/null || true)" = "$(build_id)" ] || {
         echo none
         return
     }
@@ -348,8 +377,12 @@ case "${1:-}" in
         cmd_we
         coasys_spaces build-web
         rc=0
-        (cmd_test) || rc=$?
-        (cmd_perf) || rc=$((rc ? rc : $?))
+        # Each in its own process: inside a subshell on the left of `||` errexit is off, and a
+        # failing step inside perf would pass when its last command did.
+        bash "$0" test || rc=$?
+        p=0
+        bash "$0" perf || p=$?
+        rc=$((rc ? rc : p))
         if [ "$rc" = 0 ]; then cmd_record; fi
         cmd_summary
         exit "$rc"

@@ -55,6 +55,81 @@ fn link(signer: &TestSigner, source: &str, predicate: &str, target: &str) -> Lin
     }
 }
 
+/// An import takes `persist_lock` like every perspective-level write: while a diff's
+/// write holds it, the import waits, and it commits once the lock is free.
+#[tokio::test(flavor = "multi_thread")]
+async fn import_waits_for_persist_lock() {
+    let perspective = import_test_perspective();
+    let signer = TestSigner::generate();
+    let file = export_file(vec![(
+        link(&signer, "ad4m://s", "ad4m://p", "ad4m://t"),
+        LinkStatus::Shared,
+    )
+        .into()]);
+    let held = perspective
+        .persist_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let importing = perspective.clone();
+    let path = file.path().to_path_buf();
+    let mut task = tokio::spawn(async move { importing.import_links_file(&path).await });
+    // Nothing signals "still waiting": the bound is how long the import gets to
+    // show it did not wait.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), &mut task)
+            .await
+            .is_err(),
+        "the import finished while persist_lock was held"
+    );
+    assert!(!perspective.sparql_store.has_data());
+    drop(held);
+    let stats = task.await.unwrap().expect("the import succeeds");
+    assert_eq!(stats.imported, 1);
+}
+
+/// A caller that gives up (the socket drops the RPC's future) does not stop a load that
+/// already started: it still clears the caches and queues the checks.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_import_still_queues_its_checks() {
+    let perspective = import_test_perspective();
+    let signer = TestSigner::generate();
+    let file = export_file(vec![(
+        link(&signer, "ad4m://s", "ad4m://p", "ad4m://t"),
+        LinkStatus::Shared,
+    )
+        .into()]);
+    let held = perspective
+        .persist_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    {
+        // One poll starts the import; dropping the future then is what a cancelled
+        // RPC does. The held lock keeps the load from finishing before the drop.
+        let mut call = Box::pin(perspective.import_links_file(file.path()));
+        assert!(futures::poll!(&mut call).is_pending());
+    }
+    assert!(!perspective
+        .trigger_subscription_check
+        .load(Ordering::Acquire));
+    drop(held);
+
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        // The last check the import queues.
+        while !perspective
+            .trigger_notification_check
+            .load(Ordering::Acquire)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the cancelled import never queued its checks");
+    assert!(perspective
+        .trigger_subscription_check
+        .load(Ordering::Acquire));
+    assert!(perspective.sparql_store.has_data());
+}
+
 /// After an import, a notification whose trigger only the imported links
 /// satisfy is queued for evaluation, subscriptions re-check every query,
 /// and the imported link answers the trigger — all without a published

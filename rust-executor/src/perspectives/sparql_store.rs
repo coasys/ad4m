@@ -1336,6 +1336,28 @@ SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proo
     )
 }
 
+/// Why an import refused the file: the file is at fault (malformed, not an
+/// export, a link it may not carry), not the store or the disk. A caller
+/// finds it with `downcast_ref` to answer with a request error rather than a
+/// server one.
+#[derive(Debug)]
+pub struct ImportRefused(pub String);
+
+impl std::fmt::Display for ImportRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ImportRefused {}
+
+/// `anyhow!` for a refusal of the file ([`ImportRefused`]).
+macro_rules! import_refused {
+    ($($arg:tt)*) => {
+        Error::new(ImportRefused(format!($($arg)*)))
+    };
+}
+
 /// A file import's counters ([`SparqlStore::import_links_file`]).
 #[derive(Debug, Default)]
 pub struct LinkImportStats {
@@ -1385,6 +1407,29 @@ enum DocPos {
     /// The `}` was read — the document is complete; only whitespace may
     /// follow.
     Sealed,
+}
+
+/// The longest raw spelling of the member name `links` in JSON: five
+/// `\uXXXX` escapes.
+const MAX_KEY_SPELLING: usize = 30;
+
+/// Whether the raw bytes between a key's quotes decode, as a JSON string,
+/// to `links` — `links` does, `l\inks` is no JSON string at all.
+fn key_spells_links(raw: &[u8]) -> bool {
+    if raw.len() > MAX_KEY_SPELLING {
+        return false;
+    }
+    let mut quoted = Vec::with_capacity(raw.len() + 2);
+    quoted.push(b'"');
+    quoted.extend_from_slice(raw);
+    quoted.push(b'"');
+    serde_json::from_slice::<String>(&quoted).is_ok_and(|key| key == "links")
+}
+
+/// A byte range inside one segment, as the `u32` pair a [`LinkSegment`]
+/// stores; `None` when an offset does not fit.
+fn element_range(start: usize, end: usize) -> Option<(u32, u32)> {
+    Some((u32::try_from(start).ok()?, u32::try_from(end).ok()?))
 }
 
 /// A resumable byte-walk over a perspective-export document — exactly
@@ -1458,11 +1503,13 @@ impl ElementScan {
         self.pos == DocPos::Links && self.depth > self.links_depth
     }
 
-    /// The open string's bytes still matter: it sits where the
-    /// `"links"` key is due and could yet spell it — past six bytes it
-    /// cannot, and the rest is skippable.
+    /// The open string's raw bytes (escapes included) still matter: it
+    /// sits where the `"links"` key is due and could yet spell it. The
+    /// longest spelling of `links` — each letter as a `\uXXXX` escape — is
+    /// [`MAX_KEY_SPELLING`] bytes; past that it cannot, and the rest is
+    /// skippable.
     fn collecting(&self) -> bool {
-        self.key_collect && self.key.len() < 6
+        self.key_collect && self.key.len() <= MAX_KEY_SPELLING
     }
 
     /// Scan `buf` — bytes appended to the carried remainder that `base`
@@ -1485,7 +1532,10 @@ impl ElementScan {
                 }
                 if self.collecting() {
                     match buf[i] {
-                        b'\\' => self.escaped = true,
+                        b'\\' => {
+                            self.escaped = true;
+                            self.key.push(b'\\');
+                        }
                         b'"' => {
                             self.in_string = false;
                             self.string_closed();
@@ -1652,7 +1702,7 @@ impl ElementScan {
 
     fn string_closed(&mut self) {
         if self.pos == DocPos::LinksKey {
-            if self.key == b"links" {
+            if key_spells_links(&self.key) {
                 self.pos = DocPos::LinksColon;
             } else {
                 // A member other than `links` does not fit.
@@ -1702,9 +1752,21 @@ fn segment_elements(
             .read_to_end(&mut bytes)
             .map_err(|e| anyhow!("Perspective import: failed to read the export file: {}", e))?;
         let mut ranges = Vec::new();
-        scan.feed(&bytes[base..], base, &mut |start, end| {
-            ranges.push((start as u32, end as u32));
-        });
+        let mut too_far = false;
+        scan.feed(
+            &bytes[base..],
+            base,
+            &mut |start, end| match element_range(start, end) {
+                Some(range) => ranges.push(range),
+                None => too_far = true,
+            },
+        );
+        if too_far {
+            // A truncated offset would be a reversed or wrong range: refuse the file.
+            return Err(import_refused!(
+                "Perspective import: a link element reaches past 4 GiB of one read"
+            ));
+        }
         let carry_from = scan.element_start.unwrap_or(bytes.len());
         if !ranges.is_empty() {
             let segment = std::mem::take(&mut bytes);
@@ -1793,7 +1855,7 @@ fn build_segment_quads(
     for &(start, end) in &segment.elements {
         let decorated: DecoratedLinkExpression =
             serde_json::from_slice(&segment.bytes[start as usize..end as usize]).map_err(|e| {
-                anyhow!(
+                import_refused!(
                     "Perspective import: malformed link at byte {}: {}",
                     start,
                     e
@@ -1821,7 +1883,7 @@ fn build_segment_quads(
             } else if crate::perspectives::monotonic::tombstone_ends_stored(store, &link)? {
                 // A valid Shared tombstone ending a stored link would
                 // retract, not add — the file is refused.
-                return Err(anyhow!(
+                return Err(import_refused!(
                     "Perspective import: the tombstone at byte {} ends a link the store already holds ({} -[{}]-> {} by {})",
                     start,
                     link.data.source,
@@ -1843,7 +1905,7 @@ fn build_segment_quads(
             {
                 // The reifier already stands in the store: the import
                 // adds links, it does not re-assert stored ones.
-                return Err(anyhow!(
+                return Err(import_refused!(
                     "Perspective import: the link at byte {} repeats a reifier the store already holds ({} -[{}]-> {} by {} at {})",
                     start,
                     link.data.source,
@@ -1895,7 +1957,7 @@ fn consume_segment(
     for element in segment.elements {
         if let Some(ends_key) = element.ends_key {
             if let Some(tombstone) = named.get(&ends_key) {
-                return Err(anyhow!(
+                return Err(import_refused!(
                     "Perspective import: the tombstone {tombstone} ends the link at byte {} — an import only adds links",
                     element.at
                 ));
@@ -1904,14 +1966,24 @@ fn consume_segment(
         }
         match element.kind {
             ImportKind::Skipped => stats.skipped += 1,
-            ImportKind::Covered => stats.covered += 1,
+            ImportKind::Covered => {
+                // A covered link is a fact of the file like any other: twice in the file
+                // refuses it, as a repeat of a link that would be written does.
+                if !seen.insert(element.key) {
+                    return Err(import_refused!(
+                        "Perspective import: the link at byte {} repeats a reifier the file already used (a stored tombstone ends it)",
+                        element.at
+                    ));
+                }
+                stats.covered += 1
+            }
             ImportKind::Bulk {
                 link,
                 quads: built,
                 names_key,
             } => {
                 if !seen.insert(element.key) {
-                    return Err(anyhow!(
+                    return Err(import_refused!(
                         "Perspective import: the link at byte {} repeats a reifier the file already used ({} -[{}]-> {} by {} at {})",
                         element.at,
                         link.data.source,
@@ -1923,7 +1995,7 @@ fn consume_segment(
                 }
                 if let Some(named_key) = names_key {
                     if coverable.contains(&named_key) {
-                        return Err(anyhow!(
+                        return Err(import_refused!(
                             "Perspective import: the tombstone at byte {} ends a link the file also carries ({} -[{}]-> {} by {}) — an import only adds links",
                             element.at,
                             link.data.source,
@@ -3071,7 +3143,8 @@ impl SparqlStore {
     /// - a file link's reifier already stands in the store (the pre-load
     ///   snapshot reads decide this; staged bulk data is invisible until
     ///   commit),
-    /// - a reifier appears twice in the file, or
+    /// - a reifier appears twice in the file (a covered link counts: the
+    ///   repeat is refused too), or
     /// - a Shared tombstone in the file whose own signature verifies
     ///   ends a link stored before the import or another link in the
     ///   file, in either order — an import adds links, it never
@@ -3085,6 +3158,13 @@ impl SparqlStore {
     /// is computed from its signature exactly as [`write_link_quads_proof`]
     /// does — a forged file cannot import a `true` verdict. A tombstone
     /// that ends nothing bulk-loads like any link.
+    ///
+    /// A refusal of the file's content is an [`ImportRefused`] error (the
+    /// RPC answers 400); a failure of the load itself (disk, worker,
+    /// parser) is any other error (500). When links were added the store's
+    /// write generation advances, so readers that cache by generation see
+    /// the load. The key `links` is read as JSON reads it, so an escaped
+    /// spelling of it is the same key.
     ///
     /// The file is streamed, never read whole (a snapshot of a large
     /// perspective is gigabytes). The load is a three-stage
@@ -3103,7 +3183,13 @@ impl SparqlStore {
             .writer
             .lock()
             .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
-        self.import_segmented(path)
+        let stats = self.import_segmented(path)?;
+        if stats.imported > 0 {
+            // The load wrote no diff: the generation moves here, under the writer lock, so a
+            // reader keyed on it (the auto-processor's transcript rows) reads the new links.
+            self.note_write(WriteDelta::Other);
+        }
+        Ok(stats)
     }
 
     /// The load: scan-segments ‖ worker pool ‖ the bulk loader, consumed
@@ -3206,7 +3292,7 @@ impl SparqlStore {
             let (scan, sent) = outcome?;
             if !scan.sealed {
                 // The staged SSTs are dropped uncommitted with the loader.
-                return Err(anyhow!(
+                return Err(import_refused!(
                     "Perspective import: {:?} is not a perspective export ({})",
                     path,
                     if scan.surprise {
@@ -7268,6 +7354,112 @@ mod tests {
                 "{input}"
             );
         }
+    }
+
+    /// The member name is read as JSON reads it: `\u006cinks` is `links`, and
+    /// `l\inks` — an escape JSON does not have — is no name at all, so the
+    /// file is refused and nothing commits.
+    #[test]
+    fn import_reads_the_links_key_as_json_does() {
+        let signer = TestSigner::generate();
+        let link = make_link(&signer, "ad4m://s", "ad4m://p", "ad4m://t");
+        let file = export_file(vec![(link, LinkStatus::Shared).into()]);
+        let json = std::fs::read_to_string(file.path()).unwrap();
+        assert!(json.contains("\"links\""));
+
+        let escaped = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            escaped.path(),
+            json.replacen("\"links\"", "\"\\u006cinks\"", 1),
+        )
+        .unwrap();
+        let svc = new_service();
+        assert_eq!(svc.import_links_file(escaped.path()).unwrap().imported, 1);
+
+        for spelling in [
+            "\"l\\inks\"",
+            "\"l\\u0069nk\"",
+            "\"\\u006c\\u0069\\u006e\\u006b\\u0073x\"",
+        ] {
+            let bad = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(bad.path(), json.replacen("\"links\"", spelling, 1)).unwrap();
+            let svc = new_service();
+            assert!(
+                svc.import_links_file(bad.path()).is_err(),
+                "{spelling} was taken for links"
+            );
+            assert_eq!(svc.get_all_links(&EvalStop::none()).unwrap().len(), 0);
+        }
+    }
+
+    /// An offset that does not fit a `u32` is no range: it is never cut to
+    /// one (a reversed range would read the wrong bytes).
+    #[test]
+    fn element_range_refuses_an_offset_past_u32() {
+        assert_eq!(element_range(3, 9), Some((3, 9)));
+        let past = u32::MAX as usize + 1;
+        assert_eq!(element_range(past + 0x2F_77F0, past + 0x2F_7800), None);
+        assert_eq!(element_range(5, past), None);
+    }
+
+    /// The import advances the store's write generation (a reader keyed on
+    /// it must read the new links), and a file that adds nothing does not.
+    #[test]
+    fn import_advances_the_write_generation_only_when_it_adds_links() {
+        let signer = TestSigner::generate();
+        let svc = new_service();
+        let before = svc.write_generation();
+        let file = export_file(vec![(
+            make_link(&signer, "ad4m://s", "ad4m://p", "ad4m://t"),
+            LinkStatus::Shared,
+        )
+            .into()]);
+        assert_eq!(svc.import_links_file(file.path()).unwrap().imported, 1);
+        assert_eq!(svc.write_generation(), before + 1);
+        assert!(
+            svc.additions_since(before, before + 1).is_none(),
+            "a bulk load is not a log of added links"
+        );
+
+        let empty = export_file(vec![]);
+        let now = svc.write_generation();
+        assert_eq!(svc.import_links_file(empty.path()).unwrap().imported, 0);
+        assert_eq!(svc.write_generation(), now);
+    }
+
+    /// A fact a stored tombstone ends, twice in the file, refuses the file as a
+    /// repeated reifier does — the covered path must not skip the check.
+    #[test]
+    fn import_refuses_a_covered_link_repeated_in_the_file() {
+        let signer = TestSigner::generate();
+        let fact = signed_link(
+            &signer,
+            Link {
+                source: "ad4m://s".to_string(),
+                predicate: Some("ad4m://acceptedBy".to_string()),
+                target: "ad4m://t".to_string(),
+            },
+            "2026-02-01T00:00:08Z",
+        );
+        let tombstone = tombstone_for(&signer, &fact, "2026-02-01T00:00:09Z");
+        let other = make_link(&signer, "ad4m://s/2", "test://likes", "ad4m://t/2");
+        let svc = new_service();
+        svc.add_link(&tombstone).unwrap();
+        let file = export_file(vec![
+            (fact.clone(), LinkStatus::Shared).into(),
+            (other.clone(), LinkStatus::Shared).into(),
+            (fact.clone(), LinkStatus::Shared).into(),
+        ]);
+        let err = svc.import_links_file(file.path()).unwrap_err().to_string();
+        assert!(
+            err.contains("repeats a reifier the file already used"),
+            "{err}"
+        );
+        assert_eq!(
+            svc.get_all_links(&EvalStop::none()).unwrap().len(),
+            1,
+            "only the stored tombstone: nothing of the file committed"
+        );
     }
 
     /// Every quad of `svc`, for comparing a store's whole contents —

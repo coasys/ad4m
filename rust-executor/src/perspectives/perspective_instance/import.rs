@@ -29,12 +29,37 @@ impl PerspectiveInstance {
     /// store like links written while offline: the normal sync
     /// (`share_links_missing_remotely`) may publish the ones peers lack
     /// later. Local links never leave the store.
+    ///
+    /// A task of its own runs the load and everything after it: the RPC that
+    /// asked may be cancelled (the socket drops the handler's future), and a
+    /// committed import must still clear the caches and queue its checks.
     pub(crate) async fn import_links_file(&self, path: &Path) -> Result<LinkImportStats, Error> {
-        let store = self.sparql_store.clone();
+        let this = self.clone();
         let path = path.to_path_buf();
-        let stats = tokio::task::spawn_blocking(move || store.import_links_file(&path))
+        tokio::spawn(async move { this.import_and_refresh(&path).await })
             .await
-            .map_err(|e| deno_core::anyhow::anyhow!("import task join: {}", e))??;
+            .map_err(|e| deno_core::anyhow::anyhow!("import task join: {}", e))?
+    }
+
+    async fn import_and_refresh(&self, path: &Path) -> Result<LinkImportStats, Error> {
+        let this = self.clone();
+        let path = path.to_path_buf();
+        let stats = tokio::task::spawn_blocking(move || {
+            // `persist_lock` first, as `persist_link_diff` takes it: a diff's tombstone
+            // effects and `commit_batch_if`'s expectations are read and written under it,
+            // and the load must land before or after them, never between.
+            let _persisting = this
+                .persist_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let stats = this.sparql_store.import_links_file(&path)?;
+            // In the write itself, with no await after the store write: a shape cached
+            // from the old graph must not outlive the load.
+            this.clear_shape_cache();
+            Ok::<_, Error>(stats)
+        })
+        .await
+        .map_err(|e| deno_core::anyhow::anyhow!("import task join: {}", e))??;
 
         // The load wrote no diff, so nothing downstream knows the graph
         // changed. Invalidate first — every cached or pooled view of the
@@ -46,9 +71,9 @@ impl PerspectiveInstance {
         // import was built to avoid. Simple mode marks its engines dirty
         // for the lazy reload; SdnaOnly already compares SDNA links on
         // every query; Pooled drops the pools so the next query's ensure
-        // step rebuilds them from the store. `clear_shape_cache` flushes
-        // the SHACL shapes the same way `sync_existing_links_to_sparql`
-        // does.
+        // step rebuilds them from the store. The SHACL shapes were
+        // flushed with the load itself (`clear_shape_cache`, as
+        // `sync_existing_links_to_sparql` does).
         self.mark_prolog_engine_dirty().await;
         // The store is committed: a failed pool removal must not skip the
         // checks below, so its error is held until they are raised.
@@ -62,7 +87,6 @@ impl PerspectiveInstance {
                 }
             }
         }
-        self.clear_shape_cache();
 
         // Mark every predicate changed so the next subscription pass
         // re-checks all live queries against the new graph rather than

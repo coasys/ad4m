@@ -92,6 +92,12 @@ writeFileSync(join(process.env.FEED_SCALE_ARTIFACTS, 'env.json'), JSON.stringify
   data: readdirSync(process.env.TMPDIR),
 }));
 if (mode === 'crash') process.exit(3);
+if (mode === 'orphan') {
+  // The launcher returns, a child of its group keeps running.
+  const child = spawn('sleep', ['300'], { stdio: 'ignore' });
+  writeFileSync(join(process.env.FEED_SCALE_ARTIFACTS, 'suite-child.pid'), String(child.pid));
+  process.exit(7);
+}
 if (mode === 'hang') {
   // A run stopped mid-suite: a marker in the data dir and a child in the same process
   // group. The test kills the step and checks both are gone.
@@ -199,8 +205,66 @@ test_a_stopped_run_is_cleaned_up() {
     wait "$tpid" || rc=$?
     [ "$rc" -ne 0 ] || fail "a killed step exited 0"
     [ -z "$(ls -A "$FEED_SCALE_WORK/tmp")" ] || fail "a killed run left its data: $(ls -A "$FEED_SCALE_WORK/tmp")"
-    kill -0 "$(cat "$FEED_SCALE_ARTIFACTS/suite-child.pid")" 2>/dev/null &&
-        fail "a process from the suite's group survived"
+    # The group's signal can leave the child a zombie until its parent is reaped: a zombie
+    # (state Z) or a missing process is stopped; only a running one survived.
+    local child state=
+    child="$(cat "$FEED_SCALE_ARTIFACTS/suite-child.pid")"
+    for i in $(seq 50); do
+        state="$(ps -o stat= -p "$child" 2>/dev/null | tr -d ' ' || true)"
+        case "$state" in '' | Z*) break ;; esac
+        sleep 0.1
+    done
+    case "$state" in
+        '' | Z*) ;;
+        *) fail "a process from the suite's group survived (state $state)" ;;
+    esac
+}
+
+# The suite's launcher returns while a child of its group still runs: the step must end the
+# group before it empties the data dir, and keep the suite's status.
+test_a_child_left_by_a_finished_suite_is_stopped() {
+    make_installed_we
+    local rc=0 child state=
+    FAKE_SUITE=orphan bash "$SCRIPT" test >/dev/null 2>&1 || rc=$?
+    [ "$rc" = 7 ] || fail "the suite's status 7 was not kept: $rc"
+    child="$(cat "$FEED_SCALE_ARTIFACTS/suite-child.pid")"
+    for i in $(seq 50); do
+        state="$(ps -o stat= -p "$child" 2>/dev/null | tr -d ' ' || true)"
+        case "$state" in '' | Z*) break ;; esac
+        sleep 0.1
+    done
+    case "$state" in
+        '' | Z*) ;;
+        *) fail "the child of the finished suite is still running (state $state)" ;;
+    esac
+    [ -z "$(ls -A "$FEED_SCALE_WORK/tmp")" ] || fail "the data dir was left with: $(ls "$FEED_SCALE_WORK/tmp")"
+}
+
+# cleanup kills by command line: the paths are matched as text, so a `.` in them is no wildcard.
+test_cleanup_kills_only_this_runs_processes() {
+    make_installed_we
+    local mine other
+    bash -c 'while :; do sleep 1; done' "$FEED_SCALE_WORK/tmp/we-live-web-x" &
+    mine=$!
+    # The same path with its first `.` replaced by `X`.
+    local decoy="${FEED_SCALE_WORK/./X}/tmp/we-live-web-x"
+    [ "$decoy" != "$FEED_SCALE_WORK/tmp/we-live-web-x" ] || fail "the work dir has no dot to turn into X: $FEED_SCALE_WORK"
+    bash -c 'while :; do sleep 1; done' "$decoy" &
+    other=$!
+    sleep 0.3
+    bash "$SCRIPT" cleanup >/dev/null 2>&1 || fail "cleanup failed"
+    local i
+    for i in $(seq 50); do kill -0 "$mine" 2>/dev/null || break; sleep 0.1; done
+    if kill -0 "$mine" 2>/dev/null; then
+        fail "cleanup left a process with the data dir in its command line"
+        kill "$mine" 2>/dev/null
+    fi
+    if kill -0 "$other" 2>/dev/null; then
+        kill "$other" 2>/dev/null
+    else
+        fail "cleanup killed a process whose path only looks like the work dir ($decoy)"
+    fi
+    wait 2>/dev/null
 }
 
 test_a_failing_tee_fails_the_step() {
@@ -249,6 +313,15 @@ test_rm_rf_targets_are_guarded() {
     out="$(FEED_SCALE_WORK=/ bash "$SCRIPT" summary 2>&1)" && fail "WORK=/ was taken"
     out="$(FEED_SCALE_WORK="$HOME" bash "$SCRIPT" summary 2>&1)" && fail "WORK=\$HOME was taken"
     out="$(FEED_SCALE_ARTIFACTS=relative bash "$SCRIPT" summary 2>&1)" && fail "a relative ARTIFACTS was taken"
+    # Other spellings of the same directories. The guard dies before any rm -rf, so nothing runs
+    # against the real $HOME here.
+    local spelling
+    for spelling in "$HOME//" "$HOME/" "$HOME///" "$HOME/./" "$HOME/x/.." // /// /. /..; do
+        out="$(FEED_SCALE_ARTIFACTS="$spelling" bash "$SCRIPT" summary 2>&1)" && fail "ARTIFACTS='$spelling' was taken"
+        out="$(FEED_SCALE_WORK="$spelling" bash "$SCRIPT" summary 2>&1)" && fail "WORK='$spelling' was taken"
+    done
+    # A directory below $HOME is fine.
+    out="$(FEED_SCALE_ARTIFACTS="$HOME//x-guard-test/" bash "$SCRIPT" summary 2>&1)" || fail "a directory below HOME was refused: $out"
 }
 
 test_test_needs_the_script_in_we() {
@@ -286,7 +359,7 @@ test_perf_needs_the_metrics_file() {
 
 test_perf_in_ci_uses_the_build_run_id() {
     make_installed_we
-    bash "$SCRIPT" test >/dev/null 2>&1
+    CIRCLE_BUILD_NUM=77 bash "$SCRIPT" test >/dev/null 2>&1
     out="$(CIRCLE_BUILD_NUM=77 bash "$SCRIPT" perf 2>&1)" || fail "perf failed: $out"
     grep -qF -- "--run-id circleci-77 " "$TMP/perf-calls" || fail "record's run id is not the build's: $(cat "$TMP/perf-calls")"
     grep -qxF "check --job feed-scale --run-id circleci-77" "$TMP/perf-calls" || fail "check's run id is not the build's: $(cat "$TMP/perf-calls")"
@@ -302,7 +375,58 @@ test_perf_trend_page_never_fails_the_step() {
 test_perf_regression_fails_the_step() {
     make_installed_we
     bash "$SCRIPT" test >/dev/null 2>&1
-    FAKE_PERF_CHECK_EXIT=1 bash "$SCRIPT" perf >/dev/null 2>&1 && fail "a regression passed the perf step"
+    local rc=0
+    FAKE_PERF_CHECK_EXIT=7 bash "$SCRIPT" perf >/dev/null 2>&1 || rc=$?
+    # check's own status: the failure is the rejected regression, not an earlier error.
+    [ "$rc" = 7 ] || fail "perf exited $rc, not check's 7"
+    grep -q "^check --job feed-scale" "$TMP/perf-calls" || fail "check did not run: $(cat "$TMP/perf-calls")"
+}
+
+# The artifacts dir outlives a job on a runner: results of another build are not this build's.
+test_perf_ignores_results_of_another_build() {
+    make_installed_we
+    CIRCLE_BUILD_NUM=1 bash "$SCRIPT" test >/dev/null 2>&1
+    out="$(CIRCLE_BUILD_NUM=2 bash "$SCRIPT" perf 2>&1)" || fail "perf failed: $out"
+    grep -qF "nothing recorded" <<<"$out" || fail "the reason is not given: $out"
+    [ ! -e "$TMP/perf-calls" ] || fail "perf recorded another build's results: $(cat "$TMP/perf-calls")"
+    # Another commit in the same build number is another build too.
+    out="$(CIRCLE_BUILD_NUM=1 AD4M_SHA=1111111111111111111111111111111111111111 bash "$SCRIPT" perf 2>&1)" || fail "perf failed: $out"
+    [ ! -e "$TMP/perf-calls" ] || fail "perf recorded another commit's results: $(cat "$TMP/perf-calls")"
+}
+
+# A second attempt that writes results.json but no metrics.json must not inherit the first one's
+# metrics.
+test_a_new_attempt_clears_the_old_metrics() {
+    make_installed_we
+    bash "$SCRIPT" test >/dev/null 2>&1 || fail "the first attempt failed"
+    [ -s "$FEED_SCALE_ARTIFACTS/metrics.json" ] || fail "the first attempt wrote no metrics"
+    FAKE_SUITE=no-metrics bash "$SCRIPT" test >/dev/null 2>&1 || true
+    [ ! -e "$FEED_SCALE_ARTIFACTS/metrics.json" ] || fail "the second attempt kept the first one's metrics.json"
+    out="$(bash "$SCRIPT" perf 2>&1)" && fail "perf took the first attempt's metrics: $out"
+    [ ! -e "$TMP/perf-calls" ] || fail "perf recorded: $(cat "$TMP/perf-calls")"
+}
+
+# `all` fails when a step inside perf fails, though perf's last command passes.
+test_all_fails_when_the_record_fails() {
+    make_we_remote
+    make_installed_we
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$TMP/ad4m/scripts/coasys-spaces.sh"
+    git -C "$TMP/ad4m" add -A
+    git -C "$TMP/ad4m" -c user.name=t -c user.email=t@t commit -q -m fake-spaces
+    echo "$WE_HEAD" >"$FEED_SCALE_WORK/we.sha"
+    local rc=0
+    FAKE_PERF_RECORD_EXIT=1 bash "$SCRIPT" all >/dev/null 2>&1 || rc=$?
+    [ "$rc" != 0 ] || fail "all passed with a failed record"
+    [ ! -e "$FEED_SCALE_STATE/last-success" ] || fail "all recorded the pair as measured after a failed perf step"
+    # Without the fault it passes and records.
+    rm -rf "$FEED_SCALE_ARTIFACTS" "$TMP/perf-calls"
+    bash "$SCRIPT" all >/dev/null 2>&1 || fail "all failed on a clean run"
+    [ -e "$FEED_SCALE_STATE/last-success" ] || fail "all did not record a passed run"
+    grep -q "^check" "$TMP/perf-calls" || fail "all did not judge the run"
+    # A failed suite still reaches perf, which records it.
+    rm -f "$TMP/perf-calls" "$FEED_SCALE_STATE/last-success"
+    FAKE_SUITE=fail bash "$SCRIPT" all >/dev/null 2>&1 && fail "all passed with a failed suite"
+    grep -qF -- "--status failed" "$TMP/perf-calls" || fail "all did not record the failed run: $(cat "$TMP/perf-calls" 2>/dev/null)"
 }
 
 test_perf_records_a_failed_run_without_judging_it() {

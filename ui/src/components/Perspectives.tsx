@@ -210,7 +210,15 @@ const Perspectives = (props: Props) => {
       if (filePath && typeof filePath === 'string') {
         const fileName = filePath.split(/[\\/]/).pop()!.replace(/\.[^.]*$/, '');
         const perspective = await client!.perspective.add(fileName || 'Imported perspective');
-        await client!.runtime.importPerspective(perspective.uuid, filePath);
+        try {
+          await client!.runtime.importPerspective(perspective.uuid, filePath);
+        } catch (importError) {
+          // The file was refused or the load failed: do not leave the empty perspective behind.
+          await client!.perspective.remove(perspective.uuid).catch((removeError) => {
+            console.error('Failed to remove the empty perspective:', removeError);
+          });
+          throw importError;
+        }
         await fetchPerspective(); // Refresh the list
         alert('Perspective imported successfully');
       }

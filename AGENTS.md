@@ -134,7 +134,7 @@ so the same file runs on both link languages.
 A pipeline with `run-nightly-llm: true` runs only this workflow, on `coasys/marvin`.
 Each job has its own serial group. The jobs: `llm-e2e`,
 `integration-tests-sfu`, `integration-tests-sfu-browsers` (see below),
-`coasys-spaces` and `feed-scale`.
+`coasys-spaces`, `integration-tests-agent-harness` and `feed-scale`.
 
 `llm-e2e` runs the ignored Rust interpretation suites and the JS suites gated
 by `LLM_E2E=1`. It does not start a model server. It prompts staging's
@@ -197,8 +197,12 @@ It needs no model and no GPU, and has its own serial group, `nightly-feed-scale`
   agents; the Feed shows its author and time) into one file, on all cores, and loads the
   file into the space's perspective with `runtime.importData` (`type: "perspective"`,
   Oxigraph's bulk loader, one commit; nothing goes to the link language). The import
-  only adds links new to the perspective: it refuses the whole file if a link is
-  already stored, repeats in the file, or is ended by a tombstone in the file. Then WE web opens the
+  only adds links new to the perspective: it refuses the whole file (a 400) if a link is
+  already stored, repeats in the file, or is ended by a tombstone in the file (a tombstone
+  that ends a link of the file, or a link the store holds, refuses it too). A link that a
+  tombstone already in the store ended is not loaded and counts as `covered`; the same
+  link twice in the file is refused. The import takes the perspective's `persist_lock`,
+  so it lands before or after a diff's write, never between. Then WE web opens the
   space in Chromium five times (cold, then warm) and loads the newest page and one
   older page. The links file (~6 GB at a million) lives in the data dir, beside the
   store.
@@ -240,7 +244,7 @@ curl -X POST https://circleci.com/api/v2/project/circleci/VRkXSnZDyBKHhkHKBHTmLj
        "parameters": {"run-nightly-llm": true, "we-ref": "<WE branch>"}}'
 ```
 
-This runs all five nightly jobs.
+This runs all six nightly jobs.
 
 ### Nightly performance history (`scripts/perf/`)
 

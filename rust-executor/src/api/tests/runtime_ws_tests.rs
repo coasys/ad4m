@@ -186,6 +186,47 @@ async fn perspective_import_needs_a_perspective_uuid() {
     );
 }
 
+// A file that is not a perspective export is the caller's mistake: 400, not 500.
+#[tokio::test]
+async fn perspective_import_of_a_malformed_file_is_a_400() {
+    use crate::perspectives::perspective_instance::PerspectiveInstance;
+    use crate::perspectives::register_perspective;
+    use crate::types::{PerspectiveHandle, PerspectiveState};
+
+    let uuid = uuid::Uuid::new_v4().to_string();
+    let perspective = PerspectiveInstance::new(
+        PerspectiveHandle {
+            uuid: uuid.clone(),
+            name: Some("import refusal".to_string()),
+            neighbourhood: None,
+            shared_url: None,
+            state: PerspectiveState::Private,
+            owners: None,
+        },
+        None,
+    );
+    register_perspective(uuid.clone(), perspective);
+    let _registered = super::support::Registered(uuid.clone());
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), "{\"nope\": 1}").unwrap();
+
+    let mut map = HandlerMap::new();
+    register_ws_handlers(&mut map);
+    let err = map
+        .dispatch(
+            "runtime.importData",
+            json!({
+                "type": "perspective",
+                "filePath": file.path().to_str().unwrap(),
+                "perspectiveUuid": uuid,
+            }),
+            Arc::new(RequestContext::operator_for_test()),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, 400, "{}", err.message);
+}
+
 // The operator's import lands in the perspective's store: links a query then finds,
 // with the counts the load reports.
 #[tokio::test]

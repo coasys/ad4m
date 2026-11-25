@@ -235,7 +235,17 @@ async fn import_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
             let stats = perspective
                 .import_links_file(std::path::Path::new(&body.file_path))
                 .await
-                .map_err(|e| WsRpcError::internal(e.to_string()))?;
+                .map_err(|e| {
+                    // A file the store refuses is the caller's input: 400. A failure of
+                    // the load itself (disk, worker, parser) is the executor's: 500.
+                    if e.downcast_ref::<crate::perspectives::sparql_store::ImportRefused>()
+                        .is_some()
+                    {
+                        WsRpcError::bad_request(e.to_string())
+                    } else {
+                        WsRpcError::internal(e.to_string())
+                    }
+                })?;
             Ok(serde_json::to_value(RuntimeImportPerspectiveResult {
                 imported: stats.imported,
                 covered: stats.covered,
