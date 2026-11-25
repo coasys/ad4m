@@ -16,14 +16,14 @@
 
 use super::validate::{resolve_collection, value_text};
 use super::{
-    check_setters, class_properties, coerce_scalar, decoded_literal, fetch_instance,
+    check_setters, class_properties, coerce_scalar, decoded_literal, fetch_instance, find_property,
     generate_instance_uri, instance_uri, link_target, property_target, property_value_target,
     remove_all_links_of, require_instance, resolve_class, resolve_writable_class, subject_class,
-    validate_properties, InstanceError, WriteMode, WriteStep,
+    validate_properties, validate_update, InstanceError, WriteMode, WriteStep,
 };
 use crate::agent::AgentContext;
 use crate::mcp::shacl;
-use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::perspectives::perspective_instance::{PerspectiveInstance, SetterKind};
 use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus};
 use deno_core::anyhow::anyhow;
 use serde::{Deserialize, Serialize};
@@ -56,7 +56,9 @@ pub struct InstanceCreate {
     pub batch_id: Option<String>,
 }
 
-/// Set single-valued properties of an instance; the others stay as they are.
+/// Set properties of an instance; the others stay as they are. A collection with
+/// a declared setter takes the full member list it should have — `[]` clears
+/// it; any other collection is refused (`collectionNotSettable`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
@@ -64,10 +66,14 @@ pub struct InstanceCreate {
 pub struct InstanceUpdate {
     pub class_name: String,
     pub base_uri: String,
-    /// Values by property name, at least one; single-valued properties only.
+    /// Values by property name, at least one: one JSON value per single-valued
+    /// property, an array of member URIs per collection that declares a setter.
     #[ts(type = "Record<string, unknown>")]
     pub properties: Map<String, Value>,
     /// An open batch to stage the write into; see `InstanceCreate`'s `batchId`.
+    /// A write whose lifecycle actions include `call`s cannot batch (the calls
+    /// cannot be rolled back): with `batchId` it is refused (`callsInBatch`)
+    /// before anything is called or written.
     pub batch_id: Option<String>,
 }
 
@@ -166,9 +172,13 @@ pub struct CollectionItemAdded {
     /// The collection's canonical name.
     pub collection: String,
     pub item_uri: String,
-    /// 0 when the item was in the collection already (as the batch's effective graph has it).
+    /// 0 when the item was in the collection already (as the batch's effective graph has it),
+    /// or when a language call made the write (`languageCall`).
     pub links_added: usize,
     pub already_member: bool,
+    /// The collection's declared adder is a `call`: the language added the member, and its
+    /// answer, not a link written here, makes the membership.
+    pub language_call: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -181,8 +191,10 @@ pub struct CollectionItemRemoved {
     pub item_uri: String,
     /// 0 when the item was not in the collection (as the batch's effective graph has it).
     /// Inside a batch, a member that only the batch had added counts too — it leaves by
-    /// cancelling the staged addition.
+    /// cancelling the staged addition. 0 too when a language call made the write.
     pub links_removed: usize,
+    /// The collection's declared remover is a `call`: the language removed the member.
+    pub language_call: bool,
 }
 
 /// The batch a create or update writes into.
@@ -236,6 +248,79 @@ impl Batch {
                 .map_err(|error| failed(class_name, WriteStep::Commit, error)),
         }
     }
+}
+
+/// A write step failed: drop `batch` when it is the write's own (a write with
+/// `call` actions opens none, so `None` is a no-op). The caller's batch is the
+/// caller's to discard.
+async fn abandon_batch(perspective: &PerspectiveInstance, batch: &Option<Batch>) {
+    if let Some(batch) = batch {
+        batch.abandon(perspective).await;
+    }
+}
+
+/// A write whose lifecycle actions call into a language runs outside any batch: discarding a
+/// batch cannot undo a language call. So a caller's batch is refused — `BatchNotFound` when it
+/// is not open, else `CallsInBatch` — before any call or link write.
+async fn refuse_batch_for_calls(
+    perspective: &PerspectiveInstance,
+    class_name: &str,
+    batch_id: Option<&str>,
+) -> Result<(), InstanceError> {
+    check_batch(perspective, batch_id).await?;
+    match batch_id {
+        Some(id) => Err(InstanceError::CallsInBatch {
+            class_name: class_name.to_string(),
+            batch_id: id.to_string(),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Whether `collection` of `class_name` declares a `call` adder or remover
+/// (`predicate`).
+async fn member_call(
+    perspective: &PerspectiveInstance,
+    class_name: &str,
+    collection: &str,
+    predicate: &str,
+) -> Result<bool, InstanceError> {
+    Ok(perspective
+        .property_member_kind(class_name, collection, predicate)
+        .await
+        .map_err(|e| failed(class_name, WriteStep::ReadShape, e))?
+        == Some(SetterKind::Call))
+}
+
+/// A scalar with no `ad4m://setter` is written as a one-member replace
+/// through a `collectionSetter` synthesized from its `path`: right for a
+/// link `adder`/`remover` pair, but a `call` pair's language would never
+/// see the write (and a caller's batch would pass). Such a scalar is
+/// refused as read-only, before anything is written.
+async fn refuse_call_pair_scalar(
+    perspective: &PerspectiveInstance,
+    class_name: &str,
+    info: &super::PropView<'_>,
+) -> Result<(), InstanceError> {
+    for predicate in ["ad4m://adder", "ad4m://remover"] {
+        if member_call(perspective, class_name, info.name(), predicate).await? {
+            return Err(invalid(
+                class_name,
+                vec![super::ValidationError {
+                    property: info.name().to_string(),
+                    problem: super::ValidationProblem::ReadOnly {
+                        reason: super::ReadOnlyReason::NoSetter,
+                    },
+                    expected_type: Some(info.type_name()),
+                    cardinality: Some(info.cardinality()),
+                    allowed_values: None,
+                    received: None,
+                    item: None,
+                }],
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// `BatchNotFound` unless `batch_id` is absent or names an open batch.
@@ -376,33 +461,171 @@ pub async fn create(
         collection_links.insert(collection.clone(), (predicate, status));
     }
 
-    let initial_values = if validated.scalars.is_empty() {
-        None
-    } else {
-        Some(Value::Object(validated.scalars.clone()))
-    };
+    // Route every supplied value by the actions the class declares. A `call`
+    // constructor gets the whole record — collections included — and answers
+    // the address it minted in the language. For link constructors a
+    // collection with a declared `ad4m://setter` goes through the setter
+    // (`create_subject` runs it, `call` or `collectionSetter`); one without is
+    // written as item links below. A create that includes calls runs
+    // unbatched and refuses a caller's batch (`refuse_batch_for_calls`).
+    let ctor_is_call = perspective
+        .constructor_is_call(&class_name)
+        .await
+        .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?;
+    let mut has_calls = ctor_is_call;
+    let mut initial = serde_json::Map::new();
+    // A scalar with no declared `ad4m://setter` — a `hasOne` relation's
+    // `adder`/`remover` pair — is a one-member replace written after the
+    // subject exists, like `plain_collections` below. A `call` constructor
+    // gets it instead: the record's whole values are the call's params.
+    let mut scalar_replaces: Vec<(String, String, bool, Value)> = Vec::new();
+    let infos = class_properties(&shape);
+    for (name, value) in &validated.scalars {
+        match perspective
+            .property_setter_kind(&class_name, name)
+            .await
+            .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?
+        {
+            Some(kind) => {
+                has_calls |= kind == SetterKind::Call;
+                initial.insert(name.clone(), value.clone());
+            }
+            None if ctor_is_call => {
+                initial.insert(name.clone(), value.clone());
+            }
+            None => {
+                let Some(info) = find_property(&infos, name) else {
+                    return Err(failed(
+                        &class_name,
+                        WriteStep::ReadShape,
+                        anyhow!("property `{name}` is not a property of {class_name}"),
+                    ));
+                };
+                refuse_call_pair_scalar(perspective, &class_name, info).await?;
+                scalar_replaces.push((
+                    name.clone(),
+                    info.predicate().to_string(),
+                    info.local(),
+                    value.clone(),
+                ));
+            }
+        }
+    }
+    let mut plain_collections: Vec<String> = Vec::new();
+    for (collection, items) in &validated.collections {
+        let through_subject = match perspective
+            .property_setter_kind(&class_name, collection)
+            .await
+            .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?
+        {
+            Some(SetterKind::Call) => {
+                has_calls = true;
+                true
+            }
+            Some(SetterKind::Links) => true,
+            // A constructor call receives the whole record. Otherwise a
+            // call adder must not be bypassed by synthesizing item links.
+            None if !ctor_is_call
+                && member_call(perspective, &class_name, collection, "ad4m://adder").await? =>
+            {
+                return Err(invalid(
+                    &class_name,
+                    vec![super::ValidationError {
+                        property: collection.clone(),
+                        problem: super::ValidationProblem::ReadOnly {
+                            reason: super::ReadOnlyReason::NoSetter,
+                        },
+                        expected_type: find_property(&infos, collection)
+                            .map(|info| info.type_name()),
+                        cardinality: find_property(&infos, collection)
+                            .map(|info| info.cardinality()),
+                        allowed_values: None,
+                        received: Some(Value::Array(items.clone())),
+                        item: None,
+                    }],
+                ));
+            }
+            None => ctor_is_call,
+        };
+        if through_subject {
+            initial.insert(collection.clone(), Value::Array(items.clone()));
+        } else {
+            plain_collections.push(collection.clone());
+        }
+    }
+    let initial_values = (!initial.is_empty()).then(|| Value::Object(initial));
 
     // One batch for the whole create — subject, collection links, and the parent link land
     // atomically or not at all: no partially-constructed instance is ever observable, by peers
-    // or by a failed call's aftermath.
-    let batch = Batch::open(perspective, params.batch_id).await?;
-    if let Err(e) = perspective
+    // or by a failed call's aftermath. With `call` actions there is no batch
+    // at all: a caller's is refused before the call, and none of our own is
+    // opened (`run_call_actions` refuses one).
+    let batch = if has_calls {
+        refuse_batch_for_calls(perspective, &class_name, params.batch_id.as_deref()).await?;
+        None
+    } else {
+        Some(Batch::open(perspective, params.batch_id.clone()).await?)
+    };
+    let subject_batch = batch.as_ref().map(Batch::id);
+    let links_batch = subject_batch.clone();
+    let base_uri = match perspective
         .create_subject(
             subject_class(&class_name),
             base_uri.clone(),
             initial_values,
-            Some(batch.id()),
+            subject_batch,
             agent,
         )
         .await
     {
-        batch.abandon(perspective).await;
-        return Err(failed(&class_name, WriteStep::CreateSubject, e));
+        // A `call` constructor answers the address it minted in the language —
+        // that, not the preselected `base_uri`, is the instance's id. The link
+        // constructor path answers `None`: the given `base_uri` stands.
+        Ok(minted) => minted.unwrap_or(base_uri),
+        Err(e) => {
+            abandon_batch(perspective, &batch).await;
+            return Err(failed(&class_name, WriteStep::CreateSubject, e));
+        }
+    };
+
+    // Scalars `create_subject` had no setter for: each is a replace with the
+    // single member — the `collectionSetter` an `executeAction` caller writes.
+    for (name, predicate, local, value) in &scalar_replaces {
+        if let Err(e) = perspective
+            .replace_collection_without_setter(
+                &class_name,
+                name,
+                predicate,
+                *local,
+                &base_uri,
+                &Value::Array(vec![value.clone()]),
+                links_batch.clone(),
+                agent,
+            )
+            .await
+        {
+            abandon_batch(perspective, &batch).await;
+            return Err(failed(&class_name, WriteStep::UpdateSubject, e));
+        }
     }
 
-    // Collections: one link per item, same path as `add_to_collection`.
+    // Collections `create_subject` did not write: one link per item, same path
+    // as `add_to_collection`.
     let mut collections_set = Vec::with_capacity(validated.collections.len());
     for (collection, items) in &validated.collections {
+        if !plain_collections.iter().any(|name| name == collection) {
+            collections_set.push(super::CollectionItems {
+                collection: collection.clone(),
+                items: items
+                    .iter()
+                    .map(|item| match item {
+                        Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    })
+                    .collect(),
+            });
+            continue;
+        }
         let (predicate, status) = collection_links[collection].clone();
         let mut added = Vec::with_capacity(items.len());
         for item in items {
@@ -420,10 +643,10 @@ pub async fn create(
                 target,
             };
             if let Err(e) = perspective
-                .add_link(link, status.clone(), Some(batch.id()), agent)
+                .add_link(link, status.clone(), links_batch.clone(), agent)
                 .await
             {
-                batch.abandon(perspective).await;
+                abandon_batch(perspective, &batch).await;
                 return Err(failed(
                     &class_name,
                     WriteStep::AddCollectionItem {
@@ -447,12 +670,12 @@ pub async fn create(
             .add_to_container(
                 &link_target(parent.trim()),
                 &base_uri,
-                Some(batch.id()),
+                links_batch.clone(),
                 agent,
             )
             .await
         {
-            batch.abandon(perspective).await;
+            abandon_batch(perspective, &batch).await;
             return Err(failed(
                 &class_name,
                 WriteStep::AddToParent {
@@ -463,7 +686,9 @@ pub async fn create(
         }
     }
 
-    batch.finish(perspective, agent, &class_name).await?;
+    if let Some(batch) = batch {
+        batch.finish(perspective, agent, &class_name).await?;
+    }
 
     Ok(InstanceCreated {
         properties_set: validated.scalars.keys().cloned().collect(),
@@ -474,8 +699,10 @@ pub async fn create(
     })
 }
 
-/// Set single-valued properties of an existing instance, in one batch. "Existing" means
+/// Set properties of an existing instance, in one batch. "Existing" means
 /// committed: an instance created in the same batch is not found yet (`notFound`).
+/// A collection with a declared setter replaces its members (`[]` clears them);
+/// any other collection is refused.
 pub async fn update(
     perspective: &mut PerspectiveInstance,
     agent: &AgentContext,
@@ -486,13 +713,49 @@ pub async fn update(
         return Err(InstanceError::EmptyProperties);
     }
 
-    let validated = validate_properties(&shape, &params.properties, WriteMode::Update)
-        .map_err(|errors| invalid(&class_name, errors))?;
     // Through an abstract class (#1435) the record's own classes' setters write;
-    // `update_subject` checks those.
+    // `update_subject` checks those. Which collections they can set depends on
+    // the record, so it is found first.
     let is_abstract = perspective
         .is_abstract_class(&class_name)
         .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?;
+    let abstract_record = if is_abstract {
+        let base_uri = instance_uri("base_uri", &params.base_uri)?;
+        Some(require_instance(perspective, &class_name, &base_uri).await?)
+    } else {
+        None
+    };
+
+    // A collection takes a member list only through a declared
+    // `ad4m://setter` (a mounted class's `call`, or a `collectionSetter`);
+    // through an abstract class, through what the record's own classes
+    // declare. `validate_update` refuses any other one.
+    let infos = class_properties(&shape);
+    let mut settable = Vec::new();
+    for given in params.properties.keys() {
+        let Some(info) = find_property(&infos, given) else {
+            continue;
+        };
+        if !info.collection() {
+            continue;
+        }
+        let can_set = match &abstract_record {
+            Some(stored) => perspective
+                .abstract_collection_settable(&class_name, stored, info.name())
+                .await
+                .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?,
+            None => perspective
+                .property_setter_kind(&class_name, info.name())
+                .await
+                .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?
+                .is_some(),
+        };
+        if can_set {
+            settable.push(info.name().to_string());
+        }
+    }
+    let validated = validate_update(&shape, &params.properties, &settable)
+        .map_err(|errors| invalid(&class_name, errors))?;
     if !is_abstract {
         let setter_errors = check_setters(perspective, &shape, &validated.scalars).await;
         if !setter_errors.is_empty() {
@@ -502,29 +765,133 @@ pub async fn update(
 
     let base_uri = instance_uri("base_uri", &params.base_uri)?;
     // Where it is stored: a legacy-spelled id's node is not the normalised one.
-    let stored = require_instance(perspective, &class_name, &base_uri).await?;
+    let stored = match abstract_record {
+        Some(stored) => stored,
+        None => require_instance(perspective, &class_name, &base_uri).await?,
+    };
+
+    // A collection (validation let through only those with a declared
+    // `ad4m://setter`) joins the subject values verbatim — `update_subject`
+    // gives a `call` setter `{coll: [ids]}` and a `collectionSetter` the
+    // member list. A scalar with no declared setter (a `hasOne` relation,
+    // which carries only `adder`/`remover`) gets a collectionSetter
+    // synthesized from its `path` and `local`, with one member — the replace
+    // an `executeAction` caller would write.
+    let mut subject_values = serde_json::Map::new();
+    let mut plain_collections: Vec<(String, String, bool, Vec<Value>)> = Vec::new();
+    let mut has_calls = false;
+    if is_abstract {
+        subject_values.extend(validated.scalars.clone());
+    } else {
+        for (name, value) in &validated.scalars {
+            match perspective
+                .property_setter_kind(&class_name, name)
+                .await
+                .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?
+            {
+                Some(kind) => {
+                    has_calls |= kind == SetterKind::Call;
+                    subject_values.insert(name.clone(), value.clone());
+                }
+                // `check_setters` passed, so an `adder`/`remover` pair covers
+                // the write — `update_subject` would drop the value.
+                None => {
+                    let Some(info) = find_property(&infos, name) else {
+                        return Err(failed(
+                            &class_name,
+                            WriteStep::ReadShape,
+                            anyhow!("property `{name}` is not a property of {class_name}"),
+                        ));
+                    };
+                    refuse_call_pair_scalar(perspective, &class_name, info).await?;
+                    plain_collections.push((
+                        name.clone(),
+                        info.predicate().to_string(),
+                        info.local(),
+                        vec![value.clone()],
+                    ));
+                }
+            }
+        }
+    }
+    for (collection, items) in &validated.collections {
+        // Through an abstract class a bare array is the setter op (`Op::of`)
+        // the record's own classes' collection setters write;
+        // `abstract_update_calls` below classifies them.
+        if !is_abstract
+            && perspective
+                .property_setter_kind(&class_name, collection)
+                .await
+                .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?
+                == Some(SetterKind::Call)
+        {
+            has_calls = true;
+        }
+        subject_values.insert(collection.clone(), Value::Array(items.clone()));
+    }
+
+    // Through an abstract class the record's own classes' setters write:
+    // ask them whether any of those calls a language.
+    if is_abstract {
+        has_calls = perspective
+            .abstract_update_calls(&class_name, &stored, &Value::Object(subject_values.clone()))
+            .await
+            .map_err(|e| failed(&class_name, WriteStep::UpdateSubject, e))?;
+    }
 
     // One batch for the whole update so remove-old + add-new per property lands atomically
     // (same reasoning as the per-class setters: without it a peer can observe the property as
-    // unset in between).
-    let batch = Batch::open(perspective, params.batch_id).await?;
+    // unset in between). With `call` actions there is no batch at all: a
+    // caller's is refused before the call, and none of our own is opened.
+    let batch = if has_calls {
+        refuse_batch_for_calls(perspective, &class_name, params.batch_id.as_deref()).await?;
+        None
+    } else {
+        Some(Batch::open(perspective, params.batch_id.clone()).await?)
+    };
+    let subject_batch = batch.as_ref().map(Batch::id);
+    let links_batch = subject_batch.clone();
     if let Err(e) = perspective
         .update_subject(
             subject_class(&class_name),
-            stored,
-            Value::Object(validated.scalars.clone()),
-            Some(batch.id()),
+            stored.clone(),
+            Value::Object(subject_values.clone()),
+            subject_batch,
             agent,
         )
         .await
     {
-        batch.abandon(perspective).await;
+        abandon_batch(perspective, &batch).await;
         return Err(failed(&class_name, WriteStep::UpdateSubject, e));
     }
-    batch.finish(perspective, agent, &class_name).await?;
+    for (collection, predicate, local, items) in &plain_collections {
+        if let Err(e) = perspective
+            .replace_collection_without_setter(
+                &class_name,
+                collection,
+                predicate,
+                *local,
+                &stored,
+                &Value::Array(items.clone()),
+                links_batch.clone(),
+                agent,
+            )
+            .await
+        {
+            abandon_batch(perspective, &batch).await;
+            return Err(failed(&class_name, WriteStep::UpdateSubject, e));
+        }
+    }
+    if let Some(batch) = batch {
+        batch.finish(perspective, agent, &class_name).await?;
+    }
 
     Ok(InstanceUpdated {
-        updated_properties: validated.scalars.keys().cloned().collect(),
+        updated_properties: subject_values
+            .keys()
+            .chain(plain_collections.iter().map(|(name, _, _, _)| name))
+            .cloned()
+            .collect(),
         class_name,
         base_uri,
     })
@@ -551,6 +918,13 @@ pub async fn remove(
         .is_abstract_class(&class_name)
         .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?;
     if is_abstract {
+        if perspective
+            .abstract_remove_calls(&class_name, &stored)
+            .await
+            .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?
+        {
+            refuse_batch_for_calls(perspective, &class_name, params.batch_id.as_deref()).await?;
+        }
         perspective
             .remove_subject(subject_class(&class_name), stored, params.batch_id, agent)
             .await
@@ -560,6 +934,30 @@ pub async fn remove(
             base_uri,
             links_removed: None,
         });
+    }
+
+    // A concrete class's declared destructor runs first — a `call` destructor
+    // runs unbatched and refuses a caller's batch before it calls; link
+    // destructors stage into the caller's batch as before. The cascade still
+    // follows: it cleans the links the destructor does not own (incoming
+    // ones, links of other classes on this node).
+    if let Some(kind) = perspective
+        .destructor_kind(&class_name)
+        .await
+        .map_err(|e| failed(&class_name, WriteStep::ReadShape, e))?
+    {
+        if kind == SetterKind::Call {
+            refuse_batch_for_calls(perspective, &class_name, params.batch_id.as_deref()).await?;
+        }
+        perspective
+            .remove_subject(
+                subject_class(&class_name),
+                stored.clone(),
+                params.batch_id.clone(),
+                agent,
+            )
+            .await
+            .map_err(|e| failed(&class_name, WriteStep::RemoveSubject, e))?;
     }
 
     // Outside a batch the cascade is not atomic, so on failure the links already removed stay
@@ -600,6 +998,41 @@ pub async fn add_to_collection(
     let base_uri = instance_uri("base_uri", &params.base_uri)?;
     // Where it is stored: a legacy-spelled id's node is not the normalised one.
     let stored = require_instance(perspective, &class_name, &base_uri).await?;
+
+    // A declared `call` adder is the language's to run: it gets the member,
+    // and its delta, not a link of ours, makes the membership. Unbatched.
+    if member_call(perspective, &class_name, &collection, "ad4m://adder").await? {
+        refuse_batch_for_calls(perspective, &class_name, params.batch_id.as_deref()).await?;
+        perspective
+            .run_member_calls(
+                &class_name,
+                &collection,
+                "ad4m://adder",
+                &stored,
+                vec![coerced],
+                agent,
+            )
+            .await
+            .map_err(|e| {
+                failed(
+                    &class_name,
+                    WriteStep::AddCollectionItem {
+                        collection: collection.clone(),
+                        item: params.item_uri.clone(),
+                    },
+                    e,
+                )
+            })?;
+        return Ok(CollectionItemAdded {
+            class_name,
+            base_uri,
+            collection,
+            item_uri: params.item_uri,
+            links_added: 0,
+            already_member: false,
+            language_call: true,
+        });
+    }
     check_batch(perspective, params.batch_id.as_deref()).await?;
 
     let predicate = shacl::resolve_property_predicate(perspective, &class_name, &collection)
@@ -651,6 +1084,7 @@ pub async fn add_to_collection(
             item_uri: params.item_uri,
             links_added: 0,
             already_member: true,
+            language_call: false,
         });
     }
 
@@ -702,6 +1136,7 @@ pub async fn add_to_collection(
         item_uri: params.item_uri,
         links_added: 1,
         already_member: false,
+        language_call: false,
     })
 }
 
@@ -711,7 +1146,7 @@ pub async fn add_to_collection(
 /// exists only inside the batch leaves by cancelling its staged addition.
 pub async fn remove_from_collection(
     perspective: &mut PerspectiveInstance,
-    _agent: &AgentContext,
+    agent: &AgentContext,
     params: InstanceRemoveFromCollection,
 ) -> Result<CollectionItemRemoved, InstanceError> {
     let (class_name, shape) = resolve_writable_class(perspective, &params.class_name).await?;
@@ -724,6 +1159,43 @@ pub async fn remove_from_collection(
     let base_uri = instance_uri("base_uri", &params.base_uri)?;
     // Where it is stored: a legacy-spelled id's node is not the normalised one.
     let stored = require_instance(perspective, &class_name, &base_uri).await?;
+
+    // A declared `call` remover, as a `call` adder in `add_to_collection`:
+    // the language removes the member; nothing here reads or writes links.
+    if member_call(perspective, &class_name, &collection, "ad4m://remover").await? {
+        refuse_batch_for_calls(perspective, &class_name, params.batch_id.as_deref()).await?;
+        let member = coerce_scalar(info, &Value::String(params.item_uri.clone()))
+            .unwrap_or_else(|_| Value::String(params.item_uri.clone()));
+        perspective
+            .run_member_calls(
+                &class_name,
+                &collection,
+                "ad4m://remover",
+                &stored,
+                vec![member],
+                agent,
+            )
+            .await
+            .map_err(|e| {
+                failed(
+                    &class_name,
+                    WriteStep::RemoveCollectionItem {
+                        collection: collection.clone(),
+                        item: params.item_uri.clone(),
+                        removed: 0,
+                    },
+                    e,
+                )
+            })?;
+        return Ok(CollectionItemRemoved {
+            class_name,
+            base_uri,
+            collection,
+            item_uri: params.item_uri,
+            links_removed: 0,
+            language_call: true,
+        });
+    }
     check_batch(perspective, params.batch_id.as_deref()).await?;
 
     let predicate = shacl::resolve_property_predicate(perspective, &class_name, &collection)
@@ -825,5 +1297,6 @@ pub async fn remove_from_collection(
         collection,
         item_uri: params.item_uri,
         links_removed: removed,
+        language_call: false,
     })
 }

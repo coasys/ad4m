@@ -139,9 +139,9 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'perspective.instanceRemove': (p: Record<string, unknown>) =>
         ({ className: p.className, baseUri: p.baseUri, linksRemoved: 3 }),
     'perspective.instanceAddToCollection': (p: Record<string, unknown>) =>
-        ({ className: p.className, baseUri: p.baseUri, collection: p.collection, itemUri: p.itemUri, linksAdded: 1, alreadyMember: false }),
+        ({ className: p.className, baseUri: p.baseUri, collection: p.collection, itemUri: p.itemUri, linksAdded: 1, alreadyMember: false, languageCall: false }),
     'perspective.instanceRemoveFromCollection': (p: Record<string, unknown>) =>
-        ({ className: p.className, baseUri: p.baseUri, collection: p.collection, itemUri: p.itemUri, linksRemoved: 1 }),
+        ({ className: p.className, baseUri: p.baseUri, collection: p.collection, itemUri: p.itemUri, linksRemoved: 1, languageCall: false }),
     'perspective.getSubjectData': '{"name":"test"}',
     'perspective.createBatch': 'batch-id-1',
     'perspective.commitBatch': { additions: [], removals: [] },

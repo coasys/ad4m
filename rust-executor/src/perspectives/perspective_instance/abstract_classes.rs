@@ -16,7 +16,7 @@ use deno_core::error::AnyError;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use super::call_actions::{CallGroup, CallRun};
+use super::call_actions::{CallGroup, CallRun, SetterKind};
 use super::{Action, Command, Parameter, PerspectiveInstance};
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::abstract_classes::{
@@ -287,6 +287,106 @@ impl PerspectiveInstance {
         .unwrap_or_default())
     }
 
+    /// Whether `update_subject` through the abstract `abstract_class` with
+    /// `values` on `base` calls into a language: the instance writes ask
+    /// before they choose a batch, since a call cannot run inside one.
+    ///
+    /// Read from the declared actions only, as `update_through_abstract`
+    /// picks them, never by planning the write: planning resolves values,
+    /// and a value stored through a language is an `expression_create`.
+    /// Names the write would refuse are skipped; the write refuses them.
+    pub(crate) async fn abstract_update_calls(
+        &self,
+        abstract_class: &str,
+        base: &str,
+        values: &Value,
+    ) -> Result<bool, AnyError> {
+        if abstract_class == CONTAINER_URI {
+            if let Some(write) = self.has_child_write(base, values).await? {
+                if !write.beside_own {
+                    return Ok(false);
+                }
+            }
+        }
+        let Value::Object(values) = values else {
+            return Ok(false);
+        };
+        let (alias_key, shape) = self.abstract_shape(abstract_class)?;
+        let memberships = membership_names(&shape);
+        let index = self.abstract_index()?;
+        let targets = self.write_targets(abstract_class, base)?;
+        for (name, value) in values {
+            let membership = memberships.contains(name.as_str());
+            let (op, value) = match membership {
+                true => Op::of(value),
+                false => (Op::Set, value),
+            };
+            // An adder or remover with no members makes no call.
+            if op != Op::Set && matches!(value, Value::Array(items) if items.is_empty()) {
+                continue;
+            }
+            for class in &targets {
+                let own_shape = self.get_shape(class)?;
+                let Some(own) = index.own_name(class, &own_shape, name, &alias_key) else {
+                    continue;
+                };
+                let Some(actions) = self.actions_for(class, own, op, membership).await? else {
+                    continue;
+                };
+                if actions.iter().any(|c| c.action == Action::Call) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether a member list for `name` can be set on `base` through the
+    /// abstract `abstract_class`: some class of the record it reaches has a
+    /// way to set it, as `update_through_abstract` picks it — the class's
+    /// setter, or a `collectionSetter` on its link adder's predicate. Read
+    /// from the declared actions only; the abstract shape's own setters do
+    /// not decide it.
+    pub(crate) async fn abstract_collection_settable(
+        &self,
+        abstract_class: &str,
+        base: &str,
+        name: &str,
+    ) -> Result<bool, AnyError> {
+        let (alias_key, _shape) = self.abstract_shape(abstract_class)?;
+        let index = self.abstract_index()?;
+        for class in self.write_targets(abstract_class, base)? {
+            let own_shape = self.get_shape(&class)?;
+            let Some(own) = index.own_name(&class, &own_shape, name, &alias_key) else {
+                continue;
+            };
+            if self
+                .actions_for(&class, own, Op::Set, true)
+                .await?
+                .is_some()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether `remove_subject` through the abstract `abstract_class` on
+    /// `base` calls into a language: some destructor of the record's classes
+    /// it reaches is a `call`.
+    pub(crate) async fn abstract_remove_calls(
+        &self,
+        abstract_class: &str,
+        base: &str,
+    ) -> Result<bool, AnyError> {
+        for class in self.write_targets(abstract_class, base)? {
+            if self.destructor_kind(&class).await? == Some(SetterKind::Call) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// The classes of `base` a write through `abstract_class` reaches: those
     /// it is, among those the abstract class reads, by target class IRI.
     /// Never empty.
@@ -368,13 +468,7 @@ impl PerspectiveInstance {
                 names.join(", ")
             ));
         }
-        let memberships: HashSet<&str> = shape
-            .properties
-            .iter()
-            .filter(|p| p.is_collection)
-            .map(|p| p.name.as_str())
-            .chain(shape.include_relations.iter().map(|r| r.name.as_str()))
-            .collect();
+        let memberships = membership_names(&shape);
         let index = self.abstract_index()?;
         let targets = self.write_targets(abstract_class, base)?;
         let mut commands = Vec::new();
@@ -636,6 +730,48 @@ impl PerspectiveInstance {
         Ok(())
     }
 
+    /// Replace `prop`'s members on `base` with the members `value` names,
+    /// through one `collectionSetter` synthesized from the property's `path`
+    /// and `local` flag — the write an `executeAction` caller makes of a
+    /// collection the class declares no `ad4m://setter` for. `instances`'s
+    /// update runs it for those; a declared setter (link or `call`) goes
+    /// through `update_subject` instead.
+    pub(crate) async fn replace_collection_without_setter(
+        &mut self,
+        class_name: &str,
+        prop: &str,
+        predicate: &str,
+        local: bool,
+        base: &str,
+        value: &Value,
+        batch_id: Option<String>,
+        context: &AgentContext,
+    ) -> Result<(), AnyError> {
+        let parameters: Vec<Parameter> = self
+            .members(class_name, prop, value, context)
+            .await?
+            .into_iter()
+            .map(|m| Parameter {
+                name: String::new(),
+                value: Value::String(m),
+            })
+            .collect();
+        self.execute_commands(
+            vec![Command {
+                source: Some("this".to_string()),
+                predicate: Some(predicate.to_string()),
+                target: Some("value".to_string()),
+                local: local.then_some(true),
+                action: Action::CollectionSetter,
+            }],
+            base.to_string(),
+            parameters,
+            batch_id,
+            context,
+        )
+        .await
+    }
+
     /// Delete the instance of `subject_class` at `base`: run the class's
     /// destructor. Through an abstract class, run the destructor of each
     /// target class, each command once; the record's other classes are left
@@ -873,6 +1009,18 @@ struct HasChildWrite {
     /// One of the parent's classes runs its own remover too: these commands
     /// join its run instead of being the whole write.
     beside_own: bool,
+}
+
+/// The names of `shape` that hold members — its collections and included
+/// relations — and so take an `{action, value}` op.
+fn membership_names(shape: &ModelShape) -> HashSet<&str> {
+    shape
+        .properties
+        .iter()
+        .filter(|p| p.is_collection)
+        .map(|p| p.name.as_str())
+        .chain(shape.include_relations.iter().map(|r| r.name.as_str()))
+        .collect()
 }
 
 /// What an update through an abstract class does to one name.

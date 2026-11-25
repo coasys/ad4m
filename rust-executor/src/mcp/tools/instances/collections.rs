@@ -93,7 +93,7 @@ fn collection_error(error: &InstanceError) -> String {
 impl Ad4mMcpHandler {
     /// Add an item to a collection property of an instance.
     #[tool(
-        description = "Add an item to a collection property of an instance (e.g. add a Message to a Channel's messages). class_name is the owning instance's class, base_uri its id, collection one of the names listed under collections by describe_perspective, item_uri the URI of the item (usually another instance's id). Adding an item that is already in the collection is a no-op (links_added: 0). Undo with instance_remove_from_collection."
+        description = "Add an item to a collection property of an instance (e.g. add a Message to a Channel's messages). class_name is the owning instance's class, base_uri its id, collection one of the names listed under collections by describe_perspective, item_uri the URI of the item (usually another instance's id). Adding an item that is already in the collection is a no-op (links_added: 0, already_member: true). A collection whose class declares a language call as its adder (a mounted class) is added to by that language: the reply says language_call: true, with links_added: 0. Undo with instance_remove_from_collection."
     )]
     pub async fn instance_add_to_collection(
         &self,
@@ -130,6 +130,9 @@ impl Ad4mMcpHandler {
                 if added.already_member {
                     result["already_member"] = json!(true);
                 }
+                if added.language_call {
+                    result["language_call"] = json!(true);
+                }
                 pretty(&result)
             }
             Err(e) => collection_error(&e),
@@ -138,7 +141,7 @@ impl Ad4mMcpHandler {
 
     /// Remove an item from a collection property of an instance.
     #[tool(
-        description = "Remove an item from a collection property of an instance (e.g. take a Message out of a Channel's messages). class_name is the owning instance's class, base_uri its id, collection one of the names listed under collections by describe_perspective, item_uri the item to remove as listed by instance_get. Only the membership link is removed — the item itself is untouched (use instance_remove to delete it). Removing an item that is not in the collection is a no-op (links_removed: 0)."
+        description = "Remove an item from a collection property of an instance (e.g. take a Message out of a Channel's messages). class_name is the owning instance's class, base_uri its id, collection one of the names listed under collections by describe_perspective, item_uri the item to remove as listed by instance_get. Only the membership link is removed — the item itself is untouched (use instance_remove to delete it). Removing an item that is not in the collection is a no-op (links_removed: 0). A collection whose class declares a language call as its remover (a mounted class) is removed from by that language: the reply says language_call: true."
     )]
     pub async fn instance_remove_from_collection(
         &self,
@@ -163,14 +166,20 @@ impl Ad4mMcpHandler {
         )
         .await
         {
-            Ok(removed) => pretty(&json!({
-                "success": true,
-                "class_name": removed.class_name,
-                "base_uri": removed.base_uri,
-                "collection": removed.collection,
-                "item_uri": removed.item_uri,
-                "links_removed": removed.links_removed,
-            })),
+            Ok(removed) => {
+                let mut result = json!({
+                    "success": true,
+                    "class_name": removed.class_name,
+                    "base_uri": removed.base_uri,
+                    "collection": removed.collection,
+                    "item_uri": removed.item_uri,
+                    "links_removed": removed.links_removed,
+                });
+                if removed.language_call {
+                    result["language_call"] = json!(true);
+                }
+                pretty(&result)
+            }
             Err(e) => collection_error(&e),
         }
     }

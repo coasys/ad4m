@@ -98,7 +98,7 @@ async fn update_and_delete_are_offered_on_a_record_address() {
         .into_iter()
         .map(|i| i.name)
         .collect();
-    assert_eq!(names, ["update", "delete"]);
+    assert_eq!(names, ["update", "addTags", "removeTags", "delete"]);
 
     let updated = interact(&format!("{addr}://t1"), "update", json!({"done": true}))
         .await

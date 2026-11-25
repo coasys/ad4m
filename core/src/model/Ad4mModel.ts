@@ -59,6 +59,11 @@ import { isContainedScope, isContainmentTraversal, isTraverseScope } from "./typ
  */
 const SUBJECT_CLASS_KEY = '__subjectClass';
 
+// Successful setter writes may precede their mirror delta. Share only within
+// one proxy (and class/id/field), so separately fetched rows keep awaited writes.
+// The existing WeakMap registries describe classes, not record write state.
+const pendingMembers = new WeakMap<PerspectiveProxy, Map<string, { added: string[]; removed: string[] }>>();
+
 /**
  * The IRI the executor names `cls` by (`queriedAs`: its target class), or
  * `undefined` for something that is not a declared model class.
@@ -570,6 +575,9 @@ export class Ad4mModel {
   private _baseExpression: string;
   private _perspective: PerspectiveProxy;
   private _snapshot: Record<string, any> | null = null;
+  /** Fields a static {@link Ad4mModel.update} was given on a call-backed
+   *  class: dirty whatever the snapshot says ({@link changedFields}). */
+  private _given: Set<string> | null = null;
   /** True when the constructor minted the id: no record can hold links yet. */
   private _idMinted: boolean = false;
   /** Predicates this instance has already written relation links under (`add*`/`set*`), so they may hold links. */
@@ -621,7 +629,10 @@ export class Ad4mModel {
   /** The target class IRI of this class (`sh:targetClass` of its shape),
    *  which the executor addresses it by. */
   static getTargetClass(): string {
-    const targetClass = this.generateSHACL().shape?.targetClass;
+    // A class from `fromSHACL` keeps the shape's own target class: its name
+    // need not be the IRI's local name (a mount's `MountThing` for
+    // `mounttest://Thing`), so the generated `namespace + name` is not it.
+    const targetClass = this.importedShape()?.targetClass ?? this.generateSHACL().shape?.targetClass;
     if (!targetClass) throw new Error(`Class ${this.name} has no target class: declare it with @Model.`);
     return targetClass;
   }
@@ -1017,6 +1028,10 @@ export class Ad4mModel {
     ];
 
     for (const field of allFields) {
+      if (this._given?.has(field)) {
+        changed.push(field);
+        continue;
+      }
       // Skip fields that were not recorded in the snapshot (e.g. relation
       // fields omitted because the originating query had no `include`).
       // Without this guard, a relation populated by hydrateFromLinks with
@@ -1160,6 +1175,47 @@ export class Ad4mModel {
    * Shape resolution happens server-side from the perspective's SHACL triples.
    * @internal
    */
+  /**
+   * Whether this class's shape declares a language `call` action: a
+   * constructor, destructor, or a property's setter, adder or remover (a
+   * mounted class, whose records live in a language). Such a class writes
+   * through the validated `perspective.instance*` RPCs, which run the
+   * declared actions; every other class keeps its `executeAction` / subject
+   * writes. A class from {@link fromSHACL} answers from the shape it was
+   * made from. Read each time, not cached: that shape is the caller's
+   * object and its actions may change.
+   */
+  static hasCallActions(): boolean {
+    const shape = this.ownShape();
+    const calls = (actions?: any[]) => (actions ?? []).some((a) => a?.action === 'call');
+    return !!shape && (
+      calls(shape.constructor_actions) ||
+      calls(shape.destructor_actions) ||
+      (shape.properties ?? []).some((p: any) => calls(p.setter) || calls(p.adder) || calls(p.remover))
+    );
+  }
+
+  /** The shape this class's writes follow, actions included: the shape
+   *  {@link fromSHACL} made it from ({@link importedShape}), else its
+   *  generated one. {@link getTargetClass} reads the same.
+   *  @internal */
+  static ownShape(): any {
+    return this.importedShape() ?? this.generateSHACL().shape;
+  }
+
+  /** The shape {@link fromSHACL} made this class from: its own, or the
+   *  nearest ancestor's when no class in between was decorated with
+   *  `@Model`. A decorated subclass has a generated shape of its own, and
+   *  is addressed and written by that shape, not its parent's.
+   *  @internal */
+  static importedShape(): any {
+    for (let c: any = this; c && c !== Ad4mModel; c = Object.getPrototypeOf(c)) {
+      if (Object.prototype.hasOwnProperty.call(c, 'sourceShape')) return c.sourceShape;
+      if (Object.prototype.hasOwnProperty.call(c, 'generateSHACL')) return undefined;
+    }
+    return undefined;
+  }
+
   /**
    * The IRI the executor addresses this class by: its target class, or a
    * built-in abstract class's URI (`ad4m://TextContent`, #1446). The URI is
@@ -1850,7 +1906,141 @@ export class Ad4mModel {
   }
 
   private async setProperty(key: string, value: any, batchId?: string) {
+    if (this.callBacked()) {
+      await this.instanceUpdate({ [key]: value }, batchId);
+      return;
+    }
     await this.sendWrites(await this.planProperty(key, value), batchId);
+  }
+
+  /** Whether this row writes through the validated `instance*` RPCs: its
+   *  class declares `call` actions ({@link Ad4mModel.hasCallActions}) and it
+   *  is not read through an abstract class (those dispatch per record). */
+  private callBacked(): boolean {
+    return !this.abstractName() && (this.constructor as typeof Ad4mModel).hasCallActions();
+  }
+
+  /** `perspective.instanceUpdate` on this row, under the class's target
+   *  class IRI (two classes may share a name, #1666). The executor runs each
+   *  property's declared setter; a collection is its full member list (`[]`
+   *  clears). A caller's batch is passed on: the executor refuses it when a
+   *  setter calls a language, since the batch cannot roll the call back. */
+  private async instanceUpdate(properties: Record<string, any>, batchId?: string) {
+    const mirrors = new Map<string, string[]>();
+    if (!batchId) {
+      const shape = (this.constructor as typeof Ad4mModel).ownShape();
+      for (const [key, value] of Object.entries(properties)) {
+        const prop = shape?.properties?.find((p: any) => p?.name === key);
+        if (Array.isArray(value) && this.getRelationOptions(key) &&
+            !(prop?.adder?.length || prop?.remover?.length)) {
+          mirrors.set(key, await this.currentMembers(key));
+        }
+      }
+    }
+    await this._perspective.instanceUpdate({
+      className: (this.constructor as typeof Ad4mModel).queriedAs(),
+      baseUri: this._baseExpression,
+      properties,
+      ...(batchId && { batchId }),
+    });
+    // Failed writes and caller-owned batches never become optimistic state.
+    for (const [key, mirror] of mirrors) {
+      const members: string[] = properties[key];
+      const added = members.filter(id => !mirror.includes(id));
+      const removed = mirror.filter(id => !members.includes(id));
+      let pending = pendingMembers.get(this._perspective);
+      if (!pending) pendingMembers.set(this._perspective, pending = new Map());
+      const address = this.memberWriteKey(key);
+      if (added.length || removed.length) pending.set(address, { added, removed });
+      else pending.delete(address);
+    }
+  }
+
+  private memberWriteKey(key: string): string {
+    return JSON.stringify([(this.constructor as typeof Ad4mModel).queriedAs(), this._baseExpression, key]);
+  }
+
+  /** An add or remove on a call-backed row whose shape declares an adder
+   *  (remover) for `key`: `instanceAddToCollection`
+   *  (`instanceRemoveFromCollection`) per member, which runs the declared
+   *  action (a `call` adder reaches the language). Answers false, writing
+   *  nothing, for a setter write or an op the shape does not declare: those
+   *  are a full-list replace through the setter, which the executor
+   *  refuses when there is none. */
+  private async declaredMemberWrite(
+    key: string,
+    kind: 'setter' | 'adder' | 'remover',
+    ids: string[],
+    batchId?: string
+  ): Promise<boolean> {
+    if (kind === 'setter') return false;
+    const ctor = this.constructor as typeof Ad4mModel;
+    const shape = ctor.ownShape();
+    const prop = (shape?.properties ?? []).find((p: any) => p?.name === key);
+    if (!((prop?.[kind] ?? []).length > 0)) return false;
+    for (const itemUri of ids) {
+      const body = {
+        className: ctor.queriedAs(),
+        baseUri: this._baseExpression,
+        collection: key,
+        itemUri,
+        ...(batchId && { batchId }),
+      };
+      if (kind === 'adder') await this._perspective.instanceAddToCollection(body);
+      else await this._perspective.instanceRemoveFromCollection(body);
+    }
+    return true;
+  }
+
+  /** The members `key` holds now, as IDs, read fresh from the perspective:
+   *  an add or remove on a call-backed class is a full-list replace through
+   *  the declared setter, the only collection write its shape declares. */
+  private async currentMembers(key: string): Promise<string[]> {
+    const fresh = new (this.constructor as any)(this._perspective, this._baseExpression);
+    await fresh.get();
+    const members = fresh[key];
+    return Array.isArray(members) ? members.map((m: any) => this.resolveRelationId(m)) : [];
+  }
+
+  /** The member list `key` should hold after a relation write of `kind`
+   *  with `ids`: a setter's ids as given, an adder's or remover's applied
+   *  to the current members. */
+  private async membersAfter(key: string, kind: 'setter' | 'adder' | 'remover', ids: string[]): Promise<string[]> {
+    if (kind === 'setter') return ids;
+    let current = await this.currentMembers(key);
+    const pending = pendingMembers.get(this._perspective);
+    const address = this.memberWriteKey(key);
+    const written = pending?.get(address);
+    if (written) {
+      // Retire each intent once observed. Preserve unrelated mirror changes.
+      written.added = written.added.filter(id => !current.includes(id));
+      written.removed = written.removed.filter(id => current.includes(id));
+      current = [...current.filter(id => !written.removed.includes(id)), ...written.added];
+      if (!written.added.length && !written.removed.length) pending!.delete(address);
+    }
+    if (kind === 'adder') return [...current, ...ids.filter((id) => !current.includes(id))];
+    return current.filter((id) => !ids.includes(id));
+  }
+
+  /** A relation write on a call-backed row (see {@link callBacked}): a
+   *  forward collection is replaced through `instanceUpdate` with its full
+   *  member list, so a declared `call` setter reaches the language (an add or
+   *  remove included; `[]` clears). A `hasOne` goes as its scalar member. A
+   *  reverse relation, or a `hasOne` being cleared, keeps the legacy write. */
+  private async callRelation(key: string, kind: 'setter' | 'adder' | 'remover', value: any, batchId?: string) {
+    const relMeta = this.getRelationOptions(key);
+    const ids = (value == null ? [] : Array.isArray(value) ? value : [value]).map((v) => this.resolveRelationId(v));
+    const reverse = relMeta?.kind === "belongsToOne" || relMeta?.kind === "belongsToMany";
+    if (!reverse && relMeta?.kind !== "hasOne") {
+      if (await this.declaredMemberWrite(key, kind, ids, batchId)) return;
+      await this.instanceUpdate({ [key]: await this.membersAfter(key, kind, ids) }, batchId);
+      return;
+    }
+    if (!reverse && kind !== 'remover' && ids.length > 0) {
+      await this.instanceUpdate({ [key]: ids[0] }, batchId);
+      return;
+    }
+    await this.sendWrites(this.planRelation(key, kind, value), batchId);
   }
 
   /** Resolve a relation argument to a plain string ID. Accepts either a raw
@@ -1890,11 +2080,16 @@ export class Ad4mModel {
 
   /** A relation setter, adder or remover call: on a row read through an
    *  abstract class it dispatches through the executor (see
-   *  {@link relationThroughAbstract}); otherwise its writes go out in as few
-   *  `executeAction` calls as {@link sendWrites} allows. */
+   *  {@link relationThroughAbstract}); on a call-backed class through
+   *  `instanceUpdate` ({@link callRelation}); otherwise its writes go out in
+   *  as few `executeAction` calls as {@link sendWrites} allows. */
   private async writeRelation(key: string, kind: 'setter' | 'adder' | 'remover', value: any, batchId?: string) {
     const predicate = this.getRelationOptions(key)?.predicate;
     if (predicate && kind !== 'remover') this._relationsWritten.add(predicate);
+    if (this.callBacked()) {
+      await this.callRelation(key, kind, value, batchId);
+      return;
+    }
     const abstractName = this.abstractName();
     if (!abstractName) {
       await this.sendWrites(this.planRelation(key, kind, value), batchId);
@@ -1944,6 +2139,8 @@ export class Ad4mModel {
       const abstractName = this.abstractName();
       if (abstractName) {
         await this.perspective.updateSubject(abstractName, this._baseExpression, this.changedValuesForDispatch(), batchId);
+      } else if (this.callBacked()) {
+        await this.callUpdate(batchId);
       } else {
         await this.innerUpdate(true, batchId);
       }
@@ -1963,6 +2160,10 @@ export class Ad4mModel {
         `'${name}' is an abstract class and cannot be created. Create an instance of ` +
         `a class that has its properties; querying '${name}' reads it.`
       );
+    }
+    if (this.callBacked()) {
+      await this.callCreate(batchId);
+      return;
     }
 
     // With a caller's batch, the caller commits; take a snapshot so a later
@@ -2038,6 +2239,85 @@ export class Ad4mModel {
       }
     }
     await this.sendWrites(writes, batchId);
+  }
+
+  /** Create on a call-backed class (see {@link callBacked}): one validated
+   *  `instanceCreate` under the class's target class IRI. The executor runs
+   *  the declared constructor — a `call` mints the record in its language
+   *  and answers the minted URL, which becomes this instance's id — and the
+   *  setters the shape declares. A reverse relation and an action envelope
+   *  are written after, through {@link writeRelation}. */
+  private async callCreate(batchId?: string) {
+    const ctor = this.constructor as typeof Ad4mModel;
+    const metadata = ctor.getModelMetadata();
+    const properties: Record<string, any> = {};
+    const deferred: [string, 'setter' | 'adder' | 'remover', any][] = [];
+    for (const [key, value] of Object.entries(this)) {
+      if (value === undefined || value === null) continue;
+      const relMeta = metadata.relations[key];
+      if (relMeta) {
+        if (relMeta.getter || relMeta.readOnly) continue;
+        if (value?.action) {
+          const kind = value.action === "adder" || value.action === "remover" ? value.action : "setter";
+          deferred.push([key, kind, value.value]);
+          continue;
+        }
+        if (relMeta.direction === "reverse") {
+          deferred.push([key, 'setter', value]);
+          continue;
+        }
+        const ids = (Array.isArray(value) ? value : [value]).map((v) => this.resolveRelationId(v));
+        if (ids.length === 0) continue;
+        properties[key] = this.getRelationOptions(key)?.kind === "hasOne" ? ids[0] : ids;
+        continue;
+      }
+      const propMeta = metadata.properties[key];
+      if (!propMeta || propMeta.readOnly) continue;
+      properties[key] = value;
+    }
+    const created = await this._perspective.instanceCreate({
+      className: ctor.queriedAs(),
+      baseUri: this._baseExpression,
+      properties,
+      ...(batchId && { batchId }),
+    });
+    this._baseExpression = created.baseUri;
+    for (const [key, kind, value] of deferred) {
+      await this.writeRelation(key, kind, value, batchId);
+    }
+    if (batchId) this.takeSnapshot();
+    else await this.getData();
+  }
+
+  /** Update on a call-backed class (see {@link callBacked}): the changed
+   *  fields as one `instanceUpdate` patch, so the declared setters run in one
+   *  grouped call. A forward collection is its full member list — `[]`
+   *  included, which clears it in the language; an adder or remover envelope
+   *  is applied to the current members first. A getter or readOnly relation
+   *  is not written; a reverse relation and a `hasOne` clear keep the legacy
+   *  write. A save with no change sends nothing. */
+  private async callUpdate(batchId?: string) {
+    const relations = (this.constructor as typeof Ad4mModel).getModelMetadata().relations;
+    const patch: Record<string, any> = {};
+    for (const [key, value] of Object.entries(this.changedValues())) {
+      const relMeta = relations[key];
+      if (!relMeta) {
+        patch[key] = value;
+        continue;
+      }
+      if (relMeta.getter || relMeta.readOnly) continue;
+      const kind = value?.action === "adder" || value?.action === "remover" ? value.action : "setter";
+      const members = value?.action ? value.value : value;
+      const ids = (members == null ? [] : Array.isArray(members) ? members : [members]).map((v) => this.resolveRelationId(v));
+      const scalar = this.getRelationOptions(key)?.kind === "hasOne";
+      if (relMeta.direction === "reverse" || (scalar && (kind === "remover" || ids.length === 0))) {
+        await this.sendWrites(this.planRelation(key, kind, members), batchId);
+        continue;
+      }
+      if (!scalar && (await this.declaredMemberWrite(key, kind, ids, batchId))) continue;
+      patch[key] = scalar ? ids[0] : await this.membersAfter(key, kind, ids);
+    }
+    if (Object.keys(patch).length > 0) await this.instanceUpdate(patch, batchId);
   }
 
   /** The name the executor knows the class by when it is abstract (#1435):
@@ -2356,15 +2636,21 @@ export class Ad4mModel {
    */
   async delete(batchId?: string) {
     const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
-    // Through an abstract class (#1435), `removeSubject` runs the destructors
-    // of the record's own classes.
-    const hasDestructor = !!this.abstractName() || Object.values(metadata.properties).some(
+    // A call-backed class's shape declares its destructor: `removeSubject`
+    // runs it (a `call` reaches the language; a caller's batch is refused
+    // there), under the class's target class IRI. Like any destructor it
+    // removes this class's data only: another model class may live on the
+    // same node. Through an abstract class (#1435), `removeSubject` runs the
+    // destructors of the record's own classes.
+    const callBacked = this.callBacked();
+    const hasDestructor = callBacked || !!this.abstractName() || Object.values(metadata.properties).some(
       (p) => p.required || p.flag || p.initial !== undefined
     );
 
     if (hasDestructor) {
       // Remove the subject itself (destructor actions)
-      await this._perspective.removeSubject(this, this._baseExpression, batchId);
+      const subjectClass = callBacked ? (this.constructor as typeof Ad4mModel).queriedAs() : this;
+      await this._perspective.removeSubject(subjectClass, this._baseExpression, batchId);
     } else {
       // No destructor (all-optional model).
       // SAFETY: We must NOT remove all outgoing links because another model
@@ -2531,7 +2817,17 @@ export class Ad4mModel {
       throw new Error(`${this.getModelMetadata().className} not found: ${id}`);
     }
     Object.assign(instance, data);
-    await instance.save();
+    // A call-backed record lives in its language and the perspective only
+    // mirrors it, from each call's delta: just after a write the read above
+    // can still show the old value. The fields given are the write, so they
+    // go out even when that read already shows them (an Untag `tags: []`
+    // racing the Tag before it). An ordinary class reads the store it writes.
+    if (this.hasCallActions()) (instance as any)._given = new Set(Object.keys(data));
+    try {
+      await instance.save();
+    } finally {
+      (instance as any)._given = null;
+    }
     return instance;
   }
 
@@ -2776,6 +3072,10 @@ export class Ad4mModel {
   ): typeof Ad4mModel {
     const DynamicModelClass = class extends (this as any) {} as unknown as typeof Ad4mModel;
     (DynamicModelClass as any).className = name;
+    // The shape as registered, actions included: the class's generated shape
+    // carries link actions only, but a `call` constructor, setter or
+    // destructor decides how its writes go ({@link hasCallActions}).
+    (DynamicModelClass as any).sourceShape = shape;
     (DynamicModelClass.prototype as any).className = name;
 
     // Build a backward-compat fallback map: predicate → fixed-IRI-value from

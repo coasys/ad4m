@@ -1,9 +1,10 @@
 //! The validated writes against a real perspective.
 
 use super::write::{
-    add_to_collection, create, remove_from_collection, InstanceAddToCollection, InstanceCreate,
-    InstanceRemoveFromCollection,
+    add_to_collection, create, remove_from_collection, update, InstanceAddToCollection,
+    InstanceCreate, InstanceRemoveFromCollection, InstanceUpdate,
 };
+use super::{InstanceError, ValidationProblem};
 use crate::agent::AgentContext;
 use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
@@ -422,4 +423,275 @@ mod decoded_literal {
         assert_eq!(decoded_literal("literal:boolean:true"), "true");
         assert_eq!(decoded_literal("ns://item"), "ns://item");
     }
+}
+
+/// `Counted` with `counts` written through a declared `collectionSetter`.
+const SET_COUNTED_SDNA: &str = r#"{
+  "target_class": "ns://Counted",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Counted"}
+  ],
+  "properties": [
+    {"path":"ns://counted_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://counted_title","target":"value"}]},
+    {"path":"ns://flag","name":"flags","datatype":"xsd:boolean","collection":true,"writable":true,
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://flag","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://flag","target":"value"}]},
+    {"path":"ns://count","name":"counts","datatype":"xsd:integer","collection":true,"writable":true,
+     "setter":[{"action":"collectionSetter","source":"this","predicate":"ns://count","target":"value"}],
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://count","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://count","target":"value"}]}
+  ]
+}"#;
+
+/// An `update` patch names the full member list of a collection with a
+/// declared `ad4m://setter` — members not in the list leave, `[]` clears. A
+/// collection with no setter is refused (`collectionNotSettable`): its
+/// members change through `add_to_collection` / `remove_from_collection`.
+#[tokio::test(flavor = "multi_thread")]
+async fn update_replaces_a_collections_member_list() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("Counted", SET_COUNTED_SDNA)]).await;
+    let base = create(
+        &mut p,
+        &ctx,
+        InstanceCreate {
+            class_name: "Counted".into(),
+            properties: Some(Map::from_iter([
+                ("title".to_string(), json!("t")),
+                ("counts".to_string(), json!([1, 2])),
+                ("flags".to_string(), json!([true])),
+            ])),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("create")
+    .base_uri;
+
+    assert_eq!(
+        stored_targets(&p, &base, "ns://count").await,
+        vec!["literal:number:1", "literal:number:2"]
+    );
+
+    update(
+        &mut p,
+        &ctx,
+        InstanceUpdate {
+            class_name: "Counted".into(),
+            base_uri: base.clone(),
+            properties: Map::from_iter([("counts".to_string(), json!([2, 3]))]),
+            batch_id: None,
+        },
+    )
+    .await
+    .expect("update");
+    assert_eq!(
+        stored_targets(&p, &base, "ns://count").await,
+        vec!["literal:number:2", "literal:number:3"],
+        "the member list is replaced, not appended"
+    );
+
+    update(
+        &mut p,
+        &ctx,
+        InstanceUpdate {
+            class_name: "Counted".into(),
+            base_uri: base.clone(),
+            properties: Map::from_iter([("counts".to_string(), json!([]))]),
+            batch_id: None,
+        },
+    )
+    .await
+    .expect("update");
+    assert!(
+        stored_targets(&p, &base, "ns://count").await.is_empty(),
+        "an empty list clears"
+    );
+    // The untouched collection stays.
+    assert_eq!(
+        stored_targets(&p, &base, "ns://flag").await,
+        vec!["literal:boolean:true"]
+    );
+
+    let refused = update(
+        &mut p,
+        &ctx,
+        InstanceUpdate {
+            class_name: "Counted".into(),
+            base_uri: base.clone(),
+            properties: Map::from_iter([("flags".to_string(), json!([]))]),
+            batch_id: None,
+        },
+    )
+    .await;
+    match refused {
+        Err(InstanceError::Validation { errors, .. }) => {
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(errors[0].property, "flags");
+            assert!(
+                matches!(errors[0].problem, ValidationProblem::CollectionNotSettable),
+                "{errors:?}"
+            );
+        }
+        other => panic!("a setter-less collection must be refused on update: {other:?}"),
+    }
+    assert_eq!(
+        stored_targets(&p, &base, "ns://flag").await,
+        vec!["literal:boolean:true"],
+        "the refused update wrote nothing"
+    );
+}
+
+/// A scalar `hasOne` relation: `adder`/`remover`, no `ad4m://setter`.
+const PINNED_SDNA: &str = r#"{
+  "target_class": "ns://PinPost",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://PinPost"}
+  ],
+  "properties": [
+    {"path":"ns://pin_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://pin_title","target":"value"}]},
+    {"path":"ns://pinned","name":"pinned","relation_kind":"hasOne","target_class_name":"Comment",
+     "class":"ns://CommentShape","node_kind":"IRI","max_count":1,"writable":true,
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://pinned","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://pinned","target":"value"}]}
+  ]
+}"#;
+
+/// A `hasOne` relation writes through its `adder`/`remover` pair: a scalar in
+/// the patch replaces the one member, so the old pin leaves when a new one
+/// is set.
+#[tokio::test(flavor = "multi_thread")]
+async fn update_replaces_a_scalar_relation_member() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("PinPost", PINNED_SDNA)]).await;
+    let base = create(
+        &mut p,
+        &ctx,
+        InstanceCreate {
+            class_name: "PinPost".into(),
+            properties: Some(Map::from_iter([("title".to_string(), json!("t"))])),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("create")
+    .base_uri;
+
+    update(
+        &mut p,
+        &ctx,
+        InstanceUpdate {
+            class_name: "PinPost".into(),
+            base_uri: base.clone(),
+            properties: Map::from_iter([("pinned".to_string(), json!("ns://c1"))]),
+            batch_id: None,
+        },
+    )
+    .await
+    .expect("update");
+    assert_eq!(
+        stored_targets(&p, &base, "ns://pinned").await,
+        vec!["ns://c1"]
+    );
+
+    update(
+        &mut p,
+        &ctx,
+        InstanceUpdate {
+            class_name: "PinPost".into(),
+            base_uri: base.clone(),
+            properties: Map::from_iter([("pinned".to_string(), json!("ns://c2"))]),
+            batch_id: None,
+        },
+    )
+    .await
+    .expect("update");
+    assert_eq!(
+        stored_targets(&p, &base, "ns://pinned").await,
+        vec!["ns://c2"],
+        "the scalar relation replaces its one member"
+    );
+}
+
+/// [`PINNED_SDNA`] with a `call` adder and remover on `pinned`: a language
+/// writes the pin.
+const CALL_PINNED_SDNA: &str = r#"{
+  "target_class": "ns://CallPinPost",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://CallPinPost"}
+  ],
+  "properties": [
+    {"path":"ns://pin_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://pin_title","target":"value"}]},
+    {"path":"ns://pinned","name":"pinned","relation_kind":"hasOne","target_class_name":"Comment",
+     "class":"ns://CommentShape","node_kind":"IRI","max_count":1,"writable":true,
+     "adder":[{"action":"call","source":"this","predicate":"pin","target":"{}"}],
+     "remover":[{"action":"call","source":"this","predicate":"unpin","target":"{}"}]}
+  ]
+}"#;
+
+/// A scalar whose adder and remover are `call`s is not written as raw
+/// links: the one-member replace through a synthesized `collectionSetter`
+/// would never reach the language. Create and update refuse it before
+/// they write anything.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scalar_with_a_call_adder_and_remover_is_not_written_as_links() {
+    let (mut p, _shapes, ctx) =
+        setup_perspective_no_llm(&[("CallPinPost", CALL_PINNED_SDNA)]).await;
+    let refused_create = create(
+        &mut p,
+        &ctx,
+        InstanceCreate {
+            class_name: "CallPinPost".into(),
+            properties: Some(Map::from_iter([
+                ("title".to_string(), json!("t")),
+                ("pinned".to_string(), json!("ns://c1")),
+            ])),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(
+        matches!(refused_create, Err(InstanceError::Validation { .. })),
+        "{refused_create:?}"
+    );
+
+    let base = create(
+        &mut p,
+        &ctx,
+        InstanceCreate {
+            class_name: "CallPinPost".into(),
+            properties: Some(Map::from_iter([("title".to_string(), json!("t"))])),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("create")
+    .base_uri;
+    let refused = update(
+        &mut p,
+        &ctx,
+        InstanceUpdate {
+            class_name: "CallPinPost".into(),
+            base_uri: base.clone(),
+            properties: Map::from_iter([("pinned".to_string(), json!("ns://c1"))]),
+            batch_id: None,
+        },
+    )
+    .await;
+    match refused {
+        Err(InstanceError::Validation { errors, .. }) => {
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(errors[0].property, "pinned");
+        }
+        other => panic!("a call-pair scalar must be refused: {other:?}"),
+    }
+    let pinned = p
+        .get_links(&LinkQuery {
+            predicate: Some("ns://pinned".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(pinned.is_empty(), "a raw pin link was written: {pinned:?}");
 }

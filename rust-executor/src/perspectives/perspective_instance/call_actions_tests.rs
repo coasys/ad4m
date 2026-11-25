@@ -614,6 +614,684 @@ async fn abstract_update_groups_by_concrete_name() {
     assert_eq!(updates[0]["params"], json!({"title": "z"}));
 }
 
+// --- `perspective.instance*` on a mounted class -----------------------------
+//
+// The validated writes run the same lifecycle actions `*_subject` runs — on a
+// mounted class those are `call`s, so `instanceCreate`/`instanceUpdate`/
+// `instanceRemove` reach the language and the returned delta lands in the
+// perspective.
+
+mod instance_writes {
+    use super::*;
+    use crate::perspectives::instances::{
+        add_to_collection as instance_add_to_collection, create as instance_create,
+        remove as instance_remove, remove_from_collection as instance_remove_from_collection,
+        update as instance_update, InstanceAddToCollection, InstanceCreate, InstanceError,
+        InstanceRemove, InstanceRemoveFromCollection, InstanceUpdate,
+    };
+    use crate::perspectives::perspective_instance::mounts_tests::{
+        create as create_in_language, mounted, things,
+    };
+    use serde_json::Map;
+
+    /// A link constructor must not bypass a declared call adder by writing
+    /// initial membership links. Refuse before creating or staging anything.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_refuses_a_call_adder_without_a_setter() {
+        use crate::perspectives::instances::{ReadOnlyReason, ValidationProblem};
+        let lang = load_mount_test_language().await;
+        let shape = json!({
+            "target_class": "mounttest://Mixed",
+            "constructor_actions": [{"action": "addLink", "source": "this", "predicate": "rdf://type", "target": "mounttest://Mixed"}],
+            "properties": [
+                {"path": "rdf://type", "name": "type", "has_value": "mounttest://Mixed", "min_count": 1, "max_count": 1},
+                {"path": "mounttest://tag", "name": "tags", "collection": true, "datatype": "xsd:string", "writable": true,
+                 "adder": [{"action": "call", "source": "this", "predicate": "addTags", "target": "{}"}]}
+            ]
+        });
+        let (mut p, ctx) = super::mounted("Mixed", shape.to_string()).await;
+        let before = link_count(&p).await;
+        for batched in [false, true] {
+            let batch = if batched {
+                Some(p.create_batch().await)
+            } else {
+                None
+            };
+            let result = instance_create(
+                &mut p,
+                &ctx,
+                InstanceCreate {
+                    class_name: "Mixed".into(),
+                    base_uri: Some(format!("{lang}://t1")),
+                    properties: Some(Map::from_iter([("tags".into(), json!(["x"]))])),
+                    batch_id: batch.clone(),
+                    ..Default::default()
+                },
+            )
+            .await;
+            match result {
+                Err(InstanceError::Validation { errors, .. }) => {
+                    assert_eq!(errors.len(), 1);
+                    assert_eq!(errors[0].property, "tags");
+                    assert_eq!(
+                        errors[0].problem,
+                        ValidationProblem::ReadOnly {
+                            reason: ReadOnlyReason::NoSetter
+                        }
+                    );
+                }
+                other => panic!("expected typed refusal, got {other:?}"),
+            }
+            if let Some(batch) = batch {
+                p.commit_batch(batch, &ctx).await.unwrap();
+            }
+            assert_eq!(
+                link_count(&p).await,
+                before,
+                "refusal wrote or staged links"
+            );
+            assert!(calls(&lang).await.is_empty());
+        }
+    }
+
+    /// `instanceCreate` on a mounted class calls the language's constructor;
+    /// its minted address is the instance's id, every supplied value —
+    /// collections too — is a constructor parameter, and the record reads
+    /// back as an instance at once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_calls_the_constructor_and_returns_its_address() {
+        let lang = load_mount_test_language().await;
+        let (mut p, ctx) = mounted(&lang).await;
+
+        let created = instance_create(
+            &mut p,
+            &ctx,
+            InstanceCreate {
+                class_name: "MountThing".into(),
+                properties: Some(Map::from_iter([
+                    ("title".to_string(), json!("a")),
+                    ("tags".to_string(), json!(["x", "y"])),
+                ])),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("instance create");
+
+        assert_eq!(created.base_uri, format!("{lang}://t1"));
+        assert_eq!(
+            calls(&lang).await,
+            vec![json!({"address": "class/MountThing", "name": "create",
+                        "params": {"title": "a", "tags": ["x", "y"]}})]
+        );
+        let found = things(&p).await;
+        assert_eq!(
+            found.len(),
+            1,
+            "the minted record is an instance: {found:?}"
+        );
+        assert_eq!(found[0]["title"], "a");
+        assert_eq!(found[0]["tags"], json!(["x", "y"]));
+    }
+
+    /// `instanceUpdate` sends the patch to the record's address as the
+    /// grouped setter call — scalars and the collection replace (`tags`) in
+    /// one `update` — and the delta it answers lands in the perspective. An
+    /// empty string clears through the setter like any value.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn update_calls_the_setters_and_applies_the_delta() {
+        let lang = load_mount_test_language().await;
+        create_in_language(&lang, json!({"title": "a", "tags": ["x", "y"]})).await;
+        let (mut p, ctx) = mounted(&lang).await;
+        let base = format!("{lang}://t1");
+
+        instance_update(
+            &mut p,
+            &ctx,
+            InstanceUpdate {
+                class_name: "MountThing".into(),
+                base_uri: base.clone(),
+                properties: Map::from_iter([
+                    ("done".to_string(), json!(true)),
+                    ("tags".to_string(), json!(["b"])),
+                    ("title".to_string(), json!("")),
+                ]),
+                batch_id: None,
+            },
+        )
+        .await
+        .expect("instance update");
+
+        let updates: Vec<Value> = calls(&lang)
+            .await
+            .into_iter()
+            .filter(|c| c["name"] == "update")
+            .collect();
+        assert_eq!(updates.len(), 1, "one grouped update call: {updates:?}");
+        assert_eq!(updates[0]["address"], "t1");
+        // `done` declares no datatype: it is a string-typed property, so
+        // validation coerces `true` to "true" before the call sees it.
+        assert_eq!(
+            updates[0]["params"],
+            json!({"done": "true", "tags": ["b"], "title": ""})
+        );
+
+        let found = things(&p).await;
+        assert_eq!(found[0]["title"], "");
+        assert_eq!(found[0]["done"], "true");
+        assert_eq!(found[0]["tags"], json!(["b"]));
+    }
+
+    /// `instanceRemove` runs the `call` destructor at the record's address
+    /// before the link cascade: the language sees `delete`, its record goes,
+    /// and the mirrored links leave the perspective.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remove_calls_the_destructor() {
+        let lang = load_mount_test_language().await;
+        create_in_language(&lang, json!({"title": "a"})).await;
+        let (mut p, ctx) = mounted(&lang).await;
+        let base = format!("{lang}://t1");
+
+        instance_remove(
+            &mut p,
+            &ctx,
+            InstanceRemove {
+                class_name: "MountThing".into(),
+                base_uri: base,
+                batch_id: None,
+            },
+        )
+        .await
+        .expect("instance remove");
+
+        let deletes: Vec<Value> = calls(&lang)
+            .await
+            .into_iter()
+            .filter(|c| c["name"] == "delete")
+            .collect();
+        assert_eq!(deletes.len(), 1);
+        assert_eq!(deletes[0]["address"], "t1");
+        assert!(things(&p).await.is_empty(), "the record is gone");
+    }
+
+    /// A write that calls into a language cannot honour a caller's batch:
+    /// discarding the batch cannot undo the call. `instanceCreate` with an
+    /// open batch on a class with a `call` constructor is refused before
+    /// the call — the language sees nothing and the batch stages nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_refuses_a_caller_batch_before_calling() {
+        let lang = load_mount_test_language().await;
+        let (mut p, ctx) = mounted(&lang).await;
+        let batch = p.create_batch().await;
+
+        let result = instance_create(
+            &mut p,
+            &ctx,
+            InstanceCreate {
+                class_name: "MountThing".into(),
+                properties: Some(Map::from_iter([("title".to_string(), json!("a"))])),
+                batch_id: Some(batch.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(InstanceError::CallsInBatch { .. })),
+            "a create with a call constructor ran in the caller's batch: {result:?}"
+        );
+        assert!(calls(&lang).await.is_empty(), "the language was called");
+        assert!(things(&p).await.is_empty());
+        assert!(p.has_batch(&batch).await, "the caller's batch stays open");
+    }
+
+    /// `instanceUpdate` with an open batch on a `call` setter is refused
+    /// before the call.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn update_refuses_a_caller_batch_before_calling() {
+        let lang = load_mount_test_language().await;
+        create_in_language(&lang, json!({"title": "a"})).await;
+        let (mut p, ctx) = mounted(&lang).await;
+        let batch = p.create_batch().await;
+        let before = calls(&lang).await;
+
+        let result = instance_update(
+            &mut p,
+            &ctx,
+            InstanceUpdate {
+                class_name: "MountThing".into(),
+                base_uri: format!("{lang}://t1"),
+                properties: Map::from_iter([("title".to_string(), json!("b"))]),
+                batch_id: Some(batch),
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(InstanceError::CallsInBatch { .. })),
+            "an update with a call setter ran in the caller's batch: {result:?}"
+        );
+        assert_eq!(calls(&lang).await, before, "the language was called");
+        assert_eq!(things(&p).await[0]["title"], "a");
+    }
+
+    /// `instanceRemove` with an open batch on a `call` destructor is
+    /// refused before the destructor and before the cascade.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remove_refuses_a_caller_batch_before_calling() {
+        let lang = load_mount_test_language().await;
+        create_in_language(&lang, json!({"title": "a"})).await;
+        let (mut p, ctx) = mounted(&lang).await;
+        let batch = p.create_batch().await;
+        let before = calls(&lang).await;
+
+        let result = instance_remove(
+            &mut p,
+            &ctx,
+            InstanceRemove {
+                class_name: "MountThing".into(),
+                base_uri: format!("{lang}://t1"),
+                batch_id: Some(batch),
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(InstanceError::CallsInBatch { .. })),
+            "a remove with a call destructor ran in the caller's batch: {result:?}"
+        );
+        assert_eq!(calls(&lang).await, before, "the language was called");
+        assert_eq!(things(&p).await.len(), 1, "the record is still there");
+    }
+
+    /// An app's abstract class the mount's `TextContent` alias answers to
+    /// (the built-in `ad4m://TextContent` is not an instance* class).
+    async fn register_text_content(p: &mut PerspectiveInstance, ctx: &AgentContext) {
+        p.add_sdna(
+            "TextContent".to_string(),
+            String::new(),
+            SdnaType::SubjectClass,
+            Some(
+                json!({
+                    "target_class": "app://TextContent",
+                    "abstract": true,
+                    "properties": [{
+                        "path": "app://text", "name": "text", "datatype": "xsd:string",
+                        "max_count": 1, "writable": true,
+                        "setter": [{"action": "setSingleTarget", "source": "this",
+                                    "predicate": "app://text", "target": "value"}],
+                    }],
+                })
+                .to_string(),
+            ),
+            ctx,
+        )
+        .await
+        .unwrap();
+    }
+
+    /// An abstract `instanceRemove` whose record's destructor calls a
+    /// language refuses a caller's batch before the call, like a concrete one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn abstract_remove_refuses_a_caller_batch_before_calling() {
+        let lang = load_mount_test_language().await;
+        create_in_language(&lang, json!({"title": "hello"})).await;
+        let (mut p, ctx) = mounted(&lang).await;
+        register_text_content(&mut p, &ctx).await;
+        let batch = p.create_batch().await;
+        let before = calls(&lang).await;
+
+        let result = instance_remove(
+            &mut p,
+            &ctx,
+            InstanceRemove {
+                class_name: "app://TextContent".into(),
+                base_uri: format!("{lang}://t1"),
+                batch_id: Some(batch),
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(InstanceError::CallsInBatch { .. })),
+            "{result:?}"
+        );
+        assert_eq!(calls(&lang).await, before, "the language was called");
+    }
+
+    /// `instanceUpdate` through an abstract class reaches a mounted
+    /// record's `call` setter unbatched — the write core must not open a
+    /// batch of its own around it (`run_call_actions` refuses one).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn abstract_update_calls_without_a_batch() {
+        let lang = load_mount_test_language().await;
+        create_in_language(&lang, json!({"title": "hello"})).await;
+        let (mut p, ctx) = mounted(&lang).await;
+        register_text_content(&mut p, &ctx).await;
+
+        instance_update(
+            &mut p,
+            &ctx,
+            InstanceUpdate {
+                class_name: "app://TextContent".into(),
+                base_uri: format!("{lang}://t1"),
+                properties: Map::from_iter([("text".to_string(), json!("bye"))]),
+                batch_id: None,
+            },
+        )
+        .await
+        .expect("abstract instance update");
+
+        let updates: Vec<Value> = calls(&lang)
+            .await
+            .into_iter()
+            .filter(|c| c["name"] == "update")
+            .collect();
+        assert_eq!(updates.len(), 1, "{updates:?}");
+        assert_eq!(updates[0]["params"], json!({"title": "bye"}));
+        assert_eq!(things(&p).await[0]["title"], "bye");
+    }
+
+    /// Round 6 (We's Acorn "Untag"): the frame We sends, by the mount's alias
+    /// class IRI (`literal:string:shacl://<Name>`), `tags: []` on a record
+    /// that has a tag, reaches the language's setter as `{tags: []}` and the
+    /// record reads back with no tags. Pins the executor half; the live
+    /// failure was the SDK sending no frame at all (`cdd52af8c`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn untag_by_the_alias_iri_clears_the_collection_in_the_language() {
+        let lang = load_mount_test_language().await;
+        create_in_language(&lang, json!({"title": "a", "tags": ["x"]})).await;
+        let (mut p, ctx) = mounted(&lang).await;
+        let before = calls(&lang).await.len();
+
+        instance_update(
+            &mut p,
+            &ctx,
+            InstanceUpdate {
+                class_name: "literal:string:shacl://MountThing".into(),
+                base_uri: format!("{lang}://t1"),
+                properties: Map::from_iter([("tags".to_string(), json!([]))]),
+                batch_id: None,
+            },
+        )
+        .await
+        .expect("untag");
+
+        assert_eq!(
+            calls(&lang).await[before..].to_vec(),
+            vec![json!({"address": "t1", "name": "update", "params": {"tags": []}})]
+        );
+        let tags = things(&p).await[0]["tags"].clone();
+        assert!(tags.as_array().is_none_or(|t| t.is_empty()), "{tags}");
+    }
+
+    /// a mounted collection whose shape declares a `call` adder
+    /// and remover and no setter. `instanceAddToCollection` /
+    /// `instanceRemoveFromCollection` run the language's adder / remover
+    /// with the member list (writing no membership link of their own),
+    /// and refuse a caller's batch before calling.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn collection_writes_run_a_call_adder_and_remover() {
+        let lang = load_mount_test_language().await;
+        interact(
+            &format!("{lang}://project"),
+            "setShapes",
+            json!({"shapes": [{"name": "MountThing", "target": "mounttest://Thing", "tags": {
+                "setter": null,
+                "adder": [{"action": "call", "source": "this", "predicate": "addTags", "target": "{}"}],
+                "remover": [{"action": "call", "source": "this", "predicate": "removeTags", "target": "{}"}],
+            }}]}),
+        )
+        .await
+        .unwrap();
+        create_in_language(&lang, json!({"title": "a"})).await;
+        let (mut p, ctx) = mounted(&lang).await;
+        let base = format!("{lang}://t1");
+        let add = |batch_id: Option<String>| InstanceAddToCollection {
+            class_name: "MountThing".into(),
+            base_uri: base.clone(),
+            collection: "tags".into(),
+            item_uri: "x".into(),
+            batch_id,
+        };
+        let batch = p.create_batch().await;
+        let before = calls(&lang).await;
+
+        let refused = instance_add_to_collection(&mut p, &ctx, add(Some(batch))).await;
+        assert!(
+            matches!(refused, Err(InstanceError::CallsInBatch { .. })),
+            "{refused:?}"
+        );
+        assert_eq!(calls(&lang).await, before, "nothing was called");
+
+        instance_add_to_collection(&mut p, &ctx, add(None))
+            .await
+            .expect("add through the call adder");
+        assert_eq!(things(&p).await[0]["tags"], json!(["x"]));
+        instance_remove_from_collection(
+            &mut p,
+            &ctx,
+            InstanceRemoveFromCollection {
+                class_name: "MountThing".into(),
+                base_uri: base.clone(),
+                collection: "tags".into(),
+                item_uri: "x".into(),
+                batch_id: None,
+            },
+        )
+        .await
+        .expect("remove through the call remover");
+        // No member links left: the raw model query leaves the key out.
+        let tags = things(&p).await[0]["tags"].clone();
+        assert!(tags.as_array().is_none_or(|t| t.is_empty()), "{tags}");
+
+        assert_eq!(
+            calls(&lang).await[before.len()..].to_vec(),
+            vec![
+                json!({"address": "t1", "name": "addTags", "params": {"tags": ["x"]}}),
+                json!({"address": "t1", "name": "removeTags", "params": {"tags": ["x"]}}),
+            ]
+        );
+    }
+
+    /// `app://Note`: a link class read through `app://TextContent` whose
+    /// `text` is stored through `lang` — every value written to it is an
+    /// `expressionCreate` on the language. A node is a Note when it has the
+    /// `app://is_note` flag link (`make_note`).
+    async fn register_note(p: &mut PerspectiveInstance, ctx: &AgentContext, lang: &str) {
+        p.add_sdna(
+            "Note".to_string(),
+            String::new(),
+            SdnaType::SubjectClass,
+            Some(
+                json!({
+                    "target_class": "app://Note",
+                    "properties": [
+                        {"path": "app://is_note", "name": "isNote", "has_value": "app://Note",
+                         "min_count": 1, "max_count": 1},
+                        {"path": "app://note_text", "name": "text", "datatype": "xsd:string",
+                         "max_count": 1, "writable": true, "resolve_language": lang,
+                         "setter": [{"action": "setSingleTarget", "source": "this",
+                                     "predicate": "app://note_text", "target": "value"}]},
+                    ],
+                })
+                .to_string(),
+            ),
+            ctx,
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn make_note(p: &mut PerspectiveInstance, ctx: &AgentContext, base: &str) {
+        p.add_link(
+            Link {
+                source: base.to_string(),
+                predicate: Some("app://is_note".to_string()),
+                target: "app://Note".to_string(),
+            },
+            LinkStatus::Local,
+            None,
+            ctx,
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn expression_creates(lang: &str) -> usize {
+        calls(lang)
+            .await
+            .iter()
+            .filter(|c| c["name"] == "expressionCreate")
+            .count()
+    }
+
+    /// an abstract `instanceUpdate` that reaches only a link
+    /// setter stored through a language makes one expression. Choosing the
+    /// batch must not resolve the values: a dry run of the write made one
+    /// expression, and the write itself a second.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn abstract_update_creates_each_expression_once() {
+        let lang = load_mount_test_language().await;
+        let (mut p, ctx) = mounted(&lang).await;
+        register_text_content(&mut p, &ctx).await;
+        register_note(&mut p, &ctx, &lang).await;
+        make_note(&mut p, &ctx, "app://n1").await;
+
+        instance_update(
+            &mut p,
+            &ctx,
+            InstanceUpdate {
+                class_name: "app://TextContent".into(),
+                base_uri: "app://n1".into(),
+                properties: Map::from_iter([("text".to_string(), json!("hi"))]),
+                batch_id: None,
+            },
+        )
+        .await
+        .expect("abstract instance update");
+
+        assert_eq!(
+            expression_creates(&lang).await,
+            1,
+            "{:?}",
+            calls(&lang).await
+        );
+    }
+
+    /// a record that is both a mounted Thing (`call` setter) and a
+    /// Note (a link setter stored through the language). Through the
+    /// abstract class, with no batch, the call runs once and one expression
+    /// is made; in a caller's batch the update is refused before either.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_mixed_abstract_update_creates_no_expression_when_refused() {
+        let lang = load_mount_test_language().await;
+        create_in_language(&lang, json!({"title": "hello"})).await;
+        let (mut p, ctx) = mounted(&lang).await;
+        register_text_content(&mut p, &ctx).await;
+        register_note(&mut p, &ctx, &lang).await;
+        let base = format!("{lang}://t1");
+        make_note(&mut p, &ctx, &base).await;
+        let batch = p.create_batch().await;
+        let before = calls(&lang).await;
+
+        let refused = instance_update(
+            &mut p,
+            &ctx,
+            InstanceUpdate {
+                class_name: "app://TextContent".into(),
+                base_uri: base.clone(),
+                properties: Map::from_iter([("text".to_string(), json!("bye"))]),
+                batch_id: Some(batch),
+            },
+        )
+        .await;
+        assert!(
+            matches!(refused, Err(InstanceError::CallsInBatch { .. })),
+            "{refused:?}"
+        );
+        assert_eq!(
+            calls(&lang).await,
+            before,
+            "nothing reached the language before the refusal"
+        );
+
+        instance_update(
+            &mut p,
+            &ctx,
+            InstanceUpdate {
+                class_name: "app://TextContent".into(),
+                base_uri: base,
+                properties: Map::from_iter([("text".to_string(), json!("bye"))]),
+                batch_id: None,
+            },
+        )
+        .await
+        .expect("abstract instance update");
+        let after: Vec<Value> = calls(&lang).await[before.len()..].to_vec();
+        let named = |name: &str| after.iter().filter(|c| c["name"] == name).count();
+        assert_eq!(named("expressionCreate"), 1, "{after:?}");
+        assert_eq!(named("update"), 1, "{after:?}");
+    }
+
+    /// a link constructor with a `call` setter on one property must
+    /// still write a setter-less collection's item links on create. Whether
+    /// the constructor calls — not whether any action calls — decides if
+    /// the collection goes to `create_subject`, which skips it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_call_setter_does_not_swallow_a_plain_collection_on_create() {
+        let lang = load_mount_test_language().await;
+        create_in_language(&lang, json!({"title": "a"})).await;
+        let update =
+            json!([{"action": "call", "source": "this", "predicate": "update", "target": "{}"}]);
+        let shape = json!({
+            "target_class": "mounttest://Mixed",
+            "constructor_actions": [{"action": "addLink", "source": "this", "predicate": "rdf://type", "target": "mounttest://Mixed"}],
+            "destructor_actions": [{"action": "removeLink", "source": "this", "predicate": "rdf://type", "target": "mounttest://Mixed"}],
+            "properties": [
+                {"path": "rdf://type", "name": "type", "has_value": "mounttest://Mixed", "min_count": 1, "max_count": 1},
+                {"path": "mounttest://title", "name": "title", "max_count": 1, "writable": true, "setter": update},
+                {"path": "mounttest://ref", "name": "refs", "collection": true, "node_kind": "IRI", "writable": true},
+            ],
+        });
+        let (mut p, ctx) = super::mounted("Mixed", shape.to_string()).await;
+        let base = format!("{lang}://t1");
+
+        instance_create(
+            &mut p,
+            &ctx,
+            InstanceCreate {
+                class_name: "Mixed".into(),
+                base_uri: Some(base.clone()),
+                properties: Some(Map::from_iter([
+                    ("title".to_string(), json!("b")),
+                    ("refs".to_string(), json!(["ad4m://r1", "ad4m://r2"])),
+                ])),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("mixed create");
+
+        let refs = p
+            .get_links(&LinkQuery {
+                source: Some(base),
+                predicate: Some("mounttest://ref".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(refs.len(), 2, "the plain collection was skipped: {refs:?}");
+        let updates: Vec<Value> = calls(&lang)
+            .await
+            .into_iter()
+            .filter(|c| c["name"] == "update")
+            .collect();
+        assert_eq!(updates.len(), 1, "{updates:?}");
+        assert_eq!(updates[0]["params"], json!({"title": "b"}));
+    }
+}
+
 /// A language whose `expressionCreate` counts its calls; `count` on its
 /// `project` address reads the count back.
 async fn load_counting_resolve_language() -> String {
@@ -759,4 +1437,79 @@ async fn execute_commands_refuses_a_call_before_writing_anything() {
     p.commit_batch(batch, &ctx).await.unwrap();
     assert_eq!(link_count(&p).await, before, "the batch staged the addLink");
     assert!(calls(&lang).await.is_empty(), "the call ran");
+}
+
+/// How many of `LocalNote`'s links are on `base`.
+async fn sibling_links(p: &PerspectiveInstance, base: &str) -> usize {
+    p.get_links(&LinkQuery {
+        source: Some(base.to_string()),
+        ..Default::default()
+    })
+    .await
+    .unwrap()
+    .into_iter()
+    .filter(|l| {
+        l.data.predicate.as_deref() == Some("local://text") || l.data.target == "local://LocalNote"
+    })
+    .count()
+}
+
+/// `remove_subject` of a call-backed class, by its target class IRI (as
+/// the SDK's `delete()` sends it): the destructor's `delete` call runs,
+/// and a local model on the same node keeps its links.
+#[tokio::test]
+async fn removing_a_call_backed_record_keeps_a_sibling_model() {
+    let lang = load_mount_test_language().await;
+    let (mut p, ctx) = mounted("MountThing", thing_shape(&lang).await).await;
+    let base = created_thing(&lang, &ctx, &mut p).await;
+    p.add_sdna(
+        "LocalNote".to_string(),
+        String::new(),
+        SdnaType::SubjectClass,
+        Some(
+            json!({
+                "target_class": "local://LocalNote",
+                "constructor_actions": [
+                    {"action": "addLink", "source": "this", "predicate": "rdf://type", "target": "local://LocalNote"}
+                ],
+                "destructor_actions": [
+                    {"action": "removeLink", "source": "this", "predicate": "rdf://type", "target": "local://LocalNote"}
+                ],
+                "properties": [
+                    {"path": "rdf://type", "name": "type", "has_value": "local://LocalNote", "min_count": 1, "max_count": 1},
+                    {"path": "local://text", "name": "text", "max_count": 1, "writable": true,
+                     "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "local://text", "target": "value"}]}
+                ]
+            })
+            .to_string(),
+        ),
+        &ctx,
+    )
+    .await
+    .unwrap();
+    p.create_subject(
+        class("LocalNote"),
+        base.clone(),
+        Some(json!({"text": "mine"})),
+        None,
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(sibling_links(&p, &base).await, 2);
+
+    p.remove_subject(class("mounttest://Thing"), base.clone(), None, &ctx)
+        .await
+        .unwrap();
+
+    let log = calls(&lang).await;
+    assert!(
+        log.iter().any(|c| c["name"] == "delete"),
+        "the destructor did not call: {log:?}"
+    );
+    assert_eq!(
+        sibling_links(&p, &base).await,
+        2,
+        "the sibling model lost its links"
+    );
 }

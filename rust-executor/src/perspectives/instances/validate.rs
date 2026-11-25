@@ -100,7 +100,8 @@ pub struct Cardinality {
 pub enum WriteMode {
     /// All required properties must be present; collections may be given as arrays.
     Create,
-    /// Partial patch of single-valued properties only.
+    /// Partial patch of single-valued properties; a collection only through
+    /// [`validate_update`], when it declares a setter.
     Update,
 }
 
@@ -264,13 +265,35 @@ pub(crate) fn coerce_scalar(info: &PropView<'_>, value: &Value) -> Result<Value,
 /// Validate a `properties` map against a class shape.
 ///
 /// On success returns the coerced scalar values (keyed by the property's canonical name) and,
-/// for `Create`, the collection items to link. On failure returns *every* problem found, not
-/// just the first, so the caller can fix its call in one round trip. Nothing is written by this
-/// function.
+/// for `Create`, the collection items to link. `Update` refuses every collection
+/// (`collectionNotSettable`); [`validate_update`] lets through the ones that declare a setter.
+/// On failure returns *every* problem found, not just the first, so the caller can fix its
+/// call in one round trip. Nothing is written by this function.
 pub fn validate_properties(
     shape: &ModelShape,
     props: &Map<String, Value>,
     mode: WriteMode,
+) -> Result<ValidatedWrite, Vec<ValidationError>> {
+    validate_with(shape, props, mode, &[])
+}
+
+/// `Update` validation where the collections named in `settable` (canonical names: those the
+/// class declares an `ad4m://setter` for) take their full member list, `[]` included, which
+/// the setter writes as a replace. Any other collection is refused, as in
+/// [`validate_properties`].
+pub fn validate_update(
+    shape: &ModelShape,
+    props: &Map<String, Value>,
+    settable: &[String],
+) -> Result<ValidatedWrite, Vec<ValidationError>> {
+    validate_with(shape, props, WriteMode::Update, settable)
+}
+
+fn validate_with(
+    shape: &ModelShape,
+    props: &Map<String, Value>,
+    mode: WriteMode,
+    settable: &[String],
 ) -> Result<ValidatedWrite, Vec<ValidationError>> {
     let infos = class_properties(shape);
     let mut errors: Vec<ValidationError> = Vec::new();
@@ -311,34 +334,36 @@ pub fn validate_properties(
         }
 
         if info.collection() {
-            match mode {
-                WriteMode::Update => errors.push(ValidationError::on(
+            let replace = mode == WriteMode::Update;
+            if replace && !settable.iter().any(|name| name == info.name()) {
+                errors.push(ValidationError::on(
                     info,
                     ValidationProblem::CollectionNotSettable,
                     Some(value),
-                )),
-                WriteMode::Create => {
-                    let items: Vec<Value> = match value {
-                        Value::Array(items) => items.clone(),
-                        Value::Null => vec![],
-                        other => vec![other.clone()],
-                    };
-                    let mut coerced = Vec::with_capacity(items.len());
-                    let mut bad = false;
-                    for (index, item) in items.iter().enumerate() {
-                        match coerce_scalar(info, item) {
-                            Ok(v) => coerced.push(v),
-                            Err(mut e) => {
-                                e.item = Some(index);
-                                errors.push(e);
-                                bad = true;
-                            }
-                        }
-                    }
-                    if !bad && !coerced.is_empty() {
-                        out.collections.push((info.name().to_string(), coerced));
+                ));
+                continue;
+            }
+            let items: Vec<Value> = match value {
+                Value::Array(items) => items.clone(),
+                Value::Null => vec![],
+                other => vec![other.clone()],
+            };
+            let mut coerced = Vec::with_capacity(items.len());
+            let mut bad = false;
+            for (index, item) in items.iter().enumerate() {
+                match coerce_scalar(info, item) {
+                    Ok(v) => coerced.push(v),
+                    Err(mut e) => {
+                        e.item = Some(index);
+                        errors.push(e);
+                        bad = true;
                     }
                 }
+            }
+            // Create skips an empty list (nothing to write); a settable
+            // collection's update keeps it: an empty array clears.
+            if !bad && (!coerced.is_empty() || replace) {
+                out.collections.push((info.name().to_string(), coerced));
             }
             continue;
         }

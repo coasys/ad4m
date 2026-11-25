@@ -34,6 +34,13 @@ pub enum InstanceError {
     EmptyProperties,
     /// The batch the caller named is not open.
     BatchNotFound { batch_id: String },
+    /// The class's lifecycle actions for this write call into a language, and the caller
+    /// named a batch: a language call cannot be rolled back with the batch, so the write is
+    /// refused before any call or link write. Write it without `batchId`.
+    CallsInBatch {
+        class_name: String,
+        batch_id: String,
+    },
     /// The write breaks the class's shape. Validation runs before any link write, so the call
     /// staged and wrote nothing.
     Validation {

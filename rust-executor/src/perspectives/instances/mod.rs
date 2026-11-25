@@ -31,8 +31,8 @@ mod tests;
 pub use error::{CascadeStep, InstanceError, WriteStep};
 pub(crate) use validate::coerce_scalar;
 pub use validate::{
-    validate_properties, Cardinality, ReadOnlyReason, ValidatedWrite, ValidationError,
-    ValidationProblem, WriteMode,
+    validate_properties, validate_update, Cardinality, ReadOnlyReason, ValidatedWrite,
+    ValidationError, ValidationProblem, WriteMode,
 };
 pub use write::{
     add_to_collection, create, remove, remove_from_collection, update, CollectionItemAdded,
@@ -493,20 +493,37 @@ async fn require_instance(
     }
 }
 
-/// Whether the SDNA declares a setter for `prop` on `class_uri`. `create_subject` /
-/// `update_subject` silently skip properties without one (they only log), so the check has to
-/// happen here for the write to be honest about what it did.
+/// Whether the SDNA declares a way to write `prop` on `class_uri`: an
+/// `ad4m://setter`, or the `ad4m://adder`/`ad4m://remover` pair every
+/// `Ad4mModel` relation gets (a scalar `hasOne` relation writes its member
+/// as a replace over that pair — see `plain_collections` in `write.rs`).
+/// `create_subject` / `update_subject` silently skip properties without a
+/// setter (they only log), so the check has to happen here for the write
+/// to be honest about what it did.
+///
+/// The property node comes from `property_node`, not a `{class_uri}.{prop}` guess: a mount
+/// name resolves to an alias class node (`literal:string:shacl://<name>`), while the shape's
+/// property nodes follow the declared `sh:targetClass` (`mounttest://Thing.title`).
 async fn has_setter(perspective: &PerspectiveInstance, class_uri: &str, prop: &str) -> bool {
-    let prop_shape_uri = format!("{class_uri}.{prop}");
-    perspective
-        .get_links(&LinkQuery {
-            source: Some(prop_shape_uri),
-            predicate: Some("ad4m://setter".to_string()),
-            ..Default::default()
-        })
-        .await
-        .map(|links| !links.is_empty())
-        .unwrap_or(false)
+    let Ok(Some(node)) = perspective.property_node(class_uri, prop) else {
+        return false;
+    };
+    let has = |predicate: &str| {
+        let node = node.clone();
+        let predicate = predicate.to_string();
+        async move {
+            perspective
+                .get_links(&LinkQuery {
+                    source: Some(node),
+                    predicate: Some(predicate),
+                    ..Default::default()
+                })
+                .await
+                .map(|links| !links.is_empty())
+                .unwrap_or(false)
+        }
+    };
+    has("ad4m://setter").await || (has("ad4m://adder").await && has("ad4m://remover").await)
 }
 
 /// Reject scalar writes to properties the SDNA can't actually set.
