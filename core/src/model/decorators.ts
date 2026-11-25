@@ -602,9 +602,9 @@ export interface FlagOptions {
  * }
  * 
  * // Later you can query for specific types:
- * const messages = await Message.query(perspective)
- *   .where({ type: "ad4m://message" })
- *   .run();
+ * const messages = await Message.findAll(perspective, {
+ *   where: { type: "ad4m://message" }
+ * });
  * ```
  * 
  * @param {FlagOptions} opts - Flag configuration
@@ -800,9 +800,7 @@ function checkImplements(name: string, target: any, abstractClass: any) {
  * 
  *   // Static query methods from Ad4mModel:
  *   static async findByName(perspective: PerspectiveProxy, name: string) {
- *     return Recipe.query(perspective)
- *       .where({ name })
- *       .run();
+ *     return Recipe.findAll(perspective, { where: { name } });
  *   }
  * }
  * 
@@ -812,9 +810,9 @@ function checkImplements(name: string, target: any, abstractClass: any) {
  * await recipe.save();
  * 
  * // Querying instances:
- * const recipes = await Recipe.query(perspective)
- *   .where({ name: "Chocolate Cake" })
- *   .run();
+ * const recipes = await Recipe.findAll(perspective, {
+ *   where: { name: "Chocolate Cake" }
+ * });
  * 
  * // Registering the class in a perspective:
  * await Recipe.register(perspective);
@@ -1097,7 +1095,7 @@ export interface RelationOptions {
     filter?: boolean;
     /**
      * Filter constraints on the linked target nodes, using the same query DSL
-     * as `Model.query().where(...)`. Property names reference the **target**
+     * as the `where` of `Model.findAll`. Property names reference the **target**
      * model's properties (resolved via target metadata).
      *
      * When `target` is set and `where` is omitted, conformance conditions are

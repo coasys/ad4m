@@ -61,7 +61,7 @@ fn serve_empty_language_language(
     tokio::spawn(async move {
         while let Some(request) = requests.recv().await {
             counting.any.fetch_add(1, Ordering::SeqCst);
-            if let LanguageOperation::Execute(script, _) = &request.operation {
+            if let LanguageOperation::Execute(script, ..) = &request.operation {
                 if script.contains("expressionGet(") {
                     counting.meta.fetch_add(1, Ordering::SeqCst);
                 } else if script.contains("languageGetSource(") {

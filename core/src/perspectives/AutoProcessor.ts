@@ -9,8 +9,7 @@
  * (`{ model: typeof Ad4mModel, id, field? }`) references a JS class
  * constructor, which JSON.stringify silently drops, so the executor would
  * receive `{ id }` and the scope would be unresolvable. Client callers who
- * hold a model class should resolve its predicate via
- * `ModelQueryBuilder.buildParentScope()` first and pass the result here.
+ * hold a model class should pass the relation's predicate here instead.
  */
 export type RawScope = { id: string; predicate: string };
 
