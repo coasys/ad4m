@@ -812,7 +812,7 @@ async fn an_imported_extra_own_link_is_removed_not_read_as_unchanged() {
         .unwrap();
     assert_eq!(repeat.unchanged, vec!["ns://Note".to_string()]);
 
-    let handle = perspective.persisted.lock().await.clone();
+    let handle = perspective.persisted.snapshot();
     crate::perspectives::register_perspective(handle.uuid.clone(), perspective.clone());
     let extra = "literal://string:extra";
     let imported = crate::perspectives::SerializedPerspective {

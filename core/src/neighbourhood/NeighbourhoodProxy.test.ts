@@ -13,7 +13,6 @@ jest.mock('../apiClient', () => {
       put: jest.fn(),
       delete: jest.fn(),
       on: jest.fn().mockReturnValue(() => {}),
-      watchApplied: jest.fn().mockResolvedValue(undefined),
     }))
   };
 });
@@ -38,9 +37,8 @@ describe("NeighbourhoodProxy", () => {
     };
 
     // Add multiple signal handlers in parallel
-    const promise = neighbourhoodProxy.addSignalHandler(handler1);
+    neighbourhoodProxy.addSignalHandler(handler1);
     neighbourhoodProxy.addSignalHandler(handler2);
-    await promise;
 
     neighbourhoodClient.dispatchSignal(neighbourhoodURI, signal);
 
@@ -62,7 +60,6 @@ describe("NeighbourhoodProxy", () => {
         onCallCount++;
         return () => {};
       }),
-      watchApplied: jest.fn().mockResolvedValue(undefined),
     }));
 
     const neighbourhoodClient = new NeighbourhoodClient("http://localhost:0", "test-token");
@@ -82,13 +79,13 @@ describe("NeighbourhoodProxy", () => {
     };
 
     // Add signal handler 1
-    await neighbourhoodProxy.addSignalHandler(handler1);
+    neighbourhoodProxy.addSignalHandler(handler1);
 
     // Remove signal handler 1
     neighbourhoodProxy.removeSignalHandler(handler1);
 
     // Add signal handler 2
-    await neighbourhoodProxy.addSignalHandler(handler2);
+    neighbourhoodProxy.addSignalHandler(handler2);
 
     // Check that subscription was re-created (handler1 removed = unsub, handler2 added = new sub)
     expect(onCallCount).toBe(2);

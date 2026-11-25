@@ -789,7 +789,7 @@ impl WsRpcClient {
                         // Restore interest *before* publishing: `connected`
                         // flips only once the executor acknowledged
                         // `events.watch`, so a call that waited out the
-                        // outage — a `modelSubscribe` above all — can never
+                        // outage — a `perspective.subscribe` above all — can never
                         // slip past the filter it needs (R2). The frames go
                         // over the still-private write half: nothing else
                         // can see this socket yet.
@@ -1916,7 +1916,7 @@ mod tests {
         client.close().await;
     }
 
-    /// R2: a call parked while the client was down — a `modelSubscribe`
+    /// R2: a call parked while the client was down — a `perspective.subscribe`
     /// above all — must not wake until the restored `events.watch` was
     /// acknowledged. If `connected` flips before the filter is in place,
     /// the subscribe slips past it and the live query never receives an
@@ -1947,10 +1947,7 @@ mod tests {
         let caller = client.handle();
         let sub = tokio::spawn(async move {
             caller
-                .call_value(
-                    "perspective.modelSubscribe",
-                    serde_json::json!({"uuid": "p1"}),
-                )
+                .call_value("perspective.subscribe", serde_json::json!({"uuid": "p1"}))
                 .await
         });
 
@@ -1985,7 +1982,7 @@ mod tests {
         // Only the acknowledgement may wake the parked call.
         fake.reply(&w, Value::Bool(true)).await;
         let s = fake.next_request().await;
-        assert_eq!(s["type"], "perspective.modelSubscribe");
+        assert_eq!(s["type"], "perspective.subscribe");
         fake.reply(
             &s,
             serde_json::json!({"subscriptionId": "s1", "result": {"instances": []}, "revision": 0}),

@@ -1,12 +1,13 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo, useSyncExternalStore } from "react";
 import {
   PerspectiveProxy,
   Ad4mModel,
   Query,
   TypedQuery,
-  ParentScope,
-  PaginationResult,
-  ModelQueryBuilder,
+  Scope,
+  LiveQuery,
+  Page,
+  Snapshot,
 } from "@coasys/ad4m";
 
 type ModelCtor<T extends Ad4mModel> = (new (...args: any[]) => T) &
@@ -39,7 +40,7 @@ type LiveOptions<T extends Ad4mModel> = {
    * declared `@HasMany` relation. Supports both model-form (auto-resolved predicate)
    * and raw-form (explicit predicate string).
    */
-  parent?: ParentScope;
+  parent?: Scope;
   query?: Query;
   /** When set, enables load-more / infinite-scroll mode. */
   pageSize?: number;
@@ -59,6 +60,15 @@ export type LiveInstanceResult<T> = {
   loading: boolean;
   error: string;
 };
+
+/** What a hook shows while there is no live query: loading, or (nothing to
+ *  query) an empty result. */
+const fixed = (snapshot: Snapshot<Page<Ad4mModel>>) => ({
+  subscribe: () => () => {},
+  getSnapshot: () => snapshot,
+});
+const LOADING = fixed({ status: "loading", reopening: false, initial: false });
+const EMPTY = fixed({ status: "ready", data: { results: [] }, reopening: false, initial: true });
 
 // ── Overload signatures ────────────────────────────────────────────────────
 
@@ -109,24 +119,28 @@ export function useLiveQuery<T extends Ad4mModel>(
 
   const isInstance = id !== undefined;
 
-  const [loading, setLoading] = useState(true);
-  const [collectionData, setCollectionData] = useState<T[]>([]);
-  const [instanceData, setInstanceData] = useState<T | null>(null);
-  const [error, setError] = useState<string>("");
+  // The open query and the perspective it was opened on: a render can still show
+  // the previous perspective's query while the next one opens.
+  const [opened, setOpened] = useState<{ live: LiveQuery<Page<Ad4mModel>>; uuid: string } | null>(null);
+  const [openError, setOpenError] = useState<string>("");
   const [pageNumber, setPageNumber] = useState(1);
-  const [totalCount, setTotalCount] = useState(0);
 
-  // Widened to ModelQueryBuilder<Ad4mModel> because the typed chain methods
-  // (`where`, `order`, `include`) are contravariant in T — invariance prevents
-  // the per-branch `ModelQueryBuilder<T>` / `ModelQueryBuilder<Ad4mModel>` from
-  // unifying directly. Subscribe callbacks cast back to T[] at the boundary.
-  const modelQueryRef = useRef<ModelQueryBuilder<Ad4mModel> | null>(null);
+  // A parent scope whose id is not yet resolved, or an empty class name, has
+  // nothing to query: the result is empty, not loading.
+  const parentId = parent && "id" in parent ? parent.id : undefined;
+  const held = (!!parent && "id" in parent && !parentId) || (typeof model === "string" && !model);
+  // One key for the whole parent scope (ids, predicate, field, ...), so a
+  // change to any part of it reopens the query. A model class counts by name.
+  const parentKey = JSON.stringify(parent ?? null, (_k, v) => (typeof v === "function" ? v.name : v));
+  const source = opened?.live ?? (held ? EMPTY : LOADING);
+  const snapshot = useSyncExternalStore(source.subscribe, source.getSnapshot, source.getSnapshot);
 
   /** Build the full query from user options + pagination + parent + instance filter. */
   function buildQuery(): Query {
     const q: Query = {
       ...userQuery,
-      ...(pageSize ? { limit: pageSize * pageNumber } : {}),
+      // A page always asks for its total.
+      ...(pageSize ? { limit: pageSize * pageNumber, count: true } : {}),
     };
 
     // Parent scope — pass through to Query; core resolves the predicate internally
@@ -142,134 +156,71 @@ export function useLiveQuery<T extends Ad4mModel>(
     return q;
   }
 
-  /** Build a ModelQueryBuilder for either a class constructor or a string class name.
-   *  The cast to `TypedQuery<T>` is necessary because the hook is generic over an
-   *  arbitrary `T extends Ad4mModel` — TypeScript can't statically resolve whether
-   *  T has typed fields, so the deferred `TypedQuery<T>` conditional doesn't accept
-   *  the raw `Query` shape we build at runtime. End-user callers of the static API
-   *  retain strict typing; this cast is the documented escape hatch for generic
-   *  meta-utilities that build queries dynamically. */
-  function makeQueryBuilder(q: Query): ModelQueryBuilder<Ad4mModel> {
+  /** Open the live query for either a class constructor or a string class name.
+   *  The casts are the documented escape hatch for generic meta-utilities that
+   *  build queries dynamically: TypeScript cannot resolve whether `T` has typed
+   *  fields, so the deferred `TypedQuery<T>` does not accept the raw `Query`
+   *  shape built at runtime. End-user callers of the static API keep strict
+   *  typing. */
+  function open(q: Query): LiveQuery<Page<Ad4mModel>> {
     if (typeof model === "string") {
-      return Ad4mModel.query(perspective, q as TypedQuery<Ad4mModel>).overrideModelClassName(model);
+      return Ad4mModel.query(perspective, q as TypedQuery<Ad4mModel>, { className: model }) as unknown as LiveQuery<Page<Ad4mModel>>;
     }
-    return (model as ModelCtor<T>).query(perspective, q as TypedQuery<T>) as unknown as ModelQueryBuilder<Ad4mModel>;
+    return (model as ModelCtor<T>).query(perspective, q as TypedQuery<T>) as unknown as LiveQuery<Page<Ad4mModel>>;
   }
 
-  function mergeEntries(oldEntries: T[], newEntries: T[]): T[] {
-    if (!preserveReferences) return newEntries;
-    const existingMap = new Map(oldEntries.map((e) => [e.id, e]));
-    return newEntries.map((n) => existingMap.get(n.id) ?? n);
-  }
-
-  function handleNewEntries(newEntries: T[]) {
-    if (isInstance) {
-      setInstanceData(newEntries[0] ?? null);
-    } else {
-      setCollectionData((old) => mergeEntries(old, newEntries));
-    }
-  }
-
-  function paginateSubscribeCallback({ results, totalCount: count }: PaginationResult<T>) {
-    handleNewEntries(results);
-    setTotalCount(count as number);
-  }
-
-  const subscribe = useCallback(() => {
-    if (!perspective) return;
-
-    // If a parent scope is declared but its id is not yet resolved, hold off
-    if (parent && !parent.id) {
-      setCollectionData([]);
-      setInstanceData(null);
-      setLoading(false);
+  useEffect(() => {
+    setOpenError("");
+    if (!perspective || held) {
+      setOpened(null);
       return;
     }
-
-    // For string models, skip when model name is empty
-    if (typeof model === "string" && !model) {
-      setCollectionData([]);
-      setLoading(false);
-      return;
-    }
-
-    // Dispose previous subscription
-    modelQueryRef.current?.dispose();
-    modelQueryRef.current = null;
-    setLoading(true);
-
-    const q = buildQuery();
-
+    let live: LiveQuery<Page<Ad4mModel>>;
     try {
-      modelQueryRef.current = makeQueryBuilder(q);
-
-      if (pageSize) {
-        // Paginated subscription
-        modelQueryRef.current
-          .paginateSubscribe(
-            pageSize * pageNumber,
-            1,
-            paginateSubscribeCallback as (result: PaginationResult<Ad4mModel>) => void,
-          )
-          .then(({ results, totalCount: count }) => {
-            if (isInstance) {
-              setInstanceData((results[0] as T) ?? null);
-            } else {
-              setCollectionData(results as T[]);
-            }
-            setTotalCount(count as number);
-            setLoading(false);
-          })
-          .catch((err) => {
-            setError(err instanceof Error ? err.message : String(err));
-            setLoading(false);
-          });
-      } else {
-        // Non-paginated subscription
-        modelQueryRef.current
-          .subscribe(handleNewEntries as (results: Ad4mModel[]) => void)
-          .then((results) => {
-            if (isInstance) {
-              setInstanceData((results[0] as T) ?? null);
-            } else {
-              setCollectionData(results as T[]);
-            }
-            setLoading(false);
-          })
-          .catch((err) => {
-            setError(err instanceof Error ? err.message : String(err));
-            setLoading(false);
-          });
-      }
+      live = open(buildQuery());
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      setLoading(false);
+      setOpened(null);
+      setOpenError(err instanceof Error ? err.message : String(err));
+      return;
     }
+    setOpened({ live, uuid: perspective.uuid });
+    return () => live.dispose();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     perspective?.uuid,
     typeof model === "string" ? model : (model as ModelCtor<T>).name,
     pageNumber,
     JSON.stringify(userQuery),
-    parent?.id,
-    "field" in (parent ?? {}) ? (parent as any).field : undefined,
+    parentKey,
     id,
   ]);
 
+  // The entries of the last result and the perspective they came from, kept
+  // while the next query opens. With `preserveReferences` a collection reuses
+  // its instances, but only from the same perspective.
+  const previous = useRef<{ uuid?: string; entries: T[] }>({ entries: [] });
+  const entries = useMemo(() => {
+    if (snapshot.status !== "ready") return previous.current.entries;
+    const next = snapshot.data!.results as T[];
+    if (!preserveReferences || isInstance || previous.current.uuid !== opened?.uuid) return next;
+    const known = new Map(previous.current.entries.map((e) => [e.id, e]));
+    return next.map((n) => known.get(n.id) ?? n);
+  }, [snapshot, preserveReferences, isInstance, opened?.uuid]);
+  // Written after the commit, so a discarded render leaves nothing behind.
   useEffect(() => {
-    subscribe();
-    return () => {
-      modelQueryRef.current?.dispose();
-      modelQueryRef.current = null;
-    };
-  }, [subscribe]);
+    if (snapshot.status === "ready") previous.current = { uuid: opened?.uuid, entries };
+  }, [entries, snapshot.status, opened?.uuid]);
+
+  // A query that could not open is not loading.
+  const loading = !openError && snapshot.status === "loading";
+  const error = openError || (snapshot.status === "error" ? snapshot.error!.message : "");
 
   const loadMore = useCallback(() => {
     if (pageSize) setPageNumber((p) => p + 1);
   }, [pageSize]);
 
   if (isInstance) {
-    return { data: instanceData, loading, error };
+    return { data: entries[0] ?? null, loading, error };
   }
-  return { data: collectionData, loading, error, totalCount, loadMore };
+  return { data: entries, loading, error, totalCount: snapshot.data?.totalCount ?? 0, loadMore };
 }
