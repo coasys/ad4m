@@ -257,8 +257,13 @@ impl PerspectiveInstance {
     async fn mount_as(&mut self, lang_address: &str, generation: u64) -> Result<(), AnyError> {
         let seq = next_mount_seq();
         let controller = LanguageController::global_instance();
-        let shapes = controller.mount_shapes(lang_address).await?;
-        let snapshot = controller.mount_snapshot(lang_address).await?;
+        // Only preparation is retried: never replay local writes or user actions.
+        let (shapes, snapshot) = crate::languages::mount_init::read_mount(lang_address, || async {
+            let shapes = controller.mount_shapes(lang_address).await?;
+            let snapshot = controller.mount_snapshot(lang_address).await?;
+            Ok((shapes, snapshot))
+        })
+        .await?;
 
         let mut slot = self.mount_lifecycles.lock(lang_address).await;
         if slot.generation != generation {
@@ -360,8 +365,12 @@ impl PerspectiveInstance {
         // and the records this sync read are ordered together.
         let seq = next_mount_seq();
         let controller = LanguageController::global_instance();
-        let shapes = controller.mount_shapes(lang_address).await?;
-        let snapshot = controller.mount_snapshot(lang_address).await?;
+        let (shapes, snapshot) = crate::languages::mount_init::read_mount(lang_address, || async {
+            let shapes = controller.mount_shapes(lang_address).await?;
+            let snapshot = controller.mount_snapshot(lang_address).await?;
+            Ok((shapes, snapshot))
+        })
+        .await?;
         pause(lang_address, MountPoint::SnapshotFetched).await;
 
         let Some(mut slot) = self
