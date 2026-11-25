@@ -34,12 +34,17 @@ references:
 #   Rust (fmt). More runners, with small working dirs.
 # Only `build` gates the integration tests. clippy and rust-tests start after it and run
 # next to the integration tests. fmt, js-unit-tests and plugin-ad4m-tests start at once.
-# The heavy jobs (rust-tests, rust-client-tests, the integration suites) start with
-# `heavy_gate`: on a draft PR, a PR whose base is not dev, or a branch with no PR they halt
-# green at once (.circleci/scripts/should-run-heavy.sh). The full-ci label or [full-ci] in
-# the commit message runs them anyway. The GitHub workflow heavy-suites.yml shows a halt as
-# the pending status ci/heavy-suites; it turns success only once a pipeline of the commit runs
-# the heavy jobs, and starts one when the PR gets ready or is retargeted to dev without a push.
+# No CI runs on a draft PR: every job of the PR pipeline starts with a gate and halts green
+# at once (.circleci/scripts/should-run-heavy.sh). The light jobs (build, clippy, fmt,
+# js-unit-tests, plugin-ad4m-tests, deploy-scripts) use `draft_gate`: they halt on a draft only.
+# The heavy jobs (rust-tests, rust-client-tests, the integration suites) use `heavy_gate`: they
+# also halt on a PR whose base is not dev, or a branch with no PR. The full-ci label or [full-ci]
+# in the commit message runs everything anyway; a branch with no PR runs the light jobs. A new
+# job of the PR pipeline starts with one of the two gates. The GitHub workflow heavy-suites.yml
+# shows a halt as the pending status ci/heavy-suites; it turns success only once a pipeline of
+# the commit runs the heavy jobs, and starts one when the PR gets ready, is retargeted to dev or
+# gets the full-ci label without a push (it also starts one for a ready PR whose draft pipeline
+# halted the light jobs, so the light jobs run when a draft turns ready).
 
 commands:
   fix_workdir:
@@ -159,8 +164,8 @@ commands:
     description: "Halt a heavy job (green) on a draft PR, a PR whose base is not dev, or a branch with no PR"
     steps:
       - run:
-          # A stack of PRs pays the heavy suites once, at the PR that targets dev; the
-          # branches below it get fmt, build and clippy. dev, staging, main, tags and the
+          # A draft PR runs no CI (see draft_gate). A stack of PRs pays the heavy suites once,
+          # at the PR that targets dev; the ready branches below it get fmt, build and clippy. dev, staging, main, tags and the
           # nightly always run; so do a PR with the `full-ci` label and a head commit
           # with [full-ci] in its message. The decision is in the script (tested in
           # `build`); anything but its "skip" answer runs the suite, so a GitHub API
@@ -176,6 +181,27 @@ commands:
           command: |
             rc=0
             bash .circleci/scripts/should-run-heavy.sh || rc=$?
+            if [ "$rc" = 10 ]; then
+              circleci-agent step halt
+            fi
+            exit 0
+
+  draft_gate:
+    description: "Halt a light job (green) on a draft PR"
+    steps:
+      - run:
+          # No CI on a draft PR. The same script and the same one lookup as heavy_gate (the
+          # `light` question), so a workflow's jobs agree. Only a draft halts: a PR whose base
+          # is not dev and a branch with no PR still run these jobs. Fails open like
+          # heavy_gate. The step name starts with "Draft gate", not "Stack gate", so that
+          # heavy-suites-pr.sh does not take a light job for a heavy one; it finds a halted
+          # `build` by this name (its last step), so keep both.
+          name: Draft gate (no CI on draft PRs)
+          environment:
+            HEAVY_GATE_FORCE: << pipeline.parameters.run-nightly-llm >>
+          command: |
+            rc=0
+            bash .circleci/scripts/should-run-heavy.sh light || rc=$?
             if [ "$rc" = 10 ]; then
               circleci-agent step halt
             fi
@@ -545,6 +571,7 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - draft_gate
       - setup_env
       - run:
           name: Clean up stale local artifact stashes (older than 12 hours)
@@ -745,6 +772,7 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - draft_gate
       - setup_env
       - restore_rust_compile_inputs
       - run:
@@ -799,6 +827,7 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - draft_gate
       - setup_env
       - run:
           name: cargo fmt --check
@@ -893,6 +922,7 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - draft_gate
       - setup_env
       - run:
           name: Install dependencies
@@ -1657,6 +1687,7 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - draft_gate
       - run:
           name: Install dependencies
           working_directory: plugins/ad4m
@@ -1703,6 +1734,7 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - draft_gate
       - run:
           name: shellcheck deploy/staging
           command: |
