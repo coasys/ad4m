@@ -1114,21 +1114,6 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
     }
 }
 
-/// Until ad4m#1775 passes the caller's context to a language, `mountSnapshot`
-/// reads the records as the main agent, in the language instance every agent
-/// shares. So only the main agent may mount or sync a language: a user would
-/// mirror the main agent's records into their own perspective.
-fn refuse_mount_for_users(ctx: &RequestContext) -> Result<(), WsRpcError> {
-    if ctx.acts_as().is_main_agent() {
-        Ok(())
-    } else {
-        Err(WsRpcError::forbidden(
-            "a mount reads the language as the main agent until ad4m#1775, so a user may not \
-             mount or sync one",
-        ))
-    }
-}
-
 /// Preserve the typed first-mount failure across the anyhow/RPC boundary.
 fn mount_error_ws(error: deno_core::error::AnyError) -> WsRpcError {
     let mut rpc = WsRpcError::internal(error.to_string());
@@ -1140,11 +1125,11 @@ fn mount_error_ws(error: deno_core::error::AnyError) -> WsRpcError {
 }
 
 async fn mount_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    refuse_mount_for_users(&ctx)?;
     let language_address = params.require_str("languageAddress")?;
     let mut perspective = guarded_perspective(&params).await?;
+    // Runs as the caller, who must be the perspective's single owner (#1775).
     perspective
-        .mount(&language_address)
+        .mount_by(&language_address, &ctx.acts_as())
         .await
         .map_err(mount_error_ws)?;
     Ok(Value::Bool(true))
@@ -1160,8 +1145,7 @@ async fn unmount_handler(params: Value, _ctx: Arc<RequestContext>) -> Result<Val
     Ok(Value::Bool(true))
 }
 
-async fn sync_mount_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    refuse_mount_for_users(&ctx)?;
+async fn sync_mount_handler(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let language_address = params.require_str("languageAddress")?;
     let mut perspective = guarded_perspective(&params).await?;
     let report = perspective

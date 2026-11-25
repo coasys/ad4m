@@ -51,7 +51,7 @@ pub(crate) async fn interact(url: &str, name: &str, params: Value) -> Result<Val
 /// make creates, updates and deletes language calls.
 pub(crate) async fn mount_thing_shape(lang: &str) -> String {
     LanguageController::global_instance()
-        .mount_shapes(lang)
+        .mount_shapes(lang, &crate::agent::AgentContext::main_agent())
         .await
         .unwrap()
         .shapes[0]
@@ -186,7 +186,7 @@ async fn the_project_address_reports_the_language_address() {
 async fn mount_shapes_returns_the_parsed_shapes() {
     let addr = load_mount_test_language().await;
     let shapes = LanguageController::global_instance()
-        .mount_shapes(&addr)
+        .mount_shapes(&addr, &crate::agent::AgentContext::main_agent())
         .await
         .unwrap();
     assert_eq!(shapes.version, "2");
@@ -217,7 +217,7 @@ async fn mount_snapshot_lists_the_records() {
     .unwrap();
 
     let snapshot = LanguageController::global_instance()
-        .mount_snapshot(&addr)
+        .mount_snapshot(&addr, &crate::agent::AgentContext::main_agent())
         .await
         .unwrap();
     assert_eq!(snapshot.entries.len(), 2);
@@ -252,12 +252,18 @@ async fn a_language_without_mount_exports_cannot_be_mounted() {
     let (_, path) = controller.save_language_bundle(&source, None).unwrap();
     let addr = controller.load_language(path, false).await.unwrap();
 
-    let error = controller.mount_shapes(&addr).await.unwrap_err();
+    let error = controller
+        .mount_shapes(&addr, &crate::agent::AgentContext::main_agent())
+        .await
+        .unwrap_err();
     assert!(
         error.to_string().contains("language cannot be mounted"),
         "{error}"
     );
-    let error = controller.mount_snapshot(&addr).await.unwrap_err();
+    let error = controller
+        .mount_snapshot(&addr, &crate::agent::AgentContext::main_agent())
+        .await
+        .unwrap_err();
     assert!(
         error.to_string().contains("language cannot be mounted"),
         "{error}"

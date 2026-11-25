@@ -40,16 +40,11 @@ pub async fn with_interact_grant<F: std::future::Future>(granted: bool, request:
     CALLER_MAY_INTERACT.scope(granted, request).await
 }
 
-/// `Ok` if a write by `context` may run language calls. Until ad4m#1775
-/// passes the caller's context to the language, a call runs as the main
-/// agent, so only the main agent may make one. A request also needs
-/// `expression:update`, as `expression.interact` does.
-pub(crate) fn check_call_caller(context: &AgentContext) -> Result<(), AnyError> {
-    if !context.is_main_agent() {
-        return Err(anyhow!(
-            "language calls run as the main agent until ad4m#1775, so a user may not make one"
-        ));
-    }
+/// `Ok` if a write by `context` may run language calls. The call runs as
+/// the writer (#1775): whatever the language signs or writes during it is
+/// the writer's, a managed user's own Holochain cell included. A request
+/// also needs `expression:update`, as `expression.interact` does.
+pub(crate) fn check_call_caller(_context: &AgentContext) -> Result<(), AnyError> {
     if matches!(CALLER_MAY_INTERACT.try_with(|granted| *granted), Ok(false)) {
         return Err(anyhow!(
             "a write that calls a language needs the expression:update capability"
@@ -318,10 +313,8 @@ impl PerspectiveInstance {
         run: &CallRun,
         context: &AgentContext,
     ) -> Result<CallAnswer, AnyError> {
-        // The call runs as `context` (#1775): what the language signs or
-        // writes during it (zome calls, its own links) is that agent's.
-        // `check_call_caller` still lets only the main agent make a call
-        // here, until the run-as-caller PR drops that gate.
+        // The call runs as the writer (#1775): what the language signs or
+        // writes during it (zome calls, its own links) is the writer's.
         let result = LanguageController::global_instance()
             .expression_interact(
                 &run.source,
@@ -349,7 +342,7 @@ impl PerspectiveInstance {
         delta: &MountDelta,
         generation: Option<u64>,
         seq: u64,
-        _context: &AgentContext,
+        context: &AgentContext,
     ) {
         let Some(generation) = generation else {
             log::debug!(
@@ -358,6 +351,15 @@ impl PerspectiveInstance {
             );
             return;
         };
+        // The mirror is its single owner's (`mount_owner`): another writer's result is not
+        // applied, the owner's next sync reads what the language holds for the owner.
+        if !self.is_owned_as(context).await {
+            log::warn!(
+                "call action on {lang_address}: the writer is not the single owner of perspective {}; its delta is not applied",
+                self.uuid
+            );
+            return;
+        }
         if let Err(e) = self
             .clone()
             .apply_mount_delta(lang_address, delta, generation, seq)

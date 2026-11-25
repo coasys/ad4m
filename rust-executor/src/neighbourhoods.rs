@@ -120,6 +120,22 @@ pub async fn install_neighbourhood_with_context(
                 context,
                 url
             );
+            // Keep the check and both owner mutations atomic with reserving a first mount.
+            let _membership = p.mount_membership_lock().await;
+            // Mount storage is not per agent yet (#1775): a second owner would read the
+            // mirror of the first owner's mount. Refuse the join while the perspective mounts
+            // a language and the joiner is not already its owner.
+            let joiner = crate::perspectives::perspective_instance::owner_context_of(Some(
+                crate::agent::did_for_context(context)?,
+            ));
+            if !p.is_owned_as(&joiner).await
+                && (p.mount_is_preparing().await || !p.mounts().await?.is_empty())
+            {
+                return Err(anyhow!(
+                    "neighbourhood {url} mounts a language for its owner on this executor; \
+                     another local agent cannot join it until mount storage is per agent"
+                ));
+            }
             if let Some(user_did) = context.managed_did().map(str::to_string) {
                 // Update database
                 crate::db_backend::db_backend().add_owner_to_neighbourhood(&url, &user_did)?;

@@ -3162,6 +3162,7 @@ impl LanguageController {
         &self,
         lang_address: &str,
         export: &str,
+        agent: &AgentContext,
     ) -> Result<String, LanguageError> {
         // Resolve alias forward (e.g. "did" → actual hash), like
         // expression_interactions does.
@@ -3181,13 +3182,21 @@ impl LanguageController {
             }})())"#
         );
 
-        self.execute_on_language(&lang_address, &script).await
+        self.call_language(&lang_address, &script, agent.clone(), CallKind::Ordered)
+            .await
     }
 
     /// The SHACL shapes a mountable language wants installed into the
     /// perspective (`mountShapes()`), with the language's format version.
-    pub async fn mount_shapes(&self, lang_address: &str) -> Result<MountShapes, LanguageError> {
-        let result = self.call_mount_export(lang_address, "mountShapes").await?;
+    /// Runs as `agent`: a mount reads the language as its perspective's owner (#1775).
+    pub async fn mount_shapes(
+        &self,
+        lang_address: &str,
+        agent: &AgentContext,
+    ) -> Result<MountShapes, LanguageError> {
+        let result = self
+            .call_mount_export(lang_address, "mountShapes", agent)
+            .await?;
         serde_json::from_str(&result).map_err(|e| LanguageError::SerializationError {
             message: format!("mountShapes returned an invalid value: {e}"),
         })
@@ -3195,7 +3204,13 @@ impl LanguageController {
 
     /// Every record a mountable language wants shown in the perspective
     /// (`mountSnapshot()`): class name, address and data per record.
-    pub async fn mount_snapshot(&self, lang_address: &str) -> Result<MountSnapshot, LanguageError> {
+    /// Runs as `agent`: a mount reads the language as its perspective's owner (#1775), so
+    /// each owner mirrors the records its own cell sees.
+    pub async fn mount_snapshot(
+        &self,
+        lang_address: &str,
+        agent: &AgentContext,
+    ) -> Result<MountSnapshot, LanguageError> {
         #[cfg(test)]
         crate::perspectives::perspective_instance::mount_gates::pause(
             lang_address,
@@ -3203,7 +3218,7 @@ impl LanguageController {
         )
         .await;
         let result = self
-            .call_mount_export(lang_address, "mountSnapshot")
+            .call_mount_export(lang_address, "mountSnapshot", agent)
             .await?;
         serde_json::from_str(&result).map_err(|e| LanguageError::SerializationError {
             message: format!("mountSnapshot returned an invalid value: {e}"),

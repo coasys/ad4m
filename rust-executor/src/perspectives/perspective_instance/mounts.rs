@@ -129,6 +129,23 @@ impl Drop for AbandonedMount {
 }
 
 impl PerspectiveInstance {
+    /// `perspective.mount` for `caller`: refused unless `caller` is the perspective's single
+    /// owner (`mount_owner`), the agent the mount reads its language as.
+    pub async fn mount_by(
+        &mut self,
+        lang_address: &str,
+        caller: &AgentContext,
+    ) -> Result<(), AnyError> {
+        let owner = self.mount_owner().await?;
+        if &owner != caller {
+            return Err(anyhow!(
+                "only the owner of perspective {} may mount {lang_address} in it",
+                self.uuid
+            ));
+        }
+        self.mount(lang_address).await
+    }
+
     /// Mount a language: refuse when it does not export `mountShapes()` /
     /// `mountSnapshot()` or when its classes are not its own to install
     /// (`check_class_ownership`); install the shapes; write the first
@@ -145,6 +162,8 @@ impl PerspectiveInstance {
     pub async fn mount(&mut self, lang_address: &str) -> Result<(), AnyError> {
         self.refuse_mirror_of_an_older_build(lang_address).await?;
         let generation = {
+            let _membership = self.mount_membership_lock().await;
+            self.mount_owner().await?;
             let mut slot = self.mount_lifecycles.lock(lang_address).await;
             match slot.phase {
                 MountPhase::Active => return Ok(()),
@@ -257,13 +276,15 @@ impl PerspectiveInstance {
     async fn mount_as(&mut self, lang_address: &str, generation: u64) -> Result<(), AnyError> {
         let seq = next_mount_seq();
         let controller = LanguageController::global_instance();
+        let owner = self.mount_owner().await?;
         // Only preparation is retried: never replay local writes or user actions.
         let (shapes, snapshot) = crate::languages::mount_init::read_mount(lang_address, || async {
-            let shapes = controller.mount_shapes(lang_address).await?;
-            let snapshot = controller.mount_snapshot(lang_address).await?;
+            let shapes = controller.mount_shapes(lang_address, &owner).await?;
+            let snapshot = controller.mount_snapshot(lang_address, &owner).await?;
             Ok((shapes, snapshot))
         })
         .await?;
+        pause(lang_address, MountPoint::InitialSnapshotFetched).await;
 
         let mut slot = self.mount_lifecycles.lock(lang_address).await;
         if slot.generation != generation {
@@ -295,6 +316,21 @@ impl PerspectiveInstance {
                 .await?;
             }
             self.remove_pending(lang_address).await?;
+            // Defence in depth for owner mutations outside the join path. Joins cannot
+            // add an owner while this slot is Mounting (even before its first write).
+            if self.mount_owner().await.ok().as_ref() != Some(&owner) {
+                let links: Vec<LinkExpression> = self
+                    .mount_links(Some(lang_address))
+                    .await?
+                    .into_iter()
+                    .map(LinkExpression::from)
+                    .collect();
+                self.remove_links(links, None).await?;
+                return Err(anyhow!(
+                    "perspective {} got another owner while {lang_address} was mounted",
+                    self.uuid
+                ));
+            }
             Ok::<(), AnyError>(())
         }
         .await;
@@ -365,9 +401,10 @@ impl PerspectiveInstance {
         // and the records this sync read are ordered together.
         let seq = next_mount_seq();
         let controller = LanguageController::global_instance();
+        let owner = self.mount_owner().await?;
         let (shapes, snapshot) = crate::languages::mount_init::read_mount(lang_address, || async {
-            let shapes = controller.mount_shapes(lang_address).await?;
-            let snapshot = controller.mount_snapshot(lang_address).await?;
+            let shapes = controller.mount_shapes(lang_address, &owner).await?;
+            let snapshot = controller.mount_snapshot(lang_address, &owner).await?;
             Ok((shapes, snapshot))
         })
         .await?;
@@ -486,6 +523,47 @@ impl PerspectiveInstance {
         Ok(report)
     }
 
+    /// The agent a mount of this perspective reads its language as (#1775), and the only one
+    /// it mirrors for: its single owner, a managed user or the main agent (no owner, or the
+    /// main agent's DID). Mount storage is not per agent yet, so a perspective with several
+    /// owners refuses mounts, syncs and deltas: another owner would read the mirror of this
+    /// one's snapshot.
+    pub(crate) async fn mount_owner(&self) -> Result<AgentContext, AnyError> {
+        let owners = self.persisted.load().get_owners();
+        let mut agents: Vec<AgentContext> = Vec::new();
+        for owner in owners {
+            let agent = owner_context_of(Some(owner));
+            if !agents.contains(&agent) {
+                agents.push(agent);
+            }
+        }
+        match agents.len() {
+            0 => Ok(AgentContext::main_agent()),
+            1 => Ok(agents.remove(0)),
+            n => Err(anyhow!(
+                "perspective {} has {n} owners; a mount needs a single owner until mount \
+                 storage is per agent",
+                self.uuid
+            )),
+        }
+    }
+
+    /// Serialize joining with reserving a first mount, without holding `persisted`
+    /// across awaits or a mount's apply lock across a language call.
+    pub(crate) async fn mount_membership_lock(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.mount_lifecycles.membership.clone().lock_owned().await
+    }
+
+    /// Called under `mount_membership_lock`, including before any mount link exists.
+    pub(crate) async fn mount_is_preparing(&self) -> bool {
+        self.mount_lifecycles.is_preparing().await
+    }
+
+    /// Whether `agent` is this perspective's single owner ([`Self::mount_owner`]).
+    pub(crate) async fn is_owned_as(&self, agent: &AgentContext) -> bool {
+        self.mount_owner().await.ok().as_ref() == Some(agent)
+    }
+
     /// The generation of `lang`'s mount while it is active: a delta or call
     /// result takes it before it goes to the language (or as it arrives)
     /// and hands it to `apply_mount_delta`.
@@ -505,6 +583,7 @@ impl PerspectiveInstance {
         generation: u64,
         seq: u64,
     ) -> Result<MountSyncReport, AnyError> {
+        self.mount_owner().await?;
         pause(lang_address, MountPoint::DeltaReceived).await;
         let Some(mut slot) = self
             .mount_lifecycles
@@ -638,6 +717,7 @@ impl PerspectiveInstance {
         if !self.has_mount_link(lang_address).await? {
             return Ok(false);
         }
+        self.mount_owner().await?;
         self.refuse_mirror_of_an_older_build(lang_address).await?;
         self.mount_lifecycles.enter(&mut slot, MountPhase::Active);
         register_mount(lang_address, &self.uuid);
@@ -1062,5 +1142,14 @@ impl PerspectiveInstance {
             }
         }
         Ok(links)
+    }
+}
+
+/// The agent one owner DID mounts as ([`PerspectiveInstance::mount_owner`]).
+pub(crate) fn owner_context_of(owner: Option<String>) -> AgentContext {
+    let main_did = crate::agent::did_for_context(&AgentContext::main_agent()).ok();
+    match owner {
+        Some(did) if Some(&did) != main_did.as_ref() => AgentContext::managed(did),
+        _ => AgentContext::main_agent(),
     }
 }

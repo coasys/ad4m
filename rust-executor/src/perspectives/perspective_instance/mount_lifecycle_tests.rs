@@ -96,7 +96,12 @@ async fn a_delta_blocked_across_an_unmount_brings_nothing_back() {
     let gate = gates::arm(&lang, MountPoint::DeltaReceived);
     let l = lang.clone();
     let delta = tokio::spawn(async move {
-        handle_mount_delta_from_language_impl(delta_for("t1", json!({"title": "late"})), l).await
+        handle_mount_delta_from_language_impl(
+            delta_for("t1", json!({"title": "late"})),
+            l,
+            crate::agent::AgentContext::main_agent(),
+        )
+        .await
     });
     gate.arrived().await;
     p.unmount(&lang).await.unwrap();
@@ -167,12 +172,22 @@ async fn two_concurrent_scalar_updates_leave_one_value() {
     let gate = gates::arm(&lang, MountPoint::EntryRead);
     let l = lang.clone();
     let b = tokio::spawn(async move {
-        handle_mount_delta_from_language_impl(delta_for("t1", json!({"title": "b"})), l).await
+        handle_mount_delta_from_language_impl(
+            delta_for("t1", json!({"title": "b"})),
+            l,
+            crate::agent::AgentContext::main_agent(),
+        )
+        .await
     });
     gate.arrived().await;
     let l = lang.clone();
     let mut c = tokio::spawn(async move {
-        handle_mount_delta_from_language_impl(delta_for("t1", json!({"title": "c"})), l).await
+        handle_mount_delta_from_language_impl(
+            delta_for("t1", json!({"title": "c"})),
+            l,
+            crate::agent::AgentContext::main_agent(),
+        )
+        .await
     });
     // Unserialized, `c` finishes while `b` is stopped; serialized, it waits
     // for `b` (the timeout only bounds that wait, the outcome does not
@@ -212,8 +227,12 @@ async fn a_snapshot_taken_before_a_delta_keeps_the_delta_record() {
         json!({"address": "t1", "data": {"title": "new"}, "emit": false}),
     )
     .await;
-    handle_mount_delta_from_language_impl(delta_for("t1", json!({"title": "new"})), lang.clone())
-        .await;
+    handle_mount_delta_from_language_impl(
+        delta_for("t1", json!({"title": "new"})),
+        lang.clone(),
+        crate::agent::AgentContext::main_agent(),
+    )
+    .await;
     assert_eq!(things(&p).await.len(), 1);
 
     gate.release();
@@ -237,11 +256,20 @@ async fn an_older_delta_after_a_newer_one_does_not_regress() {
     let gate = gates::arm(&lang, MountPoint::DeltaReceived);
     let l = lang.clone();
     let older = tokio::spawn(async move {
-        handle_mount_delta_from_language_impl(delta_for("t1", json!({"title": "old"})), l).await
+        handle_mount_delta_from_language_impl(
+            delta_for("t1", json!({"title": "old"})),
+            l,
+            crate::agent::AgentContext::main_agent(),
+        )
+        .await
     });
     gate.arrived().await;
-    handle_mount_delta_from_language_impl(delta_for("t1", json!({"title": "new"})), lang.clone())
-        .await;
+    handle_mount_delta_from_language_impl(
+        delta_for("t1", json!({"title": "new"})),
+        lang.clone(),
+        crate::agent::AgentContext::main_agent(),
+    )
+    .await;
     gate.release();
     older.await.unwrap();
 
@@ -648,4 +676,325 @@ async fn a_dropped_mount_can_be_retried() {
     p.mount(&lang).await.unwrap();
     crate::perspectives::unregister_mount(&lang, &p.uuid);
     assert_eq!(things(&p).await.len(), 1);
+}
+
+// --- A mount runs as its perspective's owner (#1775) -----------------------
+
+/// A delta the language pushes while it runs for one agent lands only in the
+/// perspectives that agent owns: another owner's mount reads the language
+/// through its own Holochain cell, and the main agent's mount is the main
+/// agent's.
+#[tokio::test]
+async fn a_pushed_delta_reaches_only_the_emitting_agents_perspectives() {
+    let lang = load_mount_test_language().await;
+    let alice = "did:key:z6MkAliceDeltaOwner";
+    let (alices, _) = mounted_and_registered(&lang).await;
+    alices.persisted.update(|h| h.add_owner(alice)).await;
+    let (mains, _) = mounted_and_registered(&lang).await;
+
+    let as_alice = crate::agent::AgentContext::managed(alice.to_string());
+    handle_mount_delta_from_language_impl(
+        delta_for("t9", json!({"title": "alice's"})),
+        lang.clone(),
+        as_alice,
+    )
+    .await;
+    let (in_alices, in_mains) = (things(&alices).await, things(&mains).await);
+
+    handle_mount_delta_from_language_impl(
+        delta_for("t9", json!({"title": "main's"})),
+        lang.clone(),
+        crate::agent::AgentContext::main_agent(),
+    )
+    .await;
+    let (alices_after, mains_after) = (things(&alices).await, things(&mains).await);
+    crate::perspectives::remove_perspective(&alices.uuid).await;
+    crate::perspectives::remove_perspective(&mains.uuid).await;
+
+    assert_eq!(in_alices.len(), 1, "Alice's delta missed her perspective");
+    assert!(
+        in_mains.is_empty(),
+        "Alice's delta reached the main agent's: {in_mains:?}"
+    );
+    assert_eq!(
+        mains_after.len(),
+        1,
+        "the main agent's delta missed its perspective"
+    );
+    assert_eq!(
+        alices_after, in_alices,
+        "the main agent's delta reached Alice's"
+    );
+}
+
+/// mount and syncMount read the language as the perspective's owner.
+#[tokio::test]
+async fn a_mount_reads_the_language_as_the_perspectives_owner() {
+    let lang = load_mount_test_language().await;
+    let alice = "did:key:z6MkAliceMountOwner";
+    let (mut p, _shapes, _ctx) =
+        crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
+    p.persisted.update(|h| h.add_owner(alice)).await;
+    p.mount(&lang).await.unwrap();
+    p.sync_mount(&lang).await.unwrap();
+
+    let agents = interact(&format!("{lang}://project"), "agents", json!({}))
+        .await
+        .unwrap();
+    let reads: Vec<&Value> = agents
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["what"] == "mountSnapshot" || a["what"] == "mountShapes")
+        .collect();
+    assert_eq!(reads.len(), 4, "{agents}");
+    for read in reads {
+        assert_eq!(read["agent"], json!(alice), "{agents}");
+    }
+}
+
+// --- Until mount storage is per agent, a mount needs a single owner (#1775) --
+
+fn main_did() -> String {
+    crate::agent::did_for_context(&crate::agent::AgentContext::main_agent()).unwrap()
+}
+
+/// How often the language's `mountSnapshot` ran so far.
+async fn snapshot_reads(lang: &str) -> usize {
+    let agents = interact(&format!("{lang}://project"), "agents", json!({}))
+        .await
+        .unwrap();
+    agents
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["what"] == "mountSnapshot")
+        .count()
+}
+
+/// A perspective owned by main + Alice, or by Bob + Alice, mounts nothing: the language's
+/// snapshot would be read as one owner into a store the other one queries.
+#[tokio::test]
+async fn a_perspective_with_two_owners_mounts_nothing() {
+    let lang = load_mount_test_language().await;
+    let alice = "did:key:z6MkAliceTwoOwners";
+    let bob = "did:key:z6MkBobTwoOwners";
+    for owners in [
+        vec![main_did(), alice.to_string()],
+        vec![bob.to_string(), alice.to_string()],
+    ] {
+        let (mut p, _shapes, _ctx) =
+            crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
+        for owner in &owners {
+            p.persisted.update(|h| h.add_owner(owner)).await;
+        }
+        let reads = snapshot_reads(&lang).await;
+        let mounted = p.mount(&lang).await;
+        crate::perspectives::unregister_mount(&lang, &p.uuid);
+        assert!(
+            mounted.is_err(),
+            "owners {owners:?}: the mount went through"
+        );
+        assert!(p.mounts().await.unwrap().is_empty(), "owners {owners:?}");
+        assert!(lang_links(&p, &lang).await.is_empty(), "owners {owners:?}");
+        assert_eq!(
+            snapshot_reads(&lang).await,
+            reads,
+            "owners {owners:?}: the snapshot was read"
+        );
+    }
+}
+
+/// A second owner added to a mounted perspective stops its syncs, pushed deltas and call
+/// results (which apply through `apply_mount_delta`): none writes the first owner's records
+/// where the second one reads.
+#[tokio::test]
+async fn a_second_owner_stops_syncs_and_deltas() {
+    let lang = load_mount_test_language().await;
+    let alice = "did:key:z6MkAliceFirstOwner";
+    let bob = "did:key:z6MkBobSecondOwner";
+    let (mut p, _shapes, _ctx) =
+        crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
+    p.persisted.update(|h| h.add_owner(alice)).await;
+    p.mount(&lang).await.unwrap();
+    crate::perspectives::register_perspective(p.uuid.clone(), p.clone());
+    p.persisted.update(|h| h.add_owner(bob)).await;
+
+    interact(
+        &format!("{lang}://project"),
+        "outsideChange",
+        json!({"address": "t1", "data": {"title": "alice's"}, "emit": false}),
+    )
+    .await
+    .unwrap();
+    let synced = p.sync_mount(&lang).await;
+    handle_mount_delta_from_language_impl(
+        delta_for("t2", json!({"title": "pushed"})),
+        lang.clone(),
+        crate::agent::AgentContext::managed(alice.to_string()),
+    )
+    .await;
+    let generation = p.active_mount_generation(&lang).await.unwrap();
+    let applied = p
+        .apply_mount_delta(
+            &lang,
+            &delta_for("t3", json!({"title": "call result"})),
+            generation,
+            super::next_mount_seq(),
+        )
+        .await;
+    let seen = things(&p).await;
+    crate::perspectives::remove_perspective(&p.uuid).await;
+
+    assert!(synced.is_err(), "a sync with two owners went through");
+    assert!(
+        applied.is_err(),
+        "a call result with two owners was applied"
+    );
+    assert!(seen.is_empty(), "records written with two owners: {seen:?}");
+}
+
+/// Another local agent joining a neighbourhood whose perspective mounts a language is
+/// refused, so it never reads the mirror of the owner's snapshot. The owner itself may
+/// rejoin.
+#[tokio::test]
+async fn joining_a_mounted_neighbourhood_is_refused() {
+    let lang = load_mount_test_language().await;
+    let alice = "did:key:z6MkAliceMountedHood";
+    let bob = "did:key:z6MkBobJoinsLate";
+    let (p, _shapes, _ctx) =
+        crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
+    let url = format!("neighbourhood://mounted-{}", uuid::Uuid::new_v4());
+    p.persisted
+        .update(|handle| {
+            handle.add_owner(alice);
+            handle.shared_url = Some(url.clone());
+            handle.state = PerspectiveState::Synced;
+            crate::db::Ad4mDb::with_global_instance(|db| db.add_perspective(handle)).unwrap();
+        })
+        .await;
+    let mut p = p;
+    p.mount(&lang).await.unwrap();
+    crate::perspectives::register_perspective(p.uuid.clone(), p.clone());
+
+    let as_bob = crate::agent::AgentContext::managed(bob.to_string());
+    let bob_joined =
+        crate::neighbourhoods::install_neighbourhood_with_context(url.clone(), &as_bob).await;
+    let main_joined = crate::neighbourhoods::install_neighbourhood_with_context(
+        url.clone(),
+        &crate::agent::AgentContext::main_agent(),
+    )
+    .await;
+    let owners = p.persisted.load().get_owners();
+    let as_alice = crate::agent::AgentContext::managed(alice.to_string());
+    let alice_rejoined =
+        crate::neighbourhoods::install_neighbourhood_with_context(url.clone(), &as_alice).await;
+    crate::perspectives::remove_perspective(&p.uuid).await;
+
+    assert!(bob_joined.is_err(), "Bob joined a mounted neighbourhood");
+    assert!(
+        main_joined.is_err(),
+        "the main agent joined Alice's mounted neighbourhood"
+    );
+    assert_eq!(owners, vec![alice.to_string()]);
+    assert!(alice_rejoined.is_ok(), "{:?}", alice_rejoined.err());
+}
+
+/// A `mountDelta` emitted with the async context cleared (no call token) is dropped: it
+/// counts as no agent, not as the main agent, so neither the main agent's nor Alice's mirror
+/// changes.
+#[tokio::test]
+async fn a_delta_with_no_call_token_reaches_no_mirror() {
+    let lang = load_mount_test_language().await;
+    let alice = "did:key:z6MkAliceNoToken";
+    let (alices, _) = mounted_and_registered(&lang).await;
+    alices.persisted.update(|h| h.add_owner(alice)).await;
+    let (mains, _) = mounted_and_registered(&lang).await;
+
+    crate::languages::LanguageController::global_instance()
+        .expression_interact(
+            &format!("{lang}://project"),
+            &crate::types::InteractionCall {
+                name: "emitCleared".to_string(),
+                parameters_stringified: json!({"mountDelta": {
+                    "changed": [{"class": "MountThing", "address": "t7", "data": {"title": "tokenless"}}],
+                    "removed": []
+                }})
+                .to_string(),
+            },
+            &crate::agent::AgentContext::managed(alice.to_string()),
+        )
+        .await
+        .unwrap();
+    // A routed delta applies asynchronously: give it a moment to land.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (in_alices, in_mains) = (things(&alices).await, things(&mains).await);
+    crate::perspectives::remove_perspective(&alices.uuid).await;
+    crate::perspectives::remove_perspective(&mains.uuid).await;
+
+    assert!(
+        in_mains.is_empty(),
+        "the main agent's mirror changed: {in_mains:?}"
+    );
+    assert!(
+        in_alices.is_empty(),
+        "Alice's mirror changed: {in_alices:?}"
+    );
+}
+
+/// A join between the first snapshot read and its writes must not acquire access to
+/// the owner's mirror, even though no mount link has been written yet.
+#[tokio::test]
+async fn joining_during_the_first_mount_snapshot_is_refused() {
+    let lang = load_mount_test_language().await;
+    create(&lang, json!({"title": "private snapshot"})).await;
+    let alice = "did:key:z6MkAliceMountPreparing";
+    let bob = "did:key:z6MkBobJoinsDuringSnapshot";
+    let (p, _shapes, _ctx) =
+        crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
+    let url = format!("neighbourhood://preparing-{}", uuid::Uuid::new_v4());
+    p.persisted
+        .update(|handle| {
+            handle.add_owner(alice);
+            handle.shared_url = Some(url.clone());
+            handle.state = PerspectiveState::Synced;
+            crate::db::Ad4mDb::with_global_instance(|db| db.add_perspective(handle)).unwrap();
+        })
+        .await;
+    crate::perspectives::register_perspective(p.uuid.clone(), p.clone());
+    let gate = gates::arm(&lang, MountPoint::InitialSnapshotFetched);
+    let mut mounting = p.clone();
+    let l = lang.clone();
+    let mount = tokio::spawn(async move { mounting.mount(&l).await });
+    tokio::time::timeout(Duration::from_secs(10), gate.arrived())
+        .await
+        .expect("the first snapshot never reached the gate");
+    assert!(p.mounts().await.unwrap().is_empty());
+    let joined = tokio::time::timeout(
+        Duration::from_secs(5),
+        crate::neighbourhoods::install_neighbourhood_with_context(
+            url,
+            &AgentContext::managed(bob.to_string()),
+        ),
+    )
+    .await;
+    let owners = p.persisted.load().get_owners();
+    gate.release();
+    let mounted = tokio::time::timeout(Duration::from_secs(10), mount)
+        .await
+        .expect("mount deadlocked")
+        .unwrap();
+    crate::perspectives::remove_perspective(&p.uuid).await;
+
+    let error = joined
+        .expect("join waited on the snapshot")
+        .expect_err("Bob became an owner between the private snapshot read and its writes");
+    assert!(
+        error
+            .to_string()
+            .contains("another local agent cannot join"),
+        "{error}"
+    );
+    assert_eq!(owners, vec![alice.to_string()]);
+    mounted.unwrap();
 }

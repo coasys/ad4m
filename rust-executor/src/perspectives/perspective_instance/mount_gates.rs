@@ -8,6 +8,8 @@
 pub(crate) enum MountPoint {
     /// `sync_mount`, after `mountSnapshot()` answered, before the apply.
     SnapshotFetched,
+    /// The first mount, after its snapshot read and before any writes.
+    InitialSnapshotFetched,
     /// Inside the snapshot read waiter, before the language answers.
     #[cfg(test)]
     SnapshotReading,

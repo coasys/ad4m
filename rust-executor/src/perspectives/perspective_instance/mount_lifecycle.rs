@@ -110,6 +110,9 @@ impl MountSlot {
 pub(crate) struct MountLifecycles {
     slots: Mutex<HashMap<String, Arc<AsyncMutex<MountSlot>>>>,
     generations: AtomicU64,
+    /// Serializes a join's check + owner mutation with reserving a first mount.
+    /// Taken before any slot lock; never held across a language call.
+    pub(crate) membership: Arc<AsyncMutex<()>>,
     /// Held from a mount's class ownership check through its shape
     /// install (`install_mount_shapes`). Taken under a slot's lock, never
     /// the other way round.
@@ -135,6 +138,18 @@ impl MountLifecycles {
             })
             .clone();
         slot.lock_owned().await
+    }
+
+    /// A first mount reserves its slot before reading the owner's private snapshot.
+    /// The caller holds `membership`, so no first mount can start during this check.
+    pub(crate) async fn is_preparing(&self) -> bool {
+        let slots: Vec<_> = self.slots.lock().unwrap().values().cloned().collect();
+        for slot in slots {
+            if slot.lock().await.phase == MountPhase::Mounting {
+                return true;
+            }
+        }
+        false
     }
 
     /// The perspective's shape install lock (see `install`).
