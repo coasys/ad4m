@@ -176,7 +176,7 @@ export async function leaseNet(
       clear();
       try {
         tc(`qdisc add dev ${iface} root handle ${HANDLE} prio bands 4 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1`);
-        // A queue of 100 ms at the rate: past it packets drop, as a real bottleneck's do.
+        // A queue of 300 ms at the rate: past it packets drop, as a real bottleneck's do.
         // The burst is the size of a few packets, not more: a bottleneck link has no bucket
         // of line-rate credit, and with a 16 kB one a probe cluster (str0m's, about 18 kB)
         // passed whole at line rate and the estimate read 2.7 to 4.7 Mbit/s on a 700 kbit/s cap.

@@ -14,15 +14,25 @@
 
 import { leaseNet, netAvailable, socketPorts } from "../../net.js";
 import type { Check } from "../call.js";
-import type { Size } from "../protocol.js";
+import type { Size, Snapshot } from "../protocol.js";
 import { e2eScenario } from "../scenario.js";
 
 const EVERYONE = ["u1", "u2", "u3"];
 /** 720p: libwebrtc drops simulcast layers below its resolution thresholds, and a smaller camera sends fewer. */
 const CAMERA: Size = { width: 1280, height: 720 };
 const LOW: Size = { width: CAMERA.width / 4, height: CAMERA.height / 4 };
-/** The capped receiver's downlink: the low layers of two senders fit, their medium layers do not. */
+/**
+ * The capped receiver's downlink. The premise, checked in the shaped step from
+ * the senders' own numbers: two low layers plus the audio fit under
+ * BUDGET_FRACTION of it, while a low and a medium, or two mediums, do not.
+ */
 const CAP_KBIT = 700;
+/** The SFU's budget: this share of the estimate (`BUDGET_FRACTION`, simulcast.rs). */
+const BUDGET_FRACTION = 0.85;
+/** What the SFU budgets each audio track at least (`AUDIO_RESERVE_BPS`). */
+const AUDIO_RESERVE_KBIT = 64;
+/** Bytes the SFU adds to each RTP packet when it measures a layer (`PACKET_OVERHEAD_BYTES`). */
+const PACKET_OVERHEAD_BYTES = 32;
 /** From the cap to the capped receiver on the low layer. */
 const SHAPED_MS = 45_000;
 /** From u2 on low to every check true at once: the keyframes u2's switches asked for have arrived. */
@@ -108,17 +118,69 @@ export const e24ReceiverBandwidth = e2eScenario({
       await step(`under the cap for ${STEADY_MS / 1000} s: u2 stays on low, u1 and u3 on full size, video advances, everyone hears everyone`, async () => {
         // u2's switches to low asked u1 and u3 for keyframes, and their encoders pause their other layers for a moment: the transition is over once everyone is back.
         await call.eventually(steady({ u2: LOW, u1: CAMERA, u3: CAMERA }), SETTLE_MS, "the shaped state settles");
-        const before = net.shaperCounters();
+        const counters = () => {
+          const read = net.shaperCounters();
+          if (!read) throw new Error("the shaper's counters could not be read (no tbf qdisc in `tc -s qdisc show`)");
+          return read;
+        };
+        const senders = ["u1", "u3"];
+        const sentBefore = await call.snapshots();
+        const before = counters();
         const from = Date.now();
         await call.holds(steady({ u2: LOW, u1: CAMERA, u3: CAMERA }), STEADY_MS, "the shaped state");
-        // What u2's downlink carried meanwhile: two low layers and audio fit under the cap.
-        const after = net.shaperCounters();
-        if (before && after) {
-          const seconds = (Date.now() - from) / 1000;
-          metric("shaped_downlink_kbit", Math.round(((after.sentBytes - before.sentBytes) * 8) / 1000 / seconds));
-          metric("shaped_dropped_packets", after.droppedPackets - before.droppedPackets);
-          console.log(`e24: the shaper passed ${after.sentBytes - before.sentBytes} bytes and dropped ${after.droppedPackets - before.droppedPackets} packets in ${seconds.toFixed(1)} s (cap ${CAP_KBIT} kbit/s)`);
+        const after = counters();
+        const sentAfter = await call.snapshots();
+        const seconds = (Date.now() - from) / 1000;
+
+        // What u2's filter passed meanwhile: not zero, or the shaper sat on the wrong ports.
+        const passedBytes = after.sentBytes - before.sentBytes;
+        const dropped = after.droppedPackets - before.droppedPackets;
+        if (!(passedBytes > 0)) throw new Error(`the shaper passed no bytes of u2's downlink in ${seconds.toFixed(1)} s`);
+        metric("shaped_downlink_kbit", Math.round((passedBytes * 8) / 1000 / seconds));
+        metric("shaped_dropped_packets", dropped);
+        console.log(`e24: the shaper passed ${passedBytes} bytes and dropped ${dropped} packets in ${seconds.toFixed(1)} s (cap ${CAP_KBIT} kbit/s)`);
+
+        // What the senders u2 receives offered meanwhile, as the SFU measures it: payload plus 32 bytes per packet.
+        const rate = (name: string, pick: (sent: Snapshot["sent"]) => { bytes: number; packets: number } | undefined): number => {
+          const a = pick(sentBefore.get(name)!.sent);
+          const b = pick(sentAfter.get(name)!.sent);
+          if (!a || !b || b.packets <= a.packets) throw new Error(`${name} sent nothing there in ${seconds.toFixed(1)} s`);
+          return ((b.bytes - a.bytes + (b.packets - a.packets) * PACKET_OVERHEAD_BYTES) * 8) / 1000 / seconds;
+        };
+        const offered = Object.fromEntries(
+          senders.map((name) => [
+            name,
+            {
+              low: rate(name, (sent) => sent.video.low),
+              medium: rate(name, (sent) => sent.video.medium),
+              // The SFU budgets each audio track at least AUDIO_RESERVE.
+              audio: Math.max(AUDIO_RESERVE_KBIT, rate(name, (sent) => sent.audio)),
+            },
+          ]),
+        );
+        for (const [name, layers] of Object.entries(offered)) {
+          metric(`offered_low_kbit_${name}`, Math.round(layers.low));
+          metric(`offered_medium_kbit_${name}`, Math.round(layers.medium));
+          metric(`offered_audio_kbit_${name}`, Math.round(layers.audio));
         }
+        const [a, b] = senders.map((name) => offered[name]);
+        const fixed = a.audio + b.audio;
+        const budget = BUDGET_FRACTION * CAP_KBIT;
+        // The allocator steps a track down when the cost is over the budget (cost > budget).
+        const twoLows = a.low + b.low + fixed;
+        const lowAndMedium = Math.min(a.low + b.medium, b.low + a.medium) + fixed;
+        const twoMediums = a.medium + b.medium + fixed;
+        metric("fixed_kbit", Math.round(fixed));
+        metric("budget_kbit", Math.round(budget));
+        metric("two_lows_cost_kbit", Math.round(twoLows));
+        metric("low_and_medium_cost_kbit", Math.round(lowAndMedium));
+        metric("two_mediums_cost_kbit", Math.round(twoMediums));
+        console.log(`e24: budget ${budget.toFixed(0)} kbit/s; two lows + fixed ${twoLows.toFixed(0)}, a low and a medium + fixed ${lowAndMedium.toFixed(0)}, two mediums + fixed ${twoMediums.toFixed(0)} (fixed ${fixed.toFixed(0)})`);
+        const broken: string[] = [];
+        if (!(twoLows <= budget)) broken.push(`two lows + fixed (${twoLows.toFixed(0)}) do not fit the budget`);
+        if (!(lowAndMedium > budget)) broken.push(`a low and a medium + fixed (${lowAndMedium.toFixed(0)}) fit the budget`);
+        if (!(twoMediums > budget)) broken.push(`two mediums + fixed (${twoMediums.toFixed(0)}) fit the budget`);
+        if (broken.length) throw new Error(`the cap's premise fails at ${budget.toFixed(0)} kbit/s (${BUDGET_FRACTION} x ${CAP_KBIT}): ${broken.join("; ")}`);
       });
 
       metric("recovery_to_full_ms", await step("the cap is lifted: u2 receives full size again, and stays there", async () => {

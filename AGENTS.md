@@ -518,9 +518,13 @@ ignored. Constants and why:
   (`seq_range`) over this window, known once the layer has flowed a whole
   window. The test encoders' frames reach 60 to 97 kB: a 1 s window read a
   high layer up to 5.2 Mbit/s (p99) against 1.3 nominal, 3 s and 5 s still
-  2.0 to 2.5, 8 s at most 1.7. A keyframe adds no bytes: it is a burst the
-  selector's own switches ask for.
-- `LAYER_TIMEOUT` 5 s: a layer silent this long is gone. A sender asked for a
+  2.0 to 2.5, 8 s at most 1.7. Keyframes count: the codec's cadence, loss
+  recovery, a receiver's PLI and the selector's own switches all cross the
+  receiver's link, and the window smooths one burst. Trade-off: video that
+  starts or resumes costs 0 until it has flowed a whole window, so for up to 8 s
+  a resumed high stream can stay high through an estimate drop.
+- `LAYER_TIMEOUT` 5 s: a layer silent this long is gone; the selector notices
+  on its next event (the next frame of the track), not at its own deadline. A sender asked for a
   keyframe sends none of its layers for 1 to 4 s while its pacer drains it,
   with its own bandwidth estimate at 3 Mbit/s and more (so the SFU's request
   causes the stall, not the sender's network); 3 s dropped the receivers of
@@ -528,12 +532,16 @@ ignored. Constants and why:
 - `KEYFRAME_REQUEST_INTERVAL` 3 s: at most one request per (track, layer),
   from the selector or a gap. At 500 ms the sender made one keyframe after
   another and stalled for longer. A receiver's own PLI is not limited.
-- `BUDGET_FRACTION` 0.85 of the estimate minus the audio reserve (per audio
-  track the larger of `AUDIO_RESERVE_BPS` 64 kbit/s and its measured rate;
-  audio is never touched).
-- `UPGRADE_HEADROOM` 1.40 and `UPGRADE_HOLD` 4 s: see the upgrade rule. 1.20
-  left a 2% margin over the step-down line (1 / 0.85 = 1.18), and a loopback
-  estimate that swings between 2.2 and 4.9 Mbit/s sent the receiver down again.
+- `BUDGET_FRACTION` 0.85 of the estimate minus the fixed traffic (per audio
+  track the larger of `AUDIO_RESERVE_BPS` 64 kbit/s and its measured rate, and
+  the measured rate of each video without simulcast; fixed traffic is never
+  touched).
+- `UPGRADE_HEADROOM` 1.40 and `UPGRADE_HOLD` 4 s: see the upgrade rule. With
+  video cost C and fixed traffic F, a receiver steps down when the estimate
+  E < (C + F) / 0.85 and an upgrade needs E >= (1.40 * C + F) / 0.85; at F = 0
+  the old 1.20 left a 20% gap between the two lines. 1.40 adds hysteresis
+  against the loopback estimate's swings (2.2 to 4.9 Mbit/s with the traffic
+  unchanged), which sent the receiver down again.
 
 Rules, per receiver, run on an estimate event, a track-set or ceiling change,
 a committed switch, a change in a track's set of live layers (a layer starts,
@@ -546,8 +554,13 @@ lowers the loop's timeout.
   ties by stable id), one per run.
 - An upgrade of one track by one layer needs budget >= 1.40 * (cost sum + the
   layer's extra cost), held 4 s without a dip, ceiling change, track-set change
-  or completed switch; each upgrade starts a new hold. Every layer involved
-  needs a measured rate. No estimate yet, or the last one `can_probe: false`,
+  or completed switch; each upgrade starts a new hold. The hold belongs to one
+  (track, target layer): another candidate starts its own 4 s, and a candidate
+  that holds stays the choice while another becomes cheaper. The layer to go
+  to needs a measured rate. While a forwarded video's own cost is not
+  measured yet, or an audio track is still unmeasured (its meter's first
+  packet + 8 s wakes the allocation), upgrades wait; this covers upgrades, not
+  step-downs. No estimate yet, or the last one `can_probe: false`,
   blocks upgrades; a peer that never reports stays on the lowest layer.
 - A switch commits on a keyframe of the new layer. The old layer's cost counts
   until then, and a track with a pending switch is not switched again.
@@ -563,7 +576,8 @@ lowers the loop's timeout.
   are never reused).
 - The receiver's probing target (`bwe().set_desired_bitrate`) is the estimate
   that satisfies the upgrade condition at the permitted maximum layers:
-  `(1.40 * highest + audio) / 0.85`, rounded up.
+  `(1.40 * highest + fixed) / 0.85`, rounded up (fixed: audio and
+  non-simulcast video).
 - A cap change is logged at `debug` (`rust_executor::sfu::simulcast`:
   receiver, track, old and new layer, estimate, budget, spent, layer rates).
 

@@ -1908,7 +1908,6 @@ impl SfuServer {
                     data.data.len(),
                     // The frame's RTP packets (extended sequence numbers).
                     (**data.seq_range.end()).saturating_sub(**data.seq_range.start()) + 1,
-                    keyframe == Some(true),
                     data.params.spec().codec.is_audio(),
                 );
                 // A gap in the origin's sequence (e.g. after an outage or an
