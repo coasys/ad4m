@@ -523,9 +523,28 @@ pub async fn create(
                 true
             }
             Some(SetterKind::Links) => true,
-            // With no setter the only writer left is the constructor call
-            // itself; a link constructor leaves it to the item links below,
-            // whatever its setters do (`create_subject` skips it).
+            // A constructor call receives the whole record. Otherwise a
+            // call adder must not be bypassed by synthesizing item links.
+            None if !ctor_is_call
+                && member_call(perspective, &class_name, collection, "ad4m://adder").await? =>
+            {
+                return Err(invalid(
+                    &class_name,
+                    vec![super::ValidationError {
+                        property: collection.clone(),
+                        problem: super::ValidationProblem::ReadOnly {
+                            reason: super::ReadOnlyReason::NoSetter,
+                        },
+                        expected_type: find_property(&infos, collection)
+                            .map(|info| info.type_name()),
+                        cardinality: find_property(&infos, collection)
+                            .map(|info| info.cardinality()),
+                        allowed_values: None,
+                        received: Some(Value::Array(items.clone())),
+                        item: None,
+                    }],
+                ));
+            }
             None => ctor_is_call,
         };
         if through_subject {
