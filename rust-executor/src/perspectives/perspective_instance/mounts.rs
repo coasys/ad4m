@@ -278,13 +278,12 @@ impl PerspectiveInstance {
         let controller = LanguageController::global_instance();
         let owner = self.mount_owner().await?;
         // Only preparation is retried: never replay local writes or user actions.
-        let (shapes, snapshot) =
-            crate::languages::mount_init::read_initial_mount(lang_address, || async {
-                let shapes = controller.mount_shapes(lang_address, &owner).await?;
-                let snapshot = controller.mount_snapshot(lang_address, &owner).await?;
-                Ok((shapes, snapshot))
-            })
-            .await?;
+        let (shapes, snapshot) = crate::languages::mount_init::read_mount(lang_address, || async {
+            let shapes = controller.mount_shapes(lang_address, &owner).await?;
+            let snapshot = controller.mount_snapshot(lang_address, &owner).await?;
+            Ok((shapes, snapshot))
+        })
+        .await?;
         pause(lang_address, MountPoint::InitialSnapshotFetched).await;
 
         let mut slot = self.mount_lifecycles.lock(lang_address).await;
@@ -403,8 +402,12 @@ impl PerspectiveInstance {
         let seq = next_mount_seq();
         let controller = LanguageController::global_instance();
         let owner = self.mount_owner().await?;
-        let shapes = controller.mount_shapes(lang_address, &owner).await?;
-        let snapshot = controller.mount_snapshot(lang_address, &owner).await?;
+        let (shapes, snapshot) = crate::languages::mount_init::read_mount(lang_address, || async {
+            let shapes = controller.mount_shapes(lang_address, &owner).await?;
+            let snapshot = controller.mount_snapshot(lang_address, &owner).await?;
+            Ok((shapes, snapshot))
+        })
+        .await?;
         pause(lang_address, MountPoint::SnapshotFetched).await;
 
         let Some(mut slot) = self

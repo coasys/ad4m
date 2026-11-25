@@ -945,3 +945,105 @@ async fn a_mounted_class_name_gets_one_alias_node() {
     assert_eq!(instances.len(), 1, "{instances:?}");
     assert_eq!(instances[0]["title"], "a");
 }
+
+// Two distinct classes allow both languages to be mounted in one perspective.
+async fn deadline_mount_pair() -> (PerspectiveInstance, AgentContext, String, String) {
+    let first = load_mount_test_language().await;
+    let controller = crate::languages::LanguageController::global_instance();
+    let source = format!(
+        "{}\n// instance {}\n",
+        crate::languages::mount_tests::MOUNT_TEST_SOURCE
+            .replace("MountThing", "DeadlineOtherThing")
+            .replace("mounttest://Thing", "deadlineother://DeadlineOtherThing")
+            .replace("mounttest://", "deadlineother://"),
+        uuid::Uuid::new_v4(),
+    );
+    let (_, path) = controller.save_language_bundle(&source, None).unwrap();
+    let second = controller.load_language(path, false).await.unwrap();
+    let (mut p, ctx) = mounted(&first).await;
+    p.mount(&second).await.unwrap();
+    for (lang, class) in [(&first, "MountThing"), (&second, "DeadlineOtherThing")] {
+        interact(
+            &format!("{lang}://class/{class}"),
+            "create",
+            json!({"title": "new"}),
+        )
+        .await
+        .unwrap();
+    }
+    // Use the actual traversal order, not hash/address ordering assumptions.
+    let langs = p.mounts().await.unwrap();
+    (p, ctx, langs[0].clone(), langs[1].clone())
+}
+
+/// Advance only while the read is stopped; the Deno fixture setup uses real time.
+async fn expire_mount_read(gate: &super::mount_gates::gates::Gate) {
+    tokio::time::timeout(Duration::from_secs(5), gate.arrived())
+        .await
+        .unwrap();
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(76)).await;
+    tokio::task::yield_now().await;
+    tokio::time::resume();
+}
+
+#[tokio::test]
+async fn pending_sync_read_times_out_and_resync_reaches_next_language() {
+    use super::mount_gates::{gates::arm, MountPoint};
+    use crate::languages::mount_init::MountError;
+    let (p, _ctx, stuck, healthy) = deadline_mount_pair().await;
+    let gate = arm(&stuck, MountPoint::SnapshotReading);
+    let mut syncing = p.clone();
+    let lang = stuck.clone();
+    let sync = tokio::spawn(async move { syncing.sync_mount(&lang).await });
+    expire_mount_read(&gate).await;
+    let result = tokio::time::timeout(Duration::from_secs(2), sync).await;
+    assert!(result.is_ok(), "pending sync did not release its waiter");
+    let error = result.unwrap().unwrap().unwrap_err();
+    assert!(matches!(error.downcast_ref::<MountError>(),
+        Some(MountError::ReadTimeout { language_address, after_ms: 75_000 })
+        if language_address == &stuck));
+
+    // Exercise the real sequential resync loop, with the first language stuck again.
+    let gate = arm(&stuck, MountPoint::SnapshotReading);
+    let next = arm(&healthy, MountPoint::SnapshotFetched);
+    super::mounts::set_mount_resync_interval_for_test(Duration::from_millis(1));
+    let instance = p.clone();
+    let loop_handle = tokio::spawn(async move { instance.mount_resync_loop().await });
+    expire_mount_read(&gate).await;
+    super::mounts::set_mount_resync_interval_for_test(Duration::from_secs(15));
+    tokio::time::timeout(Duration::from_secs(5), next.arrived())
+        .await
+        .expect("resync must reach the next language in the same pass");
+    next.release();
+    p.teardown_background_tasks().await;
+    loop_handle.await.unwrap();
+    assert!(lang_links(&p, &healthy)
+        .await
+        .iter()
+        .any(|l| l.data.source == format!("{healthy}://t1")));
+    for lang in [stuck, healthy] {
+        crate::perspectives::unregister_mount(&lang, &p.uuid);
+    }
+}
+
+#[tokio::test]
+async fn restore_continues_past_pending_mount_read() {
+    use super::mount_gates::{gates::arm, MountPoint};
+    let (p, _ctx, stuck, healthy) = deadline_mount_pair().await;
+    let gate = arm(&stuck, MountPoint::SnapshotReading);
+    let mut restoring = p.clone();
+    let restore = tokio::spawn(async move { restoring.restore_mounts().await });
+    expire_mount_read(&gate).await;
+    tokio::time::timeout(Duration::from_secs(5), restore)
+        .await
+        .expect("restore must continue past the pending language")
+        .unwrap();
+    assert!(lang_links(&p, &healthy)
+        .await
+        .iter()
+        .any(|l| l.data.source == format!("{healthy}://t1")));
+    for lang in [stuck, healthy] {
+        crate::perspectives::unregister_mount(&lang, &p.uuid);
+    }
+}

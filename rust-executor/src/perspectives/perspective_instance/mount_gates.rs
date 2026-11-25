@@ -10,6 +10,9 @@ pub(crate) enum MountPoint {
     SnapshotFetched,
     /// The first mount, after its snapshot read and before any writes.
     InitialSnapshotFetched,
+    /// Inside the snapshot read waiter, before the language answers.
+    #[cfg(test)]
+    SnapshotReading,
     /// A delta (pushed or a call's result), before it is applied.
     DeltaReceived,
     /// The per-record diff, after it read the record's current links and
