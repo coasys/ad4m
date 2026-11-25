@@ -36,7 +36,7 @@ check() {
   local out rc=0
   out="$(env -i PATH="$TMP/bin:$PATH" HOME="$TMP" FAKE_LOG="$TMP/curl.log" \
     HEAVY_GATE_COMMIT_MSG="feat: something" HEAVY_GATE_CACHE_DIR="$TMP/cache" \
-    "$@" bash "$SCRIPT")" || rc=$?
+    "$@" bash "$SCRIPT" ${ARGS:-})" || rc=$?
   if [ "$rc" != "$want_rc" ] || ! grep -qE "$want_out" <<<"$out"; then
     echo "  FAIL: $name: exit $rc (want $want_rc), output: $out"
     FAILED=1
@@ -46,6 +46,7 @@ check() {
 }
 
 echo "should-run-heavy.sh"
+light() { ARGS=light check "$@"; } # the question every other job asks: does CI run at all?
 
 check "push to dev runs, no API call" 0 '^run: push to dev' CIRCLE_BRANCH=dev FAKE_FAIL=1
 [ -s "$TMP/curl.log" ] && { echo "  FAIL: push to dev called the API"; FAILED=1; }
@@ -110,6 +111,43 @@ check "workflow cache: a failure is not kept" 11 '^run: GitHub API request faile
   CIRCLE_BRANCH=feat/y CIRCLE_WORKFLOW_ID=wf3 FAKE_FAIL=1
 check "workflow cache: next job after a failure asks again" 10 '^skip: no open PR for this branch$' \
   CIRCLE_BRANCH=feat/y CIRCLE_WORKFLOW_ID=wf3 FAKE_BODY='[]'
+
+# `light`: the question of the jobs that run on every PR (build, fmt, clippy, ...).
+# Only a draft halts them; a stacked PR or a branch with no PR still runs them.
+echo "should-run-heavy.sh light"
+light "light: draft PR to dev skips" 10 '^skip: PR #30 is a draft' \
+  CIRCLE_BRANCH=feat/x FAKE_BODY="[$(pr 30 true dev)]"
+light "light: draft PR to a stack branch skips" 10 '^skip: PR #31 is a draft' \
+  CIRCLE_BRANCH=feat/x FAKE_BODY="[$(pr 31 true feat/base)]"
+light "light: ready PR to dev runs" 0 '^run: PR #32 is ready' \
+  CIRCLE_BRANCH=feat/x FAKE_BODY="[$(pr 32 false dev)]"
+light "light: ready PR to a stack branch runs" 0 '^run: PR #33 is ready' \
+  CIRCLE_BRANCH=feat/x FAKE_BODY="[$(pr 33 false feat/base)]"
+light "light: branch with no PR runs" 0 '^run: no open PR' CIRCLE_BRANCH=spike/x FAKE_BODY='[]'
+light "light: full-ci label on a draft runs" 0 '^run: PR #34 has the full-ci label' \
+  CIRCLE_BRANCH=feat/x FAKE_BODY="[$(pr 34 true dev full-ci)]"
+light "light: [full-ci] in the commit message on a draft runs, no API call" 0 '^run: \[full-ci\]' \
+  CIRCLE_BRANCH=feat/x HEAVY_GATE_COMMIT_MSG=$'fix: y\n\n[full-ci]' FAKE_FAIL=1
+light "light: two PRs from one branch, one ready: runs" 0 '^run: PR #36 is ready' \
+  CIRCLE_BRANCH=feat/x FAKE_BODY="[$(pr 35 true dev),$(pr 36 false feat/base)]"
+light "light: dev, nightly and tags run, no API call" 0 '^run: push to dev' CIRCLE_BRANCH=dev FAKE_FAIL=1
+light "light: nightly (forced) runs" 0 '^run: HEAVY_GATE_FORCE' CIRCLE_BRANCH=feat/x HEAVY_GATE_FORCE=true FAKE_FAIL=1
+light "light: API failure runs (exit 11: unsure)" 11 '^run: GitHub API request failed' CIRCLE_BRANCH=feat/x FAKE_FAIL=1
+light "light: API garbage runs" 11 '^run: could not read' CIRCLE_BRANCH=feat/x FAKE_BODY='<html>'
+
+# One lookup answers both questions: the heavy jobs and the light jobs of a workflow
+# share the cache, whichever asks first.
+rm -rf "$TMP/cache"
+light "light cache: first job asks" 10 '^skip: PR #40 is a draft$' \
+  CIRCLE_BRANCH=feat/x CIRCLE_WORKFLOW_ID=wfl1 FAKE_BODY="[$(pr 40 true dev)]"
+check "light cache: a heavy job reuses it, no API call" 10 'cached for this workflow' \
+  CIRCLE_BRANCH=feat/x CIRCLE_WORKFLOW_ID=wfl1 FAKE_FAIL=1
+[ -s "$TMP/curl.log" ] && { echo "  FAIL: heavy job after a light one called the API"; FAILED=1; }
+light "light cache: a stacked ready PR: heavy skips, light runs, one request" 0 '^run: PR #41 is ready' \
+  CIRCLE_BRANCH=feat/z CIRCLE_WORKFLOW_ID=wfl2 FAKE_BODY="[$(pr 41 false feat/base)]"
+check "light cache: the heavy job of that workflow skips from the cache" 10 '^skip: PR #41 targets feat/base, not dev.*cached' \
+  CIRCLE_BRANCH=feat/z CIRCLE_WORKFLOW_ID=wfl2 FAKE_FAIL=1
+[ -s "$TMP/curl.log" ] && { echo "  FAIL: cached heavy answer called the API"; FAILED=1; }
 
 if [ "$FAILED" != 0 ]; then
   echo "FAILED"

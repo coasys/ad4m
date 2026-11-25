@@ -1,10 +1,12 @@
 name: Heavy suites
 
-# The GitHub side of CircleCI's heavy_gate (.circleci/scripts/should-run-heavy.sh).
-# heavy_gate halts rust-tests and the integration suites green on a draft PR, a
-# PR whose base is not dev, or a branch with no PR. CircleCI starts a pipeline on
-# a push only, so a PR that later got ready or was retargeted to dev kept green
-# checks for suites that never ran. On each PR event below,
+# The GitHub side of CircleCI's gates (.circleci/scripts/should-run-heavy.sh).
+# CircleCI runs no CI on a draft PR: every job halts green. heavy_gate also halts
+# rust-tests and the integration suites on a PR whose base is not dev, or a
+# branch with no PR. CircleCI starts a pipeline on a push only, so a PR that
+# later got ready or was retargeted to dev kept green checks for jobs that never
+# ran. This workflow runs on drafts too: it is the one that notices the PR turning
+# ready. On each PR event below,
 # .github/scripts/heavy-suites-pr.sh sets the commit status `ci/heavy-suites` on
 # the head commit:
 #
@@ -13,6 +15,10 @@ name: Heavy suites
 #   the gate (running or done); their ci/circleci checks are the pass or fail.
 #   It waits for CircleCI's own pipeline, and starts one for the branch when none
 #   of the commit's pipelines ran them (e.g. they halted before the PR got ready).
+#   That pipeline runs every job, the light ones too.
+# - for a ready PR whose heavy suites are not due (its base is not dev), it still
+#   starts a pipeline when the commit's pipeline halted `build` on the draft, so
+#   the light jobs run; the status stays pending.
 # - pending with what clears it in every other case. "Re-run" means re-running
 #   this workflow: it looks again and starts what is missing.
 #

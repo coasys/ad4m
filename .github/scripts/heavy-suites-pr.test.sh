@@ -231,6 +231,57 @@ check "push to a stacked PR: pending" 0 'pending: Not run: PR #30 targets feat/b
   FAKE_PULLS="[$(pr 30 false feat/base)]" "${CCI[@]}"
 statuses pending
 
+# No CI on a draft: the draft's pipeline halted every job, `build` (light) included, at its
+# "Draft gate" step. A ready PR whose heavy suites are not due (stacked) still needs its
+# light jobs, and no push comes: a new pipeline starts, and nothing waits for it.
+DRAFT_GATE='{"name":"Draft gate (no CI on draft PRs)"}'
+draft_halted() { printf '{"lifecycle":"finished","steps":[{"name":"Checkout code"},%s]}' "$DRAFT_GATE"; }
+draft_ran() { printf '{"lifecycle":"finished","steps":[{"name":"Checkout code"},%s,{"name":"cargo build"}]}' "$DRAFT_GATE"; }
+draft_pipeline() { # <build step json>
+  fx pipelines "$(pipes p1:8:$SHA)"; fx wf_p1 "$(wf wf1 success)"
+  fx jobs_wf1 "$(jobs build:10:success rust-tests:11:success)"
+  fx job_10 "$1"; fx job_11 "$(step_halted)"
+}
+fx_reset
+event ready_for_review false feat/base
+draft_pipeline "$(draft_halted)"
+check "ready stacked PR, light jobs halted on the draft: new pipeline, status stays pending" 0 'started CircleCI pipeline 4242' \
+  FAKE_PULLS="[$(pr 30 false feat/base)]" "${CCI[@]}"
+statuses pending
+logged "$RUN_URL" "did not start a pipeline for the halted light jobs"
+logged 'GET https://circleci.com/api/v1.1/project/circleci/VRkXSnZDyBKHhkHKBHTmLj/W84Q4MGGTeZwizersNwxB4/10 ' \
+  "did not read build's steps"
+not_logged 'GET https://circleci.com/api/v1.1/project/circleci/VRkXSnZDyBKHhkHKBHTmLj/W84Q4MGGTeZwizersNwxB4/11 ' \
+  "read a heavy job for the light question"
+check "ready stacked PR, light jobs halted, no CIRCLECI_API_TOKEN: warns, starts nothing" 0 'CIRCLECI_API_TOKEN is not set' \
+  FAKE_PULLS="[$(pr 30 false feat/base)]"
+not_logged "$RUN_URL" "started a pipeline without a token"
+fx_reset
+draft_pipeline "$(draft_ran)"
+check "ready stacked PR, light jobs ran: no new pipeline" 0 'build ran' \
+  FAKE_PULLS="[$(pr 30 false feat/base)]" "${CCI[@]}"
+not_logged "$RUN_URL" "started a pipeline although the light jobs ran"
+fx_reset
+event ready_for_review false feat/base
+draft_pipeline "$(draft_halted)"
+check "ready stacked PR, the branch moved: starts nothing" 0 "head of PR #30 is now $OTHER" \
+  FAKE_PULLS="[$(pr 30 false feat/base)]" "${CCI[@]}" FAKE_PR_HEAD="$OTHER"
+not_logged "$RUN_URL" "started a pipeline for a newer commit than the event's"
+fx_reset
+event synchronize true feat/base
+draft_pipeline "$(draft_halted)"
+check "draft PR with halted jobs: starts nothing" 0 'pending: Not run: PR #30 is a draft' \
+  FAKE_PULLS="[$(pr 30 true feat/base)]" "${CCI[@]}"
+not_logged "$RUN_URL" "started a pipeline for a draft"
+not_logged circleci.com "a draft called CircleCI"
+fx_reset
+event ready_for_review false dev
+draft_pipeline "$(draft_halted)"
+new_pipeline "$(jobs build:20:success rust-tests:21:running)" running
+check "ready to dev, whole draft pipeline halted: new pipeline that runs every job" 0 'success: Heavy suites running in CircleCI pipeline 4242' \
+  FAKE_PULLS="[$(pr 30 false dev)]" "${CCI[@]}"
+logged "$RUN_URL" "did not start a pipeline for the draft's halted jobs"
+
 # The gate runs: success only once a pipeline of this commit runs the heavy jobs.
 event synchronize false dev
 push_ran
@@ -444,7 +495,7 @@ fx_reset
 event ready_for_review false feat/base
 check "ready for review, stacked: pending, no pipeline" 0 'pending: Not run: PR #30 targets feat/base' \
   FAKE_PULLS="[$(pr 30 false feat/base)]" "${CCI[@]}"
-not_logged circleci.com "a stacked PR called CircleCI"
+not_logged "$RUN_URL" "a stacked PR with no halted light jobs started a pipeline"
 event edited false dev '| .changes = {base: {ref: {from: "feat/base"}}}'
 push_halted; new_pipeline "$NEW_RAN" running
 check "base changed to dev: new pipeline" 0 'success: .*pipeline 4242' \
@@ -453,7 +504,7 @@ logged "$RUN_URL" "retarget to dev started no pipeline"
 event edited false feat/other '| .changes = {base: {ref: {from: "feat/base"}}}'
 check "base changed to another stack branch: pending" 0 '^pending:' \
   FAKE_PULLS="[$(pr 30 false feat/other)]" "${CCI[@]}"
-not_logged circleci.com "a stack retarget called CircleCI"
+not_logged "$RUN_URL" "a stack retarget with no halted light jobs started a pipeline"
 event edited false dev '| .changes = {title: {from: "old"}}'
 check "title edit: nothing" 0 'not a base change' FAKE_PULLS="[$(pr 30 false dev)]" "${CCI[@]}"
 [ -s "$TMP/curl.log" ] && { echo "  FAIL: a title edit made requests"; FAILED=1; }
