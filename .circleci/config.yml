@@ -574,6 +574,11 @@ jobs:
           name: Test coasys-spaces.sh
           command: bash scripts/coasys-spaces.test.sh
       - run:
+          # Fake WE suite, fake scripts/perf, local git repo; about a second. The nightly
+          # feed-scale job's skip, data dir and calls to the performance history.
+          name: Test feed-scale.sh
+          command: bash scripts/feed-scale.test.sh
+      - run:
           # Fake curl with fixture PRs, no network; about a second. The heavy_gate decision.
           name: Test should-run-heavy.sh
           command: bash .circleci/scripts/should-run-heavy.test.sh
@@ -1535,6 +1540,99 @@ jobs:
           path: /tmp/coasys-spaces-artifacts
           destination: coasys-spaces
 
+  # How the Feed behaves in a space with a million messages, on this commit's executor: WE web
+  # opens the space in Chromium, and the job measures the newest page (cold, then warm), the
+  # older page a scroll loads, the executor's model query under those loads, the executor's
+  # CPU over the loads (with the auto-processor WE registers for the space), its RSS, and the
+  # seeding itself (WE apps/we-web/e2e/feed-scale/, `test:feed-scale`).
+  # No model and no GPU. Nightly only, in `nightly-llm-e2e`, in a serial group of its own.
+  #
+  # The shell steps are in scripts/feed-scale.sh, which also runs by hand (`all`). The
+  # executor, SDK, WE and we-web steps are coasys-spaces.sh's, run in this job's work dir.
+  # The suite seeds by `runtime.importData` of a file of signed links, keeps its data off /tmp (a
+  # tmpfs on this host), and writes metrics.json; `perf` hands that to scripts/perf/record
+  # and lets scripts/perf/check judge it against the history, by the `feed-scale` rules in
+  # scripts/perf/thresholds.json. The job halts green when this
+  # ad4m commit, the WE commit and the size were already measured here.
+  feed-scale:
+    machine: true
+    resource_class: coasys/marvin
+    environment:
+      PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: debian13-x64
+      PLAYWRIGHT_BROWSERS_PATH: /home/marvin/.cache/ms-playwright-debian13
+      WE_REF: << pipeline.parameters.we-ref >>
+      # Not /tmp: a million messages make a data dir of tens of GB. preflight empties it.
+      FEED_SCALE_ARTIFACTS: /home/marvin/.cache/ad4m-ci/feed-scale/artifacts
+      # The record's `pipeline` field (scripts/perf/record reads it from here only).
+      PERF_PIPELINE_NUMBER: << pipeline.number >>
+    steps:
+      - fix_workdir
+      - checkout
+      - setup_env
+      - run:
+          name: Skip if this ad4m commit, this WE commit and this size were already measured
+          command: |
+            rc=0
+            bash scripts/feed-scale.sh preflight || rc=$?
+            if [ "$rc" = 10 ]; then
+              circleci-agent step halt
+              exit 0
+            fi
+            exit "$rc"
+      - run:
+          name: Get the executor for this commit (published, else build)
+          command: bash scripts/feed-scale.sh executor
+          no_output_timeout: 30m
+      - run:
+          name: Build and pack core and connect
+          command: bash scripts/feed-scale.sh sdk
+          no_output_timeout: 20m
+      - run:
+          name: Clone WE at we-ref and install it with this commit's SDK
+          command: bash scripts/feed-scale.sh we
+          no_output_timeout: 20m
+      - run:
+          name: Install Chromium's system libraries
+          command: |
+            sudo apt-get update -qq
+            ./tests/js/scripts/install-browser-deps.sh
+      - run:
+          name: Build we-web
+          command: bash scripts/feed-scale.sh build-web
+          no_output_timeout: 20m
+      # add_ssh_keys takes no `when: always`, so this cannot go between the suite and
+      # perf steps: a failed suite would skip it and the run's record would not push.
+      - perf_history_key
+      - run:
+          # The seed logs every 1%; one page load at a million may wait several minutes.
+          name: Run the feed-scale suite (WE test:feed-scale)
+          command: bash scripts/feed-scale.sh test
+          no_output_timeout: 60m
+      - run:
+          # A failed run is recorded too (as failed), and only a passed one is judged.
+          name: Record the numbers in the performance history and check them
+          when: always
+          command: bash scripts/feed-scale.sh perf
+      - run:
+          name: Record this commit pair and size as measured
+          command: bash scripts/feed-scale.sh record
+      - run:
+          # A stopped or timed-out suite can leave the executor, a browser or its tens
+          # of GB behind.
+          name: Stop what the run left and empty the data dir
+          when: always
+          command: bash scripts/feed-scale.sh cleanup
+      - store_artifacts:
+          when: always
+          path: /home/marvin/.cache/ad4m-ci/feed-scale/artifacts
+          destination: feed-scale
+      - perf_history_cleanup:
+          job: feed-scale
+      - run:
+          name: Summary
+          when: always
+          command: bash scripts/feed-scale.sh summary
+
   integration-tests-cli:
     machine: true
     resource_class: coasys/marvin-light
@@ -1685,13 +1783,13 @@ workflows:
   # Same resource class (Marvin). llm-e2e and coasys-spaces both prompt
   # staging's llama-server, which already holds the GPU, and neither loads
   # a model. llm-e2e's embeddings stay on Ollama (:11434). The agent harness
-  # uses its own mock LLM. llm-e2e, the SFU wind tunnel, coasys-spaces and
-  # the agent harness start together and do not build on each other's
-  # result: one failing must not skip the others. Three API triggers fire
-  # this pipeline every night on one host. Each job has its own serial
-  # group, so a second trigger waits instead of sharing ports, DIDs and the
-  # GPU with the first. llm-e2e and coasys-spaces share one group
-  # (`nightly-llm`) so they do not run at once on that one slot.
+  # uses its own mock LLM. feed-scale needs no model. llm-e2e, the SFU wind
+  # tunnel, coasys-spaces, the agent harness and feed-scale start together
+  # and do not build on each other's result: one failing must not skip the
+  # others. Three API triggers fire this pipeline every night on one host.
+  # Each job has its own serial group, so a second trigger waits instead of
+  # sharing ports, DIDs and the GPU with the first. llm-e2e and coasys-spaces
+  # share one group (`nightly-llm`) so they do not run at once on that one slot.
   nightly-llm-e2e:
     when: << pipeline.parameters.run-nightly-llm >>
     jobs:
@@ -1708,3 +1806,5 @@ workflows:
           serial-group: << pipeline.project.slug >>/nightly-llm
       - integration-tests-agent-harness:
           serial-group: << pipeline.project.slug >>/nightly-agent-harness
+      - feed-scale:
+          serial-group: << pipeline.project.slug >>/nightly-feed-scale
