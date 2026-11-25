@@ -65,6 +65,25 @@ it in older docs.
   gets no event until it sends `events.watch` naming it, so a raw-WebSocket test
   client must send the watch and wait for its reply before it triggers the
   event (see `tests/js/helpers/sfu/events.ts`).
+- **Tests wait for a signal, never for time.** Do not put a fixed sleep before
+  an assertion or before the action that a test triggers. A sleep costs its
+  whole length on every run, and on a slow CI machine it can still be too
+  short. Wait for the signal that the state is ready instead:
+  - an event, a callback, or the reply of the call that set the state up
+    (the `events.watch` reply; a subscribe reply, because the executor
+    registers the subscription before it computes the first result);
+  - when no signal exists, a poll of the condition at a short interval (about
+    100 ms or less). A timeout is only the bound at which the test fails;
+  - to prove that something did not happen, a sentinel: after the action,
+    cause an event on the same channel that must arrive, wait for it, then
+    check that the other event did not arrive. This holds only where that
+    channel keeps the order of its events;
+  - for code that waits on time itself (a deadline, a debounce, a stale
+    bound), a test override for that duration, a paused tokio clock
+    (`#[tokio::test(start_paused = true)]`) or fake timers (`jest.useFakeTimers`, `vi.useFakeTimers`).
+    Do not pause the tokio clock in a test that talks to a real language
+    runtime thread: that thread has its own clock, and the test's clock
+    advances while it waits on the thread.
 - `connect/` tests (vitest + happy-dom) fail under Node 26 (`localStorage.clear`
   undefined); run them under Node 24.
 
@@ -181,6 +200,64 @@ curl -X POST https://circleci.com/api/v2/project/circleci/VRkXSnZDyBKHhkHKBHTmLj
 ```
 
 This runs all four nightly jobs.
+
+### Nightly performance history (`scripts/perf/`)
+
+`integration-tests-sfu` and `llm-e2e` record their numbers on every run (passed
+or failed), fail on a serious regression against their own history, and draw a
+trend page. The full contract is the header of `scripts/perf/perf.mjs`.
+
+- **The history is a git repository**: folder `nightly/` on branch `main` of
+  `coasys/ad4m-wind-tunnel`. `nightly/<job>.jsonl` holds one line per metric per
+  run, `nightly/<job>.checks.jsonl` one verdict per check. Both are append-only.
+  `record` commits `perf(<job>): <sha9> <run_at>` in a fresh shallow clone
+  (`$TMPDIR/ad4m-perf-history-<job>-*`, removed when the command ends), and
+  pushes. When another run pushed first, it fetches, puts its lines on the new
+  head and pushes again, up to 5 times. git runs with hooks off and its own ssh
+  command (no `~/.ssh/config`): the runner also runs PR jobs, so nothing of the
+  history, and not the key, stays on it. `scripts/perf/history-key` moves the
+  key out of `~/.ssh` (`perf_history_key`) and deletes it, by fixed paths, with
+  any clone left (`perf_history_cleanup`, the end of `perf_finish`). A job with
+  its own record step calls those two commands. Env: `PERF_HISTORY_REPO`, `PERF_HISTORY_BRANCH`,
+  `PERF_HISTORY_SUBDIR`, `PERF_HISTORY_SSH_KEY`.
+- **The default repository is written only when `CI=true`.** For a local run,
+  set `PERF_HISTORY_REPO` to a local bare repo. Never push test runs to the
+  real history.
+- **The push key.** CI pushes with a write deploy key on the wind-tunnel repo.
+  Add it in Project Settings → SSH Keys → Additional SSH Keys (hostname
+  `github.com`), and put its fingerprint in the pipeline parameter
+  `perf-history-key-fingerprint`. If the key is missing or a push fails, the job
+  does not fail. `record` prints `history not pushed: <reason>`, and the records
+  stay in the job's artifacts (`perf/records.jsonl`). A `check` that cannot read
+  the history only reports.
+- **`check`** fails the job when a value is worse than 1.5× the median of the
+  last 7 passing runs with the same job, metric and params. Per-metric limits
+  (factor, min_delta, an absolute ceiling or floor) live only in
+  `scripts/perf/thresholds.json`; a ceiling or floor fails at any history. With fewer than 3 earlier
+  runs it only reports. Values with different `params` (such as another LLM
+  model) never compare. A regressed run stays out of later baselines.
+  `scripts/perf/check --job J --accept <run_id>` takes it as the new normal: it
+  resets the baseline, so later runs compare only with it and the runs after it.
+- **What each job measures.**
+  - `integration-tests-sfu`: every scenario writes `$PERF_RESULTS_DIR/sfu-<id>.json`
+    (`tests/js/helpers/sfu/perf.ts`), and the step adds `sfu.suite.duration_ms`.
+  - `llm-e2e`: raw logs go to `$PERF_RESULTS_DIR/raw`:
+    - the Rust tests through `scripts/perf/libtest-timer.mjs`;
+    - mocha through `PERF_MOCHA_LOG` (`tests/js/utils/perfMochaHooks.ts`);
+    - each step's output as `<suite>.log`, where the executor logs every prompt
+      (`✅ 🤖 prompt done ... latency=…ms tokens_out=…` at info, `❌ 🤖 prompt
+      failed` at error, `rust_executor::ai_service`). The Rust step sets
+      `RUST_LOG=warn,rust_executor::ai_service=info` (its tests default to warn).
+
+    `scripts/perf/llm-e2e-results.mjs` turns them into metrics (calls, failures,
+    latency, output tokens/s), with params `{model}`.
+- A new nightly measurement writes a results JSON file (`{"metrics": [...]}`)
+  into `$PERF_RESULTS_DIR`. Wrap the job's tests in `perf_setup` and
+  `perf_finish` (`.circleci/config.yml`).
+- **Tests**: run `pnpm run test-perf-unit` in `tests/js`. It runs mocha for
+  `sfu-perf.unit.test.ts` and `node --test 'scripts/perf/*.test.mjs'`. The git
+  tests push only to bare repos in a temp directory. The `js-unit-tests` CI job
+  runs them.
 
 ### SFU wind tunnel
 

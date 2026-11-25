@@ -370,7 +370,7 @@ impl FlowReplicaState {
         perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
         event: &FlowStateChangedEvent,
     ) {
-        let readers = crate::perspectives::event_recipients(&*perspective.persisted.lock().await);
+        let readers = crate::perspectives::event_recipients(&perspective.persisted.snapshot());
         get_global_pubsub()
             .await
             .publish_event(state_changed_event(event, &readers));
