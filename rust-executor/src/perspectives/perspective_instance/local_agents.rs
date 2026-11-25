@@ -24,7 +24,7 @@ impl PerspectiveInstance {
         told: Option<&[String]>,
     ) -> Option<Vec<String>> {
         let _registering = self.local_agents_mutex.lock().await;
-        let agents = match self.persisted.lock().await.owners.clone() {
+        let agents = match self.persisted.load().owners.clone() {
             Some(owners) if !owners.is_empty() => owners,
             _ => vec![crate::agent::did()],
         };
@@ -69,7 +69,7 @@ mod tests {
 
     impl SetLocal {
         fn of(request: LanguageRuntimeRequest) -> Self {
-            let LanguageOperation::Execute(script, _) = request.operation else {
+            let LanguageOperation::Execute(script, ..) = request.operation else {
                 panic!("not a script: {:?}", request.operation);
             };
             let agents = script
@@ -187,7 +187,7 @@ mod tests {
         }
         assert!(requests.try_recv().is_err());
 
-        let owners = instance.persisted.lock().await.owners.clone().unwrap();
+        let owners = instance.persisted.load().owners.clone().unwrap();
         assert_eq!(owners, [a, b, c]);
         assert_eq!(
             local, owners,
