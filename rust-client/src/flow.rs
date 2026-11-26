@@ -940,6 +940,12 @@ impl FlowApi {
     /// `perspective.proposeFlowTransition` — propose (or co-sign an
     /// equivalent open proposal of) an edge out of the instance's derived
     /// state.
+    ///
+    /// The executor refuses a move it forbids with code 409. The call then
+    /// fails with an [`RpcCallError`](crate::ws_rpc::RpcCallError) whose `data`
+    /// has a `kind` (`not-reachable`, `guard-unmet`, `contested`, ...) and the
+    /// facts behind it. Read it with `err.downcast_ref::<RpcCallError>()`. A
+    /// failure that is no refusal has code 500 and no `data`.
     pub async fn propose_flow_transition(
         &self,
         instance_uri: &str,
@@ -962,7 +968,8 @@ impl FlowApi {
     }
 
     /// `perspective.acceptFlowProposal` — count this agent's DID toward a
-    /// proposal's quorum; fires the transition at it.
+    /// proposal's quorum; fires the transition at it. A refusal fails like
+    /// [`propose_flow_transition`](Self::propose_flow_transition).
     pub async fn accept_flow_proposal(&self, proposal_uri: &str) -> Result<Vec<FlowFireOutcome>> {
         self.ws
             .call(
@@ -973,7 +980,8 @@ impl FlowApi {
     }
 
     /// `perspective.rejectFlowProposal` — withdraw this agent's links from a
-    /// proposal; resolves to how many were retracted.
+    /// proposal; resolves to how many were retracted. A refusal fails like
+    /// [`propose_flow_transition`](Self::propose_flow_transition).
     pub async fn reject_flow_proposal(&self, proposal_uri: &str) -> Result<u64> {
         let result: Value = self
             .ws
