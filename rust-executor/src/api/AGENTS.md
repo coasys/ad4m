@@ -17,7 +17,8 @@ REST/WS shim. Split plan: spec item 6.
 `*_ws.rs`, one per RPC namespace: `agent`, `ai`, `expressions`, `hosting`,
 `languages`, `neighbourhoods`, `perspectives` (largest; also SHACL + interpretation
 handlers), `runtime`, `config` (`runtime.config`, `runtime.setConfig`), `users`, `identity`,
-`agent_session` (`perspective.runAgent`), and `perspective_instances` (`perspective.instance*`:
+`key_login` (login with a device key and the calls of key sessions; the work is in
+`identity::key_login`), `agent_session` (`perspective.runAgent`), and `perspective_instances` (`perspective.instance*`:
 validated instance writes over `perspectives/instances/`, the same functions as the MCP
 `instance_*` tools; a refused write is a `WsRpcError` with the `InstanceError` as `data`: 422
 for a shape violation, see the module doc). Each exposes `register_ws_handlers(&mut HandlerMap)`
@@ -87,8 +88,8 @@ steps before the handler alone; only `dispatch` writes the bot's activity log.
 | `Operator` | no capability; `ctx.is_operator()` (the admin credential, or no token on a loopback listener of an executor without one), else 403 "Admin credential required" (`guards::OPERATOR_ONLY`), whatever the caller's capabilities |
 | `Cap(cap)` | none: any caller holding `cap`. An anonymous caller holds only the anonymous set (request a capability, redeem it, sign up, log in, verify an email); the handler acts on `ctx.acts_as()` |
 | `Executor(cap)` | the operator or a grant on the main agent: 403 naming the method to a session on a managed agent, whatever its capabilities, and to an anonymous caller. A grant on the main agent passes (D5): WE web administers a local executor with an app token holding `*` |
-| `UserOrOperator(cap)` | the operator, or a session on a managed agent (a user, or an app the user approved): 403 "<method> for the main agent needs the admin credential" to a grant on the main agent, whatever its capabilities, and to an anonymous caller. For calls that bind the caller's agent for good (`identity.cosignIncept`, `identity.publish`): every app holds their capabilities by default |
-| `UserLoginOrOperator(cap)` | the operator, or a user's login on a managed agent (`LiveGrant::is_login`: the grant answers no capability request): 403 "<method> may not be called by an app, a user must call it" to an app the user approved, though it holds the capability; 403 "<method> for the main agent needs the admin credential" to a grant on the main agent and to an anonymous caller. For a call that ends the device's key for good (`identity.unlinkSelf`) |
+| `UserOrOperator(cap)` | the operator, or a session on a managed agent (a user, or an app the user approved): 403 "<method> for the main agent needs the admin credential" to a grant on the main agent, whatever its capabilities, and to an anonymous caller. For calls that bind the caller's agent for good (`identity.cosignIncept`, `identity.publish`) or speak for this device to its identity's other devices (`identity.postRequest`, `identity.deleteRequest`): every app holds their capabilities by default |
+| `UserLoginOrOperator(cap)` | the operator, or a user's own session on a managed agent (`LiveGrant::is_login`: a password login, which answers no capability request, or a key session, whose key binding is not delegated): 403 "<method> may not be called by an app, a user must call it" to an app the user approved, though it holds the capability; 403 "<method> for the main agent needs the admin credential" to a grant on the main agent and to an anonymous caller. For a call that ends the device's key for good (`identity.unlinkSelf`) |
 | `Owns { cap, id, owner }` | the resource `id` reads from the params exists and the operator or the session's agent owns it (`guards::owns`), else 404, missing or not |
 
 `Owns` per `Owner` (who owns the resource; the operator reaches all):
@@ -123,11 +124,29 @@ access check: a call that fails both gets the access answer.
 operator on this machine (`Session::is_operator_on_this_machine`: the admin credential, or no
 token on an executor without one, on a loopback listener). The dispatcher checks it after the
 guard: every other caller gets 403 `guards::LOCAL_ONLY` (`local-only: …`), a grant with every
-capability and the admin credential on a network listener included. The guard table marks
-these methods "local only". `runtime.setConfig` is not local only as a whole: it refuses each
-`machine` key to a caller off this machine (`config_rpc`). `identity.custodyStatus` adds the
-custody channel's own check (`identity::custody::admit`: the admin credential, not a tokenless
-operator, and `--custody-channel`).
+capability and the admin credential on a network listener included. An operator from a key
+login is never on this machine, on a loopback listener too (a forwarded port makes a remote
+device key look local), so every local-only method refuses it. Every method that is not
+local only admits it as the operator, as its guard says. That is the rule for the calls
+that create or lock the executor's agent and move its data folder: `agent.generate`,
+`agent.lock`, `runtime.exportData` and `runtime.importData` are not local
+only, so a remote operator (a key login, or the admin credential on a network listener) may
+move the whole data folder. `agent.import` is not local only either — but it is not
+implemented: its handler answers "Agent import not yet implemented". The guard table marks
+the local-only methods "local only". `runtime.setConfig` is not local only as a whole: it refuses each `machine` key to a caller
+off this machine (`config_rpc`). `identity.custodyStatus`, `identity.inboxSealed` (the
+joined inbox still sealed to the custody service's key), the custody key in
+`identity.claimOffer`, `identity.prepareDevice` and `identity.cosignIncept`, and, with the
+channel on, `identity.inboxAck` add the
+custody channel's own check (`identity::custody::admit`: the custody credential on a loopback
+listener of an executor started with `--custody-channel`); every other caller, the admin
+credential included, gets 403 `no-custody-channel`. The custody credential is its own
+principal (`Principal::Custody`), not an operator: `Session::open` refuses it off a loopback
+listener, it holds no capability, and dispatch (`admit_entry`) lets it reach only the methods
+in `identity::custody::CUSTODY_METHODS` (403 `not-a-custody-call` otherwise), acting as the
+main agent. Its sessions get only `Audience::LocalOperator` events. The events only
+local-only methods read (`link-ticket`, `inbox-message`) go to `Audience::LocalOperator`, the
+operator's sessions on this machine.
 
 Notes on some methods:
 
@@ -135,7 +154,16 @@ Notes on some methods:
   agent that is already initialised (`agent.status`'s `isInitialized`) — the check
   runs inside the agent lock, so a racing generate cannot slip between it and the
   write. `agent.unlock` is the call for an existing agent.
-- `Open` handlers check the session's principal (`user.logout`). `user.revokeAllSessions` is
+- `Open` handlers check the session's principal: `user.logout` revokes the caller's own grant
+  (any session a token opened, a key session's operator role included; 400 without a grant),
+  `user.renewSession` needs a key-bound grant, `user.endAllSessions` a key-bound session or a
+  session on a managed agent, `user.currentSession` answers every caller.
+  `user.loginWithKey` is `Cap(agent:AUTHENTICATE)`, which the anonymous set holds in
+  single-user mode too. `user.sessionChallenge` is `Open`: a key session asks for its grant's
+  own challenge whatever its capabilities, and its handler asks AGENT_AUTH of every other
+  caller (the anonymous set included). `agent.signSessionStatement` is `Operator` and
+  local only: only the operator on this machine signs as this device, never an operator from a
+  key login. `user.revokeAllSessions` is
   `Cap(agent:UPDATE)`, as `agent.removeApp`: since #1399 an app a user approved acts as the
   user's agent too; its handler checks the principal for a named user.
 - `Operator`: `runtime.importData` writes rows as they are in the file, granted notifications
@@ -145,8 +173,9 @@ Notes on some methods:
   `get_perspective_with_access` in its handler, so an app exports only the main agent's
   perspectives. A `db` export names no perspective and checks nothing past the guard: it writes
   the whole executor database (`export_all_to_json`). It and `runtime.importData` read and
-  write paths on the executor's machine; they are not local only yet (key login adds them,
-  with `agent.generate`, `agent.import` and `agent.lock`).
+  write paths on the executor's machine and are not local only (nor are `agent.generate`,
+  `agent.import` and `agent.lock`): the operator calls them from anywhere, an operator
+  from a key login included (`method_matrix_tests::OPERATOR_ANYWHERE`).
 - `Cap` methods that read executor-wide data users read today: `agent.getTrustedAgents`,
   `ai.models`, `language.*` reads, link-language templates,
   `runtime.hcAgentInfos`/`networkMetrics`/`hostRates`/`unytVersionInfo`. `Executor` would refuse
