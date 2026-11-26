@@ -245,7 +245,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'runtime.setConfig': (p: Record<string, unknown>) => ({ restartPending: true, refused: p.unset ? [{ key: 'port', reason: 'local-only' }] : [] }),
     'runtime.verifySignature': true,
     'runtime.exportData': true,
-    'runtime.importData': { success: true, count: 5 },
+    'runtime.importData': { imported: 5, skipped: 0 },
     'runtime.freeHostingEnabled': false,
     'runtime.setFreeHostingEnabled': true,
     'runtime.computeLog': [],
