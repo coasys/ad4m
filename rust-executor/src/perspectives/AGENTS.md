@@ -213,8 +213,15 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   `proofValid "true"`; a member's key is its earliest valid flag time. Read a class only when
   `scope_index_readiness` is `Ready`. The one write that skips `commit_indexed` is the file import
   (`import_links_file`, the bulk loader): it sends every class back to building
-  (`ScopeIndex::begin_rebuild`) before its ingest and starts the builds after, so the index never
-  reads as ready over links it misses (`an_import_into_a_ready_class_ends_with_the_incremental_index`).
+  (`ScopeIndex::begin_rebuild`) before its ingest, so no query reads the index over links it
+  misses, and after the loader's commit it writes the entries itself (`scope_index/import.rs`) and
+  marks ready again the classes that were ready. The import workers name the candidate members of
+  each ready class (flag-link subjects; objects of node links that are members already); a
+  candidate with no flag record gets its entries from the committed store in bounded transactions
+  (same rules as `reconcile_member`: `earliest_flag_time`, `pick_key`, `member_scopes`), one that
+  has a record goes through `reconcile_member`. A class that was building, one registered after,
+  and a failed or interrupted index step stay `Building` and use the background build
+  (`import_tests.rs`, `an_import_into_a_ready_class_ends_with_the_incremental_index`).
   A store this executor opened has the auxiliary column
   family: an executor without it cannot open the store.
 

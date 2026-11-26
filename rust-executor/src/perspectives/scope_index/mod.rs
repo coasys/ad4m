@@ -30,7 +30,9 @@
 //! store runs in the background in batches ([`build`]). Each batch records
 //! where it stopped in the class's build mark, so a build that a restart
 //! interrupted goes on from there. A class's index is read only when its mark
-//! is ready for the class's current flag.
+//! is ready for the class's current flag. A file import does not build: it
+//! writes the entries of the links it adds ([`import`]) and keeps ready the
+//! classes that were.
 //!
 //! # Key layout in the auxiliary space
 //!
@@ -54,10 +56,13 @@
 
 pub mod build;
 pub mod compact;
+pub mod import;
 pub mod writer;
 
 #[cfg(test)]
 mod build_tests;
+#[cfg(test)]
+mod import_tests;
 #[cfg(test)]
 mod keys_tests;
 #[cfg(test)]
@@ -620,6 +625,20 @@ impl ScopeIndex {
             .unwrap_or(false)
     }
 
+    /// The classes that are ready now.
+    pub(crate) fn ready_rules(&self) -> Vec<ClassRule> {
+        let Ok(state) = self.state.read() else {
+            return Vec::new();
+        };
+        state
+            .rules
+            .classes()
+            .iter()
+            .filter(|rule| state.ready.contains(&rule.id))
+            .cloned()
+            .collect()
+    }
+
     /// The classes whose build has not finished, as their marks say.
     pub fn unfinished(&self, store: &Store) -> Result<Vec<ClassRule>, Error> {
         if !self.enabled {
@@ -635,10 +654,11 @@ impl ScopeIndex {
     /// Send every class back to the start of its build, in the store and
     /// here, before a write that bypasses the index: [`Store::clear`], or the
     /// bulk loader of a file import. The classes read from SPARQL until their
-    /// builds end, and a process that stops in between resumes them at the
-    /// next open (see [`Self::unfinished`]); after a clear, those builds
-    /// remove what the clear left. The caller holds the writer lock and
-    /// starts the builds once the write has ended.
+    /// builds end (a file import writes the entries of the classes that were
+    /// ready itself, see [`import`]), and a process that stops in between
+    /// resumes them at the next open (see [`Self::unfinished`]); after a
+    /// clear, those builds remove what the clear left. The caller holds the
+    /// writer lock and starts the builds once the write has ended.
     pub(crate) fn begin_rebuild(&self, store: &Store) -> Result<(), Error> {
         if !self.enabled {
             return Ok(());

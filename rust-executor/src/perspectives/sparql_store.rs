@@ -341,7 +341,9 @@ pub(crate) mod eval_count {
 
 use super::model_query::types::ModelShape;
 use super::scope_index::build::{self, BuildMark, BuildProgress, BuildState};
+use super::scope_index::import::{index_import, link_candidates, Candidates};
 use super::scope_index::writer::{ClassRule, ScopeDelta, VerifiedDiff};
+use super::scope_index::ClassId;
 use super::scope_index::{Readiness, ScopeIndex, ScopeReader};
 
 const ONT_AUTHOR: &str = "ad4m://ontology/author";
@@ -1849,6 +1851,9 @@ enum ImportKind {
         link: LinkExpression,
         quads: Vec<Quad>,
         names_key: Option<u64>,
+        /// The members of the ready classes the link may change (see
+        /// [`scope_index::import`](super::scope_index::import)).
+        candidates: Vec<(ClassId, String)>,
     },
 }
 
@@ -1867,6 +1872,7 @@ enum ImportKind {
 fn build_segment_quads(
     store: &SparqlStore,
     ends_keys: &HashSet<u64>,
+    ready: &[ClassRule],
     segment: &LinkSegment,
 ) -> Result<SegmentQuads, Error> {
     let mut out = Vec::with_capacity(segment.elements.len());
@@ -1941,11 +1947,17 @@ fn build_segment_quads(
                     link.compute_proof_valid(),
                     ProofWrite::Whole,
                 )?;
+                let mut candidates = Vec::new();
+                if !ready.is_empty() {
+                    let (s, p, o) = make_direct_triple(&link);
+                    link_candidates(&store.store, ready, &s, &p, &o, &mut candidates)?;
+                }
                 ImportKind::Bulk {
                     names_key: crate::perspectives::monotonic::named_ends_key(&link)
                         .map(|key| crate::perspectives::monotonic::ends_key_hash(&key)),
                     link,
                     quads: write.quads,
+                    candidates,
                 }
             };
         }
@@ -1969,6 +1981,7 @@ fn consume_segment(
     coverable: &mut HashSet<u64>,
     named: &mut HashMap<u64, String>,
     stats: &mut LinkImportStats,
+    candidates: &mut Candidates,
     loader: &mut oxigraph::store::BulkLoader<'_>,
 ) -> Result<(), Error> {
     let mut quads: Vec<Result<Quad, Error>> = Vec::new();
@@ -1999,6 +2012,7 @@ fn consume_segment(
                 link,
                 quads: built,
                 names_key,
+                candidates: link_candidates,
             } => {
                 if !seen.insert(element.key) {
                     return Err(import_refused!(
@@ -2033,6 +2047,9 @@ fn consume_segment(
                             link.author
                         ),
                     );
+                }
+                for (class, member) in link_candidates {
+                    candidates.entry(class).or_default().insert(member);
                 }
                 quads.extend(built.into_iter().map(Ok));
                 stats.imported += 1;
@@ -3512,8 +3529,9 @@ impl SparqlStore {
             .lock()
             .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
         let loaded = self.import_segmented(path);
-        // The classes the load sent back to building (or, when it failed after
-        // that, left there) build again, over the links the file added.
+        // The classes still building build again, over the links the file added: the
+        // ones that were building when it came, and the ones whose entries the import
+        // could not write. A class that was ready is ready again already.
         for rule in self.scope_index.unfinished(&self.store)? {
             self.spawn_scope_build(rule);
         }
@@ -3524,6 +3542,20 @@ impl SparqlStore {
             self.note_write(WriteDelta::Other);
         }
         Ok(stats)
+    }
+
+    /// [`Self::import_links_file`] without the builds it starts: the marks
+    /// stay as the import leaves them.
+    #[cfg(test)]
+    pub(crate) fn import_links_file_without_builds(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<LinkImportStats, Error> {
+        let _writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
+        self.import_segmented(path)
     }
 
     /// The load: scan-segments ‖ worker pool ‖ the bulk loader, consumed
@@ -3537,8 +3569,12 @@ impl SparqlStore {
         // The loader writes no scope index entry: every class goes back to building
         // before it opens (a transaction cannot start while a loader is open), so no
         // query reads the index as ready over members the file adds, and a crash
-        // after the ingest resumes the builds. `import_links_file` starts them. A
-        // file the store refuses leaves the builds to run over the unchanged store.
+        // after the ingest resumes the builds. After the loader's commit, the
+        // classes that were ready get the entries of the file's links and are ready
+        // again (`scope_index::import`); `import_links_file` starts the builds of the
+        // others, and of these when that step failed. A file the store refuses leaves
+        // the builds to run over the unchanged store.
+        let ready = Arc::new(self.scope_index.ready_rules());
         self.scope_index.begin_rebuild(&self.store)?;
         let n_workers = std::thread::available_parallelism()
             .map(|n| n.get().saturating_sub(2).max(1))
@@ -3555,7 +3591,7 @@ impl SparqlStore {
         let file = std::fs::File::open(path)
             .map_err(|e| anyhow!("Failed to open perspective import file {:?}: {}", path, e))?;
 
-        std::thread::scope(|scope| -> Result<LinkImportStats, Error> {
+        let (stats, candidates) = std::thread::scope(|scope| -> Result<_, Error> {
             let parser = scope.spawn(move || {
                 segment_elements(std::io::BufReader::with_capacity(1 << 20, file), seg_tx)
             });
@@ -3563,6 +3599,7 @@ impl SparqlStore {
                 let seg_rx = Arc::clone(&seg_rx);
                 let quad_tx = quad_tx.clone();
                 let ends_keys = Arc::clone(&ends_keys);
+                let ready = Arc::clone(&ready);
                 let store = self;
                 scope.spawn(move || loop {
                     let segment = match seg_rx.lock() {
@@ -3571,7 +3608,7 @@ impl SparqlStore {
                     };
                     let Ok(segment) = segment else { return };
                     if quad_tx
-                        .send(build_segment_quads(store, &ends_keys, &segment))
+                        .send(build_segment_quads(store, &ends_keys, &ready, &segment))
                         .is_err()
                     {
                         return;
@@ -3582,6 +3619,7 @@ impl SparqlStore {
             drop(quad_tx);
 
             let mut stats = LinkImportStats::default();
+            let mut candidates = Candidates::new();
             let mut loader = self.store.bulk_loader();
             let mut load_result: Result<(), Error> = Ok(());
             // `seen` dedups reifiers by their 64-bit `reifier_with_key`
@@ -3606,6 +3644,7 @@ impl SparqlStore {
                             &mut coverable,
                             &mut named,
                             &mut stats,
+                            &mut candidates,
                             &mut loader,
                         ) {
                             load_result = Err(e);
@@ -3657,8 +3696,15 @@ impl SparqlStore {
             // The commit ingests the staged SSTs into the manifest —
             // durable without a memtable flush.
             loader.commit()?;
-            Ok(stats)
-        })
+            Ok((stats, candidates))
+        })?;
+        // The load is committed: its links stand whether or not the index step
+        // works. A failure leaves the marks building, and the builds that
+        // `import_links_file` starts bring the index level.
+        if let Err(e) = index_import(&self.store, &self.scope_index, &ready, &candidates) {
+            log::error!("Scope index: the import's entries were not written: {e}");
+        }
+        Ok(stats)
     }
 
     /// Remove every link in the store's metadata vocabulary that a store

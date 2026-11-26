@@ -21,7 +21,7 @@ use deno_core::anyhow::{anyhow, Error};
 use oxigraph::model::{
     GraphNameRef, NamedNode, NamedNodeRef, NamedOrBlankNodeRef, Term, TermRef, Triple,
 };
-use oxigraph::store::{Store, Transaction};
+use oxigraph::store::{QuadIter, Store, Transaction};
 use std::collections::{HashMap, HashSet};
 
 use super::{
@@ -272,67 +272,18 @@ impl<'a, 'tx> Apply<'a, 'tx> {
         }
     }
 
-    /// The verified links asserting `<s> <p> <o>`: for each, its timestamps.
-    /// `None` when no link with a verified signature asserts it.
-    fn verified_times(
-        &self,
-        s: &str,
-        p: &str,
-        o: TermRef<'_>,
-    ) -> Result<Option<Vec<String>>, Error> {
-        let triple = Triple::new(
-            NamedNode::new_unchecked(s),
-            NamedNode::new_unchecked(p),
-            o.into_owned(),
-        );
-        let mut times: Option<Vec<String>> = None;
-        for quad in self.tx.quads_for_pattern(
-            None,
-            Some(NamedNodeRef::new_unchecked(RDF_REIFIES)),
-            Some(TermRef::Triple(&triple)),
-            Some(GraphNameRef::DefaultGraph),
-        ) {
-            let quad = quad?;
-            let reifier = quad.subject.as_ref();
-            if !literal_values(self.tx, reifier, ONT_PROOF_VALID)?
-                .iter()
-                .any(|v| v == "true")
-            {
-                continue;
-            }
-            times.get_or_insert_with(Vec::new).extend(literal_values(
-                self.tx,
-                reifier,
-                ONT_TIMESTAMP,
-            )?);
-        }
-        Ok(times)
-    }
-
-    fn is_verified(&self, s: &str, p: &str, o: &str) -> Result<bool, Error> {
-        Ok(self
-            .verified_times(s, p, TermRef::NamedNode(NamedNodeRef::new_unchecked(o)))?
-            .is_some())
-    }
-
     /// Bring `member`'s entries for `rule` in line with the transaction:
     /// its flag time, its class scope and every `Under` scope.
     pub(crate) fn reconcile_member(&mut self, rule: &ClassRule, member: &str) -> Result<(), Error> {
         let mh = member_hash(member);
         let fkey = flag_key(&mh, rule.id);
         let old = self.tx.aux_get(&fkey)?.as_deref().and_then(decode_flag);
-        let times = self.verified_times(
+        let new = earliest_flag_time(verified_times(
+            &*self.tx,
             member,
             &rule.flag_predicate,
             TermRef::NamedNode(NamedNodeRef::new_unchecked(&rule.flag_value)),
-        )?;
-        // The earliest verified flag link. The SPARQL path takes the least
-        // timestamp string; for canonical timestamps that is the least time.
-        let new = times.and_then(|times| {
-            let parsed: Vec<(u64, bool)> = times.iter().map(|t| parse_timestamp(t)).collect();
-            let t_ms = parsed.iter().map(|(t, _)| *t).min()?;
-            Some((t_ms, parsed.iter().any(|(_, canonical)| !canonical)))
-        });
+        )?);
         let nc_key = count_key(noncanonical_scope(&rule.class));
 
         let key = match (&old, new) {
@@ -357,7 +308,7 @@ impl<'a, 'tx> Apply<'a, 'tx> {
                     if old.is_some() {
                         self.tx.aux_single_delete(&fkey);
                     }
-                    self.tx.aux_put(&fkey, &encode_flag(key, noncanonical));
+                    put_flag(self.tx, &mh, rule.id, key, noncanonical);
                     let was = old.as_ref().is_some_and(|o| o.noncanonical);
                     if was != noncanonical {
                         self.tx
@@ -372,16 +323,9 @@ impl<'a, 'tx> Apply<'a, 'tx> {
         let mut desired: HashMap<ScopeId, ()> = HashMap::new();
         let mut targets: Vec<ScopeId> = Vec::new();
         if key.is_some() {
-            let class_scope = rule.class_scope().id();
-            desired.insert(class_scope, ());
-            targets.push(class_scope);
-            for (parent, relation) in self.incoming(member)? {
-                if self.is_verified(&parent, &relation, member)? {
-                    let id = rule.under(&parent, &relation).id();
-                    if desired.insert(id, ()).is_none() {
-                        targets.push(id);
-                    }
-                }
+            for id in member_scopes(&*self.tx, rule, member)? {
+                desired.insert(id, ());
+                targets.push(id);
             }
         }
         for scope in self.current_scopes(&mh, rule.id)? {
@@ -419,9 +363,7 @@ impl<'a, 'tx> Apply<'a, 'tx> {
             // Not an instance: it is in none of the class's scopes.
             return Ok(());
         };
-        let want = self
-            .is_verified(parent, relation, member)?
-            .then_some(flag.key);
+        let want = is_verified(&*self.tx, parent, relation, member)?.then_some(flag.key);
         self.sync_entry(
             rule.under(parent, relation).id(),
             &mh,
@@ -429,28 +371,6 @@ impl<'a, 'tx> Apply<'a, 'tx> {
             rule.id,
             want,
         )
-    }
-
-    /// The `(subject, predicate)` of every link triple whose object is `member`.
-    fn incoming(&self, member: &str) -> Result<Vec<(String, String)>, Error> {
-        let mut out = Vec::new();
-        for quad in self.tx.quads_for_pattern(
-            None,
-            None,
-            Some(TermRef::NamedNode(NamedNodeRef::new_unchecked(member))),
-            Some(GraphNameRef::DefaultGraph),
-        ) {
-            let quad = quad?;
-            if is_link_metadata(quad.predicate.as_str()) {
-                continue;
-            }
-            if let oxigraph::model::NamedOrBlankNode::NamedNode(s) = quad.subject {
-                out.push((s.into_string(), quad.predicate.into_string()));
-            }
-        }
-        out.sort();
-        out.dedup();
-        Ok(out)
     }
 
     /// The scopes of `class` that hold `member` now, in the transaction.
@@ -478,50 +398,17 @@ impl<'a, 'tx> Apply<'a, 'tx> {
         Ok(out)
     }
 
-    /// A new key for a member of `rule`'s class at `t_ms`: the next `seq`, and
-    /// the one after while the class scope already has that key (only after
-    /// 2^20 members in one millisecond).
-    ///
-    /// When the class scope holds every key of `t_ms`, the key is the first
-    /// free one in a near millisecond, and the second value is `true`: the
-    /// key is not at the member's time, so the caller marks the member
-    /// noncanonical and the class's queries use the SPARQL path while it is a
-    /// member. Its next reconcile looks for a key at its time again.
+    /// A new key for a member of `rule`'s class at `t_ms` (see [`pick_key`]).
     fn alloc_key(&mut self, rule: &ClassRule, t_ms: u64) -> Result<(MemberKey, bool), Error> {
         let class_scope = rule.class_scope().id();
-        let t_ms = t_ms.min(MAX_T_MS);
         let last = self.tx.aux_count(&SEQ_KEY)? as u64;
-        let mut used: u64 = 0;
-        let mut found = None;
-        // Every `seq` of `t_ms`, then one key in each millisecond near it.
-        let slots = 1u64 << SEQ_BITS;
-        for attempt in 0..2 * slots {
-            let t = if attempt < slots {
-                t_ms
-            } else {
-                let d = attempt - slots + 1;
-                match t_ms.checked_add(d).filter(|t| *t <= MAX_T_MS) {
-                    Some(t) => t,
-                    None => match t_ms.checked_sub(d) {
-                        Some(t) => t,
-                        None => break,
-                    },
-                }
-            };
-            used += 1;
-            let key = MemberKey::new(t, last.wrapping_add(used));
-            if self.tx.aux_get(&entry_key(class_scope, key))?.is_none() {
-                found = Some((key, t != t_ms));
-                break;
-            }
-        }
+        let mut used = 0;
+        let tx = &*self.tx;
+        let picked = pick_key(&rule.class, t_ms, last, &mut used, |key| {
+            Ok(tx.aux_get(&entry_key(class_scope, key))?.is_some())
+        });
         self.tx.aux_merge_add(&SEQ_KEY, used as i64);
-        found.ok_or_else(|| {
-            anyhow!(
-                "scope index: no free key for a member of '{}' near {t_ms}",
-                rule.class
-            )
-        })
+        picked
     }
 
     /// Make `member`'s entry in `scope` be `want`: remove it, add it, or move
@@ -555,8 +442,7 @@ impl<'a, 'tx> Apply<'a, 'tx> {
             });
         }
         if let Some(new) = want {
-            self.tx.aux_put(&entry_key(scope, new), member.as_bytes());
-            self.tx.aux_put(&mkey, &encode_member(new, class));
+            put_membership(self.tx, scope, mh, member, class, new);
             self.tx.aux_merge_add(&ckey, 1);
             self.written.entry(*mh).or_default().insert(scope);
             self.deltas.push(ScopeDelta {
@@ -568,26 +454,6 @@ impl<'a, 'tx> Apply<'a, 'tx> {
         }
         Ok(())
     }
-}
-
-/// The literal values stored under `predicate` on `reifier`.
-fn literal_values(
-    tx: &Transaction<'_>,
-    reifier: NamedOrBlankNodeRef<'_>,
-    predicate: &str,
-) -> Result<Vec<String>, Error> {
-    let mut out = Vec::new();
-    for quad in tx.quads_for_pattern(
-        Some(reifier),
-        Some(NamedNodeRef::new_unchecked(predicate)),
-        None,
-        Some(GraphNameRef::DefaultGraph),
-    ) {
-        if let Term::Literal(l) = quad?.object {
-            out.push(l.value().to_string());
-        }
-    }
-    Ok(out)
 }
 
 /// The members of `rule`'s class scope with keys at or after `after`
@@ -610,4 +476,221 @@ pub(crate) fn class_members_after(
         .entries(rule.class_scope().id(), lower, None, false)
         .take(limit)
         .collect()
+}
+
+/// Where link quads are read from: a transaction (its own writes included) or
+/// the store (what is committed). The rules of membership read through this, so
+/// the write paths and the file import's index step apply the same ones.
+pub(crate) trait QuadReader {
+    fn quads(
+        &self,
+        subject: Option<NamedOrBlankNodeRef<'_>>,
+        predicate: Option<NamedNodeRef<'_>>,
+        object: Option<TermRef<'_>>,
+    ) -> QuadIter<'_>;
+}
+
+impl QuadReader for Transaction<'_> {
+    fn quads(
+        &self,
+        subject: Option<NamedOrBlankNodeRef<'_>>,
+        predicate: Option<NamedNodeRef<'_>>,
+        object: Option<TermRef<'_>>,
+    ) -> QuadIter<'_> {
+        self.quads_for_pattern(subject, predicate, object, Some(GraphNameRef::DefaultGraph))
+    }
+}
+
+impl QuadReader for Store {
+    fn quads(
+        &self,
+        subject: Option<NamedOrBlankNodeRef<'_>>,
+        predicate: Option<NamedNodeRef<'_>>,
+        object: Option<TermRef<'_>>,
+    ) -> QuadIter<'_> {
+        self.quads_for_pattern(subject, predicate, object, Some(GraphNameRef::DefaultGraph))
+    }
+}
+
+/// The timestamps of the verified links asserting `<s> <p> <o>`; `None` when
+/// no link with a verified signature asserts it.
+pub(crate) fn verified_times<R: QuadReader>(
+    reader: &R,
+    s: &str,
+    p: &str,
+    o: TermRef<'_>,
+) -> Result<Option<Vec<String>>, Error> {
+    let triple = Triple::new(
+        NamedNode::new_unchecked(s),
+        NamedNode::new_unchecked(p),
+        o.into_owned(),
+    );
+    let mut times: Option<Vec<String>> = None;
+    for quad in reader.quads(
+        None,
+        Some(NamedNodeRef::new_unchecked(RDF_REIFIES)),
+        Some(TermRef::Triple(&triple)),
+    ) {
+        let quad = quad?;
+        let reifier = quad.subject.as_ref();
+        if !literal_values(reader, reifier, ONT_PROOF_VALID)?
+            .iter()
+            .any(|v| v == "true")
+        {
+            continue;
+        }
+        times
+            .get_or_insert_with(Vec::new)
+            .extend(literal_values(reader, reifier, ONT_TIMESTAMP)?);
+    }
+    Ok(times)
+}
+
+fn is_verified<R: QuadReader>(reader: &R, s: &str, p: &str, o: &str) -> Result<bool, Error> {
+    Ok(verified_times(
+        reader,
+        s,
+        p,
+        TermRef::NamedNode(NamedNodeRef::new_unchecked(o)),
+    )?
+    .is_some())
+}
+
+/// The `(subject, predicate)` of every link triple whose object is `member`.
+fn incoming<R: QuadReader>(reader: &R, member: &str) -> Result<Vec<(String, String)>, Error> {
+    let mut out = Vec::new();
+    for quad in reader.quads(
+        None,
+        None,
+        Some(TermRef::NamedNode(NamedNodeRef::new_unchecked(member))),
+    ) {
+        let quad = quad?;
+        if is_link_metadata(quad.predicate.as_str()) {
+            continue;
+        }
+        if let oxigraph::model::NamedOrBlankNode::NamedNode(s) = quad.subject {
+            out.push((s.into_string(), quad.predicate.into_string()));
+        }
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// The literal values stored under `predicate` on `reifier`.
+fn literal_values<R: QuadReader>(
+    reader: &R,
+    reifier: NamedOrBlankNodeRef<'_>,
+    predicate: &str,
+) -> Result<Vec<String>, Error> {
+    let mut out = Vec::new();
+    for quad in reader.quads(
+        Some(reifier),
+        Some(NamedNodeRef::new_unchecked(predicate)),
+        None,
+    ) {
+        if let Term::Literal(l) = quad?.object {
+            out.push(l.value().to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// A member's earliest verified flag time and whether any of its flag times
+/// is not canonical, from the timestamps of its verified flag links. The SPARQL
+/// path takes the least timestamp string; for canonical timestamps that is the
+/// least time.
+pub(crate) fn earliest_flag_time(times: Option<Vec<String>>) -> Option<(u64, bool)> {
+    let parsed: Vec<(u64, bool)> = times?.iter().map(|t| parse_timestamp(t)).collect();
+    let t_ms = parsed.iter().map(|(t, _)| *t).min()?;
+    Some((t_ms, parsed.iter().any(|(_, canonical)| !canonical)))
+}
+
+/// The scopes `member` is in when it is an instance of `rule`'s class: the
+/// class scope, then `Under` for every verified link that puts it under a
+/// parent.
+pub(crate) fn member_scopes<R: QuadReader>(
+    reader: &R,
+    rule: &ClassRule,
+    member: &str,
+) -> Result<Vec<ScopeId>, Error> {
+    let mut scopes = vec![rule.class_scope().id()];
+    for (parent, relation) in incoming(reader, member)? {
+        if is_verified(reader, &parent, &relation, member)? {
+            let id = rule.under(&parent, &relation).id();
+            if !scopes.contains(&id) {
+                scopes.push(id);
+            }
+        }
+    }
+    Ok(scopes)
+}
+
+/// A new key for a member of `rule`'s class at `t_ms`: the next `seq` after
+/// `last + *used`, and the one after while `taken` says the class scope has
+/// that key (only after 2^20 members in one millisecond). Every attempt adds
+/// one to `used`: the caller adds it to the store's `seq` counter.
+///
+/// When the class scope holds every key of `t_ms`, the key is the first
+/// free one in a near millisecond, and the second value is `true`: the
+/// key is not at the member's time, so the caller marks the member
+/// noncanonical and the class's queries use the SPARQL path while it is a
+/// member. Its next reconcile looks for a key at its time again.
+pub(crate) fn pick_key(
+    class: &str,
+    t_ms: u64,
+    last: u64,
+    used: &mut u64,
+    mut taken: impl FnMut(MemberKey) -> Result<bool, Error>,
+) -> Result<(MemberKey, bool), Error> {
+    let t_ms = t_ms.min(MAX_T_MS);
+    // Every `seq` of `t_ms`, then one key in each millisecond near it.
+    let slots = 1u64 << SEQ_BITS;
+    for attempt in 0..2 * slots {
+        let t = if attempt < slots {
+            t_ms
+        } else {
+            let d = attempt - slots + 1;
+            match t_ms.checked_add(d).filter(|t| *t <= MAX_T_MS) {
+                Some(t) => t,
+                None => match t_ms.checked_sub(d) {
+                    Some(t) => t,
+                    None => break,
+                },
+            }
+        };
+        *used += 1;
+        let key = MemberKey::new(t, last.wrapping_add(*used));
+        if !taken(key)? {
+            return Ok((key, t != t_ms));
+        }
+    }
+    Err(anyhow!(
+        "scope index: no free key for a member of '{class}' near {t_ms}"
+    ))
+}
+
+/// Put `member` in `scope` at `key`: the entry and the member's key for the
+/// scope. The caller counts it.
+pub(crate) fn put_membership(
+    tx: &mut Transaction<'_>,
+    scope: ScopeId,
+    mh: &[u8; 16],
+    member: &str,
+    class: ClassId,
+    key: MemberKey,
+) {
+    tx.aux_put(&entry_key(scope, key), member.as_bytes());
+    tx.aux_put(&member_scope_key(mh, scope), &encode_member(key, class));
+}
+
+/// Put a member's flag record: its key, and whether it is noncanonical.
+pub(crate) fn put_flag(
+    tx: &mut Transaction<'_>,
+    mh: &[u8; 16],
+    class: ClassId,
+    key: MemberKey,
+    noncanonical: bool,
+) {
+    tx.aux_put(&flag_key(mh, class), &encode_flag(key, noncanonical));
 }

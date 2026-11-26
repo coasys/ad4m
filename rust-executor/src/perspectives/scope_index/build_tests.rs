@@ -836,10 +836,9 @@ fn a_phase_0_seen_under_the_lock_takes_a_new_snapshot() {
 
 /// `runtime.importData` loads links through the store's bulk loader, which
 /// writes no scope index entry. A class that is ready when the file lands
-/// (the feed-scale suite registers its shapes, then imports) must not stay
-/// ready over an index that misses the file's members: the import takes the
-/// class back to building, and the index it ends with is the one the write
-/// paths keep.
+/// (the feed-scale suite registers its shapes, then imports) is ready when the
+/// import returns, over the entries of the file's members, and the index is the
+/// one the write paths keep (`import_tests.rs` has the other cases).
 #[test]
 fn an_import_into_a_ready_class_ends_with_the_incremental_index() {
     let signer = TestSigner::generate();
@@ -878,9 +877,8 @@ fn an_import_into_a_ready_class_ends_with_the_incremental_index() {
     let stats = store.import_links_file(file.path()).unwrap();
     assert_eq!(stats.imported, links.len());
 
-    // Ready would be a lie while the index misses the members; the build the
-    // import started brings it level.
-    wait_ready(&store, &rule);
+    // The import wrote the entries of its links: ready with no build.
+    assert_eq!(store.scope_index_readiness(&rule), Readiness::Ready);
     assert_eq!(
         store.scope_reader().count(&rule.class_scope()).unwrap(),
         (BATCH + 40) as i64,
