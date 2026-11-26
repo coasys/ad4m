@@ -168,3 +168,119 @@ async fn plan_cost_against_the_old_form() {
         "the whole read now should beat the old query alone"
     );
 }
+
+/// A record with an optional title only: under a parent scope, nothing but the parent link
+/// selects it, so the id query is all that tells an instance from a literal target.
+const ITEM_SHAPE_JSON: &str = r#"{
+    "className": "Item",
+    "properties": {
+        "title": {"predicate":"pc://title","required":false}
+    }
+}"#;
+
+/// A parent holding one record and one literal whose text is the address of another node with a
+/// title: the literal is no member, and the node it names is not read in its place, whichever
+/// plan reads the ids (the unpaged ids-then-links, the `createdAt` page's ids first).
+#[tokio::test]
+async fn a_literal_target_is_not_read_as_the_node_its_text_names() {
+    let store = SparqlStore::new(None).unwrap();
+    let me = TestSigner::generate();
+    add(
+        &store,
+        [
+            signed(&me, "pc://parent", "pc://child", "pc://item", 1),
+            signed(&me, "pc://item", "pc://title", "literal:string:held", 1),
+            signed(
+                &me,
+                "pc://parent",
+                "pc://child",
+                "literal:string:pc://other",
+                2,
+            ),
+            signed(
+                &me,
+                "pc://other",
+                "pc://title",
+                "literal:string:not held",
+                2,
+            ),
+        ],
+    );
+    let scope = json!({ "id": "pc://parent", "predicate": "pc://child" });
+    for query in [
+        json!({ "parent": scope }),
+        json!({ "parent": scope, "order": { "createdAt": "ASC" }, "limit": 10 }),
+    ] {
+        let input: ModelQueryInput = serde_json::from_value(query.clone()).unwrap();
+        let got = execute_model_query_from_json(&store, "Item", &input, ITEM_SHAPE_JSON)
+            .await
+            .unwrap()
+            .instances;
+        let ids: Vec<&str> = got.iter().filter_map(|i| i["id"].as_str()).collect();
+        assert_eq!(ids, ["pc://item"], "{query}: {got:?}");
+    }
+}
+
+/// The two plans the kind read now runs, pinned by their form: an unpaged read of a kind whose
+/// membership is checked asks for the ids alone and then the links of those ids only; a
+/// `createdAt` page asks for the ids first and puts them in place of the membership check.
+#[test]
+fn a_kind_read_asks_for_its_ids_apart_from_their_links() {
+    use crate::perspectives::model_query::sparql_builder::{build_instance_sparql, links_of_ids};
+    use crate::perspectives::model_query::types::{
+        InstanceQueryPlan, OrderDirection, SortKey, SparqlPagination,
+    };
+    let (_resolver, shape) =
+        crate::perspectives::model_query::test_helpers::StaticShapeResolver::from_json(
+            "Task",
+            TASK_SHAPE_JSON,
+        )
+        .unwrap();
+    let all = ModelQueryInput::default();
+
+    let InstanceQueryPlan::IdsThenLinks { ids_query, links } =
+        build_instance_sparql(&shape, &all, None, None)
+    else {
+        panic!("an unpaged read of a checked kind reads its ids first");
+    };
+    assert!(
+        !ids_query.contains("?predicate"),
+        "the id query fetches no links: {ids_query}"
+    );
+    assert!(ids_query.contains("FILTER(isIRI(?source))"), "{ids_query}");
+    let second = links_of_ids(&["pc://task-00001".to_string()], &links);
+    assert!(
+        second.contains("<pc://task-00001>") && !second.contains("<pc://flag> <pc://task>"),
+        "the links query is bound to the ids found, not the membership check: {second}"
+    );
+
+    let page = SparqlPagination {
+        sort_key: SortKey::CreatedAt,
+        direction: OrderDirection::ASC,
+        offset: None,
+        limit: Some(10),
+        keyset: None,
+    };
+    let InstanceQueryPlan::TwoPhase {
+        pagination_subquery,
+        ids_first: Some(first),
+        ..
+    } = build_instance_sparql(&shape, &all, Some(&page), None)
+    else {
+        panic!("a createdAt page of a checked kind reads its ids first");
+    };
+    assert!(
+        !first.ids_query.contains("?predicate"),
+        "{}",
+        first.ids_query
+    );
+    assert!(
+        first.ids_query.contains("FILTER(isIRI(?source))"),
+        "{}",
+        first.ids_query
+    );
+    assert!(
+        pagination_subquery.contains(&first.replaces),
+        "the page query holds the check the ids replace: {pagination_subquery}"
+    );
+}

@@ -316,8 +316,10 @@ pub(super) fn build_instance_sparql(
                 // anchor too, which the ids query does not return.
                 if !conformance.trim().is_empty() && anchor_select.is_empty() {
                     ids_first = Some(IdsFirst {
+                        // `isIRI`: a literal target the conformance binds is no instance, and
+                        // its text would read back as the node it names.
                         ids_query: format!(
-                            "SELECT DISTINCT ?source WHERE {{\n{conformance}\n{where_extra}\n}}"
+                            "SELECT DISTINCT ?source WHERE {{\n{conformance}\n{where_extra}\nFILTER(isIRI(?source))\n}}"
                         ),
                         replaces: format!("\n{conformance}\n"),
                     });
@@ -389,10 +391,13 @@ pub(super) fn build_instance_sparql(
             ))
         } else {
             InstanceQueryPlan::IdsThenLinks {
+                // `isIRI`: a literal target the conformance binds is no instance, and its text
+                // would read back as the node it names (the single plan's links filter it too).
                 ids_query: format!(
                     r#"SELECT DISTINCT ?source WHERE {{
 {conformance}
 {where_extra}
+FILTER(isIRI(?source))
 }}"#
                 ),
                 links,

@@ -466,7 +466,7 @@ pub async fn execute_model_query_stopped(
 ) -> Result<ModelQueryResult, Error> {
     let timing = crate::perspectives::sparql_store::query_timing::ModelTiming::start(
         &shape.target_class,
-        &format!("{query_input:?}"),
+        query_input,
     );
     let result = execute_model_query_inner(stop, store, shape, query_input, resolver, 0).await;
     timing.done(result.as_ref().map(|r| r.instances.len()).unwrap_or(0));

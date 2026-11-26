@@ -347,12 +347,13 @@ pub(crate) mod query_timing {
     pub(crate) struct ModelTiming(Option<(Instant, String)>);
 
     impl ModelTiming {
-        pub(crate) fn start(class: &str, query_json: &str) -> Self {
+        /// `query` is formatted only when timing is on: an input with a long id list or nested
+        /// includes is large, and every model query passes here. It is cut at 4,000 characters,
+        /// as a store query's text is.
+        pub(crate) fn start(class: &str, query: &dyn std::fmt::Debug) -> Self {
             Self(enabled().then(|| {
-                (
-                    Instant::now(),
-                    format!("class={class} query={}", one_line(query_json)),
-                )
+                let shown: String = one_line(&format!("{query:?}")).chars().take(4000).collect();
+                (Instant::now(), format!("class={class} query={shown}"))
             }))
         }
 
