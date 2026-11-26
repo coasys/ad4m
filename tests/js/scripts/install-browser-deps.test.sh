@@ -33,21 +33,24 @@ EOF
   export TMP PATH="$TMP/bin:$PATH" PLAYWRIGHT_BROWSERS_PATH="$TMP/browsers" APT_BUSY_WAIT_S=0
 }
 
+# Without BASH_ENV: CircleCI's puts the system's bin directories before the fakes again.
+run() { env -u BASH_ENV bash "$SCRIPT"; }
+
 test_waits_while_apt_is_busy() {
-  out="$(FAKE_APT_BUSY=2 bash "$SCRIPT" 2>&1)" || fail "a busy apt failed the install: $out"
+  out="$(FAKE_APT_BUSY=2 run 2>&1)" || fail "a busy apt failed the install: $out"
   [ "$(grep -c "apt is busy" <<<"$out")" = 2 ] || fail "did not wait twice: $out"
   grep -q "^-o DPkg::Lock::Timeout=600 update" "$TMP/apt.log" || fail "no apt-get update: $(cat "$TMP/apt.log")"
   grep -q "^-o DPkg::Lock::Timeout=600 install .*xvfb" "$TMP/apt.log" || fail "no apt-get install: $(cat "$TMP/apt.log")"
 }
 
 test_another_error_fails_at_once() {
-  out="$(FAKE_APT_ERROR="Unable to fetch some archives" bash "$SCRIPT" 2>&1)" && fail "an apt error passed: $out"
+  out="$(FAKE_APT_ERROR="Unable to fetch some archives" run 2>&1)" && fail "an apt error passed: $out"
   [ "$(cat "$TMP/calls")" = 1 ] || fail "an apt error was tried $(cat "$TMP/calls") times"
   grep -q "Unable to fetch some archives" <<<"$out" || fail "the apt error is not shown: $out"
 }
 
 test_gives_up_when_apt_stays_busy() {
-  out="$(FAKE_APT_BUSY=1000 bash "$SCRIPT" 2>&1)" && fail "a lock that never freed passed"
+  out="$(FAKE_APT_BUSY=1000 run 2>&1)" && fail "a lock that never freed passed"
   [ "$(cat "$TMP/calls")" = 60 ] || fail "tried $(cat "$TMP/calls") times, not 60"
   grep -q "Could not get lock" <<<"$out" || fail "the lock error is not shown: $out"
 }
