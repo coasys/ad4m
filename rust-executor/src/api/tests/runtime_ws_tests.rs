@@ -320,7 +320,10 @@ async fn operator_imports_a_perspective_snapshot_into_the_store() {
         .await
         .unwrap();
     assert_eq!(stored.len(), 3);
-    assert!(stored.iter().all(|l| l.proof.valid == Some(true)));
+    // The import is offline: the signer's key log is not in the store's key map, so its
+    // unanchored links wait (`cantCheck`) for the periodic re-check, never `valid` unseen.
+    assert!(stored.iter().all(|l| l.proof.valid == Some(false)
+        && l.verdict == Some(crate::identity::verdict::LinkVerdict::CantCheck)));
 }
 
 // Nothing delivers a friend message and the outbox has no owner, so storing one would let
