@@ -67,7 +67,7 @@ pub(crate) async fn neighbourhood_perspective(
     neighbourhood_url: &str,
 ) -> Option<PerspectiveInstance> {
     for perspective in all_perspectives() {
-        if perspective.persisted.lock().await.shared_url.as_deref() == Some(neighbourhood_url) {
+        if perspective.persisted.load().shared_url.as_deref() == Some(neighbourhood_url) {
             return Some(perspective);
         }
     }
@@ -79,7 +79,7 @@ pub(crate) async fn neighbourhood_perspective(
 /// neighbourhood): such a neighbourhood has no config author.
 pub async fn neighbourhood_creator(neighbourhood_url: &str) -> Option<String> {
     let perspective = neighbourhood_perspective(neighbourhood_url).await?;
-    let handle = perspective.persisted.lock().await;
+    let handle = perspective.persisted.snapshot();
     handle.neighbourhood.as_ref().map(|n| n.author.clone())
 }
 
@@ -131,7 +131,7 @@ fn config_links_query(neighbourhood_url: &str) -> LinkQuery {
 pub async fn stored_policy(neighbourhood_url: &str) -> Option<CallPolicy> {
     let perspective = neighbourhood_perspective(neighbourhood_url).await?;
     let creator = {
-        let handle = perspective.persisted.lock().await;
+        let handle = perspective.persisted.snapshot();
         handle.neighbourhood.as_ref()?.author.clone()
     };
     match perspective
@@ -559,15 +559,17 @@ mod tests {
         let (perspective, _shapes, context) = setup_perspective_no_llm(&[]).await;
         let creator = crate::agent::did();
         let url = format!("neighbourhood://sfu-config-test/{}", uuid::Uuid::new_v4());
-        let uuid = {
-            let mut handle = perspective.persisted.lock().await;
-            handle.shared_url = Some(url.clone());
-            handle.neighbourhood = Some(DecoratedNeighbourhoodExpression {
-                author: creator.clone(),
-                ..Default::default()
-            });
-            handle.uuid.clone()
-        };
+        let uuid = perspective
+            .persisted
+            .update(|handle| {
+                handle.shared_url = Some(url.clone());
+                handle.neighbourhood = Some(DecoratedNeighbourhoodExpression {
+                    author: creator.clone(),
+                    ..Default::default()
+                });
+                handle.uuid.clone()
+            })
+            .await;
         crate::perspectives::register_perspective(uuid.clone(), perspective.clone());
 
         assert_eq!(neighbourhood_creator(&url).await, Some(creator));

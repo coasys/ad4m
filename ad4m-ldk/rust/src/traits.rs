@@ -259,3 +259,31 @@ pub trait LanguageSourceCapability: Language {
 pub trait HolochainSignalHandler: Language {
     fn handle_holochain_signal(&mut self, signal: serde_json::Value) -> LanguageResult<()>;
 }
+
+/// `mount` capability — the classes and records a language exposes in a
+/// mounted perspective (the Rust counterpart of the JS LDK's
+/// `defineLanguage({ mount })`).
+///
+/// `mount_shapes()` answers `{ version, shapes: [{ name, shape }] }`.
+/// With `#[derive(Ad4mModel)]` on the mounted classes it is typically
+/// one line — `MountShapes::from_classes` strips `node_shape_uri` and
+/// resolves the `{language}` placeholder in call-action sources and
+/// targets against this language's own address, exactly like the JS
+/// `mount.classes` form:
+///
+/// ```ignore
+/// fn mount_shapes(&mut self) -> LanguageResult<MountShapes> {
+///     Ok(MountShapes::from_classes("1", &[
+///         GoldenRecord::generate_shacl(),
+///     ]))
+/// }
+/// ```
+///
+/// `mount_snapshot()` is async because building the record list usually
+/// reaches the remote service through async host imports (`httpFetch`).
+pub trait MountCapability: Language {
+    fn mount_shapes(&mut self) -> LanguageResult<MountShapes>;
+    fn mount_snapshot(
+        &mut self,
+    ) -> impl std::future::Future<Output = LanguageResult<MountSnapshot>>;
+}

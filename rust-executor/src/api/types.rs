@@ -346,12 +346,15 @@ pub struct ExportRequest {
 }
 
 #[derive(Deserialize, TS)]
+#[ts(optional_fields)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct ImportRequest {
     #[serde(rename = "type")]
     pub import_type: String,
     pub file_path: String,
+    // Required when `type` is "perspective": the perspective to load into.
+    pub perspective_uuid: Option<String>,
 }
 
 #[derive(Deserialize, TS)]
@@ -706,15 +709,6 @@ pub struct CommitBatchRequest {
 #[ts(export)]
 pub struct DiscardBatchRequest {
     pub batch_id: String,
-}
-
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct SubscribeQueryRequest {
-    pub query: String,
-    /// Minted by the client, so it can end the subscription without the reply.
-    pub subscription_id: String,
 }
 
 #[derive(Deserialize, TS)]
