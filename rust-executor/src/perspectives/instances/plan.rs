@@ -15,6 +15,16 @@
 //! interpretation run) that the perspective does not hold yet is refused, since registering it
 //! is a write no batch can take back.
 //!
+//! Nor does it write a property stored through a language of its own (a `resolveLanguage` other
+//! than `literal`): that value is created in the language while the plan runs, outside the batch,
+//! and a plan refused later could not take it back. Such a write is refused before anything is
+//! written.
+//!
+//! A parent the plan creates is taken to be of the class it is created as. A committed parent is
+//! of every class whose shape it matches, so where two classes share their required links and only
+//! one of them holds children through a relation of its own, a part under a parent of the plan can
+//! be linked otherwise than under the same parent once committed.
+//!
 //! Only creates and adds. A plan changes no existing property and removes nothing: what it can do
 //! to records it did not make is add them to a collection, the one write a reply into a thread
 //! or an item into a list needs, and the write least able to lose anything.
@@ -96,6 +106,13 @@ pub enum PlanError {
         index: usize,
         class_name: String,
     },
+    /// A value for a property stored through a language of its own (`resolveLanguage` other than
+    /// `literal`).
+    LanguageProperty {
+        index: usize,
+        class_name: String,
+        property: String,
+    },
     /// A write the instance core refused or failed.
     Write {
         index: usize,
@@ -152,15 +169,25 @@ pub async fn apply(
     // Every create's class, by target class IRI, before anything is written. A child is put under
     // its parent through the parent class's own `children` relation, and the store cannot tell a
     // parent's class while the parent is only staged in the plan's batch.
+    // A property stored through a language of its own is refused here too (see the module doc).
     let mut class_of: HashMap<String, String> = HashMap::new();
     for (index, write) in writes.iter().enumerate() {
-        let PlannedWrite::Create {
-            reference,
-            class_name,
-            ..
-        } = write
-        else {
-            continue;
+        let (reference, class_name, named): (Option<&String>, &String, Vec<&String>) = match write {
+            PlannedWrite::Create {
+                reference,
+                class_name,
+                properties,
+                ..
+            } => (
+                Some(reference),
+                class_name,
+                properties.iter().flat_map(|p| p.keys()).collect(),
+            ),
+            PlannedWrite::Add {
+                class_name,
+                collection,
+                ..
+            } => (None, class_name, vec![collection]),
         };
         let unregistered = crate::perspectives::hardwired_class::unstored(perspective, class_name)
             .map_err(|error| PlanError::Write {
@@ -171,7 +198,7 @@ pub async fn apply(
                     error,
                 },
             })?;
-        if unregistered.is_some() {
+        if unregistered.is_some() && reference.is_some() {
             return Err(PlanError::UnregisteredClass {
                 index,
                 class_name: class_name.clone(),
@@ -180,7 +207,21 @@ pub async fn apply(
         let (_, shape) = resolve_class(perspective, class_name)
             .await
             .map_err(|error| PlanError::Write { index, error })?;
-        class_of.insert(ids[reference].clone(), shape.target_class.clone());
+        if let Some(property) = shape.properties.iter().find(|p| {
+            p.resolve_language
+                .as_deref()
+                .is_some_and(|language| language != "literal")
+                && named.iter().any(|n| n.eq_ignore_ascii_case(&p.name))
+        }) {
+            return Err(PlanError::LanguageProperty {
+                index,
+                class_name: class_name.clone(),
+                property: property.name.clone(),
+            });
+        }
+        if let Some(reference) = reference {
+            class_of.insert(ids[reference].clone(), shape.target_class.clone());
+        }
     }
 
     // Resolve every ref before writing anything, so a bad one writes nothing.

@@ -390,3 +390,55 @@ async fn a_plan_creating_an_unregistered_executor_class_writes_nothing() {
         "the refused plan registered the class"
     );
 }
+
+/// A photo stored through a language of its own, and a caption on the literal language.
+const PHOTO_SDNA: &str = r#"{
+  "target_class": "ns://Photo",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Photo"}
+  ],
+  "properties": [
+    {"path":"ns://image","name":"image","datatype":"xsd:string","max_count":1,"writable":true,"resolve_language":"QmPhotoLanguageAddress",
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://image","target":"value"}]},
+    {"path":"ns://caption","name":"caption","datatype":"xsd:string","max_count":1,"writable":true,"resolve_language":"literal",
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://caption","target":"value"}]}
+  ]
+}"#;
+
+/// A value for a property stored through a language of its own is refused before anything is
+/// written: the language would keep it though the plan were refused later. One on the literal
+/// language is written.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plan_setting_a_language_stored_property_writes_nothing() {
+    let (mut p, _shapes, ctx) =
+        setup_perspective_no_llm(&[("Note", NOTE_SDNA), ("Photo", PHOTO_SDNA)]).await;
+    let before = p.get_links(&LinkQuery::default()).await.unwrap().len();
+    let photo = |properties: Value| PlannedWrite::Create {
+        reference: "photo".into(),
+        class_name: "Photo".into(),
+        properties: properties.as_object().cloned(),
+        parent: None,
+    };
+
+    let refused = apply(
+        &mut p,
+        &ctx,
+        vec![
+            note("root", Some("root"), None, json!({})),
+            photo(json!({ "image": "data:image/png;base64,AAAA", "caption": "hi" })),
+        ],
+    )
+    .await;
+    assert!(
+        matches!(&refused, Err(PlanError::LanguageProperty { index: 1, property, .. }) if property == "image"),
+        "{refused:?}"
+    );
+    assert_eq!(
+        p.get_links(&LinkQuery::default()).await.unwrap().len(),
+        before
+    );
+
+    apply(&mut p, &ctx, vec![photo(json!({ "caption": "hi" }))])
+        .await
+        .unwrap_or_else(|e| panic!("a literal-language property is written: {e:?}"));
+}

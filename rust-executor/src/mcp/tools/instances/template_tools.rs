@@ -401,6 +401,15 @@ fn plan_error(error: &PlanError, creates: &[bool]) -> String {
             "write {index} creates a {class_name}, one of the executor's own classes, which this \
              perspective does not hold yet: writes do not register a class"
         ),
+        PlanError::LanguageProperty {
+            index,
+            class_name,
+            property,
+        } => format!(
+            "write {index} sets {class_name}'s '{property}', which is stored through a language of \
+             its own: writes cannot set it, since the language keeps the value even when the rest \
+             is refused"
+        ),
         PlanError::Write { index, error } => {
             let worded = if creates.get(*index).copied().unwrap_or(false) {
                 create_error(error)
