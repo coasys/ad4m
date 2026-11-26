@@ -156,7 +156,7 @@ describe("Agent scale: one executor, many agents", function () {
     console.log(flags.length === 0
       ? "No metric scales poorly."
       : `Scales poorly:\n${flags.map((r) => `  ${r.metric}: x${r.growth!.toFixed(1)} from ${r.from} to ${r.to} agents (${r.kind})`).join("\n")}`);
-    if (process.env.PERF_RESULTS_DIR) console.log(`Wrote ${writeResults(process.env.PERF_RESULTS_DIR, readings)}`);
+    if (process.env.PERF_RESULTS_DIR) console.log(`Wrote ${writeResults(process.env.PERF_RESULTS_DIR, readings, LINKS)}`);
   });
 
   for (const agents of COUNTS) {

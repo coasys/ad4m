@@ -78,10 +78,12 @@ describe("agent-scale helpers", () => {
       10: { "read.query_ms.median": [4, "latency"], "events.leaked": [0, "count"], "x.nan": [NaN, "latency"] },
       20: { "read.query_ms.median": [6, "latency"], "events.leaked": [0, "count"], "x.nan": [NaN, "latency"] },
     });
-    const metrics = historyMetrics(r);
-    expect(metrics).to.deep.include({ metric: "agent_scale.read.query_ms.median", value: 4, unit: "ms", better: "lower", params: { agents: 10 } });
-    expect(metrics).to.deep.include({ metric: "agent_scale.read.query_ms.median", value: 6, unit: "ms", better: "lower", params: { agents: 20 } });
-    expect(metrics).to.deep.include({ metric: "agent_scale.read.query_ms.median.growth_10_20", value: 1.5, unit: "ratio", better: "lower", params: { from: 10, to: 20 } });
+    const metrics = historyMetrics(r, 200);
+    expect(metrics).to.deep.include({ metric: "agent_scale.read.query_ms.median", value: 4, unit: "ms", better: "lower", params: { agents: 10, links: 200 } });
+    expect(metrics).to.deep.include({ metric: "agent_scale.read.query_ms.median", value: 6, unit: "ms", better: "lower", params: { agents: 20, links: 200 } });
+    expect(metrics).to.deep.include({ metric: "agent_scale.read.query_ms.median.growth_10_20", value: 1.5, unit: "ratio", better: "lower", params: { from: 10, to: 20, links: 200 } });
+    // Another link count is another workload: its own series.
+    expect(historyMetrics(r, 400)[0].params).to.deep.equal({ agents: 10, links: 400 });
     // A count has no growth; a value that is not a number is not recorded at all.
     expect(metrics.some((m) => m.metric.includes("leaked.growth"))).to.equal(false);
     expect(metrics.some((m) => m.metric.includes("x.nan"))).to.equal(false);
@@ -91,11 +93,11 @@ describe("agent-scale helpers", () => {
   it("writes agent-scale.json in the results format", () => {
     const dir = mkdtempSync(join(tmpdir(), "agent-scale-unit-"));
     try {
-      const file = writeResults(join(dir, "nested"), readings({ 10: { a: [1, "total"] }, 20: { a: [2, "total"] } }));
+      const file = writeResults(join(dir, "nested"), readings({ 10: { a: [1, "total"] }, 20: { a: [2, "total"] } }), 200);
       expect(file).to.equal(join(dir, "nested", "agent-scale.json"));
       const parsed = JSON.parse(readFileSync(file, "utf8"));
       expect(parsed.metrics).to.have.length(3);
-      expect(parsed.metrics[0]).to.deep.equal({ metric: "agent_scale.a", value: 1, unit: "ms", better: "lower", params: { agents: 10 } });
+      expect(parsed.metrics[0]).to.deep.equal({ metric: "agent_scale.a", value: 1, unit: "ms", better: "lower", params: { agents: 10, links: 200 } });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

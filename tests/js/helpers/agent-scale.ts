@@ -102,13 +102,17 @@ export function growthRows(readings: Readings): GrowthRow[] {
 /** The name of a growth metric: `rss_peak_mib` → `rss_peak_mib.growth_10_100`. */
 export const growthName = (metric: string, from: number, to: number): string => `${metric}.growth_${from}_${to}`;
 
-/** Every reading as a history metric (`params: {agents}`), then each growth (`params: {from, to}`). */
-export function historyMetrics(readings: Readings): HistoryMetric[] {
+/**
+ * Every reading as a history metric (`params: {agents, links}`), then each growth (`params: {from,
+ * to, links}`). `links` is each user's link count: a run with more links is a larger workload, so
+ * it is a series of its own.
+ */
+export function historyMetrics(readings: Readings, links: number): HistoryMetric[] {
   const metrics: HistoryMetric[] = [];
   for (const [agents, byName] of [...readings].sort((a, b) => a[0] - b[0])) {
     for (const [name, r] of byName) {
       if (!Number.isFinite(r.value)) continue;
-      metrics.push({ metric: `agent_scale.${name}`, value: r.value, unit: r.unit, better: "lower", params: { agents } });
+      metrics.push({ metric: `agent_scale.${name}`, value: r.value, unit: r.unit, better: "lower", params: { agents, links } });
     }
   }
   for (const row of growthRows(readings)) {
@@ -118,17 +122,17 @@ export function historyMetrics(readings: Readings): HistoryMetric[] {
       value: row.growth,
       unit: "ratio",
       better: "lower",
-      params: { from: row.from, to: row.to },
+      params: { from: row.from, to: row.to, links },
     });
   }
   return metrics;
 }
 
 /** Write `<dir>/agent-scale.json`, the results file of the history. Returns its path. */
-export function writeResults(dir: string, readings: Readings): string {
+export function writeResults(dir: string, readings: Readings, links: number): string {
   mkdirSync(dir, { recursive: true });
   const file = join(dir, "agent-scale.json");
-  writeFileSync(file, JSON.stringify({ metrics: historyMetrics(readings) }, null, 2) + "\n");
+  writeFileSync(file, JSON.stringify({ metrics: historyMetrics(readings, links) }, null, 2) + "\n");
   return file;
 }
 

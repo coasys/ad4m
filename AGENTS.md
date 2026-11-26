@@ -299,8 +299,9 @@ trend page. The full contract is the header of `scripts/perf/perf.mjs`.
     latency, output tokens/s), with params `{model}`.
   - `agent-scale`: the test writes `$PERF_RESULTS_DIR/agent-scale.json`
     (`tests/js/helpers/agent-scale.ts`): every metric once per agent count (params
-    `{agents: N}`), and its growth between the smallest and the largest count
-    (`agent_scale.<metric>.growth_10_100`, params `{from, to}`).
+    `{agents: N, links}`), and its growth between the smallest and the largest count
+    (`agent_scale.<metric>.growth_10_100`, params `{from, to, links}`). `links` is
+    `AGENT_SCALE_LINKS`: another link count is another workload, so a series of its own.
 - A new nightly measurement writes a results JSON file (`{"metrics": [...]}`)
   into `$PERF_RESULTS_DIR`. Wrap the job's tests in `perf_setup` and
   `perf_finish` (`.circleci/config.yml`).
