@@ -355,6 +355,12 @@ trend page. The full contract is the header of `scripts/perf/perf.mjs`.
   packages (`apt-get download`, `dpkg -x`) and list the `.so` files,
   dependencies first, in `WEBKIT_LD_PRELOAD`. `SFU_BROWSERS_DEBUG=1` dumps
   every tab's SDPs when a wait times out.
+- CI installs the browsers' system libraries with
+  `tests/js/scripts/install-browser-deps.sh` (sfu-browsers, coasys-spaces,
+  feed-scale). Nightly jobs share one runner host and run it at the same time.
+  apt fails at once on a held lists or archives lock, so the script runs
+  `apt-get update` itself and tries again while apt is busy. Call only the
+  script, never a bare `apt-get`.
 - Each test hangs up (`session.leave()`) before closing its tabs: a tab
   closed mid-call keeps its SFU slot until the server drops it, and a DID
   is in at most 4 calls per node.
