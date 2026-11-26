@@ -547,6 +547,16 @@ pub fn check_signed_entered<T: serde::Serialize>(
     )
 }
 
+/// [`check_signed_entered`] for the bulk import ([`resolver::check_signed_import_with`]): the
+/// import fetches no log, so a signer the key map does not know leaves its unanchored link
+/// `cantCheck` for the periodic re-check, not `valid`.
+pub fn check_signed_import<T: serde::Serialize>(
+    expr: &Expression<T>,
+    received_at: Option<u64>,
+) -> CheckedLink {
+    resolver::check_signed_import_with(expr, &cache::global_key_map(), received_at, service::now())
+}
+
 /// [`check_signed_entered`] for a link this executor signs during the call that writes it —
 /// the paths that create the proof (`perspective.addLink`, `perspective.addLinks`,
 /// `perspective.linkMutations`, `perspective.updateLink`, a `commitBatch`, and every write

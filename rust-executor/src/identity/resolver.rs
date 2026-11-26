@@ -345,6 +345,43 @@ pub fn check_signed_with_provenance<T: serde::Serialize>(
     now: u64,
     own: impl Fn(&str) -> bool,
 ) -> CheckedLink {
+    check_signed_inner(
+        expr,
+        map,
+        entered_after_revoke,
+        received_at,
+        now,
+        own,
+        false,
+    )
+}
+
+/// [`check_signed_with_provenance`] for the bulk import, which runs offline and never prepares
+/// the file's signers (no log is fetched, no signer held pending). A signer whose log the map
+/// does not hold is not a key no log lists: the live path would have fetched it, so an
+/// unanchored link from it would have waited or been judged by its log. The import cannot tell,
+/// so such a link is `CantCheck` (the periodic re-check fetches the log and judges it). Never
+/// `own`: an import hands in links already signed.
+pub fn check_signed_import_with<T: serde::Serialize>(
+    expr: &crate::types::Expression<T>,
+    map: &KeyMap,
+    received_at: Option<u64>,
+    now: u64,
+) -> CheckedLink {
+    check_signed_inner(expr, map, None, received_at, now, |_| false, true)
+}
+
+/// The one judgement behind both. `unknown_waits`: a signer the map has never been asked about
+/// waits (`CantCheck`) for its unanchored link, as a signer held pending does.
+fn check_signed_inner<T: serde::Serialize>(
+    expr: &crate::types::Expression<T>,
+    map: &KeyMap,
+    entered_after_revoke: Option<bool>,
+    received_at: Option<u64>,
+    now: u64,
+    own: impl Fn(&str) -> bool,
+    unknown_waits: bool,
+) -> CheckedLink {
     let signature_holds = crate::agent::signatures::signature_holds(expr);
     let signer = multikey_of(&expr.author);
     let lookup = signer.map_or(KeyLookup::NoLog, |key| map.lookup(key));
@@ -382,7 +419,7 @@ pub fn check_signed_with_provenance<T: serde::Serialize>(
         // a local identity's log is pinned in the map, so an own key the map does not know has
         // none.
         (LinkVerdict::Valid, KeyLookup::Unknown)
-            if signer.is_some_and(|k| map.is_pending(k)) && !own(&expr.author) =>
+            if signer.is_some_and(|k| unknown_waits || map.is_pending(k)) && !own(&expr.author) =>
         {
             LinkVerdict::CantCheck
         }
@@ -4748,6 +4785,37 @@ mod link_check_tests {
         );
         drop(hold);
         assert!(!map.is_pending(&key), "the batch is done: its hold went");
+    }
+
+    /// The import prepares no signer: an unanchored link from a key the map was never asked
+    /// about is `cantCheck` there, `valid` on the live path (which prepares first); a key
+    /// answered "no log" is `valid` on both, and a bad signature is `invalid` on both.
+    #[test]
+    fn an_import_waits_on_an_unasked_signer_the_live_path_would_count() {
+        let signer = TestSigner::generate();
+        let expr: Expression<Link> = signer.sign(link());
+        let map = KeyMap::new();
+        assert_eq!(
+            check_signed_with(&expr, &map, None, NOW).verdict,
+            LinkVerdict::Valid,
+            "as before"
+        );
+        assert_eq!(
+            check_signed_import_with(&expr, &map, None, NOW).verdict,
+            LinkVerdict::CantCheck
+        );
+        map.note_no_log(&signer.multikey());
+        assert_eq!(
+            check_signed_import_with(&expr, &map, None, NOW).verdict,
+            LinkVerdict::Valid,
+            "asked, and no log lists it"
+        );
+        let mut forged = expr.clone();
+        forged.data.target = "ad4m://other".into();
+        assert_eq!(
+            check_signed_import_with(&forged, &KeyMap::new(), None, NOW).verdict,
+            LinkVerdict::Invalid(InvalidReason::BadSignature)
+        );
     }
 
     /// The local write path does not wait on an unanswered prepare for the unanchored link one

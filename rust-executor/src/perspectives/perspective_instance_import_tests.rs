@@ -203,3 +203,209 @@ async fn import_queues_every_derived_state_check_a_diff_would_have() {
         "the imported link satisfies the notification's trigger"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Verdicts of imported links. The import is offline: it prepares no signers, so a signer whose
+// key log the key map does not hold leaves an unanchored link `cantCheck`, for the periodic
+// re-check (`Recheck::CantCheck`) to judge with the log fetched.
+// ---------------------------------------------------------------------------------------------
+
+mod verdicts {
+    use super::*;
+    use crate::identity::cache::tests::{store_key, FakeStore, TestLog};
+    use crate::identity::cache::{global_key_map, TrustedLog};
+    use crate::identity::resolver::Resolver;
+    use crate::identity::verdict::LinkVerdict;
+    use ad4m_identity_core::build::Signer;
+    use std::sync::Arc;
+
+    /// A link by `signer`, a key of `log`: anchored at `anchor`, or over the old signed bytes
+    /// (no anchor).
+    fn device_link(
+        signer: &dyn Signer,
+        anchor: Option<u64>,
+        target: &str,
+    ) -> crate::types::DecoratedLinkExpression {
+        let key = signer.key();
+        let data = crate::types::Link {
+            source: "ad4m://s".to_string(),
+            predicate: Some("ad4m://p".to_string()),
+            target: target.to_string(),
+        }
+        .normalize();
+        let at = chrono::Utc::now();
+        let timestamp = at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let bytes = match anchor {
+            Some(anchor) => {
+                crate::agent::signatures::anchored_signing_bytes(&data, &timestamp, anchor).unwrap()
+            }
+            None => crate::agent::signatures::hash_data_and_timestamp(&data, &at),
+        };
+        (
+            LinkExpression {
+                author: format!("did:key:{key}"),
+                timestamp,
+                data,
+                proof: crate::types::ExpressionProof {
+                    key: format!("did:key:{key}#{key}"),
+                    signature: hex::encode(signer.sign(&bytes)),
+                    anchor,
+                },
+                status: Some(LinkStatus::Shared),
+            },
+            LinkStatus::Shared,
+        )
+            .into()
+    }
+
+    /// A resolver on a fake store serving `log`, as the agent language would; `down`: the key
+    /// index never answers. Its cache feeds the process-wide key map, which the import and the
+    /// sweep judge by; the directory holds the cache's database.
+    fn resolver_for(log: &TestLog, down: bool) -> (Arc<Resolver>, tempfile::TempDir) {
+        let store = Arc::new(FakeStore::new(log.events.clone()));
+        if down {
+            store
+                .key_index_down
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        let backend: Arc<dyn crate::identity::backend::IdentityBackend> = store;
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(
+            crate::identity::cache::KelCache::open(
+                dir.path().join("ad4m_db.sqlite"),
+                vec![store_key().multikey()],
+            )
+            .unwrap(),
+        );
+        (Arc::new(Resolver::new(cache, backend, None, false)), dir)
+    }
+
+    /// Imports `links` through the entry the RPC reaches (`import_links_file`).
+    async fn import(
+        perspective: &PerspectiveInstance,
+        links: Vec<crate::types::DecoratedLinkExpression>,
+    ) {
+        let file = export_file(links);
+        let stats = perspective
+            .import_links_file(file.path())
+            .await
+            .expect("the import succeeds");
+        assert_eq!(stats.imported, 1);
+    }
+
+    fn stored_verdict(perspective: &PerspectiveInstance) -> Option<LinkVerdict> {
+        let links = perspective
+            .sparql_store
+            .get_all_links(&crate::perspectives::sparql_store::EvalStop::none())
+            .unwrap();
+        assert_eq!(links.len(), 1);
+        links[0].verdict.clone()
+    }
+
+    /// A correctly signed, unanchored link by a device key its identity log has revoked, imported
+    /// while that log was never fetched: stored `cantCheck` (never `valid`), and the sweep, once
+    /// the log is available, judges it as the live path would — `flagged`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unanchored_link_of_an_unfetched_revoked_key_is_cant_check_until_the_sweep() {
+        let perspective = import_test_perspective();
+        let mut log = TestLog::new(171);
+        log.revoke_d1();
+        let map = global_key_map();
+        map.forget(&log.scid());
+
+        import(
+            &perspective,
+            vec![device_link(&log.device, None, "ad4m://t")],
+        )
+        .await;
+        assert_eq!(stored_verdict(&perspective), Some(LinkVerdict::CantCheck));
+
+        let (resolver, _dir) = resolver_for(&log, false);
+        let changed = crate::identity::with_test_resolver(
+            resolver,
+            perspective.recheck_links(&crate::perspectives::Recheck::CantCheck),
+        )
+        .await
+        .unwrap();
+        assert_eq!(changed, 1, "the sweep rewrites the imported link");
+        assert_eq!(stored_verdict(&perspective), Some(LinkVerdict::Flagged));
+        map.forget(&log.scid());
+    }
+
+    /// The key index never answers: the sweep cannot learn the log, and the link stays
+    /// `cantCheck` — not `valid`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_imported_link_stays_cant_check_while_the_index_never_answers() {
+        let perspective = import_test_perspective();
+        let mut log = TestLog::new(172);
+        log.revoke_d1();
+        global_key_map().forget(&log.scid());
+
+        import(
+            &perspective,
+            vec![device_link(&log.device, None, "ad4m://t")],
+        )
+        .await;
+        assert_eq!(stored_verdict(&perspective), Some(LinkVerdict::CantCheck));
+
+        let (resolver, _dir) = resolver_for(&log, true);
+        for _ in 0..2 {
+            let changed = crate::identity::with_test_resolver(
+                resolver.clone(),
+                perspective.recheck_links(&crate::perspectives::Recheck::CantCheck),
+            )
+            .await
+            .unwrap();
+            assert_eq!(changed, 0);
+            assert_eq!(stored_verdict(&perspective), Some(LinkVerdict::CantCheck));
+        }
+        global_key_map().forget(&log.scid());
+    }
+
+    /// A signer whose log the store holds is judged normally on import: no `cantCheck`.
+    /// An anchored link by a live key is `valid` with its person; an unanchored link by a
+    /// revoked key is `flagged` at once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_signer_with_a_held_log_is_judged_normally_on_import() {
+        let map = global_key_map();
+
+        let live = TestLog::new(173);
+        let chain = live.chain();
+        map.publish(
+            &live.scid(),
+            TrustedLog {
+                state: chain.state().clone(),
+                trusted: chain.head().seq,
+            },
+        );
+        map.note_confirmed(&live.scid(), chrono::Utc::now().timestamp() as u64);
+        let perspective = import_test_perspective();
+        import(
+            &perspective,
+            vec![device_link(&live.device, Some(0), "ad4m://t")],
+        )
+        .await;
+        assert_eq!(stored_verdict(&perspective), Some(LinkVerdict::Valid));
+        map.forget(&live.scid());
+
+        let mut revoked = TestLog::new(174);
+        revoked.revoke_d1();
+        let chain = revoked.chain();
+        map.publish(
+            &revoked.scid(),
+            TrustedLog {
+                state: chain.state().clone(),
+                trusted: chain.head().seq,
+            },
+        );
+        map.note_confirmed(&revoked.scid(), chrono::Utc::now().timestamp() as u64);
+        let perspective = import_test_perspective();
+        import(
+            &perspective,
+            vec![device_link(&revoked.device, None, "ad4m://t")],
+        )
+        .await;
+        assert_eq!(stored_verdict(&perspective), Some(LinkVerdict::Flagged));
+        map.forget(&revoked.scid());
+    }
+}

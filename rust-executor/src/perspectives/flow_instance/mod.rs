@@ -100,6 +100,7 @@ pub mod produced;
 pub mod propose;
 pub mod read_set;
 pub mod receipt;
+pub mod refusal;
 pub mod replica_state;
 pub mod roles;
 #[cfg(test)]
