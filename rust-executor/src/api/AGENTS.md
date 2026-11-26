@@ -310,7 +310,6 @@ the guard checked:
 | `perspective.createSubject` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.discardBatch` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.disposeQuery` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.disposeSparql` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.evaluateGetters` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.executeCommands` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.flowFired` | `Owns(Perspective uuid, perspective:READ)` |
@@ -327,7 +326,6 @@ the guard checked:
 | `perspective.linkMutations` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.mintFlowReceipt` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.modelQuery` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.modelSubscribe` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.proposeFlowTransition` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.publishSnapshot` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.queryLinks` | `Owns(Perspective uuid, perspective:READ)` |
@@ -348,8 +346,7 @@ the guard checked:
 | `perspective.shapes` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.snapshot` | `Owns(Perspective uuid, perspective:READ)`, 404 → `null` |
 | `perspective.subjectClassesOf` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.subscribeQuery` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.subscribeSparql` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.subscribe` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.update` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.updateLink` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.updateSubject` | `Owns(Perspective uuid, perspective:UPDATE)` |
@@ -596,8 +593,9 @@ them against those two guards.
   the auto-permit as its caller, so `agent.permitCapability`'s guard decides whether the caller
   may approve and its handler caps the approval at the caller's own capabilities.
   `capabilities::permit_capability` is the dev-mode auto-permit.
-- Live queries: `subscribeQuery` / `modelSubscribe` take the id the client minted
-  (`subscriptionId`, required: 1 to 64 characters of `[A-Za-z0-9-]`, else 400) and reply
+- Live queries: `perspective.subscribe { uuid, subscriptionId, model | sparql }` (exactly one of
+  `model` and `sparql`, else 400; `model` is `{ className | classNames, queryJson }`) takes the id
+  the client minted (`subscriptionId`, required: 1 to 64 characters of `[A-Za-z0-9-]`, else 400) and reply
   `{ subscriptionId, result, revision }` with it (revision 0, or later if a write landed while
   the first result was computed: the subscription is registered first). An id already
   registered on the perspective, by any connection, is refused with 409 and registers nothing
@@ -612,14 +610,14 @@ them against those two guards.
   bypass `events.watch`), and `ws_rpc::serve` ends them when the socket closes, and again as each
   call still in flight ends (a late subscribe). No keepalive; subscribing without a connection
   (REST) is a 400.
-- Opening a live query (the methods registered `.opens()`: `subscribeQuery` / `modelSubscribe`,
+- Opening a live query (the method registered `.opens()`: `subscribe`,
   generated into `OPENS_METHODS`) is the one kind of call that a socket close cancels (its
   `cancel_token` is a child of `Connection::closed`); every other call still finishes after the
   close. One connection runs at most `MAX_OPENING_LIVE_QUERIES` (8) of these opens at once, and
   the rest wait, cancellably. A subscribe cancelled before its reply unregisters its query again
   (`open_subscription`), and one whose open completed in the same poll as the cancel disposes it
   (`perspectives_ws::subscribed` checks the token). Cancelling cannot stop a SPARQL statement
-  that is already running: it stops at the next await, and the plain `subscribeQuery` first
+  that is already running: it stops at the next await, and a SPARQL `subscribe` first
   result has none (#1595). The SDK cancels an `OPENS_METHODS` call that timed out or was
   aborted, then disposes its id (`PerspectiveClient`): `request.cancel` is handled inline, before
   the dispose is dispatched, so whichever wins, nothing stays registered.

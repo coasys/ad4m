@@ -533,12 +533,8 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ("perspective.queryProlog", || json!({ "query": "true." })),
     ("perspective.querySparql", || json!({ "query": "ASK {}" })),
     (
-        "perspective.subscribeQuery",
-        || json!({ "query": "true.", "subscriptionId": "s" }),
-    ),
-    (
-        "perspective.subscribeSparql",
-        || json!({ "query": "ASK {}" }),
+        "perspective.subscribe",
+        || json!({ "sparql": "ASK {}", "subscriptionId": "s" }),
     ),
     (
         "perspective.resyncSubscription",
@@ -549,20 +545,12 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "subscriptionId": "s" }),
     ),
     (
-        "perspective.disposeSparql",
-        || json!({ "subscriptionId": "s" }),
-    ),
-    (
         "perspective.getSubjectData",
         || json!({ "subjectClass": "C", "expressionAddress": "e" }),
     ),
     (
         "perspective.modelQuery",
         || json!({ "class_name": "C", "query_json": "{}" }),
-    ),
-    (
-        "perspective.modelSubscribe",
-        || json!({ "class_name": "C", "query_json": "{}", "subscriptionId": "s" }),
     ),
     (
         "perspective.evaluateGetters",
