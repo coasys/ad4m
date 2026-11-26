@@ -254,10 +254,13 @@ trend page. The full contract is the header of `scripts/perf/perf.mjs`.
   - `coasys-spaces`: WE's journeys write `$PERF_RESULTS_DIR/coasys-spaces.json`
     (the person's waits in calls, transcript, interpretation and the canvas;
     WE `apps/we-web/e2e/coasys-spaces/README.md`, "Timings"), with params
-    `{tier, …models}`. `scripts/coasys-spaces.sh we-sha` prints the tested WE
-    commit, and the job puts it in `WE_SHA`, so each record names both commits.
-    A passed run with no metrics fails `record`: the WE ref must include the
-    timings (we#578).
+    `{tier, …models}`. `scripts/coasys-spaces.sh perf <dir>` prints
+    `export WE_SHA=<sha>` for the tested WE commit, so each record names both
+    commits. The run of a checkout with changes is recorded as not passed, as
+    the commit pair is not recorded for preflight. The pair is recorded only
+    after the performance check, so a pair that regressed runs again. A passed
+    run with no metrics fails `record`: the WE ref must include the timings
+    (we#578).
 - A new nightly measurement writes a results JSON file (`{"metrics": [...]}`)
   into `$PERF_RESULTS_DIR`. Wrap the job's tests in `perf_setup` and
   `perf_finish` (`.circleci/config.yml`).

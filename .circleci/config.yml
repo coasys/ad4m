@@ -1531,20 +1531,23 @@ jobs:
           name: Run the coasys-spaces suite (WE test:spaces)
           command: bash scripts/coasys-spaces.sh test
           no_output_timeout: 60m
-      - run:
-          name: Record this commit pair as passed
-          command: bash scripts/coasys-spaces.sh record
       - perf_finish:
           job: coasys-spaces
           collect:
             - run:
                 # The numbers are WE's code as much as ad4m's: the record names the WE commit
-                # the suite ran (none when the job failed before WE was cloned).
+                # the suite ran (none when the job failed before WE was cloned). A changed
+                # checkout's run is not recorded as passed.
                 name: Perf history - the tested WE commit
                 when: always
                 command: |
-                  we_sha="$(bash scripts/coasys-spaces.sh we-sha 2>/dev/null || true)"
-                  if [ -n "$we_sha" ]; then echo "export WE_SHA=$we_sha" >> "$BASH_ENV"; fi
+                  if [ -d "${PERF_RESULTS_DIR:-}" ]; then
+                    bash scripts/coasys-spaces.sh perf "$PERF_RESULTS_DIR" >> "$BASH_ENV"
+                  fi
+      - run:
+          # After the performance check: a pair that regressed runs again the next night.
+          name: Record this commit pair as passed
+          command: bash scripts/coasys-spaces.sh record
       - store_artifacts:
           when: always
           path: /tmp/coasys-spaces-artifacts
