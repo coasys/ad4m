@@ -92,6 +92,7 @@ export type { SetLogFilterParams } from "./SetLogFilterParams";
 export type { Pinned } from "./Pinned";
 export type { RefusalReason } from "./RefusalReason";
 export type { RuntimeConfig } from "./RuntimeConfig";
+export type { RuntimeImportPerspectiveResult } from "./RuntimeImportPerspectiveResult";
 export type { SetConfigParams } from "./SetConfigParams";
 export type { SetConfigResult } from "./SetConfigResult";
 export type { AiCapability } from "./AiCapability";
