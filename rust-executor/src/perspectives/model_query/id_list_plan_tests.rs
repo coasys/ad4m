@@ -1,4 +1,5 @@
-//! A read by a list of ids seeks each id, however long the list is.
+//! A read by a list of ids seeks each id, however long the list is, when every id is an IRI. An id
+//! that is not (a bare string) is matched by its text instead, and that read still scans.
 //!
 //! The instance query used to bind the shape's predicates with
 //! `VALUES ?predicate`. Oxigraph orders joins greedily from the pattern it
@@ -47,8 +48,15 @@ fn signed(signer: &TestSigner, source: &str, predicate: &str, target: &str) -> L
     l
 }
 
-async fn fastest(store: &SparqlStore, query: Value, expect: usize) -> Duration {
+/// The fastest of five runs of `query`, each checked to answer the notes numbered `expect`, each
+/// with its own title, and no other.
+async fn fastest(store: &SparqlStore, query: Value, expect: &[u32]) -> Duration {
     let input: ModelQueryInput = serde_json::from_value(query).unwrap();
+    let mut wanted: Vec<(String, String)> = expect
+        .iter()
+        .map(|i| (format!("idl://note/{i}"), format!("t{i}")))
+        .collect();
+    wanted.sort();
     let mut best = Duration::MAX;
     for _ in 0..5 {
         let started = Instant::now();
@@ -56,10 +64,18 @@ async fn fastest(store: &SparqlStore, query: Value, expect: usize) -> Duration {
             .await
             .unwrap();
         best = best.min(started.elapsed());
-        assert_eq!(got.instances.len(), expect);
-        for inst in &got.instances {
-            assert!(inst["title"].is_string(), "{inst}");
-        }
+        let mut answered: Vec<(String, String)> = got
+            .instances
+            .iter()
+            .map(|inst| {
+                (
+                    inst["id"].as_str().unwrap_or_default().to_string(),
+                    inst["title"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect();
+        answered.sort();
+        assert_eq!(answered, wanted);
     }
     best
 }
@@ -79,9 +95,11 @@ async fn test_perf_id_list_read_seeks_each_id() {
         }
     }
 
-    let ids: Vec<String> = (0..40).map(|i| format!("idl://note/{}", i * 7)).collect();
-    let by_ids = fastest(&store, json!({ "where": { "id": ids } }), 40).await;
-    let whole = fastest(&store, json!({}), INSTANCES as usize).await;
+    let picked: Vec<u32> = (0..40).map(|i| i * 7).collect();
+    let ids: Vec<String> = picked.iter().map(|i| format!("idl://note/{i}")).collect();
+    let by_ids = fastest(&store, json!({ "where": { "id": ids } }), &picked).await;
+    let all: Vec<u32> = (0..INSTANCES).collect();
+    let whole = fastest(&store, json!({}), &all).await;
     eprintln!("40 ids: {by_ids:?}, whole class of {INSTANCES}: {whole:?}");
     assert!(
         by_ids * 10 < whole,
