@@ -65,6 +65,25 @@ it in older docs.
   gets no event until it sends `events.watch` naming it, so a raw-WebSocket test
   client must send the watch and wait for its reply before it triggers the
   event (see `tests/js/helpers/sfu/events.ts`).
+- **Tests wait for a signal, never for time.** Do not put a fixed sleep before
+  an assertion or before the action that a test triggers. A sleep costs its
+  whole length on every run, and on a slow CI machine it can still be too
+  short. Wait for the signal that the state is ready instead:
+  - an event, a callback, or the reply of the call that set the state up
+    (the `events.watch` reply; a subscribe reply, because the executor
+    registers the subscription before it computes the first result);
+  - when no signal exists, a poll of the condition at a short interval (about
+    100 ms or less). A timeout is only the bound at which the test fails;
+  - to prove that something did not happen, a sentinel: after the action,
+    cause an event on the same channel that must arrive, wait for it, then
+    check that the other event did not arrive. This holds only where that
+    channel keeps the order of its events;
+  - for code that waits on time itself (a deadline, a debounce, a stale
+    bound), a test override for that duration, a paused tokio clock
+    (`#[tokio::test(start_paused = true)]`) or fake timers (`jest.useFakeTimers`, `vi.useFakeTimers`).
+    Do not pause the tokio clock in a test that talks to a real language
+    runtime thread: that thread has its own clock, and the test's clock
+    advances while it waits on the thread.
 - `connect/` tests (vitest + happy-dom) fail under Node 26 (`localStorage.clear`
   undefined); run them under Node 24.
 
@@ -114,8 +133,8 @@ so the same file runs on both link languages.
 
 A pipeline with `run-nightly-llm: true` runs only this workflow, on `coasys/marvin`.
 Each job has its own serial group. The jobs: `llm-e2e`,
-`integration-tests-sfu`, `integration-tests-sfu-browsers` (see below) and
-`coasys-spaces`.
+`integration-tests-sfu`, `integration-tests-sfu-browsers` (see below),
+`coasys-spaces`, `integration-tests-agent-harness` and `feed-scale`.
 
 `llm-e2e` runs the ignored Rust interpretation suites and the JS suites gated
 by `LLM_E2E=1`. It does not start a model server. It prompts staging's
@@ -169,6 +188,51 @@ server named by `COASYS_SPACES_LLM_*` (the nightly job uses staging's
 llama-server). `COASYS_SPACES_TIER=stub` needs no model. `bash
 scripts/coasys-spaces.test.sh` tests the script.
 
+`feed-scale` measures WE's Feed in a space with a million messages
+(`pnpm --filter @we/app-web test:feed-scale`, WE `apps/we-web/e2e/feed-scale/`).
+It needs no model and no GPU, and has its own serial group, `nightly-feed-scale`.
+
+- The suite seeds `FEED_SCALE_MESSAGES` (1000000) TextBlock messages, 12 links each.
+  It generates every link already signed by the message's author (one of 40 seed
+  agents; the Feed shows its author and time) into one file, on all cores, and loads the
+  file into the space's perspective with `runtime.importData` (`type: "perspective"`,
+  Oxigraph's bulk loader, one commit; nothing goes to the link language). The import
+  only adds links new to the perspective: it refuses the whole file (a 400) if a link is
+  already stored, repeats in the file, or is ended by a tombstone in the file (a tombstone
+  that ends a link of the file, or a link the store holds, refuses it too). A link that a
+  tombstone already in the store ended is not loaded and counts as `covered`; the same
+  link twice in the file is refused. The import takes the perspective's `persist_lock`,
+  so it lands before or after a diff's write, never between. Then WE web opens the
+  space in Chromium five times (cold, then warm) and loads the newest page and one
+  older page. The links file (~6 GB at a million) lives in the data dir, beside the
+  store.
+- WE registers an auto-processor for the space's own collection when the space opens
+  (`we-call-<collection>`, intended behaviour). The suite removes it for the seeding
+  only, which is setup. The app registers it again for the loads, and the job measures
+  its cost: `executor.cpu_seconds.ui_phase` (the executor's CPU over the loads) and
+  `executor.idle_cpu_percent.after_ui` (idle with the watch on). A fix to the
+  auto-processor's tick shows in these two.
+- It writes `metrics.json` (metrics in the performance-history record format, job
+  `feed-scale`, params `{"messages": N}`; the failure counts and
+  `executor.cpu_seconds.ui_phase` add `"loads": L`, the number of loads, so a run with
+  another number of loads makes its own series) and `results.json` (the same, with the
+  per-call detail). The `perf` step gives `metrics.json` to `scripts/perf/record`,
+  draws the trend page with `scripts/perf/report`, and for a passed run asks
+  `scripts/perf/check` for the verdict, by the `feed-scale` rules in
+  `scripts/perf/thresholds.json`. The records and the trend page are in the artifacts
+  under `feed-scale/perf/`.
+- The executor, SDK, WE and we-web steps are `coasys-spaces.sh`'s, run in
+  `~/.cache/ad4m-ci/feed-scale`. The executor's data goes there too, not to /tmp
+  (a shared tmpfs): a million messages take tens of GB.
+- It halts green when the same ad4m commit, WE commit and size were already measured
+  (`~/.local/state/ad4m-ci/feed-scale/last-success`; `FEED_SCALE_FORCE=1` runs anyway).
+  Results, logs and failure screenshots are under the job's artifacts, `feed-scale/`. The
+  job log ends with the suite's summary line.
+
+`bash scripts/feed-scale.sh all` runs the whole job by hand
+(`FEED_SCALE_MESSAGES=10000` for a short run). `bash scripts/feed-scale.test.sh` tests the
+script.
+
 To run the workflow by hand on a branch, with another WE ref (the definition id
 is in Project Settings → Pipelines):
 
@@ -180,7 +244,65 @@ curl -X POST https://circleci.com/api/v2/project/circleci/VRkXSnZDyBKHhkHKBHTmLj
        "parameters": {"run-nightly-llm": true, "we-ref": "<WE branch>"}}'
 ```
 
-This runs all four nightly jobs.
+This runs all six nightly jobs.
+
+### Nightly performance history (`scripts/perf/`)
+
+`integration-tests-sfu` and `llm-e2e` record their numbers on every run (passed
+or failed), fail on a serious regression against their own history, and draw a
+trend page. The full contract is the header of `scripts/perf/perf.mjs`.
+
+- **The history is a git repository**: folder `nightly/` on branch `main` of
+  `coasys/ad4m-wind-tunnel`. `nightly/<job>.jsonl` holds one line per metric per
+  run, `nightly/<job>.checks.jsonl` one verdict per check. Both are append-only.
+  `record` commits `perf(<job>): <sha9> <run_at>` in a fresh shallow clone
+  (`$TMPDIR/ad4m-perf-history-<job>-*`, removed when the command ends), and
+  pushes. When another run pushed first, it fetches, puts its lines on the new
+  head and pushes again, up to 5 times. git runs with hooks off and its own ssh
+  command (no `~/.ssh/config`): the runner also runs PR jobs, so nothing of the
+  history, and not the key, stays on it. `scripts/perf/history-key` moves the
+  key out of `~/.ssh` (`perf_history_key`) and deletes it, by fixed paths, with
+  any clone left (`perf_history_cleanup`, the end of `perf_finish`). A job with
+  its own record step calls those two commands. Env: `PERF_HISTORY_REPO`, `PERF_HISTORY_BRANCH`,
+  `PERF_HISTORY_SUBDIR`, `PERF_HISTORY_SSH_KEY`.
+- **The default repository is written only when `CI=true`.** For a local run,
+  set `PERF_HISTORY_REPO` to a local bare repo. Never push test runs to the
+  real history.
+- **The push key.** CI pushes with a write deploy key on the wind-tunnel repo.
+  Add it in Project Settings → SSH Keys → Additional SSH Keys (hostname
+  `github.com`), and put its fingerprint in the pipeline parameter
+  `perf-history-key-fingerprint`. If the key is missing or a push fails, the job
+  does not fail. `record` prints `history not pushed: <reason>`, and the records
+  stay in the job's artifacts (`perf/records.jsonl`). A `check` that cannot read
+  the history only reports.
+- **`check`** fails the job when a value is worse than 1.5× the median of the
+  last 7 passing runs with the same job, metric and params. Per-metric limits
+  (factor, min_delta, an absolute ceiling or floor) live only in
+  `scripts/perf/thresholds.json`; a ceiling or floor fails at any history. With fewer than 3 earlier
+  runs it only reports. Values with different `params` (such as another LLM
+  model) never compare. A regressed run stays out of later baselines.
+  `scripts/perf/check --job J --accept <run_id>` takes it as the new normal: it
+  resets the baseline, so later runs compare only with it and the runs after it.
+- **What each job measures.**
+  - `integration-tests-sfu`: every scenario writes `$PERF_RESULTS_DIR/sfu-<id>.json`
+    (`tests/js/helpers/sfu/perf.ts`), and the step adds `sfu.suite.duration_ms`.
+  - `llm-e2e`: raw logs go to `$PERF_RESULTS_DIR/raw`:
+    - the Rust tests through `scripts/perf/libtest-timer.mjs`;
+    - mocha through `PERF_MOCHA_LOG` (`tests/js/utils/perfMochaHooks.ts`);
+    - each step's output as `<suite>.log`, where the executor logs every prompt
+      (`✅ 🤖 prompt done ... latency=…ms tokens_out=…` at info, `❌ 🤖 prompt
+      failed` at error, `rust_executor::ai_service`). The Rust step sets
+      `RUST_LOG=warn,rust_executor::ai_service=info` (its tests default to warn).
+
+    `scripts/perf/llm-e2e-results.mjs` turns them into metrics (calls, failures,
+    latency, output tokens/s), with params `{model}`.
+- A new nightly measurement writes a results JSON file (`{"metrics": [...]}`)
+  into `$PERF_RESULTS_DIR`. Wrap the job's tests in `perf_setup` and
+  `perf_finish` (`.circleci/config.yml`).
+- **Tests**: run `pnpm run test-perf-unit` in `tests/js`. It runs mocha for
+  `sfu-perf.unit.test.ts` and `node --test 'scripts/perf/*.test.mjs'`. The git
+  tests push only to bare repos in a temp directory. The `js-unit-tests` CI job
+  runs them.
 
 ### SFU wind tunnel
 

@@ -45,8 +45,8 @@ describe("NeighbourhoodClient signal routing", () => {
 
     const receivedA: PerspectiveExpression[] = [];
     const receivedB: PerspectiveExpression[] = [];
-    await client.addSignalHandler("uuid-A", (s) => { receivedA.push(s) });
-    await client.addSignalHandler("uuid-B", (s) => { receivedB.push(s) });
+    client.addSignalHandler("uuid-A", (s) => { receivedA.push(s) });
+    client.addSignalHandler("uuid-B", (s) => { receivedB.push(s) });
     expect(api.watchedEvents()).toEqual({ signal: ["uuid-A", "uuid-B"] });
 
     FakeWebSocket.last.push(signalEvent("uuid-A"));

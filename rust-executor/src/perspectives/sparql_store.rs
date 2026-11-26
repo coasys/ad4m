@@ -12,6 +12,7 @@ use oxigraph::sparql::{QueryResults, SparqlEvaluator};
 use oxigraph::store::{Store, StoreOptions, Transaction};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -858,6 +859,13 @@ enum ProofWrite {
 
 /// Generate a deterministic reifier IRI from link data + timestamp.
 fn make_reifier_iri(link: &LinkExpression) -> NamedNode {
+    reifier_with_key(link).0
+}
+
+/// [`make_reifier_iri`] plus a compact dedup key: the first eight bytes of
+/// the same hash the IRI encodes. The import's seen-set works on keys —
+/// 12M of them stay small where 12M IRIs would not.
+fn reifier_with_key(link: &LinkExpression) -> (NamedNode, u64) {
     // Hash the *normalized* storage-term form of the target, not the raw
     // wire string. `literal:json:` targets are canonicalized before storage
     // (see `target_to_storage_term`), so two callers describing the same
@@ -880,8 +888,12 @@ fn make_reifier_iri(link: &LinkExpression) -> NamedNode {
     hasher.update(link.data.predicate.as_deref().unwrap_or("").as_bytes());
     hasher.update(normalized_target.as_bytes());
     hasher.update(link.timestamp.as_bytes());
-    let hash = hex::encode(hasher.finalize());
-    NamedNode::new_unchecked(format!("link:{}", &hash[..32]))
+    let hash = hasher.finalize();
+    let key = u64::from_be_bytes(hash[..8].try_into().unwrap());
+    (
+        NamedNode::new_unchecked(format!("link:{}", &hex::encode(hash)[..32])),
+        key,
+    )
 }
 
 /// The node of the receipt of a signed statement: a hash of the proof's key and signature,
@@ -929,16 +941,18 @@ fn receive(
     if !link.signature_holds() {
         return Ok(None);
     }
-    let receipt = receipt_iri(&link.proof);
-    let graph = NamedNodeRef::new_unchecked(RECEIPTS_GRAPH);
-    let time = literal(&now.to_string());
-    tx.insert(QuadRef::new(
-        receipt.as_ref(),
-        NamedNodeRef::new_unchecked(ONT_RECEIVED_AT),
-        TermRef::Literal(time.as_ref()),
-        GraphNameRef::NamedNode(graph),
-    ));
+    tx.insert(receipt_quad(&link.proof, now).as_ref());
     Ok(Some(now))
+}
+
+/// The quad that records `proof`'s receipt at `now` (unix ms), in [`RECEIPTS_GRAPH`].
+fn receipt_quad(proof: &ExpressionProof, now: u64) -> Quad {
+    Quad::new(
+        receipt_iri(proof),
+        NamedNode::new_unchecked(ONT_RECEIVED_AT),
+        literal(&now.to_string()),
+        GraphName::NamedNode(NamedNode::new_unchecked(RECEIPTS_GRAPH)),
+    )
 }
 
 /// Build the direct triple `(source, predicate, target)` for a link.
@@ -1135,6 +1149,135 @@ fn remove_link_quads(tx: &mut Transaction<'_>, link: &LinkExpression) -> Result<
     Ok(())
 }
 
+/// The storage footprint of a link write: the quads it stores, and the
+/// reifier's annotation predicates whose stored values the write clears
+/// first. `clears` may name a predicate the write carries no value for —
+/// that erases a stale annotation, as `wireTarget` after a canonical
+/// re-encoding.
+struct LinkWrite {
+    /// The reifier node every annotation quad sits on; `clears` deletes
+    /// are scoped to it.
+    reifier: NamedNode,
+    quads: Vec<Quad>,
+    clears: Vec<&'static str>,
+}
+
+/// What the store judged of a link's proof: the verdict from its signature
+/// and the signer's key log, never from the caller. `valid` is what
+/// `proofValid` records, `verdict` the stored verdict, `person` the person
+/// the signer stands for. `keep`: the reifier's stored judgement stays
+/// (a `valid` is not replaced by `cantCheck`), so none is written.
+struct Judgement {
+    valid: bool,
+    verdict: String,
+    person: Option<String>,
+    keep: bool,
+}
+
+/// The quads of `link` stored with `status`: the direct triple, its
+/// reifier, and the reifier's annotations as `write` ([`ProofWrite`])
+/// allows, with `judgement` as the proof's verdict. The caller judges once
+/// ([`LinkExpression::check_entered`]) because `proof_write` already needs
+/// the result. Shared by the transactional writer
+/// [`write_link_quads_proof`] and the bulk-load import
+/// [`SparqlStore::import_links_file`], which always builds a
+/// [`ProofWrite::Whole`] write — the quads of a link new to the store.
+fn link_quads(
+    link: &LinkExpression,
+    reifier_iri: NamedNode,
+    status: &LinkStatus,
+    judgement: &Judgement,
+    write: ProofWrite,
+) -> Result<LinkWrite, Error> {
+    let (source_iri, predicate_iri, target_term) = make_direct_triple(link);
+
+    // 1. Direct triple in default graph. `target_term` may be a typed
+    //    literal (for `literal:*` wire values) or a NamedNode.
+    if matches!(target_term, Term::Triple(_)) {
+        return Err(anyhow!(
+            "Triple-shaped target is not supported in link storage"
+        ));
+    }
+
+    // 2. Reifier: <link:HASH> rdf:reifies <<( source predicate target )>>
+    //    Triple's object position accepts any Term, so a typed literal
+    //    target reifies the same way a NamedNode target does.
+    let triple_term = Triple::new(
+        source_iri.clone(),
+        predicate_iri.clone(),
+        target_term.clone(),
+    );
+
+    // 3. Metadata on the reifier node (all default graph)
+    let proof = &link.proof;
+    let valid_str = judgement.valid.to_string();
+    let anchor_str = proof.anchor.map(|a| a.to_string());
+    let wire_target = signed_target_annotation(link, &target_term);
+
+    // `None` writes nothing, after clearing a stale value: a proof written
+    // with a canonical target must not keep the wire target of an earlier
+    // encoding, nor one without an anchor the anchor of an earlier proof.
+    let mut annotations: Vec<(&str, Option<&str>)> = vec![
+        (ONT_AUTHOR, Some(&link.author)),
+        (ONT_TIMESTAMP, Some(&link.timestamp)),
+        (ONT_STATUS, Some(status_str(status))),
+    ];
+    let judged = if judgement.keep {
+        vec![]
+    } else {
+        vec![
+            (ONT_PROOF_VALID, Some(valid_str.as_str())),
+            (ONT_LINK_VERDICT, Some(judgement.verdict.as_str())),
+            (ONT_PERSON, judgement.person.as_deref()),
+        ]
+    };
+    match write {
+        ProofWrite::Whole => {
+            annotations.extend([
+                (ONT_PROOF_KEY, Some(proof.key.as_str())),
+                (ONT_PROOF_SIG, Some(proof.signature.as_str())),
+                (ONT_PROOF_ANCHOR, anchor_str.as_deref()),
+                (ONT_WIRE_TARGET, wire_target.as_deref()),
+            ]);
+            annotations.extend(judged);
+        }
+        ProofWrite::Rejudge => annotations.extend(judged),
+        ProofWrite::WireTargetOnly => annotations.push((ONT_WIRE_TARGET, wire_target.as_deref())),
+        ProofWrite::Nothing => {}
+    }
+
+    let mut quads = Vec::with_capacity(2 + annotations.len());
+    quads.push(Quad::new(
+        source_iri,
+        predicate_iri,
+        target_term,
+        GraphName::DefaultGraph,
+    ));
+    quads.push(Quad::new(
+        reifier_iri.clone(),
+        NamedNode::new_unchecked(RDF_REIFIES),
+        triple_term,
+        GraphName::DefaultGraph,
+    ));
+    let mut clears = Vec::with_capacity(annotations.len());
+    for (pred_uri, value) in annotations {
+        clears.push(pred_uri);
+        if let Some(value) = value {
+            quads.push(Quad::new(
+                reifier_iri.clone(),
+                NamedNode::new_unchecked(pred_uri),
+                literal(value),
+                GraphName::DefaultGraph,
+            ));
+        }
+    }
+    Ok(LinkWrite {
+        reifier: reifier_iri,
+        quads,
+        clears,
+    })
+}
+
 /// Write all quads of `link` with `status` in `tx`: the direct triple, its
 /// reifier, and the reifier's annotations, each replacing what the reifier
 /// held for it. The proof annotations are written as [`proof_write`] allows.
@@ -1165,46 +1308,7 @@ fn write_link_quads_proof(
     repair: bool,
     own: bool,
 ) -> Result<(), Error> {
-    let (source_iri, predicate_iri, target_term) = make_direct_triple(link);
     let reifier_iri = make_reifier_iri(link);
-
-    // 1. Direct triple in default graph. `target_term` may be a typed
-    //    literal (for `literal:*` wire values) or a NamedNode.
-    let target_ref: TermRef = match &target_term {
-        Term::NamedNode(n) => TermRef::NamedNode(n.as_ref()),
-        Term::Literal(l) => TermRef::Literal(l.as_ref()),
-        Term::BlankNode(b) => TermRef::BlankNode(b.as_ref()),
-        Term::Triple(_) => {
-            return Err(anyhow!(
-                "Triple-shaped target is not supported in link storage"
-            ));
-        }
-    };
-    tx.insert(QuadRef::new(
-        source_iri.as_ref(),
-        predicate_iri.as_ref(),
-        target_ref,
-        GraphNameRef::DefaultGraph,
-    ));
-
-    // 2. Reifier: <link:HASH> rdf:reifies <<( source predicate target )>>
-    //    Triple's object position accepts any Term, so a typed literal
-    //    target reifies the same way a NamedNode target does.
-    let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
-    let triple_term = Triple::new(
-        source_iri.clone(),
-        predicate_iri.clone(),
-        target_term.clone(),
-    );
-    tx.insert(QuadRef::new(
-        reifier_iri.as_ref(),
-        rdf_reifies,
-        TermRef::Triple(&triple_term),
-        GraphNameRef::DefaultGraph,
-    ));
-
-    // 3. Metadata on the reifier node (all default graph)
-    let proof = &link.proof;
 
     // The verdict is a read view over the signature and the signer's log: always
     // compute it here (the key map answers without I/O), never trust the caller's
@@ -1233,70 +1337,42 @@ fn write_link_quads_proof(
     // A stored `valid` is not replaced by `cantCheck` ([`replaces`]): the stored judgement
     // (`proofValid`, the verdict, the person) stays as it is, and with it the order above.
     let stored = counted_before.then_some(LinkVerdict::Valid);
-    let keep_judgement = !replaces(stored.as_ref(), &checked.verdict);
-    let incoming_valid = checked.verdict.counts();
-    let valid_str = incoming_valid.to_string();
-    let verdict_str = checked.verdict.stored();
-    let anchor_str = proof.anchor.map(|a| a.to_string());
+    let judgement = Judgement {
+        keep: !replaces(stored.as_ref(), &checked.verdict),
+        valid: checked.verdict.counts(),
+        verdict: checked.verdict.stored(),
+        person: checked.person,
+    };
 
-    let wire_target = signed_target_annotation(link, &target_term);
-
-    // `None` writes nothing, after clearing a stale value: a proof written
-    // with a canonical target must not keep the wire target of an earlier
-    // encoding, nor one without an anchor the anchor of an earlier proof.
-    let mut annotations: Vec<(&str, Option<&str>)> = vec![
-        (ONT_AUTHOR, Some(&link.author)),
-        (ONT_TIMESTAMP, Some(&link.timestamp)),
-        (ONT_STATUS, Some(status_str(status))),
-    ];
+    let wire_target = signed_target_annotation(link, &make_direct_triple(link).2);
     let write = if repair {
         ProofWrite::Whole
     } else {
         proof_write(
             tx,
             &reifier_iri,
-            incoming_valid,
-            proof,
+            judgement.valid,
+            &link.proof,
             wire_target.as_deref(),
         )?
     };
-    let judgement = if keep_judgement {
-        vec![]
-    } else {
-        vec![
-            (ONT_PROOF_VALID, Some(valid_str.as_str())),
-            (ONT_LINK_VERDICT, Some(verdict_str.as_str())),
-            (ONT_PERSON, checked.person.as_deref()),
-        ]
-    };
-    match write {
-        ProofWrite::Whole => {
-            annotations.extend([
-                (ONT_PROOF_KEY, Some(proof.key.as_str())),
-                (ONT_PROOF_SIG, Some(proof.signature.as_str())),
-                (ONT_PROOF_ANCHOR, anchor_str.as_deref()),
-                (ONT_WIRE_TARGET, wire_target.as_deref()),
-            ]);
-            annotations.extend(judgement);
-        }
-        ProofWrite::Rejudge => annotations.extend(judgement),
-        ProofWrite::WireTargetOnly => annotations.push((ONT_WIRE_TARGET, wire_target.as_deref())),
-        ProofWrite::Nothing => {}
-    }
+    let LinkWrite {
+        reifier,
+        quads,
+        clears,
+    } = link_quads(link, reifier_iri, status, &judgement, write)?;
 
-    for (pred_uri, value) in &annotations {
-        let pred = NamedNodeRef::new_unchecked(pred_uri);
-
-        // Delete before insert. `make_reifier_iri` hashes author, source,
-        // predicate, target and timestamp — not the proof — so an upgraded
-        // proof lands on the same reifier as the one it replaces. Without
-        // the delete the old annotation stays alongside the new one, and
-        // the `OPTIONAL { ?reifier <proofValid> ?proofValid }` in
-        // `query_links` matches both quads and returns the link twice.
+    // Delete before insert. `make_reifier_iri` hashes author, source,
+    // predicate, target and timestamp — not the proof — so an upgraded
+    // proof lands on the same reifier as the one it replaces. Without
+    // the delete the old annotation stays alongside the new one, and
+    // the `OPTIONAL { ?reifier <proofValid> ?proofValid }` in
+    // `query_links` matches both quads and returns the link twice.
+    for pred_uri in clears {
         let stale: Vec<_> = tx
             .quads_for_pattern(
-                Some(reifier_iri.as_ref().into()),
-                Some(pred),
+                Some(reifier.as_ref().into()),
+                Some(NamedNodeRef::new_unchecked(pred_uri)),
                 None,
                 Some(GraphNameRef::DefaultGraph),
             )
@@ -1304,15 +1380,9 @@ fn write_link_quads_proof(
         for quad in &stale {
             tx.remove(quad);
         }
-
-        let Some(value) = value else { continue };
-        let lit = literal(value);
-        tx.insert(QuadRef::new(
-            reifier_iri.as_ref(),
-            pred,
-            TermRef::Literal(lit.as_ref()),
-            GraphNameRef::DefaultGraph,
-        ));
+    }
+    for quad in &quads {
+        tx.insert(quad.as_ref());
     }
     Ok(())
 }
@@ -1561,6 +1631,709 @@ pub fn reifier_of(link: &DecoratedLinkExpression) -> String {
     make_reifier_iri(&LinkExpression::from(link.clone()))
         .as_str()
         .to_string()
+}
+
+/// Why an import refused the file: the file is at fault (malformed, not an
+/// export, a link it may not carry), not the store or the disk. A caller
+/// finds it with `downcast_ref` to answer with a request error rather than a
+/// server one.
+#[derive(Debug)]
+pub struct ImportRefused(pub String);
+
+impl std::fmt::Display for ImportRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ImportRefused {}
+
+/// `anyhow!` for a refusal of the file ([`ImportRefused`]).
+macro_rules! import_refused {
+    ($($arg:tt)*) => {
+        Error::new(ImportRefused(format!($($arg)*)))
+    };
+}
+
+/// A file import's counters ([`SparqlStore::import_links_file`]).
+#[derive(Debug, Default)]
+pub struct LinkImportStats {
+    /// Links the load wrote. A link a stored tombstone ended is not
+    /// counted (see `covered`).
+    pub imported: usize,
+    /// Links a tombstone the store already held ends, as `ended_by_stored`
+    /// decides on the write path: not written.
+    pub covered: usize,
+    /// Links refused: in the store's own metadata vocabulary
+    /// ([`is_link_metadata`]).
+    pub skipped: usize,
+}
+
+/// What the [`ElementScan`] expects next inside the `"links"` array, at
+/// the level between elements.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ElementPos {
+    /// Just after `[`: an element's `{` or the array's `]` is next.
+    Open,
+    /// Just after `,`: an element's `{` is next (`]` would be a
+    /// trailing comma, `"` or `,` a malformed token).
+    Comma,
+    /// Just after an element: `,` or `]` is next.
+    Element,
+}
+
+/// Where the [`ElementScan`] stands in the document grammar — exactly
+/// `{ "links" : [ element, ... ] }`, whitespace anywhere between the
+/// tokens and after the closing `}`, and nothing else.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DocPos {
+    /// Nothing read yet: the document's `{` is due.
+    Start,
+    /// The top-level object is open: the `"links"` member's key is due.
+    /// It is the only member the document may have.
+    LinksKey,
+    /// The `"links"` key closed: `:` is due.
+    LinksColon,
+    /// The `:` was read: the links `[` is due.
+    LinksArray,
+    /// Inside the links array — between elements when
+    /// `depth == links_depth`, inside an element past it.
+    Links,
+    /// The links array closed: the document's `}` is due.
+    Close,
+    /// The `}` was read — the document is complete; only whitespace may
+    /// follow.
+    Sealed,
+}
+
+/// The longest raw spelling of the member name `links` in JSON: five
+/// `\uXXXX` escapes.
+const MAX_KEY_SPELLING: usize = 30;
+
+/// Whether the raw bytes between a key's quotes decode, as a JSON string,
+/// to `links` — `links` does, `l\inks` is no JSON string at all.
+fn key_spells_links(raw: &[u8]) -> bool {
+    if raw.len() > MAX_KEY_SPELLING {
+        return false;
+    }
+    let mut quoted = Vec::with_capacity(raw.len() + 2);
+    quoted.push(b'"');
+    quoted.extend_from_slice(raw);
+    quoted.push(b'"');
+    serde_json::from_slice::<String>(&quoted).is_ok_and(|key| key == "links")
+}
+
+/// A byte range inside one segment, as the `u32` pair a [`LinkSegment`]
+/// stores; `None` when an offset does not fit.
+fn element_range(start: usize, end: usize) -> Option<(u32, u32)> {
+    Some((u32::try_from(start).ok()?, u32::try_from(end).ok()?))
+}
+
+/// A resumable byte-walk over a perspective-export document — exactly
+/// `{"links":[ element, ... ]}` — that reports the byte range of every
+/// element in the `links` array, whatever the file's layout. Only
+/// structure is read — `{`, `}`, `[`, `]`, `,`, `:` and string bounds
+/// with their escapes — so a multi-gigabyte file scans in seconds, and
+/// each element's bytes go whole to a worker for the real parse.
+///
+/// The scan ends either `surprise` — a token that does not fit the one
+/// document shape: another top-level member before or after `links`, a
+/// non-object element, a stray closer, trailing garbage — or `sealed`:
+/// the closing `}` read with only whitespace after it. A file that
+/// stops short of either is refused — a truncated export must not
+/// import as a smaller perspective.
+struct ElementScan {
+    /// Inside a `"` … `"` token: every byte but an unescaped `"` is
+    /// string content.
+    in_string: bool,
+    /// The previous byte inside the string was a `\`.
+    escaped: bool,
+    /// The open string's bytes, collected while [`Self::collecting`].
+    key: Vec<u8>,
+    /// The open string sits where the document's one member's key is
+    /// due — it could spell `"links"`.
+    key_collect: bool,
+    /// Open `{`/`[` depth. The links array's elements are the tokens
+    /// found exactly at `links_depth`.
+    depth: usize,
+    /// The depth inside the `"links"` array once it opened, else 0.
+    links_depth: usize,
+    /// Where the document grammar stands ([`DocPos`]).
+    pos: DocPos,
+    /// What the links array's element level expects next ([`ElementPos`]).
+    epos: ElementPos,
+    /// The top-level object's closing `}` was read — the document is
+    /// complete; only whitespace may follow.
+    sealed: bool,
+    /// A token did not fit the export shape.
+    surprise: bool,
+    /// Offset, in the coordinates `feed` reports, where the still-open
+    /// element began.
+    element_start: Option<usize>,
+}
+
+impl ElementScan {
+    fn new() -> Self {
+        ElementScan {
+            in_string: false,
+            escaped: false,
+            key: Vec::new(),
+            key_collect: false,
+            depth: 0,
+            links_depth: 0,
+            pos: DocPos::Start,
+            epos: ElementPos::Open,
+            sealed: false,
+            surprise: false,
+            element_start: None,
+        }
+    }
+
+    /// The cursor sits between elements of the links array.
+    fn at_element_level(&self) -> bool {
+        self.pos == DocPos::Links && self.depth == self.links_depth
+    }
+
+    /// The cursor sits inside an open element — its own braces or
+    /// deeper — where every token is content.
+    fn inside_element(&self) -> bool {
+        self.pos == DocPos::Links && self.depth > self.links_depth
+    }
+
+    /// The open string's raw bytes (escapes included) still matter: it
+    /// sits where the `"links"` key is due and could yet spell it. The
+    /// longest spelling of `links` — each letter as a `\uXXXX` escape — is
+    /// [`MAX_KEY_SPELLING`] bytes; past that it cannot, and the rest is
+    /// skippable.
+    fn collecting(&self) -> bool {
+        self.key_collect && self.key.len() <= MAX_KEY_SPELLING
+    }
+
+    /// Scan `buf` — bytes appended to the carried remainder that `base`
+    /// counts — and report each complete element's `(start, end)` byte
+    /// range in the carried buffer's coordinates.
+    fn feed(&mut self, buf: &[u8], base: usize, out: &mut impl FnMut(usize, usize)) {
+        let mut i = 0;
+        while i < buf.len() {
+            if self.surprise {
+                return;
+            }
+            if self.in_string {
+                if self.escaped {
+                    self.escaped = false;
+                    if self.collecting() {
+                        self.key.push(buf[i]);
+                    }
+                    i += 1;
+                    continue;
+                }
+                if self.collecting() {
+                    match buf[i] {
+                        b'\\' => {
+                            self.escaped = true;
+                            self.key.push(b'\\');
+                        }
+                        b'"' => {
+                            self.in_string = false;
+                            self.string_closed();
+                        }
+                        b => self.key.push(b),
+                    }
+                    i += 1;
+                    continue;
+                }
+                match memchr::memchr2(b'"', b'\\', &buf[i..]) {
+                    Some(off) => {
+                        i += off;
+                        if buf[i] == b'\\' {
+                            self.escaped = true;
+                        } else {
+                            self.in_string = false;
+                            self.string_closed();
+                        }
+                        i += 1;
+                    }
+                    None => return,
+                }
+                continue;
+            }
+            if self.sealed {
+                // Past the closing `}` only whitespace may follow.
+                if !matches!(buf[i], b' ' | b'\t' | b'\n' | b'\r') {
+                    self.sealed = false;
+                    self.surprise = true;
+                    return;
+                }
+                i += 1;
+                continue;
+            }
+            match buf[i] {
+                b'"' => self.quote(),
+                b'{' | b'[' => self.open(buf[i], base + i),
+                b'}' | b']' => self.close(buf[i], base + i, out),
+                b':' => self.colon(),
+                b',' => self.comma(),
+                b' ' | b'\t' | b'\n' | b'\r' => {}
+                _ => self.other(),
+            }
+            i += 1;
+        }
+    }
+
+    /// A `"` opens a string where one is legal: the document's member
+    /// key ([`DocPos::LinksKey`]) or anywhere inside an element. Any
+    /// other position — an element that is not an object, a member
+    /// after `links` — does not fit.
+    fn quote(&mut self) {
+        self.in_string = true;
+        self.escaped = false;
+        self.key.clear();
+        self.key_collect = self.pos == DocPos::LinksKey;
+        if !self.key_collect && !self.inside_element() {
+            self.surprise = true;
+        }
+    }
+
+    fn open(&mut self, b: u8, at: usize) {
+        match self.pos {
+            DocPos::Start => {
+                if b == b'{' {
+                    self.pos = DocPos::LinksKey;
+                } else {
+                    self.surprise = true;
+                }
+            }
+            DocPos::LinksArray => {
+                if b == b'[' {
+                    // Elements of this array are found at `links_depth`.
+                    self.links_depth = self.depth + 1;
+                    self.pos = DocPos::Links;
+                    self.epos = ElementPos::Open;
+                } else {
+                    self.surprise = true;
+                }
+            }
+            DocPos::Links if self.at_element_level() => {
+                if b == b'{' && matches!(self.epos, ElementPos::Open | ElementPos::Comma) {
+                    self.element_start = Some(at);
+                    self.epos = ElementPos::Element;
+                } else {
+                    // A nested array cannot be a link.
+                    self.surprise = true;
+                }
+            }
+            DocPos::Links => {} // a `{` or `[` inside an element is content
+            _ => self.surprise = true,
+        }
+        self.depth += 1;
+    }
+
+    fn close(&mut self, b: u8, at: usize, out: &mut impl FnMut(usize, usize)) {
+        match self.pos {
+            DocPos::Links if self.at_element_level() => {
+                // A closer at the array's own level ends it: `]` where an
+                // element or the array's end was due. `]` right after `,`
+                // is a trailing comma; `}` here never fits.
+                if b == b']' && matches!(self.epos, ElementPos::Open | ElementPos::Element) {
+                    self.pos = DocPos::Close;
+                } else {
+                    self.surprise = true;
+                }
+            }
+            DocPos::Links if self.depth == self.links_depth + 1 => {
+                // The closer that returns to the array's level is the open
+                // element's own — whichever bracket it is; a wrong one just
+                // leaves malformed bytes for the worker's serde to report.
+                match self.element_start.take() {
+                    Some(start) => out(start, at + 1),
+                    None => self.surprise = true,
+                }
+            }
+            DocPos::Links => {} // a closer inside an element's nested value
+            DocPos::Close => {
+                if b == b'}' {
+                    self.sealed = true;
+                    self.pos = DocPos::Sealed;
+                } else {
+                    self.surprise = true;
+                }
+            }
+            _ => self.surprise = true,
+        }
+        self.depth = self.depth.saturating_sub(1);
+    }
+
+    fn colon(&mut self) {
+        match self.pos {
+            DocPos::LinksColon => self.pos = DocPos::LinksArray,
+            DocPos::Links if self.inside_element() => {} // a member's `:` in an element
+            _ => self.surprise = true,
+        }
+    }
+
+    fn comma(&mut self) {
+        match self.pos {
+            DocPos::Links if self.at_element_level() => {
+                if self.epos == ElementPos::Element {
+                    self.epos = ElementPos::Comma;
+                } else {
+                    // `[,` or `,,`.
+                    self.surprise = true;
+                }
+            }
+            DocPos::Links => {} // a `,` inside an element is content
+            // A `,` anywhere else — a member before or after `links` —
+            // does not fit the one-member document.
+            _ => self.surprise = true,
+        }
+    }
+
+    fn other(&mut self) {
+        if !self.inside_element() {
+            // A bare scalar is legal only inside an element — `"links":
+            // 5`, an element that is a number, a member's value after
+            // `links` never fit.
+            self.surprise = true;
+        }
+    }
+
+    fn string_closed(&mut self) {
+        if self.pos == DocPos::LinksKey {
+            if key_spells_links(&self.key) {
+                self.pos = DocPos::LinksColon;
+            } else {
+                // A member other than `links` does not fit.
+                self.surprise = true;
+            }
+        }
+    }
+}
+
+/// One worker's share of the export file: raw JSON `bytes` and the
+/// `(start, end)` byte range of each `"links"` element inside them.
+struct LinkSegment {
+    bytes: Vec<u8>,
+    elements: Vec<(u32, u32)>,
+}
+
+/// The raw bytes one import segment carries. ~13k links apiece, small
+/// enough that tens of segments in flight stay under half a gigabyte.
+const IMPORT_SEGMENT_BYTES: u64 = 8 << 20;
+
+/// Walk the export file in [`IMPORT_SEGMENT_BYTES`]-sized reads, scan
+/// each for complete elements of the `"links"` array and hand the file
+/// bytes plus their element ranges to `sink` as one segment. The bytes
+/// after the last complete element — separators, or an element still
+/// open — carry into the next segment, so a link can straddle a read
+/// boundary.
+///
+/// The returned [`ElementScan`] tells the caller whether the document is
+/// a whole export: `sealed`, or a `surprise` / unfinished file, which
+/// the import refuses — and how many segments were sent, so the loader
+/// can notice one lost to a dead worker. `Err` on I/O failure or a
+/// closed `sink`.
+fn segment_elements(
+    mut reader: impl std::io::Read,
+    sink: std::sync::mpsc::SyncSender<LinkSegment>,
+) -> Result<(ElementScan, u64), Error> {
+    use std::io::Read;
+    let mut scan = ElementScan::new();
+    // `bytes` is the carried remainder plus what this read appended; an
+    // element larger than a whole read simply grows it.
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut sent = 0u64;
+    loop {
+        let base = bytes.len();
+        let got = (&mut reader)
+            .take(IMPORT_SEGMENT_BYTES)
+            .read_to_end(&mut bytes)
+            .map_err(|e| anyhow!("Perspective import: failed to read the export file: {}", e))?;
+        let mut ranges = Vec::new();
+        let mut too_far = false;
+        scan.feed(
+            &bytes[base..],
+            base,
+            &mut |start, end| match element_range(start, end) {
+                Some(range) => ranges.push(range),
+                None => too_far = true,
+            },
+        );
+        if too_far {
+            // A truncated offset would be a reversed or wrong range: refuse the file.
+            return Err(import_refused!(
+                "Perspective import: a link element reaches past 4 GiB of one read"
+            ));
+        }
+        let carry_from = scan.element_start.unwrap_or(bytes.len());
+        if !ranges.is_empty() {
+            let segment = std::mem::take(&mut bytes);
+            bytes = segment[carry_from..].to_vec();
+            scan.element_start = scan.element_start.map(|_| 0);
+            if sink
+                .send(LinkSegment {
+                    bytes: segment,
+                    elements: ranges,
+                })
+                .is_err()
+            {
+                return Err(anyhow!("Perspective import: the load stopped early"));
+            }
+            sent += 1;
+        } else {
+            bytes.drain(..carry_from);
+            scan.element_start = scan.element_start.map(|_| 0);
+        }
+        if scan.surprise || got < IMPORT_SEGMENT_BYTES as usize {
+            return Ok((scan, sent));
+        }
+    }
+}
+
+/// One worker's share of the load: per element, what the loader thread
+/// does with it ([`ImportElement`]). The loader consumes segments as
+/// they arrive — the import's checks are order-independent.
+struct SegmentQuads {
+    elements: Vec<ImportElement>,
+}
+
+/// What the loader thread does with one element of the file, in
+/// [`ImportKind`]; `key` is the element's reifier dedup key
+/// ([`reifier_with_key`]), `at` its byte offset for the refusals, and
+/// `ends_key` — when the element is coverable (Shared under a
+/// retractable predicate) — the hash of the [`EndsKey`] a tombstone
+/// ending it would name: a file tombstone carrying the same key refuses
+/// the file.
+///
+/// [`EndsKey`]: crate::perspectives::monotonic::EndsKey
+struct ImportElement {
+    key: u64,
+    at: u32,
+    ends_key: Option<u64>,
+    kind: ImportKind,
+}
+
+/// How one element imports ([`ImportElement`]).
+enum ImportKind {
+    /// In the store's own metadata vocabulary: counted, never written.
+    Skipped,
+    /// A stored tombstone already ends it: counted, never written.
+    Covered,
+    /// New to the store and so far unique in the file: its bulk quads,
+    /// the link itself for the refusals, and — when the link is a valid
+    /// Shared tombstone — the hash of the [`EndsKey`] it names: a stored
+    /// or in-file link under that key refuses the file.
+    ///
+    /// [`EndsKey`]: crate::perspectives::monotonic::EndsKey
+    Bulk {
+        link: LinkExpression,
+        quads: Vec<Quad>,
+        names_key: Option<u64>,
+    },
+}
+
+/// Parse a segment's elements — `ranges` are their byte ranges inside
+/// `bytes` — and classify each for the loader ([`ImportKind`]).
+/// `serde_json::from_slice` per element runs on every worker at once; the
+/// signature verdict is computed only for a link that can bulk-load,
+/// exactly as `write_link_quads_proof` computes it. `store` reads the
+/// pre-load snapshot — the bulk loader's staged SSTs are invisible until
+/// commit — so a reifier or a retracted link found here was written
+/// before the file, never by it, and its presence refuses the file:
+/// an import adds links that are new to the perspective, it never
+/// merges or retracts. `ends_keys` is [`stored_tombstone_keys`]'s set.
+///
+/// [`stored_tombstone_keys`]: crate::perspectives::monotonic::stored_tombstone_keys
+fn build_segment_quads(
+    store: &SparqlStore,
+    ends_keys: &HashSet<u64>,
+    segment: &LinkSegment,
+) -> Result<SegmentQuads, Error> {
+    let mut out = Vec::with_capacity(segment.elements.len());
+    for &(start, end) in &segment.elements {
+        let decorated: DecoratedLinkExpression =
+            serde_json::from_slice(&segment.bytes[start as usize..end as usize]).map_err(|e| {
+                import_refused!(
+                    "Perspective import: malformed link at byte {}: {}",
+                    start,
+                    e
+                )
+            })?;
+        let mut link = LinkExpression::from(decorated);
+        let (reifier, key) = reifier_with_key(&link);
+        let kind;
+        let mut ends_key = None;
+        if is_link_metadata(link.data.predicate.as_deref().unwrap_or("")) {
+            kind = ImportKind::Skipped;
+        } else {
+            if link.status.is_none() {
+                link.status = Some(LinkStatus::Shared);
+            }
+            // The link's own `EndsKey` when a valid tombstone could end
+            // it — the in-file half of the tombstone check.
+            ends_key = crate::perspectives::monotonic::coverable(&link).then(|| {
+                crate::perspectives::monotonic::ends_key_hash(
+                    &crate::perspectives::monotonic::ends_key_of(&link),
+                )
+            });
+            kind = if crate::perspectives::monotonic::ended_by_stored(ends_keys, &link) {
+                ImportKind::Covered
+            } else if crate::perspectives::monotonic::tombstone_ends_stored(store, &link)? {
+                // A valid Shared tombstone ending a stored link would
+                // retract, not add — the file is refused.
+                return Err(import_refused!(
+                    "Perspective import: the tombstone at byte {} ends a link the store already holds ({} -[{}]-> {} by {})",
+                    start,
+                    link.data.source,
+                    link.data.predicate.as_deref().unwrap_or(""),
+                    link.data.target,
+                    link.author
+                ));
+            } else if store
+                .store
+                .quads_for_pattern(
+                    Some(reifier.as_ref().into()),
+                    Some(NamedNodeRef::new_unchecked(RDF_REIFIES)),
+                    None,
+                    Some(GraphNameRef::DefaultGraph),
+                )
+                .next()
+                .transpose()?
+                .is_some()
+            {
+                // The reifier already stands in the store: the import
+                // adds links, it does not re-assert stored ones.
+                return Err(import_refused!(
+                    "Perspective import: the link at byte {} repeats a reifier the store already holds ({} -[{}]-> {} by {} at {})",
+                    start,
+                    link.data.source,
+                    link.data.predicate.as_deref().unwrap_or(""),
+                    link.data.target,
+                    link.author,
+                    link.timestamp
+                ));
+            } else {
+                let status = link.status.clone().unwrap();
+                // Judged as `write_link_quads_proof` judges a link that arrives already
+                // signed (never `own`), for a reifier the store does not hold: no stored
+                // `valid` to keep, so no entry order is known. The receipt is the
+                // statement's, held or new, and a new one is loaded with the link.
+                let (received_at, receipt) = match store.received_at(&link)? {
+                    Some(held) => (Some(held), None),
+                    None if link.signature_holds() => {
+                        let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+                        (Some(now), Some(receipt_quad(&link.proof, now)))
+                    }
+                    None => (None, None),
+                };
+                let checked = link.check_entered(None, received_at);
+                let judgement = Judgement {
+                    valid: checked.verdict.counts(),
+                    verdict: checked.verdict.stored(),
+                    person: checked.person,
+                    keep: false,
+                };
+                let mut write = link_quads(&link, reifier, &status, &judgement, ProofWrite::Whole)?;
+                write.quads.extend(receipt);
+                ImportKind::Bulk {
+                    names_key: crate::perspectives::monotonic::named_ends_key(&link)
+                        .map(|key| crate::perspectives::monotonic::ends_key_hash(&key)),
+                    link,
+                    quads: write.quads,
+                }
+            };
+        }
+        out.push(ImportElement {
+            key,
+            at: start,
+            ends_key,
+            kind,
+        });
+    }
+    Ok(SegmentQuads { elements: out })
+}
+
+/// Consume one segment's elements as they arrive: bulk candidates whose
+/// reifier key is new to the file go to the loader; the refusal checks
+/// run on the two key sets — `seen` for a repeated reifier, `coverable`
+/// and `named` for a file tombstone ending a file link in either order.
+fn consume_segment(
+    segment: SegmentQuads,
+    seen: &mut HashSet<u64>,
+    coverable: &mut HashSet<u64>,
+    named: &mut HashMap<u64, String>,
+    stats: &mut LinkImportStats,
+    loader: &mut oxigraph::store::BulkLoader<'_>,
+) -> Result<(), Error> {
+    let mut quads: Vec<Result<Quad, Error>> = Vec::new();
+    for element in segment.elements {
+        if let Some(ends_key) = element.ends_key {
+            if let Some(tombstone) = named.get(&ends_key) {
+                return Err(import_refused!(
+                    "Perspective import: the tombstone {tombstone} ends the link at byte {} — an import only adds links",
+                    element.at
+                ));
+            }
+            coverable.insert(ends_key);
+        }
+        match element.kind {
+            ImportKind::Skipped => stats.skipped += 1,
+            ImportKind::Covered => {
+                // A covered link is a fact of the file like any other: twice in the file
+                // refuses it, as a repeat of a link that would be written does.
+                if !seen.insert(element.key) {
+                    return Err(import_refused!(
+                        "Perspective import: the link at byte {} repeats a reifier the file already used (a stored tombstone ends it)",
+                        element.at
+                    ));
+                }
+                stats.covered += 1
+            }
+            ImportKind::Bulk {
+                link,
+                quads: built,
+                names_key,
+            } => {
+                if !seen.insert(element.key) {
+                    return Err(import_refused!(
+                        "Perspective import: the link at byte {} repeats a reifier the file already used ({} -[{}]-> {} by {} at {})",
+                        element.at,
+                        link.data.source,
+                        link.data.predicate.as_deref().unwrap_or(""),
+                        link.data.target,
+                        link.author,
+                        link.timestamp
+                    ));
+                }
+                if let Some(named_key) = names_key {
+                    if coverable.contains(&named_key) {
+                        return Err(import_refused!(
+                            "Perspective import: the tombstone at byte {} ends a link the file also carries ({} -[{}]-> {} by {}) — an import only adds links",
+                            element.at,
+                            link.data.source,
+                            link.data.predicate.as_deref().unwrap_or(""),
+                            link.data.target,
+                            link.author
+                        ));
+                    }
+                    named.insert(
+                        named_key,
+                        format!(
+                            "at byte {} ({} -[{}]-> {} by {})",
+                            element.at,
+                            link.data.source,
+                            link.data.predicate.as_deref().unwrap_or(""),
+                            link.data.target,
+                            link.author
+                        ),
+                    );
+                }
+                quads.extend(built.into_iter().map(Ok));
+                stats.imported += 1;
+            }
+        }
+    }
+    loader.load_ok_quads::<Error, Error>(quads)?;
+    Ok(())
 }
 
 impl SparqlStore {
@@ -2905,6 +3678,196 @@ impl SparqlStore {
         }
         self.flush()?;
         Ok(())
+    }
+
+    /// Load the `links` of a perspective-export file — the shape
+    /// `runtime.exportData {type:"perspective"}` writes — in one commit,
+    /// holding the writer lock for the whole load so no other write
+    /// interleaves.
+    ///
+    /// An import adds links that are new to the perspective: every link
+    /// that imports lands through the bulk loader's single commit, and
+    /// the whole file is refused — nothing committed, the staged SSTs
+    /// dropped with the loader — when
+    /// - a file link's reifier already stands in the store (the pre-load
+    ///   snapshot reads decide this; staged bulk data is invisible until
+    ///   commit),
+    /// - a reifier appears twice in the file (a covered link counts: the
+    ///   repeat is refused too), or
+    /// - a Shared tombstone in the file whose own signature verifies
+    ///   ends a link stored before the import or another link in the
+    ///   file, in either order — an import adds links, it never
+    ///   retracts.
+    ///
+    /// Unchanged from the write path: a link in the store's own metadata
+    /// vocabulary is skipped and counted, as [`SparqlStore::reload`]
+    /// does; a file link a stored tombstone already ends is `covered` —
+    /// not written — as `ended_by_stored` decides; a link without a
+    /// status imports as [`LinkStatus::Shared`]; and each link's verdict
+    /// is computed from its signature exactly as [`write_link_quads_proof`]
+    /// does — a forged file cannot import a `true` verdict. A tombstone
+    /// that ends nothing bulk-loads like any link.
+    ///
+    /// A refusal of the file's content is an [`ImportRefused`] error (the
+    /// RPC answers 400); a failure of the load itself (disk, worker,
+    /// parser) is any other error (500). When links were added the store's
+    /// write generation advances, so readers that cache by generation see
+    /// the load. The key `links` is read as JSON reads it, so an escaped
+    /// spelling of it is the same key.
+    ///
+    /// The file is streamed, never read whole (a snapshot of a large
+    /// perspective is gigabytes). The load is a three-stage
+    /// pipeline: one thread walks the file's bytes with [`ElementScan`]
+    /// and hands [`IMPORT_SEGMENT_BYTES`]-sized segments of raw JSON to
+    /// a worker pool; every worker parses its segment's elements with
+    /// `serde_json::from_slice` and classifies them; the loader thread
+    /// consumes the results as they arrive — the checks are
+    /// order-independent, so no reorder is needed — feeding the bulk
+    /// loader, whose own threads write the SSTs. A file that is not
+    /// exactly a `{"links":[…]}` document (another top-level member, a
+    /// non-object element, a stray comma, an unclosed array, trailing
+    /// garbage, a truncated file) fails, and nothing of it is committed.
+    pub fn import_links_file(&self, path: &std::path::Path) -> Result<LinkImportStats, Error> {
+        let _writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
+        let stats = self.import_segmented(path)?;
+        if stats.imported > 0 {
+            // The load wrote no diff: the generation moves here, under the writer lock, so a
+            // reader keyed on it (the auto-processor's transcript rows) reads the new links.
+            self.note_write(WriteDelta::Other);
+        }
+        Ok(stats)
+    }
+
+    /// The load: scan-segments ‖ worker pool ‖ the bulk loader, consumed
+    /// in arrival order (see [`import_links_file`](Self::import_links_file)).
+    /// A segment lost to a dead worker is caught by counting: the scanner
+    /// reports how many it sent and this thread counts how many it
+    /// consumed.
+    fn import_segmented(&self, path: &std::path::Path) -> Result<LinkImportStats, Error> {
+        // The signature check is the load's one CPU-bound step; quad
+        // building and element parsing ride along on the same workers.
+        let n_workers = std::thread::available_parallelism()
+            .map(|n| n.get().saturating_sub(2).max(1))
+            .unwrap_or(1);
+        let (seg_tx, seg_rx) = std::sync::mpsc::sync_channel::<LinkSegment>(n_workers);
+        let seg_rx = Arc::new(Mutex::new(seg_rx));
+        let (quad_tx, quad_rx) = std::sync::mpsc::sync_channel::<Result<SegmentQuads, Error>>(4);
+
+        // The tombstones the store already holds decide which file links
+        // the bulk path must drop (`ended_by_stored`); collected once, each
+        // check is a set lookup instead of a `query_links` per link.
+        let ends_keys = Arc::new(crate::perspectives::monotonic::stored_tombstone_keys(self)?);
+
+        let file = std::fs::File::open(path)
+            .map_err(|e| anyhow!("Failed to open perspective import file {:?}: {}", path, e))?;
+
+        std::thread::scope(|scope| -> Result<LinkImportStats, Error> {
+            let parser = scope.spawn(move || {
+                segment_elements(std::io::BufReader::with_capacity(1 << 20, file), seg_tx)
+            });
+            for _ in 0..n_workers {
+                let seg_rx = Arc::clone(&seg_rx);
+                let quad_tx = quad_tx.clone();
+                let ends_keys = Arc::clone(&ends_keys);
+                let store = self;
+                scope.spawn(move || loop {
+                    let segment = match seg_rx.lock() {
+                        Ok(rx) => rx.recv(),
+                        Err(_) => return,
+                    };
+                    let Ok(segment) = segment else { return };
+                    if quad_tx
+                        .send(build_segment_quads(store, &ends_keys, &segment))
+                        .is_err()
+                    {
+                        return;
+                    }
+                });
+            }
+            // The channel closes once every worker's sender drops.
+            drop(quad_tx);
+
+            let mut stats = LinkImportStats::default();
+            let mut loader = self.store.bulk_loader();
+            let mut load_result: Result<(), Error> = Ok(());
+            // `seen` dedups reifiers by their 64-bit `reifier_with_key`
+            // keys: a collision would refuse two different reifiers — a
+            // false refusal with negligible probability (~n²/2⁶⁵ at a
+            // million links), accepted for a set a fraction the size of
+            // one of IRIs. `coverable`/`named` are the two `EndsKey` hash
+            // sets the in-file tombstone check intersects: every
+            // coverable file link's key, and every valid file tombstone's
+            // named key with its description for the refusal.
+            let mut seen: HashSet<u64> = HashSet::new();
+            let mut coverable: HashSet<u64> = HashSet::new();
+            let mut named: HashMap<u64, String> = HashMap::new();
+            let mut consumed = 0u64;
+            while let Ok(batch) = quad_rx.recv() {
+                match batch {
+                    Ok(segment) => {
+                        consumed += 1;
+                        if let Err(e) = consume_segment(
+                            segment,
+                            &mut seen,
+                            &mut coverable,
+                            &mut named,
+                            &mut stats,
+                            &mut loader,
+                        ) {
+                            load_result = Err(e);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        load_result = Err(e);
+                        break;
+                    }
+                }
+            }
+            drop(quad_rx);
+            // A stopped load must not leave the scanner pushing segments
+            // nobody drains: dropping the last receiver ends its next send.
+            drop(seg_rx);
+
+            let outcome = parser
+                .join()
+                .map_err(|_| anyhow!("Perspective import: the parser thread panicked"))?;
+            // A loader or worker error reports before the scan's own —
+            // it carries the refused link or the store's failure.
+            load_result?;
+            let (scan, sent) = outcome?;
+            if !scan.sealed {
+                // The staged SSTs are dropped uncommitted with the loader.
+                return Err(import_refused!(
+                    "Perspective import: {:?} is not a perspective export ({})",
+                    path,
+                    if scan.surprise {
+                        match scan.pos {
+                            DocPos::Start | DocPos::LinksKey => "its only member may be `links`",
+                            DocPos::Close | DocPos::Sealed => {
+                                "it carries more than the `links` member"
+                            }
+                            _ => "its `links` is not an array of link objects",
+                        }
+                    } else {
+                        "it is truncated"
+                    }
+                ));
+            }
+            // A short count means a worker died between taking a segment
+            // and sending its result: the file cannot import with
+            // elements missing.
+            if consumed != sent {
+                return Err(anyhow!("Perspective import: a worker dropped a segment"));
+            }
+            // The commit ingests the staged SSTs into the manifest —
+            // durable without a memtable flush.
+            loader.commit()?;
+            Ok(stats)
+        })
     }
 
     /// Remove every link in the store's metadata vocabulary that a store
@@ -7322,6 +8285,835 @@ mod tests {
             "the error names the deadline: {err}"
         );
         assert!(eval_count::running() == 0);
+    }
+
+    // ── File import (runtime.importData {type:"perspective"}) ──
+
+    /// The file `runtime.exportData {type:"perspective"}` writes, laid out
+    /// for `import_links_file` to stream back.
+    fn export_file(links: Vec<DecoratedLinkExpression>) -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let snapshot = crate::types::domain::Perspective { links };
+        std::fs::write(
+            file.path(),
+            serde_json::to_string_pretty(&snapshot).unwrap(),
+        )
+        .unwrap();
+        file
+    }
+
+    /// An export of links written the normal way loads into a fresh store
+    /// as the same links: same fields, statuses and signature verdicts.
+    #[test]
+    fn import_round_trips_what_export_wrote() {
+        let signer = TestSigner::generate();
+        let other = TestSigner::generate();
+        let svc = new_service();
+        let mut links = vec![
+            make_link_with_ts(
+                &signer,
+                "ad4m://s/1",
+                "ad4m://p",
+                "ad4m://t/1",
+                "2026-02-01T00:00:01Z",
+            ),
+            make_link_with_ts(
+                &other,
+                "ad4m://s/2",
+                "ad4m://p",
+                // A non-canonical literal target, so the reifier carries a
+                // wireTarget annotation the import must reproduce.
+                "literal:string:hello world",
+                "2026-02-01T00:00:02Z",
+            ),
+            make_link_with_ts(
+                &signer,
+                "ad4m://s/3",
+                "",
+                "ad4m://t/3",
+                "2026-02-01T00:00:03Z",
+            ),
+        ];
+        let mut local = make_link_with_ts(
+            &signer,
+            "ad4m://s/4",
+            "ad4m://p",
+            "ad4m://t/4",
+            "2026-02-01T00:00:04Z",
+        );
+        local.status = Some(LinkStatus::Local);
+        links.push(local);
+        for link in &links {
+            svc.add_link(link).unwrap();
+        }
+        let file = export_file(svc.get_all_links(&EvalStop::none()).unwrap());
+
+        let fresh = new_service();
+        let stats = fresh.import_links_file(file.path()).unwrap();
+        assert_eq!((stats.imported, stats.skipped), (links.len(), 0));
+
+        let mut expected = svc.get_all_links(&EvalStop::none()).unwrap();
+        let mut imported = fresh.get_all_links(&EvalStop::none()).unwrap();
+        let key = |l: &DecoratedLinkExpression| {
+            (
+                l.author.clone(),
+                l.timestamp.clone(),
+                l.data.source.clone(),
+                l.data.predicate.clone().unwrap_or_default(),
+                l.data.target.clone(),
+            )
+        };
+        expected.sort_by_key(&key);
+        imported.sort_by_key(&key);
+        assert_eq!(imported, expected);
+    }
+
+    /// The verdict is computed from the signature, never trusted from the
+    /// file: a link claiming `valid: true` while carrying a signature that
+    /// does not verify stores `false`.
+    #[test]
+    fn import_computes_the_verdict_it_stores() {
+        let signer = TestSigner::generate();
+        let genuine: DecoratedLinkExpression = (
+            make_link(&signer, "ad4m://s", "ad4m://p", "ad4m://z/ok"),
+            LinkStatus::Shared,
+        )
+            .into();
+        let mut forged: DecoratedLinkExpression = (
+            make_link(&signer, "ad4m://s", "ad4m://p", "ad4m://a/changed"),
+            LinkStatus::Shared,
+        )
+            .into();
+        forged.data.target = "ad4m://a/attacker".to_string();
+        forged.proof.valid = Some(true);
+        forged.proof.invalid = Some(false);
+        let file = export_file(vec![genuine, forged]);
+
+        let svc = new_service();
+        let stats = svc.import_links_file(file.path()).unwrap();
+        assert_eq!((stats.imported, stats.skipped), (2, 0));
+        let mut links = svc.get_all_links(&EvalStop::none()).unwrap();
+        links.sort_by_key(|l| l.data.target.clone());
+        assert_eq!(links[0].data.target, "ad4m://a/attacker");
+        assert_eq!(links[0].proof.valid, Some(false));
+        assert_eq!(links[1].data.target, "ad4m://z/ok");
+        assert_eq!(links[1].proof.valid, Some(true));
+    }
+
+    /// A link in the store's own metadata vocabulary is skipped and
+    /// counted — the refusal `reload` and every write path apply.
+    #[test]
+    fn import_skips_links_in_the_metadata_vocabulary() {
+        let signer = TestSigner::generate();
+        let file = export_file(
+            [
+                make_link(&signer, "ad4m://s", "ad4m://p", "ad4m://t"),
+                make_link(
+                    &signer,
+                    "ad4m://s",
+                    &format!("{ONT_PREFIX}author"),
+                    "did:key:x",
+                ),
+                make_link(&signer, "ad4m://s", RDF_REIFIES, "ad4m://t"),
+            ]
+            .into_iter()
+            .map(|l| (l, LinkStatus::Shared).into())
+            .collect(),
+        );
+
+        let svc = new_service();
+        let stats = svc.import_links_file(file.path()).unwrap();
+        assert_eq!((stats.imported, stats.skipped), (1, 2));
+        assert_eq!(svc.get_all_links(&EvalStop::none()).unwrap().len(), 1);
+    }
+
+    /// A link without a status imports as Shared, as
+    /// `sync_existing_links_to_sparql` defaults it.
+    #[test]
+    fn import_defaults_a_missing_status_to_shared() {
+        let signer = TestSigner::generate();
+        let mut decorated: DecoratedLinkExpression = (
+            make_link(&signer, "ad4m://s", "ad4m://p", "ad4m://t"),
+            LinkStatus::Shared,
+        )
+            .into();
+        decorated.status = None;
+        let file = export_file(vec![decorated]);
+
+        let svc = new_service();
+        svc.import_links_file(file.path()).unwrap();
+        let links = svc.get_all_links(&EvalStop::none()).unwrap();
+        assert_eq!(links[0].status, Some(LinkStatus::Shared));
+    }
+
+    /// The bulk path must land exactly the quads the transactional writer
+    /// produces for the same link — the shared builder is the guarantee,
+    /// this compares the two stores' contents rather than the read-back
+    /// view.
+    #[test]
+    fn bulk_load_stores_the_same_quads_as_the_transactional_write() {
+        let signer = TestSigner::generate();
+        for target in ["ad4m://t", "literal:string:raw text"] {
+            let link = make_link_with_ts(
+                &signer,
+                "ad4m://s",
+                "ad4m://p",
+                target,
+                "2026-02-01T00:00:05Z",
+            );
+            let tx_store = new_service();
+            tx_store.add_link(&link).unwrap();
+
+            let file = export_file(vec![(link.clone(), LinkStatus::Shared).into()]);
+            let bulk_store = new_service();
+            bulk_store.import_links_file(file.path()).unwrap();
+
+            // Each store stamps its own receipt time (the moment it first saw the
+            // statement), so the receipt is compared by its node, not its time.
+            let quads = |svc: &SparqlStore| {
+                let mut all: Vec<String> = svc
+                    .store
+                    .quads_for_pattern(None, None, None, None)
+                    .map(|q| q.unwrap())
+                    .map(|q| {
+                        if q.predicate.as_str() == ONT_RECEIVED_AT {
+                            format!("{} receivedAt {}", q.subject, q.graph_name)
+                        } else {
+                            format!("{q:?}")
+                        }
+                    })
+                    .collect();
+                all.sort();
+                all
+            };
+            assert_eq!(quads(&tx_store), quads(&bulk_store), "target {target}");
+        }
+    }
+
+    /// A malformed file fails rather than importing a prefix silently.
+    #[test]
+    fn import_fails_on_malformed_json() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "{\"links\": [not json").unwrap();
+        let svc = new_service();
+        assert!(svc.import_links_file(file.path()).is_err());
+    }
+
+    /// A document that is not an export — `links` not an array, an
+    /// unclosed array — is refused by name and leaves the store empty.
+    #[test]
+    fn import_refuses_a_file_that_is_not_an_export() {
+        for input in ["{\"links\": 42}", "{\"links\": [1, 2]}", "{\"other\": []}"] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), input).unwrap();
+            let svc = new_service();
+            let err = svc.import_links_file(file.path()).unwrap_err().to_string();
+            assert!(
+                err.contains("is not a perspective export"),
+                "{input}: {err}"
+            );
+            assert_eq!(
+                svc.get_all_links(&EvalStop::none()).unwrap().len(),
+                0,
+                "{input}"
+            );
+        }
+    }
+
+    /// The member name is read as JSON reads it: `\u006cinks` is `links`, and
+    /// `l\inks` — an escape JSON does not have — is no name at all, so the
+    /// file is refused and nothing commits.
+    #[test]
+    fn import_reads_the_links_key_as_json_does() {
+        let signer = TestSigner::generate();
+        let link = make_link(&signer, "ad4m://s", "ad4m://p", "ad4m://t");
+        let file = export_file(vec![(link, LinkStatus::Shared).into()]);
+        let json = std::fs::read_to_string(file.path()).unwrap();
+        assert!(json.contains("\"links\""));
+
+        let escaped = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            escaped.path(),
+            json.replacen("\"links\"", "\"\\u006cinks\"", 1),
+        )
+        .unwrap();
+        let svc = new_service();
+        assert_eq!(svc.import_links_file(escaped.path()).unwrap().imported, 1);
+
+        for spelling in [
+            "\"l\\inks\"",
+            "\"l\\u0069nk\"",
+            "\"\\u006c\\u0069\\u006e\\u006b\\u0073x\"",
+        ] {
+            let bad = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(bad.path(), json.replacen("\"links\"", spelling, 1)).unwrap();
+            let svc = new_service();
+            assert!(
+                svc.import_links_file(bad.path()).is_err(),
+                "{spelling} was taken for links"
+            );
+            assert_eq!(svc.get_all_links(&EvalStop::none()).unwrap().len(), 0);
+        }
+    }
+
+    /// An offset that does not fit a `u32` is no range: it is never cut to
+    /// one (a reversed range would read the wrong bytes).
+    #[test]
+    fn element_range_refuses_an_offset_past_u32() {
+        assert_eq!(element_range(3, 9), Some((3, 9)));
+        let past = u32::MAX as usize + 1;
+        assert_eq!(element_range(past + 0x2F_77F0, past + 0x2F_7800), None);
+        assert_eq!(element_range(5, past), None);
+    }
+
+    /// The import advances the store's write generation (a reader keyed on
+    /// it must read the new links), and a file that adds nothing does not.
+    #[test]
+    fn import_advances_the_write_generation_only_when_it_adds_links() {
+        let signer = TestSigner::generate();
+        let svc = new_service();
+        let before = svc.write_generation();
+        let file = export_file(vec![(
+            make_link(&signer, "ad4m://s", "ad4m://p", "ad4m://t"),
+            LinkStatus::Shared,
+        )
+            .into()]);
+        assert_eq!(svc.import_links_file(file.path()).unwrap().imported, 1);
+        assert_eq!(svc.write_generation(), before + 1);
+        assert!(
+            svc.additions_since(before, before + 1).is_none(),
+            "a bulk load is not a log of added links"
+        );
+
+        let empty = export_file(vec![]);
+        let now = svc.write_generation();
+        assert_eq!(svc.import_links_file(empty.path()).unwrap().imported, 0);
+        assert_eq!(svc.write_generation(), now);
+    }
+
+    /// A fact a stored tombstone ends, twice in the file, refuses the file as a
+    /// repeated reifier does — the covered path must not skip the check.
+    #[test]
+    fn import_refuses_a_covered_link_repeated_in_the_file() {
+        let signer = TestSigner::generate();
+        let fact = signed_link(
+            &signer,
+            Link {
+                source: "ad4m://s".to_string(),
+                predicate: Some("ad4m://acceptedBy".to_string()),
+                target: "ad4m://t".to_string(),
+            },
+            "2026-02-01T00:00:08Z",
+        );
+        let tombstone = tombstone_for(&signer, &fact, "2026-02-01T00:00:09Z");
+        let other = make_link(&signer, "ad4m://s/2", "test://likes", "ad4m://t/2");
+        let svc = new_service();
+        svc.add_link(&tombstone).unwrap();
+        let file = export_file(vec![
+            (fact.clone(), LinkStatus::Shared).into(),
+            (other.clone(), LinkStatus::Shared).into(),
+            (fact.clone(), LinkStatus::Shared).into(),
+        ]);
+        let err = svc.import_links_file(file.path()).unwrap_err().to_string();
+        assert!(
+            err.contains("repeats a reifier the file already used"),
+            "{err}"
+        );
+        assert_eq!(
+            svc.get_all_links(&EvalStop::none()).unwrap().len(),
+            1,
+            "only the stored tombstone: nothing of the file committed"
+        );
+    }
+
+    /// Every quad of `svc`, for comparing a store's whole contents —
+    /// read-back views (`get_all_links`) can hide competing annotations
+    /// on one reifier; the raw quads cannot.
+    fn quads_of(svc: &SparqlStore) -> Vec<String> {
+        let mut all: Vec<String> = svc
+            .store
+            .quads_for_pattern(None, None, None, None)
+            .map(|q| format!("{:?}", q.unwrap()))
+            .collect();
+        all.sort();
+        all
+    }
+
+    /// A reifier appearing twice in the file — here the same statement
+    /// verified and forged, in both orders — refuses the whole file and
+    /// commits nothing: an import adds links, it does not merge
+    /// duplicates.
+    #[test]
+    fn import_refuses_a_reifier_repeated_in_the_file() {
+        let signer = TestSigner::generate();
+        let genuine = make_link_with_ts(
+            &signer,
+            "ad4m://s",
+            "ad4m://p",
+            "ad4m://t",
+            "2026-02-01T00:00:06Z",
+        );
+        let mut forged = genuine.clone();
+        forged.proof.signature = "ff".repeat(64);
+        let other = make_link(&signer, "ad4m://s/2", "ad4m://p", "ad4m://t/2");
+        for first_forged in [false, true] {
+            let pair = if first_forged {
+                vec![forged.clone(), genuine.clone()]
+            } else {
+                vec![genuine.clone(), forged.clone()]
+            };
+            let file = export_file(
+                [other.clone()]
+                    .into_iter()
+                    .chain(pair.iter().cloned())
+                    .map(|l| (l, LinkStatus::Shared).into())
+                    .collect(),
+            );
+
+            let imported = new_service();
+            let err = imported
+                .import_links_file(file.path())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("repeats a reifier"),
+                "forged first: {first_forged}: {err}"
+            );
+            assert!(
+                imported
+                    .get_all_links(&EvalStop::none())
+                    .unwrap()
+                    .is_empty(),
+                "forged first: {first_forged}: a refused file commits nothing"
+            );
+        }
+    }
+
+    /// A file link whose reifier the store already holds refuses the
+    /// whole file: the import adds links, it does not re-assert stored
+    /// ones — not even the identical statement. The store is unchanged.
+    #[test]
+    fn import_refuses_a_reifier_the_store_holds() {
+        let signer = TestSigner::generate();
+        let stored = make_link_with_ts(
+            &signer,
+            "ad4m://s",
+            "ad4m://p",
+            "ad4m://t",
+            "2026-02-01T00:00:07Z",
+        );
+        let mut local = stored.clone();
+        local.status = Some(LinkStatus::Local);
+        let other = make_link(&signer, "ad4m://s/2", "ad4m://p", "ad4m://t/2");
+        // The stored statement again with another status, and a new link
+        // that would import on its own.
+        let file = export_file(vec![
+            (local.clone(), LinkStatus::Local).into(),
+            (other.clone(), LinkStatus::Shared).into(),
+        ]);
+
+        let imported = new_service();
+        imported.add_link(&stored).unwrap();
+        let before = quads_of(&imported);
+        let err = imported
+            .import_links_file(file.path())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("repeats a reifier"), "{err}");
+        assert_eq!(
+            quads_of(&imported),
+            before,
+            "a refused file commits nothing"
+        );
+    }
+
+    /// Sign `data` for `signer` as of `ts` into a Shared
+    /// `LinkExpression` — the shape an export file carries.
+    fn signed_link(signer: &TestSigner, data: Link, ts: &str) -> LinkExpression {
+        let signed = signer.sign_at(data.normalize(), ts.parse().expect("fixture timestamp"));
+        LinkExpression {
+            author: signed.author,
+            timestamp: signed.timestamp,
+            data: signed.data,
+            proof: signed.proof,
+            status: Some(LinkStatus::Shared),
+        }
+    }
+
+    /// `fact`'s tombstone, signed by its own author — the only tombstone
+    /// that ends it.
+    fn tombstone_for(signer: &TestSigner, fact: &LinkExpression, ts: &str) -> LinkExpression {
+        signed_link(
+            signer,
+            crate::perspectives::monotonic::retraction_for(fact).unwrap(),
+            ts,
+        )
+    }
+
+    /// A tombstone the store already holds ends a link the file
+    /// re-asserts: restoring an older export does not revive it — the
+    /// file link is `covered`, and the rest of the file imports.
+    #[test]
+    fn import_does_not_revive_what_a_stored_tombstone_ended() {
+        let signer = TestSigner::generate();
+        for predicate in ["ad4m://acceptedBy", "ad4m://flow/to_state"] {
+            let fact = signed_link(
+                &signer,
+                Link {
+                    source: "ad4m://s".to_string(),
+                    predicate: Some(predicate.to_string()),
+                    target: "ad4m://t".to_string(),
+                },
+                "2026-02-01T00:00:08Z",
+            );
+            let tombstone = tombstone_for(&signer, &fact, "2026-02-01T00:00:09Z");
+            let other = make_link(&signer, "ad4m://s/2", "test://likes", "ad4m://t/2");
+
+            let svc = new_service();
+            svc.add_link(&tombstone).unwrap();
+            let file = export_file(vec![
+                (fact.clone(), LinkStatus::Shared).into(),
+                (other.clone(), LinkStatus::Shared).into(),
+            ]);
+            let stats = svc.import_links_file(file.path()).unwrap();
+            assert_eq!(
+                (stats.imported, stats.covered, stats.skipped),
+                (1, 1, 0),
+                "{predicate}"
+            );
+            let links = svc.get_all_links(&EvalStop::none()).unwrap();
+            let mut predicates: Vec<&str> = links
+                .iter()
+                .map(|l| l.data.predicate.as_deref().unwrap_or(""))
+                .collect();
+            predicates.sort();
+            assert_eq!(
+                predicates,
+                [
+                    crate::perspectives::monotonic::RETRACTED_PREDICATE,
+                    "test://likes",
+                ],
+                "{predicate}"
+            );
+        }
+    }
+
+    /// A valid Shared tombstone inside the file ending a link the file
+    /// also carries — before it or after it — refuses the whole file:
+    /// an import adds links, it never retracts. Nothing commits.
+    #[test]
+    fn import_refuses_a_file_tombstone_ending_a_file_link() {
+        let signer = TestSigner::generate();
+        let fact = signed_link(
+            &signer,
+            Link {
+                source: "ad4m://s/flow".to_string(),
+                predicate: Some("ad4m://flow/to_state".to_string()),
+                target: "ad4m://state/1".to_string(),
+            },
+            "2026-02-01T00:00:10Z",
+        );
+        // An unrelated, non-retractable link the import would take on its own.
+        let other = signed_link(
+            &signer,
+            Link {
+                source: "ad4m://s".to_string(),
+                predicate: Some("test://likes".to_string()),
+                target: "ad4m://t".to_string(),
+            },
+            "2026-02-01T00:00:11Z",
+        );
+        let tombstone = tombstone_for(&signer, &fact, "2026-02-01T00:00:12Z");
+        for order in [
+            vec![fact.clone(), other.clone(), tombstone.clone()],
+            vec![tombstone.clone(), fact.clone(), other.clone()],
+        ] {
+            let file = export_file(
+                order
+                    .into_iter()
+                    .map(|l| (l, LinkStatus::Shared).into())
+                    .collect(),
+            );
+
+            let svc = new_service();
+            let err = svc.import_links_file(file.path()).unwrap_err().to_string();
+            assert!(err.contains("ends"), "{err}");
+            assert!(
+                svc.get_all_links(&EvalStop::none()).unwrap().is_empty(),
+                "a refused file commits nothing"
+            );
+        }
+    }
+
+    /// A valid Shared tombstone in the file ending a link the store
+    /// already holds refuses the whole file — the stored link stays.
+    #[test]
+    fn import_refuses_a_tombstone_ending_a_stored_link() {
+        let signer = TestSigner::generate();
+        let fact = signed_link(
+            &signer,
+            Link {
+                source: "ad4m://s".to_string(),
+                predicate: Some("ad4m://acceptedBy".to_string()),
+                target: "did:key:zVoter".to_string(),
+            },
+            "2026-02-01T00:00:13Z",
+        );
+        let tombstone = tombstone_for(&signer, &fact, "2026-02-01T00:00:12Z");
+        let other = make_link(&signer, "ad4m://s/2", "test://likes", "ad4m://t/2");
+        let file = export_file(
+            [tombstone, other]
+                .into_iter()
+                .map(|l| (l, LinkStatus::Shared).into())
+                .collect(),
+        );
+
+        let svc = new_service();
+        svc.add_link(&fact).unwrap();
+        let before = quads_of(&svc);
+        let err = svc.import_links_file(file.path()).unwrap_err().to_string();
+        assert!(err.contains("ends a link the store already holds"), "{err}");
+        assert_eq!(quads_of(&svc), before, "a refused file commits nothing");
+    }
+
+    /// A tombstone that ends nothing — it names a link neither the store
+    /// nor the file holds — bulk-loads like any link.
+    #[test]
+    fn import_loads_a_tombstone_that_ends_nothing() {
+        let signer = TestSigner::generate();
+        let fact = signed_link(
+            &signer,
+            Link {
+                source: "ad4m://s".to_string(),
+                predicate: Some("ad4m://acceptedBy".to_string()),
+                target: "did:key:zVoter".to_string(),
+            },
+            "2026-02-01T00:00:13Z",
+        );
+        // A valid tombstone for `fact`, which is nowhere in this import.
+        let tombstone = tombstone_for(&signer, &fact, "2026-02-01T00:00:12Z");
+        let other = make_link(&signer, "ad4m://s/2", "test://likes", "ad4m://t/2");
+        let file = export_file(
+            [tombstone, other]
+                .into_iter()
+                .map(|l| (l, LinkStatus::Shared).into())
+                .collect(),
+        );
+
+        let svc = new_service();
+        let stats = svc.import_links_file(file.path()).unwrap();
+        assert_eq!((stats.imported, stats.covered, stats.skipped), (2, 0, 0));
+        assert_eq!(svc.get_all_links(&EvalStop::none()).unwrap().len(), 2);
+    }
+
+    /// A file that is not exactly `{"links":[…]}` is refused and commits
+    /// nothing: a member before or after `links`, trailing garbage, and
+    /// every truncation.
+    #[test]
+    fn import_refuses_anything_but_the_links_member() {
+        let signer = TestSigner::generate();
+        let link: DecoratedLinkExpression = (
+            make_link(&signer, "ad4m://s", "ad4m://p", "ad4m://t"),
+            LinkStatus::Shared,
+        )
+            .into();
+        let whole = serde_json::to_string(&crate::types::domain::Perspective {
+            links: vec![link.clone()],
+        })
+        .unwrap();
+        for input in [
+            // A member after `links`.
+            format!("{}\"meta\":{{\"n\":1}}}}", whole.trim_end_matches('}')),
+            format!("{}\"note\":\"a}}b\"}}", whole.trim_end_matches('}')),
+            // A member before `links`.
+            format!("{{\"meta\":1,{}", whole.trim_start_matches('{')),
+            // Trailing garbage.
+            format!("{whole}x"),
+            // Every truncation.
+            whole.trim_end_matches('}').to_string(),
+            whole[..whole.len() / 2].to_string(),
+        ] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), &input).unwrap();
+            let svc = new_service();
+            assert!(
+                svc.import_links_file(file.path()).is_err(),
+                "{input:?} must refuse"
+            );
+            assert_eq!(
+                svc.get_all_links(&EvalStop::none()).unwrap().len(),
+                0,
+                "{input:?} committed a prefix"
+            );
+        }
+    }
+
+    // ── ElementScan / the segmented load ──
+
+    /// Feed `input` through the scan in `step`-sized pieces — the splits
+    /// exercise the carry between reads — and collect the element ranges
+    /// it reports, in `input`'s coordinates.
+    fn scanned_ranges(input: &str, step: usize) -> (ElementScan, Vec<(usize, usize)>) {
+        let mut scan = ElementScan::new();
+        let mut ranges = Vec::new();
+        let mut base = 0;
+        for chunk in input.as_bytes().chunks(step) {
+            scan.feed(chunk, base, &mut |start, end| ranges.push((start, end)));
+            base += chunk.len();
+        }
+        (scan, ranges)
+    }
+
+    /// The scan finds every element whatever the layout — compact or
+    /// pretty — and is never fooled by structure inside strings; a whole
+    /// document ends `sealed`.
+    #[test]
+    fn element_scan_finds_link_ranges_in_any_layout() {
+        let input = r#"{"links":[  {"a":1,"b":"} ,["},{"a":2} ]}"#;
+        for step in [1, 3, 7, usize::MAX] {
+            let (scan, ranges) = scanned_ranges(input, step);
+            assert!(scan.sealed && !scan.surprise, "step {step}");
+            let elements: Vec<&str> = ranges.iter().map(|&(s, e)| &input[s..e]).collect();
+            assert_eq!(
+                elements,
+                [r#"{"a":1,"b":"} ,["}"#, r#"{"a":2}"#],
+                "step {step}"
+            );
+        }
+    }
+
+    /// Every shape that is not exactly `{"links":[…]}` ends `surprise`,
+    /// and anything short of the top-level `}` leaves it un-`sealed` —
+    /// the import refuses each rather than loading a prefix.
+    #[test]
+    fn element_scan_flags_shapes_it_does_not_read() {
+        for (input, sealed, surprise) in [
+            (r#"{"links":[{}]}"#, true, false),
+            (r#"{"links":[]}"#, true, false),
+            (r#"{"links":[{}]}  "#, true, false), // trailing whitespace
+            (r#"{"links":"x"}"#, false, true),    // not an array
+            (r#"{"links":42}"#, false, true),     // not an array
+            (r#"{"links":[1,2]}"#, false, true),  // non-object element
+            (r#"{"links":[[1]]}"#, false, true),  // non-object element
+            (r#"{"links":[{"a":1},]}"#, false, true), // trailing comma
+            (r#"{"links":[}"#, false, true),      // wrong closer
+            (r#"{"links":[{"a":1}}"#, false, true), // root closed early
+            (r#"{"links":[{}]"#, false, false),   // truncated after `]`
+            (r#"{"links":[{"a":1]"#, false, false), // `]` ends the element
+            (r#"{"links":[{"a":1"#, false, false), // truncated
+            // Any member but `links` — before or after it, whole or
+            // truncated — is a surprise.
+            (r#"{"other":[]}"#, false, true),
+            (r#"{"links":[],"x":42}"#, false, true),
+            (
+                r#"{"links":[],"x":{"a":[1,{"b":"}]"}]},"y":null}"#,
+                false,
+                true,
+            ),
+            (r#"{"links":[],"x":"a}b"}"#, false, true),
+            (r#"{"x":1,"links":[{}],"y":[2],"z":{"w":{}}}"#, false, true),
+            (r#"{"links":[{}],"x":"#, false, true),
+            (r#"{"links":[{}],"x""#, false, true),
+            (r#"{"links":[{}],"x":"a"#, false, true),
+            (r#"{"links":[{}],"x":tru"#, false, true),
+            (r#"{"links":[{}],"x":{"a":"#, false, true),
+            (r#"{"links":[{}],"x"}"#, false, true),
+            (r#"{"links":[{}],"x":}"#, false, true),
+            (r#"{"links":[{}],}"#, false, true), // `,` where `}` is due
+            (r#"{"links":[{}]}}x"#, false, true), // garbage after `}`
+            (r#"{"links":[{}]}x"#, false, true), // garbage after `}`
+            (r#"{"links":[{}]},"x":1"#, false, true), // closed root continues
+            // No document at all, or one that never opens its object.
+            (r#""#, false, false),
+            (r#"   "#, false, false),
+            (r#"[{"a":1}]"#, false, true),
+            (r#"42"#, false, true),
+        ] {
+            let (scan, _) = scanned_ranges(input, 4);
+            assert_eq!((scan.sealed, scan.surprise), (sealed, surprise), "{input}");
+        }
+    }
+
+    /// The segmented path reads any JSON layout — here a compact
+    /// document — not only the pretty-printed shape the exporter writes.
+    #[test]
+    fn import_reads_a_compact_export_file() {
+        let signer = TestSigner::generate();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let snapshot = crate::types::domain::Perspective {
+            links: vec![(
+                make_link(&signer, "ad4m://s", "ad4m://p", "ad4m://t"),
+                LinkStatus::Shared,
+            )
+                .into()],
+        };
+        std::fs::write(file.path(), serde_json::to_string(&snapshot).unwrap()).unwrap();
+
+        let svc = new_service();
+        let stats = svc.import_links_file(file.path()).unwrap();
+        assert_eq!((stats.imported, stats.skipped), (1, 0));
+        assert_eq!(svc.get_all_links(&EvalStop::none()).unwrap().len(), 1);
+    }
+
+    /// Manual timing check, run by hand:
+    /// `cargo test --release -p ad4m-executor --lib -- --ignored --nocapture import_one_million`
+    #[test]
+    #[ignore]
+    fn import_one_million_links_timing() {
+        use rayon::prelude::*;
+        let signer = TestSigner::generate();
+        let n = 1_000_000usize;
+        let t = Instant::now();
+        let links: Vec<DecoratedLinkExpression> = (0..n)
+            .into_par_iter()
+            .map(|i| {
+                let signed = signer.sign_at(
+                    Link {
+                        source: format!("ad4m://m/{i}"),
+                        predicate: Some("ad4m://p".to_string()),
+                        target: format!("ad4m://t/{i}"),
+                    }
+                    .normalize(),
+                    "2026-01-01T00:00:00Z".parse().unwrap(),
+                );
+                DecoratedLinkExpression {
+                    author: signed.author,
+                    timestamp: signed.timestamp,
+                    data: signed.data,
+                    proof: DecoratedExpressionProof {
+                        key: signed.proof.key,
+                        signature: signed.proof.signature,
+                        valid: None,
+                        invalid: None,
+                        anchor: signed.proof.anchor,
+                    },
+                    status: Some(LinkStatus::Shared),
+                    verdict: None,
+                    person: None,
+                }
+            })
+            .collect();
+        eprintln!("signed {n} links in {:?}", t.elapsed());
+        let file = export_file(links);
+        eprintln!(
+            "export file: {} MB",
+            file.as_ref().metadata().unwrap().len() / 1_000_000
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let svc = SparqlStore::new(Some(dir.path().to_str().unwrap())).unwrap();
+        let t = Instant::now();
+        let stats = svc.import_links_file(file.path()).unwrap();
+        let elapsed = t.elapsed();
+        eprintln!(
+            "imported {} (skipped {}, covered {}) in {:?} — {:.0} links/s",
+            stats.imported,
+            stats.skipped,
+            stats.covered,
+            elapsed,
+            stats.imported as f64 / elapsed.as_secs_f64()
+        );
+        assert_eq!(stats.imported, n);
     }
 }
 

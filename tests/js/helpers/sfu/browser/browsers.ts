@@ -20,7 +20,10 @@ export type BrowserKind = "chromium" | "firefox" | "webkit";
 export const BROWSER_KINDS: BrowserKind[] = ["chromium", "firefox", "webkit"];
 
 const TESTS_JS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const SDK_BUNDLE = path.resolve(TESTS_JS, "..", "..", "core", "lib", "index.js");
+const SDK_LIB = path.resolve(TESTS_JS, "..", "..", "core", "lib");
+const SDK_BUNDLE = path.join(SDK_LIB, "index.js");
+/** The ESM entry imports the chunk it shares with `@coasys/ad4m/model` as `./shared-<hash>.js`. */
+const SDK_CHUNK = /^\/(shared-[\w-]+\.js)$/;
 
 const TYPES: Record<BrowserKind, BrowserType> = { chromium, firefox, webkit };
 
@@ -85,11 +88,17 @@ export async function launch(kind: BrowserKind): Promise<Launched> {
   }
 }
 
-/** Serve the page and the SDK's ESM bundle on loopback. */
+/** Serve the page, the SDK's ESM bundle and its shared chunk on loopback. */
 export async function servePage(): Promise<{ url: string; server: Server }> {
   if (!existsSync(SDK_BUNDLE)) throw new Error(`${SDK_BUNDLE} is missing: build core first (\`pnpm run build\` in core).`);
   const bundle = readFileSync(SDK_BUNDLE, "utf8");
   const server = createServer((request, response) => {
+    const chunk = request.url?.match(SDK_CHUNK)?.[1];
+    if (chunk && existsSync(path.join(SDK_LIB, chunk))) {
+      response.writeHead(200, { "content-type": "text/javascript" });
+      response.end(readFileSync(path.join(SDK_LIB, chunk), "utf8"));
+      return;
+    }
     const isBundle = request.url === "/ad4m.js";
     response.writeHead(200, { "content-type": isBundle ? "text/javascript" : "text/html" });
     response.end(isBundle ? bundle : PAGE);

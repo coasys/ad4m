@@ -164,7 +164,7 @@ describe('ApiClient calls', () => {
 
 describe('ApiClient calls that open something on the executor (OPENS_METHODS)', () => {
     it('sends request.cancel when such a call times out', async () => {
-        const promise = call('perspective.modelSubscribe', { uuid: 'u' }, { timeoutMs: 50 })
+        const promise = call('perspective.subscribe', { uuid: 'u' }, { timeoutMs: 50 })
         await flush()
         const req = socket(0).sent[0]
         await expect(promise).rejects.toMatchObject({ name: 'RpcError', status: 408 })
@@ -179,20 +179,12 @@ describe('ApiClient calls that open something on the executor (OPENS_METHODS)', 
         expect(socket(0).sent.map((m) => m.type)).toEqual(['perspective.addLink'])
     })
 
-    it('sends request.cancel for a timed-out subscribeQuery too', async () => {
-        const promise = call('perspective.subscribeQuery', { uuid: 'u' }, { timeoutMs: 50 })
-        await flush()
-        const req = socket(0).sent[0]
-        await expect(promise).rejects.toMatchObject({ status: 408 })
-        expect(socket(0).sent[1]).toMatchObject({ type: 'request.cancel', params: { targetId: req.id } })
-    })
-
     it('drops a reply that crossed the cancel: the caller owns the id it sent', async () => {
         const events: unknown[] = []
         client.on('agent-updated', (e) => { events.push(e) })
-        const promise = call('perspective.modelSubscribe', { uuid: 'u', subscriptionId: 's1' }, { timeoutMs: 50 })
+        const promise = call('perspective.subscribe', { uuid: 'u', subscriptionId: 's1' }, { timeoutMs: 50 })
         await flush()
-        const req = socket(0).sent.find((m) => m.type === 'perspective.modelSubscribe')!
+        const req = socket(0).sent.find((m) => m.type === 'perspective.subscribe')!
         await expect(promise).rejects.toMatchObject({ status: 408 })
 
         const cancel = socket(0).sent.find((m) => m.type === 'request.cancel')!
@@ -1692,7 +1684,7 @@ describe('ApiClient.setToken', () => {
 
     it('sends request.cancel on the replaced socket a call that opens something went out on when it times out', async () => {
         client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
-        const promise = call('perspective.modelSubscribe', { uuid: 'u' }, { timeoutMs: 50 })
+        const promise = call('perspective.subscribe', { uuid: 'u' }, { timeoutMs: 50 })
         await flush()
         const req = socket(0).sent[0]
         client.setToken('new')
@@ -1819,176 +1811,9 @@ describe('ApiClient.setToken', () => {
         await expect(read).resolves.toEqual(['p'])
     })
 
-    it('keeps a watchApplied() waiter on the replacement socket\'s watch after setToken', async () => {
+    it('rejects a subscribe reply that lands on the replaced socket', async () => {
         client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
-        open()
-        await flush() // socket 0 open, its events.watch sent
-        const applied = outcomeOf(client.watchApplied())
-        client.setToken('new')
-        await flush() // socket 0's watch settles; socket 1 opens and sends its own
-        // The old socket's watch settling is not the answer: the waiter follows the
-        // replacement, whose watch is still unanswered.
-        expect(applied()).toBe('pending')
-        const watch = socket(1).sent.find(m => m.type === 'events.watch')!
-        socket(1).reply({ id: watch.id, result: {} })
-        await flush()
-        expect(applied()).toBe('resolved')
-    })
-
-    it('fails a watchApplied() waiter with the replacement socket\'s refusal after setToken', async () => {
-        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
-        open()
-        await flush()
-        const applied = client.watchApplied()
-        client.setToken('new')
-        await flush()
-        const watch = socket(1).sent.find(m => m.type === 'events.watch')!
-        socket(1).reply({ id: watch.id, error: { code: 401, message: 'token expired' } })
-        await expect(applied).rejects.toMatchObject({ name: 'RpcError', status: 401 })
-    })
-
-    it('keeps a watchApplied() waiter until the replacement socket\'s retried watch is applied', async () => {
-        jest.useFakeTimers()
-        try {
-            client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
-            open()
-            await jest.advanceTimersByTimeAsync(0)
-            const applied = outcomeOf(client.watchApplied())
-            client.setToken('new')
-            await jest.advanceTimersByTimeAsync(0)
-            const watch = socket(1).sent.find(m => m.type === 'events.watch')!
-            // A failure that is no refusal and no close schedules a retry: the waiter's
-            // answer is the retried watch's, not this one's.
-            socket(1).reply({ id: watch.id, error: { code: 408, message: 'timed out' } })
-            await jest.advanceTimersByTimeAsync(0)
-            expect(applied()).toBe('pending')
-            await jest.advanceTimersByTimeAsync(1_000) // the retry sends a fresh events.watch
-            const watches = socket(1).sent.filter(m => m.type === 'events.watch')
-            expect(watches).toHaveLength(2)
-            expect(applied()).toBe('pending')
-            socket(1).reply({ id: watches[1].id, result: {} })
-            await jest.advanceTimersByTimeAsync(0)
-            expect(applied()).toBe('resolved')
-        } finally {
-            jest.useRealTimers()
-        }
-    })
-
-    it('rejects a watchApplied() waiter once the watch retries run out', async () => {
-        jest.useFakeTimers()
-        try {
-            const error = jest.spyOn(console, 'error').mockImplementation(() => {})
-            open()
-            await jest.advanceTimersByTimeAsync(0)
-            const applied = outcomeOf(client.watchApplied())
-            // The first events.watch and its five retries all time out.
-            for (let i = 0; i < 6; i++) {
-                const watches = socket(0).sent.filter(m => m.type === 'events.watch')
-                socket(0).reply({ id: watches.at(-1)!.id, error: { code: 408, message: 'timed out' } })
-                await jest.advanceTimersByTimeAsync(1_000)
-            }
-            expect(applied()).toMatchObject({ name: 'RpcError', status: 408 })
-            expect(socket(0).sent.filter(m => m.type === 'events.watch')).toHaveLength(6)
-            error.mockRestore()
-        } finally {
-            jest.useRealTimers()
-        }
-    })
-
-    it('rejects a watchApplied() waiter on closeAll while a watch retry is pending, and opens no socket', async () => {
-        jest.useFakeTimers()
-        try {
-            const error = jest.spyOn(console, 'error').mockImplementation(() => {})
-            open()
-            await jest.advanceTimersByTimeAsync(0)
-            const applied = outcomeOf(client.watchApplied())
-            // A failure that is no refusal and no close arms a retry: the waiter
-            // holds on for the retried watch.
-            const watch = socket(0).sent.find(m => m.type === 'events.watch')!
-            socket(0).reply({ id: watch.id, error: { code: 408, message: 'timed out' } })
-            await jest.advanceTimersByTimeAsync(0)
-            expect(applied()).toBe('pending')
-            client.closeAll()
-            await jest.advanceTimersByTimeAsync(0)
-            expect(applied()).toMatchObject({ name: 'RpcError', status: 499 })
-            expect(socket(0).readyState).toBe(3)
-            expect(TestSocket.instances).toHaveLength(1)
-            error.mockRestore()
-        } finally {
-            jest.useRealTimers()
-        }
-    })
-
-    it('rejects a watchApplied() waiter on closeAll while a watch is in flight, and opens no socket', async () => {
-        open()
-        await flush() // socket 0 open, its events.watch sent and unanswered
-        const applied = outcomeOf(client.watchApplied())
-        expect(applied()).toBe('pending')
-        client.closeAll()
-        await flush()
-        expect(applied()).toMatchObject({ name: 'RpcError', status: 499 })
-        expect(socket(0).readyState).toBe(3)
-        expect(TestSocket.instances).toHaveLength(1)
-    })
-
-    it('rejects a watchApplied() waiter on closeAll while the socket still connects, and opens no socket', async () => {
-        TestSocket.autoOpen = false
-        open()
-        const applied = outcomeOf(client.watchApplied())
-        client.closeAll()
-        await flush()
-        expect(applied()).toMatchObject({ name: 'RpcError', status: 499 })
-        expect(socket(0).readyState).toBe(3)
-        expect(TestSocket.instances).toHaveLength(1)
-    })
-
-    // Data's test: it pins `_ensureWs`'s reset of the closed flag; without it a client
-    // reused after closeAll gets a 499 from watchApplied() on a live socket.
-    it('answers a watchApplied() waiter on a client reused after closeAll once its new socket\'s watch is applied', async () => {
-        open()
-        await flush()
-        client.closeAll()
-        open()
-        await flush() // socket 1 open, its events.watch sent
-        const applied = outcomeOf(client.watchApplied())
-        await flush()
-        expect(applied()).toBe('pending')
-        const watch = socket(1).sent.find(m => m.type === 'events.watch')!
-        socket(1).reply({ id: watch.id, result: {} })
-        await flush()
-        expect(applied()).toBe('resolved')
-    })
-
-    it('keeps a watchApplied() waiter on the new socket when setToken lands during a watch retry', async () => {
-        jest.useFakeTimers()
-        try {
-            const error = jest.spyOn(console, 'error').mockImplementation(() => {})
-            client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
-            open()
-            await jest.advanceTimersByTimeAsync(0)
-            const applied = outcomeOf(client.watchApplied())
-            const watch = socket(0).sent.find(m => m.type === 'events.watch')!
-            socket(0).reply({ id: watch.id, error: { code: 408, message: 'timed out' } })
-            await jest.advanceTimersByTimeAsync(0)
-            expect(applied()).toBe('pending')
-            client.setToken('new')
-            // Socket 1 opens and sends its own watch; the pending retry settles
-            // against it — the waiter follows the new socket.
-            await jest.advanceTimersByTimeAsync(1_000)
-            const watches = socket(1).sent.filter(m => m.type === 'events.watch')
-            expect(watches.length).toBeGreaterThan(0)
-            socket(1).reply({ id: watches.at(-1)!.id, result: {} })
-            await jest.advanceTimersByTimeAsync(0)
-            expect(applied()).toBe('resolved')
-            error.mockRestore()
-        } finally {
-            jest.useRealTimers()
-        }
-    })
-
-    it('rejects a subscribeQuery reply that lands on the replaced socket', async () => {
-        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
-        const sub = call('perspective.subscribeQuery', { uuid: 'u', query: 'q' })
+        const sub = call('perspective.subscribe', { uuid: 'u', query: 'q' })
         await flush()
         client.setToken('new')
         await flush()
@@ -2065,51 +1890,6 @@ describe('ApiClient.setToken', () => {
         expect(socket(0).readyState).toBe(3) // drained: let go
         expect(failed).toHaveBeenCalledTimes(1)
     })
-
-    it('does not answer a later watchApplied() with the refused watch\'s 401 after setToken', async () => {
-        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
-        const unsub = client.on('agent-updated', () => {})
-        await flush()
-        const watch = socket(0).sent.find(m => m.type === 'events.watch')!
-        socket(0).reply({ id: watch.id, error: { code: 401, message: 'token expired' } })
-        await flush()
-        unsub() // every handler removed, as an auth-failed app leaves them
-        client.setToken('new')
-        // The refused token's watch outcome is stale: a watch on the new socket
-        // opens and resolves the waiter, not the old 401.
-        await expect(client.watchApplied()).resolves.toBeUndefined()
-    })
-
-    it('settles a watchApplied() waiter from the successor after setToken replaced a connecting socket', async () => {
-        TestSocket.autoOpen = false
-        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
-        open()
-        const applied = outcomeOf(client.watchApplied())
-        client.setToken('new')
-        // The connecting socket's open settles against the new socket: its rejection
-        // is the replaced socket's verdict, not the wait's.
-        socket(0).drop()
-        socket(1).open()
-        await flush()
-        const watch = socket(1).sent.find(m => m.type === 'events.watch')!
-        socket(1).reply({ id: watch.id, result: {} })
-        await flush()
-        expect(applied()).toBe('resolved')
-    })
-
-    it('rejects a watchApplied() waiter with the successor\'s own refusal after setToken replaced a connecting socket', async () => {
-        TestSocket.autoOpen = false
-        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
-        open()
-        const applied = client.watchApplied()
-        client.setToken('new')
-        socket(0).drop()
-        socket(1).open()
-        await flush()
-        const watch = socket(1).sent.find(m => m.type === 'events.watch')!
-        socket(1).reply({ id: watch.id, error: { code: 401, message: 'token expired' } })
-        await expect(applied).rejects.toMatchObject({ name: 'RpcError', status: 401 })
-    })
 })
 
 describe('ApiClient when the executor refuses the token', () => {
@@ -2147,41 +1927,38 @@ describe('ApiClient when the executor refuses the token', () => {
         expect(TestSocket.instances).toHaveLength(1)
     })
 
-    it('rejects a waiting watchApplied() with 401 when the socket closes 1008 before it opens', async () => {
-        open()
-        const applied = client.watchApplied()
-        socket(0).drop(1008, REASON)
-        await expect(applied).rejects.toMatchObject({ name: 'RpcError', status: 401, body: REASON })
-    })
-
-    it('rejects a waiting watchApplied() with the reason when the socket closes 1013 before it opens', async () => {
-        const LOCKED = 'Executor is locked: ask the operator to unlock it, then reconnect'
-        open()
-        const applied = client.watchApplied()
-        socket(0).drop(1013, LOCKED)
-        await expect(applied).rejects.toMatchObject({ name: 'RpcError', status: 503, body: LOCKED })
-        expect(authFailed).not.toHaveBeenCalled()
-    })
-
     it('fails every later call with 401 without opening a socket', async () => {
         open()
         socket(0).drop(1008, REASON)
         open()
         await expect(call('agent.get')).rejects.toMatchObject({ status: 401, body: REASON })
-        await expect(client.watchApplied()).rejects.toMatchObject({ status: 401 })
         jest.advanceTimersByTime(60_000)
         expect(TestSocket.instances).toHaveLength(1)
     })
 
-    it('rejects watchApplied() with 401 when the executor refuses events.watch on an open socket', async () => {
+    it('fails auth when the executor refuses events.watch with 401', async () => {
         open()
         jest.runAllTicks() // fake timers hold the queued watch flush
         socket(0).open()
         const watch = socket(0).sent.find((m) => m.type === 'events.watch')!
-        const applied = client.watchApplied()
         socket(0).reply({ id: watch.id, error: { code: 401, message: REASON } })
-        await expect(applied).rejects.toMatchObject({ name: 'RpcError', status: 401, body: REASON })
+        await Promise.resolve()
         expect(authFailed).toHaveBeenCalledTimes(1)
+    })
+
+    it('sends the watch again when events.watch fails otherwise', async () => {
+        open()
+        jest.runAllTicks() // fake timers hold the queued watch flush
+        socket(0).open()
+        const watches = () => socket(0).sent.filter((m) => m.type === 'events.watch')
+        const errors = jest.spyOn(console, 'error').mockImplementation(() => {})
+        socket(0).reply({ id: watches()[0].id, error: { code: 500, message: 'store busy' } })
+        await Promise.resolve()
+        jest.advanceTimersByTime(60_000)
+        jest.runAllTicks()
+        expect(watches()).toHaveLength(2)
+        expect(authFailed).not.toHaveBeenCalled()
+        errors.mockRestore()
     })
 
     it('fails every pending call on a 401 reply and stops once the executor closes the socket', async () => {
