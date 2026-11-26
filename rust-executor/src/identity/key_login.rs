@@ -1436,7 +1436,7 @@ pub async fn end_key_grants_revoked_in_cache(service: &IdentityService, grants: 
 /// start — is buffered on it, not lost.
 ///
 /// `init` runs before `AgentService` is initialised and the agent loaded, and a change's and
-/// a pass's `agent_speaks` read the main agent's DID — panicking before it ("AgentService not
+/// a pass's `agent_speaks` read the main agent's DID — an error before it ("AgentService not
 /// initialized"), so the watcher waits on `agent_ready` first. Nothing is lost while it
 /// waits: `changes` holds what the subscription buffered (a lag overflows into a full pass).
 pub async fn run_key_session_watch(
@@ -3896,7 +3896,7 @@ mod tests {
     }
 
     // `init` spawns the watcher before the agent service is initialised and the agent
-    // loaded: a change's and a pass's `agent_speaks` read the main agent's DID and panic
+    // loaded: a change's and a pass's `agent_speaks` read the main agent's DID and fail
     // before it. The watcher holds its first pass — and the changes its subscription
     // buffered — until the DID reads.
     #[tokio::test]
