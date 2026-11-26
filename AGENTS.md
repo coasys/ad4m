@@ -84,7 +84,8 @@ There is no `executor/` package any more: ignore references to it in older docs.
 ## Where the detail lives
 
 - Integration suites, test lanes, port conflicts, rebuild requirements, AI wind tunnel: `tests/js/AGENTS.md`
-- SFU wind tunnel (e2e, browsers, cascade): `tests/js/helpers/sfu/AGENTS.md`
+- SFU wind tunnel (e2e, browsers, cascade), and the mesh signalling and presence
+  rules of `core/src/neighbourhood/` it pins: `tests/js/helpers/sfu/AGENTS.md`
 - CI, nightly `nightly-llm-e2e`, runner failures, K2 bootstrap-srv install: `.circleci/AGENTS.md`
 - Nightly performance history: `scripts/perf/AGENTS.md`
 - Lib-test prerequisites, `CARGO_TARGET_DIR`: `rust-executor/AGENTS.md`

@@ -5,7 +5,8 @@ CI config (`config.yml`) and its scripts.
 ## Nightly (`nightly-llm-e2e` workflow)
 
 A pipeline with `run-nightly-llm: true` runs only this workflow, on `coasys/marvin`.
-Each job has its own serial group. The jobs: `llm-e2e`,
+Each job has its own serial group, except `llm-e2e` and `coasys-spaces`, which
+share `nightly-llm`. The jobs: `llm-e2e`,
 `integration-tests-sfu`, `integration-tests-sfu-browsers` (see below),
 `coasys-spaces`, `integration-tests-agent-harness` and `feed-scale`.
 
