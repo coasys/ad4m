@@ -281,13 +281,17 @@ impl PerspectiveInstance {
     /// The classes of `base` a write through `abstract_class` reaches: those
     /// it is, among those the abstract class reads, by target class IRI.
     /// Never empty.
-    fn write_targets(&self, abstract_class: &str, base: &str) -> Result<Vec<String>, AnyError> {
+    fn write_targets(
+        &self,
+        abstract_class: &str,
+        base: &str,
+        own: &[String],
+    ) -> Result<Vec<String>, AnyError> {
         let resolution = self.resolve_abstract(abstract_class)?;
-        let own = self.own_classes(base)?;
         let targets: Vec<String> = resolution
             .classes
             .iter()
-            .filter(|c| own.contains(c))
+            .filter(|c| own.contains(*c))
             .cloned()
             .collect();
         if targets.is_empty() {
@@ -320,9 +324,24 @@ impl PerspectiveInstance {
         values: &Value,
         context: &AgentContext,
     ) -> Result<Vec<Run>, AnyError> {
+        let own = self.own_classes(base)?;
+        self.update_through_abstract_as(abstract_class, base, &own, values, context)
+            .await
+    }
+
+    /// [`Self::update_through_abstract`] on a `base` of the classes `own`
+    /// (target class IRIs), not those the store finds it to be.
+    async fn update_through_abstract_as(
+        &self,
+        abstract_class: &str,
+        base: &str,
+        own: &[String],
+        values: &Value,
+        context: &AgentContext,
+    ) -> Result<Vec<Run>, AnyError> {
         let mut has_child = Vec::new();
         if abstract_class == CONTAINER_URI {
-            if let Some(write) = self.has_child_write(base, values).await? {
+            if let Some(write) = self.has_child_write(own, values).await? {
                 if !write.beside_own {
                     return Ok(vec![Run {
                         commands: write.commands,
@@ -359,7 +378,7 @@ impl PerspectiveInstance {
             .chain(shape.include_relations.iter().map(|r| r.name.as_str()))
             .collect();
         let index = self.abstract_index()?;
-        let targets = self.write_targets(abstract_class, base)?;
+        let targets = self.write_targets(abstract_class, base, own)?;
         let mut commands = Vec::new();
         let mut runs = Vec::new();
         for (name, value) in values {
@@ -588,7 +607,7 @@ impl PerspectiveInstance {
             .subject_class_option_to_class_name(subject_class, context)
             .await?;
         let classes = if self.is_abstract_class(&class_name)? {
-            self.write_targets(&class_name, &base)?
+            self.write_targets(&class_name, &base, &self.own_classes(&base)?)?
         } else {
             vec![class_name]
         };
@@ -622,9 +641,27 @@ impl PerspectiveInstance {
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<(), AnyError> {
+        let parent_classes = self.own_classes(parent)?;
+        self.add_to_container_of(parent, &parent_classes, child, batch_id, context)
+            .await
+    }
+
+    /// [`Self::add_to_container`] under a `parent` of the classes
+    /// `parent_classes` (target class IRIs), where the store cannot say yet:
+    /// a parent created earlier in the same batch is not committed, so the
+    /// store finds it of no class and the child would be held through
+    /// `has_child` instead of the parent class's own relation.
+    pub(crate) async fn add_to_container_of(
+        &mut self,
+        parent: &str,
+        parent_classes: &[String],
+        child: &str,
+        batch_id: Option<String>,
+        context: &AgentContext,
+    ) -> Result<(), AnyError> {
         let value = serde_json::json!({ "children": { "action": "adder", "value": [child] } });
         let runs = self
-            .update_through_abstract(CONTAINER_URI, parent, &value, context)
+            .update_through_abstract_as(CONTAINER_URI, parent, parent_classes, &value, context)
             .await?;
         self.execute_runs(runs, parent.to_string(), batch_id, context)
             .await
@@ -644,7 +681,7 @@ impl PerspectiveInstance {
     /// it out of every edge (#1461 review).
     async fn has_child_write(
         &self,
-        base: &str,
+        own: &[String],
         values: &Value,
     ) -> Result<Option<HasChildWrite>, AnyError> {
         let Some(children) = values.get("children") else {
@@ -660,13 +697,12 @@ impl PerspectiveInstance {
             return Ok(None);
         }
         let resolution = self.resolve_abstract(CONTAINER_URI)?;
-        let own = self.own_classes(base)?;
         let index = self.abstract_index()?;
         let alias_key = builtin(CONTAINER_URI)
             .map(|b| b.name)
             .unwrap_or("Container");
         let mut beside_own = false;
-        for class in resolution.classes.iter().filter(|c| own.contains(c)) {
+        for class in resolution.classes.iter().filter(|c| own.contains(*c)) {
             let shape = self.get_shape(class)?;
             let Some(own_name) = index.own_name(class, &shape, "children", alias_key) else {
                 continue;

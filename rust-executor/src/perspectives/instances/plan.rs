@@ -11,12 +11,16 @@
 //! create makes. Ids are minted before anything is written, so a ref may name a create later in
 //! the plan.
 //!
+//! A plan registers no class: a create of one of the executor's own classes (a flow run, an
+//! interpretation run) that the perspective does not hold yet is refused, since registering it
+//! is a write no batch can take back.
+//!
 //! Only creates and adds. A plan changes no existing property and removes nothing: what it can do
 //! to records it did not make is add them to a collection, the one write a reply into a thread
 //! or an item into a list needs, and the write least able to lose anything.
 
-use super::write::{add_to_collection, create, InstanceAddToCollection, InstanceCreate};
-use super::{generate_instance_uri, InstanceError};
+use super::write::{add_to_collection, create_under, InstanceAddToCollection, InstanceCreate};
+use super::{generate_instance_uri, resolve_class, InstanceError};
 use crate::agent::AgentContext;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use serde::{Deserialize, Serialize};
@@ -87,6 +91,11 @@ pub enum PlanError {
         index: usize,
         reference: String,
     },
+    /// A create of one of the executor's own classes, not registered in the perspective yet.
+    UnregisteredClass {
+        index: usize,
+        class_name: String,
+    },
     /// A write the instance core refused or failed.
     Write {
         index: usize,
@@ -140,9 +149,43 @@ pub async fn apply(
         }
     };
 
+    // Every create's class, by target class IRI, before anything is written. A child is put under
+    // its parent through the parent class's own `children` relation, and the store cannot tell a
+    // parent's class while the parent is only staged in the plan's batch.
+    let mut class_of: HashMap<String, String> = HashMap::new();
+    for (index, write) in writes.iter().enumerate() {
+        let PlannedWrite::Create {
+            reference,
+            class_name,
+            ..
+        } = write
+        else {
+            continue;
+        };
+        let unregistered = crate::perspectives::hardwired_class::unstored(perspective, class_name)
+            .map_err(|error| PlanError::Write {
+                index,
+                error: InstanceError::Failed {
+                    class_name: class_name.clone(),
+                    step: super::WriteStep::CreateSubject,
+                    error,
+                },
+            })?;
+        if unregistered.is_some() {
+            return Err(PlanError::UnregisteredClass {
+                index,
+                class_name: class_name.clone(),
+            });
+        }
+        let (_, shape) = resolve_class(perspective, class_name)
+            .await
+            .map_err(|error| PlanError::Write { index, error })?;
+        class_of.insert(ids[reference].clone(), shape.target_class.clone());
+    }
+
     // Resolve every ref before writing anything, so a bad one writes nothing.
     enum Resolved {
-        Create(String, InstanceCreate),
+        Create(String, InstanceCreate, Option<String>),
         Add(InstanceAddToCollection),
     }
     let mut resolved = Vec::with_capacity(writes.len());
@@ -154,13 +197,23 @@ pub async fn apply(
                 properties,
                 parent,
             } => {
+                // Value by value: the properties map is never a ref itself, even one whose only
+                // property is named `ref`.
                 let properties = properties
-                    .map(|p| resolve_refs(index, Value::Object(p), &id_of))
-                    .transpose()?
-                    .and_then(|v| match v {
-                        Value::Object(map) => Some(map),
-                        _ => None,
-                    });
+                    .map(|p| {
+                        p.into_iter()
+                            .map(|(k, v)| Ok((k, resolve_refs(index, v, &id_of)?)))
+                            .collect::<Result<Map<String, Value>, PlanError>>()
+                    })
+                    .transpose()?;
+                let parent_class = match &parent {
+                    Some(PlannedRecord::Created { .. }) => parent
+                        .as_ref()
+                        .map(|p| id_of(index, p))
+                        .transpose()?
+                        .and_then(|id| class_of.get(&id).cloned()),
+                    _ => None,
+                };
                 let parent = parent.map(|p| id_of(index, &p)).transpose()?;
                 Resolved::Create(
                     reference.clone(),
@@ -171,6 +224,7 @@ pub async fn apply(
                         parent,
                         batch_id: None,
                     },
+                    parent_class,
                 )
             }
             PlannedWrite::Add {
@@ -192,15 +246,18 @@ pub async fn apply(
     let mut created = Vec::new();
     for (index, write) in resolved.into_iter().enumerate() {
         let outcome = match write {
-            Resolved::Create(reference, mut params) => {
+            Resolved::Create(reference, mut params, parent_class) => {
                 params.batch_id = Some(batch.clone());
-                create(perspective, agent, params).await.map(|made| {
-                    created.push(PlannedCreated {
-                        reference,
-                        class_name: made.class_name,
-                        base_uri: made.base_uri,
+                let parent_classes = parent_class.map(|c| vec![c]);
+                create_under(perspective, agent, params, parent_classes.as_deref())
+                    .await
+                    .map(|made| {
+                        created.push(PlannedCreated {
+                            reference,
+                            class_name: made.class_name,
+                            base_uri: made.base_uri,
+                        })
                     })
-                })
             }
             Resolved::Add(mut params) => {
                 params.batch_id = Some(batch.clone());

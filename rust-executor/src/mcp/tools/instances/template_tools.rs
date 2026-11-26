@@ -196,20 +196,14 @@ impl Ad4mMcpHandler {
             Err(e) => return error_json(format!("'{name}' failed: {e}")),
         };
         let text = answer["text"].as_str().unwrap_or_default().to_string();
-        if let Some(writes) = answer.get("writes").filter(|w| !w.is_null()) {
-            if !tool.writes {
-                return error_json(format!(
-                    "'{name}' says it writes nothing, yet answered with writes; nothing was written."
-                ));
+        match answered_writes(name, tool.writes, &answer) {
+            Ok(Some(writes)) => {
+                return self
+                    .apply_tool_writes(&p.perspective_id, name, &text, writes.clone())
+                    .await
             }
-            if answer.get("properties").is_some_and(|p| !p.is_null()) {
-                return error_json(format!(
-                    "'{name}' answered with both properties and writes; nothing was written."
-                ));
-            }
-            return self
-                .apply_tool_writes(&p.perspective_id, name, &text, writes.clone())
-                .await;
+            Ok(None) => {}
+            Err(refused) => return error_json(refused),
         }
         let properties = match answer.get("properties") {
             Some(Value::Object(map)) if !map.is_empty() => map.clone(),
@@ -367,6 +361,29 @@ impl From<String> for WriteError {
     }
 }
 
+/// The `writes` a bundle tool answered with, when it may: a tool that declares it writes nothing
+/// may not answer with writes, and an answer carries `properties` or `writes`, never both.
+pub(super) fn answered_writes<'a>(
+    name: &str,
+    tool_writes: bool,
+    answer: &'a Value,
+) -> Result<Option<&'a Value>, String> {
+    let Some(writes) = answer.get("writes").filter(|w| !w.is_null()) else {
+        return Ok(None);
+    };
+    if !tool_writes {
+        return Err(format!(
+            "'{name}' says it writes nothing, yet answered with writes; nothing was written."
+        ));
+    }
+    if answer.get("properties").is_some_and(|p| !p.is_null()) {
+        return Err(format!(
+            "'{name}' answered with both properties and writes; nothing was written."
+        ));
+    }
+    Ok(Some(writes))
+}
+
 /// Why a plan wrote nothing, as one sentence. `creates[i]` says whether write `i` was a create.
 fn plan_error(error: &PlanError, creates: &[bool]) -> String {
     match error {
@@ -380,6 +397,10 @@ fn plan_error(error: &PlanError, creates: &[bool]) -> String {
         PlanError::UnknownRef { index, reference } => {
             format!("write {index} names '{reference}', which no create in the writes makes")
         }
+        PlanError::UnregisteredClass { index, class_name } => format!(
+            "write {index} creates a {class_name}, one of the executor's own classes, which this \
+             perspective does not hold yet: writes do not register a class"
+        ),
         PlanError::Write { index, error } => {
             let worded = if creates.get(*index).copied().unwrap_or(false) {
                 create_error(error)

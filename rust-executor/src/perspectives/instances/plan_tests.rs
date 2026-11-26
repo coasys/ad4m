@@ -254,3 +254,139 @@ fn a_plan_reads_from_the_json_a_tool_answers_with() {
         matches!(&writes[2], PlannedWrite::Create { parent: Some(PlannedRecord::Existing(id)), .. } if id == "ns://existing")
     );
 }
+
+/// A record that holds its parts through a relation of its own, which answers to `Container`'s
+/// `children`.
+const HOLDER_SDNA: &str = r#"{
+  "target_class": "ns://Holder",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Holder"}
+  ],
+  "properties": [
+    {"path":"rdf://type","name":"type","has_value":"ns://Holder","min_count":1,"max_count":1},
+    {"path":"ns://part","name":"parts","node_kind":"IRI","relation_kind":"hasMany","collection":true,"alias":{"Container":"children"},
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://part","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://part","target":"value"}]}
+  ]
+}"#;
+
+/// A class with a property named `ref`.
+const TAG_SDNA: &str = r#"{
+  "target_class": "ns://Tag",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Tag"}
+  ],
+  "properties": [
+    {"path":"ns://tag_ref","name":"ref","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://tag_ref","target":"value"}]}
+  ]
+}"#;
+
+/// A part put under a record the same plan creates goes through that record's own `children`
+/// relation, as it would under a committed one, not `ad4m://has_child`: the parent is only
+/// staged when the part is written. A parent created after its part is the same.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_part_under_a_record_of_the_plan_goes_through_its_class_s_relation() {
+    let (mut p, _shapes, ctx) =
+        setup_perspective_no_llm(&[("Note", NOTE_SDNA), ("Holder", HOLDER_SDNA)]).await;
+    let holder = |reference: &str| PlannedWrite::Create {
+        reference: reference.into(),
+        class_name: "Holder".into(),
+        properties: None,
+        parent: None,
+    };
+    let created = apply(
+        &mut p,
+        &ctx,
+        vec![
+            holder("before"),
+            note("first", Some("first"), Some(by_ref("before")), json!({})),
+            note("second", Some("second"), Some(by_ref("after")), json!({})),
+            holder("after"),
+        ],
+    )
+    .await
+    .unwrap_or_else(|e| panic!("{e:?}"));
+
+    for (holder, part) in [("before", "first"), ("after", "second")] {
+        let holder = id(&created, holder);
+        assert_eq!(
+            targets(&p, holder, "ns://part").await,
+            vec![id(&created, part).to_string()]
+        );
+        assert!(targets(&p, holder, "ad4m://has_child").await.is_empty());
+    }
+}
+
+/// A properties map whose one property is named `ref` is a value, not a ref to a record of the
+/// plan.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_property_named_ref_is_written_as_a_value() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("Tag", TAG_SDNA)]).await;
+    let created = apply(
+        &mut p,
+        &ctx,
+        vec![PlannedWrite::Create {
+            reference: "tag".into(),
+            class_name: "Tag".into(),
+            properties: Some(Map::from_iter([("ref".to_string(), json!("v1.2"))])),
+            parent: None,
+        }],
+    )
+    .await
+    .unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(
+        targets(&p, id(&created, "tag"), "ns://tag_ref").await,
+        vec!["literal:string:v1.2"]
+    );
+}
+
+/// A create of one of the executor's own classes, not registered yet, is refused before anything
+/// is written: registering it is a write the plan's batch could not take back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plan_creating_an_unregistered_executor_class_writes_nothing() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[("Note", NOTE_SDNA)]).await;
+    let mut before: Vec<String> = p
+        .get_links(&LinkQuery::default())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|l| format!("{:?}", l.data))
+        .collect();
+    before.sort();
+
+    let refused = apply(
+        &mut p,
+        &ctx,
+        vec![
+            note("root", Some("root"), None, json!({})),
+            PlannedWrite::Create {
+                reference: "run".into(),
+                class_name: "ad4m://FlowInstance".into(),
+                properties: None,
+                parent: None,
+            },
+        ],
+    )
+    .await;
+    assert!(
+        matches!(&refused, Err(PlanError::UnregisteredClass { index: 1, class_name }) if class_name == "ad4m://FlowInstance"),
+        "{refused:?}"
+    );
+
+    let mut after: Vec<String> = p
+        .get_links(&LinkQuery::default())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|l| format!("{:?}", l.data))
+        .collect();
+    after.sort();
+    assert_eq!(after, before, "a refused plan changed the links");
+    assert!(
+        crate::perspectives::hardwired_class::unstored(&p, "ad4m://FlowInstance")
+            .unwrap()
+            .is_some(),
+        "the refused plan registered the class"
+    );
+}
