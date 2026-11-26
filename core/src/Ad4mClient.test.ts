@@ -1,5 +1,6 @@
 import { Ad4mClient } from './Ad4mClient';
 import { ApiClient, RpcError } from './apiClient';
+import type { FlowRefusal } from './generated/api';
 import { Perspective } from './perspectives/Perspective';
 import { LinkQuery } from './perspectives/LinkQuery';
 import type { EventMap, EventName } from './generated/api/Events';
@@ -142,6 +143,12 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
         ({ className: p.className, baseUri: p.baseUri, collection: p.collection, itemUri: p.itemUri, linksAdded: 1, alreadyMember: false }),
     'perspective.instanceRemoveFromCollection': (p: Record<string, unknown>) =>
         ({ className: p.className, baseUri: p.baseUri, collection: p.collection, itemUri: p.itemUri, linksRemoved: 1 }),
+    // A move to `nowhere` is refused as the executor refuses it: 409 with the FlowRefusal as data.
+    'perspective.proposeFlowTransition': () => ({ [RPC_ERROR]: {
+        code: 409,
+        message: '`nowhere` is not reachable from `identified` - no proposal written',
+        data: { kind: 'not-reachable', from: 'identified', to: 'nowhere' },
+    } }),
     'perspective.getSubjectData': '{"name":"test"}',
     'perspective.createBatch': 'batch-id-1',
     'perspective.commitBatch': { additions: [], removals: [] },
@@ -712,6 +719,18 @@ describe('PerspectiveClient', () => {
         expect(data.kind).toBe('validation');
         expect(data.errors[0].property).toBe('colour');
         expect(data.errors[0].problem.kind).toBe('unknownProperty');
+    });
+
+    test('a refused flow move rejects with the FlowRefusal as RpcError.data', async () => {
+        const error = await ad4m.perspective
+            .proposeFlowTransition('uuid-1', 'ad4m://flow/instance/1', 'nowhere')
+            .then(() => null, (e: unknown) => e);
+        expect(error).toBeInstanceOf(RpcError);
+        const rpcError = error as RpcError;
+        expect(rpcError.status).toBe(409);
+        const data = rpcError.data as FlowRefusal;
+        expect(data.kind).toBe('not-reachable');
+        expect(data).toEqual({ kind: 'not-reachable', from: 'identified', to: 'nowhere' });
     });
 
     test('the other instance writes call their methods with the body', async () => {

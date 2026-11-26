@@ -264,6 +264,22 @@ impl LinkExpression {
         crate::identity::check_signed_entered(&link_expr, entered_after_revoke, received_at)
     }
 
+    /// [`LinkExpression::check_entered`] for the bulk import, which fetches no signer log
+    /// ([`crate::identity::check_signed_import`]): an unanchored link from a signer the key
+    /// map does not know is `cantCheck`, not `valid`.
+    pub fn check_imported(
+        &self,
+        received_at: Option<u64>,
+    ) -> crate::identity::resolver::CheckedLink {
+        let link_expr = Expression::<Link> {
+            author: self.author.clone(),
+            timestamp: self.timestamp.clone(),
+            data: self.data.normalize(),
+            proof: self.proof.clone(),
+        };
+        crate::identity::check_signed_import(&link_expr, received_at)
+    }
+
     /// [`LinkExpression::check_entered`] for a link this executor signed during the call that
     /// writes it ([`crate::identity::check_signed_own`]): the local write path only, never a
     /// link that arrives already signed.
