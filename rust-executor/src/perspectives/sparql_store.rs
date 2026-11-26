@@ -2256,8 +2256,12 @@ fn build_segment_quads(
                 let status = link.status.clone().unwrap();
                 // Judged as `write_link_quads_proof` judges a link that arrives already
                 // signed (never `own`), for a reifier the store does not hold: no stored
-                // `valid` to keep, so no entry order is known. The receipt is the
-                // statement's, held or new, and a new one is loaded with the link.
+                // `valid` to keep, so no entry order is known. One difference: the import
+                // is offline and prepares no signers, so a signer whose log the key map
+                // does not hold leaves an unanchored link `cantCheck`
+                // ([`LinkExpression::check_imported`]), for the periodic re-check to judge.
+                // The receipt is the statement's, held or new, and a new one is loaded
+                // with the link.
                 let (received_at, receipt) = match store.received_at(&link)? {
                     Some(held) => (Some(held), None),
                     None if link.signature_holds() => {
@@ -2266,7 +2270,7 @@ fn build_segment_quads(
                     }
                     None => (None, None),
                 };
-                let checked = link.check_entered(None, received_at);
+                let checked = link.check_imported(received_at);
                 let judgement = Judgement {
                     valid: checked.verdict.counts(),
                     verdict: checked.verdict.stored(),
@@ -3821,8 +3825,15 @@ impl SparqlStore {
     /// does; a file link a stored tombstone already ends is `covered` —
     /// not written — as `ended_by_stored` decides; a link without a
     /// status imports as [`LinkStatus::Shared`]; and each link's verdict
-    /// is computed from its signature exactly as [`write_link_quads_proof`]
-    /// does — a forged file cannot import a `true` verdict. A tombstone
+    /// is computed from its signature as [`write_link_quads_proof`] does — a
+    /// forged file cannot import a `true` verdict. One difference: the import
+    /// is offline and, unlike a received diff, prepares none of its signers
+    /// (no log fetched, no signer held pending). A link whose signer's key log
+    /// the key map does not hold would be judged `valid` if unanchored (the
+    /// live path fetches the log first, so it never is, unseen); the import
+    /// stores it `cantCheck` ([`LinkExpression::check_imported`]), and the
+    /// periodic re-check ([`PerspectiveInstance::recheck_links`], scope
+    /// `CantCheck`) fetches the log and judges it. A tombstone
     /// that ends nothing bulk-loads like any link.
     ///
     /// A refusal of the file's content is an [`ImportRefused`] error (the
@@ -8450,6 +8461,10 @@ mod tests {
     fn import_round_trips_what_export_wrote() {
         let signer = TestSigner::generate();
         let other = TestSigner::generate();
+        // Signers no log lists, so the import judges as the write path did.
+        for s in [&signer, &other] {
+            crate::identity::cache::global_key_map().note_no_log(&s.multikey());
+        }
         let svc = new_service();
         let mut links = vec![
             make_link_with_ts(
@@ -8516,6 +8531,9 @@ mod tests {
     #[test]
     fn import_computes_the_verdict_it_stores() {
         let signer = TestSigner::generate();
+        // A signer no log lists (asked about, answered): an unanchored link counts. An
+        // unasked one would be `cantCheck` ([`LinkExpression::check_imported`]).
+        crate::identity::cache::global_key_map().note_no_log(&signer.multikey());
         let genuine: DecoratedLinkExpression = (
             make_link(&signer, "ad4m://s", "ad4m://p", "ad4m://z/ok"),
             LinkStatus::Shared,
@@ -8595,6 +8613,9 @@ mod tests {
     #[test]
     fn bulk_load_stores_the_same_quads_as_the_transactional_write() {
         let signer = TestSigner::generate();
+        // A signer no log lists (asked, answered): the import then judges as the write does.
+        // For an unasked one it stores `cantCheck` ([`LinkExpression::check_imported`]).
+        crate::identity::cache::global_key_map().note_no_log(&signer.multikey());
         for target in ["ad4m://t", "literal:string:raw text"] {
             let link = make_link_with_ts(
                 &signer,

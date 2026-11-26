@@ -628,23 +628,34 @@ export class FlowInstance {
    * and a receipt for the run speaks for exactly these instances as they
    * stood at completion.
    *
-   * Throws when `toState` is not reachable from the derived state, when the
-   * target state carries a `requires` guard that is not currently satisfied
-   * on this replica, when the instance is already contested, when `outputs`
-   * is given for a non-terminal state or names something that is not an
-   * instance of its class, or
-   * when an open proposal on the same edge names different outputs.
+   * Rejects with a refusal when `toState` is not reachable from the derived
+   * state, when the target state carries a `requires` guard that is not
+   * currently satisfied on this replica, when the instance is already
+   * contested, when `outputs` is given for a non-terminal state or names
+   * something that is not an instance of its class, or when an open proposal
+   * on the same edge names different outputs. A refusal is an `RpcError` with
+   * status 409. Its `data` is a {@link FlowRefusal}: branch on `data.kind`.
+   * Any other failure is status 500 with no `data`.
    */
   async proposeTransition(toState: string, rationale?: string, outputs?: FlowOutputRef[]): Promise<FlowProposeResult> {
     return this.perspective.proposeFlowTransition(this.uri, toState, rationale, outputs);
   }
 
+  /**
+   * Co-sign a proposal. Rejects with an `RpcError` (status 409, `data` a
+   * {@link FlowRefusal}) when this replica refuses to sign it, for example a
+   * stale proposal or outputs it cannot reproduce.
+   */
   async acceptProposal(proposal: FlowTransitionProposal | string): Promise<FlowFireOutcome[]> {
     const uri = typeof proposal === "string" ? proposal : proposal.id;
     return this.perspective.acceptFlowProposal(uri);
   }
 
-  /** Withdraw our own links from a proposal; resolves to how many went. */
+  /**
+   * Withdraw our own links from a proposal; resolves to how many went.
+   * Rejects with an `RpcError` (status 409, `data` a {@link FlowRefusal}) when
+   * the proposal does not exist or is not ours.
+   */
   async rejectProposal(proposal: FlowTransitionProposal | string): Promise<number> {
     const uri = typeof proposal === "string" ? proposal : proposal.id;
     return this.perspective.rejectFlowProposal(uri);
