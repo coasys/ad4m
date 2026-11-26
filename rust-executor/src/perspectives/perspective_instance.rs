@@ -92,6 +92,8 @@ mod expected_links;
 pub use expected_links::{ExpectedLinks, LinksChanged};
 // A batch's effective view of the graph for the validated write core.
 mod batch_view;
+// Bulk-loading a perspective-export file straight into the SPARQL store.
+mod import;
 // Remote telepresence broadcasts, off the link-language queue's critical path.
 mod language_broadcasts;
 
@@ -118,6 +120,10 @@ mod broadcast_diag_tests;
 #[cfg(test)]
 #[path = "perspective_instance_pending_diffs_tests.rs"]
 mod pending_diffs_tests;
+
+#[cfg(test)]
+#[path = "perspective_instance_import_tests.rs"]
+mod import_tests;
 
 #[cfg(test)]
 #[path = "perspective_instance_telepresence_tests.rs"]
