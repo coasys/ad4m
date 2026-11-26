@@ -19,6 +19,7 @@
     { "job": "coasys-spaces", "metric": "graph.*", "factor": 2.0, "min_delta": 50, "_metric": "The canvas's zoom, pan, drag and select: input to the next painted frame, tens of ms." },
     { "job": "coasys-spaces", "metric": "graph.*_max_ms", "factor": 3.0, "min_delta": 100, "_metric": "The slowest of 5 rounds: one late frame (a garbage collection) doubles it." },
     { "job": "coasys-spaces", "metric": "graph.first_node_ms", "factor": 1.5, "min_delta": 500, "_metric": "The canvas's load: the click on Canvas to its first node." },
-    { "job": "coasys-spaces", "metric": "graph.all_records_ms", "factor": 1.5, "min_delta": 500, "_metric": "The click on Canvas to every record drawn." }
+    { "job": "coasys-spaces", "metric": "graph.all_records_ms", "factor": 1.5, "min_delta": 500, "_metric": "Stub tier: the click on Canvas to every record drawn." },
+    { "job": "coasys-spaces", "metric": "graph.first_record_ms", "factor": 1.5, "min_delta": 500, "_metric": "Real tier: the click on Canvas to the first record the model found drawn." }
   ]
 }
