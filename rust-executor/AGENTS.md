@@ -229,3 +229,14 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   "do not") and a sibling `CLAUDE.md` containing only `@AGENTS.md`.
 - Mechanical moves and behaviour changes in separate commits.
 - Stale docs in this dir: `LOGGING.md` is current. Anything named `PHASE1_*` is obsolete.
+
+## Lib-test prerequisites and target dirs
+
+- On a fresh checkout, lib tests do not compile until two build outputs exist. Run
+  `rust-executor/scripts/build-deno-snapshot.sh` (the same as `pnpm build` here).
+  `rust-executor/dapp/dist` must exist too: `dapp_server.rs` embeds it with
+  `include_dir!`. Produce it with `pnpm build-dapp` at the repo root.
+- A gate uses its own `CARGO_TARGET_DIR` per worktree. A shared one can run a
+  stale test binary.
+- `bootstrap-languages` builds ignore `CARGO_TARGET_DIR`. Run them with
+  `env -u CARGO_TARGET_DIR`.
