@@ -116,7 +116,10 @@ export class Ad4mClient {
     /**
      * Call `handler` with every `type` event, or only those about
      * `filter.perspective`. The payload is typed by the executor's event
-     * table (`generated/api/Events.ts`). Returns a function that removes the
+     * table (`generated/api/Events.ts`). The watch goes out ahead of any call
+     * this client sends after `on()`, so an event such a call causes reaches
+     * the handler; an event another client causes may come before the
+     * executor applied the watch. Returns a function that removes the
      * handler.
      */
     on<K extends EventName>(type: K, handler: (event: EventMap[K]) => void, filter?: EventFilter): () => void {

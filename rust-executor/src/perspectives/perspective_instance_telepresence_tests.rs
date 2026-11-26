@@ -430,7 +430,7 @@ async fn a_broadcast_to_only_local_members_skips_the_language() {
     )
     .await;
     let instance = neighbourhood(&stub, vec![crate::agent::did()]).await;
-    let url = instance.persisted.lock().await.shared_url.clone().unwrap();
+    let url = instance.persisted.load().shared_url.clone().unwrap();
 
     // One policy read verifies "all hosted" and caches that verdict.
     assert_eq!(
@@ -573,7 +573,7 @@ async fn a_blocked_policy_check_serves_the_last_policy() {
     )
     .await;
     let instance = neighbourhood(&stub, vec![crate::agent::did()]).await;
-    let url = instance.persisted.lock().await.shared_url.clone().unwrap();
+    let url = instance.persisted.load().shared_url.clone().unwrap();
 
     let first = timeout(Duration::from_secs(3), read_policy(&url))
         .await
@@ -615,7 +615,7 @@ async fn a_remote_member_seen_during_the_check_is_not_lost() {
     )
     .await;
     let instance = neighbourhood(&stub, vec![crate::agent::did()]).await;
-    let url = instance.persisted.lock().await.shared_url.clone().unwrap();
+    let url = instance.persisted.load().shared_url.clone().unwrap();
     stub.set(StubMode::Slow);
 
     let read = tokio::spawn({
@@ -659,7 +659,7 @@ async fn only_a_verified_signal_counts_as_a_remote_member() {
     )
     .await;
     let instance = neighbourhood(&stub, vec![crate::agent::did()]).await;
-    let handle = instance.persisted.lock().await.clone();
+    let handle = instance.persisted.snapshot();
     let url = handle.shared_url.clone().unwrap();
     let policy = read_policy(&url).await.into_result().unwrap();
     assert_eq!(
@@ -708,7 +708,7 @@ async fn a_failed_policy_check_without_an_earlier_one_errors() {
     )
     .await;
     let instance = neighbourhood(&stub, vec![crate::agent::did()]).await;
-    let url = instance.persisted.lock().await.shared_url.clone().unwrap();
+    let url = instance.persisted.load().shared_url.clone().unwrap();
     stub.set(StubMode::Fail);
 
     let policy = timeout(Duration::from_secs(60), read_policy(&url))
@@ -845,7 +845,7 @@ async fn a_remote_member_who_joins_inside_the_cache_window_gets_the_next_signal(
     )
     .await;
     let instance = neighbourhood(&stub, vec![crate::agent::did()]).await;
-    let url = instance.persisted.lock().await.shared_url.clone().unwrap();
+    let url = instance.persisted.load().shared_url.clone().unwrap();
     assert_eq!(
         read_policy(&url).await.into_result().unwrap().mode,
         "designated",
@@ -865,7 +865,7 @@ async fn a_remote_member_who_joins_inside_the_cache_window_gets_the_next_signal(
     sleep(Duration::from_secs(5)).await;
     stub.set_peers(vec!["did:key:remote".to_string()]);
     crate::perspectives::publish_telepresence_signal(
-        instance.persisted.lock().await.clone(),
+        instance.persisted.snapshot(),
         signal_from("did:key:remote", &[("desk", beat_in("room:x"))]),
         None,
     );
@@ -974,7 +974,7 @@ async fn an_expired_policy_with_a_blocked_check_serves_the_last_policy() {
     )
     .await;
     let instance = neighbourhood(&stub, vec![crate::agent::did()]).await;
-    let url = instance.persisted.lock().await.shared_url.clone().unwrap();
+    let url = instance.persisted.load().shared_url.clone().unwrap();
     assert_eq!(
         read_policy(&url).await.into_result().unwrap().mode,
         "designated",

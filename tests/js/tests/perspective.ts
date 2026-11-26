@@ -1,4 +1,4 @@
-import { Ad4mClient, Ad4mModel, HasMany, Link, LinkQuery, Literal, MentionMessage, Mentioning, Model, PerspectiveProxy, PerspectiveState, Property, QuerySubscriptionProxy, TextContent, WakerSubscriptionManager } from "@coasys/ad4m";
+import { Ad4mClient, Ad4mModel, HasMany, Link, LinkQuery, Literal, MentionMessage, Mentioning, Model, PerspectiveProxy, PerspectiveState, Property, TextContent, WakerSubscriptionManager } from "@coasys/ad4m";
 import { TestContext } from './test-context'
 import { expect } from "chai";
 import * as sinon from "sinon";
@@ -314,7 +314,6 @@ export default function perspectiveTests(testContext: TestContext) {
                 const manager = new WakerSubscriptionManager({
                     perspectiveClient: ad4mClient.perspective,
                     logger: quiet,
-                    QuerySubscriptionProxy,
                     debounceMs: 50,
                     onWake: (_sub, _result, mentions) => { wakes.push(mentions) },
                 })
@@ -374,9 +373,11 @@ export default function perspectiveTests(testContext: TestContext) {
             it('a SPARQL live query follows a link that is added, then removed', async () => {
                 const ad4mClient: Ad4mClient = testContext.ad4mClient!
                 const p = await ad4mClient.perspective.add("live sparql rows")
-                const subscription = await p.subscribeQuery('SELECT ?target WHERE { <test://live-source> <test://live-predicate> ?target . }')
-                const rows = () => subscription.result as unknown as any[]
+                const live = p.liveSparql('SELECT ?target WHERE { <test://live-source> <test://live-predicate> ?target . }')
+                const rows = () => (live.getSnapshot().data ?? []) as any[]
                 try {
+                    await live.first
+                    expect(live.getSnapshot().initial).to.equal(true)
                     expect(rows()).to.eql([])
 
                     const link = await p.add(new Link({ source: 'test://live-source', predicate: 'test://live-predicate', target: 'test://live-target' }))
@@ -386,7 +387,7 @@ export default function perspectiveTests(testContext: TestContext) {
                     await p.remove(link)
                     await pollUntil(() => rows().length === 0, { label: 'live query row removed with the link' })
                 } finally {
-                    subscription.dispose()
+                    live.dispose()
                     await ad4mClient.perspective.remove(p.uuid)
                 }
             })
@@ -1028,11 +1029,11 @@ export default function perspectiveTests(testContext: TestContext) {
             it('refuses a Prolog live query with 400', async () => {
                 let error: any
                 try {
-                    await ad4mClient.perspective.subscribeQuery(proxy.uuid, 'triple(X, _, "todo-ontology://is-todo").')
+                    await ad4mClient.perspective.subscribe(proxy.uuid, { sparql: 'triple(X, _, "todo-ontology://is-todo").' })
                 } catch (e) {
                     error = e
                 }
-                expect(error, 'subscribeQuery rejects').to.exist
+                expect(error, 'subscribe rejects').to.exist
                 expect(error.status).to.equal(400)
                 expect(error.body).to.include('Prolog live queries are no longer supported')
             })

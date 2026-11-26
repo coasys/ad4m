@@ -136,7 +136,7 @@ async fn rekey_and_move() -> Result<DeviceKeys, WsRpcError> {
 async fn move_from_retired(retired: &[String], new: &str) -> Vec<String> {
     let mut failed: Vec<String> = Vec::new();
     for instance in crate::perspectives::all_perspectives() {
-        let handle = instance.persisted.lock().await.clone();
+        let handle = instance.persisted.snapshot();
         if !retired.iter().any(|did| handle.is_owned_by(did)) {
             continue;
         }
@@ -325,10 +325,10 @@ mod tests {
         assert!(user.check().is_err(), "a managed user's grant ends too");
         // Perspective owners: the main agent's perspective moved, the user's did not.
         let mine = crate::perspectives::get_perspective(&owned.uuid).unwrap();
-        let mine = mine.persisted.lock().await.clone();
+        let mine = mine.persisted.snapshot();
         assert_eq!(mine.owners, Some(vec![new.clone()]));
         let theirs = crate::perspectives::get_perspective(&users.uuid).unwrap();
-        let theirs = theirs.persisted.lock().await.clone();
+        let theirs = theirs.persisted.snapshot();
         assert_eq!(theirs.owners, Some(vec!["did:key:rekey-user".to_string()]));
         // Notifications and claims.
         let (owners, join, flow) = Ad4mDb::with_global_instance(|db| {
@@ -409,12 +409,14 @@ mod tests {
 
     async fn owners_of(uuid: &str) -> Option<Vec<String>> {
         let instance = crate::perspectives::get_perspective(uuid).unwrap();
-        let owners = instance.persisted.lock().await.owners.clone();
+        let owners = instance.persisted.load().owners.clone();
         owners
     }
 
     /// A second re-key waits until the first has moved every place, so the owners end on the
-    /// last key. A test that holds the perspective stops the first re-key after its key change.
+    /// last key. Holding the writer mutex stops owner migration in
+    /// `update_perspective_with`, after the first re-key changed the wallet key.
+    /// Snapshot readers remain available while that migration is paused.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn two_rekeys_run_one_after_the_other() {
         let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
@@ -426,12 +428,15 @@ mod tests {
             .unwrap();
         let instance = crate::perspectives::get_perspective(&owned.uuid).unwrap();
 
-        let held = instance.persisted.lock().await;
+        let held = instance.persisted.hold_writer().await;
         let first = tokio::spawn(rekey_main());
         let first_key = key_after(&old).await;
         let second = tokio::spawn(rekey_main());
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         let during = crate::agent::did();
+        let owners_during = instance.persisted.load().owners.clone();
+        let first_waiting = !first.is_finished();
+        let second_waiting = !second.is_finished();
         drop(held);
         let first = first.await.unwrap().unwrap();
         let second = second.await.unwrap().unwrap();
@@ -439,6 +444,9 @@ mod tests {
         crate::perspectives::remove_perspective(&owned.uuid).await;
         crate::test_utils::setup_agent();
 
+        assert_eq!(owners_during, Some(vec![old]), "owner migration is paused");
+        assert!(first_waiting, "the first re-key waits for its owner write");
+        assert!(second_waiting, "the second re-key waits for the first");
         assert_eq!(during, first_key, "the second re-key waits for the first");
         assert_eq!(first.sign, first_key);
         assert_ne!(second.sign, first_key);
@@ -457,11 +465,13 @@ mod tests {
             .unwrap();
         let instance = crate::perspectives::get_perspective(&owned.uuid).unwrap();
 
-        let held = instance.persisted.lock().await;
+        let held = instance.persisted.hold_writer().await;
         let call = tokio::spawn(rekey_main());
         let new = key_after(&old).await;
         call.abort();
         assert!(call.await.unwrap_err().is_cancelled());
+        // The caller is gone but the detached migration is still paused on its write.
+        let owners_during = instance.persisted.load().owners.clone();
         drop(held);
         let mut owners = None;
         for _ in 0..500 {
@@ -476,6 +486,7 @@ mod tests {
         crate::perspectives::remove_perspective(&owned.uuid).await;
         crate::test_utils::setup_agent();
 
+        assert_eq!(owners_during, Some(vec![old]), "owner migration was paused");
         assert_eq!(owners, Some(vec![new]));
     }
 

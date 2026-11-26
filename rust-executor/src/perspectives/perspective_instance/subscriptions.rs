@@ -145,7 +145,7 @@ impl PerspectiveInstance {
         payload.insert("revision".into(), json!(revision));
         let main = || did_for_context(&AgentContext::main_agent()).ok();
         let subscriber = subscriber.or_else(main);
-        let audience = super::super::event_recipients(&*self.persisted.lock().await)
+        let audience = super::super::event_recipients(&self.persisted.snapshot())
             .into_iter()
             .filter(|owner| Some(owner) == subscriber.as_ref())
             .collect();

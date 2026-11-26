@@ -533,12 +533,8 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
     ("perspective.queryProlog", || json!({ "query": "true." })),
     ("perspective.querySparql", || json!({ "query": "ASK {}" })),
     (
-        "perspective.subscribeQuery",
-        || json!({ "query": "true.", "subscriptionId": "s" }),
-    ),
-    (
-        "perspective.subscribeSparql",
-        || json!({ "query": "ASK {}" }),
+        "perspective.subscribe",
+        || json!({ "sparql": "ASK {}", "subscriptionId": "s" }),
     ),
     (
         "perspective.resyncSubscription",
@@ -549,20 +545,12 @@ const EXTRA_PARAMS: &[ExtraParams] = &[
         || json!({ "subscriptionId": "s" }),
     ),
     (
-        "perspective.disposeSparql",
-        || json!({ "subscriptionId": "s" }),
-    ),
-    (
         "perspective.getSubjectData",
         || json!({ "subjectClass": "C", "expressionAddress": "e" }),
     ),
     (
         "perspective.modelQuery",
         || json!({ "class_name": "C", "query_json": "{}" }),
-    ),
-    (
-        "perspective.modelSubscribe",
-        || json!({ "class_name": "C", "query_json": "{}", "subscriptionId": "s" }),
     ),
     (
         "perspective.evaluateGetters",
@@ -2337,9 +2325,8 @@ async fn the_log_names_a_shared_perspective_by_its_neighbourhood_url() {
     crate::perspectives::get_perspective(&world.users_own)
         .expect("the user's perspective")
         .persisted
-        .lock()
-        .await
-        .shared_url = Some(url.clone());
+        .update(|h| h.shared_url = Some(url.clone()))
+        .await;
     register_bot(&world, "active", &["read", "write"]);
     crate::bots::set_test_key(
         BOT_DID,

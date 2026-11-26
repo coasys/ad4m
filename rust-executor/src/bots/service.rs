@@ -447,7 +447,7 @@ pub async fn set_grant(
         .cloned()
         .collect();
     for perspective in crate::perspectives::all_perspectives() {
-        let shared_url = perspective.persisted.lock().await.shared_url.clone();
+        let shared_url = perspective.persisted.load().shared_url.clone();
         if affected.contains(&perspective.uuid)
             || shared_url
                 .as_deref()
