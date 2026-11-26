@@ -129,7 +129,7 @@ async fn a_second_propose_by_the_same_did_writes_nothing_and_is_still_one_vote()
 
 /// Two terminal branches out of one state: whichever settles first forecloses
 /// the other, which is the shape the fold reports as contention.
-fn fork_flow() -> serde_json::Value {
+pub(super) fn fork_flow() -> serde_json::Value {
     let guard = serde_json::json!([{ "className": "ns://Task", "count": { "min": 1 } }]);
     serde_json::json!({
         "name": "Fork",
