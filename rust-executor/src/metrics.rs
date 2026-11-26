@@ -314,7 +314,7 @@ pub async fn snapshot() -> Snapshot {
     let mut gauges: BTreeMap<String, (u64, u64)> = BTreeMap::new();
     let instances = crate::perspectives::all_perspectives();
     for p in &instances {
-        let owners = p.persisted.lock().await.owners.clone();
+        let owners = p.persisted.load().owners.clone();
         match owners.filter(|o| !o.is_empty()) {
             Some(owners) => {
                 for owner in owners {

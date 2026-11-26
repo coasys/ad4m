@@ -309,7 +309,8 @@ async function joinWithAudio(user: CallUser, neighbourhoodUrl: string, room: str
     else count.unverified += 1;
     signals.set(link.author, count);
   };
-  await proxy.addSignalHandler(countSignal);
+  // createSession is a call on this client, so the signal subscription is on the wire ahead of it.
+  proxy.addSignalHandler(countSignal);
   const session = await proxy.createSession(room);
   const audio = syntheticAudio(toneHz);
   const call: Call = {

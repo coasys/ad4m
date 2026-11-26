@@ -119,7 +119,7 @@ async fn test_render_after_sync() {
     let bob_render_after: Perspective = call_zome(&conductors[1], bob_cell, "render", ()).await;
     assert_eq!(bob_render_after.links.len(), 3, "Bob should see 3 links after sync");
 
-    for mut conductor in conductors.into_inner() {
+    for conductor in conductors.into_inner().iter_mut() {
         conductor.shutdown().await;
     }
 }
@@ -184,7 +184,7 @@ async fn test_anchored_link_syncs_with_its_anchor() {
     assert_eq!(links[0]["proof"]["anchor"], 7, "Bob's copy keeps the anchor");
     assert_eq!(links[0]["proof"]["signature"], "abcd");
 
-    for mut conductor in conductors.into_inner() {
+    for conductor in conductors.into_inner().iter_mut() {
         conductor.shutdown().await;
     }
 }

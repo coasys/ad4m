@@ -10,8 +10,9 @@ use serde_json::Value as JsonValue;
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
+use tokio::time::Instant;
 
 // ---------------------------------------------------------------------------
 // The agent a call acts as

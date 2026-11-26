@@ -27,6 +27,20 @@ const requireCjs = createRequire(path.join(pkgDir, "bundle.test.ts"));
 let bundle: any;
 let bundleSource: string;
 
+/**
+ * The parts of the executor client a live query uses, with `perspective.subscribe` answering
+ * as `subscribe` says.
+ */
+function liveClient(subscribe: () => Promise<unknown>) {
+  return {
+    subscribe: vi.fn(subscribe),
+    onQueryUpdate: vi.fn(() => () => {}),
+    onReconnect: vi.fn(() => () => {}),
+    disposeQuerySubscription: vi.fn(() => Promise.resolve(true)),
+    resyncSubscription: vi.fn(() => Promise.resolve()),
+  };
+}
+
 describe("shipped bundle", () => {
   beforeAll(() => {
     // Build here rather than relying on a prior `npm run build`: a stale dist
@@ -40,23 +54,14 @@ describe("shipped bundle", () => {
     const { WakerSubscriptionManager } = bundle;
     expect(typeof WakerSubscriptionManager).toBe("function");
 
-    const proxy = {
-      initialized: Promise.resolve(),
-      subscribe: vi.fn(() =>
-        Promise.reject(new Error("RPC error 403: main key not found")),
-      ),
-      dispose: vi.fn(),
-      onResult: vi.fn(),
-    };
-
     const manager = new WakerSubscriptionManager({
       perspectiveClient: {
+        ...liveClient(() =>
+          Promise.reject(new Error("RPC error 403: main key not found")),
+        ),
         querySparql: vi.fn(() => Promise.resolve({ results: { bindings: [] } })),
       },
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
-      QuerySubscriptionProxy: vi.fn(function () {
-        return proxy;
-      }),
       debounceMs: 10,
       onWake: () => {},
       onPersist: () => {},
@@ -87,22 +92,13 @@ describe("shipped bundle", () => {
 
   it("ships a manager that times out a hung handshake and keeps it pending (#1016)", async () => {
     const { WakerSubscriptionManager } = bundle;
-    const proxy = {
-      initialized: Promise.resolve(),
-      // The executor accepted the socket but never answers the subscribe RPC.
-      subscribe: vi.fn(() => new Promise<void>(() => {})),
-      dispose: vi.fn(),
-      onResult: vi.fn(),
-    };
-
     const manager = new WakerSubscriptionManager({
       perspectiveClient: {
+        // The executor accepted the socket but never answers the subscribe RPC.
+        ...liveClient(() => new Promise(() => {})),
         querySparql: vi.fn(() => Promise.resolve({ results: { bindings: [] } })),
       },
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
-      QuerySubscriptionProxy: vi.fn(function () {
-        return proxy;
-      }),
       debounceMs: 10,
       subscribeTimeoutMs: 50,
       retryPendingMs: 60_000,
@@ -133,43 +129,42 @@ describe("shipped bundle", () => {
     manager.disposeAll();
   });
 
-  it("ships a QuerySubscriptionProxy that opens a class's model query with modelSubscribe", async () => {
+  it("ships a manager that opens a class's model query through perspective.subscribe", async () => {
     // Mention and children subscriptions are model queries over a class
-    // (#1446). The released client's proxy took (uuid, query, client) only,
-    // dropped the class, and sent the JSON to subscribeQuery, which the
-    // executor rejects as "Prolog live queries are no longer supported".
-    const { QuerySubscriptionProxy } = bundle.loadWakerClientModule();
-    const client = {
-      onQueryUpdate: vi.fn(() => () => {}),
-      onReconnect: vi.fn(() => () => {}),
-      disposeQuerySubscription: vi.fn(() => Promise.resolve(true)),
-      subscribeQuery: vi.fn(() => Promise.reject(new Error("SPARQL path"))),
-      modelSubscribe: vi.fn(() =>
-        Promise.resolve({
-          subscriptionId: "sub-1",
-          revision: 0,
-          result: { instances: [], totalCount: 0 },
-        }),
-      ),
-    };
-
-    const proxy = new QuerySubscriptionProxy(
-      "perspective-uuid",
-      '{"limit":50}',
-      client,
-      "ad4m://TextContent",
+    // (#1446). A client that dropped the class sent the JSON as SPARQL, which
+    // the executor rejects.
+    const { WakerSubscriptionManager } = bundle;
+    const client = liveClient(() =>
+      Promise.resolve({
+        subscriptionId: "sub-1",
+        revision: 0,
+        result: { instances: [], totalCount: 0 },
+      }),
     );
-    await proxy.subscribe();
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: client,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+      debounceMs: 10,
+      onWake: () => {},
+      onPersist: () => {},
+    });
+    const queryJson = '{"where":{"id":"test://call"}}';
+    await manager.subscribe({
+      id: "bundle-class",
+      type: "channel-messages",
+      perspective: "perspective-uuid",
+      channel: "test://call",
+      query: queryJson,
+      className: "ad4m://Container",
+    });
 
-    expect(client.modelSubscribe).toHaveBeenCalledWith(
+    expect(client.subscribe).toHaveBeenCalledWith(
       "perspective-uuid",
-      "ad4m://TextContent",
-      '{"limit":50}',
+      { className: "ad4m://Container", queryJson },
       { signal: expect.any(AbortSignal) },
     );
-    expect(client.subscribeQuery).not.toHaveBeenCalled();
-    expect(proxy.id).toBe("sub-1");
-    proxy.dispose();
+    expect(manager.has("bundle-class")).toBe(true);
+    manager.disposeAll();
   });
 
   it("resolves @coasys/ad4m at build time, not from the installing host", () => {

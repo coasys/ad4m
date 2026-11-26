@@ -309,9 +309,9 @@ await todo.save();
 
 // Query todos
 const allTodos = await Todo.findAll(perspective);
-const doneTodos = await Todo.query(perspective)
-  .where({ state: "todo://done" })
-  .get();
+const doneTodos = await Todo.findAll(perspective, {
+  where: { state: "todo://done" }
+});
 
 // Update a todo
 todo.state = "todo://done";
