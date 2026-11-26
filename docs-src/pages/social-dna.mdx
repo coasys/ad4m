@@ -289,11 +289,11 @@ const todo = new Todo(perspective);
 todo.state = "todo://doing";
 await todo.save();
 
-// Query with the fluent API
+// Query with a where
 const todos = await Todo.findAll(perspective);
-const doneTodos = await Todo.query(perspective)
-  .where({ state: "todo://done" })
-  .get();
+const doneTodos = await Todo.findAll(perspective, {
+  where: { state: "todo://done" }
+});
 ```
 
 This approach automatically generates SHACL and provides a rich development experience.
@@ -510,7 +510,7 @@ const stats = await perspective.querySparql(`
 `);
 ```
 
-**Note**: `Ad4mModel` uses the SPARQL engine internally for `findAll()` and query builder operations. See the [SPARQL Queries Guide](/developer-guides/sparql-queries) for comprehensive examples.
+**Note**: `Ad4mModel` uses the SPARQL engine internally for `findAll()` and the other model queries. See the [SPARQL Queries Guide](/developer-guides/sparql-queries) for comprehensive examples.
 
 ### The Prolog Engine (Backward Compatibility)
 

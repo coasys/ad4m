@@ -249,13 +249,13 @@ impl AutoProcessorEvent {
 
 /// The DIDs that may read perspective `uuid` now: its owners, or the main agent for an
 /// unowned perspective (`perspectives::event_recipients`, the audience of every perspective
-/// topic). Empty when no perspective with this UUID is registered. Waits for the handle; no
-/// emitter holds it while it emits.
+/// topic). Empty when no perspective with this UUID is registered. Takes a snapshot without
+/// waiting for handle writers.
 pub(crate) async fn readers(uuid: &str) -> Vec<String> {
     let Some(instance) = crate::perspectives::get_perspective(uuid) else {
         return vec![];
     };
-    let handle = instance.persisted.lock().await;
+    let handle = instance.persisted.snapshot();
     crate::perspectives::event_recipients(&handle)
 }
 

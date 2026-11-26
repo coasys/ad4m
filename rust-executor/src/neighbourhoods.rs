@@ -112,7 +112,7 @@ pub async fn install_neighbourhood_with_context(
 
     // Check if neighbourhood already exists
     for p in perspectives.iter() {
-        let handle = p.persisted.lock().await.clone();
+        let handle = p.persisted.snapshot();
         if handle.shared_url == Some(url.clone()) {
             // Neighbourhood exists - add this user as owner if it's a user context
             log::info!(
@@ -261,12 +261,7 @@ mod tests {
             joined.unwrap();
         }
 
-        let in_memory = get_perspective(&handle.uuid)
-            .unwrap()
-            .persisted
-            .lock()
-            .await
-            .clone();
+        let in_memory = get_perspective(&handle.uuid).unwrap().persisted.snapshot();
         let stored = crate::db_backend::db_backend()
             .get_all_perspectives()
             .unwrap()
@@ -312,12 +307,7 @@ mod tests {
             .unwrap();
 
         let main = did_for_context(&AgentContext::main_agent()).unwrap();
-        let in_memory = get_perspective(&handle.uuid)
-            .unwrap()
-            .persisted
-            .lock()
-            .await
-            .clone();
+        let in_memory = get_perspective(&handle.uuid).unwrap().persisted.snapshot();
         let stored = crate::db_backend::db_backend()
             .get_all_perspectives()
             .unwrap()
@@ -378,7 +368,7 @@ mod tests {
             task.unwrap();
         }
 
-        let persisted = p.persisted.lock().await.clone();
+        let persisted = p.persisted.snapshot();
         assert_eq!(
             persisted.state,
             PerspectiveState::LinkLanguageInstalledButNotSynced,

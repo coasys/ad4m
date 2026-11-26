@@ -162,25 +162,31 @@ For comprehensive examples and graph traversal patterns, see the [SPARQL Queries
 A live query is a SPARQL query (or a model query, see [Model Classes](/developer-guides/model-classes)) whose result follows the perspective's links:
 
 ```typescript
-const subscription = await perspective.subscribeQuery(
+const live = perspective.liveSparql(
   'SELECT ?post ?agent WHERE { ?post <sioc://likes> ?agent . }'
 );
-console.log(subscription.result);
 
-// Set up callback for updates
-subscription.onResult(results => {
-    console.log("Posts and the agents who like them:", results);
+// Every value: the opening one when it arrives, then each change.
+// `initial` is true only for the opening value.
+const stop = live.subscribe(({ status, data, initial }) => {
+  if (status === "ready") console.log("Posts and the agents who like them:", data, initial);
 });
 
-// Important: Clean up subscription when done
-subscription.dispose();
+// The opening result, once the executor has computed it
+const rows = await live.first;
+
+// Important: Clean up when done
+stop();
+live.dispose();
 ```
 
-Query subscriptions provide real-time updates but require proper cleanup:
+`liveSparql()` returns a `LiveQuery`, the one handle for every live query (`Model.query()` returns the same type for a model query). It has `first` (a promise of the opening result), `getSnapshot()` (the current `{ status, data, initial, ... }`, the same object until something changes), `subscribe(fn)` (calls `fn` at once when a value exists, then once per change, and returns an unsubscribe function), `onStatus(fn)` and `dispose()`. A result equal to the last one emits nothing: a resync or a re-open that finds the same rows is silent.
 
-1. **Initialization**: When you create a subscription, it waits for the first result before becoming active
-2. **Updates**: Receive real-time updates through your callback as the data changes
-3. **Cleanup**: Call `dispose()` when done to:
+Live queries provide real-time updates but require proper cleanup:
+
+1. **Opening**: the handle opens at once; `status` is `loading` until the first result, and `dispose()` is valid before it arrives (it cancels the opening)
+2. **Updates**: receive each change through `subscribe()`; the opening value has `initial: true` and every later one `false`
+3. **Cleanup**: call `dispose()` when done to:
    - Unsubscribe from updates
    - End the backend subscription
    - Prevent memory leaks
@@ -190,7 +196,7 @@ opened it. Disposing one never interrupts another subscriber of the same query.
 The backend also ends every subscription of a connection when that connection
 closes, so a page closed without disposing leaves nothing behind.
 
-Always remember to call `dispose()` when you're done with a subscription.
+Always remember to call `dispose()` when you're done with a live query.
 
 ### Prolog Integration (Legacy)
 
@@ -203,7 +209,7 @@ const results = await perspective.queryProlog(
 // Finds posts liked by agents who know a specific person
 ```
 
-Prolog queries are one-shot: there are no Prolog live queries. `subscribeQuery()` refuses a Prolog query with a 400 error; use a SPARQL or model query for live results.
+Prolog queries are one-shot: there are no Prolog live queries. `liveSparql()` (the `perspective.subscribe` RPC) refuses a Prolog query with a 400 error; use a SPARQL or model query for live results.
 
 **Recommendation**: Use SPARQL for most queries, and reserve Prolog for complex logic programming or custom SDNA rules.
 

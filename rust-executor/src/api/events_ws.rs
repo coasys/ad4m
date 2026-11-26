@@ -1907,7 +1907,7 @@ mod audience_matrix_tests {
                 )
                 .await;
             // A write holds the handle from here until every stream has its updates.
-            writes.push(instance.persisted.lock().await);
+            writes.push(instance.persisted.hold_writer().await);
         }
         // The updates go out from a task; the fence goes after them.
         let mut updates = 0;

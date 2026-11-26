@@ -176,13 +176,6 @@ describe("Ad4mModel — linkStatus reads", function () {
     const card = await find({ linkStatus: "shared" });
     expect(card.title).to.equal("shared title");
     expect(card.note, "the Local note must not be read").to.not.equal("local note");
-
-    const viaBuilder = await LinkStatusCard.query(perspective)
-      .where({ id: cardId })
-      .linkStatus("shared")
-      .get();
-    expect(viaBuilder[0]?.title).to.equal("shared title");
-    expect(viaBuilder[0]?.note).to.not.equal("local note");
   });
 
   it("returns only the Local property with linkStatus: 'local'", async () => {
@@ -217,13 +210,6 @@ describe("Ad4mModel — linkStatus reads", function () {
     const shared = await find({ linkStatus: "shared", links: ["note", "title"] });
     expect(targets(shared, "note"), "the Local note link must not be listed").to.deep.equal([]);
     expect(targets(shared, "title")).to.have.length(1);
-
-    const viaBuilder = await LinkStatusCard.query(perspective)
-      .where({ id: cardId })
-      .linkStatus("shared")
-      .links(["note"])
-      .get();
-    expect(targets(viaBuilder[0], "note")).to.deep.equal([]);
   });
 
   it("reads a typed relation from links of the same status", async () => {
@@ -244,12 +230,6 @@ describe("Ad4mModel — linkStatus reads", function () {
       included.map((r) => (typeof r === "string" ? r : (r as LinkStatusRemark).id)),
       "nor hydrate its target through `include`"
     ).to.not.include(remarkId);
-
-    const viaBuilder = await LinkStatusCard.query(perspective)
-      .where({ id: cardId })
-      .linkStatus("shared")
-      .get();
-    expect(viaBuilder[0]?.remarks ?? []).to.not.include(remarkId);
   });
 
   it("needs a Local flag under linkStatus: 'local'", async () => {
@@ -339,12 +319,5 @@ describe("Ad4mModel — linkStatus reads", function () {
         expect(rows, label).to.not.include(unverified);
       }
     }
-
-    const viaBuilder = await LinkStatusCard.query(perspective)
-      .where({ id: cardId })
-      .linkStatus("local")
-      .includeUnverified()
-      .get();
-    expect(viaBuilder[0]?.note).to.equal("unverified local note");
   });
 });

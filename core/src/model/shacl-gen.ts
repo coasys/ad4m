@@ -7,15 +7,60 @@
  * decorators.ts stays focused on decorator registration logic.
  */
 import { SHACLShape } from "../shacl/SHACLShape";
-import type { SHACLPropertyShape, ConformanceCondition } from "../shacl/SHACLShape";
+import type { SHACLPropertyShape, ConformanceCondition, AD4MAction } from "../shacl/SHACLShape";
 import { propertyNameToSetterName } from "./util";
-import type { PropertyMetadataEntry, RelationMetadataEntry, Ad4mModelLike } from "./decorators";
+import type { PropertyMetadataEntry, RelationMetadataEntry, Ad4mModelLike, CallActionOptions } from "./decorators";
 
 /** Signature for the conformance-filter builder injected by the caller. */
 export type ConformanceFilterFn = (
     relationPredicate: string,
     targetClass: Ad4mModelLike,
 ) => { getter: string; conformanceConditions: ConformanceCondition[] } | undefined;
+
+/**
+ * Class-level emission settings carried by `@Model` (`mount`,
+ * `targetClass`, `constructorActions`, `destructorActions`)
+ * into `buildSHACL`.
+ */
+export interface ModelShapeSpec {
+    /** Mount mode — see `ModelConfig.mount`. */
+    mount?: boolean;
+    /** `sh:targetClass` override — see `ModelConfig.targetClass`. */
+    targetClass?: string;
+    /** Language-call constructor actions — see `ModelConfig.constructorActions`. */
+    constructorActions?: CallActionOptions | CallActionOptions[];
+    /** Language-call destructor actions — see `ModelConfig.destructorActions`. */
+    destructorActions?: CallActionOptions | CallActionOptions[];
+}
+
+/**
+ * One `call` action from a decorator spec: the wire form the executor's
+ * call-action engine reads — `{ action: "call", source, predicate:
+ * interaction, target }`, `target` the params object JSON-stringified.
+ * `defaultSource` applies when the spec names none; a falsy default with
+ * no `source` (a constructor call) is an authoring error.
+ */
+function toCallActions(
+    spec: CallActionOptions | CallActionOptions[],
+    defaultSource: string,
+    where: string,
+): AD4MAction[] {
+    return (Array.isArray(spec) ? spec : [spec]).map((s) => {
+        const source = s.source ?? defaultSource;
+        if (!source) {
+            throw new Error(
+                `call action of ${where} needs a 'source' expression URL ` +
+                `("this" means nothing here — e.g. "{language}://class/${where.split('.')[0]}")`
+            );
+        }
+        return {
+            action: "call",
+            source,
+            predicate: s.interaction,
+            target: JSON.stringify(s.params ?? {}),
+        };
+    });
+}
 
 /**
  * The namespace of a class that declares none: the scheme (`x://`) of its
@@ -71,15 +116,26 @@ export function buildSHACL(
     isAbstract?: boolean,
     /** `@Model({ namespace })`: the namespace of the class and shape URIs. */
     namespace?: string,
+    /**
+     * `@Model` emission settings (`mount`, `targetClass`,
+     * `constructorActions`, `destructorActions`). A mounted class emits
+     * only what the mount contract reads — no datatype inference,
+     * `writable` only when true, and no link actions.
+     */
+    modelSpec?: ModelShapeSpec,
 ): { shape: SHACLShape; name: string } {
     const obj = target.prototype;
+    const mount = !!modelSpec?.mount;
 
     // ── Namespace: declared, else the first property's or relation's ────
     namespace ??= deriveNamespace(properties, allRelationsMeta);
 
     // ── Create SHACL shape ──────────────────────────────────────────────
     const shapeUri = `${namespace}${subjectName}Shape`;
-    const targetClass = `${namespace}${subjectName}`;
+    // `sh:targetClass` — `{namespace}{name}` unless the class declares the
+    // IRI its records type themselves with (a mounted class's record type
+    // can differ from the name the mount exports it under).
+    const targetClass = modelSpec?.targetClass ?? `${namespace}${subjectName}`;
     const shape = new SHACLShape(shapeUri, targetClass);
     if (interpretationHint) {
         shape.interpretationHint = interpretationHint;
@@ -112,12 +168,45 @@ export function buildSHACL(
     }
 
     // ── Constructor / Destructor actions ────────────────────────────────
+    // `subjectConstructor` is a hand-written link-action list. It must not
+    // share a constructor list with declared `call` actions (the executor
+    // refuses a mixed list), and a mounted class emits no link actions.
     let constructorActions: any[] = [];
     if (obj.subjectConstructor && obj.subjectConstructor.length) {
+        if (mount) {
+            throw new Error(
+                `${subjectName} is a mounted class and sets subjectConstructor — ` +
+                `a mounted constructor list holds declared calls or stays empty, and must not emit link actions`
+            );
+        }
+        if (modelSpec?.constructorActions) {
+            throw new Error(
+                `${subjectName} sets both subjectConstructor and constructorActions — ` +
+                `a constructor list must not mix link actions with declared call actions`
+            );
+        }
         constructorActions = constructorActions.concat(obj.subjectConstructor);
     }
 
     let destructorActions: any[] = [];
+
+    // Declared call actions replace the per-property addLink/removeLink
+    // actions below: the executor refuses an action list that mixes `call`
+    // and link writes. Mount mode suppresses the link actions outright —
+    // a mounted class's lifecycle belongs to the language, so its
+    // constructor/destructor lists hold declared calls or stay empty.
+    const autoLinkConstructor = !mount && !modelSpec?.constructorActions;
+    const autoLinkDestructor = !mount && !modelSpec?.destructorActions;
+    if (modelSpec?.constructorActions) {
+        constructorActions.push(
+            ...toCallActions(modelSpec.constructorActions, "", `${subjectName}.constructor`),
+        );
+    }
+    if (modelSpec?.destructorActions) {
+        destructorActions.push(
+            ...toCallActions(modelSpec.destructorActions, "this", `${subjectName}.destructor`),
+        );
+    }
 
     // Class-field initialisers (`count = 0`) run in the constructor, not on the
     // prototype, so read them from one instance built without a perspective.
@@ -168,6 +257,10 @@ export function buildSHACL(
         if (propMeta.datatype) {
             // Explicit opt-in from PropertyOptions always wins over inference.
             propShape.datatype = propMeta.datatype;
+        } else if (mount) {
+            // A mounted class's properties describe the records the
+            // language projects, not the SDK's link storage — no
+            // datatype inference. `datatype` stays opt-in (handled above).
         } else {
             const isLiteral =
                 propMeta.resolveLanguage === undefined || propMeta.resolveLanguage === "literal";
@@ -189,8 +282,13 @@ export function buildSHACL(
             propShape.minCount = 1;
         }
 
-        // Single-valued properties get maxCount 1
-        propShape.maxCount = 1;
+        if (propMeta.collection) {
+            // Multi-valued property: an `ad4m://CollectionShape`, no max.
+            propShape.collection = true;
+        } else {
+            // Single-valued properties get maxCount 1
+            propShape.maxCount = 1;
+        }
 
         // Flag properties have fixed value
         if (propMeta.flag && propMeta.initial) {
@@ -209,7 +307,9 @@ export function buildSHACL(
             propShape.local = propMeta.local;
         }
 
-        if (propMeta.writable !== undefined) {
+        // Mount mode emits `writable` only when the property really is —
+        // a mounted read-only property simply has no writer to declare.
+        if (propMeta.writable !== undefined && (!mount || propMeta.writable)) {
             propShape.writable = propMeta.writable;
         }
 
@@ -252,6 +352,11 @@ export function buildSHACL(
                 `[SHACL Generation] Custom Prolog setter for property '${propName}' in class '${subjectName}' is not yet supported. ` +
                 `The property will be created without setter actions. Consider using standard writable properties or provide explicit SHACL JSON.`
             );
+        } else if (propMeta.setter) {
+            // Declared language-call setter — the mount form of a write.
+            propShape.setter = toCallActions(propMeta.setter, "this", `${subjectName}.${propName}`);
+        } else if (mount) {
+            // A mounted class never writes links: no generated setter.
         } else if (propMeta.writable && propMeta.through) {
             let setter = obj[propertyNameToSetterName(propName)];
             if (typeof setter === "function") {
@@ -271,19 +376,23 @@ export function buildSHACL(
                 ? "literal:string:" : undefined);
 
         if (effectiveInitial) {
-            constructorActions.push({
-                action: "addLink",
-                source: "this",
-                predicate: propMeta.through,
-                target: effectiveInitial,
-            });
+            if (autoLinkConstructor) {
+                constructorActions.push({
+                    action: "addLink",
+                    source: "this",
+                    predicate: propMeta.through,
+                    target: effectiveInitial,
+                });
+            }
 
-            destructorActions.push({
-                action: "removeLink",
-                source: "this",
-                predicate: propMeta.through,
-                target: "*",
-            });
+            if (autoLinkDestructor) {
+                destructorActions.push({
+                    action: "removeLink",
+                    source: "this",
+                    predicate: propMeta.through,
+                    target: "*",
+                });
+            }
         }
 
         shape.addProperty(propShape);
@@ -367,9 +476,18 @@ export function buildSHACL(
         // by a real link predicate.  Getter-only relations are read-only,
         // and so is one declared `readOnly`, which keeps its predicate as
         // the shape's path but must offer no way to write it.
+        // A declared call adder/remover replaces the link actions — the
+        // mount form of a write. Mount mode never emits link actions.
         if (relMeta.readOnly) {
-            relShape.writable = false;
-        } else if (relMeta.predicate) {
+            if (!mount) relShape.writable = false;
+        } else if (relMeta.adder || relMeta.remover) {
+            if (relMeta.adder) {
+                relShape.adder = toCallActions(relMeta.adder, "this", `${subjectName}.${relName}`);
+            }
+            if (relMeta.remover) {
+                relShape.remover = toCallActions(relMeta.remover, "this", `${subjectName}.${relName}`);
+            }
+        } else if (!mount && relMeta.predicate) {
             relShape.adder = [{
                 action: "addLink",
                 source: "this",
