@@ -610,7 +610,7 @@ async fn space_url_of(reach: &Reach) -> Option<String> {
             space: Some(Space::Perspective(uuid)),
             ..
         } => match crate::perspectives::get_perspective(uuid) {
-            Some(perspective) => perspective.persisted.lock().await.shared_url.clone(),
+            Some(perspective) => perspective.persisted.load().shared_url.clone(),
             None => None,
         },
         _ => None,

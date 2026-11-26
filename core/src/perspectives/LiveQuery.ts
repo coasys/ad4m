@@ -1,6 +1,6 @@
 import type { PerspectiveClient } from "./PerspectiveClient";
 
-/** Reply to `perspective.subscribeQuery` / `perspective.modelSubscribe`. */
+/** Reply to `perspective.subscribe`. */
 export interface Subscribed {
     subscriptionId: string
     result: any
@@ -86,71 +86,155 @@ export function applyUpdate(result: any, update: QueryUpdate): any {
     return [...kept, ...update.added!]
 }
 
+/** What a live query holds at one moment; see {@link LiveQuery.getSnapshot}. */
+export interface Snapshot<T> {
+    /** `loading` until the first result, `ready` after it, `error` when the
+     *  first open failed (the handle is then disposed). */
+    status: 'loading' | 'ready' | 'error'
+    /** The latest result; set while `status` is `ready`. */
+    data?: T
+    /** Why the first open failed; set while `status` is `error`. */
+    error?: Error
+    /** The executor's revision of `data`. */
+    revision?: number
+    /** A re-open failed and the query is retrying: `data` is then not live. */
+    reopening: boolean
+    /** `true` only for the value the handle opened on. A change after it, also
+     *  the first result of a re-open that differs from the last one, is `false`. */
+    initial: boolean
+}
+
+export type Unsubscribe = () => void
+
+/** The rows of a SPARQL live query, as the executor serialises them. */
+export type SparqlRows = any[]
+
+/** Options of a live query. */
+export interface LiveOptions {
+    /** Timeout in ms of the call that opens the query (default 30 s). */
+    timeoutMs?: number
+}
+
+/** The same JSON with object keys sorted, so equal results compare equal
+ *  whatever order the executor wrote their keys in. */
+function stableKey(value: unknown): string {
+    return JSON.stringify(value, (_, v) => {
+        if (v === null || typeof v !== 'object' || Array.isArray(v)) return v
+        return Object.fromEntries(Object.keys(v).sort().map(k => [k, v[k]]))
+    })
+}
+
 /**
- * One live query on the executor. Holds the last result, applies each update
- * to it, calls `resyncSubscription` when a revision is missing, and opens a
- * new subscription after a reconnect (the executor ends a socket's
- * subscriptions when it closes). A re-open that fails (the executor is
- * still loading the perspective after a restart) is retried with backoff
- * until it succeeds or the query is disposed; `onStatus` listeners hear
- * about it (#1595). `onResult` gets every result after the first; `start()`
- * returns the first.
+ * One live query on the executor, opened by `Model.query()` or
+ * `perspective.liveSparql()`.
+ *
+ * It holds the last result, applies each update to it, calls
+ * `resyncSubscription` when a revision is missing, and opens a new
+ * subscription after a reconnect (the executor ends a socket's subscriptions
+ * when it closes). A re-open that fails (the executor is still loading the
+ * perspective after a restart) is retried with backoff until it succeeds or
+ * the query is disposed; `onStatus` listeners hear about it (#1595).
+ *
+ * The snapshot changes only when the result, the status or `reopening` does:
+ * a resync, a re-open or an update that leaves the result as it was emits
+ * nothing, as long as the status and `reopening` are unchanged too. Call `dispose()` when done.
  */
-export class LiveQuery {
+export class LiveQuery<T> {
+    /** The first result; rejects when the first open fails or the handle is
+     *  disposed before it arrives. */
+    readonly first: Promise<T>
     #client: PerspectiveClient
     #uuid: string
     #open: (signal: AbortSignal) => Promise<Subscribed>
-    #onResult: (result: any) => void
+    #project: (raw: any) => T
     #id?: string
     #revision = 0
     #result: any
-    #started = false
+    // The stable form of `#result`, to tell a change from a repeat.
+    #key?: string
+    #snapshot: Snapshot<T> = { status: 'loading', reopening: false, initial: false }
     #disposed = false
     #generation = 0
-    #latest?: Promise<any>
     // Updates that arrive while a subscribe or resync reply is outstanding.
     #buffer: (QueryUpdate | QueryLagged)[] | null = null
     #unlisten: () => void
     #unreconnect: () => void
     #unended: () => void
-    // Aborts the subscribe call still in flight, for `dispose({ cancelOpening })`.
+    // Aborts the subscribe call still in flight, for `dispose()`.
     #opening?: AbortController
     #retryTimer?: ReturnType<typeof setTimeout>
     #reopening = false
     // The executor ended the subscription (`subscription-ended`): terminal until the owner
-    // calls `start()`/`resubscribe()`. No reconnect, retry or failed resync reopens it.
+    // calls `resubscribe()`. No reconnect, retry or failed resync reopens it.
     #terminated = false
+    #listeners = new Set<(snapshot: Snapshot<T>) => void>()
     #statusListeners = new Set<(status: LiveQueryStatus) => void>()
+    #resolveFirst!: (data: T) => void
+    #rejectFirst!: (error: Error) => void
 
-    /** `open` subscribes on the executor; aborting its signal cancels the call. */
-    constructor(client: PerspectiveClient, uuid: string, open: (signal: AbortSignal) => Promise<Subscribed>, onResult: (result: any) => void) {
+    /** `open` subscribes on the executor; aborting its signal cancels the call.
+     *  `project` builds the data from a raw result. The query opens at once. */
+    constructor(client: PerspectiveClient, uuid: string, open: (signal: AbortSignal) => Promise<Subscribed>, project: (raw: any) => T) {
         this.#client = client
         this.#uuid = uuid
         this.#open = open
-        this.#onResult = onResult
+        this.#project = project
+        this.first = new Promise<T>((resolve, reject) => {
+            this.#resolveFirst = resolve
+            this.#rejectFirst = reject
+        })
+        // `first` rejects for whoever reads it; one that does not must not get
+        // an unhandled rejection from it.
+        this.first.catch(() => {})
         this.#unlisten = client.onQueryUpdate(update => this.#receive(update))
         this.#unreconnect = client.onReconnect(() => this.#reopen())
         this.#unended = client.onSubscriptionEnded(ended => this.#ended(ended))
+        const generation = this.#generation + 1
+        this.#start().catch(error => {
+            // A newer start (a reconnect) owns the query now.
+            if (this.#disposed || generation !== this.#generation) return
+            this.#snapshot = { status: 'error', error, reopening: false, initial: false }
+            this.#rejectFirst(error)
+            this.#notify()
+            this.dispose()
+        })
     }
 
-    get id(): string | undefined { return this.#id }
-    get result(): any { return this.#result }
-    /** Whether a re-open failed and the query is waiting to retry it. */
-    get reopening(): boolean { return this.#reopening }
+    // `getSnapshot` and `subscribe` are bound, so they pass as they are to
+    // `useSyncExternalStore(live.subscribe, live.getSnapshot)`.
+
+    /** The current snapshot: the same object until the result, the status or
+     *  `reopening` changes. */
+    readonly getSnapshot = (): Snapshot<T> => this.#snapshot
+
+    /** Call `fn` with the current snapshot at once when the query is no longer
+     *  loading, then with each change. Returns a remover. A disposed handle
+     *  calls nobody and keeps nothing. */
+    readonly subscribe = (fn: (snapshot: Snapshot<T>) => void): Unsubscribe => {
+        if (this.#disposed) return () => {}
+        this.#listeners.add(fn)
+        if (this.#snapshot.status !== 'loading') this.#call(fn)
+        return () => { this.#listeners.delete(fn) }
+    }
 
     /** Call `listener` on each failed re-open and when a re-open succeeds
      *  after one failed. Returns a remover. */
-    onStatus(listener: (status: LiveQueryStatus) => void): () => void {
+    onStatus(listener: (status: LiveQueryStatus) => void): Unsubscribe {
         this.#statusListeners.add(listener)
-        return () => this.#statusListeners.delete(listener)
+        return () => { this.#statusListeners.delete(listener) }
     }
 
     /** Subscribe again after the executor ended this query's subscription
      *  (`subscription-ended`, status `ended`): a fresh subscription and a
      *  fresh baseline, no automatic polling — the owner decides when (e.g.
-     *  once a paused grant resumes). Answers the fresh first result. */
-    resubscribe(): Promise<any> {
-        return this.start()
+     *  once a paused grant resumes). Resolves when the fresh first result is
+     *  shown (it reaches `getSnapshot`/`subscribe` listeners), rejects when the
+     *  subscribe fails; a disposed query does nothing. */
+    resubscribe(): Promise<void> {
+        if (this.#disposed) return Promise.resolve()
+        // The owner asks for a subscription again: an ended query lives again, here only.
+        this.#terminated = false
+        return this.#start()
     }
 
     /** A `subscription-ended` event: it names this query's subscription, so the
@@ -171,17 +255,29 @@ export class LiveQuery {
         this.#emit({ state: 'ended', reason: ended.reason })
     }
 
-    /** Open the subscription (again) and return its initial result. A start
-     *  that a newer one overtakes resolves with the newer one's result. */
-    start(): Promise<any> {
+    /** End the subscription on the executor and drop every listener. A first
+     *  open still in flight is cancelled, so the executor stops computing a
+     *  result nobody waits for (#1595), and `first` rejects. Calling it again does nothing. */
+    dispose(): void {
+        if (this.#disposed) return
+        this.#disposed = true
+        this.#generation++
         this.#clearRetry()
-        // The owner asks for a subscription again: an ended query lives again, here only.
-        this.#terminated = false
-        this.#latest = this.#start(++this.#generation)
-        return this.#latest
+        this.#statusListeners.clear()
+        this.#listeners.clear()
+        this.#unlisten()
+        this.#unreconnect()
+        this.#unended()
+        this.#opening?.abort()
+        if (this.#snapshot.status === 'loading') this.#rejectFirst(new Error('Live query disposed before its first result'))
+        if (this.#id) this.#client.disposeQuerySubscription(this.#uuid, this.#id).catch(() => {})
     }
 
-    async #start(generation: number): Promise<any> {
+    /** Open the subscription (again). A start that a newer one overtakes
+     *  resolves without a result. */
+    async #start(): Promise<void> {
+        this.#clearRetry()
+        const generation = ++this.#generation
         this.#buffer = []
         const opening = new AbortController()
         this.#opening = opening
@@ -196,62 +292,40 @@ export class LiveQuery {
         }
         if (this.#disposed || generation !== this.#generation) {
             this.#client.disposeQuerySubscription(this.#uuid, subscribed.subscriptionId).catch(() => {})
-            // Disposed while opening (e.g. a newer subscribe() on the same
-            // builder): the caller still gets the snapshot that was read.
-            return this.#disposed ? (this.#result ?? subscribed.result) : this.#latest
+            return
         }
         this.#id = subscribed.subscriptionId
+        const recovered = this.#reopening
+        this.#reopening = false
         this.#replace(subscribed.revision, subscribed.result)
-        return this.#result
-    }
-
-    /** End the subscription. With `cancelOpening`, a subscribe call still in
-     *  flight is cancelled too, so the executor stops computing a first result
-     *  nobody waits for (#1595); the pending `start()` then rejects instead of
-     *  resolving with that result. */
-    dispose(options: { cancelOpening?: boolean } = {}) {
-        this.#disposed = true
-        this.#generation++
-        this.#clearRetry()
-        this.#statusListeners.clear()
-        this.#unlisten()
-        this.#unreconnect()
-        this.#unended()
-        if (options.cancelOpening) this.#opening?.abort()
-        if (this.#id) this.#client.disposeQuerySubscription(this.#uuid, this.#id).catch(() => {})
+        if (recovered) this.#emit({ state: 'open' })
     }
 
     /** Open the subscription again, and keep trying with backoff
      *  (`reopenDelay`) while each attempt fails, until one succeeds, a newer
-     *  `start()` takes over, or the query is disposed. One failed attempt used
+     *  start takes over, or the query is disposed. One failed attempt used
      *  to leave the query dead for good while its owner took it as live: a
      *  client that reconnects to a restarted executor before the perspective
      *  is loaded gets "Perspective not found" (#1595). */
     #reopen(failures = 0) {
         if (this.#disposed || this.#terminated) return
-        const reopened = this.start()
+        const reopened = this.#start()
         const generation = this.#generation
-        reopened.then(
-            () => {
-                if (this.#disposed || generation !== this.#generation || !this.#reopening) return
-                this.#reopening = false
-                this.#emit({ state: 'open' })
-            },
-            error => {
-                if (this.#disposed || generation !== this.#generation) return
-                const retryInMs = reopenDelay(failures + 1)
-                console.error(`Error re-opening live query (attempt ${failures + 1}), retrying in ${Math.round(retryInMs)}ms:`, error)
-                this.#reopening = true
-                this.#emit({ state: 'reopening', error, retryInMs })
-                const timer: any = setTimeout(() => {
-                    this.#retryTimer = undefined
-                    this.#reopen(failures + 1)
-                }, retryInMs)
-                // Node: a pending retry must not keep the process alive.
-                if (typeof timer?.unref === 'function') timer.unref()
-                this.#retryTimer = timer
-            },
-        )
+        reopened.catch(error => {
+            if (this.#disposed || generation !== this.#generation) return
+            const retryInMs = reopenDelay(failures + 1)
+            console.error(`Error re-opening live query (attempt ${failures + 1}), retrying in ${Math.round(retryInMs)}ms:`, error)
+            this.#reopening = true
+            this.#showReopening()
+            this.#emit({ state: 'reopening', error, retryInMs })
+            const timer: any = setTimeout(() => {
+                this.#retryTimer = undefined
+                this.#reopen(failures + 1)
+            }, retryInMs)
+            // Node: a pending retry must not keep the process alive.
+            if (typeof timer?.unref === 'function') timer.unref()
+            this.#retryTimer = timer
+        })
     }
 
     #clearRetry() {
@@ -270,18 +344,79 @@ export class LiveQuery {
         }
     }
 
+    #call(fn: (snapshot: Snapshot<T>) => void) {
+        try {
+            fn(this.#snapshot)
+        } catch (e) {
+            console.error('Error in live query listener:', e)
+        }
+    }
+
+    #notify() {
+        // A listener may remove another, or dispose the handle, while this runs.
+        for (const fn of [...this.#listeners]) {
+            if (this.#disposed) return
+            if (this.#listeners.has(fn)) this.#call(fn)
+        }
+    }
+
+    /** Make `raw` the current result. Nothing changes, and nobody hears of it,
+     *  when it equals the last one and `reopening` is as it was. */
+    #show(raw: any) {
+        const key = stableKey(raw)
+        const prev = this.#snapshot
+        const same = prev.status === 'ready' && key === this.#key
+        if (same && prev.reopening === this.#reopening) return
+        const data = same ? prev.data! : this.#project(raw)
+        this.#key = key
+        this.#snapshot = {
+            status: 'ready',
+            data,
+            revision: same ? prev.revision : this.#revision,
+            reopening: this.#reopening,
+            initial: same ? prev.initial : prev.status === 'loading',
+        }
+        if (prev.status === 'loading') this.#resolveFirst(data)
+        this.#notify()
+    }
+
+    /** Show that a re-open failed: the snapshot keeps its data. */
+    #showReopening() {
+        if (this.#snapshot.status === 'loading' || this.#snapshot.reopening) return
+        this.#snapshot = { ...this.#snapshot, reopening: true }
+        this.#notify()
+    }
+
+    /** Show `raw`. Before the first result a failure to project it fails the
+     *  open; after it, the result is skipped. */
+    #showOrSkip(raw: any) {
+        try {
+            this.#show(raw)
+        } catch (e) {
+            if (this.#snapshot.status === 'loading') throw e
+            console.error('Live query result could not be read:', e)
+            // Keep the old data, but let the snapshot agree with the status.
+            if (this.#snapshot.reopening !== this.#reopening) {
+                this.#snapshot = { ...this.#snapshot, reopening: this.#reopening }
+                this.#notify()
+            }
+        }
+    }
+
     /** Take `result` at `revision`, then apply the updates buffered meanwhile. */
     #replace(revision: number, result: any) {
+        if (this.#disposed) return
         this.#revision = revision
         this.#result = result
         const buffered = this.#buffer ?? []
         this.#buffer = null
-        if (this.#started) this.#onResult(result)
-        this.#started = true
+        this.#showOrSkip(result)
+        // A listener may have disposed the handle: nothing more is applied.
         for (const update of buffered) this.#receive(update)
     }
 
     #receive(update: QueryUpdate | QueryLagged) {
+        if (this.#disposed) return
         if (this.#buffer) {
             this.#buffer.push(update)
             return
@@ -304,10 +439,11 @@ export class LiveQuery {
         }
         this.#revision = update.revision
         this.#result = result
-        this.#onResult(this.#result)
+        this.#showOrSkip(result)
     }
 
     #resync() {
+        if (this.#disposed) return
         const generation = this.#generation
         const id = this.#id!
         this.#buffer = []

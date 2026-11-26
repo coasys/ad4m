@@ -1,7 +1,7 @@
 //! Runtime WS-native handlers.
 
 use base64::Engine;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 use ts_rs::TS;
@@ -208,7 +208,7 @@ async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     Ok(Value::Bool(true))
 }
 
-async fn import_data(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+async fn import_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: ImportRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -225,11 +225,33 @@ async fn import_data(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
             Ok(serde_json::to_value(result).map_err(|e| WsRpcError::internal(e.to_string()))?)
         }
         "perspective" => {
-            let data = std::fs::read_to_string(&body.file_path)
-                .map_err(|e| WsRpcError::internal(e.to_string()))?;
-            let snapshot: serde_json::Value =
-                serde_json::from_str(&data).map_err(|e| WsRpcError::bad_request(e.to_string()))?;
-            Ok(serde_json::json!({"success": true, "snapshot": snapshot}))
+            let uuid = body.perspective_uuid.as_deref().ok_or_else(|| {
+                WsRpcError::bad_request("perspective_uuid required for perspective import")
+            })?;
+            // The guard admits only the operator, who may import into any
+            // perspective on the executor — including a managed user's —
+            // so `get_perspective_with_access` admits it unconditionally.
+            let perspective =
+                super::perspectives_ws::get_perspective_with_access(uuid, &ctx).await?;
+            let stats = perspective
+                .import_links_file(std::path::Path::new(&body.file_path))
+                .await
+                .map_err(|e| {
+                    // A file the store refuses is the caller's input: 400. A failure of
+                    // the load itself (disk, worker, parser) is the executor's: 500.
+                    if e.downcast_ref::<crate::perspectives::sparql_store::ImportRefused>()
+                        .is_some()
+                    {
+                        WsRpcError::bad_request(e.to_string())
+                    } else {
+                        WsRpcError::internal(e.to_string())
+                    }
+                })?;
+            Ok(serde_json::to_value(RuntimeImportPerspectiveResult {
+                imported: stats.imported,
+                covered: stats.covered,
+                skipped: stats.skipped,
+            })?)
         }
         other => Err(WsRpcError::bad_request(format!(
             "Unknown import type: {}. Use 'db' or 'perspective'.",
@@ -368,7 +390,7 @@ async fn check_notification_perspectives(
             Err(e) if e.code == 404 && owner_did == dids.main_agent => continue,
             Err(e) => return Err(e),
         };
-        let handle = perspective.persisted.lock().await.clone();
+        let handle = perspective.persisted.snapshot();
         if !owner_may_read(owner_did, &dids.main_agent, &handle) {
             return Err(WsRpcError::forbidden(format!(
                 "Access denied: the notification owner cannot read perspective {}",
@@ -796,9 +818,13 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<ExportRequest, bool>("runtime.exportData", export_data)
         .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
     // An import writes rows as they are in the file: notifications with their `granted` flag
-    // and `owner_did`, users with their password hashes. Only the operator imports, as only
-    // the operator grants notifications.
+    // and `owner_did`, users with their password hashes — or, for `type: "perspective"`,
+    // every link of a snapshot into any perspective on the executor. Only the operator
+    // imports, as only the operator grants notifications. A perspective import adds links
+    // new to the perspective in one commit, and refuses the whole file otherwise (see
+    // `SparqlStore::import_links_file`). Nothing is sent to the link language.
     map.method::<ImportRequest, RuntimeImportResult>("runtime.importData", import_data)
+        .long()
         .guard(Guard::Operator);
     map.method::<NoParams, bool>("runtime.restartHolochain", restart_holochain)
         .long()
@@ -1088,7 +1114,8 @@ pub struct RuntimeSetFreeHostingEnabledParams {
     pub enabled: bool,
 }
 
-/// `type: "db"` yields import stats; `type: "perspective"` echoes the file's snapshot.
+/// `type: "db"` yields import stats; `type: "perspective"` the counts the
+/// store's bulk load reports.
 #[derive(Deserialize, TS)]
 #[serde(untagged)]
 #[ts(export)]
@@ -1097,12 +1124,18 @@ pub enum RuntimeImportResult {
     Perspective(RuntimeImportPerspectiveResult),
 }
 
-#[derive(Deserialize, TS)]
+#[derive(Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct RuntimeImportPerspectiveResult {
-    pub success: bool,
-    // The file's raw contents: import does not validate the snapshot shape.
-    #[ts(type = "any")]
-    pub snapshot: Value,
+    /// Links the load wrote — the file's links that were new to the
+    /// perspective. The whole file commits in one transaction, or not at
+    /// all: a link the store already holds, a reifier repeated in the
+    /// file, or a valid tombstone ending a stored or in-file link
+    /// refuses the import.
+    pub imported: usize,
+    /// Links a tombstone the store already held ends: not written.
+    pub covered: usize,
+    /// Links refused: in the store's own metadata vocabulary.
+    pub skipped: usize,
 }
