@@ -49,13 +49,20 @@ test_another_error_fails_at_once() {
   grep -q "Unable to fetch some archives" <<<"$out" || fail "the apt error is not shown: $out"
 }
 
+test_a_lock_file_that_cannot_open_fails_at_once() {
+  local error=$'Could not open lock file /var/lib/apt/lists/lock - open (13: Permission denied)\nE: Unable to lock directory /var/lib/apt/lists/'
+  out="$(FAKE_APT_ERROR="$error" run 2>&1)" && fail "a lock file that cannot open passed: $out"
+  [ "$(cat "$TMP/calls")" = 1 ] || fail "a lock file that cannot open was tried $(cat "$TMP/calls") times"
+}
+
 test_gives_up_when_apt_stays_busy() {
   out="$(FAKE_APT_BUSY=1000 run 2>&1)" && fail "a lock that never freed passed"
   [ "$(cat "$TMP/calls")" = 60 ] || fail "tried $(cat "$TMP/calls") times, not 60"
   grep -q "Could not get lock" <<<"$out" || fail "the lock error is not shown: $out"
 }
 
-for t in test_waits_while_apt_is_busy test_another_error_fails_at_once test_gives_up_when_apt_stays_busy; do
+for t in test_waits_while_apt_is_busy test_another_error_fails_at_once test_a_lock_file_that_cannot_open_fails_at_once \
+  test_gives_up_when_apt_stays_busy; do
   echo "$t"
   setup
   "$t"

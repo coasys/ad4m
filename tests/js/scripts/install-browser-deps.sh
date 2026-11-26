@@ -42,7 +42,8 @@ apt_get() {
       printf '%s\n' "$out"
       return 0
     fi
-    grep -qE 'Could not get lock|Unable to lock' <<<"$out" || break
+    # Only a held lock: "Unable to lock directory" also follows a lock file apt cannot open.
+    grep -q 'Could not get lock' <<<"$out" || break
     echo "apt is busy (another job on this host): trying again in ${APT_BUSY_WAIT_S:-10} s"
     sleep "${APT_BUSY_WAIT_S:-10}"
   done
