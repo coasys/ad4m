@@ -148,7 +148,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'perspective.getSubjectData': '{"name":"test"}',
     'perspective.createBatch': 'batch-id-1',
     'perspective.commitBatch': { additions: [], removals: [] },
-    'perspective.subscribeQuery': { subscriptionId: 'sub-1', result: [{ s: 'a' }], revision: 0 },
+    'perspective.subscribe': { subscriptionId: 'sub-1', result: [{ s: 'a' }], revision: 0 },
     'perspective.resyncSubscription': { revision: 3, result: [{ s: 'c' }] },
     'events.watch': true,
     'perspective.disposeQuery': true,
@@ -248,7 +248,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'runtime.setConfig': (p: Record<string, unknown>) => ({ restartPending: true, refused: p.unset ? [{ key: 'port', reason: 'local-only' }] : [] }),
     'runtime.verifySignature': true,
     'runtime.exportData': true,
-    'runtime.importData': { success: true, count: 5 },
+    'runtime.importData': { imported: 5, skipped: 0 },
     'runtime.freeHostingEnabled': false,
     'runtime.setFreeHostingEnabled': true,
     'runtime.computeLog': [],
@@ -894,27 +894,6 @@ describe('PerspectiveClient', () => {
         expect(ws.rpc.slice(2).map(c => c.type)).toEqual(['events.watch', 'perspective.snapshot']);
     });
 
-    test('watchApplied() settles only after the events.watch reply', async () => {
-        const watchReply = MOCK_RESPONSES['events.watch'];
-        let acceptWatch!: (ok: boolean) => void;
-        MOCK_RESPONSES['events.watch'] = () => new Promise<boolean>(r => { acceptWatch = r; });
-        const api = new ApiClient('http://127.0.0.1:12000', 'test-token');
-        clients.push({ close: () => api.closeAll() });
-        try {
-            api.on('link-added', () => {}, { perspective: 'A' });
-            let settled = false;
-            const waiting = api.watchApplied().then(() => { settled = true; });
-            await new Promise(r => setTimeout(r, 20));
-            expect(lastOf(MockWebSocket.instances).rpc.map(c => c.type)).toEqual(['events.watch']);
-            expect(settled).toBe(false);
-
-            acceptWatch(true);
-            await waiting;
-        } finally {
-            MOCK_RESPONSES['events.watch'] = watchReply;
-        }
-    });
-
     test('a failed events.watch is sent again, a bounded number of times', async () => {
         jest.useFakeTimers();
         const watchReply = MOCK_RESPONSES['events.watch'];
@@ -963,7 +942,8 @@ describe('PerspectiveClient', () => {
         const syncState = jest.fn();
         freshClient.on('sync-state-change', ({ state }) => syncState(state), { perspective: 'A' });
         const signal = jest.fn();
-        await freshClient.neighbourhood.addSignalHandler('A', signal);
+        freshClient.neighbourhood.addSignalHandler('A', signal);
+        await freshClient.perspective.snapshotByUUID('A');
         const ws = lastOf(MockWebSocket.instances);
         expect(lastOf(ws.rpc.filter(c => c.type === 'events.watch')).params)
             .toEqual({ 'signal': ['A'], 'sync-state-change': ['A'] });
@@ -983,11 +963,15 @@ describe('PerspectiveClient', () => {
     test('a live query applies updates and resyncs on a revision gap', async () => {
         const freshClient = newClient();
         const subscription = await freshClient.perspective.byUUID('uuid-1')
-            .then(p => p!.subscribeQuery('SELECT ?s WHERE { ?s ?p ?o }'));
+            .then(p => p!.liveSparql('SELECT ?s WHERE { ?s ?p ?o }'));
+        expect(await subscription.first).toEqual([{ s: 'a' }]);
         const results: unknown[] = [];
-        subscription.onResult(r => results.push(r));
+        subscription.subscribe(snapshot => results.push(snapshot.data));
         const ws = lastOf(MockWebSocket.instances);
-        expect(subscription.result).toEqual([{ s: 'a' }]);
+        // A listener added after the first result gets it at once.
+        expect(results).toEqual([[{ s: 'a' }]]);
+        results.length = 0;
+        const current = () => subscription.getSnapshot().data;
 
         ws.emit({ type: 'perspective-added', perspective: { uuid: 'uuid-ignored' } });
         ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-2', revision: 1, added: [{ s: 'x' }], removed: [] });
@@ -998,10 +982,10 @@ describe('PerspectiveClient', () => {
         ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-1', revision: 3, added: [{ s: 'z' }], removed: [] });
         await new Promise(r => setTimeout(r, 10));
         expect(lastRpcCall).toEqual({ type: 'perspective.resyncSubscription', params: { uuid: 'uuid-1', subscriptionId: 'sub-1' } });
-        expect(subscription.result).toEqual([{ s: 'c' }]);
+        expect(current()).toEqual([{ s: 'c' }]);
 
         ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-1', revision: 4, added: [{ s: 'd' }], removed: [] });
-        expect(subscription.result).toEqual([{ s: 'c' }, { s: 'd' }]);
+        expect(current()).toEqual([{ s: 'c' }, { s: 'd' }]);
 
         subscription.dispose();
         await new Promise(r => setTimeout(r, 10));

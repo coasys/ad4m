@@ -41,7 +41,7 @@ impl Drop for Registered {
 pub(crate) async fn registered_perspective(classes: &[(&str, &str)]) -> Registered {
     let (perspective, _shapes, _ctx) =
         crate::perspectives::interpretation_test_support::setup_perspective_no_llm(classes).await;
-    let uuid = perspective.persisted.lock().await.uuid.clone();
+    let uuid = perspective.persisted.load().uuid.clone();
     crate::perspectives::register_perspective(uuid.clone(), perspective);
     Registered(uuid)
 }

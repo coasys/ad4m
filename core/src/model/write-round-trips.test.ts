@@ -437,6 +437,40 @@ describe("an empty value clears a property", () => {
     expect(calls).toEqual([]);
   });
 
+  describe("on a class built by fromSHACL", () => {
+    // Decorator -> SHACL -> fromSHACL: the shape's minCount 1 must come back as required.
+    const fromShape = (cls: any) => Ad4mModel.fromSHACL(cls.generateSHACL().shape, cls.getClassName());
+
+    it("a scalar with minCount 1 is required, and one without is not (seen in the shape it generates back)", () => {
+      const minCount = (cls: any) => fromShape(cls).generateSHACL().shape.properties.find((p: any) => p.name).minCount;
+      expect(minCount(RoundTripRequired)).toBe(1);
+      expect(minCount(RoundTripOptional)).toBeUndefined();
+    });
+
+    it.each([[""], [null]])("update with %p on a required scalar throws and sends nothing", async (empty) => {
+      const Req = fromShape(RoundTripRequired) as any;
+      const titleLink = link("rt://req/1", "rt://title", "literal://string:old");
+      const { proxy, calls } = countingProxy([Req], 0, [titleLink]);
+      const req = new Req(proxy, "rt://req/1");
+      req.title = "old";
+      (req as any).takeSnapshot();
+      req.title = empty;
+      await expect(req.save("batch-1")).rejects.toThrow('Property "title" is required and cannot be cleared');
+      expect(calls).toEqual([]);
+    });
+
+    it.each([[""], [null]])("update with %p on a scalar without minCount still clears", async (empty) => {
+      const Opt = fromShape(RoundTripOptional) as any;
+      const { proxy, sent } = countingProxy([Opt], 0, [noteLink]);
+      const opt = new Opt(proxy, "rt://opt/1");
+      opt.note = "old";
+      (opt as any).takeSnapshot();
+      opt.note = empty;
+      await opt.save("batch-1");
+      expect(JSON.parse(sent[0][2])).toEqual([clear]);
+    });
+  });
+
   it("update clears one property and sets another in one batch", async () => {
     const { proxy, calls, sent } = countingProxy([RoundTripOptional], 0, [noteLink]);
     const opt = await existing(proxy, "");

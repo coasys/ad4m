@@ -451,7 +451,7 @@ impl PerspectiveInstance {
     /// `ensure_user_key`: a missing key must never be answered by minting a
     /// fresh DID underneath an existing user.
     pub(crate) async fn flow_pass_contexts(&self) -> Vec<AgentContext> {
-        let owners = self.persisted.lock().await.get_owners();
+        let owners = self.persisted.load().get_owners();
         if owners.is_empty() {
             return flow_pass_agents(&[], None, &[]);
         }
