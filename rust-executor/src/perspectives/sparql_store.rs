@@ -2204,7 +2204,11 @@ impl SparqlStore {
                 let Some(rule) = next else { break };
                 // Phase 1's snapshot, kept across the calls of this build.
                 let mut run = build::BuildRun::default();
+                let began = std::time::Instant::now();
+                let mut calls = 0usize;
+                log::info!("Scope index: build of {} started", rule.class);
                 loop {
+                    calls += 1;
                     let Some(store) = store.upgrade() else { break };
                     // A few batches per hold of the store, so a closed
                     // perspective's store is not kept open by its build.
@@ -2218,7 +2222,14 @@ impl SparqlStore {
                         &mut run,
                     ) {
                         Ok(BuildProgress::Paused) => continue,
-                        Ok(_) => break,
+                        Ok(end) => {
+                            log::info!(
+                                "Scope index: build of {} ended ({end:?}) after {:.1} s, {calls} calls of 16 batches",
+                                rule.class,
+                                began.elapsed().as_secs_f64()
+                            );
+                            break;
+                        }
                         Err(e) => {
                             log::error!("Scope index: build of {} failed: {e}", rule.class);
                             break;
