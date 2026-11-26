@@ -174,7 +174,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-262 methods: Cap 89, CapAnyPointer 1, Executor 43, Open 9, Operator 39, Owns 76, UserLoginOrOperator 1, UserOrOperator 4. Local only (the operator on this machine): 14.
+259 methods: Cap 89, CapAnyPointer 1, Executor 43, Open 9, Operator 39, Owns 73, UserLoginOrOperator 1, UserOrOperator 4. Local only (the operator on this machine): 14.
 
 | Method | Guard |
 |---|---|
