@@ -710,8 +710,11 @@ export class WakerSubscriptionManager {
           const address = item?.id;
           if (typeof address !== "string" || !address) continue;
           // Kept for every row, seen or not: a record already woken for may hold a part found later.
+          // A row whose text reads empty forgets the record's words; a row with no text (the
+          // mention query's) leaves them.
           const words = wordsOf(item);
           if (words) this.rememberWords(sub.id, address, words);
+          else if (item?.text !== undefined) this.texts.get(sub.id)?.delete(address);
           if (currentSeen.has(address)) continue;
           // A mention link as it is; the text, a whole word only.
           const mention = mentionOf(item, sub);
@@ -1091,13 +1094,15 @@ export class WakerSubscriptionManager {
         `[waker] ${sub.id}: ${parts.size} mention(s) are words their holder already carries, not woken for: ${Array.from(parts, (m) => m.address).join(", ")}`,
       );
     }
+    // The words this wake carries, as they are now: a row arriving while the wake is in flight
+    // changes `texts`, and what the agent was told is what it was handed.
+    const texts = this.texts.get(sub.id);
+    const carried = all.map((m) => [m.address, texts?.get(m.address)] as const);
     const settle = () => {
-      const texts = this.texts.get(sub.id);
-      for (const mention of all) {
-        pending.delete(mention.address);
-        done.add(mention.address);
-        const words = texts?.get(mention.address);
-        if (words) this.remember(this.wokenTexts, sub.id, mention.address, words);
+      for (const [address, words] of carried) {
+        pending.delete(address);
+        done.add(address);
+        if (words) this.remember(this.wokenTexts, sub.id, address, words);
       }
       this.delivered.set(sub.id, done);
       this.persist();

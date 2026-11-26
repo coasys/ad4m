@@ -1356,6 +1356,43 @@ describe('WakerSubscriptionManager', () => {
       expect(h.wakes.map((w: any) => w.map((m: any) => m.address))).toEqual([['test://message'], ['test://message/text']]);
     });
 
+    // The holder's words change while its wake is in flight: the agent was told the words the wake
+    // carried, so a part with the words added meanwhile is news.
+    it('wakes for a part whose words reached its holder while the holder\'s wake was in flight', async () => {
+      const containers = (_uuid: string, _class: string, queryJson: string) =>
+        Promise.resolve({ instances: composition(JSON.parse(queryJson).parent).map((id) => ({ id })) });
+      let release!: () => void;
+      const held = new Promise<void>((r) => { release = r; });
+      let first = true;
+      const h = await mentionHarness(10, () => {
+        if (!first) return;
+        first = false;
+        return held;
+      }, { modelQuery: containers });
+      await h.deliver(result(row('test://message', said)));
+      await waitUntil(() => h.wakes.length > 0, 1000);
+      const added = 'Data, and the summary too.';
+      await h.deliver(result(row('test://message', `${said} ${added}`)));
+      release();
+      await new Promise((r) => setTimeout(r, 30));
+      await h.deliver(result(row('test://message', `${said} ${added}`), row('test://message/text', added)));
+      await waitUntil(() => h.wakes.length > 1, 1000);
+      h.manager.disposeAll();
+      expect(h.wakes.map((w: any) => w.map((m: any) => m.address))).toEqual([['test://message'], ['test://message/text']]);
+    });
+
+    // A row whose text reads empty forgets the holder's words: they no longer cover a part.
+    it('wakes for a part when its holder\'s text was emptied before the wake', async () => {
+      const containers = (_uuid: string, _class: string, queryJson: string) =>
+        Promise.resolve({ instances: composition(JSON.parse(queryJson).parent).map((id) => ({ id })) });
+      const h = await mentionHarness(100, undefined, { modelQuery: containers });
+      await h.deliver(result(row('test://message', said)));
+      await h.deliver(result({ id: 'test://message', text: '' }, row('test://message/text', said)));
+      await waitUntil(() => h.wakes.length > 0, 1000);
+      h.manager.disposeAll();
+      expect(h.wakes[0].map((m: any) => m.address).sort()).toEqual(['test://message', 'test://message/text']);
+    });
+
     // Two records with the same words, each under the other: each is a part of the other, and the
     // agent is woken once, for the least address, not for neither.
     it('wakes once for records that hold one another round', async () => {
