@@ -3382,7 +3382,7 @@ impl SparqlStore {
             .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
         // `Store::clear` leaves the auxiliary space as it is: the index is
         // emptied after it, with every class unready in between.
-        self.scope_index.begin_clear(&self.store)?;
+        self.scope_index.begin_rebuild(&self.store)?;
         let cleared = self.store.clear();
         self.note_write(WriteDelta::Other);
         cleared?;
@@ -3395,7 +3395,7 @@ impl SparqlStore {
     #[cfg(test)]
     pub(crate) fn begin_clear_for_test(&self) -> Result<(), Error> {
         let _writer = self.writer.lock().unwrap();
-        self.scope_index.begin_clear(&self.store)?;
+        self.scope_index.begin_rebuild(&self.store)?;
         self.store.clear()?;
         self.note_write(WriteDelta::Other);
         Ok(())
@@ -3500,7 +3500,13 @@ impl SparqlStore {
             .writer
             .lock()
             .map_err(|_| anyhow!("SPARQL store writer lock poisoned"))?;
-        let stats = self.import_segmented(path)?;
+        let loaded = self.import_segmented(path);
+        // The classes the load sent back to building (or, when it failed after
+        // that, left there) build again, over the links the file added.
+        for rule in self.scope_index.unfinished(&self.store)? {
+            self.spawn_scope_build(rule);
+        }
+        let stats = loaded?;
         if stats.imported > 0 {
             // The load wrote no diff: the generation moves here, under the writer lock, so a
             // reader keyed on it (the auto-processor's transcript rows) reads the new links.
@@ -3517,6 +3523,12 @@ impl SparqlStore {
     fn import_segmented(&self, path: &std::path::Path) -> Result<LinkImportStats, Error> {
         // The signature check is the load's one CPU-bound step; quad
         // building and element parsing ride along on the same workers.
+        // The loader writes no scope index entry: every class goes back to building
+        // before it opens (a transaction cannot start while a loader is open), so no
+        // query reads the index as ready over members the file adds, and a crash
+        // after the ingest resumes the builds. `import_links_file` starts them. A
+        // file the store refuses leaves the builds to run over the unchanged store.
+        self.scope_index.begin_rebuild(&self.store)?;
         let n_workers = std::thread::available_parallelism()
             .map(|n| n.get().saturating_sub(2).max(1))
             .unwrap_or(1);

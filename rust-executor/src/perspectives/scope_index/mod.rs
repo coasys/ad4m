@@ -632,11 +632,14 @@ impl ScopeIndex {
             .collect())
     }
 
-    /// Mark every class not ready, in the store and here, before
-    /// [`Store::clear`] runs: if the process stops before [`Self::clear`]
-    /// ends, the builds at the next open remove what the clear left. The
-    /// caller holds the writer lock.
-    pub(crate) fn begin_clear(&self, store: &Store) -> Result<(), Error> {
+    /// Send every class back to the start of its build, in the store and
+    /// here, before a write that bypasses the index: [`Store::clear`], or the
+    /// bulk loader of a file import. The classes read from SPARQL until their
+    /// builds end, and a process that stops in between resumes them at the
+    /// next open (see [`Self::unfinished`]); after a clear, those builds
+    /// remove what the clear left. The caller holds the writer lock and
+    /// starts the builds once the write has ended.
+    pub(crate) fn begin_rebuild(&self, store: &Store) -> Result<(), Error> {
         if !self.enabled {
             return Ok(());
         }

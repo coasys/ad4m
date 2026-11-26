@@ -833,3 +833,59 @@ fn a_phase_0_seen_under_the_lock_takes_a_new_snapshot() {
     assert_eq!(store.scope_reader().count(&rule.class_scope()).unwrap(), 4);
     assert_consistent(&store);
 }
+
+/// `runtime.importData` loads links through the store's bulk loader, which
+/// writes no scope index entry. A class that is ready when the file lands
+/// (the feed-scale suite registers its shapes, then imports) must not stay
+/// ready over an index that misses the file's members: the import takes the
+/// class back to building, and the index it ends with is the one the write
+/// paths keep.
+#[test]
+fn an_import_into_a_ready_class_ends_with_the_incremental_index() {
+    let signer = TestSigner::generate();
+    let mut links = Vec::new();
+    for i in 0..(BATCH + 40) {
+        let id = format!("si://m/{i:05}");
+        let t = T0 + i as u64;
+        links.push(flag_link(&signer, &id, t));
+        links.push(channel_link(
+            &signer,
+            CHANNELS[i % CHANNELS.len()],
+            &id,
+            t + 1,
+        ));
+    }
+    let history: Vec<(bool, LinkExpression)> = links.iter().cloned().map(|l| (true, l)).collect();
+    let expected = incremental(&history);
+
+    let store = SparqlStore::new(None).unwrap();
+    let (rule, _) = store
+        .scope_index_register(&message_shape())
+        .unwrap()
+        .unwrap();
+    store.scope_index_build_now(&rule).unwrap();
+    assert_eq!(store.scope_index_readiness(&rule), Readiness::Ready);
+
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let snapshot = crate::types::domain::Perspective {
+        links: links
+            .iter()
+            .cloned()
+            .map(|l| (l, crate::types::LinkStatus::Shared).into())
+            .collect(),
+    };
+    std::fs::write(file.path(), serde_json::to_string(&snapshot).unwrap()).unwrap();
+    let stats = store.import_links_file(file.path()).unwrap();
+    assert_eq!(stats.imported, links.len());
+
+    // Ready would be a lie while the index misses the members; the build the
+    // import started brings it level.
+    wait_ready(&store, &rule);
+    assert_eq!(
+        store.scope_reader().count(&rule.class_scope()).unwrap(),
+        (BATCH + 40) as i64,
+        "every imported member is in the class scope"
+    );
+    assert_consistent(&store);
+    assert_eq!(index_view(&store), index_view(&expected));
+}

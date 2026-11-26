@@ -211,7 +211,11 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   and removed only with `aux_single_delete`; `C`/`B`/`V` keys only with `aux_delete` (a single
   delete over a key put twice leaves the older value). Membership is a flag link with
   `proofValid "true"`; a member's key is its earliest valid flag time. Read a class only when
-  `scope_index_readiness` is `Ready`. A store this executor opened has the auxiliary column
+  `scope_index_readiness` is `Ready`. The one write that skips `commit_indexed` is the file import
+  (`import_links_file`, the bulk loader): it sends every class back to building
+  (`ScopeIndex::begin_rebuild`) before its ingest and starts the builds after, so the index never
+  reads as ready over links it misses (`an_import_into_a_ready_class_ends_with_the_incremental_index`).
+  A store this executor opened has the auxiliary column
   family: an executor without it cannot open the store.
 
 ## Do / don't
