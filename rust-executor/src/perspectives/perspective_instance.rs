@@ -5481,6 +5481,13 @@ impl PerspectiveInstance {
         //   - Some(<addr>)     → expression_create on that custom language
         if let Some(lang) = resolve_language.as_deref() {
             if lang != "literal" {
+                if crate::perspectives::instances::plan::in_plan() {
+                    return Err(anyhow!(
+                        "'{property}' of {class_name} is stored through the language {lang}: a \
+                         write plan does not set it, since the language would keep the value \
+                         if the plan were refused"
+                    ));
+                }
                 let controller = crate::languages::LanguageController::global_instance();
                 let agent_context = context.clone();
                 return match controller

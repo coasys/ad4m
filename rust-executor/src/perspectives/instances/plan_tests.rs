@@ -442,3 +442,61 @@ async fn a_plan_setting_a_language_stored_property_writes_nothing() {
         .await
         .unwrap_or_else(|e| panic!("a literal-language property is written: {e:?}"));
 }
+
+/// The check before the batch reads the shape once. A shape registered or synced after it can
+/// make a property the plan sets language-stored; the write refuses the value then, and nothing of
+/// the plan is written. The check is skipped here, as such a shape change would leave it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_language_value_is_refused_at_the_write_when_the_check_before_missed_it() {
+    use super::plan::SKIP_LANGUAGE_CHECK;
+    let (mut p, _shapes, ctx) =
+        setup_perspective_no_llm(&[("Note", NOTE_SDNA), ("Photo", PHOTO_SDNA)]).await;
+    let before = p.get_links(&LinkQuery::default()).await.unwrap().len();
+
+    let refused = SKIP_LANGUAGE_CHECK
+        .scope(
+            (),
+            apply(
+                &mut p,
+                &ctx,
+                vec![
+                    note("root", Some("root"), None, json!({})),
+                    PlannedWrite::Create {
+                        reference: "photo".into(),
+                        class_name: "Photo".into(),
+                        properties: json!({ "image": "data:image/png;base64,AAAA" })
+                            .as_object()
+                            .cloned(),
+                        parent: None,
+                    },
+                ],
+            ),
+        )
+        .await;
+    match &refused {
+        Err(PlanError::Write { index: 1, error }) => {
+            let text = format!("{error:?}");
+            assert!(text.contains("stored through the language"), "{text}");
+        }
+        other => panic!("expected the photo refused at its write, got {other:?}"),
+    }
+    assert_eq!(
+        p.get_links(&LinkQuery::default()).await.unwrap().len(),
+        before
+    );
+
+    // Outside a plan the same value is written as before.
+    super::write::create(
+        &mut p,
+        &ctx,
+        InstanceCreate {
+            class_name: "Photo".into(),
+            properties: json!({ "image": "data:image/png;base64,AAAA" })
+                .as_object()
+                .cloned(),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("instance_create still writes a language value");
+}

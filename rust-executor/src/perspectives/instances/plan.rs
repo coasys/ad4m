@@ -37,6 +37,34 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 
+tokio::task_local! {
+    /// Set while a plan's writes run. [`in_plan`] reads it.
+    static IN_PLAN: ();
+}
+
+/// Whether the caller runs inside a plan's writes. The property encoder
+/// (`PerspectiveInstance::resolve_property_value`) refuses a value for a language of its own
+/// here, whatever shape it reads: the check before the batch reads the shape once, and a shape
+/// registered or synced in between could make a property the plan sets language-stored.
+pub(crate) fn in_plan() -> bool {
+    IN_PLAN.try_with(|_| ()).is_ok()
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Test seam: skip the check before the batch, as a shape changed after it would.
+    pub(super) static SKIP_LANGUAGE_CHECK: ();
+}
+
+#[cfg(test)]
+fn skip_language_check() -> bool {
+    SKIP_LANGUAGE_CHECK.try_with(|_| ()).is_ok()
+}
+#[cfg(not(test))]
+fn skip_language_check() -> bool {
+    false
+}
+
 /// The most writes one plan may hold.
 pub const MAX_PLANNED_WRITES: usize = 200;
 
@@ -212,6 +240,7 @@ pub async fn apply(
                 .as_deref()
                 .is_some_and(|language| language != "literal")
                 && named.iter().any(|n| n.eq_ignore_ascii_case(&p.name))
+                && !skip_language_check()
         }) {
             return Err(PlanError::LanguageProperty {
                 index,
@@ -285,33 +314,40 @@ pub async fn apply(
 
     let batch = perspective.create_batch().await;
     let mut created = Vec::new();
-    for (index, write) in resolved.into_iter().enumerate() {
-        let outcome = match write {
-            Resolved::Create(reference, mut params, parent_class) => {
-                params.batch_id = Some(batch.clone());
-                let parent_classes = parent_class.map(|c| vec![c]);
-                create_under(perspective, agent, params, parent_classes.as_deref())
-                    .await
-                    .map(|made| {
-                        created.push(PlannedCreated {
-                            reference,
-                            class_name: made.class_name,
-                            base_uri: made.base_uri,
-                        })
-                    })
+    // Under `IN_PLAN`: a language value is refused at the write too (see [`in_plan`]).
+    let written: Result<(), PlanError> = IN_PLAN
+        .scope((), async {
+            for (index, write) in resolved.into_iter().enumerate() {
+                let outcome = match write {
+                    Resolved::Create(reference, mut params, parent_class) => {
+                        params.batch_id = Some(batch.clone());
+                        let parent_classes = parent_class.map(|c| vec![c]);
+                        create_under(perspective, agent, params, parent_classes.as_deref())
+                            .await
+                            .map(|made| {
+                                created.push(PlannedCreated {
+                                    reference,
+                                    class_name: made.class_name,
+                                    base_uri: made.base_uri,
+                                })
+                            })
+                    }
+                    Resolved::Add(mut params) => {
+                        params.batch_id = Some(batch.clone());
+                        add_to_collection(perspective, agent, params)
+                            .await
+                            .map(|_| ())
+                    }
+                };
+                if let Err(error) = outcome {
+                    perspective.discard_batch(&batch).await;
+                    return Err(PlanError::Write { index, error });
+                }
             }
-            Resolved::Add(mut params) => {
-                params.batch_id = Some(batch.clone());
-                add_to_collection(perspective, agent, params)
-                    .await
-                    .map(|_| ())
-            }
-        };
-        if let Err(error) = outcome {
-            perspective.discard_batch(&batch).await;
-            return Err(PlanError::Write { index, error });
-        }
-    }
+            Ok(())
+        })
+        .await;
+    written?;
     if let Err(error) = perspective.commit_batch(batch, agent).await {
         return Err(PlanError::Commit { error });
     }
