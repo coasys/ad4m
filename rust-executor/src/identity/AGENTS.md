@@ -342,8 +342,11 @@ the offer's state).
   count offline, and a link already counted. Every write of a link that arrives already
   signed is judged as a peer's is — `addLinkExpression`, `import_perspective`, the
   rusqlite migration and the boot rebuild, a link language's diff, a re-check — whichever
-  key signed it: the same key, copied and revoked, may have signed it elsewhere. A restart
-  confirms nothing until each log is read again. `ADMIT_FRESHNESS` is
+  key signed it: the same key, copied and revoked, may have signed it elsewhere. The bulk
+  import (`runtime.importData`) is offline and prepares no signers, so it judges with
+  `check_signed_import`: an unanchored link from a signer the key map has not been asked
+  about is `cantCheck`, not `valid`, and the 60 s re-check (`Recheck::CantCheck`) fetches
+  the log and judges it. A restart confirms nothing until each log is read again. `ADMIT_FRESHNESS` is
   the exposure after a revocation: for up to 60 s after the store holds a `revoke`, this
   executor may still count new links by the revoked key. A link admitted in that window
   stays counted (stored `valid`, so the re-check keeps it): without the store's append
