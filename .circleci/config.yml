@@ -34,12 +34,17 @@ references:
 #   Rust (fmt). More runners, with small working dirs.
 # Only `build` gates the integration tests. clippy and rust-tests start after it and run
 # next to the integration tests. fmt, js-unit-tests and plugin-ad4m-tests start at once.
-# The heavy jobs (rust-tests, rust-client-tests, the integration suites) start with
-# `heavy_gate`: on a draft PR, a PR whose base is not dev, or a branch with no PR they halt
-# green at once (.circleci/scripts/should-run-heavy.sh). The full-ci label or [full-ci] in
-# the commit message runs them anyway. The GitHub workflow heavy-suites.yml shows a halt as
-# the pending status ci/heavy-suites; it turns success only once a pipeline of the commit runs
-# the heavy jobs, and starts one when the PR gets ready or is retargeted to dev without a push.
+# No CI runs on a draft PR: every job of the PR pipeline starts with a gate and halts green
+# at once (.circleci/scripts/should-run-heavy.sh). The light jobs (build, clippy, fmt,
+# js-unit-tests, plugin-ad4m-tests, deploy-scripts) use `draft_gate`: they halt on a draft only.
+# The heavy jobs (rust-tests, rust-client-tests, the integration suites) use `heavy_gate`: they
+# also halt on a PR whose base is not dev, or a branch with no PR. The full-ci label or [full-ci]
+# in the commit message runs everything anyway; a branch with no PR runs the light jobs. A new
+# job of the PR pipeline starts with one of the two gates. The GitHub workflow heavy-suites.yml
+# shows a halt as the pending status ci/heavy-suites; it turns success only once a pipeline of
+# the commit runs the heavy jobs, and starts one when the PR gets ready, is retargeted to dev or
+# gets the full-ci label without a push (it also starts one for a ready PR whose draft pipeline
+# halted the light jobs, so the light jobs run when a draft turns ready).
 
 commands:
   fix_workdir:
@@ -159,8 +164,8 @@ commands:
     description: "Halt a heavy job (green) on a draft PR, a PR whose base is not dev, or a branch with no PR"
     steps:
       - run:
-          # A stack of PRs pays the heavy suites once, at the PR that targets dev; the
-          # branches below it get fmt, build and clippy. dev, staging, main, tags and the
+          # A draft PR runs no CI (see draft_gate). A stack of PRs pays the heavy suites once,
+          # at the PR that targets dev; the ready branches below it get fmt, build and clippy. dev, staging, main, tags and the
           # nightly always run; so do a PR with the `full-ci` label and a head commit
           # with [full-ci] in its message. The decision is in the script (tested in
           # `build`); anything but its "skip" answer runs the suite, so a GitHub API
@@ -176,6 +181,27 @@ commands:
           command: |
             rc=0
             bash .circleci/scripts/should-run-heavy.sh || rc=$?
+            if [ "$rc" = 10 ]; then
+              circleci-agent step halt
+            fi
+            exit 0
+
+  draft_gate:
+    description: "Halt a light job (green) on a draft PR"
+    steps:
+      - run:
+          # No CI on a draft PR. The same script and the same one lookup as heavy_gate (the
+          # `light` question), so a workflow's jobs agree. Only a draft halts: a PR whose base
+          # is not dev and a branch with no PR still run these jobs. Fails open like
+          # heavy_gate. The step name starts with "Draft gate", not "Stack gate", so that
+          # heavy-suites-pr.sh does not take a light job for a heavy one; it finds a halted
+          # `build` by this name (its last step), so keep both.
+          name: Draft gate (no CI on draft PRs)
+          environment:
+            HEAVY_GATE_FORCE: << pipeline.parameters.run-nightly-llm >>
+          command: |
+            rc=0
+            bash .circleci/scripts/should-run-heavy.sh light || rc=$?
             if [ "$rc" = 10 ]; then
               circleci-agent step halt
             fi
@@ -545,6 +571,7 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - draft_gate
       - setup_env
       - run:
           name: Clean up stale local artifact stashes (older than 12 hours)
@@ -573,6 +600,11 @@ jobs:
           # coasys-spaces job's executor fetch, skip and model check.
           name: Test coasys-spaces.sh
           command: bash scripts/coasys-spaces.test.sh
+      - run:
+          # Fake WE suite, fake scripts/perf, local git repo; about a second. The nightly
+          # feed-scale job's skip, data dir and calls to the performance history.
+          name: Test feed-scale.sh
+          command: bash scripts/feed-scale.test.sh
       - run:
           # Fake curl with fixture PRs, no network; about a second. The heavy_gate decision.
           name: Test should-run-heavy.sh
@@ -740,6 +772,7 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - draft_gate
       - setup_env
       - restore_rust_compile_inputs
       - run:
@@ -794,6 +827,7 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - draft_gate
       - setup_env
       - run:
           name: cargo fmt --check
@@ -888,6 +922,7 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - draft_gate
       - setup_env
       - run:
           name: Install dependencies
@@ -1535,6 +1570,99 @@ jobs:
           path: /tmp/coasys-spaces-artifacts
           destination: coasys-spaces
 
+  # How the Feed behaves in a space with a million messages, on this commit's executor: WE web
+  # opens the space in Chromium, and the job measures the newest page (cold, then warm), the
+  # older page a scroll loads, the executor's model query under those loads, the executor's
+  # CPU over the loads (with the auto-processor WE registers for the space), its RSS, and the
+  # seeding itself (WE apps/we-web/e2e/feed-scale/, `test:feed-scale`).
+  # No model and no GPU. Nightly only, in `nightly-llm-e2e`, in a serial group of its own.
+  #
+  # The shell steps are in scripts/feed-scale.sh, which also runs by hand (`all`). The
+  # executor, SDK, WE and we-web steps are coasys-spaces.sh's, run in this job's work dir.
+  # The suite seeds by `runtime.importData` of a file of signed links, keeps its data off /tmp (a
+  # tmpfs on this host), and writes metrics.json; `perf` hands that to scripts/perf/record
+  # and lets scripts/perf/check judge it against the history, by the `feed-scale` rules in
+  # scripts/perf/thresholds.json. The job halts green when this
+  # ad4m commit, the WE commit and the size were already measured here.
+  feed-scale:
+    machine: true
+    resource_class: coasys/marvin
+    environment:
+      PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: debian13-x64
+      PLAYWRIGHT_BROWSERS_PATH: /home/marvin/.cache/ms-playwright-debian13
+      WE_REF: << pipeline.parameters.we-ref >>
+      # Not /tmp: a million messages make a data dir of tens of GB. preflight empties it.
+      FEED_SCALE_ARTIFACTS: /home/marvin/.cache/ad4m-ci/feed-scale/artifacts
+      # The record's `pipeline` field (scripts/perf/record reads it from here only).
+      PERF_PIPELINE_NUMBER: << pipeline.number >>
+    steps:
+      - fix_workdir
+      - checkout
+      - setup_env
+      - run:
+          name: Skip if this ad4m commit, this WE commit and this size were already measured
+          command: |
+            rc=0
+            bash scripts/feed-scale.sh preflight || rc=$?
+            if [ "$rc" = 10 ]; then
+              circleci-agent step halt
+              exit 0
+            fi
+            exit "$rc"
+      - run:
+          name: Get the executor for this commit (published, else build)
+          command: bash scripts/feed-scale.sh executor
+          no_output_timeout: 30m
+      - run:
+          name: Build and pack core and connect
+          command: bash scripts/feed-scale.sh sdk
+          no_output_timeout: 20m
+      - run:
+          name: Clone WE at we-ref and install it with this commit's SDK
+          command: bash scripts/feed-scale.sh we
+          no_output_timeout: 20m
+      - run:
+          name: Install Chromium's system libraries
+          command: |
+            sudo apt-get update -qq
+            ./tests/js/scripts/install-browser-deps.sh
+      - run:
+          name: Build we-web
+          command: bash scripts/feed-scale.sh build-web
+          no_output_timeout: 20m
+      # add_ssh_keys takes no `when: always`, so this cannot go between the suite and
+      # perf steps: a failed suite would skip it and the run's record would not push.
+      - perf_history_key
+      - run:
+          # The seed logs every 1%; one page load at a million may wait several minutes.
+          name: Run the feed-scale suite (WE test:feed-scale)
+          command: bash scripts/feed-scale.sh test
+          no_output_timeout: 60m
+      - run:
+          # A failed run is recorded too (as failed), and only a passed one is judged.
+          name: Record the numbers in the performance history and check them
+          when: always
+          command: bash scripts/feed-scale.sh perf
+      - run:
+          name: Record this commit pair and size as measured
+          command: bash scripts/feed-scale.sh record
+      - run:
+          # A stopped or timed-out suite can leave the executor, a browser or its tens
+          # of GB behind.
+          name: Stop what the run left and empty the data dir
+          when: always
+          command: bash scripts/feed-scale.sh cleanup
+      - store_artifacts:
+          when: always
+          path: /home/marvin/.cache/ad4m-ci/feed-scale/artifacts
+          destination: feed-scale
+      - perf_history_cleanup:
+          job: feed-scale
+      - run:
+          name: Summary
+          when: always
+          command: bash scripts/feed-scale.sh summary
+
   integration-tests-cli:
     machine: true
     resource_class: coasys/marvin-light
@@ -1559,6 +1687,7 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - draft_gate
       - run:
           name: Install dependencies
           working_directory: plugins/ad4m
@@ -1605,6 +1734,7 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - draft_gate
       - run:
           name: shellcheck deploy/staging
           command: |
@@ -1685,13 +1815,13 @@ workflows:
   # Same resource class (Marvin). llm-e2e and coasys-spaces both prompt
   # staging's llama-server, which already holds the GPU, and neither loads
   # a model. llm-e2e's embeddings stay on Ollama (:11434). The agent harness
-  # uses its own mock LLM. llm-e2e, the SFU wind tunnel, coasys-spaces and
-  # the agent harness start together and do not build on each other's
-  # result: one failing must not skip the others. Three API triggers fire
-  # this pipeline every night on one host. Each job has its own serial
-  # group, so a second trigger waits instead of sharing ports, DIDs and the
-  # GPU with the first. llm-e2e and coasys-spaces share one group
-  # (`nightly-llm`) so they do not run at once on that one slot.
+  # uses its own mock LLM. feed-scale needs no model. llm-e2e, the SFU wind
+  # tunnel, coasys-spaces, the agent harness and feed-scale start together
+  # and do not build on each other's result: one failing must not skip the
+  # others. Three API triggers fire this pipeline every night on one host.
+  # Each job has its own serial group, so a second trigger waits instead of
+  # sharing ports, DIDs and the GPU with the first. llm-e2e and coasys-spaces
+  # share one group (`nightly-llm`) so they do not run at once on that one slot.
   nightly-llm-e2e:
     when: << pipeline.parameters.run-nightly-llm >>
     jobs:
@@ -1708,3 +1838,5 @@ workflows:
           serial-group: << pipeline.project.slug >>/nightly-llm
       - integration-tests-agent-harness:
           serial-group: << pipeline.project.slug >>/nightly-agent-harness
+      - feed-scale:
+          serial-group: << pipeline.project.slug >>/nightly-feed-scale

@@ -66,13 +66,13 @@
 
 use super::accept::{accept_flow_proposal_locked, load_outputs};
 use super::atom::{
-    check_outputs_commitment, normalised_outputs, outputs_hash, OutputRef, OutputsRefusal,
-    TransitionAtom,
+    check_outputs_commitment, normalised_outputs, outputs_hash, OutputRef, TransitionAtom,
 };
 use super::pass::{
     catch_up_before_own_vote, run_flow_consensus_pass, run_flow_pass_for_co_owners, FireOutcome,
 };
 use super::receipt::is_terminal_state;
+use super::refusal::{FlowError, FlowRefusal};
 use super::FlowInstance;
 use crate::agent::AgentContext;
 use crate::perspectives::flow_context::FlowInstanceRecord;
@@ -122,8 +122,9 @@ pub struct ProposeOutcome {
 
 /// Mint — or co-sign — a manual flow-transition proposal for the acting agent.
 ///
-/// See the module doc for the invariants. Errors when:
-/// - the instance or its flow cannot be loaded,
+/// See the module doc for the invariants. A [`FlowError::Refused`] (see
+/// [`FlowRefusal`]) comes back when:
+/// - there is no instance at `instance_uri`,
 /// - the instance is contested,
 /// - `to_state` is not reachable from the derived state,
 /// - the target state has a `requires` guard that is not currently satisfied
@@ -132,8 +133,10 @@ pub struct ProposeOutcome {
 /// - `outputs` is non-empty and `to_state` is not terminal,
 /// - `to_state` is terminal and an entry of `outputs` is not an instance of
 ///   its class on this replica,
-/// - an open proposal on this edge names different outputs,
-/// - a store lookup fails.
+/// - an open proposal on this edge names different outputs.
+///
+/// A [`FlowError::Failed`] comes back when the flow is not in the catalogue
+/// or a store lookup fails.
 ///
 /// `outputs` is ignored in order and duplicates: the proposal names the
 /// sorted, deduplicated refs and commits to their content as this replica
@@ -145,7 +148,7 @@ pub async fn propose_flow_transition(
     outputs: &[OutputRef],
     rationale: Option<&str>,
     context: &AgentContext,
-) -> anyhow::Result<ProposeOutcome> {
+) -> Result<ProposeOutcome, FlowError> {
     // Held from the read that decides through the vote's own pass — see
     // `accept_flow_proposal`.
     let lock = perspective.flow_pass_lock.clone();
@@ -155,7 +158,9 @@ pub async fn propose_flow_transition(
     let record = instances
         .iter()
         .find(|r| r.instance_uri == instance_uri)
-        .ok_or_else(|| anyhow::anyhow!("no FlowInstance at {instance_uri}"))?;
+        .ok_or_else(|| FlowRefusal::NoInstance {
+            instance: instance_uri.to_string(),
+        })?;
     let flow = flows
         .get(&record.flow_uri)
         .ok_or_else(|| anyhow::anyhow!("flow `{}` is not in the catalogue", record.flow_uri))?;
@@ -163,11 +168,11 @@ pub async fn propose_flow_transition(
     let instance = FlowInstance::from_record(record, flow);
     let derived = instance.derive_state(perspective).await?;
     if let Some(contention) = &derived.contested {
-        return Err(anyhow::anyhow!(
-            "{instance_uri} is contested in `{}` — two edges out of it already carry quorum, \
-             so a further proposal cannot resolve it; no proposal written",
-            contention.from_state
-        ));
+        return Err(FlowRefusal::Contested {
+            instance: instance_uri.to_string(),
+            from: contention.from_state.clone(),
+        }
+        .into());
     }
     let acting_did = crate::agent::did_for_context(context)?;
 
@@ -175,11 +180,9 @@ pub async fn propose_flow_transition(
     let target_state = reachable
         .iter()
         .find(|s| s.name == to_state)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "`{to_state}` is not reachable from `{}` — no proposal written",
-                derived.state
-            )
+        .ok_or_else(|| FlowRefusal::NotReachable {
+            from: derived.state.clone(),
+            to: to_state.to_string(),
         })?;
 
     // The outputs commitment (#1104): only a run that ends here produces
@@ -202,12 +205,11 @@ pub async fn propose_flow_transition(
         let named = normalised_outputs(&by_iri);
         let loaded = load_outputs(&*perspective, &named).await?;
         if let Some(missing) = named.iter().find(|r| !loaded.contains_key(*r)) {
-            return Err(anyhow::anyhow!(
-                "a voter would refuse this proposal: {} — no proposal written",
-                OutputsRefusal::OutputNotInstance {
-                    output: missing.clone()
-                }
-            ));
+            return Err(FlowRefusal::OutputNotInstance {
+                output: missing.clone(),
+                proposal: None,
+            }
+            .into());
         }
         // Hashed over exactly what a co-signer's `load_outputs` reads, so the
         // commitment is the one `check_outputs_commitment` recomputes. Every
@@ -219,10 +221,10 @@ pub async fn propose_flow_transition(
             .collect();
         Some(items)
     } else if !outputs.is_empty() {
-        return Err(anyhow::anyhow!(
-            "`{to_state}` is not terminal, so a run does not end there and has no outputs to \
-             name — no proposal written"
-        ));
+        return Err(FlowRefusal::NotTerminal {
+            to: to_state.to_string(),
+        }
+        .into());
     } else {
         None
     };
@@ -242,9 +244,10 @@ pub async fn propose_flow_transition(
         recompute_evidence_seal(perspective, flow, &record_now, to_state, &acting_did).await?;
     let Some(evidence_hash_val) = sealed.seal.hash() else {
         debug_assert_eq!(sealed.seal, EvidenceSeal::Unmet);
-        return Err(anyhow::anyhow!(
-            "guard for `{to_state}` is not satisfied on this replica — proposal not written"
-        ));
+        return Err(FlowRefusal::GuardUnmet {
+            to: to_state.to_string(),
+        }
+        .into());
     };
     let evidence = sealed.evidence;
     let evidence_ids: Vec<String> = evidence.iter().map(|e| e.id.clone()).collect();
@@ -350,11 +353,12 @@ pub async fn propose_flow_transition(
         // for such a run is refused (`OutputsCommitmentConflict`), so the
         // disagreement goes back to the caller instead.
         (None, None) if !other_outputs.is_empty() => {
-            return Err(anyhow::anyhow!(
-                "{instance_uri} → {to_state}: open proposal(s) {} on this edge name different \
-                 outputs; co-sign one or reject it — no proposal written",
-                other_outputs.join(", ")
-            ));
+            return Err(FlowRefusal::DifferentOutputs {
+                instance: instance_uri.to_string(),
+                to: to_state.to_string(),
+                proposals: other_outputs,
+            }
+            .into());
         }
         // Either nothing shares the key, or everything that does belongs to
         // another edge. Both mean this edge has no open proposal to join.
