@@ -495,9 +495,15 @@ export class WakerSubscriptionManager {
   /**
    * The words of each record a subscription's results carried text for, read as a mention is
    * ({@link wordsOf}), newest last, at most {@link TEXT_MEMORY} per subscription. They tell a
-   * part of a record from a record of its own ({@link isPartOfAHolder}).
+   * part of a record from a record of its own ({@link partsOfHolders}).
    */
   private texts = new Map<string, Map<string, string>>();
+  /**
+   * The words each record had when the wake that reported it was delivered (or when it was
+   * settled as a part), at most {@link TEXT_MEMORY} per subscription. A delivered holder's words
+   * after its wake are not what the agent was told, so a part is matched against these.
+   */
+  private wokenTexts = new Map<string, Map<string, string>>();
   /** Failed wake attempts in a row per subscription, for the retry backoff. */
   private wakeFailures = new Map<string, number>();
 
@@ -1051,6 +1057,7 @@ export class WakerSubscriptionManager {
     this.delivered.delete(id);
     this.undelivered.delete(id);
     this.texts.delete(id);
+    this.wokenTexts.delete(id);
     this.wakeFailures.delete(id);
     if (persist) this.persist();
   }
@@ -1077,7 +1084,7 @@ export class WakerSubscriptionManager {
     if (!pending?.size || !this.activeSubscriptions.has(sub.id)) return;
     const done = this.delivered.get(sub.id) ?? new Set<string>();
     const all = Array.from(pending.values());
-    const parts = new Set(all.filter((m) => this.isPartOfAHolder(sub.id, m, pending, done)));
+    const parts = this.partsOfHolders(sub.id, pending, done);
     const mentions = all.filter((m) => !parts.has(m));
     if (parts.size) {
       this.logger.info(
@@ -1085,9 +1092,12 @@ export class WakerSubscriptionManager {
       );
     }
     const settle = () => {
+      const texts = this.texts.get(sub.id);
       for (const mention of all) {
         pending.delete(mention.address);
         done.add(mention.address);
+        const words = texts?.get(mention.address);
+        if (words) this.remember(this.wokenTexts, sub.id, mention.address, words);
       }
       this.delivered.set(sub.id, done);
       this.persist();
@@ -1121,40 +1131,94 @@ export class WakerSubscriptionManager {
   }
 
   /**
-   * Whether `mention` is a part of a record the same wake reports, or an earlier one did: a record
-   * holding it (one of its `parents`) that is itself a mention, pending or delivered, and whose
-   * text already holds the part's words. A composition carries the text of its parts (a document
-   * its paragraphs, a message its blocks), so both match the agent's name, and the words are one
-   * mention: the agent is told about the record, under the parents the record has, and not again
-   * about its part under the record. A holder whose text does not hold them (a channel named after
-   * the agent, and a message in it) is a place, not the same words, and both wake. A record whose
-   * own text or whose holder's text no result carried is never taken for a part: a second wake is
-   * better than a missed one.
+   * The pending mentions that are parts of a record the agent is told about, in this wake or an
+   * earlier one. A composition carries the text of its parts (a document its paragraphs, a
+   * message its blocks), so both match the agent's name, and the words are one mention: the agent
+   * is told about the record, under the parents the record has, and not again about its part
+   * under the record.
+   *
+   * A mention is held by a holder (one of its `parents`) whose text holds the mention's words: a
+   * pending holder by the words it has now, which this wake carries; a delivered one by the words
+   * it had when its wake was delivered, so words added to it since are news. A mention held by a
+   * delivered holder was said already. Of pending mentions held only by one another, the agent is
+   * woken for those nothing holds, and for each group that hold one another round (a cycle, as two
+   * records with the same words, each under the other), for one of them: the least address. Every
+   * other pending mention leads through its holders to one of those, or to one said already, and
+   * is a part.
+   *
+   * A holder whose text does not hold the words (a channel named after the agent, and a message in
+   * it) is a place, not the same words, and both wake. A record whose own text or whose holder's
+   * text no result carried is never taken for a part: a second wake is better than a missed one.
+   * The order a wake covers is the holder's first or both together: a part delivered before its
+   * holder arrives woke the agent already, and the holder wakes it again.
    */
-  private isPartOfAHolder(
+  private partsOfHolders(
     subId: string,
-    mention: MentionMessage,
     pending: Map<string, MentionMessage>,
     done: Set<string>,
-  ): boolean {
+  ): Set<MentionMessage> {
     const texts = this.texts.get(subId);
-    const own = texts?.get(mention.address);
-    if (!own) return false;
-    return mention.parents.some(
-      (holder) =>
-        holder !== mention.address &&
-        (pending.has(holder) || done.has(holder)) &&
-        (texts!.get(holder)?.includes(own) ?? false),
-    );
+    const woken = this.wokenTexts.get(subId);
+    const said = new Set<string>();
+    const holders = new Map<string, string[]>();
+    for (const mention of pending.values()) {
+      const own = texts?.get(mention.address);
+      const held: string[] = [];
+      if (own) {
+        for (const holder of mention.parents) {
+          if (holder === mention.address) continue;
+          if (pending.has(holder)) {
+            if (texts!.get(holder)?.includes(own)) held.push(holder);
+          } else if (done.has(holder) && woken?.get(holder)?.includes(own)) {
+            said.add(mention.address);
+          }
+        }
+      }
+      holders.set(mention.address, said.has(mention.address) ? [] : held);
+    }
+    // Every address a mention leads to through its holders, itself included.
+    const reach = (from: string): Set<string> => {
+      const seen = new Set<string>([from]);
+      const stack = [from];
+      while (stack.length) {
+        for (const next of holders.get(stack.pop()!) ?? []) {
+          if (!seen.has(next)) {
+            seen.add(next);
+            stack.push(next);
+          }
+        }
+      }
+      return seen;
+    };
+    const reaches = new Map(Array.from(holders.keys(), (address) => [address, reach(address)]));
+    const parts = new Set<MentionMessage>();
+    for (const [address, reached] of reaches) {
+      // Woken for: not said already, and the least address of a group nothing outside holds,
+      // which is a group every address it leads to leads back from.
+      const closed = Array.from(reached).every((r) => reaches.get(r)!.has(address));
+      const least = Array.from(reached).reduce((a, b) => (b < a ? b : a));
+      if (said.has(address) || !closed || least !== address) parts.add(pending.get(address)!);
+    }
+    return parts;
   }
 
   /** Keep `words` as `address`'s text for `subId`, dropping the oldest past {@link TEXT_MEMORY}. */
   private rememberWords(subId: string, address: string, words: string): void {
-    const texts = this.texts.get(subId) ?? new Map<string, string>();
+    this.remember(this.texts, subId, address, words);
+  }
+
+  /** Keep `words` under `address` in `store`'s map for `subId`, newest last, at most {@link TEXT_MEMORY}. */
+  private remember(
+    store: Map<string, Map<string, string>>,
+    subId: string,
+    address: string,
+    words: string,
+  ): void {
+    const texts = store.get(subId) ?? new Map<string, string>();
     texts.delete(address);
     texts.set(address, words);
     while (texts.size > TEXT_MEMORY) texts.delete(texts.keys().next().value!);
-    this.texts.set(subId, texts);
+    store.set(subId, texts);
   }
 
   /** Dispose all active subscriptions and drop anything still pending. */

@@ -1340,6 +1340,47 @@ describe('WakerSubscriptionManager', () => {
       h.manager.disposeAll();
       expect(h.wakes).toHaveLength(1);
     });
+
+    // The holder was woken for with its first words; the words added to it since are news, though
+    // the holder's text holds them now.
+    it('wakes for a part whose words were added to its holder after the holder was woken for', async () => {
+      const containers = (_uuid: string, _class: string, queryJson: string) =>
+        Promise.resolve({ instances: composition(JSON.parse(queryJson).parent).map((id) => ({ id })) });
+      const h = await mentionHarness(10, undefined, { modelQuery: containers });
+      await h.deliver(result(row('test://message', said)));
+      await waitUntil(() => h.wakes.length > 0, 1000);
+      const added = 'Data, and the summary too.';
+      await h.deliver(result(row('test://message', `${said} ${added}`), row('test://message/text', added)));
+      await waitUntil(() => h.wakes.length > 1, 1000);
+      h.manager.disposeAll();
+      expect(h.wakes.map((w: any) => w.map((m: any) => m.address))).toEqual([['test://message'], ['test://message/text']]);
+    });
+
+    // Two records with the same words, each under the other: each is a part of the other, and the
+    // agent is woken once, for the least address, not for neither.
+    it('wakes once for records that hold one another round', async () => {
+      const { wakes } = await wakeWith(
+        tree({ 'test://b': ['test://a'], 'test://a': ['test://b'] }),
+        0,
+        'test://a',
+        [result(row('test://b', said), row('test://a', said))],
+      );
+      expect(wakes.map((w: any[]) => w.map((m: any) => m.address))).toEqual([['test://a']]);
+    });
+
+    // The order a wake covers is the holder's first or both together: a part delivered first woke
+    // the agent already, and its holder wakes it again.
+    it('wakes for the part and then its holder when the part arrives first', async () => {
+      const containers = (_uuid: string, _class: string, queryJson: string) =>
+        Promise.resolve({ instances: composition(JSON.parse(queryJson).parent).map((id) => ({ id })) });
+      const h = await mentionHarness(10, undefined, { modelQuery: containers });
+      await h.deliver(result(row('test://message/text', said)));
+      await waitUntil(() => h.wakes.length > 0, 1000);
+      await h.deliver(result(row('test://message/text', said), row('test://message', said)));
+      await waitUntil(() => h.wakes.length > 1, 1000);
+      h.manager.disposeAll();
+      expect(h.wakes.map((w: any) => w.map((m: any) => m.address))).toEqual([['test://message/text'], ['test://message']]);
+    });
   });
 
   it('bounds the walk by ancestorDepth, and never reports the mention itself', async () => {
