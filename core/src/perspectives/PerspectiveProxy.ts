@@ -453,16 +453,24 @@ export class PerspectiveProxy {
      * hash over their content, and a receipt for the run can only speak for
      * exactly these instances, as they stood at completion. Naming outputs
      * for a non-terminal state is refused.
+     *
+     * A refused move rejects with an `RpcError` (status 409). Its `data` is a
+     * {@link FlowRefusal}: branch on `data.kind`. Any other failure is status
+     * 500 with no `data`.
      */
     async proposeFlowTransition(instanceUri: string, toState: string, rationale?: string, outputs?: FlowOutputRef[]): Promise<FlowProposeResult> {
         return await this.#client.proposeFlowTransition(this.#handle.uuid, instanceUri, toState, rationale, outputs)
     }
 
+    /** Co-sign a proposal. A refusal rejects like {@link PerspectiveProxy.proposeFlowTransition}. */
     async acceptFlowProposal(proposalUri: string): Promise<FlowFireOutcome[]> {
         return await this.#client.acceptFlowProposal(this.#handle.uuid, proposalUri)
     }
 
-    /** Withdraw our own links from a proposal; resolves to how many went. */
+    /**
+     * Withdraw our own links from a proposal; resolves to how many went.
+     * A refusal rejects like {@link PerspectiveProxy.proposeFlowTransition}.
+     */
     async rejectFlowProposal(proposalUri: string): Promise<number> {
         return await this.#client.rejectFlowProposal(this.#handle.uuid, proposalUri)
     }

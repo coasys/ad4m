@@ -1,0 +1,18 @@
+{
+    // `moduleResolution: "node"` (node10) — what core, connect, ui and
+    // tests/js still use. It ignores `exports`, so the only way
+    // `@coasys/ad4m/model` carries types for those consumers is the
+    // `typesVersions` entry in the package's package.json. Run:
+    //   ../node_modules/.bin/tsc -p tests/node-resolution/tsconfig.json
+    // Requires `pnpm run build` in core/ (the types live in lib/).
+    "include": ["probe.ts"],
+    "compilerOptions": {
+        "target": "ES2020",
+        "module": "CommonJS",
+        "moduleResolution": "node",
+        "strict": true,
+        "experimentalDecorators": true,
+        "noEmit": true,
+        "skipLibCheck": true
+    }
+}

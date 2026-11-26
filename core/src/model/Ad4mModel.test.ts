@@ -4408,3 +4408,71 @@ describe("Model writes: one executeAction call per write (P4)", () => {
     ]]);
   });
 });
+
+describe("call writers on the SDK save path", () => {
+  // A class that declares call writers emits them into its shape, where the
+  // executor runs them — the SDK's own link-writing save path must not write
+  // such a field itself: the write would bypass the language the shape says
+  // owns it. planProperty/planRelation refuse instead of emitting links.
+  @Model({ name: "CallBackedPost" })
+  class CallBackedPost extends Ad4mModel {
+    @Optional({ through: "cb://title", setter: { interaction: "set_title" } })
+    title?: string;
+
+    @HasMany({ through: "cb://member", adder: { interaction: "add_member" } })
+    members: string[] = [];
+  }
+
+  const makePerspective = () =>
+    ({
+      executeAction: jest.fn().mockResolvedValue(undefined),
+      createSubject: jest.fn().mockResolvedValue(undefined),
+      createBatch: jest.fn().mockResolvedValue("batch-generated"),
+      commitBatch: jest.fn().mockResolvedValue(undefined),
+      uuid: "test-perspective-uuid",
+    }) as any;
+
+  it("a property with a call setter cannot be written by save()", async () => {
+    const perspective = makePerspective();
+    const card = new CallBackedPost(perspective, "cb://post/1") as any;
+    card.takeSnapshot(); // as fetched — save() takes the update path
+    card.title = "new title";
+
+    await expect(card.save("batch-1")).rejects.toThrow(/call setter/);
+    expect(perspective.executeAction).not.toHaveBeenCalled();
+  });
+
+  it("a relation with a call adder refuses every write kind", async () => {
+    const perspective = makePerspective();
+    const card = new CallBackedPost(perspective, "cb://post/1") as any;
+
+    // The generated helpers and the action-envelope writes all land in the
+    // same planner — each refuses, because the declared writer is a call.
+    await expect(card.addMembers("cb://m/1")).rejects.toThrow(/call adder/);
+    await expect(card.removeMembers("cb://m/1")).rejects.toThrow(/call adder/);
+    await expect(card.setMembers(["cb://m/1"])).rejects.toThrow(/call adder/);
+
+    card.members = { action: "adder", value: ["cb://m/1"] };
+    await expect(card.innerUpdate(true, "batch-1")).rejects.toThrow(/call adder/);
+    card.members = { action: "remover", value: ["cb://m/1"] };
+    await expect(card.innerUpdate(true, "batch-1")).rejects.toThrow(/call adder/);
+
+    // A whole-list set through save() is a collectionSetter — a link write
+    // too, refused once either call writer is declared (declaring one drops
+    // both generated link lists, so no link-write path remains).
+    card.members = ["cb://m/1"];
+    card.takeSnapshot();
+    card.members = ["cb://m/2"];
+    await expect(card.save("batch-1")).rejects.toThrow(/call adder/);
+
+    expect(perspective.executeAction).not.toHaveBeenCalled();
+  });
+
+  it("create() still hands a call-setter property to createSubject — the executor runs the shape's call", async () => {
+    const perspective = makePerspective();
+    await CallBackedPost.create(perspective, { title: "t" }, { batchId: "batch-1" });
+
+    expect(perspective.createSubject.mock.calls[0][2]).toEqual({ title: "t" });
+    expect(perspective.executeAction).not.toHaveBeenCalled();
+  });
+});

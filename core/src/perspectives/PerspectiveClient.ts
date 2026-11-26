@@ -510,6 +510,11 @@ export class PerspectiveClient {
         ))
     }
 
+    /**
+     * A refused move rejects with an `RpcError`: status 409, `data` a
+     * {@link FlowRefusal}. Any other failure is status 500 with no `data`.
+     * `acceptFlowProposal` and `rejectFlowProposal` refuse the same way.
+     */
     async proposeFlowTransition(
         uuid: string,
         instanceUri: string,

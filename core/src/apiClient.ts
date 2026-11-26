@@ -13,13 +13,14 @@ export interface WsEvent {
 
 /** Error thrown by ApiClient when an RPC call fails. */
 export class RpcError extends Error {
-    /** Error code (maps to HTTP status semantics: 400, 401, 403, 404, 422, 500). */
+    /** Error code (maps to HTTP status semantics: 400, 401, 403, 404, 409, 422, 500). */
     readonly status: number
     /** Raw error message from server. */
     readonly body: string
     /**
      * Structured detail the executor attached (`error.data`), when it did: e.g. the
-     * `InstanceError` of a refused `perspective.instance*` write.
+     * `InstanceError` of a refused `perspective.instance*` write, or the
+     * `FlowRefusal` (status 409) of a refused flow move.
      */
     readonly data?: unknown
 

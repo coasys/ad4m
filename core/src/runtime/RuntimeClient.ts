@@ -1,7 +1,7 @@
 import {ApiClient, CallOptions } from '../apiClient'
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import { RuntimeInfo, SentMessage, NotificationInput, NotificationUpdate, Notification, ImportResult, UserStatistics } from "./RuntimeTypes"
-import type { HostRate, LogFilter, LogTail, RuntimeConfig, SetConfigResult, UnytVersionInfo } from "../generated/api"
+import type { HostRate, LogFilter, LogTail, RuntimeConfig, RuntimeImportPerspectiveResult, SetConfigResult, UnytVersionInfo } from "../generated/api"
 import { LanguageMeta } from "../language/LanguageMeta"
 import type { SfuStatus } from "../generated/api/SfuStatus"
 import type { Live } from "../mirror/Mirror"
@@ -180,7 +180,7 @@ export class RuntimeClient {
 
     async importDb(filePath: string): Promise<ImportResult> {
         const result = await this.#apiClient.call('runtime.importData', { type: "db", filePath })
-        if ('success' in result) throw new Error('runtime.importData answered a perspective import for type "db"')
+        if ('imported' in result) throw new Error('runtime.importData answered a perspective import for type "db"')
         return result
     }
 
@@ -200,9 +200,19 @@ export class RuntimeClient {
         return this.#apiClient.call('runtime.exportData', { type: "perspective", perspectiveUuid: uuid, filePath })
     }
 
-    async importPerspective(filePath: string): Promise<boolean> {
-        const result = await this.#apiClient.call('runtime.importData', { type: "perspective", filePath })
-        return 'success' in result && result.success
+    /** Bulk-loads a `runtime.exportData {type:"perspective"}` file into the
+     * perspective's store. The import adds links that are new to the
+     * perspective in one commit and publishes nothing to the link
+     * language — in a neighbourhood perspective the imported Shared links
+     * may sync to peers later, as links written while offline would. The
+     * whole file is refused (nothing committed) when a link's reifier
+     * already stands in the store, a reifier appears twice in the file,
+     * or a valid tombstone in the file ends a stored or in-file link.
+     */
+    async importPerspective(uuid: string, filePath: string): Promise<RuntimeImportPerspectiveResult> {
+        const result = await this.#apiClient.call('runtime.importData', { type: "perspective", perspectiveUuid: uuid, filePath })
+        if ('imported' in result) return result
+        throw new Error('runtime.importData answered a db import for type "perspective"')
     }
 
     async multiUserEnabled(): Promise<boolean> {

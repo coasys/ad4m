@@ -867,6 +867,18 @@ export class Ad4mModel {
       );
     }
 
+    // A declared call setter runs only through the executor's shape
+    // actions — it is the mount form of a write, not a link write. Writing
+    // the property as a link here would bypass the language the shape
+    // says owns it.
+    if (metadata.setter) {
+      throw new Error(
+        `Property "${key}" declares a call setter — call writers run only through ` +
+        `the executor's shape actions, so Ad4mModel's link-writing save path cannot ` +
+        `write it. Declare a plain @Property (no setter) for SDK-written properties.`
+      );
+    }
+
     if (!metadata.through) {
       throw new Error(`Property "${key}" has no 'through' predicate defined`);
     }
@@ -892,6 +904,20 @@ export class Ad4mModel {
 
     if (!metadata.predicate) {
       throw new Error(`Relation "${key}" has no predicate defined`);
+    }
+
+    // A declared call adder/remover runs only through the executor's shape
+    // actions — and declaring either drops both generated link lists, so the
+    // relation has no link-write path at all. Writing links here would
+    // bypass the language the shape says owns it.
+    if (metadata.adder || metadata.remover) {
+      const writers = [metadata.adder && "adder", metadata.remover && "remover"]
+        .filter(Boolean).join("/");
+      throw new Error(
+        `Relation "${key}" declares a call ${writers} — call writers run only through ` +
+        `the executor's shape actions, so Ad4mModel's link-writing save path cannot ` +
+        `write it. Declare a plain relation (no adder/remover) for SDK-written relations.`
+      );
     }
 
     const actionMap = {
