@@ -1,0 +1,20 @@
+{
+  "name": "s0a-worker-spike",
+  "private": true,
+  "type": "module",
+  "description": "Spike S0a: server-link-language bundle in a browser Web Worker with an ad4m:host shim. Not part of the pnpm workspace.",
+  "scripts": {
+    "build:shim": "esbuild web/shim-src.js --bundle --format=esm --outfile=web/shim.js --log-level=warning",
+    "selftest": "node selftest.mjs",
+    "drive": "node scripts/drive.mjs"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^1.0.0",
+    "@noble/curves": "^1.6.0",
+    "@noble/hashes": "^1.5.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "playwright-core": "^1.65.1"
+  }
+}

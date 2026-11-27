@@ -1,0 +1,43 @@
+[package]
+name = "s0b-probe"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[features]
+deno-shim = ["dep:deno_core"]
+# Executor dependency set as declared in rust-executor/Cargo.toml (for the dep-level probe).
+executor-deps = ["tokio/full", "oxigraph/rocksdb"]
+exec-tokio = ["tokio/full"]
+exec-rocksdb = ["oxigraph/rocksdb"]
+
+[dependencies]
+# Same versions as rust-executor/Cargo.toml; tokio/oxigraph features reduced to what builds for wasm32.
+oxigraph = { version = "=0.5.13", default-features = false, features = ["rdf-12"] }
+spargebra = { version = "0.4.8", features = ["sparql-12"] }
+tokio = { version = "1.25.0", features = ["sync", "macros", "rt", "time"] }
+tokio-util = "0.7"
+tokio-stream = { version = "0.1.12", features = ["sync"] }
+chrono = { version = "0.4.6", features = ["serde"] }
+serde = { version = "1.0.159", features = ["derive"] }
+serde_json = { version = "1.0.95", features = ["raw_value"] }
+url = { version = "2.3.1", features = ["serde"] }
+urlencoding = "2.1"
+percent-encoding = "2"
+uuid = { version = "1.3.0", features = ["v4"] }
+log = "0.4.19"
+hex = "0.4.3"
+sha2 = "0.10.8"
+regex = "1.5.4"
+anyhow = "1.0.95"
+deno_core = { path = "shim-deno-core", optional = true }
+thiserror = "2.0.12"
+lazy_static = "1.4.0"
+once_cell = "1.17.1"
+futures = "0.3.28"
+ts-rs = { version = "12.0.1", features = ["serde-compat", "no-serde-warnings", "serde-json-impl", "chrono-impl", "url-impl"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+oxigraph = { version = "=0.5.13", default-features = false, features = ["rdf-12", "js"] }
+uuid = { version = "1.3.0", features = ["v4", "js"] }

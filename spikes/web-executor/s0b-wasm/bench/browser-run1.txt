@@ -1,0 +1,25 @@
+init_ms=27.1 (fetch+compile+instantiate, localhost)
+links=50000 quads=400000 load_ms=886.7 delta=144506880 bytes_per_link=2890
+Q1 id-phase ts-sort LIMIT 50	rows=50	median_ms=119.600	min_ms=118.400
+Q2 hydrate 50 ids (decorated links)	rows=200	median_ms=3.600	min_ms=2.800
+Q3 id-phase where+property-sort LIMIT 50	rows=50	median_ms=41.900	min_ms=40.900
+Q4 count where state=done	rows=1	median_ms=14.800	min_ms=14.500
+Q5 single-plan all instances+links	rows=40000	median_ms=286.700	min_ms=285.700
+Q6 channel last-activity GROUP BY (sparql_store test shape)	rows=20	median_ms=58.800	min_ms=57.900
+mem_end=155189248 ua=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/146.0.0.0 Safari/537.36
+END
+node:fs:1283
+  return binding.rmSync(getValidatedPath(path), opts.maxRetries, opts.recursive, opts.retryDelay);
+                 ^
+
+Error: ENOTEMPTY, Directory not empty: /tmp/s0b-chrome-g8aki2 '/tmp/s0b-chrome-g8aki2'
+    at Object.rmSync (node:fs:1283:18)
+    at file:///<s0b-dir>/bench/browser-run.mjs:28:28
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5) {
+  errno: 39,
+  code: 'ENOTEMPTY',
+  path: '/tmp/s0b-chrome-g8aki2',
+  syscall: 'rm'
+}
+
+Node.js v24.20.0

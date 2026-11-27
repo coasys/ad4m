@@ -1,0 +1,8 @@
+links=50000 quads=400000 per_link=false load_ms=745.5 rss_before=2584576 rss_after=169578496 delta=166993920 bytes_per_link=3340
+Q1 id-phase ts-sort LIMIT 50	rows=50	median_ms=102.519	min_ms=99.489
+Q2 hydrate 50 ids (decorated links)	rows=200	median_ms=1.921	min_ms=1.909
+Q3 id-phase where+property-sort LIMIT 50	rows=50	median_ms=33.450	min_ms=32.637
+Q4 count where state=done	rows=1	median_ms=14.142	min_ms=13.892
+Q5 single-plan all instances+links	rows=40000	median_ms=251.306	min_ms=247.833
+Q6 channel last-activity GROUP BY (sparql_store test shape)	rows=20	median_ms=52.289	min_ms=51.197
+rss_end=174215168

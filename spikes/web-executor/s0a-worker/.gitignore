@@ -1,0 +1,12 @@
+# Built or generated; not committed.
+node_modules/
+web/shim.js
+web/*-bundle.js
+*-bundle.js
+seed/
+logs/*
+!logs/browser-run3.json
+!logs/native-snapshot.txt
+# The root .gitignore ignores *.js; these two are sources.
+!web/shim-src.js
+!web/worker.js

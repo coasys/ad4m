@@ -1,0 +1,10 @@
+wasm raw=2721463 gzip9=894521 brotli11=599588
+instantiate_ms=7.6
+links=50000 quads=400000 per_link=false load_ms=1071.6 mem_before=1572864 mem_after=146079744 delta=144506880 bytes_per_link=2890
+Q1 id-phase ts-sort LIMIT 50	rows=50	median_ms=120.810	min_ms=120.049
+Q2 hydrate 50 ids (decorated links)	rows=200	median_ms=153.593	min_ms=152.422
+Q3 id-phase where+property-sort LIMIT 50	rows=50	median_ms=42.013	min_ms=41.276
+Q4 count where state=done	rows=1	median_ms=15.229	min_ms=15.098
+Q5 single-plan all instances+links	rows=40000	median_ms=295.193	min_ms=292.220
+Q6 channel last-activity GROUP BY (sparql_store test shape)	rows=20	median_ms=60.080	min_ms=59.760
+mem_end=252641280

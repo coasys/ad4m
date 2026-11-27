@@ -1,0 +1,791 @@
+{
+  "steps": [
+    {
+      "t": "2026-11-19T06:06:46.594Z",
+      "name": "load",
+      "data": {
+        "id": 1,
+        "ok": true,
+        "result": {
+          "did": "did:key:z6MktNixUuUtTAmXCJmZ1akc5voSWMNZcByhme1Extdwwuqz",
+          "importSitesRewritten": 1,
+          "bundleBytes": 152607,
+          "exports": [
+            "default",
+            "init",
+            "interactions",
+            "isPublic",
+            "name",
+            "peersRemote",
+            "peersSetLocal",
+            "perspectiveCommit",
+            "perspectiveQueryRun",
+            "perspectiveQuerySupportedKinds",
+            "perspectiveSyncCurrentRevision",
+            "perspectiveSyncRender",
+            "perspectiveSyncSync",
+            "possibleTemplateParams",
+            "teardown",
+            "telepresenceGetOnlineAgents",
+            "telepresenceSendBroadcast",
+            "telepresenceSendSignal",
+            "telepresenceSetOnlineStatus",
+            "version"
+          ]
+        }
+      }
+    },
+    {
+      "t": "2026-11-19T06:06:46.643Z",
+      "name": "init",
+      "data": {
+        "id": 2,
+        "ok": true,
+        "result": null,
+        "ms": 48
+      }
+    },
+    {
+      "t": "2026-11-19T06:06:47.152Z",
+      "name": "pre-join link arrived",
+      "data": {
+        "afterMs": 96,
+        "payload": {
+          "additions": [
+            {
+              "author": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+              "timestamp": "2026-11-19T06:04:40.856Z",
+              "proof": {
+                "key": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP#z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+                "signature": "88ef5337d029e6d51d35d5c25cec50d03cfb8734931fa163320d6693e5948349cc29df4e446ae4f8f993714b42655cc19efcc53a6d3d60a3f3fe9fce4db92f0f"
+              },
+              "status": "SHARED",
+              "data": {
+                "predicate": "s0a://x1",
+                "source": "s0a://native-before",
+                "target": "ad4m://has"
+              }
+            },
+            {
+              "author": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+              "timestamp": "2026-11-19T06:05:38.202Z",
+              "proof": {
+                "key": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP#z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+                "signature": "b5d2eb140faebd50648a34a131ed97245b1b1a389b0b7135328e58bcb6cde319167f6cf77e5610193b2d35efc928ed84ab9e711e5297f78207431bffa996e00a"
+              },
+              "status": "SHARED",
+              "data": {
+                "predicate": "s0a://native-live-1795068338185",
+                "source": "s0a://native-live",
+                "target": "ad4m://has"
+              }
+            },
+            {
+              "author": "did:key:z6MkghMCM29a5WMWNu9ZUz11AUWuHok9Zip6aiVP75DQaPhL",
+              "timestamp": "2026-11-19T06:05:38.737Z",
+              "proof": {
+                "key": "did:key:z6MkghMCM29a5WMWNu9ZUz11AUWuHok9Zip6aiVP75DQaPhL#z6MkghMCM29a5WMWNu9ZUz11AUWuHok9Zip6aiVP75DQaPhL",
+                "signature": "6f165cb7fa77ecb7f7e0323abda60e79493b005d9c79c93e43815f5c743251855ade11773d1cbc1a81534acb51c55a4a5a4a29cd151d96144adaa7a7fb491908"
+              },
+              "data": {
+                "predicate": "ad4m://has",
+                "source": "s0a://tab",
+                "target": "s0a://from-tab-1795068338736"
+              }
+            },
+            {
+              "author": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+              "timestamp": "2026-11-19T06:06:35.095Z",
+              "proof": {
+                "key": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP#z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+                "signature": "4d22800e112856d0935047f32e0eb2d80698c7d96f7de76ae1f02e6312aa94bb60bc1b34cef62b74f22a59b3cd6ebfb960651725f577f06a7c9852fdaa50f805"
+              },
+              "status": "SHARED",
+              "data": {
+                "predicate": "ad4m://has",
+                "source": "s0a://native-live",
+                "target": "s0a://native-live-1795068395077"
+              }
+            }
+          ],
+          "removals": []
+        }
+      }
+    },
+    {
+      "t": "2026-11-19T06:06:47.174Z",
+      "name": "native add-link",
+      "data": {
+        "target": "s0a://native-live-1795068407152"
+      }
+    },
+    {
+      "t": "2026-11-19T06:06:47.683Z",
+      "name": "ACCEPT-A native link arrived as emitPerspectiveDiff",
+      "data": {
+        "latencyMs": 27,
+        "payload": {
+          "additions": [
+            {
+              "author": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+              "timestamp": "2026-11-19T06:06:47.170Z",
+              "proof": {
+                "key": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP#z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+                "signature": "279bd67dc60fe6485e147c8a15ceae0d52440c75f875a5ad9c4d082328a46cdb3d9b8912a0b352f8774018fde78a423d4ef05b1435753f6408fc2b12a1de8509"
+              },
+              "status": "SHARED",
+              "data": {
+                "predicate": "ad4m://has",
+                "source": "s0a://native-live",
+                "target": "s0a://native-live-1795068407152"
+              }
+            }
+          ],
+          "removals": []
+        }
+      }
+    },
+    {
+      "t": "2026-11-19T06:06:47.694Z",
+      "name": "call perspectiveSyncSync",
+      "data": {
+        "ok": true,
+        "result": {
+          "additions": [],
+          "removals": []
+        }
+      }
+    },
+    {
+      "t": "2026-11-19T06:06:47.697Z",
+      "name": "call perspectiveSyncCurrentRevision",
+      "data": {
+        "ok": true,
+        "result": "e4aec8311921d0555c48d4e201a1070cb0e76005bfeb497bc669de2ecd636fed"
+      }
+    },
+    {
+      "t": "2026-11-19T06:06:47.705Z",
+      "name": "call perspectiveSyncRender",
+      "data": {
+        "ok": true,
+        "result": {
+          "links": [
+            {
+              "author": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+              "timestamp": "2026-11-19T06:04:40.856Z",
+              "proof": {
+                "key": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP#z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+                "signature": "88ef5337d029e6d51d35d5c25cec50d03cfb8734931fa163320d6693e5948349cc29df4e446ae4f8f993714b42655cc19efcc53a6d3d60a3f3fe9fce4db92f0f"
+              },
+              "status": "SHARED",
+              "data": {
+                "predicate": "s0a://x1",
+                "source": "s0a://native-before",
+                "target": "ad4m://has"
+              }
+            },
+            {
+              "author": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+              "timestamp": "2026-11-19T06:05:38.202Z",
+              "proof": {
+                "key": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP#z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+                "signature": "b5d2eb140faebd50648a34a131ed97245b1b1a389b0b7135328e58bcb6cde319167f6cf77e5610193b2d35efc928ed84ab9e711e5297f78207431bffa996e00a"
+              },
+              "status": "SHARED",
+              "data": {
+                "predicate": "s0a://native-live-1795068338185",
+                "source": "s0a://native-live",
+                "target": "ad4m://has"
+              }
+            },
+            {
+              "author": "did:key:z6MkghMCM29a5WMWNu9ZUz11AUWuHok9Zip6aiVP75DQaPhL",
+              "timestamp": "2026-11-19T06:05:38.737Z",
+              "proof": {
+                "key": "did:key:z6MkghMCM29a5WMWNu9ZUz11AUWuHok9Zip6aiVP75DQaPhL#z6MkghMCM29a5WMWNu9ZUz11AUWuHok9Zip6aiVP75DQaPhL",
+                "signature": "6f165cb7fa77ecb7f7e0323abda60e79493b005d9c79c93e43815f5c743251855ade11773d1cbc1a81534acb51c55a4a5a4a29cd151d96144adaa7a7fb491908"
+              },
+              "data": {
+                "predicate": "ad4m://has",
+                "source": "s0a://tab",
+                "target": "s0a://from-tab-1795068338736"
+              }
+            },
+            {
+              "author": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+              "timestamp": "2026-11-19T06:06:35.095Z",
+              "proof": {
+                "key": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP#z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+                "signature": "4d22800e112856d0935047f32e0eb2d80698c7d96f7de76ae1f02e6312aa94bb60bc1b34cef62b74f22a59b3cd6ebfb960651725f577f06a7c9852fdaa50f805"
+              },
+              "status": "SHARED",
+              "data": {
+                "predicate": "ad4m://has",
+                "source": "s0a://native-live",
+                "target": "s0a://native-live-1795068395077"
+              }
+            },
+            {
+              "author": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+              "timestamp": "2026-11-19T06:06:47.170Z",
+              "proof": {
+                "key": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP#z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+                "signature": "279bd67dc60fe6485e147c8a15ceae0d52440c75f875a5ad9c4d082328a46cdb3d9b8912a0b352f8774018fde78a423d4ef05b1435753f6408fc2b12a1de8509"
+              },
+              "status": "SHARED",
+              "data": {
+                "predicate": "ad4m://has",
+                "source": "s0a://native-live",
+                "target": "s0a://native-live-1795068407152"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "t": "2026-11-19T06:06:47.707Z",
+      "name": "call perspectiveQuerySupportedKinds",
+      "data": {
+        "ok": true,
+        "result": [
+          "link-pattern"
+        ]
+      }
+    },
+    {
+      "t": "2026-11-19T06:06:47.712Z",
+      "name": "call perspectiveQueryRun",
+      "data": {
+        "id": 7,
+        "ok": true,
+        "result": {
+          "kind": "links",
+          "payload": [
+            {
+              "author": "did:key:z6MkghMCM29a5WMWNu9ZUz11AUWuHok9Zip6aiVP75DQaPhL",
+              "timestamp": "2026-11-19T06:05:38.737Z",
+              "proof": {
+                "key": "did:key:z6MkghMCM29a5WMWNu9ZUz11AUWuHok9Zip6aiVP75DQaPhL#z6MkghMCM29a5WMWNu9ZUz11AUWuHok9Zip6aiVP75DQaPhL",
+                "signature": "6f165cb7fa77ecb7f7e0323abda60e79493b005d9c79c93e43815f5c743251855ade11773d1cbc1a81534acb51c55a4a5a4a29cd151d96144adaa7a7fb491908"
+              },
+              "data": {
+                "predicate": "ad4m://has",
+                "source": "s0a://tab",
+                "target": "s0a://from-tab-1795068338736"
+              }
+            },
+            {
+              "author": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+              "timestamp": "2026-11-19T06:06:35.095Z",
+              "proof": {
+                "key": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP#z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+                "signature": "4d22800e112856d0935047f32e0eb2d80698c7d96f7de76ae1f02e6312aa94bb60bc1b34cef62b74f22a59b3cd6ebfb960651725f577f06a7c9852fdaa50f805"
+              },
+              "status": "SHARED",
+              "data": {
+                "predicate": "ad4m://has",
+                "source": "s0a://native-live",
+                "target": "s0a://native-live-1795068395077"
+              }
+            },
+            {
+              "author": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+              "timestamp": "2026-11-19T06:06:47.170Z",
+              "proof": {
+                "key": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP#z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+                "signature": "279bd67dc60fe6485e147c8a15ceae0d52440c75f875a5ad9c4d082328a46cdb3d9b8912a0b352f8774018fde78a423d4ef05b1435753f6408fc2b12a1de8509"
+              },
+              "status": "SHARED",
+              "data": {
+                "predicate": "ad4m://has",
+                "source": "s0a://native-live",
+                "target": "s0a://native-live-1795068407152"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "t": "2026-11-19T06:06:47.727Z",
+      "name": "tab perspectiveCommit",
+      "data": {
+        "id": 8,
+        "ok": true,
+        "result": {
+          "author": "did:key:z6MktNixUuUtTAmXCJmZ1akc5voSWMNZcByhme1Extdwwuqz",
+          "timestamp": "2026-11-19T06:06:47.714Z",
+          "data": {
+            "predicate": "ad4m://has",
+            "source": "s0a://tab",
+            "target": "s0a://from-tab-1795068407712"
+          },
+          "proof": {
+            "key": "did:key:z6MktNixUuUtTAmXCJmZ1akc5voSWMNZcByhme1Extdwwuqz#z6MktNixUuUtTAmXCJmZ1akc5voSWMNZcByhme1Extdwwuqz",
+            "signature": "9c711be9ad018a1f0549bd37802f97f23a1d37fda4265034e76794108eb0f34162ac12bf54b9cd6753c91ebf255ff6014c220618023a9c48e0a41525b24dcd0e"
+          }
+        }
+      }
+    },
+    {
+      "t": "2026-11-19T06:06:47.749Z",
+      "name": "ACCEPT-B tab link found in native query-links",
+      "data": {
+        "latencyMs": 37,
+        "lines": [
+          "\u001b[90m[2026-11-19T06:05:38.737Z] \u001b[35ms0a://tab \u001b[97m--\u001b[95mad4m://has\u001b[97m--> \u001b[32ms0a://from-tab-1795068338736 \u001b[34m(did:key:z6MkghMCM29a5WMWNu9ZUz11AUWuHok9Zip6aiVP75DQaPhL)",
+          "\u001b[90m[2026-11-19T06:06:47.714Z] \u001b[35ms0a://tab \u001b[97m--\u001b[95mad4m://has\u001b[97m--> \u001b[32ms0a://from-tab-1795068407712 \u001b[34m(did:key:z6MktNixUuUtTAmXCJmZ1akc5voSWMNZcByhme1Extdwwuqz)"
+        ]
+      }
+    },
+    {
+      "t": "2026-11-19T06:06:47.760Z",
+      "name": "tab removal commit",
+      "data": {
+        "ok": true
+      }
+    },
+    {
+      "t": "2026-11-19T06:06:47.782Z",
+      "name": "REMOVAL tab removal reached native",
+      "data": {
+        "latencyMs": 33
+      }
+    }
+  ],
+  "nativeLinks": "\u001b[90m[2026-11-19T06:04:40.856Z] \u001b[35ms0a://native-before \u001b[97m--\u001b[95ms0a://x1\u001b[97m--> \u001b[32mad4m://has \u001b[34m(did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP)\n\u001b[90m[2026-11-19T06:05:38.202Z] \u001b[35ms0a://native-live \u001b[97m--\u001b[95ms0a://native-live-1795068338185\u001b[97m--> \u001b[32mad4m://has \u001b[34m(did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP)\n\u001b[90m[2026-11-19T06:05:38.737Z] \u001b[35ms0a://tab \u001b[97m--\u001b[95mad4m://has\u001b[97m--> \u001b[32ms0a://from-tab-1795068338736 \u001b[34m(did:key:z6MkghMCM29a5WMWNu9ZUz11AUWuHok9Zip6aiVP75DQaPhL)\n\u001b[90m[2026-11-19T06:06:35.095Z] \u001b[35ms0a://native-live \u001b[97m--\u001b[95mad4m://has\u001b[97m--> \u001b[32ms0a://native-live-1795068395077 \u001b[34m(did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP)\n\u001b[90m[2026-11-19T06:06:47.170Z] \u001b[35ms0a://native-live \u001b[97m--\u001b[95mad4m://has\u001b[97m--> \u001b[32ms0a://native-live-1795068407152 \u001b[34m(did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP)\n",
+  "stats": {
+    "total": 182,
+    "byName": {
+      "agentDid": {
+        "count": 2,
+        "mode": "sync",
+        "errors": 0
+      },
+      "storageGet": {
+        "count": 68,
+        "mode": "sync",
+        "errors": 0
+      },
+      "storageListKeys": {
+        "count": 14,
+        "mode": "sync",
+        "errors": 0
+      },
+      "storagePut": {
+        "count": 45,
+        "mode": "sync",
+        "errors": 0
+      },
+      "httpFetch": {
+        "count": 15,
+        "mode": "async",
+        "errors": 0
+      },
+      "agentSignStringHex": {
+        "count": 1,
+        "mode": "sync",
+        "errors": 0
+      },
+      "storageDelete": {
+        "count": 10,
+        "mode": "sync",
+        "errors": 0
+      },
+      "emitSyncStateChange": {
+        "count": 7,
+        "mode": "sync",
+        "errors": 0
+      },
+      "agentOpenSealed": {
+        "count": 1,
+        "mode": "sync",
+        "errors": 0
+      },
+      "hash": {
+        "count": 17,
+        "mode": "sync",
+        "errors": 0
+      },
+      "emitPerspectiveDiff": {
+        "count": 2,
+        "mode": "sync",
+        "errors": 0
+      }
+    },
+    "globalUse": {
+      "crypto.getRandomValues": {
+        "shim": 1,
+        "bundle": 2
+      },
+      "fetch": {
+        "other": 1,
+        "shim": 15
+      },
+      "new TextEncoder": {
+        "bundle": 12,
+        "shim": 20
+      },
+      "AbortSignal.timeout": {
+        "shim": 15
+      },
+      "atob": {
+        "bundle": 11
+      },
+      "new TextDecoder": {
+        "bundle": 6
+      },
+      "new WebSocket": {
+        "bundle": 1
+      },
+      "btoa": {
+        "bundle": 4
+      }
+    }
+  },
+  "events": [
+    {
+      "kind": "syncState",
+      "payload": "Synced",
+      "t": 1795068406641
+    },
+    {
+      "kind": "syncState",
+      "payload": "Synced",
+      "t": 1795068406647
+    },
+    {
+      "kind": "syncState",
+      "payload": "Synced",
+      "t": 1795068406657
+    },
+    {
+      "kind": "perspectiveDiff",
+      "payload": {
+        "additions": [
+          {
+            "author": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+            "timestamp": "2026-11-19T06:04:40.856Z",
+            "proof": {
+              "key": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP#z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+              "signature": "88ef5337d029e6d51d35d5c25cec50d03cfb8734931fa163320d6693e5948349cc29df4e446ae4f8f993714b42655cc19efcc53a6d3d60a3f3fe9fce4db92f0f"
+            },
+            "status": "SHARED",
+            "data": {
+              "predicate": "s0a://x1",
+              "source": "s0a://native-before",
+              "target": "ad4m://has"
+            }
+          },
+          {
+            "author": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+            "timestamp": "2026-11-19T06:05:38.202Z",
+            "proof": {
+              "key": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP#z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+              "signature": "b5d2eb140faebd50648a34a131ed97245b1b1a389b0b7135328e58bcb6cde319167f6cf77e5610193b2d35efc928ed84ab9e711e5297f78207431bffa996e00a"
+            },
+            "status": "SHARED",
+            "data": {
+              "predicate": "s0a://native-live-1795068338185",
+              "source": "s0a://native-live",
+              "target": "ad4m://has"
+            }
+          },
+          {
+            "author": "did:key:z6MkghMCM29a5WMWNu9ZUz11AUWuHok9Zip6aiVP75DQaPhL",
+            "timestamp": "2026-11-19T06:05:38.737Z",
+            "proof": {
+              "key": "did:key:z6MkghMCM29a5WMWNu9ZUz11AUWuHok9Zip6aiVP75DQaPhL#z6MkghMCM29a5WMWNu9ZUz11AUWuHok9Zip6aiVP75DQaPhL",
+              "signature": "6f165cb7fa77ecb7f7e0323abda60e79493b005d9c79c93e43815f5c743251855ade11773d1cbc1a81534acb51c55a4a5a4a29cd151d96144adaa7a7fb491908"
+            },
+            "data": {
+              "predicate": "ad4m://has",
+              "source": "s0a://tab",
+              "target": "s0a://from-tab-1795068338736"
+            }
+          },
+          {
+            "author": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+            "timestamp": "2026-11-19T06:06:35.095Z",
+            "proof": {
+              "key": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP#z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+              "signature": "4d22800e112856d0935047f32e0eb2d80698c7d96f7de76ae1f02e6312aa94bb60bc1b34cef62b74f22a59b3cd6ebfb960651725f577f06a7c9852fdaa50f805"
+            },
+            "status": "SHARED",
+            "data": {
+              "predicate": "ad4m://has",
+              "source": "s0a://native-live",
+              "target": "s0a://native-live-1795068395077"
+            }
+          }
+        ],
+        "removals": []
+      },
+      "t": 1795068406691
+    },
+    {
+      "kind": "syncState",
+      "payload": "Synced",
+      "t": 1795068406696
+    },
+    {
+      "kind": "perspectiveDiff",
+      "payload": {
+        "additions": [
+          {
+            "author": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+            "timestamp": "2026-11-19T06:06:47.170Z",
+            "proof": {
+              "key": "did:key:z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP#z6MkoaiGUikQBmk84KKCNiwNoSM67iRPycp5rkPn6n2ZwmSP",
+              "signature": "279bd67dc60fe6485e147c8a15ceae0d52440c75f875a5ad9c4d082328a46cdb3d9b8912a0b352f8774018fde78a423d4ef05b1435753f6408fc2b12a1de8509"
+            },
+            "status": "SHARED",
+            "data": {
+              "predicate": "ad4m://has",
+              "source": "s0a://native-live",
+              "target": "s0a://native-live-1795068407152"
+            }
+          }
+        ],
+        "removals": []
+      },
+      "t": 1795068407179
+    },
+    {
+      "kind": "syncState",
+      "payload": "Synced",
+      "t": 1795068407692
+    },
+    {
+      "kind": "syncState",
+      "payload": "Synced",
+      "t": 1795068407726
+    },
+    {
+      "kind": "syncState",
+      "payload": "Synced",
+      "t": 1795068407759
+    }
+  ],
+  "workerLogs": [
+    "[shim #1] agentDid (sync) []",
+    "[shim #2] storageGet (sync) [\"render/progress\"]",
+    "[shim #3] storageGet (sync) [\"sequence\"]",
+    "[shim #4] storageListKeys (sync) [\"held/\"]",
+    "[shim #5] storagePut (sync) [\"render/progress\",\"<34 chars>\"]",
+    "[shim #6] agentDid (sync) []",
+    "[shim #7] httpFetch (async) [\"POST\",\"http://127.0.0.1:47457/rooms/s0a-room-1/auth\"] -> ok",
+    "[shim #8] agentSignStringHex (sync) [\"c51fe936d27bd8f19eb1fe6fa31b4e7682e641924ffc782f4228195902d48fce\"]",
+    "[shim #9] httpFetch (async) [\"POST\",\"http://127.0.0.1:47457/rooms/s0a-room-1/auth\"] -> ok",
+    "[shim #10] httpFetch (async) [\"GET\",\"http://127.0.0.1:47457/rooms/s0a-room-1/acl\"] -> ok",
+    "[shim #11] httpFetch (async) [\"GET\",\"http://127.0.0.1:47457/rooms/s0a-room-1/keys\"] -> ok",
+    "[shim #12] storageGet (sync) [\"render/progress\"]",
+    "[shim #13] storageGet (sync) [\"render/progress\"]",
+    "[shim #14] storageGet (sync) [\"render/progress\"]",
+    "[shim #15] httpFetch (async) [\"GET\",\"http://127.0.0.1:47457/rooms/s0a-room-1/render?limit=500\"] -> ok",
+    "[shim #16] storagePut (sync) [\"held/af3d90becc9a56209ed7eb07bbcd90ec244017a5cb1bc86785b6f16c3bdb06d0\",\"<828 chars>\"]",
+    "[shim #17] storagePut (sync) [\"held/9f47cd6a34fb8253a745c18f1272cba4aefc8ac5febf70c3dac99e7edf747b18\",\"<856 chars>\"]",
+    "[shim #18] storagePut (sync) [\"held/b85b4953f9abf4383dfa1b17830f4b2a78d39f512bbf4459b9d3fdd0ae4957b0\",\"<816 chars>\"]",
+    "[shim #19] storagePut (sync) [\"held/db0b5c7a7f300272f3e1d29ac7567b17268a7ce3bb1e9c501a576958eaa7b150\",\"<856 chars>\"]",
+    "[shim #20] storagePut (sync) [\"render/progress\",\"<31 chars>\"]",
+    "[shim #21] storageListKeys (sync) [\"held/\"]",
+    "[shim #22] storageGet (sync) [\"held/af3d90becc9a56209ed7eb07bbcd90ec244017a5cb1bc86785b6f16c3bdb06d0\"]",
+    "[shim #23] storageGet (sync) [\"held/9f47cd6a34fb8253a745c18f1272cba4aefc8ac5febf70c3dac99e7edf747b18\"]",
+    "[shim #24] storageGet (sync) [\"held/b85b4953f9abf4383dfa1b17830f4b2a78d39f512bbf4459b9d3fdd0ae4957b0\"]",
+    "[shim #25] storageGet (sync) [\"held/db0b5c7a7f300272f3e1d29ac7567b17268a7ce3bb1e9c501a576958eaa7b150\"]",
+    "[shim #26] storagePut (sync) [\"sequence\",\"<1 chars>\"]",
+    "[shim #27] storageDelete (sync) [\"render/progress\"]",
+    "[shim #28] storageGet (sync) [\"sequence\"]",
+    "[shim #29] storageGet (sync) [\"render/progress\"]",
+    "[shim #30] httpFetch (async) [\"GET\",\"http://127.0.0.1:47457/rooms/s0a-room-1/sync?since=6&limit=100\"] -> ok",
+    "[shim #31] storagePut (sync) [\"revision\",\"<64 chars>\"]",
+    "[shim #32] storagePut (sync) [\"sequence\",\"<1 chars>\"]",
+    "[shim #33] storageListKeys (sync) [\"held/\"]",
+    "[shim #34] storageGet (sync) [\"held/af3d90becc9a56209ed7eb07bbcd90ec244017a5cb1bc86785b6f16c3bdb06d0\"]",
+    "[shim #35] storageGet (sync) [\"held/9f47cd6a34fb8253a745c18f1272cba4aefc8ac5febf70c3dac99e7edf747b18\"]",
+    "[shim #36] storageGet (sync) [\"held/b85b4953f9abf4383dfa1b17830f4b2a78d39f512bbf4459b9d3fdd0ae4957b0\"]",
+    "[shim #37] storageGet (sync) [\"held/db0b5c7a7f300272f3e1d29ac7567b17268a7ce3bb1e9c501a576958eaa7b150\"]",
+    "[shim #38] httpFetch (async) [\"GET\",\"http://127.0.0.1:47457/rooms/s0a-room-1/keys\"] -> ok",
+    "[shim #39] storageGet (sync) [\"sequence\"]",
+    "[shim #40] storageGet (sync) [\"render/progress\"]",
+    "[shim #41] emitSyncStateChange (sync) [\"Synced\"]",
+    "[shim #42] emitSyncStateChange (sync) [\"Synced\"]",
+    "[shim #43] storageGet (sync) [\"sequence\"]",
+    "[shim #44] storageGet (sync) [\"render/progress\"]",
+    "[shim #45] httpFetch (async) [\"GET\",\"http://127.0.0.1:47457/rooms/s0a-room-1/sync?since=6&limit=100\"] -> ok",
+    "[shim #46] storagePut (sync) [\"revision\",\"<64 chars>\"]",
+    "[shim #47] storagePut (sync) [\"sequence\",\"<1 chars>\"]",
+    "[shim #48] storageListKeys (sync) [\"held/\"]",
+    "[shim #49] storageGet (sync) [\"held/af3d90becc9a56209ed7eb07bbcd90ec244017a5cb1bc86785b6f16c3bdb06d0\"]",
+    "[shim #50] storageGet (sync) [\"held/9f47cd6a34fb8253a745c18f1272cba4aefc8ac5febf70c3dac99e7edf747b18\"]",
+    "[shim #51] storageGet (sync) [\"held/b85b4953f9abf4383dfa1b17830f4b2a78d39f512bbf4459b9d3fdd0ae4957b0\"]",
+    "[shim #52] storageGet (sync) [\"held/db0b5c7a7f300272f3e1d29ac7567b17268a7ce3bb1e9c501a576958eaa7b150\"]",
+    "[shim #53] httpFetch (async) [\"GET\",\"http://127.0.0.1:47457/rooms/s0a-room-1/keys\"] -> ok",
+    "[shim #54] storageGet (sync) [\"sequence\"]",
+    "[shim #55] storageGet (sync) [\"render/progress\"]",
+    "[shim #56] storageGet (sync) [\"revision\"]",
+    "[shim #57] storageListKeys (sync) [\"links/\"]",
+    "[shim #58] storageListKeys (sync) [\"held/\"]",
+    "[shim #59] storageGet (sync) [\"held/af3d90becc9a56209ed7eb07bbcd90ec244017a5cb1bc86785b6f16c3bdb06d0\"]",
+    "[shim #60] storageGet (sync) [\"held/9f47cd6a34fb8253a745c18f1272cba4aefc8ac5febf70c3dac99e7edf747b18\"]",
+    "[shim #61] storageGet (sync) [\"held/b85b4953f9abf4383dfa1b17830f4b2a78d39f512bbf4459b9d3fdd0ae4957b0\"]",
+    "[shim #62] storageGet (sync) [\"held/db0b5c7a7f300272f3e1d29ac7567b17268a7ce3bb1e9c501a576958eaa7b150\"]",
+    "[shim #63] storageGet (sync) [\"render/progress\"]",
+    "[shim #64] emitSyncStateChange (sync) [\"Synced\"]",
+    "[shim #65] httpFetch (async) [\"GET\",\"http://127.0.0.1:47457/rooms/s0a-room-1/keys\"] -> ok",
+    "[shim #66] agentOpenSealed (sync) [\"<box>\"]",
+    "[shim #67] storageListKeys (sync) [\"held/\"]",
+    "[shim #68] storageGet (sync) [\"held/af3d90becc9a56209ed7eb07bbcd90ec244017a5cb1bc86785b6f16c3bdb06d0\"]",
+    "[shim #69] storageGet (sync) [\"held/9f47cd6a34fb8253a745c18f1272cba4aefc8ac5febf70c3dac99e7edf747b18\"]",
+    "[shim #70] storageGet (sync) [\"held/b85b4953f9abf4383dfa1b17830f4b2a78d39f512bbf4459b9d3fdd0ae4957b0\"]",
+    "[shim #71] storageGet (sync) [\"held/db0b5c7a7f300272f3e1d29ac7567b17268a7ce3bb1e9c501a576958eaa7b150\"]",
+    "[shim #72] storageDelete (sync) [\"held/af3d90becc9a56209ed7eb07bbcd90ec244017a5cb1bc86785b6f16c3bdb06d0\"]",
+    "[shim #73] storageDelete (sync) [\"held/9f47cd6a34fb8253a745c18f1272cba4aefc8ac5febf70c3dac99e7edf747b18\"]",
+    "[shim #74] storageDelete (sync) [\"held/b85b4953f9abf4383dfa1b17830f4b2a78d39f512bbf4459b9d3fdd0ae4957b0\"]",
+    "[shim #75] storageDelete (sync) [\"held/db0b5c7a7f300272f3e1d29ac7567b17268a7ce3bb1e9c501a576958eaa7b150\"]",
+    "[shim #76] hash (sync) [\"{\\\"source\\\":\\\"s0a://native-before\\\",\\\"predicate\\\":\\\"s0a://x1\\\",\\\"target\\\":\\\"ad4m://has\\\",\\\"au…\"]",
+    "[shim #77] storageGet (sync) [\"links/QmzSYwdk7Kievhhudd7AjEiXDEJE96ZxCTxPyxQHMuvsRCV6bjV\"]",
+    "[shim #78] hash (sync) [\"{\\\"source\\\":\\\"s0a://native-before\\\",\\\"predicate\\\":\\\"s0a://x1\\\",\\\"target\\\":\\\"ad4m://has\\\",\\\"au…\"]",
+    "[shim #79] storagePut (sync) [\"links/QmzSYwdk7Kievhhudd7AjEiXDEJE96ZxCTxPyxQHMuvsRCV6bjV\",\"<478 chars>\"]",
+    "[shim #80] storagePut (sync) [\"links-by-source/s0a://native-before/QmzSYwdk7Kievhhudd7AjEiXDEJE96ZxCTxPyxQHMuvs…\",\"<51 chars>\"]",
+    "[shim #81] storagePut (sync) [\"links-by-target/ad4m://has/QmzSYwdk7Kievhhudd7AjEiXDEJE96ZxCTxPyxQHMuvsRCV6bjV\",\"<51 chars>\"]",
+    "[shim #82] storagePut (sync) [\"links-by-pred/s0a://x1/QmzSYwdk7Kievhhudd7AjEiXDEJE96ZxCTxPyxQHMuvsRCV6bjV\",\"<51 chars>\"]",
+    "[shim #83] hash (sync) [\"{\\\"source\\\":\\\"s0a://native-before\\\",\\\"predicate\\\":\\\"s0a://x1\\\",\\\"target\\\":\\\"ad4m://has\\\",\\\"au…\"]",
+    "[shim #84] hash (sync) [\"{\\\"source\\\":\\\"s0a://native-live\\\",\\\"predicate\\\":\\\"s0a://native-live-1795068338185\\\",\\\"tar…\"]",
+    "[shim #85] storageGet (sync) [\"links/QmzSYwdj32FRU8AWwV7yUYFEHQ9YufQZoPYfCXYbhhmjZQaAuXd\"]",
+    "[shim #86] hash (sync) [\"{\\\"source\\\":\\\"s0a://native-live\\\",\\\"predicate\\\":\\\"s0a://native-live-1795068338185\\\",\\\"tar…\"]",
+    "[shim #87] storagePut (sync) [\"links/QmzSYwdj32FRU8AWwV7yUYFEHQ9YufQZoPYfCXYbhhmjZQaAuXd\",\"<499 chars>\"]",
+    "[shim #88] storagePut (sync) [\"links-by-source/s0a://native-live/QmzSYwdj32FRU8AWwV7yUYFEHQ9YufQZoPYfCXYbhhmjZQ…\",\"<51 chars>\"]",
+    "[shim #89] storagePut (sync) [\"links-by-target/ad4m://has/QmzSYwdj32FRU8AWwV7yUYFEHQ9YufQZoPYfCXYbhhmjZQaAuXd\",\"<51 chars>\"]",
+    "[shim #90] storagePut (sync) [\"links-by-pred/s0a://native-live-1795068338185/QmzSYwdj32FRU8AWwV7yUYFEHQ9YufQZoP…\",\"<51 chars>\"]",
+    "[shim #91] hash (sync) [\"{\\\"source\\\":\\\"s0a://native-live\\\",\\\"predicate\\\":\\\"s0a://native-live-1795068338185\\\",\\\"tar…\"]",
+    "[shim #92] hash (sync) [\"{\\\"source\\\":\\\"s0a://tab\\\",\\\"predicate\\\":\\\"ad4m://has\\\",\\\"target\\\":\\\"s0a://from-tab-17950683…\"]",
+    "[shim #93] storageGet (sync) [\"links/QmzSYwdkiug2ZKoxWwnj4vC3C1kyGKvuo4MeCAwKNj4pad8xu5q\"]",
+    "[shim #94] hash (sync) [\"{\\\"source\\\":\\\"s0a://tab\\\",\\\"predicate\\\":\\\"ad4m://has\\\",\\\"target\\\":\\\"s0a://from-tab-17950683…\"]",
+    "[shim #95] storagePut (sync) [\"links/QmzSYwdkiug2ZKoxWwnj4vC3C1kyGKvuo4MeCAwKNj4pad8xu5q\",\"<470 chars>\"]",
+    "[shim #96] storagePut (sync) [\"links-by-source/s0a://tab/QmzSYwdkiug2ZKoxWwnj4vC3C1kyGKvuo4MeCAwKNj4pad8xu5q\",\"<51 chars>\"]",
+    "[shim #97] storagePut (sync) [\"links-by-target/s0a://from-tab-1795068338736/QmzSYwdkiug2ZKoxWwnj4vC3C1kyGKvuo4M…\",\"<51 chars>\"]",
+    "[shim #98] storagePut (sync) [\"links-by-pred/ad4m://has/QmzSYwdkiug2ZKoxWwnj4vC3C1kyGKvuo4MeCAwKNj4pad8xu5q\",\"<51 chars>\"]",
+    "[shim #99] hash (sync) [\"{\\\"source\\\":\\\"s0a://tab\\\",\\\"predicate\\\":\\\"ad4m://has\\\",\\\"target\\\":\\\"s0a://from-tab-17950683…\"]",
+    "[shim #100] hash (sync) [\"{\\\"source\\\":\\\"s0a://native-live\\\",\\\"predicate\\\":\\\"ad4m://has\\\",\\\"target\\\":\\\"s0a://native-li…\"]",
+    "[shim #101] storageGet (sync) [\"links/QmzSYwdo4KFrMqeVx8AhDfLU8MWY5MSZKkWwJc1f4qiJhuutdPD\"]",
+    "[shim #102] hash (sync) [\"{\\\"source\\\":\\\"s0a://native-live\\\",\\\"predicate\\\":\\\"ad4m://has\\\",\\\"target\\\":\\\"s0a://native-li…\"]",
+    "[shim #103] storagePut (sync) [\"links/QmzSYwdo4KFrMqeVx8AhDfLU8MWY5MSZKkWwJc1f4qiJhuutdPD\",\"<499 chars>\"]",
+    "[shim #104] storagePut (sync) [\"links-by-source/s0a://native-live/QmzSYwdo4KFrMqeVx8AhDfLU8MWY5MSZKkWwJc1f4qiJhu…\",\"<51 chars>\"]",
+    "[shim #105] storagePut (sync) [\"links-by-target/s0a://native-live-1795068395077/QmzSYwdo4KFrMqeVx8AhDfLU8MWY5MSZ…\",\"<51 chars>\"]",
+    "[shim #106] storagePut (sync) [\"links-by-pred/ad4m://has/QmzSYwdo4KFrMqeVx8AhDfLU8MWY5MSZKkWwJc1f4qiJhuutdPD\",\"<51 chars>\"]",
+    "[shim #107] hash (sync) [\"{\\\"source\\\":\\\"s0a://native-live\\\",\\\"predicate\\\":\\\"ad4m://has\\\",\\\"target\\\":\\\"s0a://native-li…\"]",
+    "[shim #108] emitPerspectiveDiff (sync) [\"<diff>\"]",
+    "[shim #109] storageGet (sync) [\"sequence\"]",
+    "[shim #110] storageGet (sync) [\"render/progress\"]",
+    "[shim #111] httpFetch (async) [\"GET\",\"http://127.0.0.1:47457/rooms/s0a-room-1/sync?since=6&limit=100\"] -> ok",
+    "[shim #112] storagePut (sync) [\"revision\",\"<64 chars>\"]",
+    "[shim #113] storagePut (sync) [\"sequence\",\"<1 chars>\"]",
+    "[shim #114] storageListKeys (sync) [\"held/\"]",
+    "[shim #115] storageListKeys (sync) [\"held/\"]",
+    "[shim #116] storageGet (sync) [\"sequence\"]",
+    "[shim #117] storageGet (sync) [\"render/progress\"]",
+    "[shim #118] emitSyncStateChange (sync) [\"Synced\"]",
+    "[shim #119] storageGet (sync) [\"render/progress\"]",
+    "[shim #120] storageGet (sync) [\"sequence\"]",
+    "[shim #121] storageDelete (sync) [\"held/b78480cc67dbf26cabc137e7ec476c7964021ed71aee29d63a9225b46d22f4c5\"]",
+    "[shim #122] hash (sync) [\"{\\\"source\\\":\\\"s0a://native-live\\\",\\\"predicate\\\":\\\"ad4m://has\\\",\\\"target\\\":\\\"s0a://native-li…\"]",
+    "[shim #123] storageGet (sync) [\"links/QmzSYwdkfdicQRvtpWciNg4pq5QCizw2H7JN5xgEwBdtxwZorMi\"]",
+    "[shim #124] hash (sync) [\"{\\\"source\\\":\\\"s0a://native-live\\\",\\\"predicate\\\":\\\"ad4m://has\\\",\\\"target\\\":\\\"s0a://native-li…\"]",
+    "[shim #125] storagePut (sync) [\"links/QmzSYwdkfdicQRvtpWciNg4pq5QCizw2H7JN5xgEwBdtxwZorMi\",\"<499 chars>\"]",
+    "[shim #126] storagePut (sync) [\"links-by-source/s0a://native-live/QmzSYwdkfdicQRvtpWciNg4pq5QCizw2H7JN5xgEwBdtxw…\",\"<51 chars>\"]",
+    "[shim #127] storagePut (sync) [\"links-by-target/s0a://native-live-1795068407152/QmzSYwdkfdicQRvtpWciNg4pq5QCizw2…\",\"<51 chars>\"]",
+    "[shim #128] storagePut (sync) [\"links-by-pred/ad4m://has/QmzSYwdkfdicQRvtpWciNg4pq5QCizw2H7JN5xgEwBdtxwZorMi\",\"<51 chars>\"]",
+    "[shim #129] hash (sync) [\"{\\\"source\\\":\\\"s0a://native-live\\\",\\\"predicate\\\":\\\"ad4m://has\\\",\\\"target\\\":\\\"s0a://native-li…\"]",
+    "[shim #130] emitPerspectiveDiff (sync) [\"<diff>\"]",
+    "[shim #131] storageGet (sync) [\"sequence\"]",
+    "[shim #132] storagePut (sync) [\"revision\",\"<64 chars>\"]",
+    "[shim #133] storagePut (sync) [\"sequence\",\"<1 chars>\"]",
+    "[shim #134] storageGet (sync) [\"sequence\"]",
+    "[shim #135] storageGet (sync) [\"render/progress\"]",
+    "[shim #136] httpFetch (async) [\"GET\",\"http://127.0.0.1:47457/rooms/s0a-room-1/sync?since=7&limit=100\"] -> ok",
+    "[shim #137] storagePut (sync) [\"revision\",\"<64 chars>\"]",
+    "[shim #138] storagePut (sync) [\"sequence\",\"<1 chars>\"]",
+    "[shim #139] storageListKeys (sync) [\"held/\"]",
+    "[shim #140] storageListKeys (sync) [\"held/\"]",
+    "[shim #141] storageGet (sync) [\"sequence\"]",
+    "[shim #142] storageGet (sync) [\"render/progress\"]",
+    "[shim #143] emitSyncStateChange (sync) [\"Synced\"]",
+    "[shim #145] storageGet (sync) [\"revision\"]",
+    "[shim #144] httpFetch (async) [\"GET\",\"http://127.0.0.1:47457/rooms/s0a-room-1/keys/missing\"] -> ok",
+    "[shim #146] storageGet (sync) [\"render/progress\"]",
+    "[shim #147] storageListKeys (sync) [\"links/\"]",
+    "[shim #148] storageGet (sync) [\"links/QmzSYwdk7Kievhhudd7AjEiXDEJE96ZxCTxPyxQHMuvsRCV6bjV\"]",
+    "[shim #149] storageGet (sync) [\"links/QmzSYwdj32FRU8AWwV7yUYFEHQ9YufQZoPYfCXYbhhmjZQaAuXd\"]",
+    "[shim #150] storageGet (sync) [\"links/QmzSYwdkiug2ZKoxWwnj4vC3C1kyGKvuo4MeCAwKNj4pad8xu5q\"]",
+    "[shim #151] storageGet (sync) [\"links/QmzSYwdo4KFrMqeVx8AhDfLU8MWY5MSZKkWwJc1f4qiJhuutdPD\"]",
+    "[shim #152] storageGet (sync) [\"links/QmzSYwdkfdicQRvtpWciNg4pq5QCizw2H7JN5xgEwBdtxwZorMi\"]",
+    "[shim #153] storageGet (sync) [\"revision\"]",
+    "[shim #154] storageGet (sync) [\"render/progress\"]",
+    "[shim #155] storageListKeys (sync) [\"held/\"]",
+    "[shim #156] storageListKeys (sync) [\"links-by-pred/ad4m://has/\"]",
+    "[shim #157] storageGet (sync) [\"links-by-pred/ad4m://has/QmzSYwdkiug2ZKoxWwnj4vC3C1kyGKvuo4MeCAwKNj4pad8xu5q\"]",
+    "[shim #158] storageGet (sync) [\"links-by-pred/ad4m://has/QmzSYwdo4KFrMqeVx8AhDfLU8MWY5MSZKkWwJc1f4qiJhuutdPD\"]",
+    "[shim #159] storageGet (sync) [\"links-by-pred/ad4m://has/QmzSYwdkfdicQRvtpWciNg4pq5QCizw2H7JN5xgEwBdtxwZorMi\"]",
+    "[shim #160] storageGet (sync) [\"links/QmzSYwdkiug2ZKoxWwnj4vC3C1kyGKvuo4MeCAwKNj4pad8xu5q\"]",
+    "[shim #161] storageGet (sync) [\"links/QmzSYwdo4KFrMqeVx8AhDfLU8MWY5MSZKkWwJc1f4qiJhuutdPD\"]",
+    "[shim #162] storageGet (sync) [\"links/QmzSYwdkfdicQRvtpWciNg4pq5QCizw2H7JN5xgEwBdtxwZorMi\"]",
+    "[shim #163] httpFetch (async) [\"POST\",\"http://127.0.0.1:47457/rooms/s0a-room-1/commit\"] -> ok",
+    "[shim #164] hash (sync) [\"{\\\"source\\\":\\\"s0a://tab\\\",\\\"predicate\\\":\\\"ad4m://has\\\",\\\"target\\\":\\\"s0a://from-tab-17950684…\"]",
+    "[shim #165] storagePut (sync) [\"links/QmzSYwdi14ZxDbu2VcrDJGoUR3sBfKeqz9iR5o6uv8XoUfHiNq1\",\"<470 chars>\"]",
+    "[shim #166] storagePut (sync) [\"links-by-source/s0a://tab/QmzSYwdi14ZxDbu2VcrDJGoUR3sBfKeqz9iR5o6uv8XoUfHiNq1\",\"<51 chars>\"]",
+    "[shim #167] storagePut (sync) [\"links-by-target/s0a://from-tab-1795068407712/QmzSYwdi14ZxDbu2VcrDJGoUR3sBfKeqz9i…\",\"<51 chars>\"]",
+    "[shim #168] storagePut (sync) [\"links-by-pred/ad4m://has/QmzSYwdi14ZxDbu2VcrDJGoUR3sBfKeqz9iR5o6uv8XoUfHiNq1\",\"<51 chars>\"]",
+    "[shim #169] storageGet (sync) [\"sequence\"]",
+    "[shim #170] storagePut (sync) [\"sequence\",\"<1 chars>\"]",
+    "[shim #171] storagePut (sync) [\"revision\",\"<64 chars>\"]",
+    "[shim #172] emitSyncStateChange (sync) [\"Synced\"]",
+    "[shim #173] httpFetch (async) [\"POST\",\"http://127.0.0.1:47457/rooms/s0a-room-1/commit\"] -> ok",
+    "[shim #174] hash (sync) [\"{\\\"source\\\":\\\"s0a://tab\\\",\\\"predicate\\\":\\\"ad4m://has\\\",\\\"target\\\":\\\"s0a://from-tab-17950684…\"]",
+    "[shim #175] storageDelete (sync) [\"links/QmzSYwdi14ZxDbu2VcrDJGoUR3sBfKeqz9iR5o6uv8XoUfHiNq1\"]",
+    "[shim #176] storageDelete (sync) [\"links-by-source/s0a://tab/QmzSYwdi14ZxDbu2VcrDJGoUR3sBfKeqz9iR5o6uv8XoUfHiNq1\"]",
+    "[shim #177] storageDelete (sync) [\"links-by-target/s0a://from-tab-1795068407712/QmzSYwdi14ZxDbu2VcrDJGoUR3sBfKeqz9i…\"]",
+    "[shim #178] storageDelete (sync) [\"links-by-pred/ad4m://has/QmzSYwdi14ZxDbu2VcrDJGoUR3sBfKeqz9iR5o6uv8XoUfHiNq1\"]",
+    "[shim #179] storageGet (sync) [\"sequence\"]",
+    "[shim #180] storagePut (sync) [\"sequence\",\"<1 chars>\"]",
+    "[shim #181] storagePut (sync) [\"revision\",\"<64 chars>\"]",
+    "[shim #182] emitSyncStateChange (sync) [\"Synced\"]"
+  ],
+  "console": [
+    "[error] Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "[worker log] [server-link-language] this agent holds no room key yet — commits wait until the admin rotates one in or a member holding one grants it",
+    "[log] [server-link-language] this agent holds no room key yet — commits wait until the admin rotates one in or a member holding one grants it",
+    "[worker warning] [server-link-language] bootstrap: 4 link(s) wait for a room key this agent does not hold yet; they are applied once it does",
+    "[warning] [server-link-language] bootstrap: 4 link(s) wait for a room key this agent does not hold yet; they are applied once it does",
+    "[worker log] [server-link-language] bootstrap: snapshot at sequence 6 loaded in 1 page(s)",
+    "[log] [server-link-language] bootstrap: snapshot at sequence 6 loaded in 1 page(s)",
+    "[worker log] [server-link-language] catchUp: since=6, received 0 diff(s), revision=532a48fd7efa2239f789e305ede66b75d4e57ed2a50560adfcfbfb9aa0419b28, sequence=6",
+    "[log] [server-link-language] catchUp: since=6, received 0 diff(s), revision=532a48fd7efa2239f789e305ede66b75d4e57ed2a50560adfcfbfb9aa0419b28, sequence=6",
+    "[worker log] [server-link-language] this agent holds no room key yet — commits wait until the admin rotates one in or a member holding one grants it",
+    "[log] [server-link-language] this agent holds no room key yet — commits wait until the admin rotates one in or a member holding one grants it",
+    "[worker log] [server-link-language] init complete: did=did:key:z6MktNixUuUtTAmXCJmZ1akc5voSWMNZcByhme1Extdwwuqz, uid=s0a-room-1",
+    "[log] [server-link-language] init complete: did=did:key:z6MktNixUuUtTAmXCJmZ1akc5voSWMNZcByhme1Extdwwuqz, uid=s0a-room-1",
+    "[worker log] [server-link-language] catchUp: since=6, received 0 diff(s), revision=532a48fd7efa2239f789e305ede66b75d4e57ed2a50560adfcfbfb9aa0419b28, sequence=6",
+    "[log] [server-link-language] catchUp: since=6, received 0 diff(s), revision=532a48fd7efa2239f789e305ede66b75d4e57ed2a50560adfcfbfb9aa0419b28, sequence=6",
+    "[worker log] [server-link-language] this agent holds no room key yet — commits wait until the admin rotates one in or a member holding one grants it",
+    "[log] [server-link-language] this agent holds no room key yet — commits wait until the admin rotates one in or a member holding one grants it",
+    "[worker log] [server-link-language] E2E key ring acquired (1 version(s): 1)",
+    "[log] [server-link-language] E2E key ring acquired (1 version(s): 1)",
+    "[worker log] [server-link-language] opened 4 held link(s) with the key ring",
+    "[log] [server-link-language] opened 4 held link(s) with the key ring",
+    "[worker log] [server-link-language] catchUp: since=6, received 0 diff(s), revision=532a48fd7efa2239f789e305ede66b75d4e57ed2a50560adfcfbfb9aa0419b28, sequence=6",
+    "[log] [server-link-language] catchUp: since=6, received 0 diff(s), revision=532a48fd7efa2239f789e305ede66b75d4e57ed2a50560adfcfbfb9aa0419b28, sequence=6",
+    "[worker log] [server-link-language] catchUp: since=7, received 0 diff(s), revision=e4aec8311921d0555c48d4e201a1070cb0e76005bfeb497bc669de2ecd636fed, sequence=7",
+    "[log] [server-link-language] catchUp: since=7, received 0 diff(s), revision=e4aec8311921d0555c48d4e201a1070cb0e76005bfeb497bc669de2ecd636fed, sequence=7",
+    "[worker log] [server-link-language] commit: 1 adds, 0 removes (keyRingStatus=ready)",
+    "[log] [server-link-language] commit: 1 adds, 0 removes (keyRingStatus=ready)",
+    "[worker log] [server-link-language] POST /commit: 1 adds, 0 removes → room=s0a-room-1",
+    "[log] [server-link-language] POST /commit: 1 adds, 0 removes → room=s0a-room-1",
+    "[worker log] [server-link-language] commit: 0 adds, 1 removes (keyRingStatus=ready)",
+    "[log] [server-link-language] commit: 0 adds, 1 removes (keyRingStatus=ready)",
+    "[worker log] [server-link-language] POST /commit: 0 adds, 1 removes → room=s0a-room-1",
+    "[log] [server-link-language] POST /commit: 0 adds, 1 removes → room=s0a-room-1"
+  ]
+}
