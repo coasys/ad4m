@@ -50,7 +50,7 @@ REPO="$TMP/repo"
 G=(git -c user.name=t -c user.email=t@example.org -c commit.gpgsign=false -c init.defaultBranch=dev)
 mkdir -p "$REPO"
 cd "$REPO" || exit 1
-"${G[@]}" init -q .
+"${G[@]}" init -q --object-format=sha1 .
 commit() { echo "$1" >> f; "${G[@]}" add f; "${G[@]}" commit -qm "$1"; }
 commit "feat: base"
 GREEN="$(git rev-parse HEAD)"
@@ -277,6 +277,20 @@ not_logged "no POST" "^POST"
 check "green: no GITHUB_TOKEN does nothing" 0 'GITHUB_TOKEN is not set' green GITHUB_TOKEN=
 routes
 check "green: GitHub failure does not fail the job" 0 'could not list' green
+
+# A green comment that GitHub refused is retried by the next run on the same commit:
+# `moved` halts there, so it reconciles the issue before it halts.
+routes "GET /issues/41/comments comments-red-same.json" "GET issues?state=open issues-open.json"
+check "moved: green comment refused" 0 '^could not comment on #41' green
+routes "GET /tree/dev tree-same.json" "GET /issues/41/comments comments-red-same.json" "GET issues?state=open issues-open.json" "POST /repos/coasys/ad4m/issues/41/comments comment.json"
+check "moved: known-green commit notes green on the open red issue, then skips" 10 'already passed' moved
+logged "moved posts the green comment" "^POST $GH/repos/coasys/ad4m/issues/41/comments"
+logged "moved's green marker" "<!-- dev-tier: green $RED -->"
+routes "GET /tree/dev tree-same.json" "GET /issues/41/comments comments-green.json" "GET issues?state=open issues-open.json"
+check "moved: issue already green: skips, posts nothing" 10 'already passed' moved
+not_logged "no POST" "^POST"
+routes "GET /tree/dev tree-same.json"
+check "moved: GitHub unreadable still skips" 10 'already passed' moved
 
 if [ "$FAILED" != 0 ]; then
   echo "FAILED"

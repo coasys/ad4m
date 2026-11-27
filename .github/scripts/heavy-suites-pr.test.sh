@@ -128,6 +128,8 @@ GATE_STEP='{"name":"Stack gate (heavy suites only for non-draft PRs to dev)"}'
 step_ran() { printf '{"lifecycle":"%s","steps":[{"name":"Checkout code"},%s,{"name":"rust-executor tests"}]}' "${1:-running}" "$GATE_STEP"; }
 step_halted() { printf '{"lifecycle":"finished","steps":[{"name":"Checkout code"},%s]}' "$GATE_STEP"; }
 step_light() { printf '{"lifecycle":"%s","steps":[{"name":"Checkout code"},{"name":"cargo build"}]}' "${1:-finished}"; }
+# A job that passed Stack gate, then halted at the Path gate (every changed file on its skip list).
+step_pathskip() { printf '{"lifecycle":"finished","steps":[{"name":"Checkout code"},%s,{"name":"Path gate (on a PR, skip only when every changed file is on the skip list)"}]}' "$GATE_STEP"; }
 
 # A pipeline p1 for $SHA whose build finished; its rust-tests job (11) ran,
 # halted or is still in build.
@@ -554,6 +556,25 @@ not_logged circleci.com "an unlabel called CircleCI"
 event converted_to_draft true dev
 check "converted to draft: pending" 0 'pending: Not run: PR #30 is a draft' \
   FAKE_PULLS="[$(pr 30 true dev)]" "${CCI[@]}"
+
+# A docs-only PR: sfu-e2e passed Stack gate and halted at its Path gate. Without
+# the full-ci label that is a normal skip; with it, the job did not run the suite.
+path_skipped() {
+  fx pipelines "$(pipes p1:8:$SHA)"; fx wf_p1 "$(wf wf1 success)"
+  fx jobs_wf1 "$(jobs build:10:success sfu-e2e:11:success)"
+  fx job_10 "$(step_light)"; fx job_11 "$(step_pathskip)"
+}
+fx_reset
+event synchronize false dev
+path_skipped
+check "path-skipped sfu-e2e, no label: success, no pipeline" 0 'success: ' \
+  FAKE_PULLS="[$(pr 30 false dev)]" "${CCI[@]}"
+not_logged "$RUN_URL" "a path skip without the label started a pipeline"
+event labeled false dev '| .label = {name: "full-ci"}'
+path_skipped; new_pipeline "$(jobs build:20:success sfu-e2e:21:running)" running
+check "full-ci label added after a path skip: new pipeline" 0 'success: .*pipeline 4242' \
+  FAKE_PULLS="[$(pr 30 false dev full-ci)]" "${CCI[@]}"
+logged "$RUN_URL" "the label after a path skip started no pipeline"
 
 # Without the CircleCI secret: no trigger, a log line, never green without a run.
 fx_reset

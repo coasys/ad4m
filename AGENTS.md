@@ -359,7 +359,7 @@ executor's `/metrics`.
 
 | Suite | Languages | CI |
 |---|---|---|
-| `test-sfu-e2e`: single executor, end to end (about 4 min) | local, no Holochain: `pnpm run prepare-test-local` (`test-main-sfu-e2e` does both) | `integration-tests-sfu-e2e`: on every PR except one whose changed files are all on the job's `skip_paths` (docs, other apps, other suites; syntax in the header of `.circleci/scripts/paths-changed.sh`), on dev every 2 hours (`dev-2-hourly`), not on dev pushes. The `full-ci` label or `[full-ci]` forces it through the path gate (`CI_FULL_CI`, written to `$BASH_ENV` by `heavy_gate`) |
+| `test-sfu-e2e`: single executor, end to end (about 4 min) | local, no Holochain: `pnpm run prepare-test-local` (`test-main-sfu-e2e` does both) | `integration-tests-sfu-e2e`: on every PR that passes `heavy_gate` (a draft PR, or one not targeting dev, halts there first), except one whose changed files are all on the job's `skip_paths` (docs, other apps, other suites; syntax in the header of `.circleci/scripts/paths-changed.sh`; the path gate runs only after `heavy_gate`), on dev every 2 hours (`dev-2-hourly`), not on dev pushes. The `full-ci` label or `[full-ci]` forces it through the path gate (`CI_FULL_CI`, written to `$BASH_ENV` by `heavy_gate`) |
 | `test-sfu-browsers`: SFU and mesh calls in real Chromium, Firefox and WebKit, mixed (about 1 min past the world's start) | local, no Holochain: `pnpm run prepare-test-local` (`test-main-sfu-browsers` does both) | nightly, `integration-tests-sfu-browsers` |
 | `test-sfu`: `sfu-cascade`, `sfu-session` (T20, T21), `sfu-mesh` (network baselines) | Holochain: `pnpm run prepare-test` | nightly, `integration-tests-sfu` |
 

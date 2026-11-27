@@ -187,8 +187,10 @@ commands:
           # (it starts with "Stack gate") and whether a step follows it: keep both. An override
           # (the label, [full-ci], the nightly) is written to $BASH_ENV as CI_FULL_CI, so a later
           # path gate in the job (sfu-e2e) honours the same decision. That path gate must stay
-          # after this step: heavy-suites-pr.sh counts a job as halted only when this step is
-          # its last, so a path-halted job counts as ran and ci/heavy-suites can turn green.
+          # after this step, and its step name must start with "Path gate": heavy-suites-pr.sh
+          # counts a job as halted when this step is its last, and a job whose last step is the
+          # Path gate as path-halted: ran (so ci/heavy-suites can turn green) unless the PR now
+          # has the override, which that run did not see: then halted, and a pipeline starts.
           name: Stack gate (heavy suites only for non-draft PRs to dev)
           environment:
             HEAVY_GATE_FORCE: << pipeline.parameters.run-nightly-llm >>

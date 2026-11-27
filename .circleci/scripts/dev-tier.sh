@@ -8,7 +8,9 @@
 #                             run of <job> in this tier on this commit passed
 #                             (the caller halts green). A red run after a green
 #                             one on the same commit runs again. Any lookup
-#                             failure answers "run".
+#                             failure answers "run". Before it skips, it runs
+#                             `green` (below), so a green comment that failed
+#                             on the commit's run is retried.
 #   dev-tier.sh red <job>     last step, on failure. Opens one GitHub issue
 #                             titled "dev red: <job>", or comments on it when it
 #                             is open. It lists the last green commit of this
@@ -120,6 +122,9 @@ if [ "$mode" = moved ]; then
       ;;
     success|fixed)
       echo "skip: $branch @ ${sha:0:12} already passed $job in $workflow (${result_url:-}): dev has not moved"
+      # A green comment that failed on that run is retried here: no later run of this
+      # commit reaches the green step. `green` comments only after a red; it never fails.
+      bash "$0" green "$job" || true
       exit 10
       ;;
     *)

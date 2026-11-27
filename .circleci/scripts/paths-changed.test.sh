@@ -47,7 +47,7 @@ grep -qF 'bash .circleci/scripts/paths-changed.sh << parameters.skip_paths >>' "
 G=(git -c user.name=t -c user.email=t@example.org -c commit.gpgsign=false -c init.defaultBranch=dev)
 
 # origin: a bare repository with dev. repo: a clone, on PR branches.
-"${G[@]}" init -q --bare "$TMP/origin.git"
+"${G[@]}" init -q --object-format=sha1 --bare "$TMP/origin.git"
 "${G[@]}" clone -q "$TMP/origin.git" "$TMP/repo" 2>/dev/null
 cd "$TMP/repo" || exit 1
 mkdir -p rust-executor/src/sfu docs
