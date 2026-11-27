@@ -594,6 +594,80 @@ answers that with `socketBack` (resend what a fault kept, `sfu.callResume`,
 the socket: ICE `disconnected` is media evidence, and its whole answer is
 the ICE restart.
 
+SFU simulcast layer choice (`rust-executor/src/sfu/simulcast.rs`). Each client
+peer (not pipes) runs str0m's bandwidth estimator, started at 800 kbit/s
+(`BWE_START_KBPS`) and fed by the caller's transport-wide-cc reports; REMB is
+ignored. E is the receiver's estimate, C the cost of the video forwarded to
+it, F its fixed traffic. Constants (measured with the e2e source below):
+
+- `RATE_WINDOW` 2 s: a layer's cost is its bytes over this window, payload
+  plus 32 bytes per RTP packet (`seq_range`), keyframes included (cadence,
+  loss recovery, PLIs and the selector's switches all cross the link). A rate
+  is known once the layer has flowed a whole window; until then it costs 0,
+  so a resumed high stream can stay high through an estimate drop for up to
+  2 s. 1 s read the high layer up to 1.7 times nominal at p99.
+- `LAYER_TIMEOUT` 2 s: a layer silent this long is gone, noticed on the
+  track's next frame. Senders pause up to 1.6 s when an encoder starts.
+- `KEYFRAME_REQUEST_INTERVAL` 500 ms: at most one request per (track, layer),
+  from the selector or a gap. A receiver's own PLI is not limited.
+- F: per audio track the larger of `AUDIO_RESERVE_BPS` 64 kbit/s and its
+  measured rate, plus each video without simulcast; it is never touched.
+- `UPGRADE_HEADROOM` H = 1.25, `UPGRADE_HOLD` 4 s: the band between the
+  step-down line (C + F > E) and the upgrade line (E >= H * (C + F + step)).
+  The step-down line is the traffic itself: with no bottleneck, str0m's
+  estimate settles near the traffic it carries (about 1.5 times at full
+  state), and a line below the estimate (the earlier 0.85 * E) stepped
+  receivers down after almost every upgrade.
+
+Rules, per receiver, run on an estimate event, a track-set or ceiling change,
+a committed switch, a change in a track's set of live layers (a layer starts,
+or stops after `LAYER_TIMEOUT`), a layer or video that resumes after
+`LAYER_TIMEOUT`, or a deadline. There is no periodic tick: the earliest
+deadline (the hold's end, or the moment a live layer's rate is first measured)
+lowers the loop's timeout.
+
+- When C + F > E, one video track drops one live layer (largest saving first,
+  ties by stable id), one per run.
+- Upgrades: the receiver has one hold (`hold_since`). It runs while the
+  cheapest step fits E >= H * (C + F + step), is re-checked at every run, and
+  a dip, ceiling change, track-set change or completed switch resets it. When
+  it ends, every step the headroom covers is granted in one run, cheapest
+  first, one layer per track, each checked with the steps granted before it;
+  then the hold starts again. Upgrades wait while the target layer, a
+  forwarded video or an audio track has no measured rate (its first packet +
+  `RATE_WINDOW` wakes the allocation), while a switch is pending, before the
+  first estimate and while the last one has `can_probe: false`. A peer that
+  never reports stays on the lowest layer.
+- A switch commits on a keyframe of the new layer. The old layer's cost counts
+  until then, and a track with a pending switch is not switched again.
+- New tracks start on the lowest live layer, which is also the floor (video is
+  never paused).
+- When a switch commits on a layer below the receiver's cap (the layer it
+  wanted stopped), the cap drops to that layer: a layer that returns is
+  measured again (2 s) and earns its upgrade again (4 s hold, `can_probe`).
+- `SetQualityPreference` is a ceiling, not a choice: `high`, `auto` and unset
+  let the estimate decide up to high. The estimate and the hold choose the
+  layer at or below the ceiling; with no live layer there, the receiver gets
+  the lowest live one. A lowered ceiling applies on the next keyframe. For a peer the loop no longer holds it is dropped (ids
+  are never reused).
+- The receiver's probing target (`bwe().set_desired_bitrate`) is the estimate
+  that satisfies the upgrade condition at the permitted maximum layers:
+  `H * (highest + fixed)`, rounded up (fixed: audio and non-simulcast
+  video; highest: per track the most a layer up to its permitted top costs,
+  as a middle layer can measure above the top one).
+- A cap change is logged at `debug` (`rust_executor::sfu::simulcast`:
+  receiver, track, old and new layer, estimate, fixed, spent, layer rates).
+
+The e2e video source (`videoSource`, `tests/js/helpers/sfu/e2e/media.ts`) is
+a drifting gradient with soft moving discs and light noise: it compresses like
+camera video, so each layer runs near its `maxBitrate` at a steady frame rate
+and keyframes stay small. Hard-edged moving patterns make VP8 send huge
+keyframes and then drop frames for seconds, which reads as layer stalls and
+rate spikes. The e2e shaper (`limitDownlink`, `tests/js/helpers/sfu/net.ts`)
+is a `tbf` with a 3 kB burst and a 300 ms queue: a larger burst lets str0m's
+probe clusters through at line rate (the estimate read up to 4.7 Mbit/s on a
+700 kbit/s cap), a smaller queue drops so much that the estimate collapses.
+
 SFU media addresses (`rust-executor/src/sfu/{hosts,server,reachability}.rs`):
 with no `sfu_bind_addr` (the default, whatever `--localhost` says) the SFU
 binds two sockets on one port: 127.0.0.1 and the LAN address

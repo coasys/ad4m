@@ -122,7 +122,7 @@ export function sfuScenario(
       }
       if (port) deregisterPorts([port]);
       if (runDir && existsSync(runDir)) {
-        if (succeeded) {
+        if (succeeded && !process.env.SFU_KEEP_LOGS) {
           rmSync(runDir, { recursive: true, force: true });
         } else {
           console.warn(`[${scenario.id}] logs kept in ${runDir}`);
