@@ -32,6 +32,23 @@
     { "job": "coasys-spaces", "metric": "graph.*_max_ms", "factor": 3.0, "min_delta": 100, "_metric": "The slowest of 5 rounds: one late frame (a garbage collection) doubles it." },
     { "job": "coasys-spaces", "metric": "graph.first_node_ms", "factor": 1.5, "min_delta": 500, "_metric": "The canvas's load: the click on Canvas to its first node." },
     { "job": "coasys-spaces", "metric": "graph.all_records_ms", "factor": 1.5, "min_delta": 500, "_metric": "Stub tier: the click on Canvas to every record drawn." },
-    { "job": "coasys-spaces", "metric": "graph.first_record_ms", "factor": 1.5, "min_delta": 500, "_metric": "Real tier: the click on Canvas to the first record the model found drawn." }
+    { "job": "coasys-spaces", "metric": "graph.first_record_ms", "factor": 1.5, "min_delta": 500, "_metric": "Real tier: the click on Canvas to the first record the model found drawn." },
+
+    { "job": "agent-scale", "metric": "agent_scale.*", "min_delta": 5, "_min_delta": "The default for the times of one call, in ms: a median of 0.3 ms to 30 ms moves by a few ms between runs. Every metric has one series per agent count (params agents), so 10 and 100 agents never compare." },
+    { "job": "agent-scale", "metric": "agent_scale.*.p95", "min_delta": 50, "_min_delta": "A p95 is one slow call out of 10 to 100 (a scheduler pause, a flush): it jitters by tens of ms." },
+    { "job": "agent-scale", "metric": "agent_scale.*.max", "min_delta": 50, "_metric": "The slowest of N concurrent calls: as noisy as a p95." },
+    { "job": "agent-scale", "metric": "agent_scale.*.wall", "min_delta": 500, "_min_delta": "The wall time of all agents at once: 0.2 to 20 s over the counts, with a spread of a few hundred ms." },
+    { "job": "agent-scale", "metric": "agent_scale.write.total_ms", "min_delta": 500, "_metric": "The wall time of every user's perspective and links: it grows with the agent count by design, so the series is per count." },
+    { "job": "agent-scale", "metric": "agent_scale.shared.all_see_ms", "min_delta": 500 },
+    { "job": "agent-scale", "metric": "agent_scale.restart.*_ms", "min_delta": 1000, "_min_delta": "Stopping and starting a process is disk and scheduler bound: a second of spread." },
+    { "job": "agent-scale", "metric": "agent_scale.restart.first_query_ms.*", "min_delta": 50 },
+    { "job": "agent-scale", "metric": "agent_scale.events.leaked", "factor": 1.0, "min_delta": 1, "ceiling": 0, "_ceiling": "Events of another user's perspective that reached a user. The test fails on it too; a passing run has none, so the median is 0 and the factor never fires." },
+    { "job": "agent-scale", "metric": "agent_scale.idle.cpu_pct", "factor": 2.0, "min_delta": 5, "_min_delta": "Percent of one core over 30 s with no request. An idle executor is under 1 per cent at 10 agents; background work per agent shows as a rise with the count." },
+    { "job": "agent-scale", "metric": "agent_scale.rss_peak_mib", "factor": 1.3, "min_delta": 128 },
+    { "job": "agent-scale", "metric": "agent_scale.rss_per_agent_mib", "factor": 1.3, "min_delta": 2, "_min_delta": "The memory one agent adds, in MiB: a tenth of a core's worth of spread is a MiB or two." },
+    { "job": "agent-scale", "metric": "agent_scale.threads_peak", "factor": 1.3, "min_delta": 20 },
+    { "job": "agent-scale", "metric": "agent_scale.fds_peak", "factor": 1.3, "min_delta": 50 },
+    { "job": "agent-scale", "metric": "agent_scale.*_open", "factor": 1.1, "min_delta": 1, "_factor": "The executor's own gauges of perspectives and SPARQL stores held open: fixed by what the test creates, so a change is a change in what the executor keeps open." },
+    { "job": "agent-scale", "metric": "agent_scale.*.growth_*", "factor": 1.5, "min_delta": 1, "_metric": "The value at the largest agent count over the value at the smallest (a ratio, no unit). It is judged against its own history like the others: a ratio past 1.5x the median and 1 more is a metric that scales worse than it did. The test's own flags (per call above 2, totals above 15) are in its printed table, and do not fail a run." }
   ]
 }

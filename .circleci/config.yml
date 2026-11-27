@@ -1681,6 +1681,42 @@ jobs:
           when: always
           command: bash scripts/feed-scale.sh summary
 
+  # How the work of ONE executor grows with the number of agents it holds: multi-user mode,
+  # without Holochain, at 10, 20, 50 and 100 agents (tests/js/tests/agent-scale.test.ts). Each
+  # count runs on a fresh executor and data dir: onboarding, a sign-in of all agents at once,
+  # writes, reads, events, one shared neighbourhood (local link language), 30 s idle and a
+  # restart; RSS and threads are sampled every second. Every metric is recorded per count
+  # (`params: {agents: N}`) with its growth from 10 to 100, and scripts/perf/check judges it by
+  # the `agent-scale` rules in scripts/perf/thresholds.json. The test fails only on a functional
+  # error; a metric that scales poorly is flagged in its table, not failed. Nightly only, in
+  # `nightly-llm-e2e`, in a serial group of its own. It builds its own binaries: that pipeline has
+  # no `build` job.
+  agent-scale:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - setup_integration_test_environment:
+          local: true
+          build_binaries: true
+      - run:
+          name: Prepare the local test languages
+          command: cd ./tests/js && pnpm run prepare-test-local
+      - perf_setup
+      - run:
+          # The test writes $PERF_RESULTS_DIR/agent-scale.json and prints its table.
+          name: Run the agent-scale wind tunnel
+          command: |
+            mkdir -p "${TEST_ARTIFACTS:?}"
+            set -o pipefail
+            cd ./tests/js && pnpm run test:agent-scale 2>&1 | tee "$TEST_ARTIFACTS/agent-scale.log"
+          no_output_timeout: 40m
+      - perf_finish:
+          job: agent-scale
+      - store_artifacts:
+          when: always
+          path: test-artifacts
+          destination: agent-scale-logs
+
   integration-tests-cli:
     machine: true
     resource_class: coasys/marvin-light
@@ -1833,8 +1869,8 @@ workflows:
   # Same resource class (Marvin). llm-e2e and coasys-spaces both prompt
   # staging's llama-server, which already holds the GPU, and neither loads
   # a model. llm-e2e's embeddings stay on Ollama (:11434). The agent harness
-  # uses its own mock LLM. feed-scale needs no model. llm-e2e, the SFU wind
-  # tunnel, coasys-spaces, the agent harness and feed-scale start together
+  # uses its own mock LLM. feed-scale and agent-scale need no model. llm-e2e, the SFU wind
+  # tunnel, coasys-spaces, the agent harness, feed-scale and agent-scale start together
   # and do not build on each other's result: one failing must not skip the
   # others. Three API triggers fire this pipeline every night on one host.
   # Each job has its own serial group, so a second trigger waits instead of
@@ -1858,3 +1894,5 @@ workflows:
           serial-group: << pipeline.project.slug >>/nightly-agent-harness
       - feed-scale:
           serial-group: << pipeline.project.slug >>/nightly-feed-scale
+      - agent-scale:
+          serial-group: << pipeline.project.slug >>/nightly-agent-scale
