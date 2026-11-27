@@ -1270,6 +1270,109 @@ async fn the_fallback_loop_never_pushes_from_an_old_languages_short_mirror() {
     );
 }
 
+/// `fake`'s commit, with a render that answers `remote` and counts calls.
+fn counting_language(
+    fake: &Arc<FakeLanguage>,
+    remote: Vec<LinkExpression>,
+    renders: &Arc<AtomicUsize>,
+) -> Language {
+    let fake = fake.clone();
+    let renders = renders.clone();
+    Language::with_test_commit(
+        "fake-link-language".to_string(),
+        Arc::new(move |diff| fake.commit(diff)),
+    )
+    .with_test_render(Arc::new(move || {
+        renders.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(Perspective {
+            links: remote.clone(),
+        }))
+    }))
+}
+
+/// Staging 2026-11-27: the fallback calls `render()` every 5 minutes even
+/// when the remote already holds every shared link and nothing is queued.
+/// That call runs synchronously on the language thread and stalls every
+/// other call on it. A later pass with nothing unsent must not render.
+/// Changing the link language compares once more.
+#[tokio::test(start_paused = true)]
+async fn a_later_fallback_does_not_render_the_room_when_nothing_is_unsent() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let shared = store_many_shared(&perspective, "l", 40);
+    let renders = Arc::new(AtomicUsize::new(0));
+    *perspective.link_language.write().await = Some(counting_language(&fake, shared, &renders));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert_eq!(renders.load(Ordering::SeqCst), 1);
+    assert_eq!(fake.attempts(), 0, "the room already has every shared link");
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert_eq!(
+        renders.load(Ordering::SeqCst),
+        1,
+        "a second pass with nothing unsent does not render"
+    );
+
+    perspective.link_language_changed();
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert_eq!(
+        renders.load(Ordering::SeqCst),
+        2,
+        "a link-language change compares again"
+    );
+}
+
+/// A queued diff is something the fallback still has to look at, so the
+/// next pass renders even after a completed compare.
+#[tokio::test(start_paused = true)]
+async fn a_later_fallback_still_renders_when_a_diff_is_unsent() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let shared = store_many_shared(&perspective, "l", 40);
+    let renders = Arc::new(AtomicUsize::new(0));
+    *perspective.link_language.write().await = Some(counting_language(&fake, shared, &renders));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+    enqueue(&perspective, &add("queued"));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert_eq!(renders.load(Ordering::SeqCst), 2);
+    assert_eq!(fake.attempts(), 0, "the queue owns the unsent link");
+}
+
+/// A short mirror is not a completed compare: the pass refuses and the
+/// next one renders again.
+#[tokio::test(start_paused = true)]
+async fn a_fallback_that_saw_a_short_mirror_renders_again() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let shared = store_many_shared(&perspective, "l", 100);
+    let renders = Arc::new(AtomicUsize::new(0));
+    *perspective.link_language.write().await =
+        Some(counting_language(&fake, shared[..10].to_vec(), &renders));
+
+    assert!(!perspective.ensure_public_links_are_shared().await);
+    assert!(!perspective.ensure_public_links_are_shared().await);
+    assert_eq!(renders.load(Ordering::SeqCst), 2);
+    assert_eq!(fake.attempts(), 0);
+}
+
+/// Publish always renders, including after a fallback has compared the room.
+#[tokio::test(start_paused = true)]
+async fn a_publish_still_renders_after_the_room_was_compared() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let shared = store_many_shared(&perspective, "l", 40);
+    let renders = Arc::new(AtomicUsize::new(0));
+    *perspective.link_language.write().await = Some(counting_language(&fake, shared, &renders));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert!(perspective.share_links_after_publish().await);
+    assert_eq!(renders.load(Ordering::SeqCst), 2);
+    assert_eq!(fake.attempts(), 0);
+}
+
 /// A failed push after publish queues the shared links no queued or parked
 /// diff holds: a link already waiting in the queue is not queued twice, so
 /// the queue sends it once.

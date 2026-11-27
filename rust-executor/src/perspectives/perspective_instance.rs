@@ -45,7 +45,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 #[cfg(test)]
 use std::sync::atomic::AtomicI64;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, PoisonError};
 use std::time::Duration;
 use tokio::sync::{Mutex, Notify, RwLock};
@@ -695,6 +695,14 @@ pub struct PerspectiveInstance {
     // Fallback sync tracking for ensure_public_links_are_shared
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
     fallback_sync_interval: Arc<Mutex<Duration>>,
+    /// Bumped by `link_language_changed`. Starts at 1 so 0 can mean "never
+    /// compared". A compare records the value it started with
+    /// (`fallback_compared_generation`); a change during that compare stores
+    /// the old value, which no longer matches, so the new language is rendered.
+    fallback_generation: Arc<AtomicU64>,
+    /// Generation of the last completed compare. 0 means this process has not
+    /// compared yet. A refused or failed pass does not write it.
+    fallback_compared_generation: Arc<AtomicU64>,
     pub(crate) sparql_store: Arc<crate::perspectives::sparql_store::SparqlStore>,
     /// Held by every write to `sparql_store` ([`Self::persist_link_diff`]), and by
     /// [`Self::commit_batch_if`] from checking what it expects through its write, so no other
@@ -843,6 +851,8 @@ impl PerspectiveInstance {
             batch_store: Arc::new(RwLock::new(HashMap::new())),
             last_successful_fallback_sync: Arc::new(Mutex::new(None)),
             fallback_sync_interval: Arc::new(Mutex::new(Duration::from_secs(30))),
+            fallback_generation: Arc::new(AtomicU64::new(1)),
+            fallback_compared_generation: Arc::new(AtomicU64::new(0)),
             sparql_store: Arc::new(
                 crate::perspectives::sparql_store::SparqlStore::new(sparql_data_path.as_deref())
                     .expect("Failed to create per-perspective SPARQL service"),
@@ -1610,6 +1620,10 @@ impl PerspectiveInstance {
         let _sharing = self.share_links_mutex.lock().await;
         let uuid = self.uuid.clone();
 
+        // Taken with the clone: a link-language change during the compare
+        // bumps `fallback_generation`, and the value stored at the end is
+        // this one, so it no longer matches.
+        let language_generation = self.fallback_generation.load(Ordering::Acquire);
         // Clone link_language without holding the lock
         let link_language_clone = {
             let link_language_guard = self.link_language.read().await;
@@ -1617,6 +1631,29 @@ impl PerspectiveInstance {
         };
 
         if let Some(mut link_language) = link_language_clone {
+            // A completed compare of this link language already ran, and
+            // nothing is queued or parked. `render()` is ordered and reads
+            // the whole room on the language thread; repeating it on the
+            // 5-minute fallback stalls every other call on that language
+            // (staging 2026-11-27: ~35–55s every ~6 min on a 307k-link room,
+            // with nothing unsent). The next unsent diff, or a link-language
+            // change, compares again.
+            if scope == ShareScope::Fallback
+                && self.fallback_compared_generation.load(Ordering::Acquire) == language_generation
+            {
+                match crate::db_backend::db_backend().get_unsent_additions(&uuid) {
+                    Ok(unsent) if unsent.is_empty() => return true,
+                    Ok(_) => {}
+                    Err(e) => {
+                        log::warn!(
+                            "ensure_public_links_are_shared: could not read queued and parked diffs for perspective {}: {} — skipping this sync attempt",
+                            uuid, e
+                        );
+                        return false;
+                    }
+                }
+            }
+
             // Query SPARQL store for all links
             let decorated_links = match self.sparql_store.get_all_links(&EvalStop::none()) {
                 Ok(links) => links,
@@ -1746,6 +1783,13 @@ impl PerspectiveInstance {
             }
 
             //crate::db_backend::db_backend().add_many_links(&self.persisted.load().uuid, &remote_links).unwrap(); // Assuming add_many_links takes a reference to a Vec<LinkExpression> and returns Result<(), AnyError>
+            // Compared this generation. A later fallback with an empty queue
+            // does not render again. A refused or failed pass returns above
+            // without writing, so the backoff retries the compare. Storing the
+            // generation captured at the start means a change during this pass
+            // does not count as a compare of the new language.
+            self.fallback_compared_generation
+                .store(language_generation, Ordering::Release);
             return true;
         }
         false
@@ -1781,6 +1825,8 @@ impl PerspectiveInstance {
     /// (a publish). Only `update_perspective_with` calls it, and only on such a change: the
     /// loop writes its own state through there and must not cut its backoff short.
     pub(crate) fn link_language_changed(&self) {
+        // The new language's store is not the one we compared.
+        self.fallback_generation.fetch_add(1, Ordering::AcqRel);
         self.wakes.link_language.notify_one();
     }
 
