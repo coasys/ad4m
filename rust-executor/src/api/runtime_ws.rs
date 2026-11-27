@@ -1,7 +1,7 @@
 //! Runtime WS-native handlers.
 
 use base64::Engine;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 use ts_rs::TS;
@@ -63,6 +63,28 @@ async fn quit_runtime(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value
 /// `runtime.restart`: stop, exit 75; the supervisor starts the executor again.
 async fn restart_runtime(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     stop_after_answer(crate::exit::ExitReason::RestartRequested)
+}
+
+/// `runtime.setLogFilter { filter, ttlSeconds? }`: log `filter` (`ws_rpc=debug,sfu=debug`)
+/// over the startup filter for `ttlSeconds` (default 1800, at most 14400), then revert by
+/// itself. An empty `filter` reverts at once.
+async fn set_log_filter(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: SetLogFilterParams = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let ttl = body
+        .ttl_seconds
+        .map(|secs| std::time::Duration::from_secs(u64::from(secs)))
+        .unwrap_or(crate::log_filter::DEFAULT_TTL);
+    let status = crate::log_filter::state()
+        .set_override(&body.filter, ttl)
+        .map_err(WsRpcError::bad_request)?;
+    Ok(serde_json::to_value(LogFilter::from(status))?)
+}
+
+/// `runtime.logFilter`: the filter in force, the startup filter and when an override reverts.
+async fn log_filter(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let status = crate::log_filter::state().status();
+    Ok(serde_json::to_value(LogFilter::from(status))?)
 }
 
 /// `runtime.logTail { lines }`: the newest lines of this run's log file (at most 2000).
@@ -185,7 +207,7 @@ async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     Ok(Value::Bool(true))
 }
 
-async fn import_data(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+async fn import_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: ImportRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
@@ -202,11 +224,33 @@ async fn import_data(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
             Ok(serde_json::to_value(result).map_err(|e| WsRpcError::internal(e.to_string()))?)
         }
         "perspective" => {
-            let data = std::fs::read_to_string(&body.file_path)
-                .map_err(|e| WsRpcError::internal(e.to_string()))?;
-            let snapshot: serde_json::Value =
-                serde_json::from_str(&data).map_err(|e| WsRpcError::bad_request(e.to_string()))?;
-            Ok(serde_json::json!({"success": true, "snapshot": snapshot}))
+            let uuid = body.perspective_uuid.as_deref().ok_or_else(|| {
+                WsRpcError::bad_request("perspective_uuid required for perspective import")
+            })?;
+            // The guard admits only the operator, who may import into any
+            // perspective on the executor — including a managed user's —
+            // so `get_perspective_with_access` admits it unconditionally.
+            let perspective =
+                super::perspectives_ws::get_perspective_with_access(uuid, &ctx).await?;
+            let stats = perspective
+                .import_links_file(std::path::Path::new(&body.file_path))
+                .await
+                .map_err(|e| {
+                    // A file the store refuses is the caller's input: 400. A failure of
+                    // the load itself (disk, worker, parser) is the executor's: 500.
+                    if e.downcast_ref::<crate::perspectives::sparql_store::ImportRefused>()
+                        .is_some()
+                    {
+                        WsRpcError::bad_request(e.to_string())
+                    } else {
+                        WsRpcError::internal(e.to_string())
+                    }
+                })?;
+            Ok(serde_json::to_value(RuntimeImportPerspectiveResult {
+                imported: stats.imported,
+                covered: stats.covered,
+                skipped: stats.skipped,
+            })?)
         }
         other => Err(WsRpcError::bad_request(format!(
             "Unknown import type: {}. Use 'db' or 'perspective'.",
@@ -345,7 +389,7 @@ async fn check_notification_perspectives(
             Err(e) if e.code == 404 && owner_did == dids.main_agent => continue,
             Err(e) => return Err(e),
         };
-        let handle = perspective.persisted.lock().await.clone();
+        let handle = perspective.persisted.snapshot();
         if !owner_may_read(owner_did, &dids.main_agent, &handle) {
             return Err(WsRpcError::forbidden(format!(
                 "Access denied: the notification owner cannot read perspective {}",
@@ -755,6 +799,11 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<LogTailParams, LogTail>("runtime.logTail", log_tail)
         .read()
         .guard(Guard::Operator);
+    map.method::<SetLogFilterParams, LogFilter>("runtime.setLogFilter", set_log_filter)
+        .guard(Guard::Operator);
+    map.method::<NoParams, LogFilter>("runtime.logFilter", log_filter)
+        .read()
+        .guard(Guard::Operator);
     // Always errors: status updates have no implementation yet. The contract
     // is the SDK's call.
     map.method::<SetStatusRequest, bool>("runtime.setStatus", set_status)
@@ -767,9 +816,13 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<ExportRequest, bool>("runtime.exportData", export_data)
         .guard(Guard::Executor(AGENT_UPDATE_CAPABILITY.clone()));
     // An import writes rows as they are in the file: notifications with their `granted` flag
-    // and `owner_did`, users with their password hashes. Only the operator imports, as only
-    // the operator grants notifications.
+    // and `owner_did`, users with their password hashes — or, for `type: "perspective"`,
+    // every link of a snapshot into any perspective on the executor. Only the operator
+    // imports, as only the operator grants notifications. A perspective import adds links
+    // new to the perspective in one commit, and refuses the whole file otherwise (see
+    // `SparqlStore::import_links_file`). Nothing is sent to the link language.
     map.method::<ImportRequest, RuntimeImportResult>("runtime.importData", import_data)
+        .long()
         .guard(Guard::Operator);
     map.method::<NoParams, bool>("runtime.restartHolochain", restart_holochain)
         .long()
@@ -950,6 +1003,44 @@ pub struct LogTailParams {
     pub lines: u32,
 }
 
+/// `runtime.setLogFilter` params.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SetLogFilterParams {
+    /// Directives like `ws_rpc=debug,sfu=debug`: a name matches whole module path segments
+    /// anywhere in a log target. Targets it does not name keep the startup filter. Empty:
+    /// back to the startup filter now.
+    pub filter: String,
+    /// How long the filter holds before the startup filter is back; default 1800, at most
+    /// 14400.
+    #[ts(optional)]
+    pub ttl_seconds: Option<u32>,
+}
+
+/// `runtime.logFilter` and `runtime.setLogFilter` result.
+#[derive(serde::Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct LogFilter {
+    /// The filter the executor started with (`RUST_LOG`).
+    pub startup_filter: String,
+    /// The override in force over the startup filter, or `null`.
+    pub override_filter: Option<String>,
+    /// When the override reverts (RFC 3339, UTC), or `null`.
+    pub reverts_at: Option<String>,
+}
+
+impl From<crate::log_filter::FilterStatus> for LogFilter {
+    fn from(status: crate::log_filter::FilterStatus) -> Self {
+        LogFilter {
+            startup_filter: status.startup,
+            override_filter: status.current,
+            reverts_at: status.reverts_at.map(|t| t.to_rfc3339()),
+        }
+    }
+}
+
 /// `runtime.logTail` result: the newest lines of this run's log file, oldest first.
 #[derive(serde::Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -1021,7 +1112,8 @@ pub struct RuntimeSetFreeHostingEnabledParams {
     pub enabled: bool,
 }
 
-/// `type: "db"` yields import stats; `type: "perspective"` echoes the file's snapshot.
+/// `type: "db"` yields import stats; `type: "perspective"` the counts the
+/// store's bulk load reports.
 #[derive(Deserialize, TS)]
 #[serde(untagged)]
 #[ts(export)]
@@ -1030,12 +1122,18 @@ pub enum RuntimeImportResult {
     Perspective(RuntimeImportPerspectiveResult),
 }
 
-#[derive(Deserialize, TS)]
+#[derive(Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct RuntimeImportPerspectiveResult {
-    pub success: bool,
-    // The file's raw contents: import does not validate the snapshot shape.
-    #[ts(type = "any")]
-    pub snapshot: Value,
+    /// Links the load wrote — the file's links that were new to the
+    /// perspective. The whole file commits in one transaction, or not at
+    /// all: a link the store already holds, a reifier repeated in the
+    /// file, or a valid tombstone ending a stored or in-file link
+    /// refuses the import.
+    pub imported: usize,
+    /// Links a tombstone the store already held ends: not written.
+    pub covered: usize,
+    /// Links refused: in the store's own metadata vocabulary.
+    pub skipped: usize,
 }

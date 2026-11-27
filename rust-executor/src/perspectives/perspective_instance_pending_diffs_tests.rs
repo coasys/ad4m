@@ -338,7 +338,7 @@ async fn a_restart_sends_the_diffs_the_language_did_not_accept() {
 
     // The restart: nothing of the old instance or its language survives
     // but the database.
-    let handle = perspective.persisted.lock().await.clone();
+    let handle = perspective.persisted.snapshot();
     drop(perspective);
     let after = Arc::new(FakeLanguage::default());
     let restarted = PerspectiveInstance::new(handle, None);
@@ -742,8 +742,10 @@ async fn the_fallback_sync_sends_only_the_local_agents_links() {
     let fake = Arc::new(FakeLanguage::default());
     let perspective = neighbourhood_perspective(&fake).await;
     // A second local agent (a managed user who joined).
-    perspective.persisted.lock().await.owners =
-        Some(vec!["did:key:alice".to_string(), "did:key:bob".to_string()]);
+    perspective
+        .persisted
+        .update(|h| h.owners = Some(vec!["did:key:alice".to_string(), "did:key:bob".to_string()]))
+        .await;
     for (author, target) in [
         ("did:key:alice", "alice's"),
         ("did:key:bob", "bob's"),

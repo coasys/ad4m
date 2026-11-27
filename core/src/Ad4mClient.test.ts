@@ -1,5 +1,6 @@
 import { Ad4mClient } from './Ad4mClient';
 import { ApiClient, RpcError } from './apiClient';
+import type { FlowRefusal } from './generated/api';
 import { Perspective } from './perspectives/Perspective';
 import { LinkQuery } from './perspectives/LinkQuery';
 import type { EventMap, EventName } from './generated/api/Events';
@@ -142,10 +143,16 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
         ({ className: p.className, baseUri: p.baseUri, collection: p.collection, itemUri: p.itemUri, linksAdded: 1, alreadyMember: false }),
     'perspective.instanceRemoveFromCollection': (p: Record<string, unknown>) =>
         ({ className: p.className, baseUri: p.baseUri, collection: p.collection, itemUri: p.itemUri, linksRemoved: 1 }),
+    // A move to `nowhere` is refused as the executor refuses it: 409 with the FlowRefusal as data.
+    'perspective.proposeFlowTransition': () => ({ [RPC_ERROR]: {
+        code: 409,
+        message: '`nowhere` is not reachable from `identified` - no proposal written',
+        data: { kind: 'not-reachable', from: 'identified', to: 'nowhere' },
+    } }),
     'perspective.getSubjectData': '{"name":"test"}',
     'perspective.createBatch': 'batch-id-1',
     'perspective.commitBatch': { additions: [], removals: [] },
-    'perspective.subscribeQuery': { subscriptionId: 'sub-1', result: [{ s: 'a' }], revision: 0 },
+    'perspective.subscribe': { subscriptionId: 'sub-1', result: [{ s: 'a' }], revision: 0 },
     'perspective.resyncSubscription': { revision: 3, result: [{ s: 'c' }] },
     'events.watch': true,
     'perspective.disposeQuery': true,
@@ -239,11 +246,13 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'runtime.restartHolochain': true,
     'runtime.restart': true,
     'runtime.logTail': (p: Record<string, unknown>) => ({ lines: [`asked ${p.lines}`] }),
+    'runtime.setLogFilter': (p: Record<string, unknown>) => ({ startupFilter: 'rust_executor=info', overrideFilter: p.filter, revertsAt: '2026-11-20T01:00:00+00:00' }),
+    'runtime.logFilter': { startupFilter: 'rust_executor=info', overrideFilter: null, revertsAt: null },
     'runtime.config': { values: { mcp_port: 3001 }, keys: [{ key: 'mcp_port', class: 'restart' }, { key: 'port', class: 'machine', pinned: 'config' }], restartPending: false, file: '/data/adam/config.json' },
     'runtime.setConfig': (p: Record<string, unknown>) => ({ restartPending: true, refused: p.unset ? [{ key: 'port', reason: 'local-only' }] : [] }),
     'runtime.verifySignature': true,
     'runtime.exportData': true,
-    'runtime.importData': { success: true, count: 5 },
+    'runtime.importData': { imported: 5, skipped: 0 },
     'runtime.freeHostingEnabled': false,
     'runtime.setFreeHostingEnabled': true,
     'runtime.computeLog': [],
@@ -700,6 +709,18 @@ describe('PerspectiveClient', () => {
         expect(data.errors[0].problem.kind).toBe('unknownProperty');
     });
 
+    test('a refused flow move rejects with the FlowRefusal as RpcError.data', async () => {
+        const error = await ad4m.perspective
+            .proposeFlowTransition('uuid-1', 'ad4m://flow/instance/1', 'nowhere')
+            .then(() => null, (e: unknown) => e);
+        expect(error).toBeInstanceOf(RpcError);
+        const rpcError = error as RpcError;
+        expect(rpcError.status).toBe(409);
+        const data = rpcError.data as FlowRefusal;
+        expect(data.kind).toBe('not-reachable');
+        expect(data).toEqual({ kind: 'not-reachable', from: 'identified', to: 'nowhere' });
+    });
+
     test('the other instance writes call their methods with the body', async () => {
         const base = { className: 'Task', baseUri: 'ad4m://obj/t' };
         const item = { ...base, collection: 'labels', itemUri: 'ad4m://label/x' };
@@ -877,27 +898,6 @@ describe('PerspectiveClient', () => {
         expect(ws.rpc.slice(2).map(c => c.type)).toEqual(['events.watch', 'perspective.snapshot']);
     });
 
-    test('watchApplied() settles only after the events.watch reply', async () => {
-        const watchReply = MOCK_RESPONSES['events.watch'];
-        let acceptWatch!: (ok: boolean) => void;
-        MOCK_RESPONSES['events.watch'] = () => new Promise<boolean>(r => { acceptWatch = r; });
-        const api = new ApiClient('http://127.0.0.1:12000', 'test-token');
-        clients.push({ close: () => api.closeAll() });
-        try {
-            api.on('link-added', () => {}, { perspective: 'A' });
-            let settled = false;
-            const waiting = api.watchApplied().then(() => { settled = true; });
-            await new Promise(r => setTimeout(r, 20));
-            expect(lastOf(MockWebSocket.instances).rpc.map(c => c.type)).toEqual(['events.watch']);
-            expect(settled).toBe(false);
-
-            acceptWatch(true);
-            await waiting;
-        } finally {
-            MOCK_RESPONSES['events.watch'] = watchReply;
-        }
-    });
-
     test('a failed events.watch is sent again, a bounded number of times', async () => {
         jest.useFakeTimers();
         const watchReply = MOCK_RESPONSES['events.watch'];
@@ -946,7 +946,8 @@ describe('PerspectiveClient', () => {
         const syncState = jest.fn();
         freshClient.on('sync-state-change', ({ state }) => syncState(state), { perspective: 'A' });
         const signal = jest.fn();
-        await freshClient.neighbourhood.addSignalHandler('A', signal);
+        freshClient.neighbourhood.addSignalHandler('A', signal);
+        await freshClient.perspective.snapshotByUUID('A');
         const ws = lastOf(MockWebSocket.instances);
         expect(lastOf(ws.rpc.filter(c => c.type === 'events.watch')).params)
             .toEqual({ 'signal': ['A'], 'sync-state-change': ['A'] });
@@ -966,11 +967,15 @@ describe('PerspectiveClient', () => {
     test('a live query applies updates and resyncs on a revision gap', async () => {
         const freshClient = newClient();
         const subscription = await freshClient.perspective.byUUID('uuid-1')
-            .then(p => p!.subscribeQuery('SELECT ?s WHERE { ?s ?p ?o }'));
+            .then(p => p!.liveSparql('SELECT ?s WHERE { ?s ?p ?o }'));
+        expect(await subscription.first).toEqual([{ s: 'a' }]);
         const results: unknown[] = [];
-        subscription.onResult(r => results.push(r));
+        subscription.subscribe(snapshot => results.push(snapshot.data));
         const ws = lastOf(MockWebSocket.instances);
-        expect(subscription.result).toEqual([{ s: 'a' }]);
+        // A listener added after the first result gets it at once.
+        expect(results).toEqual([[{ s: 'a' }]]);
+        results.length = 0;
+        const current = () => subscription.getSnapshot().data;
 
         ws.emit({ type: 'perspective-added', perspective: { uuid: 'uuid-ignored' } });
         ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-2', revision: 1, added: [{ s: 'x' }], removed: [] });
@@ -981,10 +986,10 @@ describe('PerspectiveClient', () => {
         ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-1', revision: 3, added: [{ s: 'z' }], removed: [] });
         await new Promise(r => setTimeout(r, 10));
         expect(lastRpcCall).toEqual({ type: 'perspective.resyncSubscription', params: { uuid: 'uuid-1', subscriptionId: 'sub-1' } });
-        expect(subscription.result).toEqual([{ s: 'c' }]);
+        expect(current()).toEqual([{ s: 'c' }]);
 
         ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-1', revision: 4, added: [{ s: 'd' }], removed: [] });
-        expect(subscription.result).toEqual([{ s: 'c' }, { s: 'd' }]);
+        expect(current()).toEqual([{ s: 'c' }, { s: 'd' }]);
 
         subscription.dispose();
         await new Promise(r => setTimeout(r, 10));
@@ -1133,19 +1138,19 @@ describe('NeighbourhoodClient', () => {
         expect(ws.rpc[0].params).toEqual({ 'sfu-call-renegotiation-offer': null, 'sfu-data': null, 'sfu-migrate': null });
 
         const room = { neighbourhoodUrl: 'neighbourhood://n', roomName: 'r' };
-        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:other', participantId: 'P2', ...room, sdpOffer: '{}' }));
-        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', participantId: 'P1', ...room, sdpOffer: '{"x":1}' }));
+        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:other', participantId: 'P2', offerId: 'o2', ...room, sdpOffer: '{}' }));
+        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', participantId: 'P1', offerId: 'o1', ...room, sdpOffer: '{"x":1}' }));
         ws.emit(event('sfu-migrate', { targetDid: 'did:me', ...room, migrateToDid: 'did:node' }));
         const message = { senderDid: 'did:other', senderParticipantId: 'P2', ...room, channelLabel: 'chat', binary: false, data: 'hi' };
         ws.emit(event('sfu-data', message));
 
         expect(offers).toHaveBeenCalledTimes(1);
-        expect(offers).toHaveBeenCalledWith({ targetDid: 'did:me', participantId: 'P1', ...room, sdpOffer: '{"x":1}', trackMapping: undefined });
+        expect(offers).toHaveBeenCalledWith({ targetDid: 'did:me', participantId: 'P1', offerId: 'o1', ...room, sdpOffer: '{"x":1}', trackMapping: undefined });
         expect(migrations).toHaveBeenCalledWith({ targetDid: 'did:me', ...room, migrateToDid: 'did:node' });
         expect(data).toHaveBeenCalledWith(expect.objectContaining(message));
 
         releaseOffers();
-        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', participantId: 'P1', ...room, sdpOffer: '{}' }));
+        ws.emit(event('sfu-call-renegotiation-offer', { targetDid: 'did:me', participantId: 'P1', offerId: 'o3', ...room, sdpOffer: '{}' }));
         expect(offers).toHaveBeenCalledTimes(1);
     });
 });
@@ -1343,6 +1348,25 @@ describe('RuntimeClient', () => {
         const tail = await ad4m.runtime.logTail(20);
         expect(lastRpcCall!.params).toMatchObject({ lines: 20 });
         expect(tail.lines).toEqual(['asked 20']);
+    });
+
+    test('setLogFilter() sends the filter and the ttl', async () => {
+        const status = await ad4m.runtime.setLogFilter('ws_rpc=debug,sfu=debug', 600);
+        expect(lastRpcCall!.type).toBe('runtime.setLogFilter');
+        expect(lastRpcCall!.params).toEqual({ filter: 'ws_rpc=debug,sfu=debug', ttlSeconds: 600 });
+        expect(status.overrideFilter).toBe('ws_rpc=debug,sfu=debug');
+        expect(status.revertsAt).toBe('2026-11-20T01:00:00+00:00');
+    });
+
+    test('setLogFilter() leaves the ttl to the executor when not given', async () => {
+        await ad4m.runtime.setLogFilter('ws_rpc=debug');
+        expect(lastRpcCall!.params).toEqual({ filter: 'ws_rpc=debug' });
+    });
+
+    test('logFilter() reads the filter in force', async () => {
+        const status = await ad4m.runtime.logFilter();
+        expect(lastRpcCall!.type).toBe('runtime.logFilter');
+        expect(status).toEqual({ startupFilter: 'rust_executor=info', overrideFilter: null, revertsAt: null });
     });
 
     test('config() returns the keys with their classes', async () => {

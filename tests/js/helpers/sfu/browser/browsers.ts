@@ -8,9 +8,7 @@
  * would: `http://127.0.0.1` is a secure context, so `getUserMedia` works.
  */
 
-import { createSocket } from "node:dgram";
 import { existsSync, readFileSync } from "node:fs";
-import { networkInterfaces } from "node:os";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
@@ -22,7 +20,10 @@ export type BrowserKind = "chromium" | "firefox" | "webkit";
 export const BROWSER_KINDS: BrowserKind[] = ["chromium", "firefox", "webkit"];
 
 const TESTS_JS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const SDK_BUNDLE = path.resolve(TESTS_JS, "..", "..", "core", "lib", "index.js");
+const SDK_LIB = path.resolve(TESTS_JS, "..", "..", "core", "lib");
+const SDK_BUNDLE = path.join(SDK_LIB, "index.js");
+/** The ESM entry imports the chunk it shares with `@coasys/ad4m/model` as `./shared-<hash>.js`. */
+const SDK_CHUNK = /^\/(shared-[\w-]+\.js)$/;
 
 const TYPES: Record<BrowserKind, BrowserType> = { chromium, firefox, webkit };
 
@@ -87,34 +88,17 @@ export async function launch(kind: BrowserKind): Promise<Launched> {
   }
 }
 
-/**
- * This host's IPv4 address on the interface its default route uses, as the
- * executor picks it for an SFU served beyond loopback (`detect_outbound_ip`):
- * a connected UDP socket's local address. Connecting sends nothing. Falls
- * back to the first non-internal IPv4 interface address; null with neither.
- */
-export async function outboundIp(): Promise<string | null> {
-  const viaRoute = await new Promise<string | null>((resolve) => {
-    const socket = createSocket("udp4");
-    socket.on("error", () => { socket.close(); resolve(null); });
-    socket.connect(53, "192.0.2.1", () => {
-      const { address } = socket.address();
-      socket.close();
-      resolve(address && address !== "0.0.0.0" ? address : null);
-    });
-  });
-  if (viaRoute) return viaRoute;
-  for (const addresses of Object.values(networkInterfaces())) {
-    for (const a of addresses ?? []) if (a.family === "IPv4" && !a.internal) return a.address;
-  }
-  return null;
-}
-
-/** Serve the page and the SDK's ESM bundle on loopback. */
+/** Serve the page, the SDK's ESM bundle and its shared chunk on loopback. */
 export async function servePage(): Promise<{ url: string; server: Server }> {
   if (!existsSync(SDK_BUNDLE)) throw new Error(`${SDK_BUNDLE} is missing: build core first (\`pnpm run build\` in core).`);
   const bundle = readFileSync(SDK_BUNDLE, "utf8");
   const server = createServer((request, response) => {
+    const chunk = request.url?.match(SDK_CHUNK)?.[1];
+    if (chunk && existsSync(path.join(SDK_LIB, chunk))) {
+      response.writeHead(200, { "content-type": "text/javascript" });
+      response.end(readFileSync(path.join(SDK_LIB, chunk), "utf8"));
+      return;
+    }
     const isBundle = request.url === "/ad4m.js";
     response.writeHead(200, { "content-type": isBundle ? "text/javascript" : "text/html" });
     response.end(isBundle ? bundle : PAGE);

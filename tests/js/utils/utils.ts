@@ -455,6 +455,21 @@ export function sleep(ms: number) {
 }
 
 /**
+ * Register a signal handler and wait until the executor applied its
+ * subscription. `addSignalHandler` returns at once: the watch goes out ahead
+ * of the next call on the same client, and the executor applies it before it
+ * reads that call's frame, so the reply to a cheap call (`otherAgents`) proves
+ * a signal another agent sends from here on reaches the handler.
+ */
+export async function listenForSignals(
+    proxy: import("@coasys/ad4m").NeighbourhoodProxy,
+    handler: (signal: any) => void,
+): Promise<void> {
+    proxy.addSignalHandler(handler);
+    await proxy.otherAgents();
+}
+
+/**
  * Poll a predicate until it returns true, or throw with `label` after
  * `timeoutMs`.
  *

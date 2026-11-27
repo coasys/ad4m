@@ -150,6 +150,7 @@ A class is addressed by its target class IRI (`flux://Note`). Its name, the last
 
 - Every SDK call that names a model's class (queries, creates, updates, deletes, includes, getters) sends its target class IRI, so `we://Topic` and `flux://Topic` live side by side in one Perspective, each read and written as its own class.
 - `registerShapes` takes a class whatever name other classes hold. It refuses one target class twice in one call, a shape URI another class holds, and a shape URI that does not end in `{Name}Shape`.
+- Re-registering is the intended pattern at app start: an unchanged call writes nothing and is answered from the executor's cached registry — the stored links are compared exactly, never just the shape's hash.
 - A bare name passed to the executor (`perspective.createSubject("Note", ...)`, an MCP tool) reads the class of that name with the least IRI: `a://Note` over `b://Note`. Pass the IRI to reach any other.
 - `perspective.shapes(["Note"])` lists every class of that name, least IRI first; `perspective.shapes(["b://Note"])` only that one.
 - A relation to another class resolves through the target class of the shape it names, so `sh:class b://NoteShape` reaches `b://Note` even when `a://Note` exists.
@@ -661,12 +662,26 @@ const recipe = await Recipe.create(perspective, { name: "Cake" }, {
 });
 ```
 
+`create` returns the instance it built from your values, with its `id`, and reads nothing back
+after the commit. `author`, `createdAt`, `updatedAt`, getters and relations you did not write are
+not set. Pass `returns: 'row'` to read the row after the commit (one more round trip) and fill them:
+
+```typescript
+const recipe = await Recipe.create(perspective, { name: "Cake" }, { returns: "row" });
+console.log(recipe.author, recipe.createdAt);
+```
+
+`returns: 'row'` cannot be combined with `batchId` (nothing is committed yet to read), and it
+rejects if the read fails after the commit: the record exists then, and the error names its id, so
+do not retry the create. A later `save()` on the returned instance updates it. Instance
+`save()` on a new instance still refreshes the instance after its commit.
+
 ### Reading
 
 ```typescript
-// Get by ID
+// Get by ID: resolves to the instance, or null when no instance has this ID
 const recipe = new Recipe(perspective, existingId);
-await recipe.get();
+if (!(await recipe.get())) throw new Error("Recipe not found");
 
 // Get with eager-loaded relations
 await recipe.get({ include: { comments: true } });
@@ -691,6 +706,15 @@ await recipe.save();  // Only the name field is updated
 await Recipe.update(perspective, recipe.id, { name: "White Chocolate Cake" });
 ```
 
+**An empty value clears the property.** Setting a property to `null` or `''` on `save()`, `update()` or `create()` leaves it with no links (and no empty literal). On `create()` the property is simply not written. `undefined` writes nothing, and a relation is emptied with `[]`. A required property cannot be cleared: the write throws, because its link is part of what makes the record an instance of the class.
+
+The clear is the executor's own `removeLink` with target `*`: it removes every link on that property, also links other agents wrote, and a value staged earlier in the same batch. It holds the same through an abstract class and for `perspective.updateSubject`.
+
+```typescript
+recipe.category = null; // or ''
+await recipe.save();    // the category links are removed
+```
+
 ### Deleting
 
 ```typescript
@@ -701,7 +725,7 @@ await recipe.delete();
 await Recipe.delete(perspective, recipeId);
 ```
 
-The instance `delete()` also cleans up incoming links (e.g. a parent's `hasMany` reference to this instance).
+`delete()` also cleans up incoming links: every link whose target is the instance is removed (e.g. a parent's `hasMany` reference to this instance, including polymorphic relations, and links from other models), in the same batch as the rest of the delete. A failed removal rejects `delete()`. Incoming links are read from committed state, so a link to the instance added earlier in the same batch is not removed.
 
 ### Dirty Tracking
 
@@ -754,10 +778,10 @@ These are available after any fetch operation (`get()`, `findAll()`, `findOne()`
 
 ```typescript
 // Order by creation date
-const recent = await Recipe.query(perspective)
-  .order({ createdAt: "DESC" })
-  .limit(10)
-  .get();
+const recent = await Recipe.findAll(perspective, {
+  order: { createdAt: "DESC" },
+  limit: 10
+});
 
 console.log(recent[0].author);    // "did:key:z6Mk..."
 console.log(recent[0].createdAt); // 1709049600000
@@ -802,22 +826,67 @@ This default is a contract, not an optimisation that may change. Two options cha
 
 [Flows](/flows) depend on this default. A flow's outputs are hashed from exactly what a query by id returns through the output's class, with no other options, and every voter recomputes that hash on their own executor. If the default shape changed, executors on either side of the change would compute different hashes and refuse to co-sign.
 
-### Query Builder
+### Paging by Cursor
 
-The fluent query builder provides a chainable interface:
+`paginate(pageSize, pageNumber)` pages by `offset`. It can jump straight to page N, but a row added while you page shifts every later page, so a row can repeat or be skipped. A cursor page cannot jump, but rows added before the cursor do not move the next page.
 
 ```typescript
-const recipes = await Recipe.query(perspective)
-  .where({ category: "MainCourse", rating: { gt: 4 } })
-  .order({ createdAt: "DESC" })
-  .limit(5)
-  .get();
+// First page: no cursor (or "")
+let page = await Message.page(perspective, 50, undefined, { order: { createdAt: "DESC" } });
+render(page.results);
+
+// Each page carries the cursor for the next one
+while (page.nextCursor) {
+  page = await Message.page(perspective, 50, page.nextCursor, { order: { createdAt: "DESC" } });
+  render(page.results);
+}
+
+// Filter the pages by passing a where
+const first = await Message.page(perspective, 50, undefined, {
+  where: { channel: channelId },
+  order: { createdAt: "DESC" }
+});
+```
+
+- `Ad4mModel.page(perspective, pageSize, after?, query?)` returns `{ results, nextCursor?, pageSize }`.
+- Under the hood they send `limit: pageSize` and `after` (`""` for the first page). You can send `after` yourself in a query; the result then carries `nextCursor`.
+- `nextCursor` is there while a full page came back. When it is missing, you are on the last page. If the last rows fill a whole page exactly, the page after it is empty and has no `nextCursor`.
+- A cursor is opaque. Pass it back as it came; do not build one.
+- A cursor page has no `totalCount`; `page()` drops `count` along with `offset`. Use `paginate()` or `count()` for the total.
+
+**Supported orders.** No `order`, or one of `timestamp`, `createdAt` or `updatedAt`, `ASC` or `DESC`. Rows are ordered by their first link's timestamp, for `updatedAt` too. The instance id breaks ties, so no row is repeated or skipped. That holds while the link the timestamp is read from stays put: a class with a flag is probed on its flag link, which never moves; a class without one is probed on its first required property's link — or any link — so replacing that link moves the row, and an `ASC` walk can repeat it while a `DESC` walk skips it.
+
+**Refused.** The executor returns an error, rather than a wrong page, for a query that sends `after` (even `""`) and has:
+
+- an order on a property, or more than one order key,
+- no `limit` above zero (`limit: 0` is a count, not a page — `count()` drops `after` for you),
+- a non-zero `offset` (`page()` drops `offset` for you),
+- a cursor taken from a page in the other direction, or a malformed cursor,
+- several classes (`Ad4mModel.findAllOf`), or an abstract class (it reads every class that has its properties); page those with `limit`/`offset`,
+- a `where` the store cannot evaluate,
+- a `parent` scope with `limitPerAnchor` or `levels`,
+- `after` inside an `include` sub-query (page a relation with `limit`/`offset`), on one class or over several.
+
+Subscriptions refuse `after` too: a subscription re-runs one query, so it would re-read the same page forever. `Model.query()` leaves it out.
+
+Use `paginate()` when you need page numbers, a total count, or another order.
+
+### Sorting and Limiting
+
+`findAll`, `findOne`, `count` and `paginate` take the same query object:
+
+```typescript
+const recipes = await Recipe.findAll(perspective, {
+  where: { category: "MainCourse", rating: { gt: 4 } },
+  order: { createdAt: "DESC" },
+  limit: 5
+});
 
 // Get first match
-const topRecipe = await Recipe.query(perspective)
-  .where({ rating: { gt: 4 } })
-  .order({ rating: "DESC" })
-  .first();  // Returns Recipe | null
+const topRecipe = await Recipe.findOne(perspective, {
+  where: { rating: { gt: 4 } },
+  order: { rating: "DESC" }
+});  // Returns Recipe | null
 ```
 
 ### Where Operators
@@ -882,22 +951,22 @@ By default, relation fields contain raw URI strings. Use `include` to hydrate th
 
 ```typescript
 // Eager-load comments on query results
-const recipes = await Recipe.query(perspective)
-  .where({ category: "Dessert" })
-  .include({ comments: true })
-  .get();
+const recipes = await Recipe.findAll(perspective, {
+  where: { category: "Dessert" },
+  include: { comments: true }
+});
 
 // recipes[0].comments is now Comment[] instead of string[]
 console.log(recipes[0].comments[0].body); // "Delicious!"
 
 // Nested includes
-const recipes = await Recipe.query(perspective)
-  .include({ 
-    comments: { 
+const recipes = await Recipe.findAll(perspective, {
+  include: {
+    comments: {
       include: { chef: true }  // Load comment chefs too
-    } 
-  })
-  .get();
+    }
+  }
+});
 
 // Also works on findAll / findOne
 const recipe = await Recipe.findOne(perspective, {
@@ -918,26 +987,26 @@ Instead of `true`, pass a sub-query object to filter, sort, or paginate the eage
 
 ```typescript
 // Only load the 5 most recent comments
-const recipes = await Recipe.query(perspective)
-  .include({
+const recipes = await Recipe.findAll(perspective, {
+  include: {
     comments: {
       where: { status: "approved" },
       order: { createdAt: "DESC" },
       limit: 5
     }
-  })
-  .get();
+  }
+});
 
 // Combine with nested includes
-const recipes = await Recipe.query(perspective)
-  .include({
+const recipes = await Recipe.findAll(perspective, {
+  include: {
     comments: {
       order: { createdAt: "DESC" },
       limit: 10,
       include: { chef: true }  // Also hydrate each comment's chef
     }
-  })
-  .get();
+  }
+});
 ```
 
 The sub-query accepts: `where`, `order`, `limit`, `offset`, `include`, and `properties`.
@@ -949,9 +1018,9 @@ The sub-query accepts: `where`, `order`, `limit`, `offset`, `include`, and `prop
 Only hydrate specific properties to avoid unnecessary work (especially useful for properties with non-literal `resolveLanguage` that trigger network calls):
 
 ```typescript
-const recipes = await Recipe.query(perspective)
-  .properties(["name", "category"])
-  .get();
+const recipes = await Recipe.findAll(perspective, {
+  properties: ["name", "category"]
+});
 // Only name and category are hydrated; other fields stay at defaults
 ```
 
@@ -978,9 +1047,6 @@ post.__links.comments;
 //   …
 // ]
 post.__links["app://revoked"]; // [] when there is no such link
-
-// Fluent form
-const posts = await Post.query(perspective).links(["comments"]).get();
 ```
 
 - **Entries** are property or relation names the model declares, or absolute predicate IRIs. An IRI may be one the model does not declare. If an entry matches both, the name wins.
@@ -1000,25 +1066,25 @@ The option is also accepted by the raw RPC: `perspective.modelQuery("Post", JSON
 Query instances that are linked from a specific parent:
 
 ```typescript
-// From a model instance
-const comments = await Comment.query(perspective)
-  .parent(recipe)
-  .get();
+// From a parent id + model class (predicate auto-resolved from metadata)
+const comments = await Comment.findAll(perspective, {
+  parent: { id: recipe.id, model: Recipe }
+});
 
-// From an ID + model class (predicate auto-resolved from metadata)
-const comments = await Comment.query(perspective)
-  .parent(recipeId, Recipe)
-  .get();
+// Name the relation when the parent has several that target Comment
+const comments = await Comment.findAll(perspective, {
+  parent: { id: recipeId, model: Recipe, field: "comments" }
+});
 
 // Raw predicate escape hatch
-const comments = await Comment.query(perspective)
-  .parent(recipeId, "recipe://comment")
-  .get();
+const comments = await Comment.findAll(perspective, {
+  parent: { id: recipeId, predicate: "recipe://comment" }
+});
 ```
 
 ### Querying Several Classes at Once
 
-`Ad4mModel.findAllOf` and `Ad4mModel.queryOf` run one query over several classes. Use them for a view that shows records of mixed types, such as a canvas holding placements and edge routes, or a feed of several kinds. One query and one subscription replace one per class, and `limit` / `offset` page over all of them together.
+`Ad4mModel.findAllOf` (read once) and `Ad4mModel.queryOf` (live) run one query over several classes. Use them for a view that shows records of mixed types, such as a canvas holding placements and edge routes, or a feed of several kinds. One query and one subscription replace one per class, and `limit` / `offset` page over all of them together.
 
 ```typescript
 const items = await Ad4mModel.findAllOf(perspective, [Placement, EdgeRoute], {
@@ -1030,10 +1096,11 @@ for (const item of items) {
   if (item instanceof Placement) { /* ... */ }
 }
 
-// Builder form; subscribe() registers one subscription for every class
-const builder = Ad4mModel.queryOf(perspective, [Placement, EdgeRoute])
-  .parent(canvas.id, "canvas://item");
-await builder.subscribe((items) => render(items));
+// Live form: one subscription for every class
+const live = Ad4mModel.queryOf(perspective, [Placement, EdgeRoute], {
+  parent: { id: canvas.id, predicate: "canvas://item" },
+});
+live.subscribe(({ data }) => data && render(data.results));
 ```
 
 Each result is an instance of the class it was read as, and carries `__subjectClass` (that class's target class IRI) and `__subjectClasses` (the IRI of every class the record conforms to), as members of a [polymorphic relation](#relations) do. The query itself is the same `Query` a single class takes. The rules where the classes differ:
@@ -1043,9 +1110,9 @@ Each result is an instance of the class it was read as, and carries `__subjectCl
 | A record conforms to several of the classes | Returned once, when any of its readings passes the query (`where`, `linkStatus`, `includeUnverified`), the same answer a query per class gives. It is read as a class whose reading passes: the first such `preferClasses` entry (a target class IRI or a name; by default the classes given, in order), otherwise the most specific of them. A reading the query cannot see, such as a Local flag under `linkStatus: "shared"`, is never chosen. |
 | `where` on a property a class does not declare | That class's rows are excluded. `{ status: "open" }` returns only records that have an open status. |
 | `order` on a property a class does not declare, or a record with no value | Those rows sort last in both directions. Ties are broken by id. |
-| `limit` / `offset` | Applied once, over the union, after `where` and `order`. `count()` and `totalCount` count the union after `where`. Without `order`, paging uses `createdAt` ascending, then id. |
+| `limit` / `offset` | Applied once, over the union, after `where` and `order`. `totalCount` counts the union after `where`. Without `order`, paging uses `createdAt` ascending, then id. |
 | `include` or a `$` projection over a relation a class does not declare | Skipped for that class's rows. |
-| `subscribe()` | One subscription for the builder, over all the classes. It re-runs when a write could change the record of any of the classes, and sends the change as an update. The same classes in another order give the same result; each builder still holds its own subscription. |
+| `Ad4mModel.queryOf(...)` | One executor subscription per handle, over all the classes. It re-runs when a write could change the record of any of the classes, and sends the change as an update. The same classes in another order give the same result; each handle still holds its own subscription. |
 
 These are refused with an error rather than approximated: a `parent` scope with `limitPerAnchor` or `levels` (each class would slice its own rows per anchor), and an `order` key on a related record (`"author.name"`), which needs every class to declare the relation. A `parent` given as a model class must resolve to the same predicate for every class; otherwise pass the predicate itself. Likewise a `$` projection that two classes declare over relations to different target classes is refused; query those classes separately.
 
@@ -1073,7 +1140,7 @@ const everything = await Readable.findAll(perspective);
 const mentions = await Readable.findAll(perspective, { where: { text: { contains: "@data" } } });
 ```
 
-A query over an abstract class is a [union query](#querying-several-classes-at-once) over the classes it matches, with the same rules and limits. `modelQuery("Readable", …)` and `modelSubscribe("Readable", …)` work the same way.
+A query over an abstract class is a [union query](#querying-several-classes-at-once) over the classes it matches, with the same rules and limits. `modelQuery("Readable", …)` and `Ad4mModel.query(perspective, …, { className: "Readable" })` work the same way.
 
 | Rule | Detail |
 |---|---|
@@ -1168,9 +1235,6 @@ To *show* an unverified claim, for example a UI that marks a value as unverified
 
 ```typescript
 const recipes = await Recipe.findAll(perspective, { includeUnverified: true });
-
-// or with the query builder
-const recipes = await Recipe.query(perspective).includeUnverified().get();
 ```
 
 Included relations inherit the setting unless their own sub-query sets `includeUnverified`. Never use the opt-in for data you act on, such as vote counts or role checks.
@@ -1193,9 +1257,6 @@ Every link is either **Shared** (gossiped to the neighbourhood) or **Local** (ke
 ```typescript
 // Values only from links the neighbourhood sees
 const cards = await Card.findAll(perspective, { linkStatus: "shared" });
-
-// or with the query builder
-const cards = await Card.query(perspective).linkStatus("shared").get();
 
 // Only this executor's Local links
 const drafts = await Card.findAll(perspective, { linkStatus: "local" });
@@ -1256,30 +1317,34 @@ These APIs are useful for building dynamic UIs, tooling, and AI agent integratio
 Subscribe to changes in your data:
 
 ```typescript
-const builder = Recipe.query(perspective)
-  .where({ status: "cooking" });
+// One live handle for every shape of live query
+const live = Recipe.query(perspective, { where: { status: "cooking" } });
 
-// Subscribe — callback fires immediately with initial results,
-// then again whenever matching data changes
-const initialRecipes = await builder.subscribe(recipes => {
-  console.log("Currently cooking:", recipes);
+// The opening page
+const { results: initialRecipes } = await live.first;
+
+// Called at once with the current value (when there is one), then on each change.
+// `initial` is true only for the opening value.
+const stop = live.subscribe(({ status, data, initial }) => {
+  if (status === "ready" && data) console.log("Currently cooking:", data.results, initial);
 });
 
-// Count subscription
-const initialCount = await builder.countSubscribe(count => {
-  console.log("Number cooking:", count);
-});
+// A live count: no rows, only `totalCount`
+const count = Recipe.query(perspective, { where: { status: "cooking" }, limit: 0, count: true });
 
-// Paginated subscription
-const initialPage = await builder.paginateSubscribe(10, 1, page => {
-  console.log("Page 1:", page.results);
-});
+// A live page
+const page = Recipe.query(perspective, { limit: 10, offset: 0, count: true });
 
 // Important: Clean up when done
-builder.dispose();
+stop();
+live.dispose();
+count.dispose();
+page.dispose();
 ```
 
-Always call `dispose()` when you're done with a subscription to prevent memory leaks.
+`Model.query(perspective, query?, options?)` returns a `LiveQuery<Page<T>>` and `perspective.liveSparql(sparql)` a `LiveQuery<SparqlRows>`. `getSnapshot()` returns the same object until the result, the status or `reopening` changes, so it fits `useSyncExternalStore(live.subscribe, live.getSnapshot)`. A result equal to the last emits nothing. Over the wire, `Model.query()` calls the `perspective.subscribe` RPC with `model`, and `liveSparql()` with `sparql`.
+
+Always call `dispose()` when you're done with a live query to prevent memory leaks.
 
 #### What re-runs a subscription
 
@@ -1294,22 +1359,25 @@ not re-run a `Post` subscription, even when both classes use the same flag
 predicate. A query over several classes (`Ad4mModel.queryOf`) is one
 subscription that re-runs on a write any of its classes would re-run on. When
 the result changes, the executor sends only the change (the records added,
-updated and removed, with the new `totalCount` when the query set `count: true`), and the builder applies it to
+updated and removed, with the new `totalCount` when the query set `count: true`), and the `LiveQuery` applies it to
 the result it holds before calling your callback.
 
 #### Subscriptions and `dispose()`
 
-Each builder holds its own executor subscription, tied to its connection. Two
-builders on the same query (two components showing the same list, for example)
+Each `LiveQuery` holds its own executor subscription, tied to its connection. Two
+handles on the same query (two components showing the same list, for example)
 get two subscriptions, so disposing one never stops the other's updates.
 
-A builder holds one subscription at a time: `subscribe()`, `countSubscribe()`
-and `paginateSubscribe()` end the previous one first. `dispose()` ends it on the
-client at once and tells the executor. The executor also ends every subscription
-of a connection when the connection closes.
+`dispose()` ends the subscription on the client at once and tells the executor,
+and is valid before the first value. Calling it again does nothing. The executor
+also ends every subscription of a connection when the connection closes; the
+handle opens a new one when the client reconnects. A re-open that finds the
+result as it was emits nothing; one that finds a different result emits it with
+`initial: false`.
 
 A subscribe the client gives up on leaves nothing behind on the executor. When
-the call times out (30 s), or is cancelled (`dispose({ cancelOpening: true })`),
+the call times out (30 s, `options.timeoutMs`), or `dispose()` cancels it before
+the first value,
 the client cancels it on the executor and then disposes it. The client picks
 each subscription's id itself and sends it with the subscribe call, so it can
 dispose a subscription whose answer it never got. The
@@ -1342,16 +1410,18 @@ For lower-level batch control, see the [Batch Operations Guide](/developer-guide
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `create` | `create(perspective, data?, options?)` | Create and save in one step. `options` supports `parent` and `batchId` |
-| `update` | `update(perspective, id, data)` | Fetch by ID, merge data, save |
+| `update` | `update(perspective, id, data)` | Fetch by ID, merge data, save. Rejects if no instance has this ID |
 | `delete` | `delete(perspective, id)` | Delete by ID with incoming link cleanup |
 | `remove` | `remove(perspective, id)` | *Deprecated* — alias for `delete` |
 | `findAll` | `findAll(perspective, query?)` | Query all matching instances |
 | `findOne` | `findOne(perspective, query?)` | First matching instance or `null` |
 | `findAllAndCount` | `findAllAndCount(perspective, query?)` | Results + total count |
-| `paginate` | `paginate(perspective, pageSize, page, query?)` | Paginated results |
+| `paginate` | `paginate(perspective, pageSize, page, query?)` | Paginated results (by offset) |
+| `page` | `page(perspective, pageSize, after?, query?)` | One cursor page in timestamp order, with `nextCursor` |
 | `register` | `register(perspective)` | Install the SHACL schema in the perspective |
 | `transaction` | `transaction(perspective, fn)` | Atomic batch operation |
-| `query` | `query(perspective)` | Returns a `ModelQueryBuilder` |
+| `query` | `query(perspective, query?, options?)` | A live query: a `LiveQuery` of the current page, updated on each change |
+| `queryOf` | `queryOf(perspective, classes, query?, options?)` | A live query over several classes |
 | `getModelMetadata` | `getModelMetadata()` | Introspect property & relation metadata |
 | `generateSDNA` | `generateSDNA()` | Returns the generated Prolog SDNA rules (injected by `@Model`) |
 | `generateSHACL` | `generateSHACL()` | Returns the generated SHACL shape graph (injected by `@Model`) |
@@ -1625,9 +1695,9 @@ const BlogPost = Ad4mModel.fromJSONSchema(schema) as typeof Ad4mModel & {
 4. **Query Optimization**: Use specific queries instead of filtering in memory:
    ```typescript
    // Good - Let the query engine do the filtering server-side
-   const topRated = await Recipe.query(perspective)
-     .where({ rating: { gt: 4 } })
-     .get();
+   const topRated = await Recipe.findAll(perspective, {
+     where: { rating: { gt: 4 } }
+   });
    
    // Bad - Fetching all and filtering in memory
    const all = await Recipe.findAll(perspective);
@@ -1649,15 +1719,14 @@ const BlogPost = Ad4mModel.fromJSONSchema(schema) as typeof Ad4mModel & {
 
 6. **Subscriptions**: Clean up subscriptions when they're no longer needed:
    ```typescript
-   const builder = Recipe.query(perspective)
-     .where({ status: "active" });
+   const live = Recipe.query(perspective, { where: { status: "active" } });
      
-   await builder.subscribe(recipes => {
+   live.subscribe(({ data }) => {
      // Handle updates
    });
    
    // Later...
-   builder.dispose();
+   live.dispose();
    ```
 
 7. **Use Literals Appropriately**: 

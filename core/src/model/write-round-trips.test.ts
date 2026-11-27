@@ -33,6 +33,21 @@ class RoundTripCall extends Ad4mModel {
   attachments: string[] = [];
 }
 
+@Model({ name: "RoundTripOptional" })
+class RoundTripOptional extends Ad4mModel {
+  @Property({ through: "rt://note" })
+  note: string = "";
+
+  @Property({ through: "rt://rank" })
+  rank: string = "";
+}
+
+@Model({ name: "RoundTripRequired" })
+class RoundTripRequired extends Ad4mModel {
+  @Property({ through: "rt://title", required: true })
+  title: string = "";
+}
+
 // Two relations over one predicate.
 @Model({ name: "RoundTripShared" })
 class RoundTripShared extends Ad4mModel {
@@ -65,8 +80,8 @@ function shaclLinks(classes: any[]) {
   });
 }
 
-function countingProxy(registered: any[], rttMs = 0) {
-  const store = shaclLinks(registered);
+function countingProxy(registered: any[], rttMs = 0, stored: any[] = []) {
+  const store = [...shaclLinks(registered), ...stored];
   const summaries = registered.map((cls) => ({
     name: cls.getClassName(),
     shape: cls.generateSHACL().shape.toJSON(),
@@ -141,13 +156,22 @@ describe("RPCs per write", () => {
   it("Model.create sends no setter for an empty relation", async () => {
     const { proxy, calls } = countingProxy([RoundTripCall]);
     await RoundTripCall.create(proxy, { title: "standup" });
+    expect(calls).toEqual(["createBatch", "createSubject", "commitBatch"]);
+  });
+
+  it("Model.create with returns: 'row' reads once after the commit", async () => {
+    const { proxy, calls } = countingProxy([RoundTripCall]);
+    // This fake's query finds no row, so the create rejects: a row that
+    // cannot be read is an error, not a silent half-filled instance.
+    await expect(RoundTripCall.create(proxy, { title: "standup" }, { returns: "row" }))
+      .rejects.toThrow(/was created, but reading it back failed/);
     expect(calls).toEqual(["createBatch", "createSubject", "commitBatch", "modelQuery"]);
   });
 
   it("create still writes a non-empty relation, and only that one", async () => {
     const { proxy, calls, sent } = countingProxy([RoundTripCall]);
     await RoundTripCall.create(proxy, { title: "standup", tags: ["rt://tag/a", "rt://tag/b"] });
-    expect(calls).toEqual(["createBatch", "createSubject", "executeCommands", "commitBatch", "modelQuery"]);
+    expect(calls).toEqual(["createBatch", "createSubject", "executeCommands", "commitBatch"]);
     const [tags] = commandsSent(sent);
     expect(tags).toContain("rt://tag");
     expect(tags).toContain("rt://tag/a");
@@ -353,5 +377,109 @@ const rtt = Number(process.env.SDK_RTT_MS || 0);
       "createSubject(decorated instance)": await time((p) => p.createSubject(new RoundTripNote(undefined as any), "rt://n")),
     };
     console.log(`RTT ${rtt} ms, ${runs} runs\n` + Object.entries(rows).map(([k, v]) => `${k}: ${v}`).join("\n"));
+  });
+});
+
+describe("an empty value clears a property", () => {
+  const noteLink = link("rt://opt/1", "rt://note", "literal://string:old");
+  const clear = { action: "removeLink", source: "this", predicate: "rt://note", target: "*" };
+  const writes = (sent: any[][]) => sent.filter((c) => c[0] === "executeCommands");
+  const existing = async (proxy: PerspectiveProxy, note: string | null | undefined) => {
+    const opt = new RoundTripOptional(proxy, "rt://opt/1");
+    opt.note = "old";
+    (opt as any).takeSnapshot();
+    (opt as any).note = note;
+    return opt;
+  };
+
+  it.each([[""], [null]])("update with %p sends a removeLink of every link on the property, in the caller's batch", async (empty) => {
+    const { proxy, sent } = countingProxy([RoundTripOptional], 0, [noteLink]);
+    const opt = await existing(proxy, empty as any);
+    await opt.save("batch-1");
+    expect(sent.map((c) => c[0])).toEqual(["executeCommands"]);
+    expect(JSON.parse(sent[0][2])).toEqual([clear]);
+    expect(sent[0][3]).toBe("rt://opt/1");
+    expect(JSON.parse(sent[0][4])).toEqual([]);
+    expect(sent[0][5]).toBe("batch-1");
+  });
+
+  it.each([[""], [null]])("Model.create with %p stores no link", async (empty) => {
+    const { proxy, calls, sent } = countingProxy([RoundTripOptional]);
+    await RoundTripOptional.create(proxy, { note: empty as any, rank: "1" });
+    const createSubject = sent.find((c) => c[0] === "createSubject")!;
+    expect(JSON.stringify(createSubject)).not.toContain("note");
+    expect(JSON.stringify(createSubject)).toContain("rank");
+    expect(writes(sent)).toHaveLength(0);
+  });
+
+  it("an absent value writes nothing", async () => {
+    const { proxy, calls } = countingProxy([RoundTripOptional], 0, [noteLink]);
+    const opt = await existing(proxy, undefined);
+    await opt.save("batch-1");
+    expect(calls).toEqual([]);
+  });
+
+  it("a property already cleared, set to '' again, sends the removeLink and reads nothing", async () => {
+    const { proxy, calls } = countingProxy([RoundTripOptional]);
+    const opt = await existing(proxy, "");
+    await opt.save("batch-1");
+    expect(calls).toEqual(["executeCommands"]);
+  });
+
+  it.each([[""], [null]])("update with %p on a required property throws and writes nothing", async (empty) => {
+    const titleLink = link("rt://req/1", "rt://title", "literal://string:old");
+    const { proxy, calls } = countingProxy([RoundTripRequired], 0, [titleLink]);
+    const req = new RoundTripRequired(proxy, "rt://req/1");
+    req.title = "old";
+    (req as any).takeSnapshot();
+    (req as any).title = empty;
+    await expect(req.save("batch-1")).rejects.toThrow('Property "title" is required and cannot be cleared');
+    expect(calls).toEqual([]);
+  });
+
+  describe("on a class built by fromSHACL", () => {
+    // Decorator -> SHACL -> fromSHACL: the shape's minCount 1 must come back as required.
+    const fromShape = (cls: any) => Ad4mModel.fromSHACL(cls.generateSHACL().shape, cls.getClassName());
+
+    it("a scalar with minCount 1 is required, and one without is not (seen in the shape it generates back)", () => {
+      const minCount = (cls: any) => fromShape(cls).generateSHACL().shape.properties.find((p: any) => p.name).minCount;
+      expect(minCount(RoundTripRequired)).toBe(1);
+      expect(minCount(RoundTripOptional)).toBeUndefined();
+    });
+
+    it.each([[""], [null]])("update with %p on a required scalar throws and sends nothing", async (empty) => {
+      const Req = fromShape(RoundTripRequired) as any;
+      const titleLink = link("rt://req/1", "rt://title", "literal://string:old");
+      const { proxy, calls } = countingProxy([Req], 0, [titleLink]);
+      const req = new Req(proxy, "rt://req/1");
+      req.title = "old";
+      (req as any).takeSnapshot();
+      req.title = empty;
+      await expect(req.save("batch-1")).rejects.toThrow('Property "title" is required and cannot be cleared');
+      expect(calls).toEqual([]);
+    });
+
+    it.each([[""], [null]])("update with %p on a scalar without minCount still clears", async (empty) => {
+      const Opt = fromShape(RoundTripOptional) as any;
+      const { proxy, sent } = countingProxy([Opt], 0, [noteLink]);
+      const opt = new Opt(proxy, "rt://opt/1");
+      opt.note = "old";
+      (opt as any).takeSnapshot();
+      opt.note = empty;
+      await opt.save("batch-1");
+      expect(JSON.parse(sent[0][2])).toEqual([clear]);
+    });
+  });
+
+  it("update clears one property and sets another in one batch", async () => {
+    const { proxy, calls, sent } = countingProxy([RoundTripOptional], 0, [noteLink]);
+    const opt = await existing(proxy, "");
+    opt.rank = "2";
+    await opt.save("batch-1");
+    expect(calls).toEqual(["executeCommands"]);
+    const commands = JSON.parse(sent[0][2]);
+    expect(commands).toHaveLength(2);
+    expect(commands[0]).toEqual(clear);
+    expect(commands[1]).toMatchObject({ action: "setSingleTarget", predicate: "rt://rank" });
   });
 });

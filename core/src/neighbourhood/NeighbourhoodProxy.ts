@@ -4,6 +4,7 @@ import { Perspective, PerspectiveExpression, PerspectiveUnsignedInput } from "..
 import { NeighbourhoodClient } from "./NeighbourhoodClient";
 import type {
     CallSessionInfo,
+    SfuAnswerResult,
     SfuCallRenegotiationOffer,
     SfuCascadeStatus,
     SfuConfig,
@@ -94,8 +95,8 @@ export class NeighbourhoodProxy {
     }
 
     /** Register a handler for incoming telepresence signals. */
-    async addSignalHandler(handler: (payload: PerspectiveExpression) => void): Promise<void> {
-        await this.#client.addSignalHandler(this.#pID, handler)
+    addSignalHandler(handler: (payload: PerspectiveExpression) => void): void {
+        this.#client.addSignalHandler(this.#pID, handler)
     }
 
     /** Remove a previously registered signal handler. */
@@ -238,9 +239,10 @@ export class NeighbourhoodProxy {
         neighbourhoodUrl: string,
         roomName: string,
         participantId: string,
+        offerId: string,
         sdpAnswer: string,
-    ): Promise<boolean> {
-        return await this.#client.sfuCallAnswerServerOffer(neighbourhoodUrl, roomName, participantId, sdpAnswer)
+    ): Promise<SfuAnswerResult> {
+        return await this.#client.sfuCallAnswerServerOffer(neighbourhoodUrl, roomName, participantId, offerId, sdpAnswer)
     }
 
     /**

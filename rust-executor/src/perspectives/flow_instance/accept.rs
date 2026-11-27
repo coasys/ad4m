@@ -31,13 +31,14 @@
 //! and it is the one that runs here.
 
 use super::atom::{
-    check_outputs_commitment, signed_by, OutputRef, TransitionAtom, ACCEPTED_BY_PREDICATE,
-    FLOW_INSTANCE_PREDICATE,
+    check_outputs_commitment, signed_by, OutputRef, OutputsRefusal, TransitionAtom,
+    ACCEPTED_BY_PREDICATE, FLOW_INSTANCE_PREDICATE,
 };
 use super::pass::{
     catch_up_before_own_vote, run_flow_consensus_pass, run_flow_pass_for_co_owners, FireOutcome,
 };
 use super::receipt::is_terminal_state;
+use super::refusal::{FlowError, FlowRefusal};
 use super::FlowInstance;
 use crate::agent::AgentContext;
 use crate::perspectives::flow_context::{
@@ -47,6 +48,7 @@ use crate::perspectives::flow_evaluator::{
     recompute_evidence_hash, run_query, EvidenceItem, RequiresQueryable,
 };
 use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::perspectives::sparql_store::EvalStop;
 use crate::types::{DecoratedLinkExpression, Link, LinkQuery, LinkStatus};
 use std::collections::HashMap;
 
@@ -66,7 +68,7 @@ pub async fn accept_flow_proposal(
     perspective: &mut PerspectiveInstance,
     proposal_uri: &str,
     context: &AgentContext,
-) -> anyhow::Result<Vec<FireOutcome>> {
+) -> Result<Vec<FireOutcome>, FlowError> {
     let lock = perspective.flow_pass_lock.clone();
     let _passes = lock.lock().await;
     accept_flow_proposal_locked(perspective, proposal_uri, context).await
@@ -77,31 +79,37 @@ pub(crate) async fn accept_flow_proposal_locked(
     perspective: &mut PerspectiveInstance,
     proposal_uri: &str,
     context: &AgentContext,
-) -> anyhow::Result<Vec<FireOutcome>> {
+) -> Result<Vec<FireOutcome>, FlowError> {
     let links = proposal_links(perspective, proposal_uri).await?;
     let Some(instance_uri) = links.iter().find_map(|l| {
         (l.data.predicate.as_deref() == Some(FLOW_INSTANCE_PREDICATE))
             .then(|| l.data.target.clone())
     }) else {
-        return Err(anyhow::anyhow!(
-            "proposal {proposal_uri} carries no {FLOW_INSTANCE_PREDICATE} link — not engine-visible, accept not recorded"
-        ));
+        return Err(FlowRefusal::NotEngineVisible {
+            proposal: proposal_uri.to_string(),
+            reason: None,
+        }
+        .into());
     };
     // The visibility gate IS the atom check, so what a client may vote on and
     // what the fold may count are one rule. A proposal that fails it is left
     // in place: a mid-sync proposer link may still arrive and complete it.
-    let atom = TransitionAtom::from_links(&instance_uri, proposal_uri, &links).map_err(|reason| {
-        anyhow::anyhow!(
-            "proposal {proposal_uri} is not engine-visible ({reason} — a mid-sync proposal may still complete) — accept not recorded"
-        )
-    })?;
+    let atom =
+        TransitionAtom::from_links(&instance_uri, proposal_uri, &links).map_err(|reason| {
+            FlowRefusal::NotEngineVisible {
+                proposal: proposal_uri.to_string(),
+                reason: Some(reason.to_string()),
+            }
+        })?;
 
-    let flows = load_shacl_flows(perspective).await?;
+    let flows = load_shacl_flows(&EvalStop::none(), perspective).await?;
     let instances = load_all_flow_instances(perspective).await?;
     let record = instances
         .iter()
         .find(|r| r.instance_uri == instance_uri)
-        .ok_or_else(|| anyhow::anyhow!("no FlowInstance at {instance_uri}"))?;
+        .ok_or_else(|| FlowRefusal::NoInstance {
+            instance: instance_uri.clone(),
+        })?;
     let flow = flows
         .get(&record.flow_uri)
         .ok_or_else(|| anyhow::anyhow!("flow `{}` is not in the catalogue", record.flow_uri))?;
@@ -109,11 +117,13 @@ pub(crate) async fn accept_flow_proposal_locked(
 
     let derived = instance.derive_state(perspective).await?;
     if atom.from_state != derived.state {
-        return Err(anyhow::anyhow!(
-            "proposal {proposal_uri} is stale: it leaves `{}` but {instance_uri} is in `{}` — accept not recorded",
-            atom.from_state,
-            derived.state
-        ));
+        return Err(FlowRefusal::StaleProposal {
+            proposal: proposal_uri.to_string(),
+            leaves: atom.from_state.clone(),
+            instance: instance_uri.clone(),
+            current: derived.state.clone(),
+        }
+        .into());
     }
 
     // The one guard re-run in this engine, and it gates only our own
@@ -135,9 +145,10 @@ pub(crate) async fn accept_flow_proposal_locked(
     // gone). Sealed(h) and NoGuard both produce a well-defined hash, so they
     // can be compared against the proposal's stored seal.
     if recomputed.hash().as_deref() != Some(atom.evidence_hash.as_str()) {
-        return Err(anyhow::anyhow!(
-            "proposal {proposal_uri} cites evidence this replica cannot reproduce — refusing to co-sign; the proposal is left untouched"
-        ));
+        return Err(FlowRefusal::EvidenceUnreproducible {
+            proposal: proposal_uri.to_string(),
+        }
+        .into());
     }
 
     // Into a terminal state the vote also agrees to the run's outputs.
@@ -148,9 +159,22 @@ pub(crate) async fn accept_flow_proposal_locked(
         HashMap::new()
     };
     check_outputs_commitment(&atom, terminal, |r| loaded.get(r).cloned()).map_err(|refusal| {
-        anyhow::anyhow!(
-            "proposal {proposal_uri} is refused: {refusal} — refusing to co-sign; the proposal is left untouched"
-        )
+        let proposal = proposal_uri.to_string();
+        match refusal {
+            OutputsRefusal::Uncommitted => FlowRefusal::OutputsUncommitted { proposal },
+            OutputsRefusal::OutputNotInstance { output } => FlowRefusal::OutputNotInstance {
+                output,
+                proposal: Some(proposal),
+            },
+            OutputsRefusal::HashMismatch {
+                committed,
+                recomputed,
+            } => FlowRefusal::OutputsMismatch {
+                proposal,
+                committed,
+                recomputed,
+            },
+        }
     })?;
 
     let did = crate::agent::did_for_context(context)
@@ -215,7 +239,7 @@ pub async fn reject_flow_proposal(
     perspective: &mut PerspectiveInstance,
     proposal_uri: &str,
     context: &AgentContext,
-) -> anyhow::Result<usize> {
+) -> Result<usize, FlowError> {
     use crate::perspectives::monotonic::{is_retractable, retraction_for};
     use crate::types::LinkExpression;
 
@@ -240,9 +264,11 @@ pub async fn reject_flow_proposal(
     let local: Vec<LinkExpression> = local.into_iter().map(LinkExpression::from).collect();
 
     if tombstones.is_empty() && local.is_empty() {
-        return Err(anyhow::anyhow!(
-            "proposal {proposal_uri} carries no link signed by {did} — cannot reject another agent's proposal"
-        ));
+        return Err(FlowRefusal::NotYourProposal {
+            proposal: proposal_uri.to_string(),
+            agent: did,
+        }
+        .into());
     }
 
     // Callers report this rather than a bare "deleted": retracting one vote
@@ -303,7 +329,7 @@ pub(crate) async fn load_outputs<Q: RequiresQueryable + ?Sized>(
 async fn proposal_links(
     perspective: &PerspectiveInstance,
     proposal_uri: &str,
-) -> anyhow::Result<Vec<DecoratedLinkExpression>> {
+) -> Result<Vec<DecoratedLinkExpression>, FlowError> {
     let links = perspective
         .get_links(&LinkQuery {
             source: Some(proposal_uri.to_string()),
@@ -312,9 +338,10 @@ async fn proposal_links(
         .await
         .map_err(|e| anyhow::anyhow!("proposal lookup on {proposal_uri} failed: {e:#}"))?;
     if links.is_empty() {
-        return Err(anyhow::anyhow!(
-            "no FlowTransitionProposal at {proposal_uri}"
-        ));
+        return Err(FlowRefusal::NoProposal {
+            proposal: proposal_uri.to_string(),
+        }
+        .into());
     }
     Ok(links)
 }

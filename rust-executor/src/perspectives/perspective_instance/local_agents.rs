@@ -12,8 +12,8 @@ use crate::languages::language::Language;
 impl PerspectiveInstance {
     /// This executor's agents that own the perspective: its owners (main or
     /// managed), or the main agent's DID for a perspective without any.
-    pub(super) async fn local_agents(&self) -> Vec<String> {
-        match self.persisted.lock().await.owners.clone() {
+    pub(super) fn local_agents(&self) -> Vec<String> {
+        match self.persisted.load().owners.clone() {
             Some(owners) if !owners.is_empty() => owners,
             _ => vec![crate::agent::did()],
         }
@@ -33,7 +33,7 @@ impl PerspectiveInstance {
         told: Option<&[String]>,
     ) -> Option<Vec<String>> {
         let _registering = self.local_agents_mutex.lock().await;
-        let agents = self.local_agents().await;
+        let agents = self.local_agents();
         if told == Some(agents.as_slice()) {
             return Some(agents);
         }
@@ -75,7 +75,7 @@ mod tests {
 
     impl SetLocal {
         fn of(request: LanguageRuntimeRequest) -> Self {
-            let LanguageOperation::Execute(script, _) = request.operation else {
+            let LanguageOperation::Execute(script, ..) = request.operation else {
                 panic!("not a script: {:?}", request.operation);
             };
             let agents = script
@@ -193,7 +193,7 @@ mod tests {
         }
         assert!(requests.try_recv().is_err());
 
-        let owners = instance.persisted.lock().await.owners.clone().unwrap();
+        let owners = instance.persisted.load().owners.clone().unwrap();
         assert_eq!(owners, [a, b, c]);
         assert_eq!(
             local, owners,

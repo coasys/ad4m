@@ -1,7 +1,7 @@
 import {ApiClient, CallOptions } from '../apiClient'
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import { RuntimeInfo, SentMessage, NotificationInput, NotificationUpdate, Notification, ImportResult, UserStatistics } from "./RuntimeTypes"
-import type { HostRate, LogTail, RuntimeConfig, SetConfigResult, UnytVersionInfo } from "../generated/api"
+import type { HostRate, LogFilter, LogTail, RuntimeConfig, RuntimeImportPerspectiveResult, SetConfigResult, UnytVersionInfo } from "../generated/api"
 import { LanguageMeta } from "../language/LanguageMeta"
 
 export class RuntimeClient {
@@ -32,6 +32,21 @@ export class RuntimeClient {
     /** The newest lines (at most 2000) of the executor's log file (`--log-dir`). */
     async logTail(lines: number): Promise<LogTail> {
         return this.#apiClient.call('runtime.logTail', { lines })
+    }
+
+    /**
+     * Logs `filter` (directives like `ws_rpc=debug,sfu=debug`) over the executor's startup
+     * filter for `ttlSeconds` (default 1800, at most 14400), then the startup filter is back by
+     * itself. A directive name matches whole module path segments of a log target; targets it
+     * does not name keep their level. An empty filter reverts at once. Only the operator.
+     */
+    async setLogFilter(filter: string, ttlSeconds?: number): Promise<LogFilter> {
+        return this.#apiClient.call('runtime.setLogFilter', ttlSeconds === undefined ? { filter } : { filter, ttlSeconds })
+    }
+
+    /** The executor's startup log filter, the override in force and when it reverts. Only the operator. */
+    async logFilter(): Promise<LogFilter> {
+        return this.#apiClient.call('runtime.logFilter', {})
     }
 
     /** The executor's config file: its values, every key with its class, and whether a write waits for a restart. */
@@ -146,7 +161,7 @@ export class RuntimeClient {
 
     async importDb(filePath: string): Promise<ImportResult> {
         const result = await this.#apiClient.call('runtime.importData', { type: "db", filePath })
-        if ('success' in result) throw new Error('runtime.importData answered a perspective import for type "db"')
+        if ('imported' in result) throw new Error('runtime.importData answered a perspective import for type "db"')
         return result
     }
 
@@ -166,9 +181,19 @@ export class RuntimeClient {
         return this.#apiClient.call('runtime.exportData', { type: "perspective", perspectiveUuid: uuid, filePath })
     }
 
-    async importPerspective(filePath: string): Promise<boolean> {
-        const result = await this.#apiClient.call('runtime.importData', { type: "perspective", filePath })
-        return 'success' in result && result.success
+    /** Bulk-loads a `runtime.exportData {type:"perspective"}` file into the
+     * perspective's store. The import adds links that are new to the
+     * perspective in one commit and publishes nothing to the link
+     * language — in a neighbourhood perspective the imported Shared links
+     * may sync to peers later, as links written while offline would. The
+     * whole file is refused (nothing committed) when a link's reifier
+     * already stands in the store, a reifier appears twice in the file,
+     * or a valid tombstone in the file ends a stored or in-file link.
+     */
+    async importPerspective(uuid: string, filePath: string): Promise<RuntimeImportPerspectiveResult> {
+        const result = await this.#apiClient.call('runtime.importData', { type: "perspective", perspectiveUuid: uuid, filePath })
+        if ('imported' in result) return result
+        throw new Error('runtime.importData answered a db import for type "perspective"')
     }
 
     async multiUserEnabled(): Promise<boolean> {

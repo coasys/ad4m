@@ -12,6 +12,11 @@ name: Publish snapshot packages
 #
 # Needs the pkg.pr.new GitHub App installed on this repository. Until it is, the publish step fails.
 
+# Draft pull requests publish a snapshot too when their head branch is in this repository (the
+# publish job skips fork pull requests), unlike the CI on CircleCI, which halts on a draft. A WE pull
+# request pairs with an ad4m pull request by pinning that pull request's snapshot, so without one
+# the paired work on a draft would not install. The job runs on a GitHub-hosted runner, not on the
+# CircleCI machine runners that the no-CI-on-drafts rule protects.
 on:
   push:
     branches:
