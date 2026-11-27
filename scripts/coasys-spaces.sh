@@ -13,6 +13,8 @@
 #   scripts/coasys-spaces.sh build-web   build we-web with the Coasys seed
 #   scripts/coasys-spaces.sh test        run test:spaces, log into the artifacts
 #   scripts/coasys-spaces.sh record      note this commit pair as passed (for preflight)
+#   scripts/coasys-spaces.sh perf DIR    ready the performance record of the results in DIR: print
+#                                        `export WE_SHA=<sha>`, unmark a changed checkout's pass
 #   scripts/coasys-spaces.sh all         every step above, preflight forced
 #
 # Environment (all optional):
@@ -446,6 +448,20 @@ cmd_record() {
     log "recorded $(cat "$STATE/last-success") as passed"
 }
 
+# Readies this run's record in the performance history (perf_finish), whose results are in $1.
+# Prints `export WE_SHA=<sha>` once WE was cloned: the record names both commits. The run of a
+# checkout with changes is not marked passed, as `record` leaves it out: it makes no baseline.
+cmd_perf() {
+    local dir="$1" we_sha
+    [ -d "$dir" ] || die "usage: scripts/coasys-spaces.sh perf <perf results dir>"
+    if [ -e "$WORK/unrecorded" ]; then
+        rm -f "$dir/.passed"
+        log "perf: the checkout had changes at preflight; the run is recorded as not passed" >&2
+    fi
+    we_sha="$(cat "$WORK/we.sha" 2>/dev/null || true)"
+    if is_sha "$we_sha"; then printf 'export WE_SHA=%s\n' "$we_sha"; fi
+}
+
 case "${1:-}" in
     preflight) cmd_preflight ;;
     executor) cmd_executor ;;
@@ -456,6 +472,7 @@ case "${1:-}" in
     build-web) cmd_build_web ;;
     test) cmd_test ;;
     record) cmd_record ;;
+    perf) cmd_perf "${2:-}" ;;
     all)
         COASYS_SPACES_FORCE=1 cmd_preflight
         (cmd_executor)

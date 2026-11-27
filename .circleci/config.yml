@@ -1553,6 +1553,10 @@ jobs:
           name: Build we-web with the Coasys seed
           command: bash scripts/coasys-spaces.sh build-web
           no_output_timeout: 20m
+      # Perf history: WE's suite writes its timings (calls, transcript, interpretation, the
+      # canvas) to $PERF_RESULTS_DIR/coasys-spaces.json.
+      - test_artifacts_dir
+      - perf_setup
       - run:
           # Model calls share staging's one llama-server slot and may wait a few
           # minutes in the queue, then generate. The suite prints a wait line
@@ -1562,7 +1566,21 @@ jobs:
           name: Run the coasys-spaces suite (WE test:spaces)
           command: bash scripts/coasys-spaces.sh test
           no_output_timeout: 60m
+      - perf_finish:
+          job: coasys-spaces
+          collect:
+            - run:
+                # The numbers are WE's code as much as ad4m's: the record names the WE commit
+                # the suite ran (none when the job failed before WE was cloned). A changed
+                # checkout's run is not recorded as passed.
+                name: Perf history - the tested WE commit
+                when: always
+                command: |
+                  if [ -d "${PERF_RESULTS_DIR:-}" ]; then
+                    bash scripts/coasys-spaces.sh perf "$PERF_RESULTS_DIR" >> "$BASH_ENV"
+                  fi
       - run:
+          # After the performance check: a pair that regressed runs again the next night.
           name: Record this commit pair as passed
           command: bash scripts/coasys-spaces.sh record
       - store_artifacts:

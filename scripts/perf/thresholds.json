@@ -12,6 +12,7 @@
     { "job": "llm-e2e", "metric": "llm.*.calls", "factor": 2.0, "min_delta": 20 },
     { "job": "llm-e2e", "metric": "llm.*.failures", "factor": 2.0, "min_delta": 3, "ceiling": 5, "_ceiling": "Passing runs fail 0 prompts (the median is 0, so the factor never fires): more than 5 is a broken model or GPU (the out-of-memory runs failed 130 to 140). A few are tolerated: interpretation retries a failed prompt." },
     { "job": "llm-e2e", "metric": "llm.*.output_tokens_per_s*", "min_delta": 2 },
+
     { "job": "feed-scale", "metric": "feed.*", "min_delta": 3000, "_min_delta": "A page's time moves by up to 3 s between loads of one run (100k: 27.5 to 31.3 s for the newest page)." },
     { "job": "feed-scale", "metric": "feed.*_page.failures", "factor": 1.0, "min_delta": 1, "ceiling": 0, "_ceiling": "The count of loads whose page never drew. A passing run draws every page; one that cannot is the finding the job exists to catch." },
     { "job": "feed-scale", "metric": "executor.feed_*", "min_delta": 1000 },
@@ -23,6 +24,15 @@
     { "job": "feed-scale", "metric": "seed.import_s", "min_delta": 60 },
     { "job": "feed-scale", "metric": "seed.links_per_second", "min_delta": 50000, "_metric": "The executor's import rate (links over seed.import_s)." },
     { "job": "feed-scale", "metric": "seed.links", "factor": 1.1, "min_delta": 1, "_factor": "Fixed by the suite (12 links a message): a change is a change in what is seeded, not in the executor." },
+
+    { "job": "coasys-spaces", "metric": "*", "min_delta": 1000, "_metric": "WE's timings of a person's waits in the built app (we: apps/we-web/e2e/coasys-spaces, README \"Timings\"), all in ms. A wait that shows on a page moves by up to a second between runs." },
+    { "job": "coasys-spaces", "metric": "transcript.*", "min_delta": 5000, "_metric": "In the real tier: Unmute to the first heard word, the recording and the speech model included." },
+    { "job": "coasys-spaces", "metric": "interpretation.*", "factor": 2.0, "min_delta": 60000, "_metric": "A call of the staging model, which can wait minutes behind other jobs on its one llama-server slot." },
+    { "job": "coasys-spaces", "metric": "graph.*", "factor": 2.0, "min_delta": 50, "_metric": "The canvas's zoom, pan, drag and select: input to the next painted frame, tens of ms." },
+    { "job": "coasys-spaces", "metric": "graph.*_max_ms", "factor": 3.0, "min_delta": 100, "_metric": "The slowest of 5 rounds: one late frame (a garbage collection) doubles it." },
+    { "job": "coasys-spaces", "metric": "graph.first_node_ms", "factor": 1.5, "min_delta": 500, "_metric": "The canvas's load: the click on Canvas to its first node." },
+    { "job": "coasys-spaces", "metric": "graph.all_records_ms", "factor": 1.5, "min_delta": 500, "_metric": "Stub tier: the click on Canvas to every record drawn." },
+    { "job": "coasys-spaces", "metric": "graph.first_record_ms", "factor": 1.5, "min_delta": 500, "_metric": "Real tier: the click on Canvas to the first record the model found drawn." },
 
     { "job": "agent-scale", "metric": "agent_scale.*", "min_delta": 5, "_min_delta": "The default for the times of one call, in ms: a median of 0.3 ms to 30 ms moves by a few ms between runs. Every metric has one series per agent count (params agents), so 10 and 100 agents never compare." },
     { "job": "agent-scale", "metric": "agent_scale.*.p95", "min_delta": 50, "_min_delta": "A p95 is one slow call out of 10 to 100 (a scheduler pause, a flush): it jitters by tens of ms." },
