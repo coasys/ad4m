@@ -308,7 +308,7 @@ export AD4M_ADMIN_CREDENTIAL="$(cat /path/to/admin-credential)"   # required
 ad4m-executor run
 
 # Create a perspective
-ad4m perspectives create
+ad4m perspectives add <name>
 
 # Query links
 ad4m perspectives query-links <uuid>

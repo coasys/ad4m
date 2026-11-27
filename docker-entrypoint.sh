@@ -204,7 +204,7 @@ maybe_setup_agent() {
 
     if [ -z "${AGENT_PASSPHRASE:-}" ]; then
         echo "WARNING: Agent is initialised but locked, and AGENT_PASSPHRASE is not set." >&2
-        echo "         Set AGENT_PASSPHRASE to auto-unlock on boot, or run 'ad4m agent unlock' manually." >&2
+        echo "         Set AGENT_PASSPHRASE to auto-unlock on boot, or run 'ad4m -a \"\$(cat <admin-credential-file>)\" agent unlock' manually." >&2
         return
     fi
 

@@ -77,7 +77,7 @@ This returns an **instantiated language address** — the template code with you
 #### 4. Create a neighbourhood
 
 ```bash
-ad4m perspectives create                              # → perspective UUID
+ad4m perspectives add <name>                          # → perspective UUID
 ad4m neighbourhoods create <perspective-UUID> <instantiated-language-address>
 ```
 
