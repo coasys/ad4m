@@ -29,9 +29,11 @@ trend page. The full contract is the header of `scripts/perf/perf.mjs`.
   does not fail. `record` prints `history not pushed: <reason>`, and the records
   stay in the job's artifacts (`perf/records.jsonl`). A `check` that cannot read
   the history still fails on a ceiling or floor; only the factor rule reports.
-- **`check`** fails the job when a value is worse than `factor` × the median of
-  the last 7 passing runs with the same job, metric and params, and at least
-  `min_delta` worse than it; or past an absolute ceiling or floor. `factor`
+- **`check`** compares a value with the median of the last 7 passing runs with
+  the same job, metric and params. It fails the job when a lower-is-better value
+  is above `factor` × the median or above `ceiling`, or a higher-is-better value
+  is below the median ÷ `factor` or below `floor`; the factor rule also needs the
+  value at least `min_delta` worse than the median. `factor`
   (default 1.5), `min_delta` (default 0), `ceiling` and `floor` are per job and
   metric, and live only in `scripts/perf/thresholds.json`; a ceiling or floor
   fails at any history. With fewer than 3 earlier runs, the factor rule only
