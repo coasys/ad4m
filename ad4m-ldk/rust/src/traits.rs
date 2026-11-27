@@ -12,7 +12,9 @@ use crate::types::*;
 pub trait Language: 'static {
     fn name() -> &'static str;
     fn version() -> &'static str;
-    fn is_public() -> bool { false }
+    fn is_public() -> bool {
+        false
+    }
     /// Async so that languages can register Holochain DNAs, await zome
     /// calls, or otherwise use any of the Promise-returning imports
     /// during initialization. Languages whose init logic is sync can
@@ -21,13 +23,17 @@ pub trait Language: 'static {
     fn init() -> impl std::future::Future<Output = LanguageResult<Self>>
     where
         Self: Sized;
-    fn teardown(&mut self) -> LanguageResult<()> { Ok(()) }
+    fn teardown(&mut self) -> LanguageResult<()> {
+        Ok(())
+    }
     /// Returns the interactions available for the given expression
     /// address. Spec §5.7 — the runtime calls this per expression to
     /// discover what actions can be performed against it. Languages
     /// that don't expose per-expression interactions can ignore the
     /// address argument and return a static list (or `Vec::new()`).
-    fn interactions(&self, _address: Address) -> Vec<Interaction> { Vec::new() }
+    fn interactions(&self, _address: Address) -> Vec<Interaction> {
+        Vec::new()
+    }
 
     /// Execute a named interaction against an expression. Spec §5.7 —
     /// Rust ALDK languages cannot return JS callables in `interactions()`
@@ -252,4 +258,32 @@ pub trait LanguageSourceCapability: Language {
 /// declares `holochain_signal` in the `ad4m_language!` macro.
 pub trait HolochainSignalHandler: Language {
     fn handle_holochain_signal(&mut self, signal: serde_json::Value) -> LanguageResult<()>;
+}
+
+/// `mount` capability — the classes and records a language exposes in a
+/// mounted perspective (the Rust counterpart of the JS LDK's
+/// `defineLanguage({ mount })`).
+///
+/// `mount_shapes()` answers `{ version, shapes: [{ name, shape }] }`.
+/// With `#[derive(Ad4mModel)]` on the mounted classes it is typically
+/// one line — `MountShapes::from_classes` strips `node_shape_uri` and
+/// resolves the `{language}` placeholder in call-action sources and
+/// targets against this language's own address, exactly like the JS
+/// `mount.classes` form:
+///
+/// ```ignore
+/// fn mount_shapes(&mut self) -> LanguageResult<MountShapes> {
+///     Ok(MountShapes::from_classes("1", &[
+///         GoldenRecord::generate_shacl(),
+///     ]))
+/// }
+/// ```
+///
+/// `mount_snapshot()` is async because building the record list usually
+/// reaches the remote service through async host imports (`httpFetch`).
+pub trait MountCapability: Language {
+    fn mount_shapes(&mut self) -> LanguageResult<MountShapes>;
+    fn mount_snapshot(
+        &mut self,
+    ) -> impl std::future::Future<Output = LanguageResult<MountSnapshot>>;
 }

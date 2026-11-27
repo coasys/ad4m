@@ -285,6 +285,42 @@ bobPress.proposalUri === alicePress.proposalUri; // true
 
 A vote on a listed proposal is also available directly: `instance.acceptProposal(proposalUri)` adds this DID's signature and re-derives. On the wire these calls are `perspective.proposeFlowTransition`, `perspective.acceptFlowProposal` and `perspective.rejectFlowProposal`, and over MCP the `flow_proposal_accept` / `flow_proposal_reject` tools.
 
+### Refusals
+
+The executor refuses a flow move on purpose when your input or the flow's state forbids it. A refusal is not a fault. The reply has status 409, and `error.data` is a `FlowRefusal`: a `kind` and the facts behind it. Branch on `kind`. Do not parse the English `message`. In the SDK, the call rejects with an `RpcError` whose `status` is 409 and whose `data` is the `FlowRefusal` type (exported from `@coasys/ad4m`):
+
+```ts
+try {
+  await instance.proposeTransition("Done");
+} catch (e) {
+  if (e instanceof RpcError && e.status === 409) {
+    const refusal = e.data as FlowRefusal;
+    if (refusal.kind === "not-reachable") showStates(refusal.from);
+  } else {
+    throw e; // a real failure: status 500, no `data`
+  }
+}
+```
+
+A real failure (a store, signing or serialisation error) stays status 500 and carries no `data`. Over MCP, the text of a refused `flow_proposal_accept` or `flow_proposal_reject` call names the `kind` in parentheses.
+
+| `kind` | When | Fields |
+| --- | --- | --- |
+| `no-instance` | The perspective has no `FlowInstance` at that URI. | `instance` |
+| `no-proposal` | The perspective has no proposal at that URI. | `proposal` |
+| `not-reachable` | `toState` is not reachable from the derived state. | `from`, `to` |
+| `guard-unmet` | The `requires` guard of `toState` is not satisfied on this replica. | `to` |
+| `contested` | Two edges out of the current state already hold quorum. | `instance`, `from` |
+| `not-terminal` | `outputs` were named for a state that is not terminal. | `to` |
+| `output-not-instance` | A named output is not an instance of its class on this replica. `proposal` is `null` when you propose, and the proposal you refuse to sign when you vote. | `output` (`className`, `id`), `proposal` |
+| `outputs-uncommitted` | A proposal into a terminal state carries no outputs commitment. | `proposal` |
+| `outputs-mismatch` | The outputs a proposal names hash to another value on this replica than the one it committed to. | `proposal`, `committed`, `recomputed` |
+| `different-outputs` | An open proposal on the same edge names different outputs. | `instance`, `to`, `proposals` |
+| `stale-proposal` | The proposal leaves a state the instance is no longer in. | `proposal`, `leaves`, `instance`, `current` |
+| `not-engine-visible` | The proposal is not identity-checked, or is still syncing. `reason` is `null` when it has no flow-instance link. | `proposal`, `reason` |
+| `evidence-unreproducible` | The proposal cites evidence this replica cannot reproduce. | `proposal` |
+| `not-your-proposal` | You signed no link of the proposal, so you cannot reject it. | `proposal`, `agent` |
+
 ### Quorum belongs to the edge
 
 When two replicas mint proposals for the same transition concurrently — each not yet having seen the other's — one edge carries twin proposals. If quorum were counted per proposal, a flow with `n: 2` and two twins holding one vote each would sit at genesis forever, both one short. So the engine asks *"did this **edge** collect `n` distinct voters?"*, across every proposal for it. Twins converge, and each appears in the outcome's `contributingProposalUris`.
@@ -558,12 +594,12 @@ The refusals a developer will meet, what each one means, and what to do:
 
 | You did | You get | It means | Do |
 | --- | --- | --- | --- |
-| `proposeTransition("Done")` from a state with no declared edge to Done | error naming the states, e.g. `` `Done` is not reachable from `Ready` `` | the flow's transitions do not include this edge from the **derived** state (not the cache) | render only `availableTransitions`; re-read `derivedState` from the error |
-| `proposeTransition` into a state whose `requires` is unmet | error naming the unmet guard | the guard query found no match on this replica at mint time | write the evidence first, or wait for it to sync |
-| `proposeTransition` while the instance is contested | refusal | two edges out of the current state both hold quorum; the group must resolve it socially (retract votes) | do not retry; surface the contention |
-| `proposeTransition` with `outputs` into a non-terminal state | refusal | a run does not end there, so there is nothing the outputs could be outputs *of* | name outputs only on the final transition |
-| `proposeTransition` with `outputs` different from the open proposal's | refusal (neither joined nor twinned) | co-signing would sign outputs you did not name; a twin would split the final edge's commitment | co-sign or reject the open proposal, or agree on the outputs |
-| `rejectProposal` on a proposal you never signed | error | there is nothing of yours to withdraw; a link that merely *names* your DID is not yours | nothing — only signers can retract |
+| `proposeTransition("Done")` from a state with no declared edge to Done | refusal `not-reachable` (see [Refusals](#refusals)), message naming the states, e.g. `` `Done` is not reachable from `Ready` `` | the flow's transitions do not include this edge from the **derived** state (not the cache) | render only `availableTransitions`; re-read `derivedState` from the error |
+| `proposeTransition` into a state whose `requires` is unmet | refusal `guard-unmet` | the guard query found no match on this replica at mint time | write the evidence first, or wait for it to sync |
+| `proposeTransition` while the instance is contested | refusal `contested` | two edges out of the current state both hold quorum; the group must resolve it socially (retract votes) | do not retry; surface the contention |
+| `proposeTransition` with `outputs` into a non-terminal state | refusal `not-terminal` | a run does not end there, so there is nothing the outputs could be outputs *of* | name outputs only on the final transition |
+| `proposeTransition` with `outputs` different from the open proposal's | refusal `different-outputs` (neither joined nor twinned) | co-signing would sign outputs you did not name; a twin would split the final edge's commitment | co-sign or reject the open proposal, or agree on the outputs |
+| `rejectProposal` on a proposal you never signed | refusal `not-your-proposal` | there is nothing of yours to withdraw; a link that merely *names* your DID is not yours | nothing — only signers can retract |
 | `removeLink` / `removeLinks` / `updateLink` / `linkMutations` / a batch removing a Shared flow link | error: `… is monotonic; retract with a tombstone` | flow links end only by their author's tombstone | `rejectProposal` for your own proposal links; otherwise leave the link |
 | `mintFlowReceipt` on a run that has not settled | error: `no settled edge` | the fold found no completed final transition, so there is nothing to freeze | reach quorum on the final transition first |
 | `flowValidOutputs` / the `producedByFlow` filter / a `fromRole` with `producedByFlow` naming a flow this replica does not hold | error, never `[]` | "I cannot check" must not read as "there are none" | sync the flow definition (the Social DNA) first |

@@ -1,0 +1,18 @@
+{
+    // tsx picks each compiled file's tsconfig via a files-matcher scoped to
+    // the tsconfig's own directory, so the only config that can cover both
+    // the LDK tests (`ad4m-ldk/js/tests`) and the shared decorated fixtures
+    // (`ad4m-ldk/tests`) lives here at the ad4m-ldk root. The ad4m-ldk/js
+    // test script points TSX_TSCONFIG_PATH at this file; the package's own
+    // `tsc` lib build keeps using ad4m-ldk/js/tsconfig.json unchanged.
+    "include": ["**/*"],
+    "compilerOptions": {
+        "target": "ES2022",
+        "module": "ES2022",
+        "moduleResolution": "Bundler",
+        "strict": true,
+        "experimentalDecorators": true,
+        "skipLibCheck": true,
+        "lib": ["ES2022"]
+    }
+}
