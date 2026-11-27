@@ -43,7 +43,8 @@ export const e9Simulcast = e2eScenario({
     };
 
     await step("three join", () => call.join(EVERYONE));
-    await step("everyone receives full size", () => call.eventually(call.seesEveryone(CAMERA), 60_000, "full size"));
+    // A receiver starts on the lowest layer and climbs one layer per 4 s hold as its bandwidth estimate allows.
+    await step("everyone receives full size", () => call.eventually(call.seesEveryone(CAMERA), 120_000, "full size"));
 
     await step("u2 asks for low: u2 receives quarter size", async () => {
       await call.who("u2").quality("low");

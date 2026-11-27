@@ -24,6 +24,7 @@
  */
 
 import { wrtc } from "./media.js";
+import type { SentMedia } from "./protocol.js";
 
 /** The peer connections this process holds open. */
 const open = new Set<RTCPeerConnection>();
@@ -61,6 +62,32 @@ export async function selectedRemoteAddresses(): Promise<string[]> {
     if (remote) addresses.push(`${remote.ip ?? remote.address}:${remote.port}`);
   }
   return addresses;
+}
+
+/**
+ * What this process's connections have sent so far, from WebRTC's outbound-rtp
+ * stats: the payload bytes and RTP packets of its audio, and of each video
+ * simulcast layer by rid. Two reads give a layer's rate over the time between.
+ */
+export async function sentMedia(): Promise<SentMedia> {
+  const sent: SentMedia = { audio: { bytes: 0, packets: 0 }, video: {} };
+  for (const pc of open) {
+    const stats = (await pc.getStats().catch(() => new Map())) as Map<string, any>;
+    for (const s of stats.values()) {
+      if (s.type !== "outbound-rtp") continue;
+      const bytes = s.bytesSent ?? 0;
+      const packets = s.packetsSent ?? 0;
+      if (s.kind === "audio") {
+        sent.audio.bytes += bytes;
+        sent.audio.packets += packets;
+      } else if (s.kind === "video" && s.rid) {
+        const layer = (sent.video[s.rid] ??= { bytes: 0, packets: 0 });
+        layer.bytes += bytes;
+        layer.packets += packets;
+      }
+    }
+  }
+  return sent;
 }
 
 export function specPeerConnection(configuration: RTCConfiguration = {}): RTCPeerConnection {
