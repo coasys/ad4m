@@ -45,6 +45,10 @@ pub struct Language {
     /// Test-only: answers [`Self::render`] in place of the language runtime.
     #[cfg(test)]
     test_render: Option<TestRender>,
+    /// Test-only: answers [`Self::current_revision`] in place of the language
+    /// runtime, and makes [`Self::has`] report `PerspectiveCurrentRevision`.
+    #[cfg(test)]
+    test_revision: Option<TestRevision>,
 }
 
 #[cfg(test)]
@@ -53,6 +57,9 @@ pub(crate) type TestCommit =
 
 #[cfg(test)]
 pub(crate) type TestRender = Arc<dyn Fn() -> Result<Option<Perspective>, AnyError> + Send + Sync>;
+
+#[cfg(test)]
+pub(crate) type TestRevision = Arc<dyn Fn() -> Result<Option<String>, AnyError> + Send + Sync>;
 
 fn parse_revision(js_result: String) -> Result<Option<String>, AnyError> {
     if let Ok(maybe_revision) = serde_json::from_str::<Option<ByteArray>>(&js_result) {
@@ -78,6 +85,8 @@ impl Language {
             test_commit: None,
             #[cfg(test)]
             test_render: None,
+            #[cfg(test)]
+            test_revision: None,
         }
     }
 
@@ -99,6 +108,16 @@ impl Language {
         }
     }
 
+    /// Test seam: `current_revision` answers with `revision`, and the language
+    /// reports `PerspectiveCurrentRevision`.
+    #[cfg(test)]
+    pub(crate) fn with_test_revision(self, revision: TestRevision) -> Self {
+        Self {
+            test_revision: Some(revision),
+            ..self
+        }
+    }
+
     pub fn address(&self) -> &str {
         &self.address
     }
@@ -110,6 +129,10 @@ impl Language {
     /// that registry, so a language whose `register_callbacks` has not yet
     /// run will report an empty capability set.
     pub fn has(&self, cap: Capability) -> bool {
+        #[cfg(test)]
+        if cap == Capability::PerspectiveCurrentRevision && self.test_revision.is_some() {
+            return true;
+        }
         self.capabilities.contains(&cap)
     }
 }
@@ -168,6 +191,10 @@ impl Language {
     }
 
     pub async fn current_revision(&mut self) -> Result<Option<String>, AnyError> {
+        #[cfg(test)]
+        if let Some(revision) = &self.test_revision {
+            return revision();
+        }
         if !self.has(Capability::PerspectiveCurrentRevision) {
             return Ok(None);
         }

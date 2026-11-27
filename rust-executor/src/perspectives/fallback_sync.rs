@@ -21,6 +21,16 @@ pub(crate) enum ShareScope {
 /// A fallback pass may always send up to this many links.
 pub(crate) const FALLBACK_ALWAYS_SENDS: usize = 20;
 
+/// Idle fallback passes between forced compares.
+///
+/// After a success the loop waits 300s (`fallback_sync_loop`), so 12 idle
+/// passes is about an hour. A link language that reports no revision, or
+/// the same one, still gets a compare on that pass: that is what repairs a
+/// remote that lost links while the local queue stayed empty. Passes that
+/// already compare — the first, an unsent diff, a revision change, a
+/// link-language change — are not counted.
+pub(crate) const FALLBACK_FORCED_COMPARE_EVERY_N_PASSES: u64 = 12;
+
 /// Whether a pass that finds `missing` of the perspective's `shared` links
 /// absent remotely must send nothing: a fallback pass that would send more
 /// than `FALLBACK_ALWAYS_SENDS` links and more than half the shared set.
