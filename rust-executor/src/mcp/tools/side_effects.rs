@@ -79,6 +79,7 @@ pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
     ("instance_create", SideEffect::Write),
     ("instance_query", SideEffect::Read),
     ("instance_get", SideEffect::Read),
+    ("instance_search", SideEffect::Read),
     ("instance_update", SideEffect::Write),
     ("instance_add_to_collection", SideEffect::Write),
     ("instance_remove_from_collection", SideEffect::Write),

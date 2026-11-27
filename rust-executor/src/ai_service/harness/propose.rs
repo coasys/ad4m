@@ -38,6 +38,37 @@ use uuid::Uuid;
 /// `apply_with_overlay`.
 pub type ProposalBuffer = super::provider::HintBuffer<InterpretationOp>;
 
+/// The model's `propose_same_as` decisions of one pass: (new row, existing row). The engine
+/// drains it with the [`ProposalBuffer`] and merges each new row into its existing row.
+pub type SameAsBuffer = super::provider::HintBuffer<(String, String)>;
+
+// ── duplicate check ───────────────────────────────────────────────────────
+
+/// An existing row that may be the same as a row the model creates.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NearRow {
+    pub id: String,
+    pub title: String,
+    pub score: f32,
+    /// At or above the merge threshold: the engine merges the new row into this one at
+    /// the end of the pass. Else the row is in the unclear band and the model decides.
+    pub clear: bool,
+}
+
+/// The engine's duplicate check, for the `{class}_create` reply and `propose_same_as`. The
+/// harness knows no perspective; the engine implements this over the pass's rows.
+#[async_trait]
+pub trait DuplicateCheck: Send + Sync {
+    /// The existing rows of `class` near a new row with `values`, best first: the one
+    /// clear match (if any) and the unclear ones.
+    async fn near(&self, class: &str, values: &serde_json::Map<String, Value>) -> Vec<NearRow>;
+    /// Whether `id` is an existing row of `class`.
+    async fn is_row_of(&self, class: &str, id: &str) -> bool;
+}
+
+/// The tool the model records a duplicate decision with.
+pub const PROPOSE_SAME_AS: &str = "propose_same_as";
+
 // ── per-class shape ───────────────────────────────────────────────────────
 
 /// Enough of a SHACL class to describe its propose-write tool surface —
@@ -176,6 +207,9 @@ pub struct ProposeWritesProvider<P: ToolProvider + ?Sized> {
     /// The pass owner (engine) passes its `base_prefix` here — matches the
     /// `plan_interpretation_ops_resolved` argument name.
     base_prefix: String,
+    /// With [`Self::with_duplicate_check`]: the hits a `{class}_create` reply adds, and
+    /// where `propose_same_as` records.
+    duplicates: Option<(Arc<dyn DuplicateCheck>, SameAsBuffer)>,
 }
 
 impl<P: ToolProvider + ?Sized> ProposeWritesProvider<P> {
@@ -190,7 +224,19 @@ impl<P: ToolProvider + ?Sized> ProposeWritesProvider<P> {
             classes,
             buffer,
             base_prefix,
+            duplicates: None,
         }
+    }
+
+    /// Add the existing rows near a new row to each `{class}_create` reply, and offer
+    /// `propose_same_as`, which records into `same_as`.
+    pub fn with_duplicate_check(
+        mut self,
+        check: Arc<dyn DuplicateCheck>,
+        same_as: SameAsBuffer,
+    ) -> Self {
+        self.duplicates = Some((check, same_as));
+        self
     }
 }
 
@@ -218,6 +264,9 @@ where
                 out.push(propose_link_child_schema(c));
             }
         }
+        if self.duplicates.is_some() {
+            out.push(propose_same_as_schema());
+        }
         out
     }
 
@@ -226,6 +275,9 @@ where
         // wins: `_propose_link_child` is checked before `_create` (which
         // could otherwise consume something like `<class>_link_child_
         // create` if we ever added it).
+        if name == PROPOSE_SAME_AS && self.duplicates.is_some() {
+            return self.handle_propose_same_as(args).await;
+        }
         if let Some(class_name) = strip_class_suffix(name, "_propose_link_child") {
             return self.handle_propose_link_child(&class_name, args);
         }
@@ -245,7 +297,8 @@ where
             // handler runs. `find_class` returns None for a prefix that
             // isn't a registered class, so we fall through cleanly.
             if self.find_class(&class_name).is_some() {
-                return self.handle_propose_create(&class_name, args);
+                let created = self.handle_propose_create(&class_name, args)?;
+                return Ok(self.with_near_rows(created).await);
             }
         }
         // `<class>_add_<relation>` alias family: gemma3:12b in CI job
@@ -383,6 +436,97 @@ impl<P: ToolProvider + ?Sized> ProposeWritesProvider<P> {
         });
 
         Ok(format!("created: {base}"))
+    }
+
+    /// The `created: <base>` reply of the create just buffered, plus the existing rows near
+    /// it: the clear match the pass merges it into, and the unclear rows the model decides on.
+    async fn with_near_rows(&self, created: String) -> String {
+        let Some((check, _)) = &self.duplicates else {
+            return created;
+        };
+        // The op of this reply, by its base: another call may have buffered one since.
+        let Some(base) = created.strip_prefix("created: ").map(str::to_string) else {
+            return created;
+        };
+        let Some((class, values)) = self.buffer.find_map(|op| match op {
+            InterpretationOp::Create {
+                base: b,
+                class,
+                values,
+            } if *b == base => Some((class.clone(), values.clone())),
+            _ => None,
+        }) else {
+            return created;
+        };
+        let near = check.near(&class, &values).await;
+        let mut reply = created;
+        if let Some(clear) = near.iter().find(|r| r.clear) {
+            reply.push_str(&format!(
+                "\nThis is the same as the existing {class} {} \"{}\" (score {:.2}). At the \
+                 end of the pass the new row is merged into it, so {} is the id to link to.",
+                clear.id, clear.title, clear.score, clear.id
+            ));
+            return reply;
+        }
+        let unclear: Vec<&NearRow> = near.iter().filter(|r| !r.clear).collect();
+        if unclear.is_empty() {
+            return reply;
+        }
+        reply.push_str(&format!(
+            "\nExisting {class} rows that may be the same (read one with instance_get to know \
+             more):"
+        ));
+        for row in unclear {
+            reply.push_str(&format!(
+                "\n- {} \"{}\" score {:.2}",
+                row.id, row.title, row.score
+            ));
+        }
+        reply.push_str(&format!(
+            "\nIf one is the same thing, call {PROPOSE_SAME_AS} with new=\"{base}\" and \
+             existing=its id. If none is, do nothing: the new row stays."
+        ));
+        reply
+    }
+
+    /// Record that the new row `new` (a `created:` id of this pass) is the existing row
+    /// `existing` of the same class. The engine merges the two at the end of the pass.
+    async fn handle_propose_same_as(&self, args: Value) -> Result<String> {
+        let Some((check, same_as)) = &self.duplicates else {
+            return Err(anyhow!("tool `{PROPOSE_SAME_AS}` is not available"));
+        };
+        let field = |name: &str| {
+            args.get(name)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| anyhow!("{PROPOSE_SAME_AS} needs `{name}`"))
+        };
+        let (new, existing) = (field("new")?, field("existing")?);
+        let class = self
+            .buffer
+            .find_map(|op| match op {
+                InterpretationOp::Create { base, class, .. } if *base == new => Some(class.clone()),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                anyhow!("`new` must be an id from a `created:` reply of this pass; `{new}` is not")
+            })?;
+        if existing == new {
+            return Err(anyhow!("`existing` must be another row than `new`"));
+        }
+        if !check.is_row_of(&class, &existing).await {
+            return Err(anyhow!(
+                "`existing` must be an existing {class} row; `{existing}` is not. Take the id \
+                 from the {class}_create reply, instance_search or instance_query."
+            ));
+        }
+        same_as.push((new.clone(), existing.clone()));
+        Ok(format!(
+            "recorded: {new} is the same as {existing}. At the end of the pass the new row is \
+             merged into it."
+        ))
     }
 
     fn handle_propose_link_child(&self, lower_class: &str, args: Value) -> Result<String> {
@@ -875,6 +1019,35 @@ fn propose_link_child_schema(c: &ClassProposeShape) -> ToolSchema {
             rel_hint = rel_hint,
         ),
         parameters,
+    }
+}
+
+fn propose_same_as_schema() -> ToolSchema {
+    ToolSchema {
+        // Like the propose tools: it changes what the pass writes at its end.
+        side_effect: crate::ai_service::harness::provider::SideEffect::Write,
+        name: PROPOSE_SAME_AS.to_string(),
+        description: "Say that a row you created in this pass is the same thing as an \
+             existing row of the same class. At the end of the pass the new row is merged into \
+             the existing row: its values go to the existing row, except the title, and its \
+             links point to the existing row. Use it when a `_create` reply or instance_search \
+             shows a row that may be the same and you decide it is. With no call, the new row \
+             stays."
+            .to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "new": {
+                    "type": "string",
+                    "description": "The id from the `created:` reply of this pass.",
+                },
+                "existing": {
+                    "type": "string",
+                    "description": "The id of the existing row it is the same as.",
+                },
+            },
+            "required": ["new", "existing"],
+        }),
     }
 }
 

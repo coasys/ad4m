@@ -43,6 +43,8 @@
 //! fixtures/harness in `interpretation_test_support.rs`.
 
 mod dedup;
+mod duplicates;
+pub(crate) mod embedding_cache;
 mod existing_budget;
 mod graph;
 mod overflow;
@@ -54,6 +56,7 @@ pub(crate) mod overlay;
 mod parse;
 mod prompt;
 mod run;
+pub mod search;
 mod types;
 
 pub use dedup::*;
