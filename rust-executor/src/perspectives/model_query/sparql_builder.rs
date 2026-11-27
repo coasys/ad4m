@@ -220,16 +220,8 @@ pub(super) fn build_instance_sparql(
 
     let needed = instance_link_predicates(shape);
 
-    let predicate_filter = if needed.is_empty() {
-        String::new()
-    } else {
-        let values: String = needed
-            .iter()
-            .map(|p| format!("<{p}>"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        format!("    VALUES ?predicate {{ {values} }}\n")
-    };
+    // A filter, not `VALUES`: see `predicate_in_filter`.
+    let predicate_filter = super::utils::predicate_in_filter(&needed);
 
     let pagination_suffix = if let Some(pg) = sparql_pagination {
         let mut suffix = String::new();

@@ -1,6 +1,6 @@
 [package]
 name = "ad4m-executor"
-version = "0.13.1-staging.20"
+version = "0.13.1-staging.21"
 edition = "2021"
 authors = ["Nicolas Luck <nicolas.luck@coasys.org>"]
 description = "Runtime implementation of AD4M as library - https://ad4m.dev"
@@ -188,9 +188,13 @@ url2 = "0.0.6"
 # Features updated for 0.7.0 stable naming: sqlite-encrypted → encryption,
 # wasmer_sys → wasmer-sys-cranelift, transport-iroh dropped (not a feature
 # on 0.7.0 stable).
-holochain = { version = "0.7.0", default-features = false, features = ["test_utils", "encryption", "schema", "wasmer-sys-cranelift"], git = "https://github.com/coasys/holochain.git", branch = "0.7.0-space-override-coasys" }
-holochain_cli_bundle = { version = "0.7.0", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-space-override-coasys" }
-holochain_types = { version = "0.7.0", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-space-override-coasys" }
+# Bumped to HC 0.7.1 (coasys fork branch 0.7.1-space-override-coasys =
+# upstream holochain-0.7.1 + our space-override / network-readiness
+# commits) so AD4M can share cells with stock 0.7.1 conductors such as the
+# Acorn desktop app (0.7.1 changed the CapGrant shape).
+holochain = { version = "0.7.1", default-features = false, features = ["test_utils", "encryption", "schema", "wasmer-sys-cranelift"], git = "https://github.com/coasys/holochain.git", branch = "0.7.1-space-override-coasys" }
+holochain_cli_bundle = { version = "0.7.1", git = "https://github.com/coasys/holochain.git", branch = "0.7.1-space-override-coasys" }
+holochain_types = { version = "0.7.1", git = "https://github.com/coasys/holochain.git", branch = "0.7.1-space-override-coasys" }
 # Bumped from 0.6.3 to 0.7.1 to match HC 0.7.0 stable (which pins lair 0.7.1).
 # Using upstream lair 0.7.1 directly — no fork needed anymore. The old
 # coasys/lair 0.7.1-coasys fork existed only to downgrade rusqlite to 0.34
@@ -202,7 +206,7 @@ sodoken = "=0.1.0"
 scryer-prolog = { version = "0.10", git = "https://github.com/coasys/scryer-prolog", branch = "ad4m" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
 
-ad4m-client = { path = "../rust-client", version="0.13.1-staging.20" }
+ad4m-client = { path = "../rust-client", version="0.13.1-staging.21" }
 reqwest = { version = "0.11.20", features = ["json", "native-tls", "blocking", "stream", "multipart"] }
 # reqwest 0.11's DNS `Name` (the identity resolver's public-address-only `dns_resolver`).
 hyper_014 = { package = "hyper", version = "0.14.21", default-features = false, features = ["tcp", "client"] }
@@ -220,6 +224,7 @@ regex = "1.5.4"
 json5 = "0.4"
 serde_yaml = "0.9"
 rayon = "1.7.0"  # For parallel processing in filtering optimization
+memchr = "2"     # String skipping in the perspective-import byte scan
 lettre = "0.11"  # For sending verification emails via SMTP
 
 include_dir = "0.6.0"
