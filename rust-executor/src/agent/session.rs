@@ -385,6 +385,9 @@ impl Session {
             Audience::Everyone => true,
             Audience::Operator => self.is_operator(),
             Audience::Dids(dids) => self.acts_as_did().is_some_and(|did| dids.contains(&did)),
+            Audience::DidsAndOperator(dids) => {
+                self.is_operator() || self.acts_as_did().is_some_and(|did| dids.contains(&did))
+            }
         };
         in_audience && self.may(&event.capability)
     }

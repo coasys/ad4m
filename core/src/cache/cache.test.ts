@@ -1,6 +1,6 @@
 import { Ad4mClient } from '../Ad4mClient';
 import { Perspective } from '../perspectives/Perspective';
-import { NullCache } from '../cache/PersistentCache';
+import { NullCache, prefixEnd } from '../cache/PersistentCache';
 import { AgentClient } from '../agent/AgentClient';
 import { ExpressionClient } from '../expression/ExpressionClient';
 
@@ -45,6 +45,9 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
                 return failure;
             }
         }),
+    'agent.updateProfile': () => ({
+        did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://written',
+    }),
     'expression.interact': () => 'ok',
     'expression.create': (p: Record<string, unknown>) => `lang://test/Qm-created-${Date.now()}`,
 };
@@ -164,6 +167,28 @@ beforeEach(() => {
 });
 
 // ===================== NULLCACHE TESTS =====================
+
+describe('prefixEnd', () => {
+    const inRange = (key: string, prefix: string) => {
+        const end = prefixEnd(prefix);
+        return key >= prefix && (end === undefined || key < end);
+    };
+
+    test('every key that starts with the prefix is in the range, and no other key is', () => {
+        expect(inRange('o|did|a', 'o|did|')).toBe(true);
+        expect(inRange('o|did|￿x', 'o|did|')).toBe(true);
+        expect(inRange('o|did|￿￿', 'o|did|')).toBe(true);
+        expect(inRange('o|did}', 'o|did|')).toBe(false);
+        expect(inRange('o|dic|a', 'o|did|')).toBe(false);
+    });
+
+    test('a prefix of U+FFFF units has no end; a trailing U+FFFF is skipped', () => {
+        expect(prefixEnd('￿￿')).toBeUndefined();
+        expect(prefixEnd('')).toBeUndefined();
+        expect(prefixEnd('a￿')).toBe('b');
+        expect(inRange('a￿z', 'a￿')).toBe(true);
+    });
+});
 
 describe('NullCache', () => {
     test('get() always returns undefined', async () => {
@@ -330,60 +355,104 @@ describe('AgentClient Cache', () => {
         ]);
     });
 
-    test('invalidateByDid() clears cache and forces re-fetch', async () => {
-        await ad4m.agent.byDID('did:test:invalidate');
+    test('50 byDID() misses of one tick make one agent.byDIDs', async () => {
+        const dids = Array.from({ length: 50 }, (_, i) => `did:test:fifty-${i}`);
 
-        // Invalidate
-        ad4m.agent.invalidateByDid('did:test:invalidate');
+        const agents = await Promise.all(dids.map(did => ad4m.agent.byDID(did)));
 
-        // Next call should make a new RPC
-        await ad4m.agent.byDID('did:test:invalidate');
-
-        const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDIDs');
-        expect(byDidCalls).toHaveLength(2);
+        expect(agents.map(a => a.did)).toEqual(dids);
+        const calls = rpcCallLog.filter(c => c.type.startsWith('agent.by'));
+        expect(calls.map(c => c.type)).toEqual(['agent.byDIDs']);
+        expect(calls[0].params.dids).toEqual(dids);
     });
 
-    test('clearByDidCache() clears all L1 entries', async () => {
-        await ad4m.agent.byDID('did:test:clear1');
-        await ad4m.agent.byDID('did:test:clear2');
+    test('read-your-writes: me() and byDID() answer with what updatePublicPerspective returned, before any event', async () => {
+        expect((await ad4m.agent.me()).directMessageLanguage).toBe('lang://dm');
+        expect((await ad4m.agent.byDID('did:test:123')).directMessageLanguage).toBeUndefined();
+
+        await ad4m.agent.updatePublicPerspective({ links: [] } as any);
+
+        expect((await ad4m.agent.me()).directMessageLanguage).toBe('lang://written');
+        expect((await ad4m.agent.byDID('did:test:123')).directMessageLanguage).toBe('lang://written');
+        expect(rpcCallLog.filter(c => c.type === 'agent.get')).toHaveLength(1);
+        expect(rpcCallLog.filter(c => c.type === 'agent.byDIDs')).toHaveLength(1);
+    });
+
+    test('agent-updated for the own DID replaces me(); for another DID it leaves me() alone', async () => {
+        const me = ad4m.agent.live.me();
+        await me.read();
+        const seen: unknown[] = [];
+        me.subscribe(s => seen.push(s.value?.directMessageLanguage));
+
+        const ws = lastOf(MockWebSocket.instances);
+        ws.emit({ type: 'agent-updated', agent: { did: 'did:test:other', perspective: null, directMessageLanguage: 'lang://other' } });
+        ws.emit({ type: 'agent-updated', agent: { did: 'did:test:123', perspective: null, directMessageLanguage: 'lang://pushed' } });
+
+        expect(me.getSnapshot()).toMatchObject({ state: 'fresh', value: { directMessageLanguage: 'lang://pushed' } });
+        expect(seen).toEqual(['lang://pushed']);
+        expect(rpcCallLog.filter(c => c.type === 'agent.get')).toHaveLength(1);
+    });
+
+    test('agent-updated refreshes the live view of a profile before its TTL runs out', async () => {
+        const live = ad4m.agent.live.byDID('did:test:view');
+        const seen: unknown[] = [];
+        live.subscribe(s => seen.push([s.state, s.value?.directMessageLanguage]));
+        await live.read();
+
+        lastOf(MockWebSocket.instances).emit({
+            type: 'agent-updated',
+            agent: { did: 'did:test:view', perspective: null, directMessageLanguage: 'lang://fresh' },
+        });
+
+        expect(live.getSnapshot()).toMatchObject({ state: 'fresh', value: { directMessageLanguage: 'lang://fresh' } });
+        expect(seen[seen.length - 1]).toEqual(['fresh', 'lang://fresh']);
+        expect(rpcCallLog.filter(c => c.type === 'agent.byDIDs')).toHaveLength(1);
+    });
+
+    test('after a lag marker the subscribed profiles reload together, the others wait for a read', async () => {
+        const subscribed = ['did:test:sub-1', 'did:test:sub-2'].map(did => ad4m.agent.live.byDID(did));
+        subscribed.forEach(live => live.subscribe(() => {}));
+        await Promise.all(subscribed.map(live => live.read()));
+        await ad4m.agent.byDID('did:test:idle');
+        rpcCallLog = [];
+
+        lastOf(MockWebSocket.instances).emit({ type: 'query-subscription-update', lagged: true });
+        await Promise.all(subscribed.map(live => live.read()));
+
+        const calls = rpcCallLog.filter(c => c.type === 'agent.byDIDs');
+        expect(calls.map(c => c.params.dids)).toEqual([['did:test:sub-1', 'did:test:sub-2']]);
+    });
+
+    test('a lagged marker makes every profile stale: the next read asks again', async () => {
+        await ad4m.agent.byDID('did:test:lag1');
+        await ad4m.agent.byDID('did:test:lag2');
         expect(rpcCallLog.filter(c => c.type === 'agent.byDIDs')).toHaveLength(2);
 
-        ad4m.agent.clearByDidCache();
+        lastOf(MockWebSocket.instances).emit({ type: 'query-subscription-update', lagged: true });
 
-        // Both should re-fetch
-        await ad4m.agent.byDID('did:test:clear1');
-        await ad4m.agent.byDID('did:test:clear2');
+        await ad4m.agent.byDID('did:test:lag1');
+        await ad4m.agent.byDID('did:test:lag2');
         expect(rpcCallLog.filter(c => c.type === 'agent.byDIDs')).toHaveLength(4);
     });
 
-    test('byDID() RPC failure cleans up cache entry for retry', async () => {
-        // Temporarily make agent.byDid return an error response
+    test('a failed byDID() is not cached: the next read retries', async () => {
         const origHandler = MOCK_RESPONSES['agent.byDid'];
-        let failCount = 0;
-        // Override to fail once, then succeed
+        let failures = 1;
         MOCK_RESPONSES['agent.byDid'] = (p: Record<string, unknown>) => {
-            if (failCount === 0) {
-                failCount++;
-                // Return a value that will cause a TypeError when accessing .did
-                // Actually, we need to test RPC-level failure.
-                // The mock sends back result, so let's do a different approach:
-                // Just test that invalidateByDid works to force re-fetch.
-                return { did: p.did, perspective: new Perspective() };
-            }
-            return { did: p.did, perspective: new Perspective(), retry: true };
+            if (failures-- > 0) throw { code: 500, message: 'language failed' };
+            return { did: p.did, perspective: new Perspective() };
         };
 
         try {
-            // First call
-            await ad4m.agent.byDID('did:test:fail');
-            // Invalidate to simulate failure recovery
-            ad4m.agent.invalidateByDid('did:test:fail');
-            // Second call should fetch again
+            const view = ad4m.agent.live.byDID('did:test:fail');
+            const off = view.subscribe(() => {});
+            await expect(ad4m.agent.byDID('did:test:fail')).rejects.toMatchObject({ status: 500 });
+            expect(view.getSnapshot().state).toBe('error');
+            off();
+
             const agent = await ad4m.agent.byDID('did:test:fail');
             expect(agent.did).toBe('did:test:fail');
-
-            const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDIDs');
-            expect(byDidCalls).toHaveLength(2);
+            expect(rpcCallLog.filter(c => c.type === 'agent.byDIDs')).toHaveLength(2);
         } finally {
             MOCK_RESPONSES['agent.byDid'] = origHandler;
         }
@@ -640,24 +709,15 @@ describe('ExpressionClient Cache', () => {
         expect(rpcCallLog).toHaveLength(0); // no RPCs at all
     });
 
-    test('get() TTL expiry triggers re-fetch', async () => {
-        // A language may change what a URL returns and no event tells the
-        // client, so a cached expression expires instead of staying fresh.
-        const originalTTL = ExpressionClient.EXPRESSION_TTL_MS;
-        ExpressionClient.EXPRESSION_TTL_MS = 1; // 1ms
+    test('an expression is immutable: a lagged marker leaves it, a reconnect does not refetch it', async () => {
+        await ad4m.expression.get('lang://test/Qm-immutable');
+        expect(expressionReads()).toHaveLength(1);
 
-        try {
-            await ad4m.expression.get('lang://test/Qm-ttl');
-            expect(expressionReads()).toHaveLength(1);
+        lastOf(MockWebSocket.instances).emit({ type: 'query-subscription-update', lagged: true });
+        ad4m.reconnectNow();
 
-            // Wait longer than TTL
-            await new Promise(r => setTimeout(r, 10));
-
-            await ad4m.expression.get('lang://test/Qm-ttl');
-            expect(expressionReads()).toHaveLength(2);
-        } finally {
-            ExpressionClient.EXPRESSION_TTL_MS = originalTTL;
-        }
+        await ad4m.expression.get('lang://test/Qm-immutable');
+        expect(expressionReads()).toHaveLength(1);
     });
 
     test('clearCache() forces re-fetch', async () => {
@@ -850,21 +910,6 @@ describe('AgentClient Cache — additional edge cases', () => {
         expect(byDidCalls).toHaveLength(0);
     });
 
-    test('invalidateByDid() on non-existent DID does not throw', () => {
-        expect(() => ad4m.agent.invalidateByDid('did:test:nonexistent')).not.toThrow();
-    });
-
-    test('invalidateByDid() on the own DID forces a re-fetch', async () => {
-        const own = (await ad4m.agent.status()).did!;
-        await ad4m.agent.byDID(own);
-        expect(rpcCallLog.filter(c => c.type === 'agent.byDIDs')).toHaveLength(1);
-
-        ad4m.agent.invalidateByDid(own);
-
-        await ad4m.agent.byDID(own);
-        expect(rpcCallLog.filter(c => c.type === 'agent.byDIDs')).toHaveLength(2);
-    });
-
     test('concurrent byDID() for different DIDs makes one RPC', async () => {
         const [a1, a2, a3] = await Promise.all([
             ad4m.agent.byDID('did:test:par-1'),
@@ -917,16 +962,12 @@ describe('Cache isolation between clients', () => {
 // ===================== AD4M CLIENT INTEGRATION =====================
 
 describe('Ad4mClient cache integration', () => {
-    test('close() clears agent L1 cache', async () => {
+    test('a new client after close() has its own mirror', async () => {
         await ad4m.agent.byDID('did:test:close');
         expect(rpcCallLog.filter(c => c.type === 'agent.byDIDs')).toHaveLength(1);
 
         ad4m.close();
 
-        // After close, a new client is needed; but we can test that
-        // the clearByDidCache was called by checking the old client
-        // Note: close() calls apiClient.closeAll() which may close sockets,
-        // so we create a fresh client to verify the pattern
         const fresh = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         await fresh.agent.byDID('did:test:close');
         // New client should make its own RPC (separate cache)

@@ -163,7 +163,7 @@ export async function startWorld(spec: WorldSpec): Promise<World> {
       },
       ports: async () => {
         // The operator's view of the SFU, read only to aim the network impairment.
-        const { bindAddress } = await admin.neighbourhood.sfuStatus();
+        const { bindAddress } = await admin.runtime.sfuStatus();
         return [port, Number(bindAddress.split(":").pop())];
       },
       restartExecutor: async () => {

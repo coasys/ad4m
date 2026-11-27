@@ -1,43 +1,26 @@
-import { computed, effect, ref, shallowRef, watch } from "vue";
-import { Ad4mClient, Agent, AgentStatus, LinkExpression } from "@coasys/ad4m";
+import { computed } from "vue";
+import { Ad4mClient, LinkExpression } from "@coasys/ad4m";
+import { useLive } from "./useLive";
 
-const status = shallowRef<AgentStatus>({ isInitialized: false, isUnlocked: false });
-const agent = shallowRef<Agent | undefined>();
-const isListening = shallowRef(false);
-const profile = shallowRef<any | null>(null);
-
+/**
+ * The agent and its status, read from the client's mirror: `agent-updated` and
+ * `agent-status-changed` replace them, a reconnect reloads them. Calls with one client
+ * share the entries; two clients share nothing.
+ */
 export function useMe<T>(client: Ad4mClient, formatter: (links: LinkExpression[]) => T) {
-  effect(async () => {
-    if (isListening.value) return;
+  const statusSnapshot = useLive(client.agent.live.status());
+  const meSnapshot = useLive(client.agent.live.me());
 
-    status.value = await client.agent.status();
-    agent.value = await client.agent.me();
+  const status = computed(() => statusSnapshot.value.value);
+  const me = computed(() => meSnapshot.value.value);
+  const profile = computed(() => {
+    const perspective = me.value?.perspective;
+    return perspective ? formatter(perspective.links) : null;
+  });
+  const error = computed(() => {
+    const failure = meSnapshot.value.error ?? statusSnapshot.value.error;
+    return failure === undefined ? undefined : String(failure);
+  });
 
-    isListening.value = true;
-
-    client.on("agent-status-changed", ({ agent: s }) => {
-      status.value = new AgentStatus(s);
-    });
-
-    client.on("agent-updated", ({ agent: a }) => {
-      agent.value = Agent.fromWire(a);
-    });
-  }, {});
-
-  watch(
-    () => agent.value,
-    (newAgent) => {
-      if (agent.value?.perspective) {
-        const perspective = newAgent?.perspective;
-        if (!perspective) return;
-        profile.value = formatter(perspective.links);
-      } else {
-        profile.value = null;
-      }
-    },
-    { immediate: true }
-  )
-  
-
-  return { status, me: agent, profile };
+  return { status, me, profile, error };
 }

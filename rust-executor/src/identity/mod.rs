@@ -208,6 +208,7 @@ pub fn no_store_keys_cause(store_url: Option<&str>, keys_source: StoreSource) ->
 pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheError> {
     let mut cache = KelCache::open(db_path, settings.store_keys.clone())?;
     cache.set_fork_listener(Box::new(publish_fork));
+    cache.set_change_listener(service::change_listener(|| SERVICE.get().cloned()));
     if let Some(warning) = missing_store_keys_warning(settings) {
         log::warn!("{warning}");
     }
@@ -230,6 +231,7 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
         store_url: settings.store_url.clone(),
         store_keys_source: settings.store_keys_source,
         resolver: Arc::new(resolver),
+        main_identity: Default::default(),
     };
     if SERVICE.set(Arc::new(service)).is_err() {
         log::warn!("identity: the module was started twice; keeping the first");

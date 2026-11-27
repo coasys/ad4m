@@ -4,6 +4,7 @@ import { DID } from "../DID"
 import { OnlineAgent, TelepresenceSignalCallback } from "../language/Language"
 import { Perspective, PerspectiveExpression, PerspectiveUnsignedInput } from "../perspectives/Perspective"
 import { PerspectiveHandle } from "../perspectives/PerspectiveHandle"
+import { keepPerspective } from "../perspectives/perspectiveList"
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy"
 import type {
     CallSessionInfo,
@@ -19,7 +20,6 @@ import type {
     SfuRoomInfo,
     SfuRoomRoster,
     SfuSessionReplaced,
-    SfuStatus,
 } from "./SfuTypes"
 
 export class NeighbourhoodClient {
@@ -43,7 +43,9 @@ export class NeighbourhoodClient {
     }
 
     async joinFromUrl(url: string, options?: CallOptions): Promise<PerspectiveHandle> {
-        return PerspectiveHandle.fromWire(await this.#apiClient.call('neighbourhood.join', { url }, options))
+        const handle = PerspectiveHandle.fromWire(await this.#apiClient.call('neighbourhood.join', { url }, options))
+        keepPerspective(this.#apiClient, handle)
+        return handle
     }
 
     async otherAgents(perspectiveUUID: string): Promise<DID[]> {
@@ -437,21 +439,6 @@ export class NeighbourhoodClient {
     }
 
     // ── SFU diagnostic / test-harness endpoints ────────────────────────
-
-    /** The calling agent's own DID — the user's, for a user token. */
-    async callerDid(): Promise<string | null> {
-        return (await this.#apiClient.call("agent.status", {})).did
-    }
-
-    /**
-     * Read-only: SFU service status including public reachability.
-     * Returns whether this executor can relay media to remote
-     * participants (public), sits behind NAT (nat), or could not
-     * determine its reachability (unknown).
-     */
-    async sfuStatus(): Promise<SfuStatus> {
-        return this.#apiClient.call("sfu.status", {})
-    }
 
     /**
      * Read-only: how many SFU↔SFU pipe transports are fully established,

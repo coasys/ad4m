@@ -129,9 +129,8 @@ export class Ad4mClient {
         this.#apiClient.reconnectNow()
     }
 
-    /** Close all event connections and clear in-memory caches */
+    /** Close all event connections. The client's mirror goes with the client. */
     close(): void {
-        this.#agentClient.clearByDidCache()
         this.#apiClient.closeAll()
     }
 }

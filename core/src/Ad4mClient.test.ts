@@ -469,12 +469,17 @@ afterAll(() => {
 
 afterEach(closeClients);
 
-beforeEach(() => {
+beforeEach(async () => {
+    // A new client has a new mirror: no value of an earlier test is read. Its status entry
+    // is read first, with the perspective list and the hosting info, so the client has watched
+    // its events before a test looks at the last call.
+    ad4m.close();
+    ad4m = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
+    await ad4m.agent.status();
+    await ad4m.perspective.live.all().read();
+    await ad4m.agent.hostingUserInfo();
     lastRpcCall = null;
     MockWebSocket.instances = [];
-    // Clear caches to prevent cross-test interference
-    ad4m.agent.clearByDidCache();
-    ad4m.expression.clearCache();
 });
 
 // ===================== AGENT TESTS =====================
@@ -967,7 +972,7 @@ describe('PerspectiveClient', () => {
     test('a live query applies updates and resyncs on a revision gap', async () => {
         const freshClient = newClient();
         const subscription = await freshClient.perspective.byUUID('uuid-1')
-            .then(p => p!.liveSparql('SELECT ?s WHERE { ?s ?p ?o }'));
+            .then(p => p!.liveSparql('SELECT ?s WHERE { ?s ?p ?o }', { keepAliveMs: 0 }));
         expect(await subscription.first).toEqual([{ s: 'a' }]);
         const results: unknown[] = [];
         subscription.subscribe(snapshot => results.push(snapshot.data));
@@ -1132,7 +1137,7 @@ describe('NeighbourhoodClient', () => {
         const releaseOffers = freshClient.neighbourhood.subscribeSfuCallRenegotiationOffer('did:me', offers);
         freshClient.neighbourhood.subscribeSfuMigrateEvent('did:me', migrations);
         freshClient.neighbourhood.subscribeSfuDataChannel(data);
-        await freshClient.neighbourhood.sfuStatus();
+        await freshClient.runtime.sfuStatus();
         const ws = lastOf(MockWebSocket.instances);
         expect(ws.rpc.map(c => c.type)).toEqual(['events.watch', 'sfu.status']);
         expect(ws.rpc[0].params).toEqual({ 'sfu-call-renegotiation-offer': null, 'sfu-data': null, 'sfu-migrate': null });
@@ -1440,7 +1445,8 @@ describe('IdentityClient', () => {
     });
 
     test('agent.status() carries the identity beside the device did', async () => {
-        const status = await ad4m.agent.status();
+        // A new client: `ad4m` keeps the status its earlier generate() and import() tests returned.
+        const status = await newClient().agent.status();
         expect(status.did).toBe('did:test:123');
         expect(status.identity).toBe('did:scid:coasys:1:QmTest');
     });

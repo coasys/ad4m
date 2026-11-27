@@ -11,9 +11,11 @@ import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
 import { PerspectiveHandle } from "./PerspectiveHandle";
+import { forgetPerspective, heldPerspective, keepPerspective, keepUpdatedPerspective, perspectiveList } from "./perspectiveList";
+import type { Live } from "../mirror/Mirror";
 import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
-import type { QueryLagged, QueryUpdate, Subscribed } from "./LiveQuery";
+import { LiveSubscription, type LiveOptions, type LiveQuery, type QueryLagged, type QueryUpdate, type Subscribed } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
 import type { AgentMessage } from "../generated/api/AgentMessage";
 import type { AgentReply } from "../generated/api/AgentReply";
@@ -41,6 +43,15 @@ function classParams(className: string | string[]): { class_name: string } | { c
     return Array.isArray(className) ? { class_names: className } : { class_name: className }
 }
 
+type LiveQueryText = { sparql: string } | { className: string | string[], queryJson: string }
+
+/** What a live query sends to open, besides the perspective and the subscription id: its key's params. */
+function subscribeWire(query: LiveQueryText) {
+    return 'sparql' in query
+        ? { sparql: query.sparql }
+        : { model: { ...(Array.isArray(query.className) ? { classNames: query.className } : { className: query.className }), queryJson: query.queryJson } }
+}
+
 /** A new live query's id (a UUID v4). The client mints it, so it can end the
  *  subscription without the subscribe call's reply. `getRandomValues`, not
  *  `randomUUID`: a page served over plain HTTP has only the former. */
@@ -56,10 +67,10 @@ export class PerspectiveClient {
     #apiClient: ApiClient
     #expressionClient?: ExpressionClient
     #neighbourhoodClient?: NeighbourhoodClient
+    #neighbourhoodProxies = new Map<string, NeighbourhoodProxy>()
+    /** A perspective removed by any client of this executor takes its neighbourhood proxy with it. */
+    #dropProxy = ({ perspectiveUuid }: { perspectiveUuid: string }) => { this.#neighbourhoodProxies.delete(perspectiveUuid) }
     #aiClient?: AIClient
-    #sparqlInFlight = new Map<string, Promise<string>>()
-    /** Per perspective, how many writes through this client have settled; part of the in-flight key. */
-    #writeGeneration = new Map<string, number>()
 
     constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token)
@@ -81,9 +92,21 @@ export class PerspectiveClient {
         return this.#aiClient!
     }
 
+    /**
+     * Every perspective of the agent. One list is kept per client and followed: the
+     * executor's `perspective-added`, `-updated` and `-removed` events and the handles that
+     * {@link add}, {@link update}, {@link remove} and `neighbourhood.joinFromUrl` return
+     * change it, so a read of a fresh list is local. Each call returns new proxies.
+     */
     async all(): Promise<PerspectiveProxy[]> {
-        const perspectives = await this.#apiClient.call('perspective.all', {})
-        return perspectives.map(handle => new PerspectiveProxy(PerspectiveHandle.fromWire(handle), this))
+        const handles = await perspectiveList(this.#apiClient).read()
+        return handles.map(handle => new PerspectiveProxy(handle, this))
+    }
+
+    /** Views on the client's mirror entries: subscribe for changes, or read. */
+    readonly live = {
+        /** The agent's perspectives as handles; {@link all} reads it. */
+        all: (): Live<PerspectiveHandle[]> => perspectiveList(this.#apiClient),
     }
 
     async byUUID(uuid: string): Promise<PerspectiveProxy|null> {
@@ -125,35 +148,70 @@ export class PerspectiveClient {
 
     /**
      * Concurrent identical calls (same perspective and query, no `options`)
-     * share one RPC. Each caller parses its own copy of the reply, and a call
-     * made after the shared one settled makes a new RPC. So does a call made
-     * after a write through this client settled: the shared RPC may have been
-     * answered before the write (see `#wrote`).
+     * share one RPC, through the mirror's one-shot layer (`Mirror.oneShot`). Each caller
+     * parses its own copy of the reply, and a call made after the shared one settled makes
+     * a new RPC. So does a call made after a write through this client settled: the shared
+     * RPC may have been answered before the write (see `#wrote`).
      */
     async querySparql<T = any>(uuid: string, query: string, options?: CallOptions): Promise<T> {
-        if (options) return JSON.parse(await this.#apiClient.call('perspective.querySparql', { uuid, engine: 'sparql', query }, options)) as T
-        const key = `${uuid}\n${this.#writeGeneration.get(uuid) ?? 0}\n${query}`
-        let reply = this.#sparqlInFlight.get(key)
-        if (!reply) {
-            reply = this.#apiClient.call('perspective.querySparql', { uuid, engine: 'sparql', query })
-                .finally(() => this.#sparqlInFlight.delete(key))
-            this.#sparqlInFlight.set(key, reply)
-        }
-        return JSON.parse(await reply) as T
+        const live = options?.signal?.aborted ? undefined : this.#liveAnswer(uuid, { sparql: query })
+        if (live) return live.result as T
+        const params = { uuid, engine: 'sparql' as const, query }
+        if (options) return JSON.parse(await this.#apiClient.call('perspective.querySparql', params, options)) as T
+        return JSON.parse(await this.#apiClient.mirror.oneShot({
+            perspective: uuid,
+            method: 'perspective.querySparql',
+            params,
+            request: () => this.#apiClient.call('perspective.querySparql', params),
+        })) as T
     }
 
     /**
-     * Await a write to `uuid`, then start a new write generation for it
-     * (also when the write failed: it may still have changed the perspective).
-     * Calls of {@link querySparql} already waiting keep sharing their RPC; an
-     * identical call started from now on makes its own.
+     * Await a write to `uuid`, then tell the mirror (`Mirror.wrote`) a write settled, also
+     * when it failed: it may still have changed the perspective. One-shot calls already
+     * waiting keep sharing their RPC; an identical call started from now on makes its own,
+     * and the live queries of the perspective answer no one-shot until an update arrives.
      */
     async #wrote<T>(uuid: string, write: Promise<T>): Promise<T> {
         try {
             return await write
         } finally {
-            this.#writeGeneration.set(uuid, (this.#writeGeneration.get(uuid) ?? 0) + 1)
+            this.#apiClient.mirror.wrote(uuid)
         }
+    }
+
+    /**
+     * A live query handle on the client's mirror. Handles with one perspective, query and
+     * parameters share one executor subscription (see {@link LiveQuery}); `open` runs only
+     * for the first, and keeps the raw result. Each handle builds its data from that result
+     * with its own `project` (see `LiveView`); a `project` that throws fails the handle's
+     * `first` before it had data, and keeps the handle's old data after.
+     */
+    liveQuery<T>(uuid: string, query: LiveQueryText, project: (raw: any) => T, options: LiveOptions = {}): LiveQuery<T> {
+        return this.#apiClient.mirror.live<T>({
+            perspective: uuid,
+            method: 'perspective.subscribe',
+            params: subscribeWire(query),
+            keepAliveMs: options.keepAliveMs,
+            open: () => new LiveSubscription(
+                this, uuid,
+                signal => this.subscribe(uuid, query, { signal, timeoutMs: options.timeoutMs }),
+            ),
+            project,
+        })
+    }
+
+    /**
+     * The result of an open live query with this text, while it is ready and live: what a
+     * one-shot read of the same question answers, so it needs no request (a call whose signal
+     * is already aborted takes no answer: it goes to the RPC, which rejects it). The one-shot's
+     * params are the live query's: a one-shot with a cursor (`after`) differs in its
+     * `queryJson`, so it is no match.
+     */
+    #liveAnswer(uuid: string, query: LiveQueryText): { result: any } | undefined {
+        return this.#apiClient.mirror.liveResult({
+            perspective: uuid, method: 'perspective.subscribe', params: subscribeWire(query),
+        })
     }
 
     /** Open a live query: a SPARQL query, or a model query over one class or
@@ -161,13 +219,11 @@ export class PerspectiveClient {
      *  `options.signal` cancels the call, and the executor stops computing the first result. */
     async subscribe(
         uuid: string,
-        query: { sparql: string } | { className: string | string[], queryJson: string },
+        query: LiveQueryText,
         options?: CallOptions,
     ): Promise<Subscribed> {
         const subscriptionId = mintSubscriptionId()
-        const wire = 'sparql' in query
-            ? { sparql: query.sparql }
-            : { model: { ...(Array.isArray(query.className) ? { classNames: query.className } : { className: query.className }), queryJson: query.queryJson } }
+        const wire = subscribeWire(query)
         return this.#released(uuid, subscriptionId, this.#apiClient.call(
             'perspective.subscribe', { uuid, subscriptionId, ...wire }, options,
         ))
@@ -209,10 +265,16 @@ export class PerspectiveClient {
 
     /** `className` may name several classes: one query over their union (#1238). */
     async modelQuery(uuid: string, className: string | string[], queryJson: string, options?: CallOptions): Promise<any> {
-        const resultJson = await this.#apiClient.call(
-            'perspective.modelQuery', { uuid, ...classParams(className), query_json: queryJson }, options
-        )
-        return JSON.parse(resultJson)
+        const live = options?.signal?.aborted ? undefined : this.#liveAnswer(uuid, { className, queryJson })
+        if (live) return live.result
+        const params = { uuid, ...classParams(className), query_json: queryJson }
+        if (options) return JSON.parse(await this.#apiClient.call('perspective.modelQuery', params, options))
+        return JSON.parse(await this.#apiClient.mirror.oneShot({
+            perspective: uuid,
+            method: 'perspective.modelQuery',
+            params,
+            request: () => this.#apiClient.call('perspective.modelQuery', params),
+        }))
     }
 
     async subjectClassesOf(uuid: string, uris: string[]): Promise<Record<string, string[]>> {
@@ -239,17 +301,22 @@ export class PerspectiveClient {
     }
 
     async add(name: string): Promise<PerspectiveProxy> {
-        const handle = await this.#apiClient.call('perspective.create', { name })
-        return new PerspectiveProxy(PerspectiveHandle.fromWire(handle), this)
+        const handle = PerspectiveHandle.fromWire(await this.#apiClient.call('perspective.create', { name }))
+        keepPerspective(this.#apiClient, handle)
+        return new PerspectiveProxy(handle, this)
     }
 
     async update(uuid: string, name: string): Promise<PerspectiveProxy> {
-        const handle = await this.#apiClient.call('perspective.update', { uuid, name })
-        return new PerspectiveProxy(PerspectiveHandle.fromWire(handle), this)
+        const was = heldPerspective(this.#apiClient, uuid)
+        const handle = PerspectiveHandle.fromWire(await this.#apiClient.call('perspective.update', { uuid, name }))
+        keepUpdatedPerspective(this.#apiClient, handle, was)
+        return new PerspectiveProxy(handle, this)
     }
 
     async remove(uuid: string): Promise<{perspectiveRemove: boolean}> {
         const result = await this.#apiClient.call('perspective.remove', { uuid })
+        if (result) forgetPerspective(this.#apiClient, uuid)
+        this.#neighbourhoodProxies.delete(uuid)
         return { perspectiveRemove: result }
     }
 
@@ -642,8 +709,18 @@ export class PerspectiveClient {
         return this.#apiClient.on(type, handler, filter)
     }
 
+    /** The perspective's neighbourhood proxy: one per uuid, so its sessions and handlers are shared. */
     getNeighbourhoodProxy(uuid: string): NeighbourhoodProxy {
-        return new NeighbourhoodProxy(this.#neighbourhoodClient!, uuid)
+        // With the first proxy, not in the constructor, so a client opens no socket for it.
+        // `on` keeps one registration per handler. `remove()` still drops its own proxy at once,
+        // before the event arrives.
+        this.#apiClient.on('perspective-removed', this.#dropProxy)
+        let proxy = this.#neighbourhoodProxies.get(uuid)
+        if (!proxy) {
+            proxy = new NeighbourhoodProxy(this.#neighbourhoodClient!, uuid, this.#apiClient)
+            this.#neighbourhoodProxies.set(uuid, proxy)
+        }
+        return proxy
     }
 
     async createBatch(uuid: string): Promise<string> {

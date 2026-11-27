@@ -8,7 +8,9 @@
   "files": [
     "src"
   ],
-  "scripts": {},
+  "scripts": {
+    "test": "vitest run"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
@@ -21,6 +23,12 @@
   "peerDependencies": {
     "preact": "*",
     "react": ">=18"
+  },
+  "devDependencies": {
+    "happy-dom": "^14.0.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "vitest": "^1.6.0"
   },
   "repository": {
     "type": "git",

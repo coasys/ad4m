@@ -1364,9 +1364,12 @@ the result it holds before calling your callback.
 
 #### Subscriptions and `dispose()`
 
-Each `LiveQuery` holds its own executor subscription, tied to its connection. Two
-handles on the same query (two components showing the same list, for example)
-get two subscriptions, so disposing one never stops the other's updates.
+Handles on one client with the same perspective, query and parameters (two
+components showing the same list, for example) share one executor subscription,
+tied to its connection. Each handle has its own listeners and its own result,
+built from the shared one, and its `first` is the result as it is when the handle
+opens. Disposing one never stops the other's updates; the subscription ends 30 s
+(`keepAliveMs`) after the last handle is disposed.
 
 `dispose()` ends the subscription on the client at once and tells the executor,
 and is valid before the first value. Calling it again does nothing. The executor

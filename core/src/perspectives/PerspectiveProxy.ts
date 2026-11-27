@@ -18,7 +18,7 @@ import { AIClient } from "../ai/AIClient";
 
 import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators";
 import { AllInstancesResult } from "../model/types";
-import { LiveOptions, LiveQuery, SparqlRows } from "./LiveQuery";
+import type { LiveOptions, LiveQuery, SparqlRows } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
 import type { AgentMessage } from "../generated/api/AgentMessage";
 import type { AgentReply } from "../generated/api/AgentReply";
@@ -1509,11 +1509,11 @@ export class PerspectiveProxy {
      *  ```
      */
     liveSparql<T = SparqlRows>(sparql: string, options: LiveOptions = {}): LiveQuery<T> {
-        return new LiveQuery<T>(
-            this.#client, this.uuid,
-            signal => this.#client.subscribe(this.uuid, { sparql }, { signal, timeoutMs: options.timeoutMs }),
-            // A copy: LiveQuery keeps the raw result to apply later diffs to.
+        return this.#client.liveQuery<T>(
+            this.uuid, { sparql },
+            // A copy: the subscription keeps the raw result to apply later diffs to.
             rows => structuredClone(rows),
+            options,
         );
     }
 

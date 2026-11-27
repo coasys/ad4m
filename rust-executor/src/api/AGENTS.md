@@ -456,9 +456,9 @@ them against those two guards.
   `events_ws::event_specs()` is keyed by `Topic`. A socket's stream
   (`events_ws::build_event_stream`) delivers an event when `Session::may_receive` and
   `event_interest::wants` (the watch, keyed by `Topic`) hold, as `events_ws::wire_message`.
-- `Audience = Everyone | Dids(Vec<String>) | Operator`. `may_receive` needs both: the session is
-  in the audience (everyone, `Session::acts_as_did` is one of the DIDs, or for `Operator` the
-  operator principal only; a grant acts as its agent, the operator as the main agent it owns),
+- `Audience = Everyone | Dids(Vec<String>) | Operator | DidsAndOperator(Vec<String>)`. `may_receive`
+  needs both: the session is in the audience (everyone, `Session::acts_as_did` is one of the DIDs,
+  for `Operator` the operator principal only, for `DidsAndOperator` either of the two, once; a grant acts as its agent, the operator as the main agent it owns),
   and it holds `Event::capability`. `Event::new` fills
   the capability from `Topic::capability(perspective)`, the capability of the RPC method that
   reads the same data (#1284): per-perspective topics name the event's perspective
@@ -473,14 +473,20 @@ them against those two guards.
   (`Session::is_authenticated`: not anonymous) get a stream. The stream ends at the first event
   the session may receive after `Session::check()` fails. `audience_matrix_tests` in
   `events_ws.rs` pins who receives each audience; a new topic or audience adds its cases there.
-- The operator has no view of other agents' events: it receives what the main agent receives,
-  plus `Operator` events (what only the operator may read).
+- The operator receives what the main agent receives, plus `Operator` events (what only the
+  operator may read), plus the perspective list events of every perspective (below). It
+  receives no other agent's link, state or query events.
 - Audiences. Every per-perspective topic reads its recipients from one helper,
   `perspectives::event_recipients`: the owners, or the main agent for an unowned perspective
   (or one whose owner list is empty), read when the event is published. No per-perspective event
-  goes to `Everyone`. Each goes out once, to all recipients (`perspectives::publish_to_owners`),
-  and no payload names an `owner`: `perspective-added/-updated/-removed`, `sync-state-change`,
-  `link-added/-removed/-updated`. `query-subscription-update`
+  goes to `Everyone`, and no payload names an `owner`. Each goes out once, to all recipients.
+  `sync-state-change` and `link-added/-removed/-updated` go to the owners only
+  (`perspectives::publish_to_owners`, `Audience::Dids`). The list events
+  `perspective-added/-updated/-removed` follow another rule: whoever `perspective.all` lists a
+  perspective to must hear its list events, because an SDK client mirrors that list and
+  refreshes it from those events. `perspective.all` lists every perspective to the operator, so
+  the list events go out as `Audience::DidsAndOperator(recipients)`
+  (`perspectives::publish_list_event`). `query-subscription-update`
   (`PerspectiveInstance::send_delta_update`, which reads the recipients when it publishes)
   goes only to the subscriber (`SubscribedQuery::subscriber`, the main agent for `None`) when it
   is one of them: the query ran as the subscriber, so a co-owner must not get its results.
@@ -524,7 +530,11 @@ them against those two guards.
   already-cancelled child, so there is no race to check. Only the socket's own task writes the
   close frame. The RPC socket first delivers in-flight replies for up to `REPLY_GRACE`, so
   `user.logout` gets its answer; each call's `cancel_token` is a child of the socket's token, so
-  the calls still running are cancelled (401). Expiry closes an idle socket the same way:
+  the calls still running are cancelled (401). A socket whose token opens no session is closed
+  by `close_refused` right after the upgrade, which then reads (and ignores) what the client
+  sends until the client's close, for up to `REPLY_GRACE`: a client writes as soon as the socket
+  opens, and a connection dropped under those writes makes the client abort (1006) without
+  reading the 1008 and its reason. Expiry closes an idle socket the same way:
   every socket (and the SSE chat stream, and the RPC socket's event stream,
   `build_event_stream`) also waits on `session.over()`, which completes when
   the grant ends or the token expires (leeway included). A new socket type must watch

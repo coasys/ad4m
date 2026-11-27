@@ -164,6 +164,29 @@ pub struct IdentityService {
     pub store_keys_source: super::StoreSource,
     /// DID resolution (`identity.resolve`) over the same cache and backend.
     pub resolver: Arc<super::resolver::Resolver>,
+    /// The identity the last `agent-status-changed` of the main agent carried (`None`: none
+    /// published yet; `Some(None)`: published with no identity). Held while a status is
+    /// computed and published, so the events go out in the order of the states they show.
+    pub(super) main_identity: tokio::sync::Mutex<Option<Option<String>>>,
+}
+
+/// The cache's change listener for the service `get` returns (`None` before it exists): the
+/// main agent's status event follows the log, whichever call or refresh moved it.
+pub(super) fn change_listener(
+    get: impl Fn() -> Option<Arc<IdentityService>> + Send + Sync + 'static,
+) -> super::cache::ChangeListener {
+    Box::new(move |scid| {
+        let Some(service) = get() else { return };
+        let scid = scid.to_string();
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move { service.main_status_after_log_change(&scid).await });
+            }
+            Err(_) => log::warn!(
+                "identity: the log of {scid} changed outside a runtime; the main agent's status event is not sent"
+            ),
+        }
+    })
 }
 
 impl IdentityService {
@@ -183,6 +206,35 @@ impl IdentityService {
                 log::info!("identity: refresh of {scid} failed ({e}); answering from the cache");
                 Ok(cached)
             }
+        }
+    }
+
+    /// Publishes `agent-status-changed` for the main agent (`agent_did`, its `did:key`) with the
+    /// identity it speaks for now. With `only_if_changed`, nothing goes out while the last event
+    /// carried the same identity: the status computes its identity on read, so a log that moves
+    /// (a revocation arriving) is the only thing that changes it unseen.
+    pub(super) async fn publish_main_status(&self, agent_did: &str, only_if_changed: bool) {
+        let mut last = self.main_identity.lock().await;
+        let mut status = crate::agent::AgentService::with_global_instance(|a| a.dump());
+        status.identity = self.identity_of(agent_did).await;
+        if only_if_changed && last.as_ref() == Some(&status.identity) {
+            return;
+        }
+        *last = Some(status.identity.clone());
+        crate::pubsub::get_global_pubsub()
+            .await
+            .publish_event(crate::events::Event::agent_status(&status));
+    }
+
+    /// The cache took new state for `scid`: when the main agent is bound to it, its status
+    /// event follows if the identity it shows changed (a revocation reaching the trusted seq).
+    pub(super) async fn main_status_after_log_change(&self, scid: &str) {
+        let Some(agent_did) = crate::agent::AgentService::with_global_instance(|a| a.dump()).did
+        else {
+            return;
+        };
+        if bound_identity(&agent_did).as_deref() == Some(scid) {
+            self.publish_main_status(&agent_did, true).await;
         }
     }
 
@@ -366,11 +418,7 @@ impl IdentityService {
             // The main agent's status gains its identity (a managed agent's status event names
             // the main agent's, so only the main agent's changes here).
             if agent.is_main_agent() {
-                let mut status = crate::agent::AgentService::with_global_instance(|a| a.dump());
-                status.identity = self.identity_of(&agent_did).await;
-                crate::pubsub::get_global_pubsub()
-                    .await
-                    .publish_event(crate::events::Event::agent_status(&status));
+                self.publish_main_status(&agent_did, false).await;
             }
             if !bound_before {
                 if let Err(e) =
@@ -704,7 +752,86 @@ mod tests {
             cache,
             store_url: None,
             store_keys_source: crate::identity::StoreSource::Config,
+            main_identity: Default::default(),
         }
+    }
+
+    /// The next `agent-status-changed` of `did`, within the bound a test waits for it.
+    async fn next_status_of(
+        events: &mut tokio::sync::broadcast::Receiver<Arc<crate::events::Event>>,
+        did: &str,
+    ) -> Value {
+        let wait = async {
+            loop {
+                let event = events.recv().await.expect("the event channel stays open");
+                if event.topic == crate::events::Topic::AgentStatusChanged
+                    && event.payload["did"] == did
+                {
+                    return event.payload.clone();
+                }
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), wait)
+            .await
+            .expect("an agent-status-changed event")
+    }
+
+    /// The main agent's status shows the identity its key speaks for, computed on read. A
+    /// revocation that reaches the cache (a refresh, an accepted head: any path) changes it
+    /// with no bind, so the cache's change must publish the new status, or a client holding
+    /// the old one keeps it.
+    #[tokio::test]
+    async fn a_revocation_reaching_the_cache_publishes_the_main_agents_status() {
+        use crate::identity::cache::tests::{accept_signed, trusting};
+        use ad4m_identity_core::build::revoke;
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let main = AgentContext::main_agent();
+        let (agent_did, _) = device_key(&main).unwrap();
+
+        let slot: Arc<std::sync::OnceLock<Arc<IdentityService>>> = Default::default();
+        let mut cache = trusting();
+        let held = slot.clone();
+        cache.set_change_listener(change_listener(move || held.get().cloned()));
+        let cache = Arc::new(cache);
+        let backend: Arc<dyn IdentityBackend> =
+            Arc::new(crate::identity::cache::tests::FakeStore::new(vec![]));
+        let service = Arc::new(IdentityService {
+            resolver: Arc::new(crate::identity::resolver::Resolver::new(
+                cache.clone(),
+                backend.clone(),
+                None,
+                false,
+            )),
+            backend,
+            cache,
+            store_url: None,
+            store_keys_source: crate::identity::StoreSource::Config,
+            main_identity: Default::default(),
+        });
+        assert!(slot.set(service.clone()).is_ok());
+
+        // The main agent co-signs an incept only while no operator record names another identity.
+        Ad4mDb::with_global_instance(|db| db.set_operator_record_for_test(None)).unwrap();
+        let cosigned = service
+            .cosign_incept(&main, &incept_listing(&main, 71))
+            .await
+            .unwrap();
+        let incept = Event::from_json(&cosigned).unwrap();
+        let scid = incept.scid.clone();
+        let mut events = crate::pubsub::get_global_pubsub().await.subscribe_events();
+        accept_signed(&service.cache, std::slice::from_ref(&incept)).await;
+        service.record_agent_if_listed(&main, &scid).await.unwrap();
+        let bound = next_status_of(&mut events, &agent_did).await;
+        assert_eq!(bound["identity"], did_of(&scid).as_str());
+
+        let master = ed25519_dalek::SigningKey::from_bytes(&[71; 32]);
+        let chain = ad4m_identity_core::fold(std::slice::from_ref(&incept)).unwrap();
+        let revocation = revoke(&chain, &master, &["d1".to_string()]).unwrap();
+        accept_signed(&service.cache, &[incept, revocation]).await;
+        let revoked = next_status_of(&mut events, &agent_did).await;
+        assert_eq!(revoked["identity"], Value::Null);
+        assert_eq!(service.identity_of(&agent_did).await, None);
     }
 
     /// `identity.status` shows a configured store that answers the log behind the cache, from
@@ -738,6 +865,7 @@ mod tests {
             cache,
             store_url: None,
             store_keys_source: crate::identity::StoreSource::Config,
+            main_identity: Default::default(),
         };
         assert_eq!(service.status(&agent).await.unwrap().store_behind, None);
 
@@ -784,6 +912,7 @@ mod tests {
                 cache,
                 store_url: store_url.map(String::from),
                 store_keys_source: crate::identity::StoreSource::Config,
+                main_identity: Default::default(),
             }
         };
 
@@ -838,6 +967,7 @@ mod tests {
                 cache,
                 store_url: store_url.map(String::from),
                 store_keys_source,
+                main_identity: Default::default(),
             }
             .refuse_without_store_keys()
             .unwrap_err()
@@ -1093,6 +1223,7 @@ mod tests {
             cache,
             store_url: None,
             store_keys_source: crate::identity::StoreSource::Config,
+            main_identity: Default::default(),
         };
         let scid = ours.scid();
         let did = did_of(&scid);
@@ -1180,6 +1311,7 @@ mod tests {
             cache,
             store_url: None,
             store_keys_source: crate::identity::StoreSource::Config,
+            main_identity: Default::default(),
         }
     }
 
@@ -1320,6 +1452,7 @@ mod tests {
             cache,
             store_url: None,
             store_keys_source: crate::identity::StoreSource::Config,
+            main_identity: Default::default(),
         };
         let incept = incept_listing(&agent, 53);
         let cosigned = service.cosign_incept(&agent, &incept).await.unwrap();

@@ -7,7 +7,7 @@
  * own copy. Any behaviour change belongs here.
  */
 
-import { LiveQuery } from "./LiveQuery";
+import { LiveSubscription, type LiveQuery } from "./LiveQuery";
 
 export interface WakerSubscription {
   id: string;
@@ -509,11 +509,10 @@ export class WakerSubscriptionManager {
   /** Open a live query over `query`: a model query (JSON) when `className` is set, SPARQL otherwise. */
   private openLive(uuid: string, query: string, className?: string | string[]): LiveQuery<any> {
     const client = this.perspectiveClient;
-    return new LiveQuery<any>(
+    return new LiveSubscription(
       client,
       uuid,
       (signal) => client.subscribe(uuid, className === undefined ? { sparql: query } : { className, queryJson: query }, { signal }),
-      (raw) => raw,
     );
   }
 

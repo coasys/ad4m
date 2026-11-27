@@ -87,6 +87,171 @@ it in older docs.
 - `connect/` tests (vitest + happy-dom) fail under Node 26 (`localStorage.clear`
   undefined); run them under Node 24.
 
+## Client data mirror (`core/src/mirror/`)
+
+Each `ApiClient` owns one `Mirror` (`apiClient.mirror`): one `Entry` per data
+point the SDK reads from the executor, keyed by scope (`executor | agent |
+{perspective} | {neighbourhood}`) + RPC name + canonical params. Two clients
+share nothing. Views read an entry through `Live<T>` (`getSnapshot`,
+`subscribe`, `read`).
+
+- States: `unknown | loading | fresh | stale | error`. A read of an unknown,
+  stale or failed entry sends one request; concurrent reads share it. A value
+  push (`entry.push`) replaces the value and notifies unless it is equal; an
+  invalidation or the
+  `lagged` marker (`{"type":"query-subscription-update","lagged":true}`; the socket
+  is up) calls `invalidate`: the entry is stale and reloads at once only if it
+  has subscribers. One rule for the absence of a socket: the loss of the socket
+  that had opened (`ApiClient._onClose`), a refused token (`ApiClient._failAuth`:
+  close code 1008 or a 401, after which no reconnect comes) and `closeAll()`
+  (`Mirror.reset`) mark every value stale and send **no request**
+  (`markAllStale(false)`, `invalidate(false)`, `markStale(false)`). Every socket
+  open (`ApiClient._onOpen`, a reused client's first open included) then calls
+  `Mirror.reloadWatched()`: each value with a subscriber that is stale or failed (a read
+  made while the socket was down ends in `error`) loads once; fresh values and reads in
+  flight are left alone. A reset (`closeAll()`)
+  or a refusal that a subscriber makes while the loss is announced (or while a socket-open
+  reload, or the stored value of a `persistentStale` key, is being shown) stops the reads the
+  announcement had queued, and `_onClose` then asks for no reconnect. So a watched value never dials a
+  socket by itself, and a reconnect reads each watched value once, after the
+  socket is back. A read the app started before `closeAll()` and that a keyed
+  cache had only queued (the tick's batch) can still dial once after it. A refused
+  token (`Mirror.refuse`) also makes the expression cache stale and blocks its
+  persistent tier, so after it every read fails with 401: a cache the mirror creates
+  after the refusal is refused from the start, and a call made while the refusal
+  notifies (`_authFailed` is set while the socket is still open) rejects with 401
+  without a frame. `markAllStale` and `refuse` mark every entry, cache key and live
+  result before they tell any subscriber (two phases), so a subscriber told first
+  cannot read another value still shown as fresh. Until the
+  1008 close arrives, a client whose token was revoked still answers from its
+  stored values.
+- An answer is kept only if nothing changed the entry since its request went
+  out: one sent before a reconnect reaches its readers once and is dropped. A
+  failure is never kept.
+- What keeps an entry fresh is written in its spec, not in a kind: the events
+  it listens to (`on`) and its `load`. An `Entry` is keyed by its RPC name
+  (`mirror.entry({ method, load, on })`: one entry per method per client); the
+  perspective uuid in a key belongs only to live queries and one-shot reads
+  (`live`, `liveResult`, `oneShot`, `wrote`). The loss of the socket, `closeAll()` or `lagged` makes every
+  entry stale, and every keyed cache except the expressions (`staleOnReconnect: false`). Entries (see the sections below and the code for each one's events):
+  - `agent.status`: pushed by `agent-status-changed` and the results of
+    `agent.unlock/lock/generate/import`; read through `client.agent.status()` and
+    `client.agent.did()`; a status with no DID is not kept.
+  - `sfu.status`: fixed for an executor process (`client.runtime.sfuStatus()`); a
+    failure is not kept.
+  - `agent.get`, `hosting.info` and `perspective.all`: below.
+  `NeighbourhoodProxy.createSession` reads `agent.status` and `sfu.status` together;
+  `PerspectiveClient.getNeighbourhoodProxy(uuid)` returns one proxy per uuid, and
+  a `perspective-removed` event or `remove()` drops that uuid's proxy.
+- A mounted view (a `Live` with a subscriber, a hook) reloads on an executor
+  event that changes the value, on a reconnect or `lagged` marker, on a
+  remount, or on a read. It does not reload on the age of a keyed value
+  (`REMOTE_AGENT_TTL_MS`, `EXPRESSION_TTL_MS`) by itself: an aged value is old
+  and no one is told, so the next read or subscribe loads it. There is no expiry
+  timer.
+- A keyed cache answers `null` for an unknown key and does not keep it (the next
+  `get()` asks again), but a key with a subscriber shows it as `{ state: 'fresh',
+  value: null }`. Its maps hold only keys with a value, a read in flight or a
+  subscriber (a failed read's error is kept only while a view watches the key, even when the key has a value, until
+  its next read, a reconnect, or the last subscriber leaving); a read that finds
+  nothing for a key that had a value drops the value and its persisted copy;
+  `storedUsed` follows the held values.
+- Profiles and expressions. The own agent (`agent.get`, read through
+  `client.agent.me()` / `client.agent.live.me()`) is pushed: `agent-updated`
+  for the own DID (while the own DID is not known yet, the event only makes the entry
+  stale: a read in flight is used once and not kept) and the result of `updatePublicPerspective` /
+  `updateDirectMessageLanguage` (read-your-writes) replace it; a write's reply is dropped when
+  an event or an invalidation changed the entry since the write went out. `agent-status-changed`
+  with another `identity` makes the held agent stale, and an agent pushed when the entry is not
+  fresh (it carries no identity) makes it stale instead of keeping a revoked one. Other agents
+  (`agent.byDIDs`, `client.agent.byDID(did)` / `live.byDID(did)`) are
+  keyed: fresh for `AgentClient.REMOTE_AGENT_TTL_MS` (5 min), replaced at
+  once by `agent-updated`, stale after a reconnect or `lagged`; bounded to
+  `MAX_MEM_ENTRIES` (200) and `MAX_MEM_BYTES` (5 MB) in memory. Expressions
+  (`expression.get`) are keyed too, with `staleOnReconnect: false`: bounded to
+  200 entries / 5 MB, fresh for `ExpressionClient.EXPRESSION_TTL_MS` (5 min) in
+  memory and in the persistent tier, kept through a reconnect and `lagged`,
+  dropped by that age, `clearCache()` or an `interact`.
+- The perspective list (`perspective.all`, `client.perspective.all()` /
+  `client.perspective.live.all()`) is pushed: `perspective-added`,
+  `-updated` and `-removed` change it, and so do the handles an own write
+  returns (`add`, `update`, `remove`, `neighbourhood.joinFromUrl`), with no
+  read. An event or write on a list that is not fresh makes it stale instead
+  (no sound base to patch). An own `update` compares the list's handle before and after the
+  call; with no fresh list before it, the reply is not applied and the list is made stale
+  (a perspective removed meanwhile does not come back). The hosting account (`hosting.info`,
+  `client.agent.hostingUserInfo()` / `client.agent.live.hostingUserInfo()`) is
+  pushed: `hosting-user-info-changed` for its own email replaces it, an event
+  for another email (an operator hears every user's) and `setHotWalletAddress`
+  make it stale. `connect` reads it, so it no longer polls. `agent.getApps` is
+  not mirrored: `apps-changed` is sent only when a grant is minted and carries
+  one app; `removeApp` and `revokeToken` send nothing, so no push source says
+  when the list is stale.
+- Keyed values (profiles, expressions) live in a `KeyedCache` the mirror owns, one
+  per RPC name (`mirror.cache({method, staleOnReconnect?, options, on?})`; the first
+  call's spec wins), so two clients share nothing. It has its own per-key state (same
+  states and rules as `Entry`) and adds tick batching through `loadMany` (50 `byDID`
+  misses in one tick = one `agent.byDIDs`; the per-key retry applies only to an `RpcError`
+  500 with more than one DID, any other failure rejects the whole shared batch; a failure is
+  never kept), `maxAgeMs`, the memory limits and the persistent tier. The limits never
+  evict a key a view is subscribed to (its view would go blank): while views hold them,
+  watched keys may take a cache past its limits.
+  `mirror.persistent(db, store)` is the IndexedDB tier, keyed `origin|acting DID|key`, where the
+  origin includes the executor's path (two executors on one host share nothing); the DID
+  is the one the client already knows (the status entry, never a request), so a cold read
+  waits on nothing, and while it is unknown nothing is stored or read (Node has none).
+  `clear()` removes only the `origin|DID|` prefix of this client. A profile loaded from the
+  tier is shown `stale` and read again once per session (`persistentStale`); an expression
+  is used as fresh while younger than `persistentMaxAgeMs`. `markAllStale()` skips caches
+  with `staleOnReconnect: false`.
+- The Mirror registers an entry's events itself: the spec's `on` map (event name to
+  `(event, entry) => void`) is registered once, when the Mirror creates the entry. The
+  mirror registers them without dialling. `ApiClient.closeAll()` clears the handlers and
+  calls `mirror.reset()`: every value is stale, the pooled live subscriptions end, and the
+  handlers are registered again, so a client used after `closeAll()` reads from the executor
+  and hears events (the lazy `Entry` fields of `AgentClient` stay valid: entries are kept).
+  The expressions survive `closeAll()` (`staleOnReconnect: false`): only their age, `clearCache()`,
+  an `interact` or a refused token expires them.
+- Live queries (`core/src/mirror/live.ts`). `mirror.live` keeps one
+  `LiveSubscription` per perspective + RPC + canonical params; each caller gets its own
+  `LiveQuery` view (own `first`, own projection, own listeners; `dispose()` releases only that
+  view). The subscription holds the executor's raw result; each view applies its own `project`
+  (model hydration) to it, so views with one key and different projections share one executor
+  subscription. A `project` that throws fails only its view: before the view had data its
+  status is `error` and its `first` rejects; after, the view keeps its old data and logs
+  'Live query result could not be read:'. A view's `first` is the current result when the view opens,
+  and that result is the view's `initial` one (a view that joins an open subscription is not
+  handed the current result as a change). After
+  the last view is released the subscription stays open `keepAliveMs` (default 30000,
+  `LiveOptions`), then is disposed; a view in the grace answers at once with no request.
+  `LiveSubscription` resyncs itself on `lagged` and reconnect. The mirror marks the live
+  results stale when the socket is lost (`ApiClient._onClose`), on `lagged` and on reconnect
+  (`markAllStale`): snapshots keep the last value for display, but one-shot reads go to the
+  executor until the resync delivers a result.
+  `PerspectiveClient.modelQuery` / `querySparql` answer from a ready live handle with the
+  same key (no `after` cursor). After an own write (`mirror.wrote`) they ask the executor
+  until an update changes the result, because the executor sends updates 250 ms or more
+  after the write's reply. A write made while a result is on its way (a resync, an open) also
+  keeps them closed past the updates already buffered behind it: those came before the write,
+  so the updates replayed behind a resync's result do not count in `changes`. A loss notice
+  (`stale()`) never lowers a write's barrier. A view that opens after a write whose update has
+  not come does not join the pooled subscription (its result may be from before the write, so
+  its `first` would be old): the mirror opens a new one, and its first result is that view's
+  `initial` one; the old one ends at once if no view holds it, else when its last view is
+  released (after the grace) or when the client is reset, whichever comes first. While a resync's result and its
+  buffered updates are applied, the result answers nothing. A live SPARQL result is a multiset: row order can differ from a
+  fresh query with no `ORDER BY`. The Waker keeps its own unshared subscription.
+  The write counter lives in `Mirror.wrote(scope)` only. Its cost: a write that does not
+  change a query's result sends every later one-shot of that query to the executor until
+  an update changes the result. The same counter keys `mirror.oneShot`: identical
+  one-shot requests (scope, RPC, canonical params, no `options`) in flight share one
+  request, and a call made after a write does not join one sent before it. Nothing is kept
+  after it settles.
+- The hooks (`ad4m-hooks` react and vue `useMe`, `useAgent`, `usePerspectives`) subscribe to these
+  `Live` views; they keep no state of their own.
+- A test that reuses one client across tests must not expect a fresh read:
+  the mirror keeps the last status. Use a new client.
+
 ## Holochain DHT and GetStrategy
 
 **Important**: Holochain currently only implements **full-arc (full-sync) DHT mode** where every node gossips and stores all data. This means:

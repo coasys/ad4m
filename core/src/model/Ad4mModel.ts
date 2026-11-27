@@ -14,8 +14,7 @@ import type { RegisterResult } from "../generated/api/RegisterResult";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 
 import { buildSPARQLQuery, valueToLiteralIri, effectiveLiteralStorage } from "./query-sparql";
-import { LiveQuery } from "../perspectives/LiveQuery";
-import type { LiveOptions } from "../perspectives/LiveQuery";
+import type { LiveOptions, LiveQuery } from "../perspectives/LiveQuery";
 import {
   normalizeValue,
 } from "./hydration";
@@ -1495,14 +1494,14 @@ export class Ad4mModel {
     const { after: _after, ...cursorless } = (query ?? {}) as Query;
     const withAll = Ad4mModel.withIncludeAll([this], cursorless);
     const { className, queryJson } = this.prepareModelQueryParams(withAll, options.className);
-    return new LiveQuery<Page<T & IncludeExtras<T, IncludeOf<Q>>>>(
-      perspective.client, perspective.uuid,
-      (signal) => perspective.client.subscribe(perspective.uuid, { className, queryJson }, { signal, timeoutMs: options.timeoutMs }),
+    return perspective.client.liveQuery<Page<T & IncludeExtras<T, IncludeOf<Q>>>>(
+      perspective.uuid, { className, queryJson },
       (raw) => ({
         // A copy: LiveQuery keeps the raw result to apply later diffs to.
         results: this.parseModelResult(perspective, structuredClone(raw), withAll.include, withAll.properties) as (T & IncludeExtras<T, IncludeOf<Q>>)[],
         ...(raw?.totalCount !== undefined ? { totalCount: raw.totalCount } : {}),
       }),
+      options,
     );
   }
 
@@ -1518,13 +1517,13 @@ export class Ad4mModel {
     const { after: _after, ...cursorless } = query ?? {};
     const withAll = Ad4mModel.withIncludeAll(classList, cursorless);
     const { classNames, queryJson } = Ad4mModel.prepareUnionQueryParams(classList, withAll);
-    return new LiveQuery<Page<InstanceType<C[number]>>>(
-      perspective.client, perspective.uuid,
-      (signal) => perspective.client.subscribe(perspective.uuid, { className: classNames, queryJson }, { signal, timeoutMs: options.timeoutMs }),
+    return perspective.client.liveQuery<Page<InstanceType<C[number]>>>(
+      perspective.uuid, { className: classNames, queryJson },
       (raw) => ({
         results: Ad4mModel.parseUnionResult(classList, perspective, structuredClone(raw), withAll.include, withAll.properties) as InstanceType<C[number]>[],
         ...(raw?.totalCount !== undefined ? { totalCount: raw.totalCount } : {}),
       }),
+      options,
     );
   }
 

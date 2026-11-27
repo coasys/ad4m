@@ -221,6 +221,14 @@ pub enum Audience {
     /// The operator's sessions only: for what only the operator may read, such as the main
     /// agent's state on a perspective the main agent does not own.
     Operator,
+    /// The sessions that act as one of these DIDs, and the operator's sessions. For the
+    /// perspective list events (`perspective-added`, `-updated`, `-removed`): `perspective.all`
+    /// lists every perspective to the operator, so a client that mirrors that list must hear
+    /// when any perspective joins it, changes or leaves it. A session that is in both parts
+    /// (the operator acts as the main agent, which may own the perspective) still gets one
+    /// event. Link and state events of a perspective stay on `Dids`: they go to its owners,
+    /// not to everyone who can list it.
+    DidsAndOperator(Vec<String>),
 }
 
 impl Audience {

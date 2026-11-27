@@ -188,11 +188,18 @@ Live queries provide real-time updates but require proper cleanup:
 2. **Updates**: receive each change through `subscribe()`; the opening value has `initial: true` and every later one `false`
 3. **Cleanup**: call `dispose()` when done to:
    - Unsubscribe from updates
-   - End the backend subscription
+   - Release your handle on the backend subscription
    - Prevent memory leaks
 
-Every subscriber gets its own backend subscription, tied to the connection that
-opened it. Disposing one never interrupts another subscriber of the same query.
+Every handle of one client with the same perspective and the same query shares one
+backend subscription, tied to the connection that opened it. Disposing one handle
+never interrupts another. When the last handle is disposed the subscription stays open
+for `keepAliveMs` (option of the query, default 30000), so a view opened again in that
+time answers at once from the current result and costs no request; then it ends.
+A one-shot `Model.query` or `querySparql` with the same query as a ready live one
+is answered from it, except after a write of this client (until an update arrives that
+came after the write), after the connection was lost (until the resync's result), and while
+a resync's result is being applied: those go to the executor.
 The backend also ends every subscription of a connection when that connection
 closes, so a page closed without disposing leaves nothing behind.
 

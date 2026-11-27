@@ -128,6 +128,11 @@ pub enum Ingested {
 /// Called once for each fork the cache records for the first time: `(did, evidence)`.
 pub type ForkListener = Box<dyn Fn(&str, &ForkEvidence) + Send + Sync>;
 
+/// Called with an SCID each time the cache takes new state for its log: events appended, a
+/// head accepted that changed the trusted seq, or the log dropped (`reset`). It runs while the
+/// cache holds its locks: it must not wait on the cache (spawn instead).
+pub type ChangeListener = Box<dyn Fn(&str) + Send + Sync>;
+
 /// One identity's fetch gate: one fetch at a time, and which of them succeeded.
 #[derive(Default)]
 struct Gate {
@@ -154,6 +159,7 @@ pub struct KelCache {
     behind: StdMutex<HashMap<String, StoreBehind>>,
     store_keys: Vec<String>,
     on_fork: Option<ForkListener>,
+    on_change: Option<ChangeListener>,
 }
 
 const META_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS identity_heads (
@@ -354,6 +360,7 @@ impl KelCache {
             behind: StdMutex::new(HashMap::new()),
             store_keys,
             on_fork: None,
+            on_change: None,
         })
     }
 
@@ -366,6 +373,18 @@ impl KelCache {
     /// Calls `listener` for each fork recorded for the first time.
     pub fn set_fork_listener(&mut self, listener: ForkListener) {
         self.on_fork = Some(listener);
+    }
+
+    /// Calls `listener` with the SCID each time the cache takes new state for a log (see
+    /// [`ChangeListener`]): the one place every refresh, ingest and accepted head goes through.
+    pub fn set_change_listener(&mut self, listener: ChangeListener) {
+        self.on_change = Some(listener);
+    }
+
+    fn changed(&self, scid: &str) {
+        if let Some(listener) = &self.on_change {
+            listener(scid);
+        }
     }
 
     /// The cached log of `scid` (memory, else rebuilt from the database with `fold`).
@@ -452,13 +471,17 @@ impl KelCache {
     fn accept_head(&self, head: &SignedHead) -> Result<(), CacheError> {
         let text = serde_json::to_string(head).map_err(storage)?;
         let meta = self.meta.lock().map_err(storage)?;
-        meta.execute(
-            "INSERT INTO identity_heads (scid, head, accepted_at) VALUES (?1, ?2, ?3)
-             ON CONFLICT(scid) DO UPDATE SET head = ?2, accepted_at = ?3
-             WHERE excluded.head != identity_heads.head",
-            params![head.scid, text, now() as i64],
-        )
-        .map_err(storage)?;
+        let rows = meta
+            .execute(
+                "INSERT INTO identity_heads (scid, head, accepted_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(scid) DO UPDATE SET head = ?2, accepted_at = ?3
+                 WHERE excluded.head != identity_heads.head",
+                params![head.scid, text, now() as i64],
+            )
+            .map_err(storage)?;
+        if rows > 0 {
+            self.changed(&head.scid);
+        }
         Ok(())
     }
 
@@ -501,6 +524,7 @@ impl KelCache {
             refreshed.remove(scid);
         }
         self.note_behind(scid, None);
+        self.changed(scid);
         Ok(())
     }
 
@@ -625,6 +649,7 @@ impl KelCache {
                 let fresh: Vec<&Event> = entries.iter().collect();
                 self.persist(scid, Some(&before), &fresh).await?;
                 chains.insert(scid.to_string(), next);
+                self.changed(scid);
                 Ok(Ingested::Appended(head))
             }
         }
@@ -641,6 +666,7 @@ impl KelCache {
         let refs: Vec<&Event> = sorted.iter().collect();
         self.persist(scid, None, &refs).await?;
         chains.insert(scid.to_string(), chain);
+        self.changed(scid);
         Ok(Ingested::Appended(head))
     }
 
@@ -1311,6 +1337,40 @@ pub(crate) mod tests {
             seen.fetch_add(1, Ordering::SeqCst);
         }));
         forks
+    }
+
+    /// The change listener hears every way the cache takes new state: events appended, a head
+    /// accepted, the log dropped; and nothing when a refresh finds nothing new.
+    #[tokio::test]
+    async fn the_change_listener_hears_appended_events_accepted_heads_and_a_reset() {
+        let mut log = TestLog::new(3);
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let heard = seen.clone();
+        let mut cache = in_memory(vec![store_key().multikey()]);
+        cache.set_change_listener(Box::new(move |scid| {
+            heard.lock().unwrap().push(scid.into())
+        }));
+        let scid = log.scid();
+        let count = || seen.lock().unwrap().len();
+
+        cache.ingest(&scid, &log.events).await.unwrap();
+        assert_eq!(count(), 1, "a new log");
+        cache.ingest(&scid, &log.events).await.unwrap();
+        assert_eq!(count(), 1, "events it holds");
+
+        let head = log.chain().head();
+        let signed = store_key().sign_head(&scid, head.seq, &head.hash, 1);
+        cache.accept(&scid, &signed, &log.events).await.unwrap();
+        assert_eq!(count(), 2, "a head that makes the incept trusted");
+        cache.accept(&scid, &signed, &log.events).await.unwrap();
+        assert_eq!(count(), 2, "the same head again");
+
+        log.revoke_d1();
+        accept_signed(&cache, &log.events).await;
+        assert_eq!(count(), 4, "the revocation and its head");
+        cache.reset(&scid).await.unwrap();
+        assert_eq!(count(), 5, "a reset");
+        assert!(seen.lock().unwrap().iter().all(|s| *s == scid));
     }
 
     #[tokio::test]

@@ -18,6 +18,8 @@ jest.mock('../apiClient', () => {
         ApiClient: jest.fn().mockImplementation(() => ({
             call: mockCall,
             on: mockOn,
+            // The client's own mirror, as the real ApiClient has one.
+            mirror: new (jest.requireActual('../mirror/Mirror').Mirror)(() => '', () => {}, () => null),
         })),
         RpcError: class RpcError extends Error {
             readonly status: number
@@ -225,6 +227,22 @@ describe('PerspectiveClient RPC operations', () => {
             expect.objectContaining({ uuid: 'uuid-q', class_name: 'Recipe' }),
             { signal: controller.signal },
         )
+    })
+
+    it('identical concurrent one-shot modelQuery and querySparql calls share one request', async () => {
+        mockCall.mockClear()
+        mockCall.mockImplementation(async (method: string) =>
+            method === 'perspective.modelQuery' ? JSON.stringify({ instances: [], totalCount: 0 }) : JSON.stringify([]))
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        await Promise.all([
+            client.modelQuery('uuid-s', 'Recipe', '{}'),
+            client.modelQuery('uuid-s', 'Recipe', '{}'),
+            client.querySparql('uuid-s', 'SELECT 1'),
+            client.querySparql('uuid-s', 'SELECT 1'),
+        ])
+        const sent = (name: string) => mockCall.mock.calls.filter((c: any[]) => c[0] === name).length
+        expect(sent('perspective.modelQuery')).toBe(1)
+        expect(sent('perspective.querySparql')).toBe(1)
     })
 
     it('queryLinks forwards options to apiClient.call', async () => {

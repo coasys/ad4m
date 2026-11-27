@@ -7,6 +7,7 @@ import { PerspectiveClient } from "./perspectives/PerspectiveClient"
 import { PerspectiveHandle } from "./perspectives/PerspectiveHandle"
 import { PerspectiveProxy } from "./perspectives/PerspectiveProxy"
 import { RuntimeClient } from "./runtime/RuntimeClient"
+import { ExpressionClient } from "./expression/ExpressionClient"
 
 type AnyMsg = Record<string, any>
 
@@ -1619,6 +1620,34 @@ describe('ApiClient when the executor refuses the token', () => {
         expect(TestSocket.instances).toHaveLength(1)
     })
 
+    it('makes every mirror value stale: a later read fails with 401, not the stored value', async () => {
+        open()
+        socket(0).open()
+        const status = client.mirror.entry({ method: 'agent.status', load: () => call('agent.status') })
+        const first = status.read()
+        await Promise.resolve()
+        const req = socket(0).sent.find((m) => m.type === 'agent.status')!
+        socket(0).reply({ id: req.id, result: { isUnlocked: true } })
+        await first
+        expect(status.getSnapshot().state).toBe('fresh')
+        socket(0).drop(1008, REASON)
+        await expect(status.read()).rejects.toMatchObject({ status: 401, body: REASON })
+    })
+
+    it('does not serve a warm expression after the refusal: the read fails with 401', async () => {
+        open()
+        socket(0).open()
+        const expressions = new ExpressionClient(url, undefined, client)
+        const first = expressions.get('lang://e1')
+        for (let i = 0; i < 10; i++) await Promise.resolve()
+        const req = socket(0).sent.find((m) => m.type === 'expression.get')!
+        socket(0).reply({ id: req.id, result: { author: 'did:test:a', timestamp: 't', data: 'x', proof: {} } })
+        await first
+        await expect(expressions.get('lang://e1')).resolves.toMatchObject({ author: 'did:test:a' })
+        socket(0).drop(1008, REASON)
+        await expect(expressions.get('lang://e1')).rejects.toMatchObject({ status: 401, body: REASON })
+    })
+
     it('fails every later call with 401 without opening a socket', async () => {
         open()
         socket(0).drop(1008, REASON)
@@ -1666,6 +1695,29 @@ describe('ApiClient when the executor refuses the token', () => {
         jest.advanceTimersByTime(60_000)
         expect(TestSocket.instances).toHaveLength(1)
         expect(authFailed).toHaveBeenCalledTimes(1)
+    })
+
+    it('a call made by a subscriber told of a 401 reply fails with 401 at once and writes no frame', async () => {
+        open()
+        socket(0).open()
+        const status = client.mirror.entry({ method: 'agent.status', load: () => call('agent.status') })
+        const first = status.read()
+        await Promise.resolve()
+        socket(0).reply({ id: socket(0).sent.find((m) => m.type === 'agent.status')!.id, result: { isUnlocked: true } })
+        await first
+        const pending = call('agent.get')
+        pending.catch(() => {})
+        const reads: Promise<unknown>[] = []
+        status.subscribe((s) => { if (s.state === 'stale') reads.push(call('agent.me')) })
+        const written = () => socket(0).sent.length
+        const before = written()
+        socket(0).reply({ id: socket(0).sent.find((m) => m.type === 'agent.get')!.id, error: { code: 401, message: REASON } })
+        expect(reads).toHaveLength(1)
+        let outcome: unknown = 'pending'
+        reads[0].then(() => { outcome = 'resolved' }, (e) => { outcome = e })
+        for (let i = 0; i < 5; i++) await Promise.resolve()
+        expect(outcome).toMatchObject({ name: 'RpcError', status: 401, body: REASON })
+        expect(written()).toBe(before)
     })
 
     it('still reconnects after an ordinary close, with 503 for an unsent write', async () => {
