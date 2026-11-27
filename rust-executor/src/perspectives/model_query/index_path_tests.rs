@@ -847,3 +847,33 @@ fn a_clear_that_ends_during_the_reads_goes_to_sparql() {
     .unwrap();
     assert_eq!(page, None);
 }
+
+/// The hydration read of a page must not join `VALUES ?source` with
+/// `VALUES ?predicate`: Oxigraph then scans every triple of the store, so the
+/// read of 50 instances grew with the perspective (about 0.8 s at 800 000
+/// links, 10 s at 8 million). The predicates are a `FILTER` after the pattern
+/// then, which the planner answers by one lookup per `?source`.
+#[tokio::test]
+async fn the_hydration_of_a_page_does_not_join_two_values_blocks() {
+    let world = World::random(7, 60);
+    let before = world.indexed.queries_run().len();
+    let q = query(json!({"limit": 10, "order": {"timestamp": "DESC"}}));
+    let used = world.compare(&q, "newest 10").await;
+    assert!(used, "the index gave the page");
+    let ran = world.indexed.queries_run()[before..].to_vec();
+    let hydrations: Vec<&String> = ran
+        .iter()
+        .filter(|s| s.contains("VALUES ?source") && s.contains("ad4m://ontology/author"))
+        .collect();
+    assert!(!hydrations.is_empty(), "the page was hydrated: {ran:?}");
+    for sparql in hydrations {
+        assert!(
+            !sparql.contains("VALUES ?predicate"),
+            "two VALUES blocks make the planner scan the store:\n{sparql}"
+        );
+        assert!(
+            sparql.contains("FILTER(?predicate IN ("),
+            "the predicates filter the links of the bound sources:\n{sparql}"
+        );
+    }
+}
