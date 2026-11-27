@@ -26,7 +26,9 @@ import {
     adminRotationStep,
     afterFailedKeyRead,
     grantMissingRoomKeys,
+    keyRingRefreshChanged,
     rotateRoomKey,
+    rotationLog,
     type KeyRingStatus,
     type RoomRole,
 } from "./src/room-keys.js";
@@ -95,6 +97,31 @@ function isPlaceholder(value: string): boolean {
     return !value || value === "<to-be-filled>";
 }
 
+/** Open room-key versions, low to high. Empty when this agent holds none. */
+function openKeyVersions(): number[] {
+    return keyRing ? [...keyRing.keys()].sort((a, b) => a - b) : [];
+}
+
+/**
+ * A successful refresh. Info when the status or the open versions changed
+ * since the call started; debug when this cycle saw the same ring. Errors
+ * stay on `console.error`.
+ */
+function logKeyRingRefresh(
+    before: { status: KeyRingStatus; versions: number[] },
+    message: string,
+): void {
+    const changed = keyRingRefreshChanged(before, {
+        status: keyRingStatus,
+        versions: openKeyVersions(),
+    });
+    (changed ? console.info : console.debug)(message);
+}
+
+function logRotation(event: "attempt" | "skipped" | "complete", message: string): void {
+    (rotationLog(event) === "info" ? console.info : console.debug)(message);
+}
+
 function setupKeyRingCoalesced(): Promise<void> {
     if (!keyRingInflight) {
         const p = setupKeyRing().finally(() => {
@@ -111,6 +138,7 @@ function setupKeyRingCoalesced(): Promise<void> {
 
 async function setupKeyRing(): Promise<void> {
     const gen = lifecycleGen;
+    const before = { status: keyRingStatus, versions: openKeyVersions() };
     const config = getConfig();
     try {
         const token = await auth.getValidToken();
@@ -119,7 +147,8 @@ async function setupKeyRing(): Promise<void> {
         if (keysRes.keys.length === 0) {
             keyRingStatus = "pending";
             keyRing = null;
-            console.log(
+            logKeyRingRefresh(
+                before,
                 "[server-link-language] this agent holds no room key yet — commits wait until the admin " +
                 "rotates one in or a member holding one grants it",
             );
@@ -145,12 +174,18 @@ async function setupKeyRing(): Promise<void> {
             // the same as holding none.
             keyRingStatus = "pending";
             keyRing = null;
-            console.log("[server-link-language] no room key version opens for this agent — waiting for a new one");
+            logKeyRingRefresh(
+                before,
+                "[server-link-language] no room key version opens for this agent — waiting for a new one",
+            );
             return;
         }
         keyRingStatus = "ready";
-        const versions = [...keyRing.keys()].sort((a, b) => a - b);
-        console.log(`[server-link-language] E2E key ring acquired (${versions.length} version(s): ${versions.join(", ")})`);
+        const versions = openKeyVersions();
+        logKeyRingRefresh(
+            before,
+            `[server-link-language] E2E key ring acquired (${versions.length} version(s): ${versions.join(", ")})`,
+        );
     } catch (err) {
         if (gen !== lifecycleGen) return;
         ({ status: keyRingStatus, ring: keyRing } = afterFailedKeyRead(keyRingStatus, keyRing));
@@ -193,7 +228,10 @@ async function rotateIfAdminWithoutKey(): Promise<void> {
         roomRole = await readRoomRole();
     }
     if (adminRotationStep(keyRingStatus, rotatedThisRun, roomRole) !== "rotate") return;
-    console.log(`[server-link-language] admin holds no room key (${keyRingStatus}) — generating a new one`);
+    logRotation(
+        "attempt",
+        `[server-link-language] admin holds no room key (${keyRingStatus}) — generating a new one`,
+    );
     await performRotation();
 }
 
@@ -210,7 +248,7 @@ async function performKeyGrants(): Promise<void> {
         const token = await auth.getValidToken();
         const grants = await grantMissingRoomKeys(getConfig(), token, keyRing, myDid);
         for (const grant of grants) {
-            console.log(
+            console.info(
                 `[server-link-language] granted key versions [${grant.versions.join(", ")}] to ${grant.did}`,
             );
         }
@@ -231,11 +269,15 @@ async function performRotation(): Promise<void> {
         const token = await auth.getValidToken();
         const result = await rotateRoomKey(getConfig(), token);
         if (!result) {
-            console.log("[server-link-language] no ACL member to seal a room key to — skipping rotation");
+            logRotation(
+                "skipped",
+                "[server-link-language] no ACL member to seal a room key to — skipping rotation",
+            );
             return;
         }
         rotatedThisRun = true;
-        console.log(
+        logRotation(
+            "complete",
             `[server-link-language] client-side key rotation complete: version ${result.version}, ` +
             `${result.recipients.length} recipient(s)`,
         );
@@ -270,7 +312,7 @@ const language = defineLanguage({
 
         configured = !isPlaceholder(SERVER_URL) && !isPlaceholder(UID);
         if (!configured) {
-            console.log(
+            console.info(
                 `[server-link-language] init: did=${myDid}, template variables not filled in — ` +
                 "running inert until published with SERVER_URL/UID.",
             );
@@ -359,7 +401,7 @@ const language = defineLanguage({
                     getRuntime().emitSyncStateChange("LinkLanguageInstalledButNotSynced");
                 },
                 onReconnecting(attempt, delayMs) {
-                    console.log(
+                    console.debug(
                         `[server-link-language] websocket reconnecting (attempt ${attempt}) in ${Math.round(delayMs)}ms`,
                     );
                 },
@@ -414,7 +456,7 @@ const language = defineLanguage({
             console.error("[server-link-language] initial websocket connect failed:", err);
         });
 
-        console.log(`[server-link-language] init complete: did=${myDid}, uid=${UID}`);
+        console.info(`[server-link-language] init complete: did=${myDid}, uid=${UID}`);
     },
 
     async teardown() {
@@ -433,7 +475,7 @@ const language = defineLanguage({
         keyRingInflight = null;
         auth.resetAuth();
         resetAdapters();
-        console.log("[server-link-language] teardown");
+        console.info("[server-link-language] teardown");
     },
 
     interactions() {
@@ -472,7 +514,7 @@ const language = defineLanguage({
                 );
             }
 
-            console.log(
+            console.debug(
                 `[server-link-language] commit: ${diff.additions.length} adds, ` +
                 `${diff.removals.length} removes (keyRingStatus=${keyRingStatus})`,
             );

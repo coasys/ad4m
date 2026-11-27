@@ -457,7 +457,11 @@ macro_rules! ad4m_db_methods {
             fn interrupt_running_ai_messages(
                 &self,
                 session_id: Option<&str>
-            ) -> Result<u64, rusqlite::Error>;
+            ) -> Result<(u64, Vec<AiSessionMessage>), rusqlite::Error>;
+            fn list_running_assistant_messages(
+                &self,
+                session_id: Option<&str>
+            ) -> Result<Vec<AiSessionMessage>, rusqlite::Error>;
 
             // Expression cache
             fn _add_expression(&self, url: &str, expression: &Expression<Value>) -> Ad4mDbResult<()>;

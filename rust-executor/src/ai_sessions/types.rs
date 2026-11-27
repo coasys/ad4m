@@ -102,6 +102,11 @@ impl AiTurnStatus {
     }
 }
 
+/// Written on a `running` row whose task is gone, and used as the cause when that
+/// turn is logged. The sweep, a later send, and a cancel of a dead slot all store
+/// this same sentence (`COALESCE` keeps an error the row already had).
+pub(crate) const CUT_OFF_ERROR: &str = "the executor restarted, or the task that ran it ended";
+
 /// One transcript entry: the `ai_messages` row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]

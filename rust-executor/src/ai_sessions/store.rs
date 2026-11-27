@@ -62,7 +62,8 @@ pub trait AiSessionStore: Send + Sync {
         id: &str,
     ) -> Result<Option<AiSessionMessage>, AnyError>;
     /// The turn's end written on `id`: `status`, `error`, `content_patch` merged into
-    /// `content`. `false`: no such message of this owner.
+    /// `content`, and only while that row is still `running`. `false`: no such message
+    /// of this owner, or the row had already left `running`.
     fn finish_message(
         &self,
         owner_did: Option<&str>,
@@ -81,8 +82,19 @@ pub trait AiSessionStore: Send + Sync {
         before: Option<i64>,
     ) -> Result<Vec<AiSessionMessage>, AnyError>;
     /// Every `running` row — of the session `session_id`, or of the whole table when none is
-    /// named — marked `interrupted`. How many it caught.
-    fn interrupt_running(&self, session_id: Option<&str>) -> Result<u64, AnyError>;
+    /// named — marked `interrupted`. The count is every row the write changed. The messages
+    /// are the assistant rows that write changed, in `seq` order: a warn is owed for each
+    /// of those and for no row the write left alone.
+    fn interrupt_running(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<(u64, Vec<AiSessionMessage>), AnyError>;
+    /// Assistant rows still `running` — of the session `session_id`, or of the whole table
+    /// when none is named — in `seq` order.
+    fn running_assistants(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<Vec<AiSessionMessage>, AnyError>;
 }
 
 /// [`AiSessionStore`] on the executor's `DbBackend`: the executor's SQLite tables on
@@ -182,9 +194,21 @@ impl AiSessionStore for DbAiSessionStore {
             .map_err(Into::into)
     }
 
-    fn interrupt_running(&self, session_id: Option<&str>) -> Result<u64, AnyError> {
+    fn interrupt_running(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<(u64, Vec<AiSessionMessage>), AnyError> {
         db_backend()
             .interrupt_running_ai_messages(session_id)
+            .map_err(Into::into)
+    }
+
+    fn running_assistants(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<Vec<AiSessionMessage>, AnyError> {
+        db_backend()
+            .list_running_assistant_messages(session_id)
             .map_err(Into::into)
     }
 }

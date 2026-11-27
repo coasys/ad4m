@@ -5,7 +5,13 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { initAdapters, getConfig, resetAdapters } from "../src/adapters.js";
-import { adminRotates, adminRotationStep, afterFailedKeyRead } from "../src/room-keys.js";
+import {
+    adminRotates,
+    adminRotationStep,
+    afterFailedKeyRead,
+    keyRingRefreshChanged,
+    rotationLog,
+} from "../src/room-keys.js";
 import { generateRoomKey } from "../src/encryption.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -140,5 +146,53 @@ describe("afterFailedKeyRead", () => {
             assert.deepStrictEqual(afterFailedKeyRead(status, null), { status: "error", ring: null });
         }
         assert.deepStrictEqual(afterFailedKeyRead("ready", new Map()), { status: "error", ring: null });
+    });
+});
+
+describe("keyRingRefreshChanged", () => {
+    it("is true only when the status or the open versions changed", () => {
+        assert.strictEqual(
+            keyRingRefreshChanged(
+                { status: "pending", versions: [] },
+                { status: "pending", versions: [] },
+            ),
+            false,
+        );
+        assert.strictEqual(
+            keyRingRefreshChanged(
+                { status: "pending", versions: [] },
+                { status: "ready", versions: [1] },
+            ),
+            true,
+        );
+        assert.strictEqual(
+            keyRingRefreshChanged(
+                { status: "ready", versions: [2, 1] },
+                { status: "ready", versions: [1, 2] },
+            ),
+            false,
+        );
+        assert.strictEqual(
+            keyRingRefreshChanged(
+                { status: "ready", versions: [1] },
+                { status: "ready", versions: [1, 2] },
+            ),
+            true,
+        );
+        assert.strictEqual(
+            keyRingRefreshChanged(
+                { status: "error", versions: [] },
+                { status: "pending", versions: [] },
+            ),
+            true,
+        );
+    });
+});
+
+describe("rotationLog", () => {
+    it("keeps an unfinished attempt and a skip off info; the completed rotation stays", () => {
+        assert.strictEqual(rotationLog("attempt"), "debug");
+        assert.strictEqual(rotationLog("skipped"), "debug");
+        assert.strictEqual(rotationLog("complete"), "info");
     });
 });
