@@ -420,12 +420,15 @@ async fn call_zome_function(
         }
         None => None,
     };
-    let app_id = match holochain_service_once_started().await {
-        Some(interface) => app_for_call(&interface, &app_id, language.as_deref(), &agent).await?,
+    // One lookup for routing and the call: a second lookup could find a conductor that
+    // started in between and dispatch an app id `app_for_call` never resolved.
+    let interface = holochain_service_once_started().await;
+    let app_id = match &interface {
+        Some(interface) => app_for_call(interface, &app_id, language.as_deref(), &agent).await?,
         None => app_id,
     };
     let response = call_zome_within(
-        holochain_service_once_started(),
+        std::future::ready(interface),
         TIMEOUT_DURATION,
         app_id,
         cell_name,

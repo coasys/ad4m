@@ -332,3 +332,33 @@ async fn a_user_app_under_another_key_than_the_users_is_refused() {
         .await;
     assert!(used.is_err(), "after a restart Alice's call used {used:?}");
 }
+
+#[test]
+fn a_roster_that_cannot_be_read_is_not_overwritten() {
+    let backend = Backend::default();
+    let key = users_setting("lang");
+    backend.set_setting(&key, "not json").unwrap();
+    let cells = UserCells::default();
+    assert!(cells.add_user(&backend, "lang", "did:key:alice").is_err());
+    assert_eq!(backend.setting(&key).unwrap().as_deref(), Some("not json"));
+}
+
+#[test]
+fn users_added_at_the_same_time_are_all_kept() {
+    let backend = Arc::new(Backend::default());
+    let cells = Arc::new(UserCells::default());
+    let threads: Vec<_> = (0..16)
+        .map(|i| {
+            let (backend, cells) = (backend.clone(), cells.clone());
+            std::thread::spawn(move || {
+                cells
+                    .add_user(backend.as_ref(), "lang", &format!("did:key:u{i}"))
+                    .unwrap()
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().unwrap();
+    }
+    assert_eq!(cells.users_of(backend.as_ref(), "lang").len(), 16);
+}

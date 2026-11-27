@@ -132,6 +132,8 @@ pub(crate) struct UserCells {
     user_apps: StdMutex<HashMap<(String, String), String>>,
     /// Serialises the install of a user's app per (main app, DID).
     locks: StdMutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Serialises the read-modify-write of the per-language user rosters.
+    roster_lock: StdMutex<()>,
     /// User cells' signal routes, by [`cell_key`].
     routes: RwLock<HashMap<String, UserRoute>>,
     /// Languages loaded as system languages: their calls always use the main app.
@@ -191,14 +193,26 @@ impl UserCells {
             );
     }
 
-    /// The users that have an agent key in `language`, as stored.
+    /// The users that have an agent key in `language`, as stored. An error when the
+    /// roster can't be read or parsed, so a write never replaces a roster it couldn't read.
+    fn read_users(
+        &self,
+        backend: &dyn CellBackend,
+        language: &str,
+    ) -> Result<Vec<String>, AnyError> {
+        match backend.setting(&users_setting(language))? {
+            Some(json) => serde_json::from_str::<Vec<String>>(&json)
+                .map_err(|e| anyhow!("unreadable user roster of {language}: {e}")),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// [`Self::read_users`] for readers that can go on without the roster.
     fn users_of(&self, backend: &dyn CellBackend, language: &str) -> Vec<String> {
-        backend
-            .setting(&users_setting(language))
-            .ok()
-            .flatten()
-            .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
-            .unwrap_or_default()
+        self.read_users(backend, language).unwrap_or_else(|e| {
+            log::warn!("{e}");
+            Vec::new()
+        })
     }
 
     fn add_user(
@@ -207,7 +221,8 @@ impl UserCells {
         language: &str,
         did: &str,
     ) -> Result<(), AnyError> {
-        let mut users = self.users_of(backend, language);
+        let _roster = self.roster_lock.lock().unwrap_or_else(|p| p.into_inner());
+        let mut users = self.read_users(backend, language)?;
         if !users.iter().any(|u| u == did) {
             users.push(did.to_string());
             backend.set_setting(&users_setting(language), &serde_json::to_string(&users)?)?;
