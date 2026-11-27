@@ -33,7 +33,7 @@ trend page. The full contract is the header of `scripts/perf/perf.mjs`.
   last 7 passing runs with the same job, metric and params. Per-metric limits
   (factor, min_delta, an absolute ceiling or floor) live only in
   `scripts/perf/thresholds.json`; a ceiling or floor fails at any history. With fewer than 3 earlier
-  runs it only reports. Values with different `params` (such as another LLM
+  runs, the factor rule only reports. Values with different `params` (such as another LLM
   model) never compare. A regressed run stays out of later baselines.
   `scripts/perf/check --job J --accept <run_id>` takes it as the new normal: it
   resets the baseline, so later runs compare only with it and the runs after it.
