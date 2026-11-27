@@ -2,13 +2,19 @@
 # The GitHub side of CircleCI's heavy_gate (.circleci/scripts/should-run-heavy.sh),
 # run by .github/workflows/heavy-suites.yml on pull_request events.
 #
-# heavy_gate halts the heavy suites green on a draft PR, a stacked PR (base not
-# dev) or a branch with no PR. CircleCI starts a pipeline on a push, not when a
+# CircleCI runs no CI on a draft PR: every job halts green (draft_gate for the
+# light jobs, heavy_gate for the heavy suites, which also halt on a stacked PR
+# (base not dev) or a branch with no PR). CircleCI starts a pipeline on a push, not when a
 # PR gets ready, is retargeted to dev, is reopened or gets the full-ci label, so
 # such a PR kept green checks for suites that never ran. This script:
 #
 # - asks the same should-run-heavy.sh the same question. Skip: the commit
-#   status `ci/heavy-suites` goes pending at once.
+#   status `ci/heavy-suites` goes pending at once. A PR that is ready but
+#   stacked (the heavy suites are not due) still gets its light jobs: it polls
+#   this commit's newest pipeline's `build` (the same bounded wait and retries)
+#   until it ran past the Draft gate (nothing to start) or halted there (it
+#   starts one pipeline for the branch and does not wait for it). Its status
+#   stays pending.
 # - Run: it watches this commit's newest CircleCI pipeline (the project is
 #   public, so reads need no token) and sets success only when its heavy jobs
 #   are past heavy_gate, running or done. Their ci/circleci checks stay the
@@ -80,10 +86,16 @@ esac
 
 # The gate's answer for this branch, as CircleCI would get it now.
 msg="${HEAVY_GATE_COMMIT_MSG-$(git log -1 --format=%B "$sha" 2>/dev/null)}"
+# One workflow id and cache dir make the gate's second question (light, below) reuse this lookup.
+cache="$(mktemp -d)"
+trap 'rm -rf "$cache"' EXIT
+gate() { # [light]
+  env -u HEAVY_GATE_FORCE -u CIRCLE_TAG CIRCLE_WORKFLOW_ID="heavy-suites-${GITHUB_RUN_ID:-0}" \
+    HEAVY_GATE_CACHE_DIR="$cache/gate" CIRCLE_BRANCH="$branch" HEAVY_GATE_REPO="$repo" \
+    HEAVY_GATE_API="$gh_api" HEAVY_GATE_COMMIT_MSG="$msg" bash "$GATE" "$@"
+}
 rc=0
-line="$(env -u HEAVY_GATE_FORCE -u CIRCLE_TAG -u CIRCLE_WORKFLOW_ID \
-  CIRCLE_BRANCH="$branch" HEAVY_GATE_REPO="$repo" HEAVY_GATE_API="$gh_api" \
-  HEAVY_GATE_COMMIT_MSG="$msg" bash "$GATE")" || rc=$?
+line="$(gate)" || rc=$?
 echo "gate: $line (exit $rc)"
 case "$rc" in
   0) verdict=run ;;
@@ -135,14 +147,16 @@ start_pipeline() {
 # A heavy job runs heavy_gate's step (found by its name, "Stack gate ..."). It
 # ran when a step follows that one; it halted when the job finished with that
 # step last (`circleci-agent step halt` leaves exit 0 and status success, so the
-# step list is the only sign). Verified on real jobs of this project.
+# step list is the only sign). Verified on real jobs of this project. The light
+# jobs' step is "Draft gate ...": GATE_PREFIX picks which one is looked for, so
+# a light job is never counted as a heavy one.
 # shellcheck disable=SC2016 # jq's $g, not the shell's
 JOB_STATE='if (.steps | type) != "array" then "unread" else
-  ([.steps[]?.name] | map(startswith("Stack gate")) | index(true)) as $g
+  ([.steps[]?.name] | map(startswith($p)) | index(true)) as $g
   | if $g == null then "light" elif $g < ((.steps | length) - 1) then "ran"
     elif .lifecycle == "finished" then "halted" else "gate" end end'
-cache="$(mktemp -d)"
-trap 'rm -rf "$cache"' EXIT
+GATE_PREFIX="Stack gate"
+ONLY_JOB="" # when set, workflow_state and look read only the job of this name
 
 # workflow_state <workflow id> <workflow status>: ran, halted, waiting or stopped.
 # A job whose details cannot be read may have halted: while one is unread, the
@@ -157,7 +171,7 @@ workflow_state() {
       js="$(cat "$cache/$num")"
     else
       past && { echo waiting; return; }
-      js="$(cci_job "$num" | jq -r "$JOB_STATE" 2>/dev/null)" || js=""
+      js="$(cci_job "$num" | jq -r --arg p "$GATE_PREFIX" "$JOB_STATE" 2>/dev/null)" || js=""
       case "$js" in light|ran|halted|gate) ;; *) unread=1; continue ;; esac
       case "$st" in running|queued|not_running|on_hold) ;; *) echo "$js" > "$cache/$num" ;; esac
     fi
@@ -165,7 +179,7 @@ workflow_state() {
       halted) echo halted; return ;;
       ran) ran=1 ;;
     esac
-  done < <(jq -r '.items[] | "\(.job_number) \(.status)"' <<<"$jobs" 2>/dev/null)
+  done < <(jq -r --arg only "$ONLY_JOB" '.items[] | select($only == "" or .name == $only) | "\(.job_number) \(.status)"' <<<"$jobs" 2>/dev/null)
   if [ "$unread" = 1 ]; then echo waiting; return; fi
   if [ "$ran" = 1 ]; then echo ran; return; fi
   case "$2" in running|on_hold|failing|not_run) echo waiting ;; *) echo stopped ;; esac
@@ -208,7 +222,9 @@ pr_head() {
 }
 
 last=""
+light=0 # 1: only the light jobs are due; the poll below posts no status
 post() { # <state> <description>
+  [ "$light" = 1 ] && return 0
   local desc="${2:0:140}" body
   [ "$1 $desc" = "$last" ] && return 0
   body="$(jq -cn --arg s "$1" --arg c "$CONTEXT" --arg d "$desc" \
@@ -232,7 +248,18 @@ stays="If this stays, $rerun"
 
 if [ "$verdict" = skip ]; then
   post pending "Not run: $reason. Runs when the PR is ready and targets dev."
-  exit 0
+  # The heavy suites are not due, but a ready PR still gets the light jobs. They
+  # halted if the commit's pipeline was made while the PR was a draft, and no
+  # push comes when it turns ready. `build` alone is enough to look at: a workflow has
+  # one verdict, the first job's, failed lookups included (the gate's cache), so
+  # every light job halts or runs exactly as `build` does. It may still be at its
+  # Draft gate when the PR turns ready, so it takes the poll below (same wait,
+  # reads and retries) until build ran (nothing to start) or halted (start one
+  # pipeline, no wait). The status stays pending: the poll posts none.
+  lrc=0
+  gate light >/dev/null || lrc=$?
+  [ "$lrc" = 10 ] && exit 0
+  light=1 ONLY_JOB=build GATE_PREFIX="Draft gate"
 fi
 
 # The gate runs the suites (or the PR state is unknown). Success only once the
@@ -247,7 +274,7 @@ while :; do
   i=$(( i + 1 ))
   read -r st got <<<"$(look)"
   [ "$st" = unknown ] || n="$got"
-  echo "poll $i: $st ${got:+(pipeline $got)}"
+  echo "poll $i: ${ONLY_JOB:+$ONLY_JOB }$st ${got:+(pipeline $got)}"
   case "$st" in
     ran)
       post success "Heavy suites running in CircleCI pipeline $n; their ci/circleci checks have the result."
@@ -308,6 +335,7 @@ while :; do
         fi
         read -r mine mine_n <<<"$started"
         echo "started CircleCI pipeline $mine_n for $branch"
+        [ "$light" = 1 ] && exit 0 # the light jobs run in it; nothing waits for them
         post pending "Heavy suites started in CircleCI pipeline $mine_n; waiting for them. $stays"
       fi ;;
   esac
@@ -316,6 +344,10 @@ while :; do
   sleep $(( left < poll_s ? left : poll_s ))
 done
 
+if [ "$light" = 1 ]; then
+  echo "build did not reach a verdict in $(( wait_s / 60 )) min: no pipeline started; re-run the Heavy suites workflow."
+  exit 0
+fi
 if [ "$verdict" = unsure ] && [ -z "$mine" ]; then
   post pending "PR state unknown ($reason). $RERUN"
   exit 0

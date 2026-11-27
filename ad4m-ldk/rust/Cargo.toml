@@ -6,7 +6,11 @@ description = "AD4M Language Development Kit (Rust) — typed wrappers around th
 license = "CAL-1.0"
 
 # Standalone — not part of the main rust-executor workspace.
+# `model-derive` (the #[derive(Ad4mModel)] proc-macro) is a member of
+# this workspace for the same reason: it ships to language crates the
+# same way the LDK does, independently of the executor's lockfile.
 [workspace]
+members = ["model-derive"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -23,6 +27,7 @@ serde-wasm-bindgen = "0.6"
 js-sys = "0.3"
 # `futures::lock::Mutex` (needs the `std` feature) serializes calls into the language instance.
 futures = { version = "0.3", default-features = false, features = ["std"] }
+ad4m-model-derive = { path = "model-derive", version = "0.13.0-test-1" }
 
 [dev-dependencies]
 futures = { version = "0.3", default-features = false, features = ["std", "executor"] }

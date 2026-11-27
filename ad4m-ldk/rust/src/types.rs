@@ -116,3 +116,39 @@ pub struct InteractionParameter {
     #[serde(rename = "type")]
     pub param_type: String,
 }
+
+// ----- Mount capability -----
+
+/// One `{ name, shape }` pair of the `mountShapes()` answer — `shape` is
+/// the class's SHACL JSON (the mount contract's wire form).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MountShapeEntry {
+    pub name: String,
+    pub shape: serde_json::Value,
+}
+
+/// The `mountShapes()` answer — the classes this language exposes in a
+/// mounted perspective, plus the format version the mount engine keys
+/// re-installs on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MountShapes {
+    pub version: String,
+    pub shapes: Vec<MountShapeEntry>,
+}
+
+/// One record shown in the mounted perspective — `class` names the
+/// mounted class, `address` the record's expression address without the
+/// `<lang>://` prefix (as in `mount_types.rs`), `data` its fields.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MountEntry {
+    pub class: String,
+    pub address: Address,
+    pub data: serde_json::Value,
+}
+
+/// The `mountSnapshot()` answer — the current records of every mounted
+/// class.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MountSnapshot {
+    pub entries: Vec<MountEntry>,
+}
