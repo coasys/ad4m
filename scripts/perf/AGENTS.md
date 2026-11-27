@@ -28,12 +28,14 @@ trend page. The full contract is the header of `scripts/perf/perf.mjs`.
   `perf-history-key-fingerprint`. If the key is missing or a push fails, the job
   does not fail. `record` prints `history not pushed: <reason>`, and the records
   stay in the job's artifacts (`perf/records.jsonl`). A `check` that cannot read
-  the history only reports.
-- **`check`** fails the job when a value is worse than 1.5× the median of the
-  last 7 passing runs with the same job, metric and params. Per-metric limits
-  (factor, min_delta, an absolute ceiling or floor) live only in
-  `scripts/perf/thresholds.json`; a ceiling or floor fails at any history. With fewer than 3 earlier
-  runs, the factor rule only reports. Values with different `params` (such as another LLM
+  the history still fails on a ceiling or floor; only the factor rule reports.
+- **`check`** fails the job when a value is worse than `factor` × the median of
+  the last 7 passing runs with the same job, metric and params, and at least
+  `min_delta` worse than it; or past an absolute ceiling or floor. `factor`
+  (default 1.5), `min_delta` (default 0), `ceiling` and `floor` are per job and
+  metric, and live only in `scripts/perf/thresholds.json`; a ceiling or floor
+  fails at any history. With fewer than 3 earlier runs, the factor rule only
+  reports. Values with different `params` (such as another LLM
   model) never compare. A regressed run stays out of later baselines.
   `scripts/perf/check --job J --accept <run_id>` takes it as the new normal: it
   resets the baseline, so later runs compare only with it and the runs after it.
