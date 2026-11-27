@@ -529,6 +529,49 @@ describe('SHACLShape', () => {
       expect(prop?.resolveLanguage).toBe('lang://custom');
     });
 
+    it('round-trips autoAccept through toJSON/fromJSON and toLinks/fromLinks', () => {
+      const original = new SHACLShape('test://Model');
+      original.autoAccept = 'when_placed';
+
+      expect(SHACLShape.fromJSON(original.toJSON()).autoAccept).toBe('when_placed');
+
+      const links = original.toLinks();
+      expect(links).toContainEqual({
+        source: 'test://ModelShape',
+        predicate: 'ad4m://auto_accept',
+        target: 'literal:string:when_placed',
+      });
+      expect(SHACLShape.fromLinks(links, 'test://ModelShape').autoAccept)
+        .toBe('when_placed');
+
+      // Absent stays absent (behaves as "never" on the executor).
+      const plain = new SHACLShape('test://Model');
+      expect(plain.toLinks().some(l => l.predicate === 'ad4m://auto_accept')).toBe(false);
+      expect(SHACLShape.fromJSON(plain.toJSON()).autoAccept).toBeUndefined();
+    });
+
+    it('rejects an invalid auto_accept in fromJSON', () => {
+      // The fixture is not a valid AutoAccept. Cast only the argument so the
+      // runtime value stays "sometimes" and fromJSON still throws.
+      const shape = {
+        ...new SHACLShape('test://Model').toJSON(),
+        auto_accept: 'sometimes',
+      } as unknown as Parameters<typeof SHACLShape.fromJSON>[0];
+      expect(() => SHACLShape.fromJSON(shape)).toThrow(/auto_accept/);
+    });
+
+    it('leaves autoAccept unset when fromLinks sees two different rules', () => {
+      const original = new SHACLShape('test://Model');
+      original.autoAccept = 'always';
+      const links = original.toLinks();
+      links.push({
+        source: 'test://ModelShape',
+        predicate: 'ad4m://auto_accept',
+        target: 'literal:string:never',
+      });
+      expect(SHACLShape.fromLinks(links, 'test://ModelShape').autoAccept).toBeUndefined();
+    });
+
     it('preserves constructor and destructor actions', () => {
       const original = new SHACLShape('test://Model');
       original.constructor_actions = [

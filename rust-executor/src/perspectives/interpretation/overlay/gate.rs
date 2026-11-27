@@ -45,8 +45,12 @@ fn predicate_for(shapes: &[ModelShape], class: &str, name: &str) -> Option<Strin
 /// the overlay and leaves the real value alone. Reads the base's current real
 /// values (through the same `model_query` read path app code uses) and the
 /// overlay's last-inferred snapshot, then per property decides:
-///   * real unset → nothing to overwrite → **keep** the real write (a fresh
-///     field the LLM is filling in).
+///   * real unset and the overlay stages nothing for it → nothing to
+///     overwrite → **keep** the real write (a fresh field the LLM is filling
+///     in). Real unset *while* the overlay stages a value for it means the
+///     value was there when the last snapshot was taken and a person deleted
+///     it since — **drop** the real write; the re-proposed value is only a
+///     suggestion, or the deletion would be silently undone.
 ///   * the base has **no overlay** yet → the LLM did *not* write this instance
 ///     (it's human/seed-created), so its real values are **not** the LLM's to
 ///     overwrite → **drop** the real write; only stage `inferred = proposed` as
@@ -91,8 +95,11 @@ pub(super) async fn gate_update(
         let real_val = real.get(name);
         let inferred_val = inferred_now.get(&pred);
         let llm_owns = match real_val {
-            // Fresh/unset field → the LLM filling it in is always allowed.
-            None => true,
+            // Fresh/unset field → the LLM may fill it in — unless the overlay
+            // stages a value for it: then the field had a value at snapshot
+            // time and a person deleted it, so a re-proposed value stays a
+            // suggestion.
+            None => inferred_val.is_none(),
             // No overlay → the LLM never wrote this instance, so an existing real
             // value is not its to overwrite → suggestion-only (protect the human).
             Some(_) if !has_overlay => false,

@@ -1233,6 +1233,7 @@ mod tests {
             properties: vec![],
             include_relations: vec![],
             interpretation_hint: None,
+            auto_accept: None,
         }
     }
 

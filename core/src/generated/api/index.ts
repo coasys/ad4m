@@ -13,6 +13,7 @@ export type { AgentMessage } from "./AgentMessage";
 export type { AgentReply } from "./AgentReply";
 export type { AgentsByDidsRequest } from "./AgentsByDidsRequest";
 export type { ApplyTemplateRequest } from "./ApplyTemplateRequest";
+export type { AutoAccept } from "./AutoAccept";
 export type { CommitBatchRequest } from "./CommitBatchRequest";
 export type { CreateExpressionRequest } from "./CreateExpressionRequest";
 export type { CreatePerspectiveRequest } from "./CreatePerspectiveRequest";

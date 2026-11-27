@@ -28,7 +28,10 @@
 
 use super::class_label;
 use super::dedup::{cosine_similarity, embed_via_ai_service};
-use super::prompt::{build_interpretation_input_showing, existing_entry_json, ExistingShown};
+use super::prompt::{
+    build_interpretation_input_showing, existing_entry_json, outline_depths, outline_line,
+    ExistingShown,
+};
 use super::types::{ExistingInstances, InstanceContext, ProposedInstance, TranscriptTurn};
 use crate::ai_service::{estimate_task_prompt_tokens, estimate_token_count};
 use crate::perspectives::flow_context::FlowContext;
@@ -276,6 +279,17 @@ fn fill_stages<'a>(
     }
 }
 
+/// Tokens of one outline line at `depth` inside the prompt's JSON string,
+/// plus one token for the `"outline"` key (paid once for the block, so
+/// every line carries it). The fill still prices a candidate at depth 0;
+/// [`reconcile_shown_outline`] re-prices the lines that were actually nested.
+fn outline_line_tokens(depth: usize, class: &str, title: &str, id: &str) -> usize {
+    let line = outline_line(depth, class, title, id);
+    let escaped = serde_json::to_string(&format!("{line}\n")).expect("outline line");
+    let inner = &escaped[1..escaped.len() - 1];
+    estimate_token_count(inner) + 1
+}
+
 /// Pick the rows of `existing` that fit in `budget_tokens`, stage by stage
 /// (see [`fill_stages`]). A stage takes its rows in order and leaves out a
 /// row that does not fit in its share, then goes on with the next row, so
@@ -289,8 +303,21 @@ fn fill_stages<'a>(
 /// - an id in `full_ids` stays whole. These are the subjects of the active
 ///   flows, which the prompt names by full id under `active_flows`, so the
 ///   model can tie a flow to its row.
-/// - a handle that is also a real id in `existing` is not used, so every
-///   handle in the answer means one row.
+/// - a handle that is also a real id in `existing`, or that equals any
+///   parent target (including a target with no row), is not used. A dangling
+///   target that spelled a handle would otherwise nest under the unrelated
+///   row that took that handle, and a handle in the answer must mean one row.
+///
+/// `shapes` is how the outline nests (the same walk as the prompt). A
+/// candidate is priced with the shown id of a parent already selected, so a
+/// long parent id does not reject a child that fits once that parent is a
+/// handle. A parent selected later is still a full id at that point. After
+/// the fill, every parent target that names a selected row is rewritten to
+/// that row's shown id — the handle map is complete then, including when the
+/// child was selected first. A parent the budget left out keeps its full
+/// id. The outline is then charged at the depth it will render, and the
+/// lowest-priority rows are dropped until the block fits. Flat rows stay
+/// at the depth-0 cost the fill used.
 pub(crate) fn select_existing(
     existing: &ExistingInstances,
     base_prefix: &str,
@@ -298,6 +325,7 @@ pub(crate) fn select_existing(
     scores: Option<&HashMap<String, f32>>,
     compact: Compact,
     full_ids: &HashSet<String>,
+    shapes: &[ModelShape],
 ) -> PromptExisting {
     let mut out = PromptExisting {
         shown: ExistingInstances::new(),
@@ -310,6 +338,15 @@ pub(crate) fn select_existing(
     };
     let mut taken: HashSet<&String> = HashSet::new();
     let mut next_handle = 1usize;
+    // Parent targets are reserved even when they are not rows. `P1` as a
+    // dangling target must not become some other row's handle.
+    let reserved_targets: HashSet<&str> = existing
+        .values()
+        .flat_map(|rows| {
+            rows.iter()
+                .flat_map(|r| r.parents.values().map(String::as_str))
+        })
+        .collect();
     for stage in fill_stages(existing, base_prefix, scores) {
         let free = budget_tokens - out.tokens;
         let cap = (free as f64 * stage.share) as usize;
@@ -324,25 +361,47 @@ pub(crate) fn select_existing(
             }
             let handle = compact == Compact::Yes && !full_ids.contains(id);
             let shown_id = if handle {
-                while existing.contains_key(&format!("P{next_handle}")) {
+                loop {
+                    let candidate = format!("P{next_handle}");
+                    if !existing.contains_key(&candidate)
+                        && !reserved_targets.contains(candidate.as_str())
+                    {
+                        break candidate;
+                    }
                     next_handle += 1;
                 }
-                format!("P{next_handle}")
             } else {
                 id.clone()
             };
+            // Price a parent that is already in the view by its shown id.
+            // Reconciliation still rewrites parents selected later, and
+            // charges the indent; it cannot add a row the fill rejected.
             let shown_rows: Vec<InstanceContext> = existing[id]
                 .iter()
-                .map(|r| InstanceContext {
-                    id: shown_id.clone(),
-                    ..r.clone()
+                .map(|r| {
+                    let mut row = InstanceContext {
+                        id: shown_id.clone(),
+                        ..r.clone()
+                    };
+                    for target in row.parents.values_mut() {
+                        if let Some(shown) = shown_for_selected(&out, target) {
+                            *target = shown;
+                        }
+                    }
+                    row
                 })
                 .collect();
-            // Each row costs its JSON plus the comma between rows.
-            let cost: usize = shown_rows
+            // Each row costs its JSON plus the comma between rows, and the
+            // outline line the same row adds. The outline is one line per
+            // instance (the first class's title), not per class row. The
+            // extra token on that line pays for the `"outline"` key.
+            let mut cost: usize = shown_rows
                 .iter()
                 .map(|r| estimate_token_count(&existing_entry_json(r).to_string()) + 1)
                 .sum();
+            if let Some(first) = shown_rows.first() {
+                cost += outline_line_tokens(0, &first.class, &first.title, &shown_id);
+            }
             if used + cost > cap {
                 continue;
             }
@@ -360,7 +419,135 @@ pub(crate) fn select_existing(
         }
         out.stages.push((stage.name, rows_taken));
     }
+    // The fill priced parents that were already selected. Rewrite every
+    // parent from the original rows now that the handle map is complete
+    // (a child may have been selected before its parent), charge each
+    // outline line at the depth it will render, and drop the
+    // lowest-priority rows until that fits.
+    reconcile_shown_outline(&mut out, existing, shapes, budget_tokens);
     out
+}
+
+/// Shown id of a row already selected into `out`. A compact row is stored
+/// under its handle; a row kept whole (not compact, or a flow subject) is
+/// stored under its own id.
+fn shown_for_selected(out: &PromptExisting, full_id: &str) -> Option<String> {
+    if out.shown.contains_key(full_id) {
+        return Some(full_id.to_string());
+    }
+    out.handles
+        .to_id
+        .iter()
+        .find(|(_, full)| full.as_str() == full_id)
+        .map(|(shown, _)| shown.clone())
+}
+
+/// Full id → shown id for the rows in `out`. A compact handle maps back to
+/// its `P*` id. A row shown under its own id (not compact, or a flow subject
+/// kept whole) maps to itself. A shown handle is not a full id: handles that
+/// collide with a real id are never assigned.
+fn full_to_shown(out: &PromptExisting) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for (shown, full) in &out.handles.to_id {
+        map.insert(full.clone(), shown.clone());
+    }
+    for shown in out.shown.keys() {
+        map.entry(shown.clone()).or_insert_with(|| shown.clone());
+    }
+    map
+}
+
+/// Rewrite `parents` from the original rows. A target that is a selected row
+/// becomes that row's shown id. Any other target, including a parent the
+/// budget did not select, stays the full id.
+fn apply_shown_parents(out: &mut PromptExisting, existing: &ExistingInstances) {
+    let map = full_to_shown(out);
+    let order = out.order.clone();
+    for full_id in order {
+        let Some(orig) = existing.get(&full_id) else {
+            continue;
+        };
+        let shown_id = map
+            .get(&full_id)
+            .cloned()
+            .unwrap_or_else(|| full_id.clone());
+        let Some(shown_rows) = out.shown.get_mut(&shown_id) else {
+            continue;
+        };
+        for (shown, src) in shown_rows.iter_mut().zip(orig.iter()) {
+            shown.parents = src
+                .parents
+                .iter()
+                .map(|(rel, target)| {
+                    (
+                        rel.clone(),
+                        map.get(target).cloned().unwrap_or_else(|| target.clone()),
+                    )
+                })
+                .collect();
+        }
+    }
+}
+
+/// JSON plus outline, at the depth the prompt will indent each line.
+fn shown_tokens(shown: &ExistingInstances, shapes: &[ModelShape]) -> usize {
+    let depths = outline_depths(shown, shapes);
+    let mut tokens = 0usize;
+    for (id, rows) in shown {
+        tokens += rows
+            .iter()
+            .map(|r| estimate_token_count(&existing_entry_json(r).to_string()) + 1)
+            .sum::<usize>();
+        if let Some(first) = rows.first() {
+            let depth = depths.get(id).copied().unwrap_or(0);
+            tokens += outline_line_tokens(depth, &first.class, &first.title, id);
+        }
+    }
+    tokens
+}
+
+/// Drop the lowest-priority shown row (the last one filled). Returns false
+/// when nothing is left to drop.
+fn drop_last_shown(out: &mut PromptExisting) -> bool {
+    let Some(full_id) = out.order.pop() else {
+        return false;
+    };
+    let shown_id = out
+        .handles
+        .to_id
+        .iter()
+        .find(|(_, full)| **full == full_id)
+        .map(|(shown, _)| shown.clone())
+        .unwrap_or(full_id);
+    out.handles.to_id.remove(&shown_id);
+    out.shown.remove(&shown_id);
+    if let Some((_, n)) = out.stages.iter_mut().rev().find(|(_, n)| *n > 0) {
+        *n -= 1;
+    }
+    true
+}
+
+/// Remap parents, then charge real outline depth. While the block is over
+/// budget, drop the lowest-priority row and try again. Parents are always
+/// taken from `existing`, so a child whose parent was just dropped goes back
+/// to naming that parent by its full id.
+fn reconcile_shown_outline(
+    out: &mut PromptExisting,
+    existing: &ExistingInstances,
+    shapes: &[ModelShape],
+    budget_tokens: usize,
+) {
+    loop {
+        apply_shown_parents(out, existing);
+        out.tokens = shown_tokens(&out.shown, shapes);
+        out.rows_shown = out.order.len();
+        if out.tokens <= budget_tokens || out.order.is_empty() {
+            break;
+        }
+        if !drop_last_shown(out) {
+            break;
+        }
+    }
 }
 
 /// One text per existing instance for the similarity order: its identity
@@ -497,7 +684,15 @@ pub(crate) async fn existing_for_prompt(
     let budget = existing_budget_tokens(window, other_tokens);
 
     let flow_subjects: HashSet<String> = active_flows.iter().map(|f| f.subject.clone()).collect();
-    let mut view = select_existing(existing, base_prefix, budget, None, compact, &flow_subjects);
+    let mut view = select_existing(
+        existing,
+        base_prefix,
+        budget,
+        None,
+        compact,
+        &flow_subjects,
+        shapes,
+    );
     if let Some(model) = embed_model.filter(|_| needs_similarity(&view)) {
         if let Some(scores) = similarity_scores(model, transcript, existing).await {
             view = select_existing(
@@ -507,6 +702,7 @@ pub(crate) async fn existing_for_prompt(
                 Some(&scores),
                 compact,
                 &flow_subjects,
+                shapes,
             );
         }
     }
@@ -559,6 +755,7 @@ mod tests {
             title: title.to_string(),
             class: class.to_string(),
             properties: BTreeMap::new(),
+            parents: BTreeMap::new(),
             updated_at: updated_ms.to_string(),
         }
     }
@@ -597,7 +794,16 @@ mod tests {
             .collect();
         let existing = existing_of(rows);
         let one = existing_of(vec![row("soa://t/00", "Task", "Task 00", 0)]);
-        let cost = select_existing(&one, "", usize::MAX, None, Compact::No, &HashSet::new()).tokens;
+        let cost = select_existing(
+            &one,
+            "",
+            usize::MAX,
+            None,
+            Compact::No,
+            &HashSet::new(),
+            &[],
+        )
+        .tokens;
         (existing, scores, cost)
     }
 
@@ -617,6 +823,7 @@ mod tests {
             Some(&scores),
             Compact::No,
             &HashSet::new(),
+            &[],
         );
         assert_eq!(
             view.stages,
@@ -632,6 +839,7 @@ mod tests {
             Some(&scores),
             Compact::No,
             &HashSet::new(),
+            &[],
         );
         assert_eq!(
             in_scope.stages,
@@ -650,6 +858,7 @@ mod tests {
             Some(&scores),
             Compact::No,
             &HashSet::new(),
+            &[],
         );
         let mut expected = ids((15..20).rev());
         expected.extend(ids(0..5));
@@ -665,7 +874,15 @@ mod tests {
     fn without_an_embedding_model_the_order_is_pure_recency() {
         let (existing, _, cost) = twenty_rows();
         let budget = 10 * cost + cost / 2;
-        let view = select_existing(&existing, "", budget, None, Compact::No, &HashSet::new());
+        let view = select_existing(
+            &existing,
+            "",
+            budget,
+            None,
+            Compact::No,
+            &HashSet::new(),
+            &[],
+        );
         assert_eq!(shown_ids(&view), ids((10..20).rev()));
         assert_eq!(view.stages, vec![("scope", 0), ("recent", 10)]);
     }
@@ -693,6 +910,7 @@ mod tests {
                 None,
                 Compact::No,
                 &HashSet::new(),
+                &[],
             )
             .tokens
         };
@@ -708,6 +926,7 @@ mod tests {
             None,
             Compact::No,
             &HashSet::new(),
+            &[],
         );
         assert_eq!(shown_ids(&view), vec!["soa://a", "soa://c"]);
     }
@@ -724,6 +943,7 @@ mod tests {
             None,
             Compact::No,
             &HashSet::new(),
+            &[],
         );
         assert_eq!(full.rows_shown, 3);
         assert!(!needs_similarity(&full), "{:?}", full.stages);
@@ -736,6 +956,7 @@ mod tests {
             None,
             Compact::No,
             &HashSet::new(),
+            &[],
         );
         assert_eq!(room.stages[0], ("scope", 10));
         assert!(needs_similarity(&room));
@@ -765,6 +986,7 @@ mod tests {
             None,
             Compact::No,
             &HashSet::new(),
+            &[],
         );
         let view = select_existing(
             &existing,
@@ -773,6 +995,7 @@ mod tests {
             None,
             Compact::No,
             &HashSet::new(),
+            &[],
         );
         assert_eq!((view.rows_shown, view.rows_total), (1, 2));
         let prompt: serde_json::Value = serde_json::from_str(&build_interpretation_input_showing(
@@ -829,6 +1052,7 @@ mod tests {
                     s,
                     Compact::Yes,
                     &HashSet::new(),
+                    &[],
                 );
                 assert_eq!(
                     shown_ids(&view)[..2],
@@ -859,6 +1083,7 @@ mod tests {
             None,
             Compact::Yes,
             &HashSet::new(),
+            &[],
         );
         assert_eq!(
             shown_ids(&view),
@@ -869,13 +1094,21 @@ mod tests {
     #[test]
     fn a_zero_budget_skips_the_similarity_order() {
         let (existing, _, cost) = twenty_rows();
-        let none = select_existing(&existing, "", 0, None, Compact::Yes, &HashSet::new());
+        let none = select_existing(&existing, "", 0, None, Compact::Yes, &HashSet::new(), &[]);
         assert_eq!(none.rows_shown, 0);
         assert!(
             !needs_similarity(&none),
             "nothing can be shown: no embedding call"
         );
-        let some = select_existing(&existing, "", 3 * cost, None, Compact::Yes, &HashSet::new());
+        let some = select_existing(
+            &existing,
+            "",
+            3 * cost,
+            None,
+            Compact::Yes,
+            &HashSet::new(),
+            &[],
+        );
         assert!(needs_similarity(&some));
         let all = select_existing(
             &existing,
@@ -884,16 +1117,27 @@ mod tests {
             None,
             Compact::Yes,
             &HashSet::new(),
+            &[],
         );
         assert!(!needs_similarity(&all), "all rows shown");
     }
 
-    /// The token cost of one row as the prompt shows it, plus its comma.
-    fn row_cost(view: &PromptExisting, shown_id: &str) -> usize {
-        view.shown[shown_id]
+    /// The token cost of one row as the prompt shows it, plus its comma,
+    /// at the depth `shapes` will indent it.
+    fn row_cost(view: &PromptExisting, shown_id: &str, shapes: &[ModelShape]) -> usize {
+        let rows = &view.shown[shown_id];
+        let json: usize = rows
             .iter()
             .map(|r| estimate_token_count(&existing_entry_json(r).to_string()) + 1)
-            .sum()
+            .sum();
+        let depth = outline_depths(&view.shown, shapes)
+            .get(shown_id)
+            .copied()
+            .unwrap_or(0);
+        let line = rows
+            .first()
+            .map(|r| outline_line_tokens(depth, &r.class, &r.title, shown_id));
+        json + line.unwrap_or(0)
     }
 
     #[test]
@@ -967,7 +1211,15 @@ mod tests {
         }
         let existing = existing_of(rows);
         let budget = 2_000;
-        let view = select_existing(&existing, "", budget, None, Compact::Yes, &HashSet::new());
+        let view = select_existing(
+            &existing,
+            "",
+            budget,
+            None,
+            Compact::Yes,
+            &HashSet::new(),
+            &[],
+        );
         assert_eq!(view.rows_total, 504);
         assert!(
             view.rows_shown > 0 && view.rows_shown < 504,
@@ -999,6 +1251,291 @@ mod tests {
         );
     }
 
+    fn prompt_outline(shapes: &[ModelShape], shown: &ExistingInstances) -> String {
+        let input = build_interpretation_input(
+            shapes,
+            &[TranscriptTurn::from_speaker_text("Ana", "hello")],
+            shown,
+            &[],
+            &HashMap::new(),
+        );
+        let v: serde_json::Value = serde_json::from_str(&input).unwrap();
+        v["outline"].as_str().unwrap_or("").to_string()
+    }
+
+    /// Lal on #1710: a compact prompt renames selected rows to `P1`, `P2`, …
+    /// but used to leave `parents` as full ids. The outline keys nodes by the
+    /// shown id, so a chapter and its note both in the view rendered as two
+    /// roots. The child is the newer row, so it is selected first and its
+    /// handle exists before the parent's does — the remap has to wait until
+    /// the full-id → shown-id map is complete.
+    #[test]
+    fn compact_handles_nest_a_child_selected_before_its_parent() {
+        let shapes = vec![
+            shape_from_sdna("Chapter", AA_PARENT_SDNA),
+            shape_from_sdna("Note", AA_CHILD_SDNA),
+        ];
+        let parent_id = "ns://chapter/1";
+        let child_id = "ns://note/1";
+        let mut child = row(child_id, "Note", "Note 1", 500);
+        child.parents.insert("partOf".into(), parent_id.to_string());
+        let existing = existing_of(vec![row(parent_id, "Chapter", "Chapter A", 100), child]);
+        let view = select_existing(
+            &existing,
+            "",
+            usize::MAX,
+            None,
+            Compact::Yes,
+            &HashSet::new(),
+            &shapes,
+        );
+        assert_eq!(
+            view.order,
+            vec![child_id.to_string(), parent_id.to_string()],
+            "the newer child is selected before its parent"
+        );
+        assert_eq!(
+            view.shown["P1"][0]
+                .parents
+                .get("partOf")
+                .map(String::as_str),
+            Some("P2"),
+            "the parent was selected, so the row names it by its shown handle"
+        );
+        assert_eq!(view.handles.id_of("P1"), Some(child_id));
+        assert_eq!(view.handles.id_of("P2"), Some(parent_id));
+        assert_eq!(
+            prompt_outline(&shapes, &view.shown),
+            "- [Chapter] Chapter A (P2)\n  - [Note] Note 1 (P1)"
+        );
+    }
+
+    /// A parent the budget does not show keeps its full id. That id is not a
+    /// handle in the view, so the outline renders the child as a root and the
+    /// row still says the parent sits outside the view.
+    #[test]
+    fn a_parent_the_budget_left_out_keeps_its_full_id() {
+        let shapes = vec![
+            shape_from_sdna("Chapter", AA_PARENT_SDNA),
+            shape_from_sdna("Note", AA_CHILD_SDNA),
+        ];
+        let parent_id = "ns://chapter/outside";
+        let child_id = "ns://note/inside";
+        let mut child = row(child_id, "Note", "Note 1", 500);
+        child.parents.insert("partOf".into(), parent_id.to_string());
+        let mut parent = row(parent_id, "Chapter", "Outside", 100);
+        parent
+            .properties
+            .insert("summary".into(), "z".repeat(8_000));
+        let child_only = existing_of(vec![child.clone()]);
+        let child_cost = select_existing(
+            &child_only,
+            "",
+            usize::MAX,
+            None,
+            Compact::Yes,
+            &HashSet::new(),
+            &shapes,
+        )
+        .tokens;
+        let existing = existing_of(vec![parent, child]);
+        let view = select_existing(
+            &existing,
+            "",
+            child_cost,
+            None,
+            Compact::Yes,
+            &HashSet::new(),
+            &shapes,
+        );
+        assert_eq!(view.rows_shown, 1, "only the child fits");
+        assert_eq!(view.order, vec![child_id.to_string()]);
+        assert_eq!(
+            view.shown["P1"][0]
+                .parents
+                .get("partOf")
+                .map(String::as_str),
+            Some(parent_id),
+            "an unselected parent stays the full id, outside the shown handles"
+        );
+        assert_eq!(prompt_outline(&shapes, &view.shown), "- [Note] Note 1 (P1)");
+    }
+
+    /// A child whose parent is already selected is priced with that parent's
+    /// shown handle. Pricing the full id rejects a note that fits, including
+    /// the extra indent of nesting under the chapter, and reconciliation only
+    /// drops rows, so the note never comes back.
+    #[test]
+    fn a_child_priced_with_a_selected_parents_handle_still_fits() {
+        let shapes = vec![
+            shape_from_sdna("Chapter", AA_PARENT_SDNA),
+            shape_from_sdna("Note", AA_CHILD_SDNA),
+        ];
+        let parent_id = format!("ns://chapter/{}", "x".repeat(200));
+        let child_id = "ns://note/1";
+        // The chapter is newer, so the fill selects it before the note and
+        // its handle exists while the note is being priced.
+        let chapter = row(&parent_id, "Chapter", "A", 200);
+        let mut note = row(child_id, "Note", "B", 100);
+        note.parents.insert("partOf".into(), parent_id.clone());
+
+        let mut chapter_shown = chapter.clone();
+        chapter_shown.id = "P1".into();
+        let chapter_cost = estimate_token_count(&existing_entry_json(&chapter_shown).to_string())
+            + 1
+            + outline_line_tokens(0, "Chapter", "A", "P1");
+
+        let mut note_short = note.clone();
+        note_short.id = "P2".into();
+        note_short.parents.insert("partOf".into(), "P1".into());
+        let note_at_depth = estimate_token_count(&existing_entry_json(&note_short).to_string())
+            + 1
+            + outline_line_tokens(1, "Note", "B", "P2");
+
+        let mut note_long = note.clone();
+        note_long.id = "P2".into();
+        let note_with_full_parent =
+            estimate_token_count(&existing_entry_json(&note_long).to_string())
+                + 1
+                + outline_line_tokens(0, "Note", "B", "P2");
+        assert!(
+            note_with_full_parent > note_at_depth,
+            "the full parent id must be what pushes the note over the budget"
+        );
+
+        let budget = chapter_cost + note_at_depth;
+        let existing = existing_of(vec![chapter, note]);
+        let view = select_existing(
+            &existing,
+            "",
+            budget,
+            None,
+            Compact::Yes,
+            &HashSet::new(),
+            &shapes,
+        );
+        assert_eq!(
+            view.order,
+            vec![parent_id.clone(), child_id.to_string()],
+            "the note fits once its parent is the handle P1"
+        );
+        assert_eq!(
+            view.shown["P2"][0]
+                .parents
+                .get("partOf")
+                .map(String::as_str),
+            Some("P1")
+        );
+        assert!(view.tokens <= budget, "{} > {budget}", view.tokens);
+        assert_eq!(
+            prompt_outline(&shapes, &view.shown),
+            "- [Chapter] A (P1)\n  - [Note] B (P2)"
+        );
+    }
+
+    /// A parent target that is not a row can still spell a compact handle.
+    /// Allocating that handle to an unrelated row makes the outline nest the
+    /// note under it. The target stays the original string, and the handle
+    /// is skipped.
+    #[test]
+    fn a_dangling_parent_target_is_not_reused_as_a_compact_handle() {
+        let shapes = vec![
+            shape_from_sdna("Chapter", AA_PARENT_SDNA),
+            shape_from_sdna("Note", AA_CHILD_SDNA),
+        ];
+        let chapter_id = "ns://chapter/1";
+        let note_id = "ns://note/1";
+        let chapter = row(chapter_id, "Chapter", "A", 200);
+        let mut note = row(note_id, "Note", "B", 100);
+        note.parents.insert("partOf".into(), "P1".into());
+        let existing = existing_of(vec![chapter, note]);
+        let view = select_existing(
+            &existing,
+            "",
+            usize::MAX,
+            None,
+            Compact::Yes,
+            &HashSet::new(),
+            &shapes,
+        );
+        assert_eq!(view.handles.id_of("P1"), None, "P1 is a dangling target");
+        assert_eq!(view.handles.id_of("P2"), Some(chapter_id));
+        assert_eq!(view.handles.id_of("P3"), Some(note_id));
+        assert_eq!(
+            view.shown["P3"][0]
+                .parents
+                .get("partOf")
+                .map(String::as_str),
+            Some("P1"),
+            "the target is not a selected row, so it stays P1"
+        );
+        assert_eq!(
+            prompt_outline(&shapes, &view.shown),
+            "- [Chapter] A (P2)\n- [Note] B (P3)"
+        );
+    }
+
+    /// Depth-0 outline accounting under-counts a chain: the renderer indents
+    /// two spaces per level (`outline_line`). A budget that pays for every
+    /// row at depth 0 must not let the rendered prompt grow past it.
+    #[test]
+    fn a_deep_chain_stays_within_the_outline_budget() {
+        let shapes = vec![shape_from_sdna("Note", AA_CHILD_SDNA)];
+        let n = 24;
+        let mut rows = Vec::new();
+        for i in 0..n {
+            let id = format!("ns://n/{i:02}");
+            let mut r = row(&id, "Note", &format!("N{i}"), i as i64);
+            if i > 0 {
+                r.parents
+                    .insert("partOf".into(), format!("ns://n/{:02}", i - 1));
+            }
+            rows.push(r);
+        }
+        // What the selector charges when every line is depth 0 and shown
+        // under its full id (the harness path, `Compact::No`).
+        let mut budget = 0usize;
+        for r in &rows {
+            budget += estimate_token_count(&existing_entry_json(r).to_string()) + 1;
+            let line = outline_line(0, &r.class, &r.title, &r.id);
+            let escaped = serde_json::to_string(&format!("{line}\n")).expect("line");
+            let inner = &escaped[1..escaped.len() - 1];
+            budget += estimate_token_count(inner) + 1;
+        }
+        let existing = existing_of(rows);
+        let view = select_existing(
+            &existing,
+            "",
+            budget,
+            None,
+            Compact::No,
+            &HashSet::new(),
+            &shapes,
+        );
+        assert!(
+            view.tokens <= budget,
+            "counted {} > budget {budget}",
+            view.tokens
+        );
+        let transcript = [TranscriptTurn::from_speaker_text("Ana", "hello")];
+        let with =
+            build_interpretation_input(&shapes, &transcript, &view.shown, &[], &HashMap::new());
+        let without = build_interpretation_input(
+            &shapes,
+            &transcript,
+            &ExistingInstances::new(),
+            &[],
+            &HashMap::new(),
+        );
+        let grown = estimate_token_count(&with) - estimate_token_count(&without);
+        assert!(
+            grown <= budget + 2,
+            "the prompt grew by {grown}, budget {budget}, shown {}/{}",
+            view.rows_shown,
+            view.rows_total
+        );
+    }
+
     #[test]
     fn rows_in_the_pass_scope_come_before_newer_rows_outside_it() {
         let existing = existing_of(vec![
@@ -1014,6 +1551,7 @@ mod tests {
             None,
             Compact::Yes,
             &HashSet::new(),
+            &[],
         );
         assert_eq!(
             shown_ids(&all),
@@ -1026,7 +1564,7 @@ mod tests {
         );
 
         // A budget for two rows shows the two in scope, though older.
-        let budget = row_cost(&all, "P1") + row_cost(&all, "P2");
+        let budget = row_cost(&all, "P1", &[]) + row_cost(&all, "P2", &[]);
         let two = select_existing(
             &existing,
             "we://call/1/",
@@ -1034,6 +1572,7 @@ mod tests {
             None,
             Compact::Yes,
             &HashSet::new(),
+            &[],
         );
         assert_eq!(
             shown_ids(&two),
@@ -1055,6 +1594,7 @@ mod tests {
             None,
             Compact::Yes,
             &HashSet::new(),
+            &[],
         );
         assert_eq!(shown_ids(&view), vec!["soa://a", "soa://c", "soa://b"]);
 
@@ -1063,7 +1603,15 @@ mod tests {
         rfc.get_mut("soa://a").unwrap()[0].updated_at = "2026-11-18T10:00:00.000Z".into();
         rfc.get_mut("soa://b").unwrap()[0].updated_at = "2026-11-18T12:00:00.000Z".into();
         rfc.get_mut("soa://c").unwrap()[0].updated_at = "2026-11-18T11:00:00.000Z".into();
-        let view = select_existing(&rfc, "", usize::MAX, None, Compact::Yes, &HashSet::new());
+        let view = select_existing(
+            &rfc,
+            "",
+            usize::MAX,
+            None,
+            Compact::Yes,
+            &HashSet::new(),
+            &[],
+        );
         assert_eq!(shown_ids(&view), vec!["soa://b", "soa://c", "soa://a"]);
     }
 
@@ -1113,6 +1661,7 @@ mod tests {
             None,
             Compact::Yes,
             &HashSet::new(),
+            &[],
         );
         assert_eq!(
             (1..=3)
@@ -1158,6 +1707,7 @@ mod tests {
             None,
             Compact::Yes,
             &HashSet::new(),
+            &[],
         );
         let answer =
             parse_interpretation_response(r#"[{"class":"Task","id":"P9","title":"Fresh"}]"#)
@@ -1196,6 +1746,7 @@ mod tests {
             None,
             Compact::Yes,
             &HashSet::new(),
+            &[],
         );
         assert_eq!(view.shown["P1"][0].properties["summary"], full);
 
@@ -1227,6 +1778,7 @@ mod tests {
             None,
             Compact::Yes,
             &HashSet::new(),
+            &[],
         );
         assert_eq!(shown_ids(&view), vec!["P1", "soa://task/other"]);
         assert_eq!(view.handles.id_of("P1"), None, "no handle P1");
@@ -1370,6 +1922,7 @@ mod tests {
             None,
             Compact::No,
             &HashSet::new(),
+            &[],
         );
         assert_eq!(view.shown["soa://task/a"][0].properties["owner"], long);
         assert_eq!(view.handles, Handles::default());
@@ -1387,6 +1940,7 @@ mod tests {
             None,
             Compact::No,
             &HashSet::new(),
+            &[],
         );
         let compact = select_existing(
             &existing,
@@ -1395,11 +1949,20 @@ mod tests {
             None,
             Compact::Yes,
             &HashSet::new(),
+            &[],
         );
         // 65,536 window; about 12k tokens of system prompt, examples, schema
         // and a 100-turn transcript (6.6k).
         let budget = existing_budget_tokens(Some(65_536), 12_000);
-        let after = select_existing(&existing, "", budget, None, Compact::Yes, &HashSet::new());
+        let after = select_existing(
+            &existing,
+            "",
+            budget,
+            None,
+            Compact::Yes,
+            &HashSet::new(),
+            &[],
+        );
         println!(
             "#1804 existing block, 504 rows: before {} tokens (est.), short handles {} tokens, \
              budget {budget} -> {} rows, {} tokens, stages {:?}",

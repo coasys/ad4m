@@ -1,3 +1,4 @@
+use crate::perspectives::model_query::types::AutoAccept;
 use crate::types::Link;
 use anyhow::Error;
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,14 @@ pub struct SHACLShape {
     /// Emitted as an `ad4m://interpretation_hint` link.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interpretation_hint: Option<String>,
+    /// Whether inferred instances of this class are accepted automatically
+    /// after an interpretation pass: `"always"`, `"when_placed"` (only items
+    /// carrying a parent relation value) or `"never"`. Absent behaves as
+    /// `"never"`. Emitted as an `ad4m://auto_accept` link on the shape node.
+    /// An unknown value is rejected by deserialization — it names the three
+    /// valid variants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_accept: Option<AutoAccept>,
     /// Constructor actions for creating instances
     #[serde(default)]
     #[ts(as = "Option<Vec<AD4MAction>>")]
@@ -62,6 +71,10 @@ pub struct SHACLShape {
 
 /// Marks a node shape as an abstract class (#1435).
 pub const ABSTRACT_PREDICATE: &str = "ad4m://abstract";
+
+/// The class-level interpretation auto-accept rule on a node shape
+/// (`SHACLShape.auto_accept`), stored as `literal:string:<value>`.
+pub const AUTO_ACCEPT_PREDICATE: &str = "ad4m://auto_accept";
 
 /// A property's names for abstract classes (#1435): one link on the property
 /// shape, targeting `literal:string:` + the URL-encoded JSON map
@@ -1826,6 +1839,16 @@ pub fn shape_links(mut shape: SHACLShape, class_name: &str) -> Result<Vec<Link>,
         });
     }
 
+    // Class-level auto-accept rule for interpretation. `load_shape` reads it
+    // back onto `ModelShape::auto_accept`; absent means "never".
+    if let Some(auto_accept) = &shape.auto_accept {
+        links.push(Link {
+            source: shape_uri.clone(),
+            predicate: Some(AUTO_ACCEPT_PREDICATE.to_string()),
+            target: format!("literal:string:{}", auto_accept.as_str()),
+        });
+    }
+
     if shape.is_abstract {
         links.push(Link {
             source: shape_uri.clone(),
@@ -2271,12 +2294,13 @@ pub enum ShapeNode {
     Property,
 }
 
-const SHAPE_NODE_PREDICATES: [&str; 7] = [
+const SHAPE_NODE_PREDICATES: [&str; 8] = [
     "sh://targetClass",
     "sh://node",
     "sh://property",
     "ad4m://interpretation_hint",
     ABSTRACT_PREDICATE,
+    AUTO_ACCEPT_PREDICATE,
     "ad4m://constructor",
     "ad4m://destructor",
 ];
@@ -2478,10 +2502,40 @@ pub fn shape_from_links(target_class: &str, links: &[Link]) -> Option<SHACLShape
         .collect();
     properties.sort_by(|a, b| a.name.cmp(&b.name));
 
+    // Same rule as `load_shape`: one known value is the rule; none, an
+    // unknown value, or several different values read as no rule (a person
+    // decides). `text` would keep whichever link the map returned first.
+    let auto_accept = {
+        let mut values: Vec<String> = all(&shape_uri, AUTO_ACCEPT_PREDICATE)
+            .iter()
+            .map(|t| literal_value(t))
+            .collect();
+        values.sort();
+        values.dedup();
+        match values.as_slice() {
+            [] => None,
+            [one] => AutoAccept::parse(one).or_else(|| {
+                log::warn!(
+                    "SHACL shape '{target_class}': unknown auto_accept value '{one}', \
+                     treating it as 'never'"
+                );
+                None
+            }),
+            several => {
+                log::warn!(
+                    "SHACL shape '{target_class}': conflicting auto_accept values {several:?}, \
+                     treating them as 'never'"
+                );
+                None
+            }
+        }
+    };
+
     Some(SHACLShape {
         target_class: target_class.to_string(),
         properties,
         interpretation_hint: text(&shape_uri, "ad4m://interpretation_hint"),
+        auto_accept,
         constructor_actions: json(text(&shape_uri, "ad4m://constructor")).unwrap_or_default(),
         destructor_actions: json(text(&shape_uri, "ad4m://destructor")).unwrap_or_default(),
         parent_shapes: all(&shape_uri, "sh://node"),
@@ -3121,6 +3175,77 @@ mod tests {
                 .iter()
                 .any(|l| l.predicate == Some("ad4m://interpretation_hint".to_string())),
             "no ad4m://interpretation_hint link should be emitted when the hint is absent"
+        );
+    }
+
+    #[test]
+    fn test_parse_shacl_auto_accept_emits_one_link_per_value() {
+        // Each declared `auto_accept` mode lands as one `ad4m://auto_accept`
+        // link on the class shape node, its target the literal mode string.
+        for value in ["always", "when_placed", "never"] {
+            let shacl_json = format!(
+                r#"{{
+                    "target_class": "soa://Task",
+                    "auto_accept": "{value}",
+                    "properties": []
+                }}"#
+            );
+
+            let links = parse_shacl_to_links(&shacl_json, "Task").unwrap();
+            let emitted: Vec<&Link> = links
+                .iter()
+                .filter(|l| {
+                    l.source == "soa://TaskShape"
+                        && l.predicate == Some("ad4m://auto_accept".to_string())
+                })
+                .collect();
+            assert_eq!(
+                emitted.len(),
+                1,
+                "{value}: expected exactly one ad4m://auto_accept link"
+            );
+            assert_eq!(emitted[0].target, format!("literal:string:{value}"));
+        }
+    }
+
+    #[test]
+    fn test_parse_shacl_without_auto_accept_emits_none() {
+        // Absent means "never" — and emits no link at all, so shapes written
+        // before this key existed are unchanged.
+        let shacl_json = r#"{
+            "target_class": "recipe://Recipe",
+            "properties": [
+                { "path": "recipe://name", "name": "name", "datatype": "xsd://string" }
+            ]
+        }"#;
+
+        let links = parse_shacl_to_links(shacl_json, "Recipe").unwrap();
+        assert!(
+            !links
+                .iter()
+                .any(|l| l.predicate == Some("ad4m://auto_accept".to_string())),
+            "no ad4m://auto_accept link should be emitted when the key is absent"
+        );
+    }
+
+    #[test]
+    fn test_parse_shacl_rejects_an_unknown_auto_accept_value() {
+        // The enum is closed: a typo or a mode this executor does not know
+        // fails the whole shape at parse time, naming the valid values.
+        let shacl_json = r#"{
+            "target_class": "soa://Task",
+            "auto_accept": "sometimes",
+            "properties": []
+        }"#;
+
+        let err = parse_shacl_to_links(shacl_json, "Task").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("sometimes")
+                && msg.contains("always")
+                && msg.contains("when_placed")
+                && msg.contains("never"),
+            "error should name the bad value and the valid ones, got: {msg}"
         );
     }
 

@@ -162,6 +162,9 @@ fn notification_pool_name(uuid: &str) -> String {
 /// still uses one of those predicates only costs a refill. An own-link
 /// change the scan misses would leave `register_shapes` answering a
 /// stale `unchanged`, so matching too much is safe and too little is not.
+/// A class's `ad4m://auto_accept` link is one of those own links
+/// ([`super::shacl_parser::AUTO_ACCEPT_PREDICATE`] on the shape node), so a
+/// diff that only adds or removes the rule drops the cached shape.
 pub(super) fn touches_shape<'a>(links: impl IntoIterator<Item = &'a Link>) -> bool {
     links.into_iter().any(|link| {
         let predicate = link.predicate.as_deref().unwrap_or("");
@@ -286,6 +289,24 @@ mod touches_shape_tests {
             crate::perspectives::shacl_parser::ALIAS_PREDICATE,
             "literal:string:%7B%7D",
         )])));
+    }
+
+    /// A member changing only a class's auto-accept rule sends a diff with
+    /// that one link (added, or removed when the rule is dropped). A cached
+    /// shape that kept the old rule would go on accepting items the class
+    /// now leaves to a person.
+    #[test]
+    fn auto_accept_rule_counts_as_shacl() {
+        let rule = link(
+            "ns://ItemShape",
+            crate::perspectives::shacl_parser::AUTO_ACCEPT_PREDICATE,
+            "literal:string:never",
+        );
+        assert!(diff_touches_shape(&diff(vec![rule.clone()])));
+        assert!(diff_touches_shape(&DecoratedPerspectiveDiff {
+            additions: vec![],
+            removals: vec![rule],
+        }));
     }
 
     #[test]

@@ -843,6 +843,7 @@ fn make_shape_with_relation(class: &str, rel_name: &str, predicate: &str) -> Mod
         }],
         include_relations: vec![],
         interpretation_hint: None,
+        auto_accept: None,
     }
 }
 
@@ -1490,6 +1491,7 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
         }],
         include_relations: vec![],
         interpretation_hint: None,
+        auto_accept: None,
     };
 
     let mut instances = vec![serde_json::json!({"id": board})];
@@ -2072,6 +2074,7 @@ async fn test_where_filter_signed_expression_string() {
         }],
         include_relations: vec![],
         interpretation_hint: None,
+        auto_accept: None,
     };
 
     let mut instances = vec![json!({"id": board})];
@@ -2162,6 +2165,7 @@ async fn test_where_filter_signed_expression_no_matches() {
         }],
         include_relations: vec![],
         interpretation_hint: None,
+        auto_accept: None,
     };
 
     let mut instances = vec![json!({"id": parent})];
@@ -2300,6 +2304,7 @@ async fn test_where_filter_multiple_conditions() {
         }],
         include_relations: vec![],
         interpretation_hint: None,
+        auto_accept: None,
     };
 
     let mut instances = vec![json!({"id": board})];
@@ -2383,6 +2388,7 @@ async fn test_where_filter_missing_property_on_target() {
         }],
         include_relations: vec![],
         interpretation_hint: None,
+        auto_accept: None,
     };
 
     let mut instances = vec![json!({"id": parent})];
@@ -2464,6 +2470,7 @@ async fn test_where_filter_plain_literal_string() {
         }],
         include_relations: vec![],
         interpretation_hint: None,
+        auto_accept: None,
     };
 
     let mut instances = vec![json!({"id": parent})];
@@ -2568,6 +2575,7 @@ async fn test_where_filter_on_multiple_instances() {
         }],
         include_relations: vec![],
         interpretation_hint: None,
+        auto_accept: None,
     };
 
     let mut instances = vec![json!({"id": board1}), json!({"id": board2})];
@@ -3005,6 +3013,7 @@ fn make_shape(props: Vec<ShapeProperty>) -> ModelShape {
         properties: props,
         include_relations: vec![],
         interpretation_hint: None,
+        auto_accept: None,
     }
 }
 
@@ -4612,6 +4621,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
         }],
         include_relations: vec![],
         interpretation_hint: None,
+        auto_accept: None,
     };
     resolver.register("Signal", signal_shape);
 

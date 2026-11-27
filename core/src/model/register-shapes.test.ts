@@ -137,6 +137,7 @@ describe("registerShapes payload", () => {
       target_class: "ns://Thing",
       properties: [property],
       interpretation_hint: "a thing",
+      auto_accept: "always",
       constructor_actions: [{ action: "addLink", source: "this", predicate: "ns://kind", target: "ns://thing" }],
       destructor_actions: [{ action: "removeLink", source: "this", predicate: "ns://kind", target: "ns://thing" }],
       parent_shapes: ["ns://BaseShape"],

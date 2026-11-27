@@ -135,6 +135,7 @@ mod tests {
             properties: Vec::new(),
             include_relations: Vec::new(),
             interpretation_hint: None,
+            auto_accept: None,
         }
     }
 

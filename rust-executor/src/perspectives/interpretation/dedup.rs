@@ -563,6 +563,7 @@ mod tests {
             title: "Ship the MVP".to_string(),
             class: "Task".to_string(),
             properties: BTreeMap::new(),
+            parents: BTreeMap::new(),
             updated_at: String::new(),
         }]);
         let mut identity_props = HashMap::new();
@@ -773,6 +774,7 @@ mod tests {
             title: "Ship the MVP".to_string(),
             class: "Task".to_string(),
             properties: BTreeMap::new(),
+            parents: BTreeMap::new(),
             updated_at: String::new(),
         }]);
         let string_res: Vec<Resolution> =
@@ -1048,6 +1050,7 @@ mod tests {
             title: "Ship the MVP".to_string(),
             class: "Task".to_string(),
             properties: BTreeMap::new(),
+            parents: BTreeMap::new(),
             updated_at: String::new(),
         }]);
         let mut identity_props = HashMap::new();
@@ -1103,6 +1106,7 @@ mod tests {
             title: "Ship the MVP".to_string(),
             class: "Task".to_string(),
             properties: BTreeMap::new(),
+            parents: BTreeMap::new(),
             updated_at: String::new(),
         }]);
         let kept = filter_already_present(proposed, &existing_trusted, &identity_props);

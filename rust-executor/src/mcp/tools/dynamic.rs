@@ -1477,6 +1477,7 @@ mod tests {
             properties: [scalars, vec![collection]].concat(),
             shape_uri: Some("repro://ReproClass00Shape".into()),
             all_predicates: vec![],
+            auto_accept: None,
         };
         let tools = Ad4mMcpHandler::class_tools(&class, true);
         assert_eq!(
