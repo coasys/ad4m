@@ -8,6 +8,7 @@ use ts_rs::TS;
 
 use crate::agent::capabilities::*;
 use crate::helpers::can_access_perspective_with_did;
+use crate::perspectives::flow_instance::refusal::FlowError;
 use crate::perspectives::model_query::QueryClasses;
 use crate::perspectives::perspective_instance::{
     is_sparql_query, model_query_sends_cursor, result_json, SubscriptionIdTaken,
@@ -1887,6 +1888,20 @@ async fn interpretation_overlays_handler(
 
 // ── Flow consensus accept / reject ──
 
+/// The RPC error of a flow call. A refusal is 409 with the
+/// [`FlowRefusal`](crate::perspectives::flow_instance::refusal::FlowRefusal) as `data`,
+/// like the 422 of `instance_error`. A failure is 500.
+fn flow_error(error: FlowError) -> WsRpcError {
+    match error {
+        FlowError::Refused(refusal) => WsRpcError {
+            code: 409,
+            message: refusal.to_string(),
+            data: Some(serde_json::to_value(&refusal).unwrap_or(Value::Null)),
+        },
+        FlowError::Failed(error) => WsRpcError::internal(error.to_string()),
+    }
+}
+
 async fn accept_flow_proposal_handler(
     params: Value,
     ctx: Arc<RequestContext>,
@@ -1900,7 +1915,7 @@ async fn accept_flow_proposal_handler(
         &agent_context,
     )
     .await
-    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    .map_err(flow_error)?;
     Ok(serde_json::to_value(fired)?)
 }
 
@@ -1917,7 +1932,7 @@ async fn reject_flow_proposal_handler(
         &agent_context,
     )
     .await
-    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    .map_err(flow_error)?;
     // How many of OUR links went, not a bare `true`: withdrawing one vote and
     // retracting a proposal we opened are different events on the same call.
     Ok(serde_json::to_value(PerspectiveRejectFlowProposalResult {
@@ -1963,7 +1978,7 @@ async fn propose_flow_transition_handler(
         &agent_context,
     )
     .await
-    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    .map_err(flow_error)?;
     Ok(serde_json::to_value(outcome)?)
 }
 
