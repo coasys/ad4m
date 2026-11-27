@@ -190,7 +190,7 @@ independently exported. A Language exports whichever subset it supports:
 |---|---|---|
 | `perspective-commit` | Write diffs into the shared state | `perspectiveCommit(diff)` |
 | `perspective-query` | Answer reads without requiring a full local replica | `perspectiveQueryRun(request)`, `perspectiveQuerySupportedKinds()` |
-| `perspective-sync` | Bidirectional full-replica CRDT convergence | `perspectiveSyncSync()`, `perspectiveSyncRender()`, `perspectiveSyncCurrentRevision()` |
+| `perspective-sync` | Bidirectional full-replica CRDT convergence | `perspectiveSyncSync()`, `perspectiveSyncRender()`, `perspectiveSyncCurrentRevision()`; optional `perspectiveSyncMissing(links)` |
 
 And one peer-fabric interface the first and third usually pair with:
 
@@ -283,6 +283,13 @@ queries are first-class; Prolog is supported for back-compat.
 | `perspectiveSyncSync()` | — | `Promise<PerspectiveDiff>` |
 | `perspectiveSyncRender()` | — | `Promise<Perspective>` |
 | `perspectiveSyncCurrentRevision()` | — | `Promise<string \| null>` |
+| `perspectiveSyncMissing(links)` (optional) | `LinkExpression[]` | `Promise<LinkExpression[] \| null>` |
+
+`perspectiveSyncMissing` returns the links of `links` the shared state
+lacks, or null when the Language cannot say yet. The runtime's fallback
+sync asks it in batches of 500 links instead of comparing with
+`perspectiveSyncRender()`, and uses `render()` only for a Language
+without it.
 
 The runtime calls `perspectiveSyncSync` on a timer; the Language
 fetches new diffs from its underlying transport (Holochain or

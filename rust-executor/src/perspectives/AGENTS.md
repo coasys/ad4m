@@ -126,15 +126,21 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   `ensure_public_links_are_shared` and the fallback pass. Immediate sends from `commit` are
   outside this lock, so a fallback sync can run while an immediate send is in flight and submit
   the same link again.
+- The fallback sync asks a language with `perspectiveSyncMissing` (`Capability::PerspectiveMissing`)
+  which Shared links it lacks, in calls of `MISSING_BATCH` (500) links, leaving out the queued
+  and parked ones (`ask_missing` in `share_links_missing_remotely`). A null or failed answer to any call commits
+  nothing and returns false. Before the commit it asks again about the links it found and
+  commits only those still missing. It never calls `current_revision` or `render` then. A
+  language without the capability is compared with its whole `render()`.
 - The fallback sync never pushes most of the shared set (`fallback_sync.rs`,
-  `fallback_push_refused`): more than 20 links and more than half of the Shared links missing
-  from `render()` means the language's view of the remote is short (a partial or empty
-  mirror), so it logs an error, commits nothing and returns false. A language that does not
-  know the remote returns null from `render()` (skip). Only the creator's push at publish
+  `fallback_push_refused`, over the whole answer, not per call): more than 20 links and more
+  than half of the Shared links missing remotely means the language's view of the remote is
+  short (a partial or empty mirror), so it logs an error, commits nothing and returns false.
+  A language that does not know the remote returns null from `render()` or `missing` (skip). Only the creator's push at publish
   (`share_links_after_publish`: `publish` and `attach_link_language` in
   `NeighbourhoodCreationInitiated`) sends the whole set: the links made before the
-  neighbourhood existed were never sent. When that push fails (commit error, or `render()`
-  null while the language's first render runs), it queues them as one pending diff, so the
+  neighbourhood existed were never sent. When that push fails (commit error, or `render()` or
+  `missing` null while the language's first render runs), it queues them as one pending diff, so the
   queue, not the refusing fallback, delivers them.
 - Background loops (`nh_sync_loop`, `pending_diffs_loop`, `fallback_sync_loop`,
   `subscribed_queries_loop`, `notification_check_loop`, auto-processor supervisor) exit on

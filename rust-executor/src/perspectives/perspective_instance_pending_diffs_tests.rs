@@ -167,6 +167,77 @@ fn rendering_language(fake: &Arc<FakeLanguage>, remote: Vec<LinkExpression>) -> 
     }))
 }
 
+/// The remote a `missing_language` answers for.
+#[derive(Default)]
+struct MissingRemote {
+    /// The links the remote holds.
+    held: std::sync::Mutex<Vec<LinkExpression>>,
+    /// The targets of each batch `missing` was asked, in order.
+    asks: std::sync::Mutex<Vec<Vec<String>>>,
+    /// The ask (0-based) that answers null: the language does not know the remote.
+    null_at: Option<usize>,
+    /// After the ask with this index, the remote gains this link (another
+    /// member's commit lands between the scan and the fence).
+    gains: std::sync::Mutex<Option<(usize, LinkExpression)>>,
+}
+
+impl MissingRemote {
+    fn holding(held: Vec<LinkExpression>) -> Arc<Self> {
+        Arc::new(MissingRemote {
+            held: std::sync::Mutex::new(held),
+            ..Default::default()
+        })
+    }
+
+    fn missing(&self, links: &[LinkExpression]) -> Option<Vec<LinkExpression>> {
+        let mut asks = self.asks.lock().unwrap();
+        let ask = asks.len();
+        asks.push(links.iter().map(|l| l.data.target.clone()).collect());
+        if self.null_at == Some(ask) {
+            return None;
+        }
+        let mut held = self.held.lock().unwrap();
+        let answer = links
+            .iter()
+            .filter(|l| !held.iter().any(|h| link_identity(h) == link_identity(l)))
+            .cloned()
+            .collect();
+        let mut gains = self.gains.lock().unwrap();
+        if gains.as_ref().is_some_and(|(after, _)| *after == ask) {
+            held.push(gains.take().unwrap().1);
+        }
+        Some(answer)
+    }
+
+    fn ask_sizes(&self) -> Vec<usize> {
+        self.asks.lock().unwrap().iter().map(Vec::len).collect()
+    }
+
+    fn asked(&self, target: &str) -> bool {
+        self.asks
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|ask| ask.iter().any(|t| t == target))
+    }
+}
+
+/// `fake`'s commit, with `perspectiveSyncMissing` answered by `remote` and a
+/// `render` that fails the test: a language that answers `missing` is never
+/// asked for the whole room.
+fn missing_language(fake: &Arc<FakeLanguage>, remote: &Arc<MissingRemote>) -> Language {
+    let fake = fake.clone();
+    let remote = remote.clone();
+    Language::with_test_commit(
+        "fake-link-language".to_string(),
+        Arc::new(move |diff| fake.commit(diff)),
+    )
+    .with_test_render(Arc::new(|| {
+        panic!("render() called on a language that answers perspectiveSyncMissing")
+    }))
+    .with_test_missing(Arc::new(move |links| Ok(remote.missing(links))))
+}
+
 /// Diffs still waiting to be committed.
 fn pending(perspective: &PerspectiveInstance) -> usize {
     Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&perspective.uuid, None))
@@ -1322,4 +1393,305 @@ async fn an_offline_backlog_larger_than_half_the_shared_set_goes_through_the_que
         .expect("the queue drains the backlog");
     task.abort();
     assert_eq!(fake.committed().len(), 80);
+}
+
+/// #1991: a language that answers `perspectiveSyncMissing` is asked which of
+/// the shared links it lacks, in batches of at most `MISSING_BATCH`, never for
+/// the whole room (`missing_language`'s `render` panics). The answers of all
+/// batches are combined, and a second ask of just the candidates (the fence)
+/// precedes the commit.
+#[tokio::test(start_paused = true)]
+async fn the_fallback_sync_asks_what_is_missing_in_batches() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let shared = store_many_shared(&perspective, "l", 1_203);
+    let lacking = ["l7", "l600", "l1202"];
+    let remote = MissingRemote::holding(
+        shared
+            .iter()
+            .filter(|l| !lacking.contains(&l.data.target.as_str()))
+            .cloned()
+            .collect(),
+    );
+    *perspective.link_language.write().await = Some(missing_language(&fake, &remote));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+
+    assert_eq!(remote.ask_sizes(), vec![500, 500, 203, 3]);
+    let mut committed = fake.committed();
+    committed.sort();
+    assert_eq!(committed, vec!["+l1202", "+l600", "+l7"]);
+    assert_eq!(fake.attempts(), 1, "one commit");
+}
+
+/// A null answer to any ask, a batch of the scan or the fence, means the
+/// language does not know the remote: the pass commits nothing and fails.
+#[tokio::test(start_paused = true)]
+async fn a_null_missing_answer_commits_nothing() {
+    for null_at in 0..4 {
+        let fake = Arc::new(FakeLanguage::default());
+        let perspective = neighbourhood_perspective(&fake).await;
+        let shared = store_many_shared(&perspective, "l", 1_203);
+        let remote = Arc::new(MissingRemote {
+            held: std::sync::Mutex::new(shared[3..].to_vec()),
+            null_at: Some(null_at),
+            ..Default::default()
+        });
+        *perspective.link_language.write().await = Some(missing_language(&fake, &remote));
+
+        assert!(
+            !perspective.ensure_public_links_are_shared().await,
+            "null at ask {null_at}"
+        );
+        assert_eq!(
+            fake.attempts(),
+            0,
+            "null at ask {null_at}: nothing committed"
+        );
+        assert_eq!(
+            remote.ask_sizes().len(),
+            null_at + 1,
+            "no ask after the null"
+        );
+    }
+}
+
+/// The refusal counts the candidates of all batches together: 12,303 of
+/// 12,803 missing is refused, though no single batch of 500 is most of the
+/// shared set. A refused pass does not ask the fence either.
+#[tokio::test(start_paused = true)]
+async fn the_fallback_sync_refuses_most_of_the_shared_set_over_all_batches() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let shared = store_many_shared(&perspective, "l", 12_803);
+    let remote = MissingRemote::holding(shared[..500].to_vec());
+    *perspective.link_language.write().await = Some(missing_language(&fake, &remote));
+
+    assert!(!perspective.ensure_public_links_are_shared().await);
+
+    assert_eq!(fake.attempts(), 0, "nothing is committed");
+    assert_eq!(remote.ask_sizes().len(), 26, "the scan only, no fence");
+}
+
+/// A minority of the shared set across batches still goes through.
+#[tokio::test(start_paused = true)]
+async fn the_fallback_sync_sends_a_minority_found_over_several_batches() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let shared = store_many_shared(&perspective, "l", 1_100);
+    let remote = MissingRemote::holding(shared[..700].to_vec());
+    *perspective.link_language.write().await = Some(missing_language(&fake, &remote));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+
+    assert_eq!(remote.ask_sizes(), vec![500, 500, 100, 400]);
+    assert_eq!(fake.committed().len(), 400);
+}
+
+/// The fence: a candidate the remote gains between the scan and the second
+/// ask (another member's copy, or our own commit applied meanwhile) is not
+/// committed again.
+#[tokio::test(start_paused = true)]
+async fn a_link_the_remote_gains_before_the_fence_is_not_committed() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let shared = store_many_shared(&perspective, "l", 10);
+    let remote = MissingRemote::holding(shared[3..].to_vec());
+    *remote.gains.lock().unwrap() = Some((0, shared[1].clone()));
+    *perspective.link_language.write().await = Some(missing_language(&fake, &remote));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+
+    assert_eq!(remote.ask_sizes(), vec![10, 3]);
+    let mut committed = fake.committed();
+    committed.sort();
+    assert_eq!(committed, vec!["+l0", "+l2"]);
+}
+
+/// A fence that finds nothing left commits nothing.
+#[tokio::test(start_paused = true)]
+async fn a_fence_that_finds_nothing_missing_commits_nothing() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let shared = store_many_shared(&perspective, "l", 10);
+    let remote = MissingRemote::holding(shared[1..].to_vec());
+    *remote.gains.lock().unwrap() = Some((0, shared[0].clone()));
+    *perspective.link_language.write().await = Some(missing_language(&fake, &remote));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+
+    assert_eq!(remote.ask_sizes(), vec![10, 1]);
+    assert_eq!(fake.attempts(), 0);
+}
+
+/// Queued and parked links belong to the queue: they are never asked about
+/// and never sent by the fallback.
+#[tokio::test(start_paused = true)]
+async fn the_missing_ask_leaves_queued_and_parked_links_to_the_queue() {
+    let fake = Arc::new(FakeLanguage::default());
+    fake.fail_next.store(2, Ordering::SeqCst);
+    let perspective = neighbourhood_perspective(&fake).await;
+    enqueue(&perspective, &add("a"));
+    enqueue(&perspective, &add("b"));
+    let task = start_loop(&perspective);
+    run_until(Duration::from_secs(60), || pending(&perspective) == 0)
+        .await
+        .expect("the queue drains");
+    task.abort();
+    assert_eq!(parked_targets(&perspective), vec!["a"]);
+    enqueue(&perspective, &add("queued"));
+
+    for target in ["a", "b", "queued", "missing"] {
+        store_shared(&perspective, target);
+    }
+    let remote = MissingRemote::holding(vec![link("did:key:alice", "b")]);
+    *perspective.link_language.write().await = Some(missing_language(&fake, &remote));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+
+    assert!(!remote.asked("a"), "the parked link is not asked about");
+    assert!(
+        !remote.asked("queued"),
+        "the queued link is not asked about"
+    );
+    assert_eq!(fake.committed(), vec!["+b", "+missing"]);
+    assert_eq!(pending(&perspective), 1);
+}
+
+/// A queued diff that names a stored link with `""` for its predicate holds
+/// that link (the store reads it back as none), so it is not asked about.
+/// The stored link is asked as stored; a remote that holds it with `""`
+/// holds it.
+#[tokio::test(start_paused = true)]
+async fn the_missing_ask_matches_an_empty_predicate_to_none() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let with_predicate = |target: &str, predicate: Option<&str>| LinkExpression {
+        data: Link {
+            predicate: predicate.map(str::to_string),
+            ..link("did:key:alice", target).data
+        },
+        ..link("did:key:alice", target)
+    };
+    for target in ["queued", "plain"] {
+        perspective
+            .sparql_store
+            .add_link(&LinkExpression {
+                status: Some(LinkStatus::Shared),
+                ..with_predicate(target, None)
+            })
+            .unwrap();
+    }
+    enqueue(
+        &perspective,
+        &PerspectiveDiff {
+            additions: vec![with_predicate("queued", Some(""))],
+            removals: vec![],
+        },
+    );
+    let remote = MissingRemote::holding(vec![with_predicate("plain", Some(""))]);
+    *perspective.link_language.write().await = Some(missing_language(&fake, &remote));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+
+    assert!(!remote.asked("queued"));
+    assert!(remote.asked("plain"));
+    assert_eq!(fake.attempts(), 0, "{:?}", fake.committed());
+}
+
+/// The links the fallback asks about are the store's copies, read back from
+/// SPARQL. server-link-language's `missing` keys a link by its exact strings
+/// (`hashLink`: source, predicate or null, target, author, timestamp), with no
+/// normalising. So the copies must keep those strings exactly, or a link the
+/// room holds reads as missing on every pass. The remote here keys links the
+/// same way and holds the links as they were written: a fractional-second
+/// timestamp with an offset, literal and unicode targets, and no predicate.
+#[tokio::test(start_paused = true)]
+async fn the_store_copy_of_a_link_matches_the_remote_s_exact_strings() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let written: Vec<LinkExpression> = [
+        (
+            "2026-11-28T01:02:03.456789123+00:00",
+            "literal://string:caf%C3%A9%20%E2%98%95",
+            Some("ad4m://has"),
+        ),
+        ("2026-11-28T01:02:03Z", "literal://number:1.50", None),
+        (
+            "2026-11-28T01:02:03.4+10:00",
+            "ad4m://café ☕",
+            Some("flux://has_message"),
+        ),
+    ]
+    .into_iter()
+    .map(|(timestamp, target, predicate)| LinkExpression {
+        timestamp: timestamp.to_string(),
+        data: Link {
+            source: "ad4m://self".to_string(),
+            predicate: predicate.map(str::to_string),
+            target: target.to_string(),
+        },
+        ..link("did:key:alice", target)
+    })
+    .collect();
+    for link in &written {
+        perspective
+            .sparql_store
+            .add_link(&LinkExpression {
+                status: Some(LinkStatus::Shared),
+                ..link.clone()
+            })
+            .unwrap();
+    }
+    let key = |l: &LinkExpression| {
+        serde_json::json!({
+            "source": l.data.source,
+            "predicate": l.data.predicate,
+            "target": l.data.target,
+            "author": l.author,
+            "timestamp": l.timestamp,
+        })
+        .to_string()
+    };
+    let held: HashSet<String> = written.iter().map(key).collect();
+    let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let asked_in = asked.clone();
+    let fake_in = fake.clone();
+    *perspective.link_language.write().await = Some(
+        Language::with_test_commit(
+            "fake-link-language".to_string(),
+            Arc::new(move |diff| fake_in.commit(diff)),
+        )
+        .with_test_missing(Arc::new(move |links| {
+            asked_in.lock().unwrap().extend(links.iter().map(key));
+            Ok(Some(
+                links
+                    .iter()
+                    .filter(|l| !held.contains(&key(l)))
+                    .cloned()
+                    .collect(),
+            ))
+        })),
+    );
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+
+    assert_eq!(asked.lock().unwrap().len(), 3, "every copy is asked about");
+    assert_eq!(fake.attempts(), 0, "{:?}", fake.committed());
+}
+
+/// The creator's push after publish takes the missing path too and sends the
+/// whole set: the refusal is for the background fallback only.
+#[tokio::test(start_paused = true)]
+async fn the_push_after_publish_asks_what_is_missing() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    store_many_shared(&perspective, "l", 600);
+    let remote = MissingRemote::holding(vec![]);
+    *perspective.link_language.write().await = Some(missing_language(&fake, &remote));
+
+    assert!(perspective.share_links_after_publish().await);
+
+    assert_eq!(remote.ask_sizes(), vec![500, 100, 500, 100]);
+    assert_eq!(fake.committed().len(), 600);
 }

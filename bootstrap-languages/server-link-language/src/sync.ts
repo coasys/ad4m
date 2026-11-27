@@ -30,9 +30,7 @@ import type {
 } from "./types.js";
 import { isEncryptedLinkData } from "./types.js";
 import {
-    bytesToHex,
     decryptLinkFromWire,
-    hexToBytes,
     encryptLinkForWire,
     latestKeyVersion,
     wireLinkHash,
@@ -591,40 +589,19 @@ export async function performSync(): Promise<PerspectiveDiff> {
 }
 
 // ---------------------------------------------------------------------------
-// Is the store the room? (render, and the heal of a short store)
+// Is the store the room? (render, missing, and the heal of a short store)
 // ---------------------------------------------------------------------------
 
 /** The link server's revision format: 32 bytes, hex. */
 const SERVER_REVISION = /^[0-9a-f]{64}$/;
 
-/**
- * The revision the room has if it holds what this store holds: the XOR of the
- * link hashes of the stored links, with each held op applied (a held add is
- * the room's, a held removal is not). The link server keeps its revision the
- * same way, over the `link_hash` each member computes with `wireLinkHash`.
- * Null when a held link carries no `link_hash`.
- */
-function storeRevision(links: LinkExpression[]): string | null {
-    const hashes = new Set(links.map(wireLinkHash));
-    for (const held of store.heldLinks()) {
-        if (!held.link.link_hash) return null;
-        if (held.op === "add") hashes.add(held.link.link_hash);
-        else hashes.delete(held.link.link_hash);
-    }
-    const acc = new Uint8Array(32);
-    for (const h of hashes) {
-        const bytes = hexToBytes(h);
-        for (let i = 0; i < 32; i++) acc[i] ^= bytes[i];
-    }
-    return bytesToHex(acc);
-}
-
-/** Whether `links` (the store's) are the room at the cursor: no render is
- *  stored and they hash to the server's revision stored with the cursor. */
-function storeIsRoom(links: LinkExpression[]): boolean {
+/** Whether the store is the room at the cursor: no render is stored and it
+ *  hashes (`store.linksRevision`) to the server's revision stored with the
+ *  cursor. */
+function storeIsRoom(): boolean {
     const revision = store.getRevision();
     return !store.getRenderProgress() && !!revision && SERVER_REVISION.test(revision) &&
-        storeRevision(links) === revision;
+        store.linksRevision() === revision;
 }
 
 /**
@@ -646,8 +623,8 @@ function healIfShort(head: number): void {
     const revision = store.getRevision();
     if (!revision || !SERVER_REVISION.test(revision)) return;
     _mirrorChecked = true;
+    if (store.linksRevision() === revision) return;
     const links = store.allLinks().links;
-    if (storeRevision(links) === revision) return;
     console.warn(
         `[server-link-language] the store (${links.length} link(s) at sequence ${head}) does not ` +
         "hash to the room's revision; rendering the room again",
@@ -670,7 +647,26 @@ export function currentRevision(): string {
  * link `render()` lacks, so a short store must never answer.
  */
 export function render(): { links: LinkExpression[] } | null {
-    if (store.getRenderProgress()) return null;
-    const rendered = store.allLinks();
-    return storeIsRoom(rendered.links) ? rendered : null;
+    return storeIsRoom() ? store.allLinks() : null;
+}
+
+/**
+ * perspective-sync.missing(): the links of `links` this store lacks, when the
+ * store is the room at its cursor (`storeIsRoom`), so a link it lacks is one
+ * the room lacks. Null (unknown) otherwise, as `render()`. The executor's
+ * fallback sync asks this in batches instead of reading `render()`.
+ *
+ * A link matches with its predicate either missing or `""`: the executor
+ * stores an empty predicate as none, and a member may have sent either.
+ * Reads no key list, so a batch costs a lookup per link.
+ */
+export function missing(links: LinkExpression[]): LinkExpression[] | null {
+    if (!storeIsRoom()) return null;
+    return links.filter((link) => {
+        if (store.hasLink(link)) return false;
+        const predicate = link.data.predicate;
+        if (predicate) return true;
+        const other = predicate === "" ? undefined : "";
+        return !store.hasLink({ ...link, data: { ...link.data, predicate: other } });
+    });
 }

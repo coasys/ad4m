@@ -8,6 +8,8 @@
  *   links-by-source/{source}/{hash}  → link-hash
  *   links-by-target/{target}/{hash}  → link-hash
  *   links-by-pred/{predicate}/{hash} → link-hash
+ *   links-xor                        → XOR of the `wireLinkHash` of every
+ *                                      stored link, hex (see linksRevision)
  *   revision                         → last known server revision hash
  *   sequence                         → last applied server sequence number
  *   held/{link_hash}                 → {op, link}: an inbound wire link this
@@ -17,7 +19,8 @@
  *                                      resumes it
  */
 
-import { getStorage } from "./adapters.js";
+import { getStorage, type StorageAdapter } from "./adapters.js";
+import { bytesToHex, hexToBytes, wireLinkHash } from "./encryption.js";
 import type { LinkExpression, PerspectiveDiff, Perspective, WireLinkExpression } from "./types.js";
 
 let _hashFn: ((data: string) => string) | null = null;
@@ -76,6 +79,7 @@ export function hashLink(link: LinkExpression): string {
 export function putLink(link: LinkExpression): string {
     const h = hashLink(link);
     const storage = getStorage();
+    if (storage.get(linkKey(h)) === null) addToRevision(storage, link);
     storage.put(linkKey(h), JSON.stringify(link));
 
     const source = link.data.source || "";
@@ -92,6 +96,7 @@ export function putLink(link: LinkExpression): string {
 export function removeLink(link: LinkExpression): void {
     const h = hashLink(link);
     const storage = getStorage();
+    if (storage.get(linkKey(h)) !== null) removeFromRevision(storage, link);
     storage.delete(linkKey(h));
 
     const source = link.data.source || "";
@@ -231,11 +236,15 @@ const HELD_PREFIX = "held/";
 
 /** Keeps `link` until a key opens it. A later op on the same link replaces it. */
 export function holdLink(id: string, op: HeldOp, link: WireLinkExpression): void {
-    getStorage().put(HELD_PREFIX + id, JSON.stringify({ op, link }));
+    const storage = getStorage();
+    storage.put(HELD_PREFIX + id, JSON.stringify({ op, link }));
+    revisionCache(storage).held?.set(id, { op, hash: link.link_hash });
 }
 
 export function releaseHeld(id: string): void {
-    getStorage().delete(HELD_PREFIX + id);
+    const storage = getStorage();
+    storage.delete(HELD_PREFIX + id);
+    revisionCache(storage).held?.delete(id);
 }
 
 export function heldLinks(): HeldLink[] {
@@ -253,6 +262,95 @@ export function heldLinks(): HeldLink[] {
 export function clearHeld(): void {
     const storage = getStorage();
     for (const key of storage.listKeys(HELD_PREFIX)) storage.delete(key);
+    revisionCache(storage).held?.clear();
+}
+
+// ---------------------------------------------------------------------------
+// The store's revision (see sync.ts, storeIsRoom)
+// ---------------------------------------------------------------------------
+
+const XOR_KEY = "links-xor";
+
+/** What `linksRevision` keeps in memory, per storage: the held ops (read
+ *  once), and the wire hashes of the stored links, only while links are held. */
+interface RevisionCache {
+    held: Map<string, { op: HeldOp; hash: string | undefined }> | null;
+    stored: Set<string> | null;
+}
+
+const _revisionCaches = new WeakMap<StorageAdapter, RevisionCache>();
+
+function revisionCache(storage: StorageAdapter): RevisionCache {
+    let cache = _revisionCaches.get(storage);
+    if (!cache) {
+        cache = { held: null, stored: null };
+        _revisionCaches.set(storage, cache);
+    }
+    return cache;
+}
+
+function xorInto(acc: Uint8Array, hex: string): void {
+    const bytes = hexToBytes(hex);
+    for (let i = 0; i < 32; i++) acc[i] ^= bytes[i];
+}
+
+/** The stored XOR. A store written before it existed computes it once from
+ *  `allLinks()` and keeps it. */
+function linksXor(storage: StorageAdapter): Uint8Array {
+    const raw = storage.get(XOR_KEY);
+    if (raw !== null) return hexToBytes(raw);
+    const acc = new Uint8Array(32);
+    for (const link of allLinks().links) xorInto(acc, wireLinkHash(link));
+    storage.put(XOR_KEY, bytesToHex(acc));
+    return acc;
+}
+
+/** Called by putLink for a link the store did not hold. */
+function addToRevision(storage: StorageAdapter, link: LinkExpression): void {
+    const h = wireLinkHash(link);
+    const acc = linksXor(storage);
+    xorInto(acc, h);
+    storage.put(XOR_KEY, bytesToHex(acc));
+    revisionCache(storage).stored?.add(h);
+}
+
+/** Called by removeLink for a link the store held. */
+function removeFromRevision(storage: StorageAdapter, link: LinkExpression): void {
+    const h = wireLinkHash(link);
+    const acc = linksXor(storage);
+    xorInto(acc, h);
+    storage.put(XOR_KEY, bytesToHex(acc));
+    revisionCache(storage).stored?.delete(h);
+}
+
+/**
+ * The revision the room has if it holds what this store holds: the XOR of the
+ * `wireLinkHash` of the stored links, with each held op applied (a held add is
+ * the room's, a held removal is not). The link server keeps its revision the
+ * same way, over the `link_hash` each member computes with `wireLinkHash`.
+ * Null when a held link carries no `link_hash`.
+ *
+ * Reads no key list: the XOR is kept by putLink and removeLink, the held ops
+ * are read once per storage, and the stored hashes are listed once, only
+ * while links are held.
+ */
+export function linksRevision(): string | null {
+    const storage = getStorage();
+    const acc = linksXor(storage);
+    const cache = revisionCache(storage);
+    if (!cache.held) {
+        cache.held = new Map(heldLinks().map((h) => [h.id, { op: h.op, hash: h.link.link_hash }]));
+    }
+    if (cache.held.size === 0) {
+        cache.stored = null;
+        return bytesToHex(acc);
+    }
+    for (const { hash } of cache.held.values()) if (!hash) return null;
+    cache.stored ??= new Set(allLinks().links.map(wireLinkHash));
+    for (const { op, hash } of cache.held.values()) {
+        if ((op === "add") !== cache.stored.has(hash!)) xorInto(acc, hash!);
+    }
+    return bytesToHex(acc);
 }
 
 // ---------------------------------------------------------------------------

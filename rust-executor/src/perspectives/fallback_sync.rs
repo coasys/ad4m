@@ -3,9 +3,15 @@
 //! few links a commit missed; when it finds most of the shared set missing,
 //! the link language's view of the remote is wrong (an empty or partial
 //! mirror), and sending would push the room's whole set again.
+//!
+//! A link language with `perspectiveSyncMissing` says which links it lacks
+//! (`ask_missing`); one without it renders the whole room
+//! (`rendered_remote_links`).
 
 use super::perspective_instance::{links_missing_remotely, PerspectiveInstance};
 use super::sparql_store::EvalStop;
+use crate::languages::capability::Capability;
+use crate::languages::language::Language;
 use crate::types::{LinkExpression, LinkStatus, PerspectiveDiff};
 
 /// Who asks for the shared links the remote lacks.
@@ -21,6 +27,11 @@ pub(crate) enum ShareScope {
 /// A fallback pass may always send up to this many links.
 pub(crate) const FALLBACK_ALWAYS_SENDS: usize = 20;
 
+/// How many links one `perspectiveSyncMissing` call asks about. The shared
+/// set goes to the language in calls of at most this many links, so no call
+/// carries the whole set, and each answer is at most this long.
+pub(crate) const MISSING_BATCH: usize = 500;
+
 /// Whether a pass that finds `missing` of the perspective's `shared` links
 /// absent remotely must send nothing: a fallback pass that would send more
 /// than `FALLBACK_ALWAYS_SENDS` links and more than half the shared set.
@@ -28,9 +39,95 @@ pub(crate) fn fallback_push_refused(missing: usize, shared: usize, scope: ShareS
     scope == ShareScope::Fallback && missing > FALLBACK_ALWAYS_SENDS && missing * 2 > shared
 }
 
+/// The links of `links` the link language lacks, asked in calls of
+/// `MISSING_BATCH`. None when an answer is unknown (null) or fails: the links
+/// after it are not asked about.
+pub(super) async fn ask_missing(
+    link_language: &mut Language,
+    links: &[LinkExpression],
+    uuid: &str,
+) -> Option<Vec<LinkExpression>> {
+    let mut missing = Vec::new();
+    for batch in links.chunks(MISSING_BATCH) {
+        match link_language.missing(batch).await {
+            Ok(Some(lacking)) => missing.extend(lacking),
+            Ok(None) => {
+                log::warn!(
+                    "fallback sync: the link language cannot say yet which links it lacks for perspective {} - skipping this sync attempt",
+                    uuid
+                );
+                return None;
+            }
+            Err(e) => {
+                log::warn!(
+                    "fallback sync: missing() failed for perspective {}: {:?} - skipping this sync attempt",
+                    uuid, e
+                );
+                return None;
+            }
+        }
+    }
+    Some(missing)
+}
+
+/// The links the link language holds, from its whole `render()`. None when the
+/// remote state is unknown.
+///
+/// `current_revision()` returns `Ok(None)` both when the link language
+/// genuinely has no committed revision yet AND when it lacks the
+/// `PerspectiveCurrentRevision` capability at all (see
+/// `Language::current_revision`) — the two cases are indistinguishable from
+/// the return value alone. Only trust `Ok(None)` as "nothing committed yet"
+/// when the capability is actually present; otherwise go straight to
+/// `render()`, which has its own capability check and safely reports
+/// "unavailable" as `Ok(None)` too.
+///
+/// Any other non-success outcome (a transport/timeout error from either call,
+/// or an unexpected `Ok(None)` from `render()` despite a revision existing)
+/// means we don't actually know the remote state. Treating that the same as
+/// "remote is empty" makes every local shared link look "missing", so a single
+/// transient timeout resubmits the perspective's *entire* shared link set
+/// (SDNA included) as a fresh batch of creates. Return None and let the
+/// caller's backoff loop retry once the link language is reachable again.
+pub(super) async fn rendered_remote_links(
+    link_language: &mut Language,
+    uuid: &str,
+) -> Option<Vec<LinkExpression>> {
+    if link_language.has(Capability::PerspectiveCurrentRevision) {
+        match link_language.current_revision().await {
+            Ok(None) => return Some(vec![]),
+            Ok(Some(_)) => {}
+            Err(e) => {
+                log::warn!(
+                    "ensure_public_links_are_shared: current_revision() failed for perspective {}: {:?} — skipping this sync attempt",
+                    uuid, e
+                );
+                return None;
+            }
+        }
+    }
+    match link_language.render().await {
+        Ok(Some(rendered)) => Some(rendered.links),
+        Ok(None) => {
+            log::warn!(
+                "ensure_public_links_are_shared: render() returned no perspective for {} — skipping this sync attempt rather than risk resubmitting the whole shared link set",
+                uuid
+            );
+            None
+        }
+        Err(e) => {
+            log::warn!(
+                "ensure_public_links_are_shared: render() failed for perspective {}: {:?} — skipping this sync attempt",
+                uuid, e
+            );
+            None
+        }
+    }
+}
+
 impl PerspectiveInstance {
     /// The background fallback sync: commits the shared links the link
-    /// language's `render()` lacks, unless that is most of them
+    /// language lacks, unless that is most of them
     /// (`fallback_push_refused`). False when it sent nothing it should have,
     /// so the caller's backoff retries.
     pub async fn ensure_public_links_are_shared(&self) -> bool {

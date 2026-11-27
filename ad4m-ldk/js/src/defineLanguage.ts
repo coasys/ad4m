@@ -10,6 +10,7 @@
 import type {
     Address,
     Expression,
+    LinkExpression,
     Perspective,
     PerspectiveDiff,
     QueryRequest,
@@ -58,6 +59,11 @@ export interface PerspectiveSyncCapability {
      *  (the executor's fallback sync then skips, rather than push what is missing). */
     render(): Promise<Perspective | { links: any[] } | null>;
     currentRevision(): Promise<string | null> | string | null;
+    /** Of `links`, the ones the remote lacks, compared by author, timestamp,
+     *  source, predicate ("" = none) and target; null when the language does
+     *  not know what the remote holds. Optional: when present, the executor's
+     *  fallback sync asks this in batches instead of calling `render()`. */
+    missing?(links: LinkExpression[]): Promise<LinkExpression[] | null>;
 }
 
 export interface PerspectiveQueryCapability {
@@ -320,6 +326,7 @@ export interface FlatLanguageExports {
     perspectiveSyncSync?(): Promise<PerspectiveDiff>;
     perspectiveSyncRender?(): Promise<Perspective | { links: any[] } | null>;
     perspectiveSyncCurrentRevision?(): Promise<string | null> | string | null;
+    perspectiveSyncMissing?(links: LinkExpression[]): Promise<LinkExpression[] | null>;
 
     // Perspective-query
     perspectiveQuerySupportedKinds?(): string[];
@@ -431,6 +438,9 @@ export function defineLanguage(spec: LanguageSpec): FlatLanguageExports {
         out.perspectiveSyncSync = s.sync.bind(s);
         out.perspectiveSyncRender = s.render.bind(s);
         out.perspectiveSyncCurrentRevision = s.currentRevision.bind(s) as any;
+        // Only when defined: the executor detects the capability by the
+        // export, and a default answering null would fail every fallback pass.
+        if (s.missing) out.perspectiveSyncMissing = s.missing.bind(s);
     }
 
     // Perspective-query

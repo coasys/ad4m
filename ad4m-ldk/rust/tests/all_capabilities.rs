@@ -48,6 +48,15 @@ impl PerspectiveSyncCapability for Full {
     }
 }
 
+impl PerspectiveMissingCapability for Full {
+    fn perspective_sync_missing(
+        &mut self,
+        _links: Vec<LinkExpression>,
+    ) -> LanguageResult<Option<Vec<LinkExpression>>> {
+        Ok(None)
+    }
+}
+
 impl PerspectiveQueryCapability for Full {
     fn perspective_query_supported_kinds(&self) -> Vec<String> {
         Vec::new()
@@ -117,7 +126,7 @@ impl HolochainSignalHandler for Full {
 ad4m_language! {
     language: Full,
     capabilities: [
-        expression, perspective_commit, perspective_sync, perspective_query,
+        expression, perspective_commit, perspective_sync, perspective_missing, perspective_query,
         peers, language_source, telepresence, mount,
     ],
     holochain_signal: true,

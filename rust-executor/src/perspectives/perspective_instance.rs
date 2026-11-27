@@ -1,4 +1,4 @@
-use super::fallback_sync::{fallback_push_refused, ShareScope};
+use super::fallback_sync::{ask_missing, fallback_push_refused, rendered_remote_links, ShareScope};
 use super::hosted_status;
 use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
@@ -1603,9 +1603,12 @@ impl PerspectiveInstance {
         }
     }
 
-    /// Commits the Shared links the link language's `render()` lacks. Callers:
+    /// Commits the Shared links the link language lacks. Callers:
     /// `ensure_public_links_are_shared` and `share_links_after_publish`
-    /// (`fallback_sync.rs`); `scope` says how many it may send.
+    /// (`fallback_sync.rs`); `scope` says how many it may send. A language with
+    /// `perspectiveSyncMissing` is asked which links it lacks, in batches
+    /// (`ask_missing`), and asked again before the commit; one without it is
+    /// compared with its whole `render()` (`rendered_remote_links`).
     pub(crate) async fn share_links_missing_remotely(&self, scope: ShareScope) -> bool {
         let _sharing = self.share_links_mutex.lock().await;
         let uuid = self.uuid.clone();
@@ -1639,66 +1642,6 @@ impl PerspectiveInstance {
 
             local_links.retain(|(_, status)| status == &LinkStatus::Shared);
 
-            // `current_revision()` returns `Ok(None)` both when the link language
-            // genuinely has no committed revision yet AND when it lacks the
-            // `PerspectiveCurrentRevision` capability at all (see
-            // `Language::current_revision`) — the two cases are indistinguishable from
-            // the return value alone. Only trust `Ok(None)` as "nothing committed yet"
-            // when the capability is actually present; otherwise go straight to
-            // `render()`, which has its own capability check and safely reports
-            // "unavailable" as `Ok(None)` too.
-            //
-            // Any other non-success outcome (a transport/timeout error from either call,
-            // or an unexpected `Ok(None)` from `render()` despite a revision existing)
-            // means we don't actually know the remote state. Treating that the same as
-            // "remote is empty" — which the previous `.unwrap_or(None).unwrap_or_default()`
-            // did — makes every local shared link look "missing" below, so a single
-            // transient timeout resubmits the perspective's *entire* shared link set
-            // (SDNA included) as a fresh batch of creates. Bail out and let the caller's
-            // backoff loop retry once the link language is actually reachable again.
-            let has_revision_capability = link_language
-                .has(crate::languages::capability::Capability::PerspectiveCurrentRevision);
-
-            // `Ok(Some(_))` here just means "we're clear to call render()" — it's reached
-            // both when a revision genuinely exists and when we skip the check entirely
-            // because the capability isn't supported.
-            let known_revision = if has_revision_capability {
-                match link_language.current_revision().await {
-                    Ok(None) => None,
-                    Ok(Some(_)) => Some(()),
-                    Err(e) => {
-                        log::warn!(
-                            "ensure_public_links_are_shared: current_revision() failed for perspective {}: {:?} — skipping this sync attempt",
-                            uuid, e
-                        );
-                        return false;
-                    }
-                }
-            } else {
-                Some(())
-            };
-
-            let remote_links = match known_revision {
-                None => vec![],
-                Some(()) => match link_language.render().await {
-                    Ok(Some(rendered)) => rendered.links,
-                    Ok(None) => {
-                        log::warn!(
-                            "ensure_public_links_are_shared: render() returned no perspective for {} — skipping this sync attempt rather than risk resubmitting the whole shared link set",
-                            uuid
-                        );
-                        return false;
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "ensure_public_links_are_shared: render() failed for perspective {}: {:?} — skipping this sync attempt",
-                            uuid, e
-                        );
-                        return false;
-                    }
-                },
-            };
-
             // A queued or parked diff's links stay Shared in the store, but the queue owns
             // them: a queued one would be sent twice, a parked one after its successors.
             let unsent = match crate::db_backend::db_backend().get_unsent_additions(&uuid) {
@@ -1711,7 +1654,20 @@ impl PerspectiveInstance {
                     return false;
                 }
             };
-            let links_to_commit = links_missing_remotely(&local_links, &remote_links, &unsent);
+
+            let asks_missing =
+                link_language.has(crate::languages::capability::Capability::PerspectiveMissing);
+            let missing = if asks_missing {
+                let candidates = links_missing_remotely(&local_links, &[], &unsent);
+                ask_missing(&mut link_language, &candidates, &uuid).await
+            } else {
+                rendered_remote_links(&mut link_language, &uuid)
+                    .await
+                    .map(|remote| links_missing_remotely(&local_links, &remote, &unsent))
+            };
+            let Some(mut links_to_commit) = missing else {
+                return false;
+            };
 
             if !links_to_commit.is_empty() {
                 let links_count = links_to_commit.len();
@@ -1722,11 +1678,30 @@ impl PerspectiveInstance {
                 // whole set again. Send nothing; the caller's backoff retries.
                 if fallback_push_refused(links_count, local_links.len(), scope) {
                     log::error!(
-                        "ensure_public_links_are_shared: refusing to commit {} of {} local shared links for perspective {}: the link language's render() lacks most of them, so its view of the remote is incomplete, not the remote",
+                        "ensure_public_links_are_shared: refusing to commit {} of {} local shared links for perspective {}: the link language lacks most of them, so its view of the remote is incomplete, not the remote",
                         links_count, local_links.len(), uuid
                     );
                     return false;
                 }
+
+                // The scan took many calls: ask again about the links it found, so a
+                // link the room got meanwhile is not sent twice. An immediate commit
+                // (outside `share_links_mutex`) that lands after this ask still makes
+                // a duplicate. The link server keeps one row and one revision for it
+                // (`applyDiffAndAppend`, `INSERT OR IGNORE`), but appends and
+                // broadcasts a second diff, which every member drops.
+                if asks_missing {
+                    let Some(still_missing) =
+                        ask_missing(&mut link_language, &links_to_commit, &uuid).await
+                    else {
+                        return false;
+                    };
+                    if still_missing.is_empty() {
+                        return true;
+                    }
+                    links_to_commit = still_missing;
+                }
+                let links_count = links_to_commit.len();
 
                 let result = link_language
                     .commit(PerspectiveDiff {
@@ -1745,7 +1720,6 @@ impl PerspectiveInstance {
                 );
             }
 
-            //crate::db_backend::db_backend().add_many_links(&self.persisted.load().uuid, &remote_links).unwrap(); // Assuming add_many_links takes a reference to a Vec<LinkExpression> and returns Result<(), AnyError>
             return true;
         }
         false

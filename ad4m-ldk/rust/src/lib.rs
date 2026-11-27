@@ -84,8 +84,9 @@ pub mod prelude {
     pub use crate::model::{MountClassShape, MountShapeBuilder};
     pub use crate::traits::{
         ExpressionCapability, HolochainSignalHandler, IdentityCapability, Language,
-        MountCapability, PeersCapability, PerspectiveCommitCapability, PerspectiveQueryCapability,
-        PerspectiveSyncCapability, TelepresenceCapability, TokenCapability,
+        MountCapability, PeersCapability, PerspectiveCommitCapability,
+        PerspectiveMissingCapability, PerspectiveQueryCapability, PerspectiveSyncCapability,
+        TelepresenceCapability, TokenCapability,
     };
     pub use crate::types::*;
     pub use crate::Ad4mModel;

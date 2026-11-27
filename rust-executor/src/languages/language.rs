@@ -27,8 +27,7 @@ use super::language_runtime::CallKind;
 use super::LanguageController;
 use crate::{
     agent::AgentContext,
-    types::{OnlineAgent, PerspectiveExpression},
-    types::{Perspective, PerspectiveDiff},
+    types::{LinkExpression, OnlineAgent, Perspective, PerspectiveDiff, PerspectiveExpression},
 };
 use base64::prelude::*;
 use deno_core::error::AnyError;
@@ -45,6 +44,9 @@ pub struct Language {
     /// Test-only: answers [`Self::render`] in place of the language runtime.
     #[cfg(test)]
     test_render: Option<TestRender>,
+    /// Test-only: answers [`Self::missing`] in place of the language runtime.
+    #[cfg(test)]
+    test_missing: Option<TestMissing>,
 }
 
 #[cfg(test)]
@@ -53,6 +55,10 @@ pub(crate) type TestCommit =
 
 #[cfg(test)]
 pub(crate) type TestRender = Arc<dyn Fn() -> Result<Option<Perspective>, AnyError> + Send + Sync>;
+
+#[cfg(test)]
+pub(crate) type TestMissing =
+    Arc<dyn Fn(&[LinkExpression]) -> Result<Option<Vec<LinkExpression>>, AnyError> + Send + Sync>;
 
 fn parse_revision(js_result: String) -> Result<Option<String>, AnyError> {
     if let Ok(maybe_revision) = serde_json::from_str::<Option<ByteArray>>(&js_result) {
@@ -78,6 +84,8 @@ impl Language {
             test_commit: None,
             #[cfg(test)]
             test_render: None,
+            #[cfg(test)]
+            test_missing: None,
         }
     }
 
@@ -95,6 +103,19 @@ impl Language {
     pub(crate) fn with_test_render(self, render: TestRender) -> Self {
         Self {
             test_render: Some(render),
+            ..self
+        }
+    }
+
+    /// Test seam: `missing` answers with `missing`, and the language has
+    /// `Capability::PerspectiveMissing`.
+    #[cfg(test)]
+    pub(crate) fn with_test_missing(self, missing: TestMissing) -> Self {
+        let mut capabilities = (*self.capabilities).clone();
+        capabilities.insert(Capability::PerspectiveMissing);
+        Self {
+            capabilities: Arc::new(capabilities),
+            test_missing: Some(missing),
             ..self
         }
     }
@@ -212,6 +233,42 @@ impl Language {
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         let maybe_value = serde_json::from_str(&result)?;
         Ok(maybe_value)
+    }
+
+    /// Of `links`, the ones the remote lacks, compared by author, timestamp,
+    /// source, predicate (`""` = none) and target. `None` when the language
+    /// does not know what the remote holds, or lacks
+    /// `Capability::PerspectiveMissing`.
+    pub async fn missing(
+        &mut self,
+        links: &[LinkExpression],
+    ) -> Result<Option<Vec<LinkExpression>>, AnyError> {
+        #[cfg(test)]
+        if let Some(missing) = &self.test_missing {
+            return missing(links);
+        }
+        if !self.has(Capability::PerspectiveMissing) {
+            return Ok(None);
+        }
+        let controller = LanguageController::global_instance();
+        let script = format!(
+            r#"JSON.stringify((await language.perspectiveSyncMissing({})) ?? null)"#,
+            serde_json::to_string(links)?
+        );
+
+        // Ordered: see `current_revision`. A commit sent before the ask is
+        // applied first, so its links are not reported missing. Callers ask in
+        // short batches, so other calls run between them.
+        let result = controller
+            .call_language(
+                &self.address,
+                &script,
+                AgentContext::main_agent(),
+                CallKind::Ordered,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        Ok(serde_json::from_str(&result)?)
     }
 }
 
@@ -373,5 +430,83 @@ impl Language {
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::languages::capability::{register_capabilities, remove_capabilities};
+    use crate::languages::language_runtime::LanguageOperation;
+    use crate::languages::language_runtime_handle::LanguageRuntimeHandle;
+    use crate::types::{ExpressionProof, Link};
+
+    fn link(target: &str) -> LinkExpression {
+        LinkExpression {
+            author: "did:key:alice".to_string(),
+            timestamp: "2026-11-27T00:00:00.000Z".to_string(),
+            data: Link {
+                source: "ad4m://self".to_string(),
+                predicate: None,
+                target: target.to_string(),
+            },
+            proof: ExpressionProof::default(),
+            status: None,
+        }
+    }
+
+    /// `missing` sends the links to `perspectiveSyncMissing` as one ordered call
+    /// (so a commit sent before it is applied first) and reads the answer: the
+    /// links the remote lacks, or null when the language does not know.
+    #[tokio::test]
+    async fn missing_asks_the_language_in_an_ordered_call() {
+        let controller = LanguageController::global_instance();
+        let address = format!("QmMissing{}", uuid::Uuid::new_v4().simple());
+        let (tx, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        controller
+            .set_runtime_for_test(
+                &address,
+                Some(LanguageRuntimeHandle::from_channel(address.clone(), tx)),
+            )
+            .await;
+        register_capabilities(&address, HashSet::from([Capability::PerspectiveMissing]));
+        let asked = vec![link("a"), link("b")];
+
+        for answer in [Some(vec![link("b")]), None] {
+            let mut language = Language::new(address.clone());
+            let links = asked.clone();
+            let call = tokio::spawn(async move { language.missing(&links).await });
+            let request = requests.recv().await.unwrap();
+            let LanguageOperation::Execute(script, _, kind) = request.operation else {
+                panic!("not a script: {:?}", request.operation);
+            };
+            assert_eq!(kind, CallKind::Ordered);
+            assert_eq!(
+                script,
+                format!(
+                    "JSON.stringify((await language.perspectiveSyncMissing({})) ?? null)",
+                    serde_json::to_string(&asked).unwrap()
+                )
+            );
+            request
+                .response_tx
+                .send(Ok(serde_json::to_string(&answer).unwrap()))
+                .unwrap();
+            let got = call.await.unwrap().unwrap();
+            assert_eq!(
+                got.map(|l| l.iter().map(|l| l.data.target.clone()).collect::<Vec<_>>()),
+                answer.map(|l| l.iter().map(|l| l.data.target.clone()).collect::<Vec<_>>())
+            );
+        }
+
+        controller.set_runtime_for_test(&address, None).await;
+        remove_capabilities(&address);
+    }
+
+    /// A language without the capability is never asked.
+    #[tokio::test]
+    async fn missing_without_the_capability_is_none() {
+        let mut language = Language::new(format!("QmNoMissing{}", uuid::Uuid::new_v4().simple()));
+        assert!(language.missing(&[link("a")]).await.unwrap().is_none());
     }
 }

@@ -11,6 +11,7 @@ import type { StorageAdapter } from "../src/adapters.js";
 import { initAdapters } from "../src/adapters.js";
 import * as store from "../src/store.js";
 import type { LinkExpression } from "../src/types.js";
+import { bytesToHex, hexToBytes, wireLinkHash } from "../src/encryption.js";
 
 // ---------------------------------------------------------------------------
 // Mock adapters
@@ -276,5 +277,115 @@ describe("store: sequence tracking", () => {
         store.setSequence(123456);
         assert.equal(store.getSequence(), 123456);
         assert.equal(typeof store.getSequence(), "number");
+    });
+});
+
+// ---------------------------------------------------------------------------
+// linksRevision: the running XOR
+// ---------------------------------------------------------------------------
+
+/** Counts the key lists, so a test can show a read lists no keys. */
+class CountingStorage extends MockStorage {
+    listings = 0;
+    listKeys(prefix?: string): string[] {
+        this.listings++;
+        return super.listKeys(prefix);
+    }
+}
+
+/** The revision as sync.ts computed it before the running XOR, from the
+ *  whole store and every held op: the value linksRevision must keep. */
+function revisionFromScratch(): string | null {
+    const hashes = new Set(store.allLinks().links.map(wireLinkHash));
+    for (const held of store.heldLinks()) {
+        if (!held.link.link_hash) return null;
+        if (held.op === "add") hashes.add(held.link.link_hash);
+        else hashes.delete(held.link.link_hash);
+    }
+    const acc = new Uint8Array(32);
+    for (const h of hashes) {
+        const bytes = hexToBytes(h);
+        for (let i = 0; i < 32; i++) acc[i] ^= bytes[i];
+    }
+    return bytesToHex(acc);
+}
+
+describe("store: linksRevision", () => {
+    beforeEach(setup);
+
+    const a = makeLink({ target: "expr://a" });
+    const b = makeLink({ target: "expr://b" });
+
+    it("equals the revision from scratch after a put, a double put, a remove and a double remove", () => {
+        assert.equal(store.linksRevision(), "0".repeat(64), "an empty store");
+        store.putLink(a);
+        assert.equal(store.linksRevision(), revisionFromScratch());
+        store.putLink(b);
+        store.putLink(b);
+        assert.equal(store.linksRevision(), revisionFromScratch(), "a double put counts once");
+        assert.notEqual(store.linksRevision(), "0".repeat(64));
+        store.removeLink(a);
+        assert.equal(store.linksRevision(), revisionFromScratch());
+        store.removeLink(a);
+        assert.equal(store.linksRevision(), revisionFromScratch(), "a double remove counts once");
+        store.removeLink(b);
+        assert.equal(store.linksRevision(), "0".repeat(64));
+    });
+
+    it("computes a store's XOR once when the store has none (a store from an earlier build)", () => {
+        const storage = new CountingStorage();
+        initAdapters({ storage });
+        store.putLink(a);
+        store.putLink(b);
+        storage.delete("links-xor");
+        const expected = revisionFromScratch();
+
+        storage.listings = 0;
+        assert.equal(store.linksRevision(), expected);
+        assert.equal(storage.listings, 2, "the migration lists the links once, and the held links once");
+        assert.notEqual(storage.get("links-xor"), null, "and keeps the XOR");
+
+        storage.listings = 0;
+        store.putLink(makeLink({ target: "expr://c" }));
+        assert.equal(store.linksRevision(), revisionFromScratch());
+        storage.listings -= 2; // revisionFromScratch's own two lists
+        assert.equal(storage.listings, 0, "no list after the migration");
+    });
+
+    it("applies held ops as before: a held add counts, a held removal does not, no link_hash is null", () => {
+        const storage = new CountingStorage();
+        initAdapters({ storage });
+        store.putLink(a);
+        store.putLink(b);
+        store.linksRevision();
+
+        const c = makeLink({ target: "expr://c" });
+        store.holdLink(wireLinkHash(c), "add", { link_hash: wireLinkHash(c) });
+        store.holdLink(wireLinkHash(a), "remove", { link_hash: wireLinkHash(a) });
+        store.holdLink(wireLinkHash(b), "add", { link_hash: wireLinkHash(b) });
+        const expected = revisionFromScratch();
+        assert.equal(store.linksRevision(), expected);
+
+        store.removeLink(b);
+        store.putLink(c);
+        assert.equal(store.linksRevision(), revisionFromScratch(), "the stored hashes follow puts and removes");
+
+        store.releaseHeld(wireLinkHash(a));
+        assert.equal(store.linksRevision(), revisionFromScratch(), "a released op no longer counts");
+
+        store.holdLink("nonce-x", "add", { data: { ciphertext: "x", nonce: "x" } as any });
+        assert.equal(store.linksRevision(), null);
+        assert.equal(revisionFromScratch(), null);
+
+        store.clearHeld();
+        assert.equal(store.linksRevision(), revisionFromScratch());
+
+        storage.listings = 0;
+        store.linksRevision();
+        store.holdLink(wireLinkHash(a), "remove", { link_hash: wireLinkHash(a) });
+        store.linksRevision();
+        assert.equal(storage.listings, 1, "held again: the stored hashes are listed once, then kept");
+        store.linksRevision();
+        assert.equal(storage.listings, 1);
     });
 });

@@ -74,6 +74,12 @@ export async function perspectiveSyncCurrentRevision() {
     return revision.toString();
 }
 
+// The links of `asked` this store lacks. Never null: this store is the room.
+export async function perspectiveSyncMissing(asked) {
+    const held = new Set(links.map(linkKey));
+    return asked.filter(function(l) { return !held.has(linkKey(l)); });
+}
+
 // -- commit capability --
 
 function linkKey(l) {
