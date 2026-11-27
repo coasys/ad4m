@@ -17,6 +17,12 @@ trap 'rm -rf "$TMP"' EXIT
 
 fail() { echo "  FAIL: $*"; FAILED=1; }
 
+# paths-changed.sh bounds its fetch with GNU `timeout` (not on stock macOS).
+if ! command -v timeout >/dev/null 2>&1; then
+  echo "skip: GNU timeout is not installed (macOS: brew install coreutils); paths-changed.sh needs it"
+  exit 0
+fi
+
 # The `default: >-` block of `skip_paths:` under the job integration-tests-sfu-e2e.
 SKIP=()
 read -ra SKIP <<<"$(awk '
@@ -65,7 +71,7 @@ check() {
   local name="$1" want_rc="$2" want_out="$3"
   shift 3
   local out rc=0
-  out="$(env -i PATH="$PATH" HOME="$TMP" PATHS_GATE_COMMIT_MSG="feat: something" \
+  out="$(env -i PATH="$PATH" HOME="$TMP" \
     "$@" bash "$SCRIPT" "${SKIP[@]}" 2>&1)" || rc=$?
   if [ "$rc" != "$want_rc" ] || ! grep -qE "$want_out" <<<"$out"; then
     fail "$name: exit $rc (want $want_rc), output: $out"
@@ -89,19 +95,13 @@ pr() {
 }
 
 # Branches and overrides, before any diff is read.
-check "push to dev skips: the 2-hourly tier runs it" 10 '^skip: push to dev' CIRCLE_BRANCH=dev
+check "push to dev runs (the 2-hourly tier)" 0 '^run: push to dev' CIRCLE_BRANCH=dev
 check "push to staging runs" 0 '^run: push to staging' CIRCLE_BRANCH=staging
 check "push to main runs" 0 '^run: push to main' CIRCLE_BRANCH=main
 check "tag runs" 0 '^run: tag v1' CIRCLE_TAG=v1
 check "no branch runs" 0 '^run: no CIRCLE_BRANCH'
-check "PATHS_GATE_FORCE runs" 0 '^run: PATHS_GATE_FORCE' CIRCLE_BRANCH=feat/x PATHS_GATE_FORCE=true
-check "[full-ci] in the commit message runs" 0 '^run: \[full-ci\]' \
-  CIRCLE_BRANCH=feat/x PATHS_GATE_COMMIT_MSG=$'fix: y\n\n[full-ci]'
 check "heavy_gate's full-ci decision (CI_FULL_CI) runs" 0 '^run: full-ci: PR #7 has the full-ci label' \
   CIRCLE_BRANCH=feat/x CI_FULL_CI='PR #7 has the full-ci label'
-out="$(env -i PATH="$PATH" HOME="$TMP" CIRCLE_BRANCH=feat/x bash "$SCRIPT" 2>&1)"; rc=$?
-if [ "$rc" = 0 ] && grep -q '^run: no skip paths given' <<<"$out"; then echo "  ok: no skip paths -> $out"
-else fail "no skip paths: exit $rc, output: $out"; fi
 
 # Every entry of the list skips on its own (one sample file per entry).
 for p in "${SKIP[@]}"; do
@@ -174,7 +174,7 @@ for label in "" full-ci; do
     HEAVY_GATE_CACHE_DIR="$TMP/cache" HEAVY_GATE_EXPORT="$TMP/bash_env" FAKE_BODY="$body" \
     bash "$HEAVY" >/dev/null 2>&1
   out="$(env -i PATH="$PATH" HOME="$TMP" BASH_ENV="$TMP/bash_env" CIRCLE_BRANCH=labelled \
-    PATHS_GATE_COMMIT_MSG="docs: x" bash "$SCRIPT" "${SKIP[@]}" 2>&1)"; rc=$?
+    bash "$SCRIPT" "${SKIP[@]}" 2>&1)"; rc=$?
   if [ -n "$label" ]; then
     if [ "$rc" = 0 ] && grep -q '^run: full-ci: PR #7 has the full-ci label' <<<"$out"; then
       echo "  ok: full-ci-labelled PR touching only skipped paths runs -> $out"
@@ -224,7 +224,7 @@ echo x > x
 "${G[@]}" add x
 "${G[@]}" commit -qm "unrelated"
 check "no merge base runs" 0 '^run: no merge base' CIRCLE_BRANCH=unrelated
-out="$(cd "$TMP" && env -i PATH="$PATH" HOME="$TMP" CIRCLE_BRANCH=feat/x PATHS_GATE_COMMIT_MSG=x bash "$SCRIPT" docs/ 2>&1)"; rc=$?
+out="$(cd "$TMP" && env -i PATH="$PATH" HOME="$TMP" CIRCLE_BRANCH=feat/x bash "$SCRIPT" docs/ 2>&1)"; rc=$?
 if [ "$rc" = 0 ] && grep -q '^run: ' <<<"$out"; then echo "  ok: outside a git repository runs -> $out"
 else fail "outside a git repository: exit $rc, output: $out"; fi
 

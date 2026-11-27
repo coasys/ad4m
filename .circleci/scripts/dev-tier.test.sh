@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tests for .circleci/scripts/dev-tier.sh. A scratch git repo stands in for dev; a
 # fake `curl` on PATH answers CircleCI and GitHub from fixture files and records
-# every request, so they need no network. About 7 seconds (the stash checks wait 1 s each).
+# every request, so they need no network.
 # Run: bash .circleci/scripts/dev-tier.test.sh
 
 set -uo pipefail
@@ -31,7 +31,6 @@ while [ $# -gt 0 ]; do
   shift
 done
 echo "$method $url" >> "$FAKE_LOG"
-[ -n "${FAKE_ON_CALL:-}" ] && bash -c "$FAKE_ON_CALL"
 [ -n "$data" ] && echo "  data: $data" >> "$FAKE_LOG"
 while read -r m sub file; do
   [ -z "$m" ] && continue
@@ -168,6 +167,13 @@ check "moved: CircleCI error object runs" 0 '^run: no finished' moved
 routes "GET /tree/feat%2Fx tree-same.json"
 check "moved: a run by hand on another branch asks for that branch" 10 '^skip: feat/x @' moved CIRCLE_BRANCH=feat/x
 check "moved: no CIRCLE_SHA1 runs" 0 '^run: no CIRCLE_SHA1' moved CIRCLE_SHA1=
+routes "GET /tree/dev tree-same.json"
+echo "[$(row nightly-llm-e2e integration-tests-sfu-e2e "$RED" 3)]" > "$FIX/tree-nightly.json"
+routes "GET /tree/dev tree-nightly.json"
+check "moved: DEV_TIER_WORKFLOW names another workflow (the nightly llm-e2e check)" 10 '^skip:.*in nightly-llm-e2e' moved DEV_TIER_WORKFLOW=nightly-llm-e2e
+check "moved: a run in another workflow does not count" 0 '^run: no finished dev-2-hourly run' moved
+routes "GET /tree/dev tree-same.json"
+check "moved: no CircleCI token (empty auth array under set -u)" 10 '^skip:' moved CIRCLECI_API_TOKEN=
 
 # --- red: open an issue, or comment on the open one.
 routes "GET /tree/dev tree-green.json" "GET issues?state=open issues-none.json" \
@@ -253,78 +259,6 @@ not_logged "nothing sent to GitHub issues" "issues"
 routes "GET /tree/feat%2Fx tree-green.json"
 check "red: a run on another branch opens nothing" 0 'not dev' red CIRCLE_BRANCH=feat/x
 not_logged "nothing sent to GitHub issues" "issues"
-check "red: DEV_TIER_NO_ISSUE (no build stash) opens nothing" 0 '^no issue: no build stash' red DEV_TIER_NO_ISSUE="no build stash"
-not_logged "nothing sent" "."
-
-# --- stash: wait for build's stash of the commit while that build runs; build
-# here when it is gone; fail (no issue) when that build is red.
-STASH="$TMP/stash/$RED"
-STASH_ENV=(CI_ARTIFACT_DIR="$TMP/stash" DEV_TIER_POLL_SECS=0.1 DEV_TIER_WAIT_SECS=1 DEV_TIER_NONE_GRACE_SECS=0)
-stash_files() { mkdir -p "$STASH"; for f in ad4m ad4m-executor identity-store holder integration-inputs.tar; do echo x > "$STASH/$f"; done; }
-build_row() { row build-and-test build "$RED" "$1" "$2" "${3:-finished}"; }
-echo "[$(build_row 5 running running)]" > "$FIX/build-running.json"
-echo "[$(build_row 5 failed)]" > "$FIX/build-failed.json"
-echo "[$(build_row 5 timedout)]" > "$FIX/build-timedout.json"
-echo "[$(build_row 5 success)]" > "$FIX/build-success.json"
-echo "[$(build_row 5 canceled)]" > "$FIX/build-canceled.json"
-echo "[$(build_row 6 queued queued),$(build_row 5 failed)]" > "$FIX/build-rerun-queued.json"
-echo "[$(row build-and-test build "$GREEN" 5 running running),$(row dev-2-hourly integration-tests-sfu-e2e "$RED" 4 failed)]" > "$FIX/build-other-commit.json"
-
-stash_check() { rm -rf "$TMP/stash"; check "$@"; }
-assert() {
-  local name="$1"; shift
-  if "$@"; then echo "  ok: $name"; else echo "  FAIL: $name: $*"; FAILED=1; fi
-}
-rm -rf "$TMP/stash"; stash_files
-routes
-check "stash: there: use it, no API call" 0 "^stash: .*$RED" stash "${STASH_ENV[@]}"
-not_logged "no API call" "."
-routes "GET /tree/dev build-running.json"
-stash_check "stash: build running, stash arrives: use it" 0 "^stash: " stash "${STASH_ENV[@]}" \
-  FAKE_ON_CALL="mkdir -p '$STASH'; for f in ad4m ad4m-executor identity-store holder integration-inputs.tar; do echo x > '$STASH/'\$f; done"
-logged "asks for all of dev's jobs" "GET $CIRCLE/tree/dev\\?limit=100&shallow=true&offset=0$"
-stash_check "stash: build still running at the deadline: fail, no build beside it" 13 '^no build here: build of .* still running after' stash "${STASH_ENV[@]}"
-routes "GET /tree/dev build-failed.json"
-stash_check "stash: build of this commit failed: fail, no build here" 11 "^build of ${RED:0:12} failed" stash "${STASH_ENV[@]}"
-routes "GET /tree/dev build-timedout.json"
-stash_check "stash: build of this commit timed out: fail" 11 'failed: timedout' stash "${STASH_ENV[@]}"
-routes "GET /tree/dev build-success.json"
-stash_check "stash: build passed, stash gone (12 h cleanup): build here" 12 '^build here: build of .* finished \(success' stash "${STASH_ENV[@]}"
-routes "GET /tree/dev build-canceled.json"
-stash_check "stash: build cancelled: build here" 12 '^build here: build of .* finished \(canceled' stash "${STASH_ENV[@]}"
-routes "GET /tree/dev build-rerun-queued.json"
-stash_check "stash: a queued rerun over a failed build: wait, no build beside it" 13 '^no build here: build of .* still running after' stash "${STASH_ENV[@]}"
-routes "GET offset=100 empty.json" "GET /tree/dev build-other-commit.json"
-stash_check "stash: no build of this commit: build here" 12 '^build here: no build of' stash "${STASH_ENV[@]}"
-routes "GET offset=100 empty.json" "GET /tree/dev build-other-commit.json"
-stash_check "stash: no build yet, within the grace: wait" 12 '^build here: waited .*no build of' stash "${STASH_ENV[@]}" DEV_TIER_NONE_GRACE_SECS=60
-routes
-stash_check "stash: CircleCI API failure: wait, then build here" 12 '^build here: waited .*cannot tell' stash "${STASH_ENV[@]}"
-routes "GET /tree/dev unauthorized.json"
-stash_check "stash: CircleCI error object: wait, then build here" 12 '^build here: waited .*cannot tell' stash "${STASH_ENV[@]}"
-stash_check "stash: no CIRCLE_SHA1: build here" 12 '^build here: no CIRCLE_SHA1' stash "${STASH_ENV[@]}" CIRCLE_SHA1=
-
-
-# One producer per commit: the job that builds here holds $STASH/.dev-tier-build.
-routes "GET /tree/dev build-success.json"
-stash_check "stash: building here takes the lock" 12 '^build here: build of .* finished \(success' stash "${STASH_ENV[@]}" CIRCLE_BUILD_NUM=77
-assert "the lock names this job" grep -qx 77 "$STASH/.dev-tier-build/owner"
-routes "GET /tree/dev build-success.json"
-rm -rf "$TMP/stash"; mkdir -p "$STASH/.dev-tier-build"; echo 76 > "$STASH/.dev-tier-build/owner"
-check "stash: another tier job holds the lock: wait, no second build" 13 '^no build here: tier job 76 is building' stash "${STASH_ENV[@]}" CIRCLE_BUILD_NUM=77
-assert "the lock is still the other job's" grep -qx 76 "$STASH/.dev-tier-build/owner"
-rm -rf "$TMP/stash"; mkdir -p "$STASH/.dev-tier-build"; echo 76 > "$STASH/.dev-tier-build/owner"
-check "stash: the lock holder's stash arrives: use it" 0 "^stash: " stash "${STASH_ENV[@]}" CIRCLE_BUILD_NUM=77 \
-  FAKE_ON_CALL="for f in ad4m ad4m-executor identity-store holder integration-inputs.tar; do echo x > '$STASH/'\$f; done"
-rm -rf "$TMP/stash"; mkdir -p "$STASH/.dev-tier-build"; echo 76 > "$STASH/.dev-tier-build/owner"
-touch -d '3 hours ago' "$STASH/.dev-tier-build"
-check "stash: a stale lock (holder died): take it, build here" 12 '^build here: build of .* finished \(success' stash "${STASH_ENV[@]}" CIRCLE_BUILD_NUM=77
-assert "the stale lock is now this job's" grep -qx 77 "$STASH/.dev-tier-build/owner"
-assert "nothing of the stale lock is left aside" bash -c "! ls -d '$STASH'/.dev-tier-build.stale.* 2>/dev/null"
-# The stash lands while build_state asks CircleCI: recheck before choosing to build.
-stash_check "stash: the stash lands during the lookup: use it, no build" 0 "^stash: " stash "${STASH_ENV[@]}" \
-  FAKE_ON_CALL="mkdir -p '$STASH'; for f in ad4m ad4m-executor identity-store holder integration-inputs.tar; do echo x > '$STASH/'\$f; done"
-assert "no lock taken" test ! -e "$STASH/.dev-tier-build"
 
 # --- green: note it on the open issue; never opens or closes one.
 routes "GET /issues/41/comments comments-none.json" "GET issues?state=open issues-open.json" "POST /repos/coasys/ad4m/issues/41/comments comment.json"

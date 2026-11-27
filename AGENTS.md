@@ -132,12 +132,13 @@ so the same file runs on both link languages.
 `integration-tests-mcp` and `integration-tests-email-verification` do not run on
 PRs. They run with `integration-tests-sfu-e2e` in the 2-hourly dev tier
 (workflow `dev-2-hourly`, pipeline parameter `run-dev-2-hourly`), only when dev
-has moved or the last run on its head was red. They use the stash of `build`'s
-run on the same commit, and build it themselves when that stash is gone. A red
-job there opens the GitHub issue `dev red: <job>` with the PRs merged since the
-tier's last green commit, and comments on it only for a new red commit or a
-change of state (`.circleci/scripts/dev-tier.sh`). To run one on a PR, run its
-script locally.
+has moved or the last run on its head was red. They build their own binaries
+(that pipeline has no `build` job). A red job there (a red build too) opens the
+GitHub issue `dev red: <job>` with the PRs merged since the tier's last green
+commit, and comments on it only for a new red commit or a change of state
+(`.circleci/scripts/dev-tier.sh`; the same `moved` check lets `llm-e2e` skip a
+commit it already passed). To run one on a PR, run its script locally.
+The CI step "Test paths-changed.sh and dev-tier.sh" runs both scripts' tests.
 
 ### Nightly (`nightly-llm-e2e` workflow)
 
@@ -358,7 +359,7 @@ executor's `/metrics`.
 
 | Suite | Languages | CI |
 |---|---|---|
-| `test-sfu-e2e`: single executor, end to end (about 4 min) | local, no Holochain: `pnpm run prepare-test-local` (`test-main-sfu-e2e` does both) | `integration-tests-sfu-e2e`: on every PR except one whose changed files are all on the job's `skip_paths` (docs, other apps, other suites), on dev every 2 hours (`dev-2-hourly`). The `full-ci` label or `[full-ci]` runs it anyway |
+| `test-sfu-e2e`: single executor, end to end (about 4 min) | local, no Holochain: `pnpm run prepare-test-local` (`test-main-sfu-e2e` does both) | `integration-tests-sfu-e2e`: on every PR except one whose changed files are all on the job's `skip_paths` (docs, other apps, other suites; syntax in the header of `.circleci/scripts/paths-changed.sh`), on dev every 2 hours (`dev-2-hourly`), not on dev pushes. The `full-ci` label or `[full-ci]` forces it through the path gate (`CI_FULL_CI`, written to `$BASH_ENV` by `heavy_gate`) |
 | `test-sfu-browsers`: SFU and mesh calls in real Chromium, Firefox and WebKit, mixed (about 1 min past the world's start) | local, no Holochain: `pnpm run prepare-test-local` (`test-main-sfu-browsers` does both) | nightly, `integration-tests-sfu-browsers` |
 | `test-sfu`: `sfu-cascade`, `sfu-session` (T20, T21), `sfu-mesh` (network baselines) | Holochain: `pnpm run prepare-test` | nightly, `integration-tests-sfu` |
 

@@ -2,20 +2,22 @@
 # Decides whether a by-path CI job (integration-tests-sfu-e2e) runs on this push
 # or halts green at its start. On a PR the job halts only when every file the
 # PR's own changes touch is on the skip list given as arguments: paths known not
-# to reach the job. Any other file, a new or unknown one too, runs it. On dev it
-# halts: the 2-hourly dev tier (workflow dev-2-hourly) runs the job there.
+# to reach the job. Any other file, a new or unknown one too, runs it.
 #
 # Prints one line, "run: <reason>" or "skip: <reason>", and exits 0 to run or
 # 10 to skip. Any other exit is a failure of this script; the caller runs the
 # job then (fails open). Every git step that fails also answers "run".
 #
-# Runs:  PATHS_GATE_FORCE=true, CI_FULL_CI set (heavy_gate's full-ci decision:
-#        the label or [full-ci], written to $BASH_ENV by should-run-heavy.sh), a
-#        tag, a push to staging or main, a head commit whose message holds
-#        [full-ci], a branch with a changed file that is not on the skip list.
-# Skips: a push to dev, a branch whose changed files are all on the skip list,
-#        a branch with no changes of its own.
+# Runs:  CI_FULL_CI set (heavy_gate's full-ci decision: the label, [full-ci] or
+#        HEAVY_GATE_FORCE, written to $BASH_ENV by should-run-heavy.sh, which
+#        must therefore run first), a tag, a push to dev, staging or main (the
+#        2-hourly dev tier runs the job on dev), a branch with a changed file
+#        that is not on the skip list.
+# Skips: a branch whose changed files are all on the skip list, a branch with
+#        no changes of its own.
 #
+# This header is the one description of the skip list syntax (the config's
+# skip_paths parameter and AGENTS.md link here).
 # Skip list entries, in order; the last entry that matches a file decides:
 #   dir/     every file under dir/
 #   pattern  with a slash: a shell pattern on the whole path, `*` crosses `/`
@@ -30,8 +32,6 @@
 #
 #   CIRCLE_BRANCH, CIRCLE_TAG  from CircleCI
 #   CI_FULL_CI             set: always run (its value is the reason)
-#   PATHS_GATE_FORCE       "true": always run
-#   PATHS_GATE_COMMIT_MSG  default: `git log -1 --format=%B`
 #   PATHS_GATE_BASE        default dev
 #   PATHS_GATE_REMOTE      default origin
 #
@@ -45,19 +45,11 @@ branch="${CIRCLE_BRANCH:-}"
 base="${PATHS_GATE_BASE:-dev}"
 remote="${PATHS_GATE_REMOTE:-origin}"
 
-[ "${PATHS_GATE_FORCE:-}" = true ] && run "PATHS_GATE_FORCE=true"
 [ -n "${CI_FULL_CI:-}" ] && run "full-ci: $CI_FULL_CI (heavy_gate)"
 [ -n "${CIRCLE_TAG:-}" ] && run "tag ${CIRCLE_TAG}"
 [ -z "$branch" ] && run "no CIRCLE_BRANCH"
 case "$branch" in
-  dev) skip "push to dev: the 2-hourly dev tier (dev-2-hourly) runs this job" ;;
-  staging|main) run "push to $branch" ;;
-esac
-[ $# -eq 0 ] && run "no skip paths given"
-
-msg="${PATHS_GATE_COMMIT_MSG-$(git log -1 --format=%B 2>/dev/null)}"
-case "$msg" in
-  *"[full-ci]"*) run "[full-ci] in the commit message" ;;
+  dev|staging|main) run "push to $branch" ;;
 esac
 
 timeout 120 git fetch --no-tags --quiet "$remote" "+refs/heads/$base:refs/remotes/$remote/$base" 2>/dev/null \
