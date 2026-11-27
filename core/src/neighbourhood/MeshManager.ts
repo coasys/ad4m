@@ -513,6 +513,48 @@ interface PeerSlot {
  *  saying so leaves its tracks `live` but `muted`. */
 const isLive = (track: MediaStreamTrack) => track.readyState !== "ended" && !track.muted
 
+/** Direction an offer gave one media section. Omitted means sendrecv, per RFC 3264. */
+type OfferDirection = "sendrecv" | "sendonly" | "recvonly" | "inactive"
+
+/** The offerer receives on this section, so the answer may send. RFC 3264 §6.1. */
+const offerAcceptsSend = (direction: OfferDirection) => direction === "sendrecv" || direction === "recvonly"
+
+/**
+ * Direction of each `a=mid` in an offer. A media section with no direction
+ * line is sendrecv. An offer with no m-lines yields an empty map, and a mid
+ * that is absent is treated the same way by the caller.
+ */
+const offeredDirections = (sdp: string | undefined): Map<string, OfferDirection> => {
+    const found = new Map<string, OfferDirection>()
+    if (!sdp) return found
+    let inMedia = false
+    let mid: string | null = null
+    let direction: OfferDirection | null = null
+    const finish = () => {
+        if (!inMedia || !mid) return
+        found.set(mid, direction ?? "sendrecv")
+    }
+    for (const line of sdp.split(/\r?\n/)) {
+        if (line.startsWith("m=")) {
+            finish()
+            inMedia = true
+            mid = null
+            direction = null
+            continue
+        }
+        if (!inMedia) continue
+        if (line.startsWith("a=mid:")) {
+            mid = line.slice("a=mid:".length).trim()
+            continue
+        }
+        if (line === "a=sendrecv" || line === "a=sendonly" || line === "a=recvonly" || line === "a=inactive") {
+            direction = line.slice("a=".length) as OfferDirection
+        }
+    }
+    finish()
+    return found
+}
+
 export class MeshManager {
     private channel: SignallingChannel
     private callId: string
@@ -528,6 +570,28 @@ export class MeshManager {
     private outbound: Map<"audio" | "video", MediaStreamTrack | null> = new Map()
     /** One stream for all outbound tracks, so a peer receives mic and camera grouped. */
     private outboundStream: MediaStream | null = null
+    /**
+     * The clone each sender encodes, and the camera or mic it was cloned from.
+     * Recorded only after `replaceTrack` accepts the clone. See {@link putTrack}.
+     */
+    private owned = new Map<RTCRtpSender, { source: MediaStreamTrack; clone: MediaStreamTrack }>()
+    /**
+     * A clone minted for a `replaceTrack` that has not accepted it yet.
+     * Closing the connection aborts that call without settling its promise, so
+     * {@link releaseClones} stops these itself. See {@link putTrack}.
+     */
+    private inflight = new Map<RTCRtpSender, MediaStreamTrack>()
+    /**
+     * Replacements of one sender, one at a time. The `sender.track` check and
+     * live-clone reuse both read what the previous replacement committed.
+     * Dropped when that sender's connection is closed or replaced, so a call
+     * queued behind one the browser will never settle does not wait on it.
+     */
+    private senderTail = new Map<RTCRtpSender, Promise<void>>()
+    /** Senders whose connection has been closed or replaced. */
+    private droppedSenders = new WeakSet<RTCRtpSender>()
+    /** Wakes a `replaceTrack` that is still pending when its sender is dropped. */
+    private droppedWaiters = new Map<RTCRtpSender, Array<() => void>>()
     private closed = false
     private channelUnsubscribe: (() => void) | null = null
     private unwatchPublish: (() => void) | null = null
@@ -788,7 +852,13 @@ export class MeshManager {
      * Replace the outbound track of a given kind on every peer connection.
      * Uses `RTCRtpSender.replaceTrack` on the sections declared up front, so
      * muting, unmuting and camera↔screen swaps never renegotiate. Pass `null`
-     * to stop sending that kind.
+     * to stop sending that kind. Each sender encodes a clone of `track`; the
+     * track handed in is left running.
+     *
+     * Resolves when a connection closes or is replaced while its native
+     * `replaceTrack` is still pending. The browser does not settle that
+     * promise. The track is already stored here, and the connection that
+     * takes over sends it. The call does not reject for that.
      */
     async replaceTrack(kind: "audio" | "video", track: MediaStreamTrack | null): Promise<void> {
         const previous = this.outbound.get(kind)
@@ -801,14 +871,33 @@ export class MeshManager {
 
         await Promise.all(
             [...this.slots.entries()].map(async ([peerId, slot]) => {
+                const pc = slot.pc
                 try {
                     const sender = slot.senders.get(kind)
                     if (sender) {
-                        await sender.replaceTrack(track)
+                        await this.putTrack(sender, track)
+                        // Left, or an offer adopted a different sender, while this
+                        // one was accepting the track. The clone was recorded after
+                        // `releaseClones` had already run, and that release only
+                        // stops a clone the sender already owned.
+                        if (!this.slotCurrent(peerId, slot, pc) || slot.senders.get(kind) !== sender) this.releaseSender(sender)
                     } else if (track) {
+                        if (!this.slotCurrent(peerId, slot, pc)) return
                         // Only reachable if `addTransceiver` failed. This fires
                         // `negotiationneeded`, which perfect negotiation resolves.
-                        slot.senders.set(kind, slot.pc.addTrack(track, this.outboundStream!))
+                        const clone = track.clone()
+                        try {
+                            const added = slot.pc.addTrack(clone, new MediaStream([clone]))
+                            if (!this.slotCurrent(peerId, slot, pc)) {
+                                this.stopClone(clone)
+                                return
+                            }
+                            slot.senders.set(kind, added)
+                            this.owned.set(added, { source: track, clone })
+                        } catch (error) {
+                            this.stopClone(clone)
+                            throw error
+                        }
                     }
                 } catch (error) {
                     this.fail(`replacing ${kind} track for ${peerId}`, error)
@@ -939,8 +1028,57 @@ export class MeshManager {
             disconnectedAt: 0,
         }
         this.slots.set(peerId, slot)
+        this.arm(peerId, slot)
+
+        /*
+         * Sections, and who creates them.
+         *
+         * A connection can only carry media of a kind it negotiated a section
+         * for. Declaring both up front makes a later mute or camera swap a
+         * `replaceTrack` on an existing section.
+         *
+         * With the tracks already attached. `replaceTrack` applies on a later
+         * turn, so an offer made in between describes sections with nothing
+         * to send. The other side answers recvonly, and the offer that
+         * follows — once the track is on the sender — adds a second section
+         * of that kind. Firefox will not reuse a section this side already
+         * created for the peer's offer, so the pair ends sendonly on the
+         * first video section and recvonly on the second. Firefox then
+         * delivers the new section's packets to the first (bug 1874471) and
+         * this side stops receiving video, while audio on its own section
+         * and the ICE transport keep going. Attaching the track here makes
+         * the first offer sendrecv. An offer that arrives before this side
+         * has offered is answered on a new connection ({@link reseat}), so
+         * Firefox and Chromium — which will not reuse these sections — cannot
+         * leave them beside the offer's. Stopping the unused ones instead
+         * makes `negotiationneeded` fire on every return to stable: an offer
+         * cannot name a section that never had a mid, so the need is never
+         * met and the pair renegotiates until the browser falls over.
+         *
+         * Each connection gets its own stream. One stream shared by every
+         * connection is dropped from the survivors when one connection closes.
+         * It also gets its own clone of the camera and the mic. A track shared by
+         * two connections has been seen to stop on the survivor when one
+         * connection closes: the receiver's video packet count freezes while
+         * audio on the same transport and the connection stay up. A clone per
+         * connection is what stopped that. A shared encoder changing the SSRC
+         * is a likely account of it, and was not measured.
+         */
+        this.declareSending(peerId, slot)
+
+        return slot
+    }
+
+    /**
+     * Handlers for one peer connection. {@link reseat} binds them again on the
+     * replacement, so a handler closed over the connection it was given and
+     * does nothing once that connection is no longer the slot's.
+     */
+    private arm(peerId: string, slot: PeerSlot): void {
+        const pc = slot.pc
 
         const negotiate = async () => {
+            if (slot.pc !== pc) return
             /*
              * An answerer's first offer waits until the pair connects. Before
              * that this side cannot know its answer arrived; if it was lost,
@@ -968,18 +1106,20 @@ export class MeshManager {
                  * first the browser refuses, and asks again once stable.
                  */
                 await pc.setLocalDescription({ type: "offer" })
+                if (slot.pc !== pc) return
                 slot.offeredAt = this.now()
                 slot.renegotiating = pc.connectionState === "connected"
                 this.sendDescription(peerId, slot)
             } catch (error) {
-                if (pc.signalingState === "stable") this.fail(`negotiating with ${peerId}`, error)
+                if (slot.pc === pc && pc.signalingState === "stable") this.fail(`negotiating with ${peerId}`, error)
             } finally {
-                slot.makingOffer = false
+                if (slot.pc === pc) slot.makingOffer = false
             }
         }
         pc.onnegotiationneeded = negotiate
 
         pc.onicecandidate = ({ candidate }) => {
+            if (slot.pc !== pc) return
             if (candidate) this.sendFrom(peerId, slot, { kind: "ice", candidate: candidate.toJSON() })
         }
 
@@ -1011,6 +1151,7 @@ export class MeshManager {
         }
 
         pc.onconnectionstatechange = () => {
+            if (slot.pc !== pc) return
             const state = pc.connectionState
             this.states.set(peerId, state)
             if (state === "connected") {
@@ -1031,48 +1172,397 @@ export class MeshManager {
             // `failed` is actionable at once — there is nothing in flight to wait for.
             if (state === "failed") this.tick()
         }
+    }
 
-        /*
-         * Both m-lines, before there is anything to put in them.
-         *
-         * A connection can only carry media of a kind it negotiated a section
-         * for, and `addTrack` creates one. An agent sending no video negotiated
-         * no video section, which left the *other* peer's camera with nowhere
-         * to arrive. Declaring both up front makes every track change a
-         * `replaceTrack` on an existing section.
-         */
+    /** One section per kind, a clone of each track already on it. */
+    private declareSending(peerId: string, slot: PeerSlot): void {
+        const pc = slot.pc
+        const group = new MediaStream()
         for (const kind of ["audio", "video"] as const) {
+            const source = this.outbound.get(kind) ?? null
+            // Cloned before `addTransceiver`: the sender's track has to be set
+            // synchronously, or the first offer describes a section with nothing
+            // to send. See {@link putTrack} for why it is a clone.
+            const sending = source ? source.clone() : null
+            if (sending) group.addTrack(sending)
             try {
-                slot.senders.set(
-                    kind,
-                    pc.addTransceiver(kind, {
-                        direction: "sendrecv",
-                        streams: this.outboundStream ? [this.outboundStream] : [],
-                    }).sender,
-                )
+                const transceiver = sending
+                    ? pc.addTransceiver(sending, { direction: "sendrecv", streams: [group] })
+                    : pc.addTransceiver(kind, { direction: "sendrecv" })
+                slot.senders.set(kind, transceiver.sender)
+                if (source && sending) this.owned.set(transceiver.sender, { source, clone: sending })
             } catch (error) {
+                if (sending) this.stopClone(sending)
                 this.fail(`preparing ${kind} for ${peerId}`, error)
             }
         }
+    }
 
-        // Attach whatever already gets sent, so a peer joining mid-call
-        // receives our media without waiting for a toggle.
-        for (const [kind, track] of this.outbound) {
-            if (!track) continue
-            const sender = slot.senders.get(kind)
-            if (!sender) continue
-            void sender.replaceTrack(track).catch((error) =>
-                this.fail(`sending ${kind} to ${peerId}`, error),
-            )
+    /**
+     * Put `source` on `sender`, or nothing when `source` is null.
+     *
+     * Each sender gets its own clone. A track shared by two connections has
+     * been seen to stop on the survivor when one connection closes, while
+     * audio on that transport and the connection stay up. A clone per
+     * connection is what stopped that. A shared encoder changing the SSRC is
+     * a likely account of it, and was not measured. A later offer for the
+     * same source reuses the live clone, so renegotiating does not replace it
+     * on purpose. The previous clone is stopped only after the sender accepts
+     * the new track. A refusal stops the clone that was just minted and leaves
+     * the one the sender still holds. The source is never stopped.
+     *
+     * A fresh clone is remembered in {@link inflight} for the await. Disconnect
+     * and reseat stop it there. The browser aborts a pending `replaceTrack`
+     * when the connection closes and does not settle the promise, so this
+     * resolves without waiting for it and does not reject. The caller has
+     * already stored the track, and the connection that takes over sends it.
+     * A replacement queued on that sender finds the sender gone and does not
+     * mint a clone.
+     *
+     * Calls on one sender run in order while the connection is live.
+     * `sender.track` changes only when `replaceTrack` settles, so a mute that
+     * looks while a camera is still attaching would otherwise see a null
+     * track and skip `replaceTrack(null)`.
+     */
+    private async putTrack(sender: RTCRtpSender, source: MediaStreamTrack | null): Promise<void> {
+        const previous = this.senderTail.get(sender) ?? Promise.resolve()
+        let release = () => {}
+        const gate = new Promise<void>((resolve) => { release = resolve })
+        // A refusal must not strand the next replacement behind a rejected tail.
+        const finished = previous.then(() => gate, () => gate)
+        this.senderTail.set(sender, finished)
+        try {
+            await previous
+            await this.applyTrack(sender, source)
+        } finally {
+            release()
+            if (this.senderTail.get(sender) === finished) this.senderTail.delete(sender)
+        }
+    }
+
+    /** Prepare, replace and commit one track. Caller serialises this per sender. */
+    private async applyTrack(sender: RTCRtpSender, source: MediaStreamTrack | null): Promise<void> {
+        // A queued call whose predecessor was dropped must not mint a clone
+        // for a sender that no longer belongs to a live connection.
+        if (!this.senderLive(sender)) return
+        const prepared = this.prepareTrack(sender, source)
+        if (!this.senderLive(sender)) {
+            if (prepared.fresh && prepared.track) this.stopClone(prepared.track)
+            return
+        }
+        if (prepared.fresh && prepared.track) this.inflight.set(sender, prepared.track)
+        try {
+            if (sender.track !== prepared.track) await this.replaceOrDrop(sender, prepared.track)
+        } catch (error) {
+            this.abandonInflight(sender, prepared)
+            throw error
+        }
+        // Teardown took the clone while `replaceTrack` was pending. Recording
+        // it now would undo that, and the promise may equally never settle.
+        if (!this.senderLive(sender)) return
+        if (prepared.fresh && prepared.track && this.inflight.get(sender) !== prepared.track) return
+        if (prepared.fresh && prepared.track) this.inflight.delete(sender)
+        this.commitTrack(sender, source, prepared.track, prepared.fresh)
+    }
+
+    /**
+     * `sender.replaceTrack`, or a resolution when the sender's connection is
+     * dropped first. The native promise is left pending in that case. The
+     * browser does not settle it, and a later rejection must not surface.
+     */
+    private async replaceOrDrop(sender: RTCRtpSender, track: MediaStreamTrack | null): Promise<void> {
+        let wake = () => {}
+        const dropped = new Promise<void>((resolve) => {
+            wake = resolve
+            if (this.droppedSenders.has(sender)) {
+                resolve()
+                return
+            }
+            const waiters = this.droppedWaiters.get(sender) ?? []
+            waiters.push(resolve)
+            this.droppedWaiters.set(sender, waiters)
+        })
+        const native = sender.replaceTrack(track)
+        void native.catch(() => undefined)
+        try {
+            await Promise.race([native, dropped])
+        } finally {
+            this.forgetDroppedWaiter(sender, wake)
+        }
+    }
+
+    /** `sender` is still on a connection this mesh has not closed or replaced. */
+    private senderLive(sender: RTCRtpSender): boolean {
+        if (this.closed || this.droppedSenders.has(sender)) return false
+        for (const slot of this.slots.values()) {
+            if (this.sendersOf(slot).includes(sender)) return true
+        }
+        return false
+    }
+
+    private forgetDroppedWaiter(sender: RTCRtpSender, wake: () => void): void {
+        const waiters = this.droppedWaiters.get(sender)
+        if (!waiters) return
+        const index = waiters.indexOf(wake)
+        if (index !== -1) waiters.splice(index, 1)
+        if (waiters.length === 0) this.droppedWaiters.delete(sender)
+    }
+
+    /** Unblock replacements on senders whose connection is going away, and drop their queue. */
+    private dropSenderWork(senders: RTCRtpSender[]): void {
+        for (const sender of senders) {
+            this.droppedSenders.add(sender)
+            this.senderTail.delete(sender)
+            const waiters = this.droppedWaiters.get(sender)
+            this.droppedWaiters.delete(sender)
+            if (waiters) for (const wake of waiters) wake()
+        }
+    }
+
+    /** Stop a fresh clone `replaceTrack` refused, unless teardown already did. */
+    private abandonInflight(
+        sender: RTCRtpSender,
+        prepared: { track: MediaStreamTrack | null; fresh: boolean },
+    ): void {
+        if (!prepared.fresh || !prepared.track) return
+        if (this.inflight.get(sender) !== prepared.track) return
+        this.inflight.delete(sender)
+        this.stopClone(prepared.track)
+    }
+
+    /** The track to give `sender`. A fresh clone is not owned until {@link commitTrack}. */
+    private prepareTrack(
+        sender: RTCRtpSender,
+        source: MediaStreamTrack | null,
+    ): { track: MediaStreamTrack | null; fresh: boolean } {
+        if (!source) return { track: null, fresh: false }
+        const held = this.owned.get(sender)
+        if (held && held.source === source && held.clone.readyState === "live") return { track: held.clone, fresh: false }
+        return { track: source.clone(), fresh: true }
+    }
+
+    /** Record what `sender` encodes, once `replaceTrack` has accepted it. */
+    private commitTrack(sender: RTCRtpSender, source: MediaStreamTrack | null, track: MediaStreamTrack | null, fresh: boolean): void {
+        const held = this.owned.get(sender)
+        if (!source || !track) {
+            if (held) {
+                this.stopClone(held.clone)
+                this.owned.delete(sender)
+            }
+            return
+        }
+        if (!fresh) return
+        if (held && held.clone !== track) this.stopClone(held.clone)
+        this.owned.set(sender, { source, clone: track })
+    }
+
+    /** `stop` on a clone. Never the camera or the mic the caller handed in. */
+    private stopClone(clone: MediaStreamTrack): void {
+        if (clone.readyState === "ended") return
+        try {
+            clone.stop()
+        } catch {
+            // Already ended, or a sender the browser has dropped.
+        }
+    }
+
+    /** Stop one sender's clone and forget it. The source stays live. */
+    private releaseSender(sender: RTCRtpSender): void {
+        const held = this.owned.get(sender)
+        if (!held) return
+        this.stopClone(held.clone)
+        this.owned.delete(sender)
+    }
+
+    /**
+     * Every sender on this connection, not only the one `slot.senders` remembers
+     * per kind. An offer can carry two sections of one kind; the kind map holds
+     * one of them.
+     */
+    private sendersOf(slot: PeerSlot): RTCRtpSender[] {
+        const mine: RTCRtpSender[] = []
+        const seen = new Set<RTCRtpSender>()
+        const add = (sender: RTCRtpSender) => {
+            if (seen.has(sender)) return
+            seen.add(sender)
+            mine.push(sender)
+        }
+        for (const sender of slot.senders.values()) add(sender)
+        if (typeof slot.pc.getSenders === "function") {
+            for (const sender of slot.pc.getSenders()) add(sender)
+        }
+        return mine
+    }
+
+    /**
+     * Stop the clones one connection was encoding, including one `replaceTrack`
+     * has not accepted. The sources stay live for the others.
+     */
+    private releaseClones(slot: PeerSlot): void {
+        const senders = this.sendersOf(slot)
+        for (const sender of senders) {
+            const pending = this.inflight.get(sender)
+            if (pending) {
+                this.inflight.delete(sender)
+                this.stopClone(pending)
+            }
+            this.releaseSender(sender)
+        }
+        // After the clones are stopped. Waking a waiter before that would let
+        // it record a clone this loop is about to drop.
+        this.dropSenderWork(senders)
+    }
+
+    /** This slot still owns `pc`. False after a disconnect or a reseat during an await. */
+    private slotCurrent(peerId: string, slot: PeerSlot, pc: RTCPeerConnection): boolean {
+        return !this.closed && this.slots.get(peerId) === slot && slot.pc === pc
+    }
+
+    private sectionKind(transceiver: RTCRtpTransceiver): "audio" | "video" | null {
+        const kind = transceiver.receiver?.track?.kind ?? transceiver.sender?.track?.kind
+        return kind === "audio" || kind === "video" ? kind : null
+    }
+
+    /**
+     * The peer's offer got here before this side offered, and this side had
+     * already created sections for its own offer. Firefox and Chromium will
+     * not reuse those, so answer on a connection that has none. A connection
+     * that has already applied a remote description is renegotiating: its
+     * sections have mids and the offer names them.
+     */
+    private shouldReseatForOffer(slot: PeerSlot): boolean {
+        const pc = slot.pc
+        if (slot.makingOffer || pc.remoteDescription) return false
+        if (typeof pc.getTransceivers !== "function") return false
+        return pc.getTransceivers().some((transceiver) => transceiver.mid == null && transceiver.direction !== "stopped")
+    }
+
+    /** Swap in a connection with no sections. The slot, and its generation, stay. */
+    private reseat(peerId: string, slot: PeerSlot): void {
+        // Stop this connection's clones. The replacement encodes new ones, and
+        // the camera the caller holds is not one of them.
+        this.releaseClones(slot)
+        const old = slot.pc
+        old.onnegotiationneeded = null
+        old.onicecandidate = null
+        old.ontrack = null
+        old.onconnectionstatechange = null
+        try { old.close() } catch (error) {
+            this.fail(`replacing the connection to ${peerId}`, error)
+        }
+        slot.pc = this.createPeerConnection(this.configuration)
+        slot.senders.clear()
+        slot.makingOffer = false
+        slot.ignoreOffer = false
+        slot.offerDeferred = false
+        slot.renegotiating = false
+        slot.offeredAt = 0
+        // The description this connection sent described sections it no longer has.
+        slot.lastSent = null
+        slot.lastResent = null
+        this.arm(peerId, slot)
+    }
+
+    /**
+     * Send on the offer's sections, before the answer.
+     *
+     * The connection {@link reseat} installed has only the sections the offer
+     * created, and they arrive recvonly. One section of each kind carries our
+     * track, and only a section whose offered direction still lets us send
+     * (`sendrecv` or `recvonly`, RFC 3264 §6.1). The sender already in use is
+     * kept when it is still one of those. Another section is used only when
+     * it is not, and then the last such section in the offer — the one added
+     * beside a section that can no longer carry local media. A `sendonly` or
+     * `inactive` section cannot: the answer intersects to recvonly or
+     * inactive. Every adopted audio and video section is sendrecv, with or
+     * without a track, so a camera or mic turned on later is a `replaceTrack`
+     * and does not need a new offer. The answer still intersects with the
+     * offer's direction. A section we are not sending on is not given a clone.
+     */
+    private async adoptOfferSections(peerId: string, slot: PeerSlot, sdp?: string): Promise<void> {
+        const pc = slot.pc
+        if (!this.slotCurrent(peerId, slot, pc)) return
+        if (typeof pc.getTransceivers !== "function") return
+        const kept = pc.getTransceivers().filter((transceiver) => transceiver.mid != null)
+        const sections = kept.length > 0 ? kept : pc.getTransceivers()
+        const offered = offeredDirections(sdp)
+        const directionOf = (transceiver: RTCRtpTransceiver): OfferDirection => {
+            const mid = transceiver.mid
+            if (mid && offered.has(mid)) return offered.get(mid)!
+            return "sendrecv"
+        }
+        const canSend = (transceiver: RTCRtpTransceiver) =>
+            transceiver.direction !== "stopped" && offerAcceptsSend(directionOf(transceiver))
+
+        const chosen = new Map<"audio" | "video", RTCRtpTransceiver>()
+        const adopted: RTCRtpTransceiver[] = []
+        for (const transceiver of sections) {
+            if (transceiver.direction === "stopped") continue
+            const kind = this.sectionKind(transceiver)
+            if (!kind) continue
+            adopted.push(transceiver)
+            // Last eligible section. Replaced below when the current sender is still eligible.
+            if (canSend(transceiver)) chosen.set(kind, transceiver)
+        }
+        for (const kind of ["audio", "video"] as const) {
+            const current = slot.senders.get(kind)
+            const currentSection = sections.find((transceiver) => transceiver.sender === current)
+            if (currentSection && canSend(currentSection)) chosen.set(kind, currentSection)
         }
 
-        return slot
+        // Drop a clone on any section of this kind we are not going to send on.
+        for (const kind of ["audio", "video"] as const) {
+            const transceiver = chosen.get(kind)
+            const sender = transceiver?.sender
+            const displaced = slot.senders.get(kind)
+            if (!sender) {
+                if (displaced) {
+                    this.releaseSender(displaced)
+                    slot.senders.delete(kind)
+                }
+                continue
+            }
+            if (displaced && displaced !== sender) this.releaseSender(displaced)
+            for (const other of this.sendersOf(slot)) {
+                if (other === sender) continue
+                const held = this.owned.get(other)
+                if (held?.clone.kind === kind) this.releaseSender(other)
+            }
+            slot.senders.set(kind, sender)
+        }
+
+        for (const transceiver of adopted) {
+            if (!this.slotCurrent(peerId, slot, pc)) return
+            const kind = this.sectionKind(transceiver)!
+            const sending = chosen.get(kind)?.sender === transceiver.sender
+            try {
+                if (sending) {
+                    await this.putTrack(transceiver.sender, this.outbound.get(kind) ?? null)
+                    // `putTrack` records the clone after this await. A disconnect
+                    // in between has already released whatever was owned then.
+                    if (!this.slotCurrent(peerId, slot, pc)) {
+                        this.releaseSender(transceiver.sender)
+                        return
+                    }
+                }
+                transceiver.direction = "sendrecv"
+            } catch (error) {
+                if (!this.slotCurrent(peerId, slot, pc)) {
+                    this.releaseSender(transceiver.sender)
+                    return
+                }
+                this.fail(`sending ${kind} to ${peerId}`, error)
+            }
+        }
     }
 
     /** Close one pair's connection, without telling anyone it happened. */
     private disconnect(peerId: string): void {
         const slot = this.slots.get(peerId)
         if (!slot) return
+        // Stop this connection's clones before it goes. The other connections
+        // keep theirs, and the camera the caller holds is not one of them.
+        this.releaseClones(slot)
         slot.pc.onnegotiationneeded = null
         slot.pc.onicecandidate = null
         slot.pc.ontrack = null
@@ -1237,6 +1727,11 @@ export class MeshManager {
                 // from the resend rung — would be refused against the current one.
                 if (description.type === "answer" && message.offer !== undefined && message.offer !== slot.offers) return
 
+                /*
+                 * Before the description is applied. Afterwards the offer's
+                 * sections are already on this connection, beside any it created.
+                 */
+                if (description.type === "offer" && this.shouldReseatForOffer(slot)) this.reseat(peerId, slot)
                 await slot.pc.setRemoteDescription(description)
                 if (description.type === "offer") slot.remoteOffer = message.offer
                 // An answer settles this side's offer, and accepting the
@@ -1255,7 +1750,13 @@ export class MeshManager {
                 await this.flushCandidates(peerId, slot)
 
                 if (description.type === "offer") {
+                    const pc = slot.pc
+                    await this.adoptOfferSections(peerId, slot, description.sdp)
+                    // The peer can leave while the offer's sections are adopted.
+                    // Answering then would describe a connection that is gone.
+                    if (!this.slotCurrent(peerId, slot, pc)) return
                     await slot.pc.setLocalDescription({ type: "answer" })
+                    if (!this.slotCurrent(peerId, slot, pc)) return
                     this.sendDescription(peerId, slot)
                 }
                 return
