@@ -1,0 +1,14 @@
+[package]
+name = "ad4m-model-derive"
+version = "0.13.0-test-1"
+edition = "2021"
+description = "#[derive(Ad4mModel)] for ad4m-ldk — SHACL mount-shape generation for language-defined classes, the counterpart of the TS model decorators in @coasys/ad4m/model."
+license = "CAL-1.0"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["derive"] }
+quote = "1"
+proc-macro2 = "1"

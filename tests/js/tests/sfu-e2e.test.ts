@@ -36,6 +36,7 @@ import { e20TabTakesOver } from "../helpers/sfu/e2e/scenarios/e20-tab-takes-over
 import { e21TabGivesUp } from "../helpers/sfu/e2e/scenarios/e21-tab-gives-up.js";
 import { e22TwoDevices } from "../helpers/sfu/e2e/scenarios/e22-two-devices.js";
 import { e23MainAgentDevices } from "../helpers/sfu/e2e/scenarios/e23-main-agent-devices.js";
+import { e24ReceiverBandwidth } from "../helpers/sfu/e2e/scenarios/e24-receiver-bandwidth.js";
 import type { Scenario } from "../helpers/sfu/scenario.js";
 
 /** `E2E_ONLY=e19,e21` runs only those scenarios; unset, all of them. */
@@ -364,5 +365,6 @@ describe("SFU: end to end through the SDK", function () {
   scenario(e21TabGivesUp, 600_000);
   scenario(e22TwoDevices, 600_000);
   scenario(e23MainAgentDevices, 600_000);
+  scenario(e24ReceiverBandwidth, 900_000);
   checkOnly();
 });

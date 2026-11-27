@@ -133,8 +133,9 @@ so the same file runs on both link languages.
 
 A pipeline with `run-nightly-llm: true` runs only this workflow, on `coasys/marvin`.
 Each job has its own serial group. The jobs: `llm-e2e`,
-`integration-tests-sfu`, `integration-tests-sfu-browsers` (see below) and
-`coasys-spaces`.
+`integration-tests-sfu`, `integration-tests-sfu-browsers` (see below),
+`coasys-spaces`, `integration-tests-agent-harness`, `feed-scale` and `agent-scale`
+(see "Agent-scale wind tunnel" below).
 
 `llm-e2e` runs the ignored Rust interpretation suites and the JS suites gated
 by `LLM_E2E=1`. It does not start a model server. It prompts staging's
@@ -188,6 +189,51 @@ server named by `COASYS_SPACES_LLM_*` (the nightly job uses staging's
 llama-server). `COASYS_SPACES_TIER=stub` needs no model. `bash
 scripts/coasys-spaces.test.sh` tests the script.
 
+`feed-scale` measures WE's Feed in a space with a million messages
+(`pnpm --filter @we/app-web test:feed-scale`, WE `apps/we-web/e2e/feed-scale/`).
+It needs no model and no GPU, and has its own serial group, `nightly-feed-scale`.
+
+- The suite seeds `FEED_SCALE_MESSAGES` (1000000) TextBlock messages, 12 links each.
+  It generates every link already signed by the message's author (one of 40 seed
+  agents; the Feed shows its author and time) into one file, on all cores, and loads the
+  file into the space's perspective with `runtime.importData` (`type: "perspective"`,
+  Oxigraph's bulk loader, one commit; nothing goes to the link language). The import
+  only adds links new to the perspective: it refuses the whole file (a 400) if a link is
+  already stored, repeats in the file, or is ended by a tombstone in the file (a tombstone
+  that ends a link of the file, or a link the store holds, refuses it too). A link that a
+  tombstone already in the store ended is not loaded and counts as `covered`; the same
+  link twice in the file is refused. The import takes the perspective's `persist_lock`,
+  so it lands before or after a diff's write, never between. Then WE web opens the
+  space in Chromium five times (cold, then warm) and loads the newest page and one
+  older page. The links file (~6 GB at a million) lives in the data dir, beside the
+  store.
+- WE registers an auto-processor for the space's own collection when the space opens
+  (`we-call-<collection>`, intended behaviour). The suite removes it for the seeding
+  only, which is setup. The app registers it again for the loads, and the job measures
+  its cost: `executor.cpu_seconds.ui_phase` (the executor's CPU over the loads) and
+  `executor.idle_cpu_percent.after_ui` (idle with the watch on). A fix to the
+  auto-processor's tick shows in these two.
+- It writes `metrics.json` (metrics in the performance-history record format, job
+  `feed-scale`, params `{"messages": N}`; the failure counts and
+  `executor.cpu_seconds.ui_phase` add `"loads": L`, the number of loads, so a run with
+  another number of loads makes its own series) and `results.json` (the same, with the
+  per-call detail). The `perf` step gives `metrics.json` to `scripts/perf/record`,
+  draws the trend page with `scripts/perf/report`, and for a passed run asks
+  `scripts/perf/check` for the verdict, by the `feed-scale` rules in
+  `scripts/perf/thresholds.json`. The records and the trend page are in the artifacts
+  under `feed-scale/perf/`.
+- The executor, SDK, WE and we-web steps are `coasys-spaces.sh`'s, run in
+  `~/.cache/ad4m-ci/feed-scale`. The executor's data goes there too, not to /tmp
+  (a shared tmpfs): a million messages take tens of GB.
+- It halts green when the same ad4m commit, WE commit and size were already measured
+  (`~/.local/state/ad4m-ci/feed-scale/last-success`; `FEED_SCALE_FORCE=1` runs anyway).
+  Results, logs and failure screenshots are under the job's artifacts, `feed-scale/`. The
+  job log ends with the suite's summary line.
+
+`bash scripts/feed-scale.sh all` runs the whole job by hand
+(`FEED_SCALE_MESSAGES=10000` for a short run). `bash scripts/feed-scale.test.sh` tests the
+script.
+
 To run the workflow by hand on a branch, with another WE ref (the definition id
 is in Project Settings → Pipelines):
 
@@ -199,12 +245,12 @@ curl -X POST https://circleci.com/api/v2/project/circleci/VRkXSnZDyBKHhkHKBHTmLj
        "parameters": {"run-nightly-llm": true, "we-ref": "<WE branch>"}}'
 ```
 
-This runs all four nightly jobs.
+This runs all seven nightly jobs.
 
 ### Nightly performance history (`scripts/perf/`)
 
-`integration-tests-sfu` and `llm-e2e` record their numbers on every run (passed
-or failed), fail on a serious regression against their own history, and draw a
+`integration-tests-sfu`, `llm-e2e` and `agent-scale` record their numbers on every
+run (passed or failed), fail on a serious regression against their own history, and draw a
 trend page. The full contract is the header of `scripts/perf/perf.mjs`.
 
 - **The history is a git repository**: folder `nightly/` on branch `main` of
@@ -251,13 +297,52 @@ trend page. The full contract is the header of `scripts/perf/perf.mjs`.
 
     `scripts/perf/llm-e2e-results.mjs` turns them into metrics (calls, failures,
     latency, output tokens/s), with params `{model}`.
+  - `agent-scale`: the test writes `$PERF_RESULTS_DIR/agent-scale.json`
+    (`tests/js/helpers/agent-scale.ts`): every metric once per agent count (params
+    `{agents: N, links}`), and its growth between the smallest and the largest count
+    (`agent_scale.<metric>.growth_10_100`, params `{from, to, links}`). `links` is
+    `AGENT_SCALE_LINKS`: another link count is another workload, so a series of its own.
 - A new nightly measurement writes a results JSON file (`{"metrics": [...]}`)
   into `$PERF_RESULTS_DIR`. Wrap the job's tests in `perf_setup` and
   `perf_finish` (`.circleci/config.yml`).
 - **Tests**: run `pnpm run test-perf-unit` in `tests/js`. It runs mocha for
-  `sfu-perf.unit.test.ts` and `node --test 'scripts/perf/*.test.mjs'`. The git
+  `sfu-perf.unit.test.ts` and `agent-scale.unit.test.ts`, and `node --test 'scripts/perf/*.test.mjs'`. The git
   tests push only to bare repos in a temp directory. The `js-unit-tests` CI job
   runs them.
+
+### Agent-scale wind tunnel
+
+How the work of ONE executor grows with the number of agents it holds. One executor in
+multi-user mode, no Holochain, at 10, 20, 50 and 100 agents; each count gets a fresh
+executor and data dir. `tests/js/tests/agent-scale.test.ts` runs, per count: onboarding
+(`createUser` + `loginUser`, one after the other), a sign-in of all agents at once, writes
+(each user a perspective and `AGENT_SCALE_LINKS` links, default 200, in batches of 20, all
+users at once), reads (a SPARQL count, all users at once, 5 rounds), events (each user's own
+`link-added`, and none of another user's), one shared neighbourhood on the local link
+language (all users join; the first writes; time until every member sees it), 30 s idle CPU,
+and a restart on the same data (time to ready, and from ready to each user's first answer).
+RSS and threads come from `/proc` every second; open perspectives and SPARQL stores from the
+executor's `/metrics`.
+
+- Run it: `pnpm run prepare-test-local` once, then `pnpm run test:agent-scale` in `tests/js`
+  (`pnpm run test-main-agent-scale` does both). `AGENT_SCALE_COUNTS=10,20` for a short run,
+  `AGENT_SCALE_LINKS`, `AGENT_SCALE_IDLE_SECONDS` (30), `EXECUTOR_PATH` as for the other
+  suites. Set `PERF_RESULTS_DIR` to get `agent-scale.json`. Run it under a memory cap
+  (`systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0`); a count of 100 is a
+  few hundred MB of executor. Mocha runs under Node 24 here: `ts-mocha` fails under Node 26.
+- It prints each metric by count with `growth_<smallest>_<largest>` and a flag: **a time of
+  one call (median, p95, per-agent memory) above 2x is flagged, a total (wall time, RSS,
+  threads) above 15x.** A flag never fails the test; `scripts/perf/check` fails a regression
+  against the job's own history (rules `agent-scale` in `thresholds.json`). The test fails
+  only on a functional error: a user that cannot log in, an event that reaches another user,
+  a link that is lost, a perspective that is not back after the restart.
+- The pure helpers (percentile, growth, flags, results file, table, `/proc` parsers) are in
+  `tests/js/helpers/agent-scale.ts`, with their unit test in `test-perf-unit`.
+- `fds_peak` needs root: the executor forbids core dumps (`forbid_core_dumps`), so the
+  kernel makes its `/proc/<pid>/fd` readable by root only. Without root the metric is
+  left out, not recorded as 0.
+- The restart waits for each user's perspective: `agent.unlock` answers before the
+  executor has loaded every perspective, so a query at once finds none.
 
 ### SFU wind tunnel
 
@@ -508,6 +593,80 @@ answers that with `socketBack` (resend what a fault kept, `sfu.callResume`,
 `checkIceSoon`), not an immediate ICE restart. The call layer never probes
 the socket: ICE `disconnected` is media evidence, and its whole answer is
 the ICE restart.
+
+SFU simulcast layer choice (`rust-executor/src/sfu/simulcast.rs`). Each client
+peer (not pipes) runs str0m's bandwidth estimator, started at 800 kbit/s
+(`BWE_START_KBPS`) and fed by the caller's transport-wide-cc reports; REMB is
+ignored. E is the receiver's estimate, C the cost of the video forwarded to
+it, F its fixed traffic. Constants (measured with the e2e source below):
+
+- `RATE_WINDOW` 2 s: a layer's cost is its bytes over this window, payload
+  plus 32 bytes per RTP packet (`seq_range`), keyframes included (cadence,
+  loss recovery, PLIs and the selector's switches all cross the link). A rate
+  is known once the layer has flowed a whole window; until then it costs 0,
+  so a resumed high stream can stay high through an estimate drop for up to
+  2 s. 1 s read the high layer up to 1.7 times nominal at p99.
+- `LAYER_TIMEOUT` 2 s: a layer silent this long is gone, noticed on the
+  track's next frame. Senders pause up to 1.6 s when an encoder starts.
+- `KEYFRAME_REQUEST_INTERVAL` 500 ms: at most one request per (track, layer),
+  from the selector or a gap. A receiver's own PLI is not limited.
+- F: per audio track the larger of `AUDIO_RESERVE_BPS` 64 kbit/s and its
+  measured rate, plus each video without simulcast; it is never touched.
+- `UPGRADE_HEADROOM` H = 1.25, `UPGRADE_HOLD` 4 s: the band between the
+  step-down line (C + F > E) and the upgrade line (E >= H * (C + F + step)).
+  The step-down line is the traffic itself: with no bottleneck, str0m's
+  estimate settles near the traffic it carries (about 1.5 times at full
+  state), and a line below the estimate (the earlier 0.85 * E) stepped
+  receivers down after almost every upgrade.
+
+Rules, per receiver, run on an estimate event, a track-set or ceiling change,
+a committed switch, a change in a track's set of live layers (a layer starts,
+or stops after `LAYER_TIMEOUT`), a layer or video that resumes after
+`LAYER_TIMEOUT`, or a deadline. There is no periodic tick: the earliest
+deadline (the hold's end, or the moment a live layer's rate is first measured)
+lowers the loop's timeout.
+
+- When C + F > E, one video track drops one live layer (largest saving first,
+  ties by stable id), one per run.
+- Upgrades: the receiver has one hold (`hold_since`). It runs while the
+  cheapest step fits E >= H * (C + F + step), is re-checked at every run, and
+  a dip, ceiling change, track-set change or completed switch resets it. When
+  it ends, every step the headroom covers is granted in one run, cheapest
+  first, one layer per track, each checked with the steps granted before it;
+  then the hold starts again. Upgrades wait while the target layer, a
+  forwarded video or an audio track has no measured rate (its first packet +
+  `RATE_WINDOW` wakes the allocation), while a switch is pending, before the
+  first estimate and while the last one has `can_probe: false`. A peer that
+  never reports stays on the lowest layer.
+- A switch commits on a keyframe of the new layer. The old layer's cost counts
+  until then, and a track with a pending switch is not switched again.
+- New tracks start on the lowest live layer, which is also the floor (video is
+  never paused).
+- When a switch commits on a layer below the receiver's cap (the layer it
+  wanted stopped), the cap drops to that layer: a layer that returns is
+  measured again (2 s) and earns its upgrade again (4 s hold, `can_probe`).
+- `SetQualityPreference` is a ceiling, not a choice: `high`, `auto` and unset
+  let the estimate decide up to high. The estimate and the hold choose the
+  layer at or below the ceiling; with no live layer there, the receiver gets
+  the lowest live one. A lowered ceiling applies on the next keyframe. For a peer the loop no longer holds it is dropped (ids
+  are never reused).
+- The receiver's probing target (`bwe().set_desired_bitrate`) is the estimate
+  that satisfies the upgrade condition at the permitted maximum layers:
+  `H * (highest + fixed)`, rounded up (fixed: audio and non-simulcast
+  video; highest: per track the most a layer up to its permitted top costs,
+  as a middle layer can measure above the top one).
+- A cap change is logged at `debug` (`rust_executor::sfu::simulcast`:
+  receiver, track, old and new layer, estimate, fixed, spent, layer rates).
+
+The e2e video source (`videoSource`, `tests/js/helpers/sfu/e2e/media.ts`) is
+a drifting gradient with soft moving discs and light noise: it compresses like
+camera video, so each layer runs near its `maxBitrate` at a steady frame rate
+and keyframes stay small. Hard-edged moving patterns make VP8 send huge
+keyframes and then drop frames for seconds, which reads as layer stalls and
+rate spikes. The e2e shaper (`limitDownlink`, `tests/js/helpers/sfu/net.ts`)
+is a `tbf` with a 3 kB burst and a 300 ms queue: a larger burst lets str0m's
+probe clusters through at line rate (the estimate read up to 4.7 Mbit/s on a
+700 kbit/s cap), a smaller queue drops so much that the estimate collapses.
 
 SFU media addresses (`rust-executor/src/sfu/{hosts,server,reachability}.rs`):
 with no `sfu_bind_addr` (the default, whatever `--localhost` says) the SFU
