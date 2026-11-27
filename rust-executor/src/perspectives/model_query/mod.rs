@@ -99,6 +99,8 @@ mod filtering;
 mod getters;
 mod hydration;
 #[cfg(test)]
+mod id_list_plan_tests;
+#[cfg(test)]
 mod include_limit_tests;
 pub(crate) mod index_path;
 #[cfg(test)]
