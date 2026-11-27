@@ -1,6 +1,6 @@
 import { Ad4mModel } from "./Ad4mModel";
 import { isIncludeProjection } from "./types";
-import { Model, Property, Optional, ReadOnly, HasMany, HasOne, Flag } from "./decorators";
+import { Model, Property, Optional, ReadOnly, HasMany, HasOne, BelongsToOne, BelongsToMany, Flag } from "./decorators";
 import { path } from "../shacl/builders";
 
 describe("Ad4mModel.getModelMetadata()", () => {
@@ -2818,6 +2818,97 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
       await rel.setSource("we://block/a");
 
       expect(batchIds(perspective)).toEqual([undefined]);
+    });
+  });
+
+  // Characterization for the shared mutator install behind @HasMany and
+  // @HasOne: each generated method forwards to the matching private writer
+  // with the instance as receiver, the exact relation key, the argument and
+  // the batchId, and adopts the returned promise — rejections included.
+  describe("generated add/remove/set mutators forward to the private writers", () => {
+    @Model({ name: "MutManyHolder" })
+    class MutManyHolder extends Ad4mModel {
+      @HasMany({ through: "test://many_rel" })
+      tags: string[] = [];
+    }
+
+    @Model({ name: "MutOneHolder" })
+    class MutOneHolder extends Ad4mModel {
+      @HasOne({ through: "test://one_rel" })
+      author: string = "";
+    }
+
+    const FORWARDERS = [
+      ["add", "addRelationValue"],
+      ["remove", "removeRelationValue"],
+      ["set", "setRelationValues"],
+    ] as const;
+
+    const HOLDERS: Array<[string, any]> = [
+      ["tags", MutManyHolder],
+      ["author", MutOneHolder],
+    ];
+
+    for (const [relKey, holder] of HOLDERS) {
+      const cap = relKey[0].toUpperCase() + relKey.slice(1);
+      for (const [verb, privateName] of FORWARDERS) {
+        const generated = `${verb}${cap}`;
+        it(`${holder.name}.prototype.${generated} forwards to ${privateName}`, async () => {
+          const proto = (holder.prototype as any)[generated];
+          expect(typeof proto).toBe("function");
+          expect(proto).toHaveLength(2);
+
+          const calls: any[][] = [];
+          const receiver = {
+            [privateName]: function (this: any, ...args: any[]) {
+              calls.push([this, ...args]);
+              return Promise.resolve("forwarded");
+            },
+          };
+
+          const result = await proto.call(receiver, "test://arg/1", "batch-9");
+          expect(result).toBe("forwarded");
+          expect(calls).toEqual([[receiver, relKey, "test://arg/1", "batch-9"]]);
+        });
+      }
+    }
+
+    it("keeps a rejected writer promise rejected", async () => {
+      const proto = (MutManyHolder.prototype as any).addTags;
+      const failure = new Error("write refused");
+      const receiver = { addRelationValue: () => Promise.reject(failure) };
+      await expect(proto.call(receiver, "test://arg/1")).rejects.toBe(failure);
+    });
+
+    it("leaves an ordinary data-property descriptor on the prototype", () => {
+      const desc = Object.getOwnPropertyDescriptor(MutOneHolder.prototype, "setAuthor")!;
+      expect(desc.writable).toBe(true);
+      expect(desc.enumerable).toBe(true);
+      expect(desc.configurable).toBe(true);
+      expect(typeof desc.value).toBe("function");
+    });
+
+    it("installs no mutators on getter-only or inverse relations", () => {
+      @Model({ name: "MutReadOnly" })
+      class MutReadOnly extends Ad4mModel {
+        @HasMany({ getter: "SELECT ?t WHERE { <Base> <test://t> ?t . }" })
+        getterOnly: string[] = [];
+
+        @BelongsToOne({ through: "test://owning" })
+        owner: string = "";
+
+        @BelongsToMany({ through: "test://tagged" })
+        tagged: string[] = [];
+      }
+
+      const proto = MutReadOnly.prototype as any;
+      for (const name of [
+        "addGetterOnly", "removeGetterOnly", "setGetterOnly",
+        "addOwner", "removeOwner", "setOwner",
+        "addTagged", "removeTagged", "setTagged",
+      ]) {
+        expect(proto[name]).toBeUndefined();
+      }
     });
   });
 });
