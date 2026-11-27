@@ -106,9 +106,137 @@ Common shapes:
 | Full link Language          | `commit` + `sync` + `peers`                           |
 | Remote query backend        | `query` (no `sync`, no local replica needed)          |
 | Live-presence Language      | `telepresence` + `peers`                              |
+| Records shown in a perspective | `mount` (see [Mounted classes](#mounted-classes)) |
 
 Implement only what your Language actually does — the runtime routes
 around capabilities you don't expose rather than synthesizing them.
+
+## Mounted classes
+
+A Language can mount its records into a perspective. The perspective
+then shows them as instances of subject classes, and a write to an
+instance runs one of your interactions. The full feature (mounting,
+sync, how records become links) is in the
+[Languages docs](https://github.com/coasys/ad4m/blob/dev/docs-src/pages/languages.mdx#mounted-languages).
+This section is the author's side.
+
+Describe each class with the model decorators from `@coasys/ad4m/model`
+(the decorators and the SHACL generation, without the client) and pass
+the classes to `defineLanguage`:
+
+```typescript
+import { defineLanguage, emitSignal } from "@coasys/ad4m-ldk";
+import { Model, Flag, Optional } from "@coasys/ad4m/model";
+
+@Model({
+    name: "Thing",
+    namespace: "things://",
+    targetClass: "things://Thing",
+    mount: true,
+    constructorActions: { interaction: "create", source: "{language}://class/Thing" },
+    destructorActions: { interaction: "delete" },
+})
+class Thing {
+    @Flag({ through: "rdf://type", value: "things://Thing" })
+    type!: string;
+
+    @Optional({ through: "things://title", setter: { interaction: "update" } })
+    title!: string;
+}
+
+export default defineLanguage({
+    name: "thing-store",
+    version: "1.0.0",
+    mount: {
+        classes: [Thing],
+        version: "1", // change it when the classes change
+        snapshot: async () => ({
+            entries: [{ class: "Thing", address: "t1", data: { title: "First" } }],
+        }),
+    },
+    // ... expression, interactions, etc.
+});
+```
+
+`mount.classes` builds `mountShapes()` from each class's
+`generateSHACL()`. It replaces `{language}` in a call's `source` or
+`target` with your Language's address (the `languageAddress()` host
+import). `mount.snapshot` becomes `mountSnapshot()`. If you prefer to
+write the SHACL yourself, `mount: { shapes, snapshot }` still works.
+
+`@Model({ mount: true })` changes the generated shape: no datatype
+inference, no link actions, `writable` only on properties that have a
+writer, and a `targetClass` that can differ from the class name.
+
+### Call actions
+
+A property, relation or lifecycle action of a mounted class runs one of
+your interactions:
+
+| Decorator option | Runs when |
+|---|---|
+| `@Property` / `@Optional` `setter: { interaction }` | a property is set |
+| `@HasOne` / `@HasMany` `adder`, `remover` | an item is added or removed |
+| `@Model` `constructorActions` | an instance is created |
+| `@Model` `destructorActions` | an instance is removed |
+
+A call option is `{ interaction, source?, params? }`. `params` is a JSON
+object as text and defaults to `{}`. The executor merges the caller's
+values over it and passes the merged object to your interaction as its
+only argument. Properties that share a source and an interaction in one
+write share one call.
+
+### How a call finds your Language
+
+1. The URL of a mounted record is your Language's own expression URL:
+   `<language address>://<expression address>`.
+2. For setters, adders, removers and destructors, `source` defaults to
+   `"this"`, the instance URL. The executor splits it into the language
+   address and the expression address, and runs the interaction on your
+   Language for that expression. So `interactions(address)` must list the
+   interaction for the record's address.
+3. A constructor has no instance yet, so it must name its `source`,
+   normally `"{language}://class/<ClassName>"`. `interactions()` must
+   answer for the address `class/<ClassName>`.
+
+### What an interaction returns
+
+An interaction that a call runs returns a delta:
+
+```typescript
+{
+    address: "t2",                                   // required from a create
+    changed: [{ class: "Thing", address: "t2", data: { title: "New" } }],
+    removed: [],                                     // addresses
+}
+```
+
+The executor applies it at once. For a create, `address` is the new
+record, and `createSubject` returns `<language address>://t2`.
+
+### Pushing changes
+
+When a record changes outside a call (another agent, a remote service),
+send the same delta as a signal:
+
+```typescript
+emitSignal({ mountDelta: { changed: [entry], removed: [] } });
+```
+
+Signals are best effort. The executor also reads `mountSnapshot()` again
+every 15 seconds, so a missed signal is corrected then.
+
+### Rules
+
+- A class's action list holds either calls or links, never both. The
+  decorators make sure of this.
+- Calls are not rolled back, and a write that calls your Language cannot
+  run inside a batch.
+- A call runs as the agent who made the write. On a multi-user executor
+  that can be a managed user, so use the host imports (`agentDid()` and
+  the rest) instead of a cached identity.
+- `mountSnapshot()` runs as the owner of the mounting perspective. A perspective
+  with more than one owner can't mount a Language.
 
 ## Optional extensions
 
