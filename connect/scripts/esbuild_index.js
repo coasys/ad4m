@@ -5,6 +5,9 @@ const isDev = process.env.NODE_ENV !== "production";
 const buildOptions = {
   entryPoints: ["./src/index.ts"],
   bundle: true,
+  // The SDK is the app's, not ours: a bundled copy is a second set of classes, so `instanceof`
+  // against the app's import (RpcError, PerspectiveProxy) silently fails. A peer dependency.
+  external: ["@coasys/ad4m"],
   format: "esm",
   minify: !isDev,
   sourcemap: isDev,
