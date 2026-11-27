@@ -195,6 +195,8 @@ the seed's `identityStore`.
   "storeKeys": ["z6Mk…"] } }
 ```
 
+`init` refuses a seed whose `languageLanguageBundle` is empty or only whitespace, and the error names that field. Loading the language language refuses the same field, before a 0-byte `bundle.js` would be written.
+
 **`log_config`** sets a level (`error`, `warn`, `info`, `debug`, `trace`)
 per crate over the defaults `rust_executor: info`, `holochain: warn`,
 `wasmer_compiler_cranelift: warn`, `warp::server: info`.

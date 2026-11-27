@@ -3,6 +3,8 @@ mod byte_array;
 mod call_deadline_tests;
 pub mod capability;
 mod conductor_languages;
+#[cfg(test)]
+mod empty_bundle_tests;
 pub mod error;
 #[cfg(test)]
 mod install_tests;
@@ -750,9 +752,15 @@ impl LanguageController {
         &self,
         language_language_only: bool,
     ) -> Result<(), LanguageError> {
-        // Step 1: Load the language language from the bootstrap seed bundle
+        // Step 1: Load the language language from the bootstrap seed bundle.
+        // Refuse an empty field before save_language_bundle, which would
+        // write a 0-byte bundle.js.
         let language_language_bundle =
             RuntimeService::with_global_instance(|rs| rs.get_language_language_bundle());
+        crate::runtime_service::require_language_language_bundle(&language_language_bundle)
+            .map_err(|e| LanguageError::InvalidBundle {
+                message: e.to_string(),
+            })?;
 
         let (hash, bundle_path) = self.save_language_bundle(&language_language_bundle, None)?;
         info!("Saved language-language bundle, hash={}, loading...", hash);

@@ -93,10 +93,15 @@ fn start(admin_credential: Option<&str>) -> Option<Executor> {
     let port = free_port();
     // `init` first — as `tests/js/startExecutor` does: `run` on a data dir
     // that never saw `init` leaves the runtime service without its seed and
-    // `agent.generate` panics executor-side. The seed is the one the JS
-    // suites use; its language addresses may not resolve, which is fine —
-    // only the language-language is started and our reads don't need it.
-    let seed = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/js/bootstrapSeed.json");
+    // `agent.generate` panics executor-side. The committed JS seed leaves
+    // `languageLanguageBundle` empty (the JS suite injects a built bundle,
+    // then strips it), and `init` refuses that field. This harness boots
+    // with the executor's real seed. Only the language language is started
+    // (`--language-language-only`); these reads do not need the other
+    // system languages.
+    let seed =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../rust-executor/src/mainnet_seed.json");
+    assert!(seed.is_file(), "bootstrap seed missing: {}", seed.display());
     let init = Command::new(&binary)
         .args([
             "init",

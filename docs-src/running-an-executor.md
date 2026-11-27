@@ -60,6 +60,8 @@ Creates:
 - `mainnet_seed.seed` — bootstrap configuration (languages, network settings)
 - `last-seen-version` — version tracking
 
+`init` refuses a seed whose `languageLanguageBundle` is empty or only whitespace. The error names that field, and `mainnet_seed.seed` is not written (an existing seed file is left as it is). Loading the language language refuses the same field, so a data folder that already has an empty bundle does not get a 0-byte `bundle.js`.
+
 ### Step 2: Run Executor
 
 ```bash

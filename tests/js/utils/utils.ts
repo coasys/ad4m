@@ -1,5 +1,5 @@
 import { ChildProcess, exec, ExecException, execSync, spawn } from "node:child_process";
-import { mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "path";
@@ -220,6 +220,65 @@ export function executorDataPath(dataPath: string): string {
     );
 }
 
+// Same file `scripts/injectLanguageLanguageBundle.js` copies in, via
+// `scripts/get-builtin-test-langs.js` (both Holochain and local mode).
+const PREPARED_LANGUAGE_LANGUAGE = path.resolve(
+    __dirname, "..", "tst-tmp", "languages", "languages", "build", "bundle.js",
+);
+const BUNDLED_LANGUAGE_LANGUAGE = path.resolve(
+    __dirname, "..", "..", "..", "bootstrap-languages", "local", "language-language.js",
+);
+
+function readNonEmpty(file: string): string | null {
+    if (!existsSync(file)) return null;
+    const bundle = readFileSync(file, "utf8");
+    return bundle.trim() ? bundle : null;
+}
+
+function languageLanguageBundleSource(): string {
+    // Prefer the copy prepare-test just wrote. Suites that never run
+    // prepare-test (MCP, model, flow) still have the committed local bundle.
+    const bundle = readNonEmpty(PREPARED_LANGUAGE_LANGUAGE) ?? readNonEmpty(BUNDLED_LANGUAGE_LANGUAGE);
+    if (!bundle) {
+        throw new Error(
+            `language-language bundle is empty (looked at ${PREPARED_LANGUAGE_LANGUAGE} and ${BUNDLED_LANGUAGE_LANGUAGE})`,
+        );
+    }
+    return bundle;
+}
+
+/**
+ * Seed path for `ad4m-executor init`.
+ *
+ * The committed `bootstrapSeed.json` keeps `languageLanguageBundle` as ""
+ * (prepare-test injects the built bundle, cleanTestingData strips it).
+ * `init` refuses that empty field. Suites that init without the inject
+ * step get the same local language-language here, in a temp copy, so the
+ * fixture stays "". A seed that already has a bundle is returned as-is.
+ * A seed that does not parse is returned as-is so init reports that error.
+ */
+export function seedPathWithLanguageLanguage(bootstrapSeedPath: string): { path: string; cleanup: () => void } {
+    const keep = { path: bootstrapSeedPath, cleanup: () => {} };
+    let seed: { languageLanguageBundle?: unknown };
+    try {
+        seed = JSON.parse(readFileSync(bootstrapSeedPath, "utf8"));
+    } catch {
+        return keep;
+    }
+    const current = seed.languageLanguageBundle;
+    if (typeof current === "string" && current.trim() !== "") {
+        return keep;
+    }
+    seed.languageLanguageBundle = languageLanguageBundleSource();
+    const dir = mkdtempSync(path.join(os.tmpdir(), "ad4m-seed-"));
+    const out = path.join(dir, "bootstrapSeed.json");
+    writeFileSync(out, JSON.stringify(seed));
+    return {
+        path: out,
+        cleanup: () => { rmSync(dir, { recursive: true, force: true }); },
+    };
+}
+
 export async function startExecutor(dataPath: string,
     bootstrapSeedPath: string,
     apiPort: number,
@@ -268,13 +327,21 @@ export async function startExecutor(dataPath: string,
     }
     rmSync(dataPath, { recursive: true, force: true })
     rmSync(effectiveDataPath, { recursive: true, force: true })
-    execSync(`"${command}" init --data-path "${effectiveDataPath}" --network-bootstrap-seed "${bootstrapSeedPath}" ${initArgs.join(' ')}`, {cwd: process.cwd()})
+    // Fill an empty languageLanguageBundle before init. Passing the fixture
+    // through unchanged is what made MCP and model fail: init refuses "".
+    const seedForInit = seedPathWithLanguageLanguage(bootstrapSeedPath);
+    try {
+        execSync(`"${command}" init --data-path "${effectiveDataPath}" --network-bootstrap-seed "${seedForInit.path}" ${initArgs.join(' ')}`, {cwd: process.cwd()})
 
-    // Shared mode for the local language-language and neighbourhood store,
-    // so executors see each other's published languages and neighbourhoods
-    // (see sharedStores.ts). Off only for tests of the default KV mode.
-    if (sharedStores) {
-        configureSharedStores(effectiveDataPath, bootstrapSeedPath);
+        // Shared mode for the local language-language and neighbourhood store,
+        // so executors see each other's published languages and neighbourhoods
+        // (see sharedStores.ts). Off only for tests of the default KV mode.
+        // Use the seed init actually read, so the language address matches the bundle.
+        if (sharedStores) {
+            configureSharedStores(effectiveDataPath, seedForInit.path);
+        }
+    } finally {
+        seedForInit.cleanup();
     }
 
     // Symlink legacy dataPath → effectiveDataPath so test helpers that
