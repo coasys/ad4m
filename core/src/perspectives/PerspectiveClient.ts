@@ -17,6 +17,7 @@ import type { QueryLagged, QueryUpdate, Subscribed } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
 import type { AgentMessage } from "../generated/api/AgentMessage";
 import type { AgentReply } from "../generated/api/AgentReply";
+import type { PerspectiveCreateSubjectResult } from "../generated/api/PerspectiveCreateSubjectResult";
 import type { PerspectiveQueryLinksParams } from "../generated/api/PerspectiveQueryLinksParams";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 import type { FlowFiredEntry } from "../generated/api/FlowFiredEntry";
@@ -562,7 +563,8 @@ export class PerspectiveClient {
         ))
     }
 
-    async createSubject(uuid: string, subjectClass: string, expressionAddress: string, initialValues?: string, batchId?: string): Promise<boolean> {
+    /** The URL a `call` constructor minted (string), or `true` for a link constructor. */
+    async createSubject(uuid: string, subjectClass: string, expressionAddress: string, initialValues?: string, batchId?: string): Promise<PerspectiveCreateSubjectResult> {
         return this.#wrote(uuid, this.#apiClient.call(
             'perspective.createSubject', { uuid, subjectClass, expressionAddress, initialValues, batchId }
         ))

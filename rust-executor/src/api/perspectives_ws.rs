@@ -966,7 +966,7 @@ async fn create_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         .as_ref()
         .and_then(|s| serde_json::from_str(s).ok())
         .or(parsed_initial_values);
-    perspective
+    let created = perspective
         .create_subject(
             subject_class,
             body.expression_address.clone(),
@@ -977,7 +977,11 @@ async fn create_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    Ok(Value::Bool(true))
+    // A `call` constructor names its instance: its URL is the answer.
+    Ok(match created {
+        Some(url) => Value::String(url),
+        None => Value::Bool(true),
+    })
 }
 
 async fn update_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -2210,8 +2214,11 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         execute_commands,
     )
     .guard(update());
-    map.method::<PerspectiveCreateSubjectParams, bool>("perspective.createSubject", create_subject)
-        .guard(update());
+    map.method::<PerspectiveCreateSubjectParams, PerspectiveCreateSubjectResult>(
+        "perspective.createSubject",
+        create_subject,
+    )
+    .guard(update());
     map.method::<PerspectiveUpdateSubjectParams, bool>("perspective.updateSubject", update_subject)
         .guard(update());
     map.method::<PerspectiveRemoveSubjectParams, bool>("perspective.removeSubject", remove_subject)
@@ -2515,6 +2522,18 @@ pub struct PerspectiveCreateSubjectParams {
     pub uuid: String,
     #[serde(flatten)]
     pub body: CreateSubjectRequest,
+}
+
+/// The URL a `call` constructor minted for the new instance (`Url`);
+/// `true` when the class's constructor wrote links (`Created`). A mounted
+/// class's constructor calls into its language, which names the record it
+/// made (design §3.3).
+#[derive(Deserialize, TS)]
+#[serde(untagged)]
+#[ts(export)]
+pub enum PerspectiveCreateSubjectResult {
+    Created(bool),
+    Url(String),
 }
 
 #[derive(Deserialize, TS)]

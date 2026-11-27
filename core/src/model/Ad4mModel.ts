@@ -2039,12 +2039,20 @@ export class Ad4mModel {
       }
     }
 
-    await this.perspective.createSubject(
+    const created = await this.perspective.createSubject(
       this,
       this._baseExpression,
       initialValues,
       batchId
     );
+
+    // A `call` constructor mints the record inside its language and the RPC
+    // answers the minted URL — that URL, not `_baseExpression`, is the
+    // instance's id. Adopt it before writing relations, or they land on an
+    // address the language never created.
+    if (typeof created === "string") {
+      this._baseExpression = created;
+    }
 
     // Relations via innerUpdate; createSubject wrote the scalar properties.
     const writes = await this.updateWrites(false);
