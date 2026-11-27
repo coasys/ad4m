@@ -9,7 +9,7 @@
 //! | `IDENTITY_STORE_KEY` | `store-key` | the head key file; `serve` makes one when it is missing |
 //! | `IDENTITY_STORE_LISTEN` | `0.0.0.0:8080` | the listen address; port 0 picks a free port |
 //! | `POW_BITS` | `22` | the proof-of-work cost `GET /v1/pow` publishes |
-//! | `CORS_ORIGINS` | none | comma-separated origins allowed from a browser |
+//! | `CORS_ORIGINS` | none | comma-separated origins allowed from a browser; `*` allows any |
 //! | `FEED_TOKEN` | none | the mirror token of `GET /v1/feed` |
 //! | `HELD_LOG_BYTES` | 256 MiB | the most heap the held folds take together; at least twice `LOG_FOLD_BYTES` |
 //! | `LOG_FOLD_BYTES` | 16 MiB | the per-log budget: the most heap one log's fold may take without revoked keys; the whole fold at most twice it |

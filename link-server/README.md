@@ -268,6 +268,8 @@ POST /rooms/:roomId/keys/rotate { keys, commitment } (admin only) -> { version, 
 GET  /rooms/:roomId/ws              (WebSocket upgrade — first message must be {type:"auth",token:"<jwt>"})
 ```
 
+Every endpoint above answers CORS for any origin (`Access-Control-Allow-Origin: *`, `Retry-After` exposed), so a language that runs in a browser can call it. Auth is the bearer token, never a cookie. The operator listener below does not answer CORS.
+
 Operator listener (only with `--operator-port`; all `/api/*` need the operator token):
 
 ```

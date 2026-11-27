@@ -343,7 +343,7 @@ tests name them by these names.
 | `IDENTITY_STORE_KEY` | `store-key` | the head key file (32-byte secret, base58btc); `serve` makes one when missing |
 | `IDENTITY_STORE_LISTEN` | `0.0.0.0:8080` | port 0 picks a free port |
 | `POW_BITS` | `22` | what `GET /v1/pow` publishes and a sent proof must meet |
-| `CORS_ORIGINS` | none | comma-separated browser origins (all routes but the public host profile's, which allow any origin) |
+| `CORS_ORIGINS` | none | comma-separated browser origins, or `*` for any (all routes but the public host profile's, which allow any origin) |
 | `FEED_TOKEN` | none | the mirror token; without one the feed answers `401` |
 | `HELD_LOG_BYTES` | `268435456` (256 MiB) | the most heap the logs held folded in memory take together (`held::held_bytes_of`); at least twice `LOG_FOLD_BYTES`, else `serve` refuses to start |
 | `LOG_FOLD_BYTES` | `16777216` (16 MiB) | the per-log budget: the most heap one log's fold may take without the records of revoked keys, and half the most its whole fold may take; an append past either is `400 log-too-large`, unless all its events are `rotate`s |

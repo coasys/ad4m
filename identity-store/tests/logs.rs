@@ -1601,3 +1601,39 @@ async fn logs_and_heads_are_readable_from_any_origin_and_writes_only_from_the_co
     assert_eq!(pow.status, StatusCode::OK);
     assert_eq!(header(&pow, "access-control-allow-origin"), None);
 }
+
+#[tokio::test]
+async fn a_star_in_cors_origins_lets_any_origin_write() {
+    let t = TestStore::with_settings(Settings {
+        pow_bits: 8,
+        feed_token: None,
+        cors_origins: vec!["*".into()],
+        ..Settings::default()
+    });
+    let alice = Person::new("alice");
+    let preflight = t
+        .send_with(
+            "OPTIONS",
+            &format!("/v1/logs/{}/events", alice.scid()),
+            None,
+            None,
+            &[
+                ("origin", ORIGIN),
+                ("access-control-request-method", "POST"),
+            ],
+        )
+        .await;
+    assert_eq!(header(&preflight, "access-control-allow-origin"), Some("*"));
+    let incept = serde_json::to_vec(&json!({ "events": [alice.json(0)] })).unwrap();
+    let write = t
+        .send_with(
+            "POST",
+            &format!("/v1/logs/{}/events", alice.scid()),
+            Some(incept),
+            None,
+            &[("origin", ORIGIN)],
+        )
+        .await;
+    assert_eq!(write.status, StatusCode::OK, "{}", write.body);
+    assert_eq!(header(&write, "access-control-allow-origin"), Some("*"));
+}

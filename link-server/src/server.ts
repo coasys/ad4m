@@ -1,6 +1,7 @@
 import path from "node:path";
 import Fastify, { type FastifyInstance } from "fastify";
 import compressPlugin from "@fastify/compress";
+import corsPlugin from "@fastify/cors";
 import websocketPlugin from "@fastify/websocket";
 import { AuthManager, ChallengeStore } from "./auth.js";
 import { LinkServerDB } from "./db.js";
@@ -92,6 +93,16 @@ export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
   // bodies stay uncompressed: decompressing them would let a small upload
   // grow past bodyLimit.
   await app.register(compressPlugin, { globalDecompression: false });
+  // Any origin may call: a language that runs in a browser (the web
+  // executor) calls from the page's origin. Auth is a bearer JWT in a
+  // header, never a cookie, so a page gets nothing it could not get with its
+  // own token. The operator app is a separate Fastify instance and keeps its
+  // own origin check (operator.ts).
+  await app.register(corsPlugin, {
+    origin: "*",
+    methods: ["GET", "POST", "DELETE"],
+    exposedHeaders: ["Retry-After"],
+  });
   await app.register(websocketPlugin, {
     options: {
       // Cap inbound WebSocket frames at 1 MiB — link diffs and telepresence
