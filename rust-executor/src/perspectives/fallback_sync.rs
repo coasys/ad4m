@@ -31,8 +31,8 @@ pub(crate) fn fallback_push_refused(missing: usize, shared: usize, scope: ShareS
 impl PerspectiveInstance {
     /// The background fallback sync: commits the shared links of the
     /// perspective's local agents (`local_agents`: its owners) that the link
-    /// language's `render()` lacks, unless that is most of them
-    /// (`fallback_push_refused`). Other agents' links are their authors' to
+    /// language's `render()` lacks, unless the render lacks most of all the
+    /// shared links (`fallback_push_refused`). Other agents' links are their authors' to
     /// share. False when it sent nothing it should have, so the caller's
     /// backoff retries.
     pub async fn ensure_public_links_are_shared(&self) -> bool {

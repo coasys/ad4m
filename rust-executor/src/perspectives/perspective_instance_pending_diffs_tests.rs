@@ -768,6 +768,65 @@ async fn the_fallback_sync_sends_only_the_local_agents_links() {
     assert_eq!(committed, vec!["+alice's", "+bob's"]);
 }
 
+/// Store `count` Shared links by `author`, targets `{prefix}0..`, and return them.
+fn store_shared_by(
+    perspective: &PerspectiveInstance,
+    author: &str,
+    prefix: &str,
+    count: usize,
+) -> Vec<LinkExpression> {
+    (0..count)
+        .map(|i| {
+            let link = link(author, &format!("{prefix}{i}"));
+            perspective
+                .sparql_store
+                .add_link(&LinkExpression {
+                    status: Some(LinkStatus::Shared),
+                    ..link.clone()
+                })
+                .unwrap();
+            link
+        })
+        .collect()
+}
+
+/// The refusal measures the render against the whole Shared set, not only the
+/// local agents' links: 40 of alice's links missing beside 1,000 of carol's
+/// that the render holds is a few links a commit missed, so they go out.
+#[tokio::test(start_paused = true)]
+async fn the_fallback_sync_sends_own_links_missing_beside_many_present_ones() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let carols = store_shared_by(&perspective, "did:key:carol", "c", 1_000);
+    store_shared_by(&perspective, "did:key:alice", "a", 40);
+    *perspective.link_language.write().await = Some(rendering_language(&fake, carols));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+
+    let committed = fake.committed();
+    assert_eq!(committed.len(), 40);
+    assert!(
+        committed.iter().all(|t| t.starts_with("+a")),
+        "{committed:?}"
+    );
+}
+
+/// The inverse: a render that lacks most of the room is refused, though only
+/// 5 of the missing links are the local agents'.
+#[tokio::test(start_paused = true)]
+async fn the_fallback_sync_refuses_a_short_render_though_few_missing_links_are_own() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let carols = store_shared_by(&perspective, "did:key:carol", "c", 1_000);
+    store_shared_by(&perspective, "did:key:alice", "a", 5);
+    *perspective.link_language.write().await =
+        Some(rendering_language(&fake, carols[..100].to_vec()));
+
+    assert!(!perspective.ensure_public_links_are_shared().await);
+
+    assert_eq!(fake.attempts(), 0, "nothing is committed");
+}
+
 /// A fallback sync that starts while the commit loop is parking a diff waits
 /// for the park: it must not read the parked rows before the park lands and
 /// then send the parked link after the diffs that went through behind it.

@@ -1604,7 +1604,8 @@ impl PerspectiveInstance {
     }
 
     /// Commits the Shared links the link language's `render()` lacks (for the
-    /// fallback, only the links of the perspective's local agents). Callers:
+    /// fallback, only the links of the perspective's local agents, after the
+    /// refusal check over the whole Shared set). Callers:
     /// `ensure_public_links_are_shared` and `share_links_after_publish`
     /// (`fallback_sync.rs`); `scope` says how many it may send.
     pub(crate) async fn share_links_missing_remotely(&self, scope: ShareScope) -> bool {
@@ -1638,18 +1639,7 @@ impl PerspectiveInstance {
                 })
                 .collect();
 
-            // The fallback catches up this executor's own commits: another
-            // agent's link is its author's to share. Sending it again pushes a
-            // duplicate to every member, or brings back a link its author
-            // removed. At publish the new room has none of the links yet.
-            let own = match scope {
-                ShareScope::Fallback => Some(self.local_agents()),
-                ShareScope::Publish => None,
-            };
-            local_links.retain(|(link, status)| {
-                status == &LinkStatus::Shared
-                    && own.as_ref().is_none_or(|own| own.contains(&link.author))
-            });
+            local_links.retain(|(_, status)| status == &LinkStatus::Shared);
 
             // `current_revision()` returns `Ok(None)` both when the link language
             // genuinely has no committed revision yet AND when it lacks the
@@ -1723,7 +1713,7 @@ impl PerspectiveInstance {
                     return false;
                 }
             };
-            let links_to_commit = links_missing_remotely(&local_links, &remote_links, &unsent);
+            let mut links_to_commit = links_missing_remotely(&local_links, &remote_links, &unsent);
 
             if !links_to_commit.is_empty() {
                 let links_count = links_to_commit.len();
@@ -1739,6 +1729,20 @@ impl PerspectiveInstance {
                     );
                     return false;
                 }
+
+                // The refusal above measures the language's view against the whole
+                // Shared set. The fallback then sends only this executor's own links:
+                // another agent's link is its author's to share. Sending it again
+                // pushes a duplicate to every member, or brings back a link its author
+                // removed. At publish the new room has none of the links yet.
+                if scope == ShareScope::Fallback {
+                    let own = self.local_agents();
+                    links_to_commit.retain(|link| own.contains(&link.author));
+                    if links_to_commit.is_empty() {
+                        return true;
+                    }
+                }
+                let links_count = links_to_commit.len();
 
                 let result = link_language
                     .commit(PerspectiveDiff {

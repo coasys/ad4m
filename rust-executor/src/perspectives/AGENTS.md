@@ -126,12 +126,6 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   `ensure_public_links_are_shared` and the fallback pass. Immediate sends from `commit` are
   outside this lock, so a fallback sync can run while an immediate send is in flight and submit
   the same link again.
-- The fallback sync sends only links authored by the perspective's local agents
-  (`local_agents`: its owners, main or managed; the main agent's DID without any), compared
-  as DID strings. Another agent's link is its author's to share: sending it again pushed a
-  duplicate diff every pass (staging, 2026-11-03: 80 commits overnight from an executor that
-  wrote none of the room's links) and could bring back a link its author removed. The refusal
-  below counts only those links. The push at publish is not filtered.
 - The fallback sync never pushes most of the shared set (`fallback_sync.rs`,
   `fallback_push_refused`): more than 20 links and more than half of the Shared links missing
   from `render()` means the language's view of the remote is short (a partial or empty
@@ -142,6 +136,13 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   neighbourhood existed were never sent. When that push fails (commit error, or `render()`
   null while the language's first render runs), it queues them as one pending diff, so the
   queue, not the refusing fallback, delivers them.
+- After that check, over the whole Shared set, the fallback sync sends only the missing links
+  authored by the perspective's local agents (`local_agents`: its owners, main or managed; the
+  main agent's DID without any), compared as DID strings. Another agent's link is its author's
+  to share: sending it again pushed a duplicate diff every pass (staging, 2026-11-03: 80 commits
+  overnight from an executor that wrote none of the room's links) and could bring back a link
+  its author removed. The refusal counts every Shared link, so a few own links missing beside
+  many present links of other authors still go out. The push at publish is not filtered.
 - Background loops (`nh_sync_loop`, `pending_diffs_loop`, `fallback_sync_loop`,
   `subscribed_queries_loop`, `notification_check_loop`, auto-processor supervisor) exit on
   `is_teardown`; `teardown_background_tasks` must be called on remove.
