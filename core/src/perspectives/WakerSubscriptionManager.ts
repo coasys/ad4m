@@ -64,6 +64,17 @@ export interface WakerSubscription {
  *  plugin bundle does not pull in the model layer). */
 const CONTAINER = "ad4m://Container";
 
+/** The built-in `FileContent` (same: a literal, not `FileContent.builtinUri`): the files a record holds. */
+const FILE_CONTENT = "ad4m://FileContent";
+
+/** How many attached files a mention reports; a message holding more is cut here. */
+const MAX_ATTACHMENTS = 20;
+/**
+ * How long a wake waits for its messages' file lookups, shared by all of them. Files are
+ * enrichment: a lookup that misses this gives `[]`, and the wake goes out without it.
+ */
+const ATTACHMENT_BUDGET_MS = 2000;
+
 /** A letter, combining mark, digit or underscore: what a term must not touch. */
 const WORD_CHAR = "[\\p{L}\\p{M}\\p{N}_]";
 
@@ -169,6 +180,18 @@ export function holdsAWholeWordTerm(text: string, terms: string[]): boolean {
   });
 }
 
+/** A file held by a mentioned record, as the woken agent is told of it. */
+export interface MentionAttachment {
+  /** The file record's id: read it with `instance_get`. */
+  address: string;
+  name: string;
+  mimeType: string;
+  /** Bytes. */
+  size: number;
+  /** Where the stored bytes are: the file-storage expression address. */
+  url: string;
+}
+
 /** Per-message parent resolution result for mention subscriptions. */
 export interface MentionMessage {
   /** The mentioned record's id. */
@@ -185,6 +208,13 @@ export interface MentionMessage {
    * parents have none, or the walk could not be made.
    */
   ancestors: string[];
+  /**
+   * The files the record holds (a message's attachments): every record up to two containment
+   * levels below it, directly or in a group among its parts, whose class has a `name`,
+   * `mimeType`, `size` and `url` (`ad4m://FileContent`). Empty when it holds none or the
+   * lookup failed.
+   */
+  attachments: MentionAttachment[];
   /**
    * The DID that signed the link of the path that woke the agent (`via`): the mention link to
    * its DID, or the text link whose own text names it. Only that link is theirs; the record's
@@ -716,6 +746,15 @@ export class WakerSubscriptionManager {
           `[waker] ${sub.id}: ${newMessages.length} new message(s) out of ${rows.length} total`,
         );
 
+        // The file lookups start together and share one short budget: a stalled executor must
+        // not hold the wake for its call timeout per message, nor for a message with no files.
+        let budgetTimer: ReturnType<typeof setTimeout> | undefined;
+        const budget = new Promise<MentionAttachment[]>((resolve) => {
+          budgetTimer = setTimeout(() => resolve([]), ATTACHMENT_BUDGET_MS);
+        });
+        const files = new Map<string, Promise<MentionAttachment[]>>(
+          newMessages.map((addr) => [addr, Promise.race([this.attachmentsOf(sub, addr), budget])]),
+        );
         // Resolve parents, and the chain above them, per new message
         const mentions: MentionMessage[] = [];
         for (const msgAddr of newMessages) {
@@ -726,8 +765,16 @@ export class WakerSubscriptionManager {
             `[waker] ${sub.id}: message ${msgAddr} has ${parents.length} parent(s): ${parents.join(", ")}` +
               (ancestors.length ? `; ancestors: ${ancestors.join(", ")}` : ""),
           );
-          mentions.push({ address: msgAddr, parents, ancestors, ...provenance.get(msgAddr)! });
+          const attachments = await files.get(msgAddr)!;
+          mentions.push({
+            address: msgAddr,
+            parents,
+            ancestors,
+            attachments,
+            ...provenance.get(msgAddr)!,
+          });
         }
+        clearTimeout(budgetTimer);
         // Released, or replaced under the same id, during the lookups: the state under `sub.id`
         // is no longer this subscription's, so write nothing and wake for nothing.
         if (this.isStale(sub.id, token)) return;
@@ -1129,6 +1176,40 @@ export class WakerSubscriptionManager {
     const scope = { ids: parents, direction: "in", transitive: true, maxDepth: this.ancestorDepth };
     const seen = new Set<string>([address, ...parents]);
     return (await this.containers(sub, scope, parents)).filter((id) => !seen.has(id));
+  }
+
+  /**
+   * The files `address` holds, in one model query over `FileContent`: the executor reads every
+   * record up to two containment levels below it (its direct parts, and the parts of a group
+   * among them) whose class has a file's four names, whatever the app calls the class. Failures
+   * count as none.
+   *
+   * Two levels, because a composed message holds its files in one attachment group, while an
+   * earlier message holds them directly.
+   */
+  private async attachmentsOf(sub: WakerSubscription, address: string): Promise<MentionAttachment[]> {
+    try {
+      const query = JSON.stringify({
+        parent: { ids: address, transitive: true, maxDepth: 2 },
+        properties: ["name", "mimeType", "size", "url"],
+        limit: MAX_ATTACHMENTS,
+      });
+      const result = await this.perspectiveClient.modelQuery(sub.perspective, FILE_CONTENT, query);
+      const instances: unknown = result?.instances;
+      if (!Array.isArray(instances)) return [];
+      return instances
+        .filter((row) => typeof row?.id === "string")
+        .map((row) => ({
+          address: row.id,
+          name: String(row.name ?? ""),
+          mimeType: String(row.mimeType ?? ""),
+          size: Number(row.size) || 0,
+          url: String(row.url ?? ""),
+        }));
+    } catch (err: any) {
+      this.logger.warn(`[waker] ${sub.id}: attachment lookup failed for ${address} — ${err?.message ?? err}`);
+      return [];
+    }
   }
 
   /** The ids of the `Container` rows `parent` scopes to, in the executor's order. */

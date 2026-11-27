@@ -190,6 +190,13 @@ Two reasons this is not cosmetic:
   your DID, whatever it shows, or a record of the
   built-in TextContent whose text names you: your profile names (username,
   given and family name) and your DID are the terms, matched as whole words.
+  The wake lists up to 20 files the record holds (a message's attachments):
+  records up to two containment levels below it (its direct parts, and the
+  parts of a group among them) whose class has `name`, `mimeType`, `size` and
+  `url`, read
+  through the built-in FileContent. Best effort: a failed or slow lookup (2 s
+  budget) gives none, so no files listed does not prove the message has none.
+  The sender writes every field, and it is unverified.
 - **Humans see the username**, not your DID, in transcripts and app UIs. An
   unnamed agent is hard to talk to and hard to trust.
 

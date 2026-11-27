@@ -1137,3 +1137,233 @@ async fn a_required_property_refuses_to_clear() {
         );
     }
 }
+
+/// An app's file record, shaped like WE's `FileBlock`: its own predicates,
+/// none of them the built-in's own (`rdfs:label`, `dcat:*`).
+const FILE_BLOCK_SDNA: &str = r#"{
+  "target_class":"we://FileBlock",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"we://type","target":"we://file_block"}],
+  "properties":[
+    {"path":"we://type","name":"type","has_value":"we://file_block","min_count":1,"max_count":1},
+    {"path":"we://name","name":"name","max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"we://name","target":"value"}]},
+    {"path":"we://url","name":"url","max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"we://url","target":"value"}]},
+    {"path":"we://mime_type","name":"mimeType","max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"we://mime_type","target":"value"}]},
+    {"path":"we://size","name":"size","max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"we://size","target":"value"}]}
+  ]
+}"#;
+
+/// A file-like class that lacks `size`: not a `FileContent`.
+const NOTE_BLOCK_SDNA: &str = r#"{
+  "target_class":"we://NoteBlock",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"we://type","target":"we://note_block"}],
+  "properties":[
+    {"path":"we://type","name":"type","has_value":"we://note_block","min_count":1,"max_count":1},
+    {"path":"we://name","name":"name","max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"we://name","target":"value"}]},
+    {"path":"we://url","name":"url","max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"we://url","target":"value"}]},
+    {"path":"we://mime_type","name":"mimeType","max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"we://mime_type","target":"value"}]}
+  ]
+}"#;
+
+/// A message that holds its files through `ad4m://has_child`.
+const FILE_MESSAGE_SDNA: &str = r#"{
+  "target_class":"we://TextBlock",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"we://type","target":"we://text_block"}],
+  "properties":[
+    {"path":"we://type","name":"type","has_value":"we://text_block","min_count":1,"max_count":1},
+    {"path":"ad4m://has_child","name":"children","node_kind":"IRI","relation_kind":"hasMany","collection":true,
+     "adder":[{"action":"addLink","source":"this","predicate":"ad4m://has_child","target":"value"}]}
+  ]
+}"#;
+
+/// What the waker asks for a mentioned record's attachments
+/// (`WakerSubscriptionManager.attachmentsOf`): a `parent: { id }` model
+/// query over the built-in `ad4m://FileContent`. It reads the files under
+/// the message through an app class that shares none of its predicates,
+/// leaves out a child that lacks one of the four properties, and one under
+/// another message.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_waker_reads_the_files_a_message_holds_through_file_content() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[
+        ("FileBlock", FILE_BLOCK_SDNA),
+        ("NoteBlock", NOTE_BLOCK_SDNA),
+        ("TextBlock", FILE_MESSAGE_SDNA),
+    ])
+    .await;
+    let file = |name: &str, size: u64| json!({"name": name, "url": format!("Qm{name}"), "mimeType": "application/pdf", "size": size});
+    for (class, base, props) in [
+        ("TextBlock", "we://msg-1", json!({})),
+        ("TextBlock", "we://msg-2", json!({})),
+        ("FileBlock", "we://file-1", file("plan.pdf", 2048)),
+        ("FileBlock", "we://file-2", file("notes.pdf", 512)),
+        ("FileBlock", "we://file-other", file("other.pdf", 7)),
+        (
+            "NoteBlock",
+            "we://not-a-file",
+            json!({"name": "memo", "url": "Qmmemo", "mimeType": "text/plain"}),
+        ),
+    ] {
+        create(&mut p, &ctx, class, base, props).await.unwrap();
+    }
+    for (parent, child) in [
+        ("we://msg-1", "we://file-1"),
+        ("we://msg-1", "we://file-2"),
+        ("we://msg-1", "we://not-a-file"),
+        ("we://msg-2", "we://file-other"),
+    ] {
+        p.add_link(
+            Link {
+                source: parent.into(),
+                predicate: Some("ad4m://has_child".into()),
+                target: child.into(),
+            },
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .unwrap();
+    }
+
+    let query = json!({
+        "parent": {"id": "we://msg-1"},
+        "properties": ["name", "mimeType", "size", "url"],
+        "limit": 20,
+    })
+    .to_string();
+    let json = p
+        .model_query_classes(&one("ad4m://FileContent"), &query)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_str(&json).unwrap();
+    let mut files: Vec<(String, String, String, String, String)> = result["instances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            let text = |key: &str| match &r[key] {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            (
+                text("id"),
+                text("name"),
+                text("mimeType"),
+                text("size"),
+                text("url"),
+            )
+        })
+        .collect();
+    files.sort();
+    let expect = |id: &str, name: &str, size: &str| {
+        (
+            id.to_string(),
+            name.to_string(),
+            "application/pdf".to_string(),
+            size.to_string(),
+            format!("Qm{name}"),
+        )
+    };
+    assert_eq!(
+        files,
+        vec![
+            expect("we://file-1", "plan.pdf", "2048"),
+            expect("we://file-2", "notes.pdf", "512"),
+        ]
+    );
+}
+
+/// The ids of the rows of a model query, sorted.
+async fn row_ids(p: &PerspectiveInstance, class: &str, query: Value) -> Vec<String> {
+    let json = p
+        .model_query_classes(&one(class), &query.to_string())
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_str(&json).unwrap();
+    let mut ids: Vec<String> = result["instances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// WE's composition layout: a message holds its text, then one attachment
+/// group, and the group holds a file record per file. The waker asks with
+/// `parent: { ids, transitive: true, maxDepth: 2 }`, so it finds the files of
+/// the group and a file directly under the message (the earlier layout). The
+/// one-step `{ id }` scope finds only the direct one. A file three levels
+/// down is out of reach, and a file under another message is not found.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_waker_reads_files_one_group_below_the_message() {
+    let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[
+        ("FileBlock", FILE_BLOCK_SDNA),
+        ("TextBlock", FILE_MESSAGE_SDNA),
+    ])
+    .await;
+    let file = |name: &str| json!({"name": name, "url": format!("Qm{name}"), "mimeType": "application/pdf", "size": 1});
+    for (class, base, props) in [
+        ("TextBlock", "we://msg", json!({})),
+        ("TextBlock", "we://group", json!({})),
+        ("TextBlock", "we://deep-group", json!({})),
+        ("TextBlock", "we://other-msg", json!({})),
+        ("FileBlock", "we://direct", file("direct.pdf")),
+        ("FileBlock", "we://in-group-1", file("a.pdf")),
+        ("FileBlock", "we://in-group-2", file("b.pdf")),
+        ("FileBlock", "we://too-deep", file("deep.pdf")),
+        ("FileBlock", "we://elsewhere", file("other.pdf")),
+    ] {
+        create(&mut p, &ctx, class, base, props).await.unwrap();
+    }
+    for (parent, child) in [
+        ("we://msg", "we://direct"),
+        ("we://msg", "we://group"),
+        ("we://group", "we://in-group-1"),
+        ("we://group", "we://in-group-2"),
+        ("we://group", "we://deep-group"),
+        ("we://deep-group", "we://too-deep"),
+        ("we://other-msg", "we://elsewhere"),
+    ] {
+        p.add_link(
+            Link {
+                source: parent.into(),
+                predicate: Some("ad4m://has_child".into()),
+                target: child.into(),
+            },
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .unwrap();
+    }
+
+    let props = ["name", "mimeType", "size", "url"];
+    let old = row_ids(
+        &p,
+        "ad4m://FileContent",
+        json!({"parent": {"id": "we://msg"}, "properties": props, "limit": 20}),
+    )
+    .await;
+    assert_eq!(old, vec!["we://direct".to_string()]);
+
+    let new = row_ids(
+        &p,
+        "ad4m://FileContent",
+        json!({
+            "parent": {"ids": "we://msg", "transitive": true, "maxDepth": 2},
+            "properties": props,
+            "limit": 20,
+        }),
+    )
+    .await;
+    assert_eq!(
+        new,
+        vec![
+            "we://direct".to_string(),
+            "we://in-group-1".to_string(),
+            "we://in-group-2".to_string(),
+        ]
+    );
+}

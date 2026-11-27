@@ -823,16 +823,25 @@ describe('WakerSubscriptionManager', () => {
     ancestorDepth?: number,
     address = 'test://message',
     deliveries: any[] = [result(named(address))],
+    // The file records a `FileContent` query under the mentioned item answers with: a list, or a
+    // function of the query's `parent` scope.
+    files: any[] | ((scope: any) => any[]) = [],
   ) {
     const delivers: Record<string, (result: any) => Promise<void>> = {};
     const opened: any[][] = [];
     const ProxyClass = answeringLive(delivers, opened);
     const queries: [string, any][] = [];
+    const fileQueries: any[] = [];
     const warnings: string[] = [];
     const client = {
       querySparql: () => Promise.reject(new Error('the waker resolves containment through Container')),
       modelQuery: (_uuid: string, className: string, queryJson: string) => {
         const query = JSON.parse(queryJson);
+        if (className === 'ad4m://FileContent') {
+          fileQueries.push(query);
+          const found = typeof files === 'function' ? files(query.parent) : files;
+          return Promise.resolve({ instances: found, totalCount: found.length });
+        }
         queries.push([className, query]);
         const rows = answer(query.parent);
         return Promise.resolve(
@@ -858,7 +867,7 @@ describe('WakerSubscriptionManager', () => {
     }
     await waitUntil(() => wakes.length > 0);
     manager.disposeAll();
-    return { wakes, queries, warnings, opened };
+    return { wakes, queries, fileQueries, warnings, opened };
   }
 
   it('opens a mention subscription as two model queries, over TextContent and over Mentioning', async () => {
@@ -896,7 +905,7 @@ describe('WakerSubscriptionManager', () => {
       [{ source: 'test://sparql-row' }],
       result(named('test://message'), { text: 'hi Data, no id' }),
     ]);
-    expect(wakes).toEqual([[{ address: 'test://message', parents: [], ancestors: [], ...byOther, via: 'text' }]]);
+    expect(wakes).toEqual([[{ address: 'test://message', parents: [], ancestors: [], attachments: [], ...byOther, via: 'text' }]]);
     expect(queries).toHaveLength(1);
   });
 
@@ -977,8 +986,8 @@ describe('WakerSubscriptionManager', () => {
       const editorsText = { ...editor, timestamp: '2026-10-27T00:40:30.000Z' };
       expect(h.wakes).toEqual([
         [
-          { address: 'test://both', parents: [], ancestors: [], ...both },
-          { address: 'test://named', parents: [], ancestors: [], ...editorsText, via: 'text' },
+          { address: 'test://both', parents: [], ancestors: [], attachments: [], ...both },
+          { address: 'test://named', parents: [], ancestors: [], attachments: [], ...editorsText, via: 'text' },
         ],
       ]);
     }
@@ -1034,12 +1043,12 @@ describe('WakerSubscriptionManager', () => {
       'ad4m://Container',
       { parent: { ids: ['test://message'], direction: 'in' }, properties: [] },
     ]);
-    expect(wakes).toEqual([[{ address: 'test://message', parents: ['test://parent'], ancestors: [], ...byOther, via: 'text' }]]);
+    expect(wakes).toEqual([[{ address: 'test://message', parents: ['test://parent'], ancestors: [], attachments: [], ...byOther, via: 'text' }]]);
   });
 
   it('reports no parents, without a warning, when the executor returns no instances', async () => {
     const { wakes, warnings } = await wakeWith(() => true);
-    expect(wakes).toEqual([[{ address: 'test://message', parents: [], ancestors: [], ...byOther, via: 'text' }]]);
+    expect(wakes).toEqual([[{ address: 'test://message', parents: [], ancestors: [], attachments: [], ...byOther, via: 'text' }]]);
     expect(warnings).toEqual([]);
   });
 
@@ -1047,7 +1056,7 @@ describe('WakerSubscriptionManager', () => {
     const { wakes, queries } = await wakeWith(() => [], undefined, 'addr://msg-1', [
       result(named('addr://msg-1'), named('addr://msg-1')),
     ]);
-    expect(wakes).toEqual([[{ address: 'addr://msg-1', parents: [], ancestors: [], ...byOther, via: 'text' }]]);
+    expect(wakes).toEqual([[{ address: 'addr://msg-1', parents: [], ancestors: [], attachments: [], ...byOther, via: 'text' }]]);
     // The parent lookup runs once, not once per row.
     expect(queries).toHaveLength(1);
   });
@@ -1190,9 +1199,11 @@ describe('WakerSubscriptionManager', () => {
       10,
       () => (h.wakes.length === 1 ? new Promise((r) => { landA = r; }) : true),
       {
-        // A's lookups answer at once; B's waits until the test lets it go.
-        modelQuery: (_uuid: string, _className: string, queryJson: string) => {
+        // A's lookups answer at once; B's parent lookup waits until the test lets it go. The
+        // file lookup of either answers at once.
+        modelQuery: (_uuid: string, className: string, queryJson: string) => {
           const empty = { instances: [], totalCount: 0 };
+          if (className === 'ad4m://FileContent') return Promise.resolve(empty);
           if (!JSON.parse(queryJson).parent?.ids?.includes('test://b')) return Promise.resolve(empty);
           bLookupStarted = true;
           return new Promise((r) => { resolveB = () => r(empty); });
@@ -1265,6 +1276,7 @@ describe('WakerSubscriptionManager', () => {
           address: 'test://message',
           parents: ['test://channel', 'test://block'],
           ancestors: ['test://call', 'test://space', 'ad4m://self'],
+          attachments: [],
           ...byOther,
           via: 'text',
         },
@@ -1278,6 +1290,81 @@ describe('WakerSubscriptionManager', () => {
         properties: [],
       },
     ]);
+  });
+
+  it('tells the woken agent about the files the mentioned item holds', async () => {
+    const files = [
+      { id: 'test://file-1', name: 'plan.pdf', mimeType: 'application/pdf', size: 2048, url: 'QmPlan' },
+      { id: 'test://file-2', name: 'shot.png', mimeType: 'image/png', size: '512', url: 'QmShot' },
+    ];
+    const { wakes, fileQueries } = await wakeWith(() => [], 3, 'test://message', undefined, files);
+    expect(fileQueries).toEqual([
+      {
+        parent: { ids: 'test://message', transitive: true, maxDepth: 2 },
+        properties: ['name', 'mimeType', 'size', 'url'],
+        limit: 20,
+      },
+    ]);
+    expect(wakes[0][0].attachments).toEqual([
+      { address: 'test://file-1', name: 'plan.pdf', mimeType: 'application/pdf', size: 2048, url: 'QmPlan' },
+      { address: 'test://file-2', name: 'shot.png', mimeType: 'image/png', size: 512, url: 'QmShot' },
+    ]);
+  });
+
+  it('finds the files of an attachment group one level below the message', async () => {
+    // The executor answers a one-step `{ id }` scope with the direct file only, and the
+    // two-level traversal with the direct file and the group's files.
+    const direct = { id: 'test://direct', name: 'a.txt', mimeType: 'text/plain', size: 1, url: 'QmA' };
+    const grouped = { id: 'test://grouped', name: 'b.txt', mimeType: 'text/plain', size: 2, url: 'QmB' };
+    const { wakes } = await wakeWith(
+      () => [],
+      3,
+      'test://message',
+      undefined,
+      (scope) => (scope.transitive && scope.maxDepth === 2 ? [direct, grouped] : scope.id ? [direct] : []),
+    );
+    expect(wakes[0][0].attachments.map((a: any) => a.address)).toEqual(['test://direct', 'test://grouped']);
+  });
+
+  it('reports an empty attachments list for an item that holds no files', async () => {
+    const { wakes } = await wakeWith(() => []);
+    expect(wakes[0][0].attachments).toEqual([]);
+  });
+
+  describe('a file lookup the executor never answers', () => {
+    beforeEach(() => { jest.useFakeTimers(); });
+    afterEach(() => { jest.useRealTimers(); });
+
+    it('wakes within the shared budget with no attachments, for every message of the batch', async () => {
+      const delivers: Record<string, (result: any) => Promise<void>> = {};
+      const client = {
+        querySparql: () => Promise.reject(new Error('the waker resolves containment through Container')),
+        modelQuery: (_uuid: string, className: string) =>
+          className === 'ad4m://FileContent'
+            ? new Promise(() => {})
+            : Promise.resolve({ instances: [], totalCount: 0 }),
+      };
+      const wakes: any[] = [];
+      const manager = makeManager({
+        perspectiveClient: client,
+        logger: noopLogger(),
+        live: answeringLive(delivers, []),
+        debounceMs: 10,
+        retryPendingMs: 60_000,
+        onWake: (_sub, _result, mentions) => { wakes.push(mentions); },
+      });
+      await manager.subscribe({ ...sub, id: 'mention-parents' });
+      void deliverTo(delivers, result(named('test://one'), named('test://two')));
+      await jest.advanceTimersByTimeAsync(1999);
+      expect(wakes).toHaveLength(0);
+      await jest.advanceTimersByTimeAsync(100);
+      manager.disposeAll();
+      expect(wakes).toHaveLength(1);
+      expect(wakes[0].map((m: any) => [m.address, m.attachments])).toEqual([
+        ['test://one', []],
+        ['test://two', []],
+      ]);
+    });
   });
 
   it('bounds the walk by ancestorDepth, and never reports the mention itself', async () => {
@@ -1301,7 +1388,7 @@ describe('WakerSubscriptionManager', () => {
     const address = 'test://bad> . ?s ?p ?o . #';
     const { wakes, queries } = await wakeWith(() => [], 3, address);
     expect(queries[0][1].parent.ids).toEqual([address]);
-    expect(wakes[0][0]).toEqual({ address, parents: [], ancestors: [], ...byOther, via: 'text' });
+    expect(wakes[0][0]).toEqual({ address, parents: [], ancestors: [], attachments: [], ...byOther, via: 'text' });
   });
 
   // The one test over the real LiveQuery: the executor's reply is the opening value (`initial`,
