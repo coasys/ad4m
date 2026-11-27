@@ -215,7 +215,10 @@ async fn a_rerun_update_reaches_only_its_subscriber() {
     let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
     let u = "did:key:subscriber-u".to_string();
     let v = "did:key:subscriber-v".to_string();
-    perspective.persisted.lock().await.owners = Some(vec![u.clone(), v.clone()]);
+    perspective
+        .persisted
+        .update(|h| h.owners = Some(vec![u.clone(), v.clone()]))
+        .await;
     let query = "SELECT ?s ?o WHERE { ?s <ns://audience-title> ?o . }".to_string();
 
     let (id_u, _, _) = perspective
@@ -473,6 +476,47 @@ async fn union_model_subscriptions_answer_the_same_regardless_of_class_order() {
         .expect("second union subscribe");
     assert_ne!(a, b, "each subscriber gets its own subscription");
     assert_eq!(result_a, result_b, "equal unions answer the same");
+}
+
+/// A model subscription re-runs one query on every matching write. With a
+/// cursor it would re-run the same page forever, so `after` is refused before
+/// anything is registered, while `"after": null` reads as no cursor.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_model_subscription_refuses_a_cursor() {
+    let (perspective, _shapes, _ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+    for query_json in [
+        r#"{"limit":5,"after":""}"#,
+        r#"{"limit":5,"after":"c1"}"#,
+        r#"{"after":""}"#,
+    ] {
+        let err = perspective
+            .model_subscribe_and_query(
+                &crate::perspectives::sparql_store::EvalStop::none(),
+                "Task".into(),
+                query_json.into(),
+                uuid::Uuid::new_v4().to_string(),
+                "c".into(),
+                None,
+            )
+            .await
+            .expect_err(query_json);
+        assert_eq!(err.to_string(), MODEL_SUBSCRIPTION_CURSOR_UNSUPPORTED);
+    }
+    assert!(
+        perspective.subscribed_queries.lock().await.is_empty(),
+        "a refused subscription registers nothing"
+    );
+    perspective
+        .model_subscribe_and_query(
+            &crate::perspectives::sparql_store::EvalStop::none(),
+            "Task".into(),
+            r#"{"limit":5,"after":null}"#.into(),
+            uuid::Uuid::new_v4().to_string(),
+            "c".into(),
+            None,
+        )
+        .await
+        .expect("a null cursor is no cursor");
 }
 
 /// A client that gives up on a slow subscribe and tries again leaves the earlier

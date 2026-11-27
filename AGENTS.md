@@ -65,6 +65,25 @@ it in older docs.
   gets no event until it sends `events.watch` naming it, so a raw-WebSocket test
   client must send the watch and wait for its reply before it triggers the
   event (see `tests/js/helpers/sfu/events.ts`).
+- **Tests wait for a signal, never for time.** Do not put a fixed sleep before
+  an assertion or before the action that a test triggers. A sleep costs its
+  whole length on every run, and on a slow CI machine it can still be too
+  short. Wait for the signal that the state is ready instead:
+  - an event, a callback, or the reply of the call that set the state up
+    (the `events.watch` reply; a subscribe reply, because the executor
+    registers the subscription before it computes the first result);
+  - when no signal exists, a poll of the condition at a short interval (about
+    100 ms or less). A timeout is only the bound at which the test fails;
+  - to prove that something did not happen, a sentinel: after the action,
+    cause an event on the same channel that must arrive, wait for it, then
+    check that the other event did not arrive. This holds only where that
+    channel keeps the order of its events;
+  - for code that waits on time itself (a deadline, a debounce, a stale
+    bound), a test override for that duration, a paused tokio clock
+    (`#[tokio::test(start_paused = true)]`) or fake timers (`jest.useFakeTimers`, `vi.useFakeTimers`).
+    Do not pause the tokio clock in a test that talks to a real language
+    runtime thread: that thread has its own clock, and the test's clock
+    advances while it waits on the thread.
 - `connect/` tests (vitest + happy-dom) fail under Node 26 (`localStorage.clear`
   undefined); run them under Node 24.
 
@@ -124,8 +143,9 @@ script locally.
 
 A pipeline with `run-nightly-llm: true` runs only this workflow, on `coasys/marvin`.
 Each job has its own serial group. The jobs: `llm-e2e`,
-`integration-tests-sfu`, `integration-tests-sfu-browsers` (see below) and
-`coasys-spaces`.
+`integration-tests-sfu`, `integration-tests-sfu-browsers` (see below),
+`coasys-spaces`, `integration-tests-agent-harness`, `feed-scale` and `agent-scale`
+(see "Agent-scale wind tunnel" below).
 
 `llm-e2e` runs the ignored Rust interpretation suites and the JS suites gated
 by `LLM_E2E=1`. It does not start a model server. It prompts staging's
@@ -179,6 +199,51 @@ server named by `COASYS_SPACES_LLM_*` (the nightly job uses staging's
 llama-server). `COASYS_SPACES_TIER=stub` needs no model. `bash
 scripts/coasys-spaces.test.sh` tests the script.
 
+`feed-scale` measures WE's Feed in a space with a million messages
+(`pnpm --filter @we/app-web test:feed-scale`, WE `apps/we-web/e2e/feed-scale/`).
+It needs no model and no GPU, and has its own serial group, `nightly-feed-scale`.
+
+- The suite seeds `FEED_SCALE_MESSAGES` (1000000) TextBlock messages, 12 links each.
+  It generates every link already signed by the message's author (one of 40 seed
+  agents; the Feed shows its author and time) into one file, on all cores, and loads the
+  file into the space's perspective with `runtime.importData` (`type: "perspective"`,
+  Oxigraph's bulk loader, one commit; nothing goes to the link language). The import
+  only adds links new to the perspective: it refuses the whole file (a 400) if a link is
+  already stored, repeats in the file, or is ended by a tombstone in the file (a tombstone
+  that ends a link of the file, or a link the store holds, refuses it too). A link that a
+  tombstone already in the store ended is not loaded and counts as `covered`; the same
+  link twice in the file is refused. The import takes the perspective's `persist_lock`,
+  so it lands before or after a diff's write, never between. Then WE web opens the
+  space in Chromium five times (cold, then warm) and loads the newest page and one
+  older page. The links file (~6 GB at a million) lives in the data dir, beside the
+  store.
+- WE registers an auto-processor for the space's own collection when the space opens
+  (`we-call-<collection>`, intended behaviour). The suite removes it for the seeding
+  only, which is setup. The app registers it again for the loads, and the job measures
+  its cost: `executor.cpu_seconds.ui_phase` (the executor's CPU over the loads) and
+  `executor.idle_cpu_percent.after_ui` (idle with the watch on). A fix to the
+  auto-processor's tick shows in these two.
+- It writes `metrics.json` (metrics in the performance-history record format, job
+  `feed-scale`, params `{"messages": N}`; the failure counts and
+  `executor.cpu_seconds.ui_phase` add `"loads": L`, the number of loads, so a run with
+  another number of loads makes its own series) and `results.json` (the same, with the
+  per-call detail). The `perf` step gives `metrics.json` to `scripts/perf/record`,
+  draws the trend page with `scripts/perf/report`, and for a passed run asks
+  `scripts/perf/check` for the verdict, by the `feed-scale` rules in
+  `scripts/perf/thresholds.json`. The records and the trend page are in the artifacts
+  under `feed-scale/perf/`.
+- The executor, SDK, WE and we-web steps are `coasys-spaces.sh`'s, run in
+  `~/.cache/ad4m-ci/feed-scale`. The executor's data goes there too, not to /tmp
+  (a shared tmpfs): a million messages take tens of GB.
+- It halts green when the same ad4m commit, WE commit and size were already measured
+  (`~/.local/state/ad4m-ci/feed-scale/last-success`; `FEED_SCALE_FORCE=1` runs anyway).
+  Results, logs and failure screenshots are under the job's artifacts, `feed-scale/`. The
+  job log ends with the suite's summary line.
+
+`bash scripts/feed-scale.sh all` runs the whole job by hand
+(`FEED_SCALE_MESSAGES=10000` for a short run). `bash scripts/feed-scale.test.sh` tests the
+script.
+
 To run the workflow by hand on a branch, with another WE ref (the definition id
 is in Project Settings → Pipelines):
 
@@ -190,7 +255,104 @@ curl -X POST https://circleci.com/api/v2/project/circleci/VRkXSnZDyBKHhkHKBHTmLj
        "parameters": {"run-nightly-llm": true, "we-ref": "<WE branch>"}}'
 ```
 
-This runs all four nightly jobs.
+This runs all seven nightly jobs.
+
+### Nightly performance history (`scripts/perf/`)
+
+`integration-tests-sfu`, `llm-e2e` and `agent-scale` record their numbers on every
+run (passed or failed), fail on a serious regression against their own history, and draw a
+trend page. The full contract is the header of `scripts/perf/perf.mjs`.
+
+- **The history is a git repository**: folder `nightly/` on branch `main` of
+  `coasys/ad4m-wind-tunnel`. `nightly/<job>.jsonl` holds one line per metric per
+  run, `nightly/<job>.checks.jsonl` one verdict per check. Both are append-only.
+  `record` commits `perf(<job>): <sha9> <run_at>` in a fresh shallow clone
+  (`$TMPDIR/ad4m-perf-history-<job>-*`, removed when the command ends), and
+  pushes. When another run pushed first, it fetches, puts its lines on the new
+  head and pushes again, up to 5 times. git runs with hooks off and its own ssh
+  command (no `~/.ssh/config`): the runner also runs PR jobs, so nothing of the
+  history, and not the key, stays on it. `scripts/perf/history-key` moves the
+  key out of `~/.ssh` (`perf_history_key`) and deletes it, by fixed paths, with
+  any clone left (`perf_history_cleanup`, the end of `perf_finish`). A job with
+  its own record step calls those two commands. Env: `PERF_HISTORY_REPO`, `PERF_HISTORY_BRANCH`,
+  `PERF_HISTORY_SUBDIR`, `PERF_HISTORY_SSH_KEY`.
+- **The default repository is written only when `CI=true`.** For a local run,
+  set `PERF_HISTORY_REPO` to a local bare repo. Never push test runs to the
+  real history.
+- **The push key.** CI pushes with a write deploy key on the wind-tunnel repo.
+  Add it in Project Settings → SSH Keys → Additional SSH Keys (hostname
+  `github.com`), and put its fingerprint in the pipeline parameter
+  `perf-history-key-fingerprint`. If the key is missing or a push fails, the job
+  does not fail. `record` prints `history not pushed: <reason>`, and the records
+  stay in the job's artifacts (`perf/records.jsonl`). A `check` that cannot read
+  the history only reports.
+- **`check`** fails the job when a value is worse than 1.5× the median of the
+  last 7 passing runs with the same job, metric and params. Per-metric limits
+  (factor, min_delta, an absolute ceiling or floor) live only in
+  `scripts/perf/thresholds.json`; a ceiling or floor fails at any history. With fewer than 3 earlier
+  runs it only reports. Values with different `params` (such as another LLM
+  model) never compare. A regressed run stays out of later baselines.
+  `scripts/perf/check --job J --accept <run_id>` takes it as the new normal: it
+  resets the baseline, so later runs compare only with it and the runs after it.
+- **What each job measures.**
+  - `integration-tests-sfu`: every scenario writes `$PERF_RESULTS_DIR/sfu-<id>.json`
+    (`tests/js/helpers/sfu/perf.ts`), and the step adds `sfu.suite.duration_ms`.
+  - `llm-e2e`: raw logs go to `$PERF_RESULTS_DIR/raw`:
+    - the Rust tests through `scripts/perf/libtest-timer.mjs`;
+    - mocha through `PERF_MOCHA_LOG` (`tests/js/utils/perfMochaHooks.ts`);
+    - each step's output as `<suite>.log`, where the executor logs every prompt
+      (`✅ 🤖 prompt done ... latency=…ms tokens_out=…` at info, `❌ 🤖 prompt
+      failed` at error, `rust_executor::ai_service`). The Rust step sets
+      `RUST_LOG=warn,rust_executor::ai_service=info` (its tests default to warn).
+
+    `scripts/perf/llm-e2e-results.mjs` turns them into metrics (calls, failures,
+    latency, output tokens/s), with params `{model}`.
+  - `agent-scale`: the test writes `$PERF_RESULTS_DIR/agent-scale.json`
+    (`tests/js/helpers/agent-scale.ts`): every metric once per agent count (params
+    `{agents: N, links}`), and its growth between the smallest and the largest count
+    (`agent_scale.<metric>.growth_10_100`, params `{from, to, links}`). `links` is
+    `AGENT_SCALE_LINKS`: another link count is another workload, so a series of its own.
+- A new nightly measurement writes a results JSON file (`{"metrics": [...]}`)
+  into `$PERF_RESULTS_DIR`. Wrap the job's tests in `perf_setup` and
+  `perf_finish` (`.circleci/config.yml`).
+- **Tests**: run `pnpm run test-perf-unit` in `tests/js`. It runs mocha for
+  `sfu-perf.unit.test.ts` and `agent-scale.unit.test.ts`, and `node --test 'scripts/perf/*.test.mjs'`. The git
+  tests push only to bare repos in a temp directory. The `js-unit-tests` CI job
+  runs them.
+
+### Agent-scale wind tunnel
+
+How the work of ONE executor grows with the number of agents it holds. One executor in
+multi-user mode, no Holochain, at 10, 20, 50 and 100 agents; each count gets a fresh
+executor and data dir. `tests/js/tests/agent-scale.test.ts` runs, per count: onboarding
+(`createUser` + `loginUser`, one after the other), a sign-in of all agents at once, writes
+(each user a perspective and `AGENT_SCALE_LINKS` links, default 200, in batches of 20, all
+users at once), reads (a SPARQL count, all users at once, 5 rounds), events (each user's own
+`link-added`, and none of another user's), one shared neighbourhood on the local link
+language (all users join; the first writes; time until every member sees it), 30 s idle CPU,
+and a restart on the same data (time to ready, and from ready to each user's first answer).
+RSS and threads come from `/proc` every second; open perspectives and SPARQL stores from the
+executor's `/metrics`.
+
+- Run it: `pnpm run prepare-test-local` once, then `pnpm run test:agent-scale` in `tests/js`
+  (`pnpm run test-main-agent-scale` does both). `AGENT_SCALE_COUNTS=10,20` for a short run,
+  `AGENT_SCALE_LINKS`, `AGENT_SCALE_IDLE_SECONDS` (30), `EXECUTOR_PATH` as for the other
+  suites. Set `PERF_RESULTS_DIR` to get `agent-scale.json`. Run it under a memory cap
+  (`systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0`); a count of 100 is a
+  few hundred MB of executor. Mocha runs under Node 24 here: `ts-mocha` fails under Node 26.
+- It prints each metric by count with `growth_<smallest>_<largest>` and a flag: **a time of
+  one call (median, p95, per-agent memory) above 2x is flagged, a total (wall time, RSS,
+  threads) above 15x.** A flag never fails the test; `scripts/perf/check` fails a regression
+  against the job's own history (rules `agent-scale` in `thresholds.json`). The test fails
+  only on a functional error: a user that cannot log in, an event that reaches another user,
+  a link that is lost, a perspective that is not back after the restart.
+- The pure helpers (percentile, growth, flags, results file, table, `/proc` parsers) are in
+  `tests/js/helpers/agent-scale.ts`, with their unit test in `test-perf-unit`.
+- `fds_peak` needs root: the executor forbids core dumps (`forbid_core_dumps`), so the
+  kernel makes its `/proc/<pid>/fd` readable by root only. Without root the metric is
+  left out, not recorded as 0.
+- The restart waits for each user's perspective: `agent.unlock` answers before the
+  executor has loaded every perspective, so a query at once finds none.
 
 ### SFU wind tunnel
 
@@ -310,10 +472,15 @@ returned, and acts only on that session of the caller's DID; the SDK sends
 none of them without one, so a tab that never joined cannot end another
 tab's call (E19, E21). The executor publishes `sfu-room-roster` (to the
 listed DIDs, plus the departed session's DID on departure) after every join
-and departure, listing sessions (`participantId` + `agentDid`), and the SDK
+and departure, listing sessions (`participantId` + `agentDid`) and a
+`revision` (one sequence for every roster this process publishes: 1 the
+first time, then one more on every publish, a resume included; a later
+room, and a room created again, continues it, so a roster from an earlier
+life of the room is older), so a client can drop a roster whose
+`revision` is older than one it already applied. The SDK
 keys participants by participant id from it; when the roster stops listing
-this session (its `participantId`) for 3 s, the SDK rebuilds the call, but a
-replaced session never does; tracks are attributed only by the `trackMapping`
+this session (its `participantId`) for 3 s and `sfu.callResume` does not list
+it either, the SDK rebuilds the call, but a replaced session never does; tracks are attributed only by the `trackMapping`
 mids (which name
 the participant id); a session never receives its own media or its own
 `sfu-data` (`senderParticipantId`), but does receive its agent's other
@@ -322,25 +489,194 @@ space's policy (`maxMeshParticipants × 4`, 128 without one), and cascade
 per-node capacity only drives redirects; the server drops a peer after
 10 s of ICE `Disconnected`, or, once the client asked for an ICE restart
 (`sfu.callRestartIce`), 15 s after the request. The restart's answer ends
-that grace and the 10 s disconnect clock starts again. The deadline sweep
-also drops a peer when a server offer stays unanswered after both resends
-(resend at 10 s and at 30 s, drop at 70 s), even when ICE stays connected;
+that grace and the 10 s disconnect clock starts again. An unanswered server
+offer is resent at 10 s and 30 s, then every 30 s, and never drops a client
+peer (#1802 dropped it at 70 s, also while its media flowed). A client keeps
+that offer. An established pipe whose answer str0m rejects locally, or
+whose offer is still unanswered after those two resends, is disconnected.
+That rejection is local: a pipe answer carries no refusal, and a node that
+rejects an incoming offer only logs it, so the sender waits until the offer
+goes unanswered. The other end drops the pipe when its ICE fails. The end
+that dials (the lexically higher DID) redials at once the first time,
+whether it ended the offer or only saw the drop. The next consecutive
+failure waits 30 s, then 60 s, then 120 s, and stays at 120 s. A pipe that
+stayed connected for 120 s clears that count, so the next drop is free
+again. A timeout, a pipe that never connected, does not wait. When the new
+pipe is usable it is offered the origins already in the room, so media resumes
+without a new track. An Announce arrives every 10 s, so the announce alone
+would dial again on the next heartbeat. A crossed offer (`ChangesOutOfOrder`)
+keeps the pipe and queues the tracks again. An initial pipe that never connects stays
+through the second resend plus the 15 s ICE-restart grace, then is dropped.
+The offer carries
+an `offerId` that a resend and `sfu.callResume` repeat; the answer echoes
+it. `ParticipantId` (`P{n}`) and that offer id (`o{n}`) are minted from a
+counter that starts, once per process, at a random value at least `2^63`,
+so a restarted process does not hand a client's old id to a new session. `sfu.callAnswerServerOffer` answers `{ accepted: true }`, or
+`{ accepted: false, reason }` (`stale`, `no-pending`, `unknown-session`),
+after the event loop applies the answer. A repeat of the id accepted last
+for that session is `{ accepted: true }` and changes nothing; an older
+accepted id is `stale`. `stale` also covers an answer that does not parse,
+or whose mids are not the pending offer's, under the pending offer's own
+id: that offer stays pending. A refused answer is that value, not an RPC
+error. The RPC errors are 403 (a session of another agent) and 408 (the
+event loop did not answer, or its command channel is closed).
+`sfu.callResume` (the session's
+`participantId`) sends the pending offer and the roster again at once, for
+a client whose socket came back, and answers `{ listed: true, offer?,
+roster: { revision, participants } }` with the same offer, the same sessions,
+and the same `revision` as the roster event that resume just published, or
+`{ listed: false }` when the room or the session is not there. A session of
+another agent is 403. `sfu.callAnswerServerOffer` and `sfu.callResume` are
+408 when they have not finished within 5 s. That wait starts before the
+rooms lock, so a join that holds the lock counts, and it covers the resume
+roster publish as well as the command waiting for a slot in the bounded queue.
 on ICE `disconnected` or a network change the SDK restarts ICE in place (the
 SFU stays the only offerer: the restart comes as a server renegotiation
-offer), and rebuilds the call if that has not reconnected within 15 s; a
-failed connection is rebuilt at once, and a rebuild retries the join for
-120 s. The restart names the session's `participantId` (only that session
+offer), and rebuilds the call if that has not reconnected within 15 s; after
+a socket reconnect with no network change it restarts ICE only if ICE is not
+connected 2 s later; a failed connection is rebuilt at once, a rebuild
+retries the join for 120 s, and either terminal give-up — the 120 s spent
+without a rejoin, or a 4th rebuild inside 2 min — ends the call, in this
+order: `participant-left` for each participant, then `error`, then the
+connection closes, the `sfu.callLeave` request starts (the end does not wait
+for its reply) and `call-ended` (`{ reason: "gave-up" }`, also on the
+`Session`, which goes idle) is emitted for the UI to show; a new `join`
+starts over. A rebuild keeps the participants and clears only their media:
+it refreshes `hasAudio` and `hasVideo`, then emits one `stream-removed` per
+track, and a track that ends later does not emit a second one. Only an SDP the connection
+cannot apply rebuilds from a renegotiation: the answer names its offer's
+`offerId`, and the server refuses one naming another — `stale` or
+`no-pending` (a settled or superseded offer, or the server's own SDP step
+refusing it, as `ChangesOutOfOrder`) is non-acceptance: repair is left to
+media and session evidence, not a rebuild; `unknown-session` rebuilds the
+call. The client keeps its last answer (`lastAnswer`) and resends
+nothing by itself: an answer a socket fault lost (503, 408) goes out
+again from the cache when the executor resends its offer or the resume
+reply carries it. Once the socket is back, `sfu.callResume` returns what went by — the
+session's pending offer and the room's roster, applied like the events
+that carry them; a resume the socket fails keeps the call, and a 403 ends
+it (`call-ended`, `{ reason: "refused" }`: the executor refused the
+resume — the session is another agent's, or this agent is no longer a
+member). Of the server offers waiting, only the newest
+is applied; no RPC runs on the offer queue (an answer is sent without
+waiting for its reply) and SDP steps run to their end; a resume's ask
+waits off the queue, bounded by `RESUME_STEP_TIMEOUT_MS` (10 s) and
+by the restart's remaining window when one is in flight, so the restart
+offer it triggers is answered while the reply is still out. The restart names the session's `participantId` (only that session
 restarts, never another device of the agent), and a manager with no session
 (join not back, left, replaced) sends none. A room roster that leaves this
-session out for 3 s also rebuilds the call (the executor sends the departure
-roster to the departed DID too); a roster that lists it, as during a restart
-in place, changes nothing.
+session out for 3 s asks `sfu.callResume` and rebuilds the call when its
+reply says the session is not listed — an ask the socket fails is asked
+again within the grace while the roster still omits it; a roster that
+lists it, as during a restart in place, changes nothing.
 `ApiClient` drops an executor socket whose ping stays unanswered for a ping
 interval (10 s, `PING_INTERVAL_MS`; longer while a large write it sent may
 still be crossing a 16 kB/s link) and dials a new one, so a
-socket a network switch left OPEN is noticed in 10 to 20 s. `online` redials
-at once; `change` on `navigator.connection` and ICE `disconnected` run
-`checkConnection`, which drops a socket silent for 2 s after its ping.
+socket a network switch left OPEN is noticed in 10 to 20 s. `onNetworkChange`
+fires only for platform network events: `online` redials at once and tells
+it once the new socket is open, and `change` on `navigator.connection`
+marks a change — told once an open socket is proven — only when its
+`type` or `navigator.onLine` moved: the local path changed, so media must
+restart. On a platform that reports no `type` (desktop Chromium) a `change`
+with the reported state unmoved only has the socket judged — a real
+switch kills it and its drop redials; a moved estimate keeps it and marks
+nothing. The socket is judged by socket evidence through
+`checkConnection`, which also runs when a request
+has had no reply for 4 s (`PENDING_PROBE_MS`) on a socket nothing
+arrived on since it was sent. A request that cannot wait that long goes
+out urgent (`CallOptions.urgent`; `sfu.callRestartIce`, `sfu.callResume`
+and `sfu.callAnswerServerOffer`): its wait is 1 s
+(`URGENT_PENDING_PROBE_MS`) and the probe it starts judges a silent
+socket in 3 s (`URGENT_CHECK_CONNECTION_DEADLINE_MS`, drain allowance
+kept) instead of 8 s — it shortens only that request's timing, and a probe
+already running gets its verdict moved earlier to that wait, never later.
+The probe sends no ping when the socket
+delivered a message in the last 5 s and drops a socket that answered
+nothing for 8 s after one probe (at least 8 s: while a large write it sent
+may still be crossing the link, the wait grows by that write's drain time);
+any frame proves the socket, so a slow
+request on a socket that keeps delivering fails as an RPC timeout, not a
+dead socket. A probe that gives up only redials, at once and without
+backoff — socket evidence is not a network change, so no `onNetworkChange`
+fires for it; `onReconnect` on the new socket is its signal, and the SFU
+answers that with `socketBack` (resend what a fault kept, `sfu.callResume`,
+`checkIceSoon`), not an immediate ICE restart. The call layer never probes
+the socket: ICE `disconnected` is media evidence, and its whole answer is
+the ICE restart.
+
+SFU simulcast layer choice (`rust-executor/src/sfu/simulcast.rs`). Each client
+peer (not pipes) runs str0m's bandwidth estimator, started at 800 kbit/s
+(`BWE_START_KBPS`) and fed by the caller's transport-wide-cc reports; REMB is
+ignored. E is the receiver's estimate, C the cost of the video forwarded to
+it, F its fixed traffic. Constants (measured with the e2e source below):
+
+- `RATE_WINDOW` 2 s: a layer's cost is its bytes over this window, payload
+  plus 32 bytes per RTP packet (`seq_range`), keyframes included (cadence,
+  loss recovery, PLIs and the selector's switches all cross the link). A rate
+  is known once the layer has flowed a whole window; until then it costs 0,
+  so a resumed high stream can stay high through an estimate drop for up to
+  2 s. 1 s read the high layer up to 1.7 times nominal at p99.
+- `LAYER_TIMEOUT` 2 s: a layer silent this long is gone, noticed on the
+  track's next frame. Senders pause up to 1.6 s when an encoder starts.
+- `KEYFRAME_REQUEST_INTERVAL` 500 ms: at most one request per (track, layer),
+  from the selector or a gap. A receiver's own PLI is not limited.
+- F: per audio track the larger of `AUDIO_RESERVE_BPS` 64 kbit/s and its
+  measured rate, plus each video without simulcast; it is never touched.
+- `UPGRADE_HEADROOM` H = 1.25, `UPGRADE_HOLD` 4 s: the band between the
+  step-down line (C + F > E) and the upgrade line (E >= H * (C + F + step)).
+  The step-down line is the traffic itself: with no bottleneck, str0m's
+  estimate settles near the traffic it carries (about 1.5 times at full
+  state), and a line below the estimate (the earlier 0.85 * E) stepped
+  receivers down after almost every upgrade.
+
+Rules, per receiver, run on an estimate event, a track-set or ceiling change,
+a committed switch, a change in a track's set of live layers (a layer starts,
+or stops after `LAYER_TIMEOUT`), a layer or video that resumes after
+`LAYER_TIMEOUT`, or a deadline. There is no periodic tick: the earliest
+deadline (the hold's end, or the moment a live layer's rate is first measured)
+lowers the loop's timeout.
+
+- When C + F > E, one video track drops one live layer (largest saving first,
+  ties by stable id), one per run.
+- Upgrades: the receiver has one hold (`hold_since`). It runs while the
+  cheapest step fits E >= H * (C + F + step), is re-checked at every run, and
+  a dip, ceiling change, track-set change or completed switch resets it. When
+  it ends, every step the headroom covers is granted in one run, cheapest
+  first, one layer per track, each checked with the steps granted before it;
+  then the hold starts again. Upgrades wait while the target layer, a
+  forwarded video or an audio track has no measured rate (its first packet +
+  `RATE_WINDOW` wakes the allocation), while a switch is pending, before the
+  first estimate and while the last one has `can_probe: false`. A peer that
+  never reports stays on the lowest layer.
+- A switch commits on a keyframe of the new layer. The old layer's cost counts
+  until then, and a track with a pending switch is not switched again.
+- New tracks start on the lowest live layer, which is also the floor (video is
+  never paused).
+- When a switch commits on a layer below the receiver's cap (the layer it
+  wanted stopped), the cap drops to that layer: a layer that returns is
+  measured again (2 s) and earns its upgrade again (4 s hold, `can_probe`).
+- `SetQualityPreference` is a ceiling, not a choice: `high`, `auto` and unset
+  let the estimate decide up to high. The estimate and the hold choose the
+  layer at or below the ceiling; with no live layer there, the receiver gets
+  the lowest live one. A lowered ceiling applies on the next keyframe. For a peer the loop no longer holds it is dropped (ids
+  are never reused).
+- The receiver's probing target (`bwe().set_desired_bitrate`) is the estimate
+  that satisfies the upgrade condition at the permitted maximum layers:
+  `H * (highest + fixed)`, rounded up (fixed: audio and non-simulcast
+  video; highest: per track the most a layer up to its permitted top costs,
+  as a middle layer can measure above the top one).
+- A cap change is logged at `debug` (`rust_executor::sfu::simulcast`:
+  receiver, track, old and new layer, estimate, fixed, spent, layer rates).
+
+The e2e video source (`videoSource`, `tests/js/helpers/sfu/e2e/media.ts`) is
+a drifting gradient with soft moving discs and light noise: it compresses like
+camera video, so each layer runs near its `maxBitrate` at a steady frame rate
+and keyframes stay small. Hard-edged moving patterns make VP8 send huge
+keyframes and then drop frames for seconds, which reads as layer stalls and
+rate spikes. The e2e shaper (`limitDownlink`, `tests/js/helpers/sfu/net.ts`)
+is a `tbf` with a 3 kB burst and a 300 ms queue: a larger burst lets str0m's
+probe clusters through at line rate (the estimate read up to 4.7 Mbit/s on a
+700 kbit/s cap), a smaller queue drops so much that the estimate collapses.
 
 SFU media addresses (`rust-executor/src/sfu/{hosts,server,reachability}.rs`):
 with no `sfu_bind_addr` (the default, whatever `--localhost` says) the SFU

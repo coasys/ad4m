@@ -8,9 +8,11 @@ use ts_rs::TS;
 
 use crate::agent::capabilities::*;
 use crate::helpers::can_access_perspective_with_did;
+use crate::perspectives::flow_instance::refusal::FlowError;
 use crate::perspectives::model_query::QueryClasses;
 use crate::perspectives::perspective_instance::{
-    is_sparql_query, result_json, SubscriptionIdTaken, PROLOG_LIVE_QUERY_UNSUPPORTED,
+    is_sparql_query, model_query_sends_cursor, result_json, SubscriptionIdTaken,
+    MODEL_SUBSCRIPTION_CURSOR_UNSUPPORTED, PROLOG_LIVE_QUERY_UNSUPPORTED,
 };
 use crate::perspectives::{
     add_perspective, get_perspective,
@@ -121,7 +123,7 @@ pub(crate) async fn get_perspective_with_access(
     let perspective = get_perspective_or_404(uuid).await?;
 
     if !ctx.is_operator() {
-        let handle = perspective.persisted.lock().await.clone();
+        let handle = perspective.persisted.snapshot();
         if !ctx.session.is_authenticated()
             || !can_access_perspective_with_did(ctx.user_did(), &handle)
         {
@@ -273,7 +275,7 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
     if ctx.is_operator() {
         let mut handles: Vec<PerspectiveHandle> = Vec::new();
         for p in all {
-            handles.push(p.persisted.lock().await.clone());
+            handles.push(p.persisted.snapshot());
         }
         return Ok(serde_json::to_value(handles)?);
     }
@@ -284,7 +286,7 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
     let readable = pointers_covered(&ctx.session.capabilities(), PERSPECTIVE, READ);
     let mut filtered: Vec<PerspectiveHandle> = Vec::new();
     for p in all {
-        let handle = p.persisted.lock().await.clone();
+        let handle = p.persisted.snapshot();
         if can_access_perspective_with_did(ctx.user_did(), &handle)
             && readable
                 .as_ref()
@@ -310,7 +312,7 @@ async fn get_perspective_handler(
     _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
     let perspective = guarded_perspective(&params).await?;
-    let handle = perspective.persisted.lock().await.clone();
+    let handle = perspective.persisted.snapshot();
     Ok(serde_json::to_value(handle)?)
 }
 
@@ -773,28 +775,59 @@ async fn discard_batch(params: Value, _ctx: Arc<RequestContext>) -> Result<Value
     Ok(Value::Bool(perspective.discard_batch(&body.batch_id).await))
 }
 
-async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let body: SubscribeQueryRequest = serde_json::from_value(params.clone())
+/// `perspective.subscribe { uuid, subscriptionId, model | sparql }`: opens a live query,
+/// a model query or a SPARQL query, and replies with its first result.
+async fn subscribe(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: PerspectiveSubscribeParams = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-    // Live queries are SPARQL; Prolog live queries were removed.
-    if !is_sparql_query(&body.query) {
-        return Err(WsRpcError::bad_request(PROLOG_LIVE_QUERY_UNSUPPORTED));
-    }
+    let subscription_id = client_subscription_id(body.subscription_id)?;
     let connection_id = connection_id(&ctx)?;
-
-    let perspective = guarded_perspective(&params).await?;
-
-    let gate = crate::perspectives::sparql_store::query_gate(&ctx, &perspective).await;
-    let opened = perspective
-        .subscribe_and_query(
-            &gate.stop(),
-            body.query,
-            client_subscription_id(body.subscription_id)?,
-            connection_id.clone(),
-            subscriber(&ctx),
-        )
-        .await;
-    subscribed(&perspective, &ctx, &connection_id, opened).await
+    match (body.model, body.sparql) {
+        (Some(model), None) => {
+            let classes = classes_of(model.class_name, model.class_names)?;
+            crate::call_diag::model::query(&body.uuid, classes.names(), &model.query_json);
+            // A subscription re-runs one query; cursor paging is `modelQuery`'s.
+            if model_query_sends_cursor(&model.query_json) {
+                return Err(WsRpcError::bad_request(
+                    MODEL_SUBSCRIPTION_CURSOR_UNSUPPORTED,
+                ));
+            }
+            let perspective = guarded_perspective(&params).await?;
+            let gate = crate::perspectives::sparql_store::query_gate(&ctx, &perspective).await;
+            let opened = perspective
+                .model_subscribe_and_query(
+                    &gate.stop(),
+                    classes,
+                    model.query_json,
+                    subscription_id,
+                    connection_id.clone(),
+                    subscriber(&ctx),
+                )
+                .await;
+            subscribed(&perspective, &ctx, &connection_id, opened).await
+        }
+        (None, Some(sparql)) => {
+            // Live queries are SPARQL; Prolog live queries were removed.
+            if !is_sparql_query(&sparql) {
+                return Err(WsRpcError::bad_request(PROLOG_LIVE_QUERY_UNSUPPORTED));
+            }
+            let perspective = guarded_perspective(&params).await?;
+            let gate = crate::perspectives::sparql_store::query_gate(&ctx, &perspective).await;
+            let opened = perspective
+                .subscribe_and_query(
+                    &gate.stop(),
+                    sparql,
+                    subscription_id,
+                    connection_id.clone(),
+                    subscriber(&ctx),
+                )
+                .await;
+            subscribed(&perspective, &ctx, &connection_id, opened).await
+        }
+        _ => Err(WsRpcError::bad_request(
+            "Pass exactly one of 'model' and 'sparql'",
+        )),
+    }
 }
 
 /// The RPC connection a subscription belongs to; a call without one (REST)
@@ -856,6 +889,7 @@ async fn subscribed(
             message: "Request cancelled by client".to_string(),
         });
     }
+    crate::call_diag::model::results(&result);
     Ok(serde_json::to_value(PerspectiveSubscribed {
         subscription_id,
         result: result_json(&result),
@@ -888,15 +922,6 @@ async fn resync_subscription(params: Value, ctx: Arc<RequestContext>) -> Result<
             body.subscription_id
         ))),
     }
-}
-
-async fn subscribe_sparql_query(
-    _params: Value,
-    _ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
-    Err(WsRpcError::not_implemented(
-        "subscribe_sparql_query not yet implemented",
-    ))
 }
 
 async fn dispose_query(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -1062,6 +1087,11 @@ async fn subject_classes_of_handler(
 async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let classes = query_classes(&params)?;
     let query_json = params.require_str("query_json")?;
+    crate::call_diag::model::query(
+        &crate::api::guards::UUID_PARAM.require(&params)?,
+        classes.names(),
+        &query_json,
+    );
 
     let perspective = guarded_perspective(&params).await?;
 
@@ -1072,7 +1102,10 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
         .model_query_classes_stopped(&gate.stop(), &classes, &query_json)
         .await
     {
-        Ok(json) => Ok(Value::String(json)),
+        Ok(json) => {
+            crate::call_diag::model::results(&json);
+            Ok(Value::String(json))
+        }
         Err(e) => Err(query_eval_error_ws(e)),
     }
 }
@@ -1126,31 +1159,6 @@ async fn evaluate_getters_handler(
         Ok(Err(e)) => Err(query_eval_error_ws(e)),
         Err(e) => Err(WsRpcError::internal(format!("Task join error: {}", e))),
     }
-}
-
-async fn model_subscribe_handler(
-    params: Value,
-    ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
-    let classes = query_classes(&params)?;
-    let query_json = params.require_str("query_json")?;
-    let subscription_id = client_subscription_id(params.require_str("subscriptionId")?)?;
-
-    let connection_id = connection_id(&ctx)?;
-    let perspective = guarded_perspective(&params).await?;
-
-    let gate = crate::perspectives::sparql_store::query_gate(&ctx, &perspective).await;
-    let opened = perspective
-        .model_subscribe_and_query(
-            &gate.stop(),
-            classes,
-            query_json,
-            subscription_id,
-            connection_id.clone(),
-            subscriber(&ctx),
-        )
-        .await;
-    subscribed(&perspective, &ctx, &connection_id, opened).await
 }
 
 async fn run_interpretation_handler(
@@ -1872,6 +1880,20 @@ async fn interpretation_overlays_handler(
 
 // ── Flow consensus accept / reject ──
 
+/// The RPC error of a flow call. A refusal is 409 with the
+/// [`FlowRefusal`](crate::perspectives::flow_instance::refusal::FlowRefusal) as `data`,
+/// like the 422 of `instance_error`. A failure is 500.
+fn flow_error(error: FlowError) -> WsRpcError {
+    match error {
+        FlowError::Refused(refusal) => WsRpcError {
+            code: 409,
+            message: refusal.to_string(),
+            data: Some(serde_json::to_value(&refusal).unwrap_or(Value::Null)),
+        },
+        FlowError::Failed(error) => WsRpcError::internal(error.to_string()),
+    }
+}
+
 async fn accept_flow_proposal_handler(
     params: Value,
     ctx: Arc<RequestContext>,
@@ -1885,7 +1907,7 @@ async fn accept_flow_proposal_handler(
         &agent_context,
     )
     .await
-    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    .map_err(flow_error)?;
     Ok(serde_json::to_value(fired)?)
 }
 
@@ -1902,7 +1924,7 @@ async fn reject_flow_proposal_handler(
         &agent_context,
     )
     .await
-    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    .map_err(flow_error)?;
     // How many of OUR links went, not a bare `true`: withdrawing one vote and
     // retracting a proposal we opened are different events on the same call.
     Ok(serde_json::to_value(PerspectiveRejectFlowProposalResult {
@@ -1948,7 +1970,7 @@ async fn propose_flow_transition_handler(
         &agent_context,
     )
     .await
-    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    .map_err(flow_error)?;
     Ok(serde_json::to_value(outcome)?)
 }
 
@@ -2209,9 +2231,9 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     .guard(update());
     map.method::<PerspectiveDiscardBatchParams, bool>("perspective.discardBatch", discard_batch)
         .guard(update());
-    map.method::<PerspectiveSubscribeQueryParams, PerspectiveSubscribed>(
-        "perspective.subscribeQuery",
-        subscribe_query,
+    map.method::<PerspectiveSubscribeParams, PerspectiveSubscribed>(
+        "perspective.subscribe",
+        subscribe,
     )
     .opens()
     .guard(query());
@@ -2221,14 +2243,6 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     )
     .guard(query());
     map.method::<PerspectiveSubscriptionParams, bool>("perspective.disposeQuery", dispose_query)
-        .guard(query());
-    // Always answers 501; the result type mirrors `perspective.subscribeQuery`.
-    map.method::<PerspectiveQueryParams, PerspectiveSubscribed>(
-        "perspective.subscribeSparql",
-        subscribe_sparql_query,
-    )
-    .guard(query());
-    map.method::<PerspectiveSubscriptionParams, bool>("perspective.disposeSparql", dispose_query)
         .guard(query());
     map.method::<PerspectiveModelQueryParams, String>(
         "perspective.modelQuery",
@@ -2241,12 +2255,6 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         subject_classes_of_handler,
     )
     .read()
-    .guard(query());
-    map.method::<PerspectiveModelSubscribeParams, PerspectiveSubscribed>(
-        "perspective.modelSubscribe",
-        model_subscribe_handler,
-    )
-    .opens()
     .guard(query());
     map.method::<PerspectiveEvaluateGettersParams, String>(
         "perspective.evaluateGetters",
@@ -2447,15 +2455,32 @@ pub struct PerspectiveQueryParams {
     pub query: String,
 }
 
-/// `perspective.subscribeQuery`: the subscription id is the client's, so it can end the
-/// subscription without the reply (after a timeout or an abort).
+/// `perspective.subscribe`: a live query on a perspective, a model query or a SPARQL query
+/// (exactly one of `model` and `sparql`). The subscription id is the client's, so it can end
+/// the subscription without the reply (after a timeout or an abort).
 #[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export)]
-pub struct PerspectiveSubscribeQueryParams {
+pub struct PerspectiveSubscribeParams {
     pub uuid: String,
-    pub query: String,
-    #[serde(rename = "subscriptionId")]
     pub subscription_id: String,
+    #[ts(optional)]
+    pub model: Option<ModelLiveParams>,
+    #[ts(optional)]
+    pub sparql: Option<String>,
+}
+
+/// The model query of a `perspective.subscribe`: [`PerspectiveModelQueryParams`] without the
+/// perspective. Exactly one of `className` and `classNames`.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
+pub struct ModelLiveParams {
+    #[ts(optional)]
+    pub class_name: Option<String>,
+    #[ts(optional)]
+    pub class_names: Option<Vec<String>>,
+    pub query_json: String,
 }
 
 #[derive(Deserialize, TS)]
@@ -2544,7 +2569,7 @@ pub struct PerspectiveShapesParams {
     pub names: Option<Vec<String>>,
 }
 
-/// Reply to `perspective.subscribeQuery` / `perspective.modelSubscribe`:
+/// Reply to `perspective.subscribe`:
 /// the first result, as JSON, at its revision (0 unless a change was
 /// published while it was computed).
 #[derive(Serialize, Deserialize, TS)]
@@ -2594,22 +2619,7 @@ pub struct PerspectiveModelQueryParams {
     pub query_json: String,
 }
 
-/// `perspective.modelSubscribe`: [`PerspectiveModelQueryParams`] and the client's
-/// subscription id (see [`PerspectiveSubscribeQueryParams`]).
-#[derive(Deserialize, TS)]
-#[ts(export)]
-pub struct PerspectiveModelSubscribeParams {
-    pub uuid: String,
-    #[ts(optional)]
-    pub class_name: Option<String>,
-    #[ts(optional)]
-    pub class_names: Option<Vec<String>>,
-    pub query_json: String,
-    #[serde(rename = "subscriptionId")]
-    pub subscription_id: String,
-}
-
-/// The classes a `modelQuery` / `modelSubscribe` call names: `class_name` or
+/// The classes a `modelQuery` call names: `class_name` or
 /// `class_names`, never both and never neither.
 fn query_classes(params: &Value) -> Result<QueryClasses, WsRpcError> {
     let one = params.opt_str("class_name");
@@ -2621,6 +2631,11 @@ fn query_classes(params: &Value) -> Result<QueryClasses, WsRpcError> {
             ))
         })?),
     };
+    classes_of(one, many)
+}
+
+/// `class_name` or `class_names`, never both and never neither.
+fn classes_of(one: Option<String>, many: Option<Vec<String>>) -> Result<QueryClasses, WsRpcError> {
     match (one, many) {
         (Some(name), None) => Ok(QueryClasses::One(name)),
         (None, Some(names)) if !names.is_empty() => Ok(QueryClasses::union(names)),

@@ -153,6 +153,14 @@ Notes on some methods:
 - `neighbourhood.*` methods that name a perspective (`publish` by `perspectiveUuid`, the others
   by `uuid`) use `Owns { Perspective }` on the neighbourhood capability: the perspective that
   holds a neighbourhood decides who may use it.
+- `sfu.callResume` answers `{ listed: true, offer?, roster: { revision, participants } }`
+  or `{ listed: false }`. `revision` is the same number the `sfu-room-roster` event
+  carries for that publish: one sequence for every roster this process publishes,
+  1 the first time, then one more every publish. A later room, and a room created
+  again, continues it. `sfu.callAnswerServerOffer` and `sfu.callResume` are 408 when
+  they have not finished within 5 s. The wait starts before the rooms lock, so a
+  join that holds the lock counts, and it covers the resume roster publish as well
+  as the command waiting for a slot in the bounded queue.
 
 Which guard each method has, generated from the handler map
 (`tests/handler_table_tests.rs::render_guard_table`). `the_guard_table_in_agents_md_is_current`
@@ -165,7 +173,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-236 methods: Cap 81, CapAnyPointer 1, Executor 43, Open 5, Operator 28, Owns 76, UserOrOperator 2. Local only (the operator on this machine): 5.
+237 methods: Cap 83, CapAnyPointer 1, Executor 43, Open 5, Operator 30, Owns 73, UserOrOperator 2. Local only (the operator on this machine): 5.
 
 | Method | Guard |
 |---|---|
@@ -257,6 +265,7 @@ the guard checked:
 | `identity.status` | `Cap(agent:READ)` |
 | `language.all` | `Cap(language:READ)` |
 | `language.applyTemplate` | `Cap(language:CREATE)` |
+| `language.applyTemplateLocal` | `Cap(language:CREATE)` |
 | `language.get` | `Cap(language:READ)` |
 | `language.meta` | `Cap(language:READ)` |
 | `language.publish` | `Executor(language:CREATE)` |
@@ -285,7 +294,6 @@ the guard checked:
 | `perspective.createSubject` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.discardBatch` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.disposeQuery` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.disposeSparql` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.evaluateGetters` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.executeCommands` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.flowFired` | `Owns(Perspective uuid, perspective:READ)` |
@@ -302,7 +310,6 @@ the guard checked:
 | `perspective.linkMutations` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.mintFlowReceipt` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.modelQuery` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.modelSubscribe` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.proposeFlowTransition` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.publishSnapshot` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.queryLinks` | `Owns(Perspective uuid, perspective:READ)` |
@@ -323,8 +330,7 @@ the guard checked:
 | `perspective.shapes` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.snapshot` | `Owns(Perspective uuid, perspective:READ)`, 404 → `null` |
 | `perspective.subjectClassesOf` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.subscribeQuery` | `Owns(Perspective uuid, perspective:READ)` |
-| `perspective.subscribeSparql` | `Owns(Perspective uuid, perspective:READ)` |
+| `perspective.subscribe` | `Owns(Perspective uuid, perspective:READ)` |
 | `perspective.update` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.updateLink` | `Owns(Perspective uuid, perspective:UPDATE)` |
 | `perspective.updateSubject` | `Owns(Perspective uuid, perspective:UPDATE)` |
@@ -347,6 +353,7 @@ the guard checked:
 | `runtime.inbox` | `Cap(runtime.messages:READ)` |
 | `runtime.info` | `Open` |
 | `runtime.linkLanguageTemplates` | `Cap(runtime.known_link_languages:READ)` |
+| `runtime.logFilter` | `Operator` |
 | `runtime.logTail` | `Operator` |
 | `runtime.networkMetrics` | `Cap(runtime.hc_agent_info:READ)` |
 | `runtime.notifications` | `Cap(agent:UPDATE)` |
@@ -361,6 +368,7 @@ the guard checked:
 | `runtime.setConfig` | `Operator` |
 | `runtime.setFreeHostingEnabled` | `Executor(*:*)` |
 | `runtime.setHostRates` | `Operator` |
+| `runtime.setLogFilter` | `Operator` |
 | `runtime.setStatus` | `Cap(runtime.my_status:UPDATE)` |
 | `runtime.setUnytMembraneProof` | `Operator` |
 | `runtime.tlsDomain` | `Open` |
@@ -378,6 +386,7 @@ the guard checked:
 | `sfu.callJoin` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.callLeave` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.callRestartIce` | `Cap(neighbourhood:UPDATE)` |
+| `sfu.callResume` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.callSetQualityPreference` | `Cap(neighbourhood:UPDATE)` |
 | `sfu.cascadeStatus` | `Cap(neighbourhood:READ)` |
 | `sfu.ensureMembership` | `Operator` |
@@ -563,8 +572,9 @@ them against those two guards.
   the auto-permit as its caller, so `agent.permitCapability`'s guard decides whether the caller
   may approve and its handler caps the approval at the caller's own capabilities.
   `capabilities::permit_capability` is the dev-mode auto-permit.
-- Live queries: `subscribeQuery` / `modelSubscribe` take the id the client minted
-  (`subscriptionId`, required: 1 to 64 characters of `[A-Za-z0-9-]`, else 400) and reply
+- Live queries: `perspective.subscribe { uuid, subscriptionId, model | sparql }` (exactly one of
+  `model` and `sparql`, else 400; `model` is `{ className | classNames, queryJson }`) takes the id
+  the client minted (`subscriptionId`, required: 1 to 64 characters of `[A-Za-z0-9-]`, else 400) and reply
   `{ subscriptionId, result, revision }` with it (revision 0, or later if a write landed while
   the first result was computed: the subscription is registered first). An id already
   registered on the perspective, by any connection, is refused with 409 and registers nothing
@@ -579,14 +589,14 @@ them against those two guards.
   bypass `events.watch`), and `ws_rpc::serve` ends them when the socket closes, and again as each
   call still in flight ends (a late subscribe). No keepalive; subscribing without a connection
   (REST) is a 400.
-- Opening a live query (the methods registered `.opens()`: `subscribeQuery` / `modelSubscribe`,
+- Opening a live query (the method registered `.opens()`: `subscribe`,
   generated into `OPENS_METHODS`) is the one kind of call that a socket close cancels (its
   `cancel_token` is a child of `Connection::closed`); every other call still finishes after the
   close. One connection runs at most `MAX_OPENING_LIVE_QUERIES` (8) of these opens at once, and
   the rest wait, cancellably. A subscribe cancelled before its reply unregisters its query again
   (`open_subscription`), and one whose open completed in the same poll as the cancel disposes it
   (`perspectives_ws::subscribed` checks the token). Cancelling cannot stop a SPARQL statement
-  that is already running: it stops at the next await, and the plain `subscribeQuery` first
+  that is already running: it stops at the next await, and a SPARQL `subscribe` first
   result has none (#1595). The SDK cancels an `OPENS_METHODS` call that timed out or was
   aborted, then disposes its id (`PerspectiveClient`): `request.cancel` is handled inline, before
   the dispose is dispatched, so whichever wins, nothing stays registered.

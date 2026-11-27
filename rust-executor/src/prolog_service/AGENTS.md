@@ -26,7 +26,7 @@ configurable (`Ad4mConfig.prolog_mode` / `AD4M_PROLOG_MODE`).
 | `pool_trait.rs` | `FilteredPool` trait + `PoolUtils` shared by all three pools |
 | `source_filtering.rs`, `assert_utils.rs`, `embedding_cache.rs`, `types.rs` | fact filtering, assert-query parsing, cache, `QueryResolution`/`QueryMatch` |
 
-Live queries (`perspective.subscribeQuery`) are SPARQL or model queries and do
+Live queries (`perspective.subscribe`) are SPARQL or model queries and do
 not use Prolog; a Prolog live query gets a 400. The filtered sub-pools were built
 for Prolog live queries and are now only reached through `run_query_smart`
 (`is_subscription = false` uses existing filtered pools, never creates one).

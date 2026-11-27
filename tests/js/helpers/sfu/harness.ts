@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { InstrumentedClient } from "./client.js";
 import { startExecutor, waitForHealth, stopExecutor, sleep, ExecutorConfig } from "./executor.js";
 import { Scenario, ScenarioContext } from "./scenario.js";
+import { writePerfResults } from "./perf.js";
 import { getFreePort, registerPorts, deregisterPorts } from "../ports.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -121,7 +122,7 @@ export function sfuScenario(
       }
       if (port) deregisterPorts([port]);
       if (runDir && existsSync(runDir)) {
-        if (succeeded) {
+        if (succeeded && !process.env.SFU_KEEP_LOGS) {
           rmSync(runDir, { recursive: true, force: true });
         } else {
           console.warn(`[${scenario.id}] logs kept in ${runDir}`);
@@ -141,6 +142,8 @@ export function sfuScenario(
         executorPath,
       };
       const result = await scenario.run(ctx);
+      // Numbers for the nightly performance history (only when PERF_RESULTS_DIR is set).
+      writePerfResults(scenario.id, result);
       expect(result.passed, result.summary).to.be.true;
     });
   });

@@ -1,4 +1,4 @@
-//! Live query RPCs (`perspective.subscribeQuery`, `modelSubscribe`,
+//! Live query RPCs (`perspective.subscribe`,
 //! `resyncSubscription`, `disposeQuery`), driven through the real
 //! `HandlerMap` so each test also proves the method and its contract are
 //! registered.
@@ -31,23 +31,14 @@ const TODO_SDNA: &str = r#"{
   ]
 }"#;
 
-#[test]
-fn keepalive_methods_are_gone() {
-    let map = build_handler_map();
-    let names: Vec<&str> = map.specs().iter().map(|s| s.name.as_str()).collect();
-    for gone in ["perspective.keepAliveQuery", "perspective.keepAliveSparql"] {
-        assert!(!names.contains(&gone), "{gone}");
-    }
-    assert!(names.contains(&"perspective.resyncSubscription"));
-}
 // ── subscribe replies and resync ────────────────────────────────────────
 
 #[tokio::test]
 async fn subscribe_replies_json_at_revision_zero() {
     let p = registered_perspective(&[("Todo", TODO_SDNA)]).await;
     let reply = call(
-        "perspective.subscribeQuery",
-        json!({ "uuid": p.0, "query": "SELECT ?s WHERE { ?s <test://none> ?o }",
+        "perspective.subscribe",
+        json!({ "uuid": p.0, "sparql": "SELECT ?s WHERE { ?s <test://none> ?o }",
                 "subscriptionId": "query-sub" }),
         admin_conn_ctx("c"),
     )
@@ -62,8 +53,8 @@ async fn subscribe_replies_json_at_revision_zero() {
     );
 
     let reply = call(
-        "perspective.modelSubscribe",
-        json!({ "uuid": p.0, "class_name": "Todo", "query_json": "{}",
+        "perspective.subscribe",
+        json!({ "uuid": p.0, "model": { "className": "Todo", "queryJson": "{}" },
                 "subscriptionId": "model-sub" }),
         admin_conn_ctx("c"),
     )
@@ -82,8 +73,8 @@ async fn subscribe_replies_json_at_revision_zero() {
 async fn resync_subscription_returns_revision_and_result() {
     let p = registered_perspective(&[]).await;
     let sub = call(
-        "perspective.subscribeQuery",
-        json!({ "uuid": p.0, "query": "SELECT ?s WHERE { ?s <test://none> ?o }",
+        "perspective.subscribe",
+        json!({ "uuid": p.0, "sparql": "SELECT ?s WHERE { ?s <test://none> ?o }",
                 "subscriptionId": "s" }),
         admin_conn_ctx("c"),
     )
@@ -122,16 +113,7 @@ async fn resync_subscription_returns_revision_and_result() {
 #[tokio::test]
 async fn subscribing_needs_a_socket() {
     let p = registered_perspective(&[("Todo", TODO_SDNA)]).await;
-    for (method, params) in [
-        (
-            "perspective.subscribeQuery",
-            json!({ "uuid": p.0, "query": "SELECT ?s WHERE { ?s ?p ?o }", "subscriptionId": "s" }),
-        ),
-        (
-            "perspective.modelSubscribe",
-            json!({ "uuid": p.0, "class_name": "Todo", "query_json": "{}", "subscriptionId": "s" }),
-        ),
-    ] {
+    for (method, params) in opens(&p.0, "s") {
         let err = call(method, params, admin_ctx())
             .await
             .expect_err("no connection (REST)");
@@ -139,12 +121,45 @@ async fn subscribing_needs_a_socket() {
     }
 }
 
+/// A subscription re-runs one query; a cursor would re-run the same page
+/// forever, so `after` (even `""`) is a bad request on a model `subscribe`.
+#[tokio::test]
+async fn model_subscribe_refuses_a_cursor() {
+    let p = registered_perspective(&[("Todo", TODO_SDNA)]).await;
+    for (classes, after) in [
+        (json!({ "className": "Todo" }), json!("")),
+        (json!({ "className": "Todo" }), json!("c1")),
+        (json!({ "classNames": ["Todo"] }), json!("")),
+    ] {
+        let mut model = json!({ "queryJson": json!({ "limit": 5, "after": after }).to_string() });
+        model
+            .as_object_mut()
+            .unwrap()
+            .extend(classes.as_object().unwrap().clone());
+        let params = json!({ "uuid": p.0, "model": model, "subscriptionId": "cursor-sub" });
+        let err = call("perspective.subscribe", params, admin_conn_ctx("c"))
+            .await
+            .expect_err("a subscription cannot page by cursor");
+        assert_eq!(err.code, 400, "{classes} after={after}");
+        assert!(err.message.contains("after"), "{}", err.message);
+    }
+    // Without a cursor the same query subscribes.
+    call(
+        "perspective.subscribe",
+        json!({ "uuid": p.0, "model": { "className": "Todo", "queryJson": r#"{"limit":5}"# },
+                "subscriptionId": "cursor-sub" }),
+        admin_conn_ctx("c"),
+    )
+    .await
+    .expect("no cursor: subscribes");
+}
+
 #[tokio::test]
 async fn dispose_query_ends_only_this_connections_subscription() {
     let p = registered_perspective(&[]).await;
     let sub = call(
-        "perspective.subscribeQuery",
-        json!({ "uuid": p.0, "query": "SELECT ?s WHERE { ?s ?p ?o }", "subscriptionId": "s" }),
+        "perspective.subscribe",
+        json!({ "uuid": p.0, "sparql": "SELECT ?s WHERE { ?s ?p ?o }", "subscriptionId": "s" }),
         admin_conn_ctx("c"),
     )
     .await
@@ -163,16 +178,17 @@ async fn dispose_query_ends_only_this_connections_subscription() {
 
 // ── client-minted ids ───────────────────────────────────────────────────
 
-/// `perspective.subscribeQuery` and `modelSubscribe` with `subscriptionId` set to `id`.
+/// `perspective.subscribe` with a SPARQL query and with a model query, `subscriptionId` set to
+/// `id`.
 fn opens(uuid: &str, id: &str) -> [(&'static str, Value); 2] {
     [
         (
-            "perspective.subscribeQuery",
-            json!({ "uuid": uuid, "query": "SELECT ?s WHERE { ?s ?p ?o }", "subscriptionId": id }),
+            "perspective.subscribe",
+            json!({ "uuid": uuid, "sparql": "SELECT ?s WHERE { ?s ?p ?o }", "subscriptionId": id }),
         ),
         (
-            "perspective.modelSubscribe",
-            json!({ "uuid": uuid, "class_name": "Todo", "query_json": "{}", "subscriptionId": id }),
+            "perspective.subscribe",
+            json!({ "uuid": uuid, "model": { "className": "Todo", "queryJson": "{}" }, "subscriptionId": id }),
         ),
     ]
 }
@@ -276,12 +292,38 @@ fn the_live_query_opens_are_the_methods_marked_opens() {
         .filter(|s| s.opens)
         .map(|s| s.name.as_str())
         .collect();
-    assert_eq!(
-        marked,
-        ["perspective.modelSubscribe", "perspective.subscribeQuery"]
-    );
+    assert_eq!(marked, ["perspective.subscribe"]);
     for name in marked {
         assert!(map.opens(name), "{name}: the connection reads the marker");
     }
     assert!(!map.opens("perspective.disposeQuery"));
+}
+
+/// Exactly one of `model` and `sparql`: both, neither and unknown members are refused, and
+/// nothing is registered.
+#[tokio::test]
+async fn subscribe_takes_exactly_one_of_model_and_sparql() {
+    let p = registered_perspective(&[("Todo", TODO_SDNA)]).await;
+    let sparql = "SELECT ?s WHERE { ?s ?p ?o }";
+    let model = json!({ "className": "Todo", "queryJson": "{}" });
+    for params in [
+        json!({ "uuid": p.0, "subscriptionId": "bad", "sparql": sparql, "model": model }),
+        json!({ "uuid": p.0, "subscriptionId": "bad" }),
+        json!({ "uuid": p.0, "subscriptionId": "bad", "sparql": sparql, "extra": 1 }),
+        json!({ "uuid": p.0, "subscriptionId": "bad", "model": { "queryJson": "{}" } }),
+        json!({ "uuid": p.0, "subscriptionId": "bad", "model": { "className": "Todo", "classNames": ["Todo"], "queryJson": "{}" } }),
+    ] {
+        let err = call("perspective.subscribe", params.clone(), admin_conn_ctx("c"))
+            .await
+            .expect_err("not exactly one query");
+        assert_eq!(err.code, 400, "{params}: {}", err.message);
+    }
+    let disposed = call(
+        "perspective.disposeQuery",
+        json!({ "uuid": p.0, "subscriptionId": "bad" }),
+        admin_conn_ctx("c"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(disposed, json!(false), "a refused call registered");
 }
