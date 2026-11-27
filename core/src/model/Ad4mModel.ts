@@ -8,7 +8,7 @@ import { getPropertiesMetadata, getRelationsMetadata, setPropertyRegistryEntry, 
 import type { PropertyOptions, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
 import { formatQueryValue, compileWhereClause } from "./query-utils";
 import { requireSingleParent, requireTotalCount, resolveParentPredicate } from "./query-common";
-import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
+import { isArrayType, isObjectArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
 import type { SHACLShape } from "../shacl/SHACLShape";
 import type { RegisterResult } from "../generated/api/RegisterResult";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
@@ -17,7 +17,9 @@ import { buildSPARQLQuery, valueToLiteralIri, effectiveLiteralStorage } from "./
 import { LiveQuery } from "../perspectives/LiveQuery";
 import type { LiveOptions } from "../perspectives/LiveQuery";
 import {
+  isPropertyOnly,
   normalizeValue,
+  snapshotOf,
 } from "./hydration";
 import type {
   Scope, IncludeMap, Query,
@@ -735,7 +737,7 @@ export class Ad4mModel {
       
       if (schema.properties) {
         for (const [propertyName, propertySchema] of Object.entries(schema.properties)) {
-          const isArray = isArrayType(propertySchema as JSONSchemaProperty);
+          const isArray = isArrayType(propertySchema as JSONSchemaProperty) && !isObjectArrayType(propertySchema as JSONSchemaProperty, schema as JSONSchema);
           const predicate = determinePredicate(
             schema, 
             propertyName, 
@@ -959,10 +961,7 @@ export class Ad4mModel {
 
     // Always snapshot properties
     for (const propName of Object.keys(metadata.properties)) {
-      const val = (this as any)[propName];
-      snap[propName] = normalizeValue(
-        Array.isArray(val) ? [...val] : val,
-      );
+      snap[propName] = snapshotOf((this as any)[propName], isPropertyOnly(metadata, propName));
     }
 
     // Snapshot relations only when appropriate:
@@ -1051,7 +1050,7 @@ export class Ad4mModel {
       // setRelationValues call during innerUpdate.
       if (!(field in this._snapshot)) continue;
 
-      const current = normalizeValue((this as any)[field]);
+      const current = snapshotOf((this as any)[field], isPropertyOnly(metadata, field));
       const original = this._snapshot[field];
 
       if (Array.isArray(current) || Array.isArray(original)) {
@@ -2305,8 +2304,7 @@ export class Ad4mModel {
       const modelInstance = instance as Ad4mModel;
       if (modelInstance._snapshot) {
         for (const propName of evaluatedPropertyNames) {
-          const val = (instance as any)[propName];
-          modelInstance._snapshot[propName] = normalizeValue(Array.isArray(val) ? [...val] : val);
+          modelInstance._snapshot[propName] = snapshotOf((instance as any)[propName], isPropertyOnly(metadata, propName));
         }
       }
     }
