@@ -130,15 +130,20 @@ const relationsMetadataCache = new WeakMap<Function, Record<string, RelationMeta
 const shaclCache = new WeakMap<Function, any>();
 
 /**
- * Retrieve property metadata for a given class constructor.
- * Walks the prototype chain so subclass decorators compose with parent decorators.
- * Results are memoised per class constructor.
+ * Shared memoised merge behind getPropertiesMetadata / getRelationsMetadata:
+ * walks the constructor chain parent-first so subclass entries override
+ * inherited ones on the same key, and caches the merged object per class.
+ * Each caller keeps its own registry and cache WeakMap.
  */
-export function getPropertiesMetadata(ctor: Function): Record<string, PropertyMetadataEntry> {
-    const cached = propertiesMetadataCache.get(ctor);
+function collectMetadata<T>(
+    ctor: Function,
+    registry: WeakMap<Function, Record<string, T>>,
+    cache: WeakMap<Function, Record<string, T>>,
+): Record<string, T> {
+    const cached = cache.get(ctor);
     if (cached) return cached;
 
-    const result: Record<string, PropertyMetadataEntry> = {};
+    const result: Record<string, T> = {};
     const chain: Function[] = [];
     let current = ctor;
     while (current && current !== Object) {
@@ -146,11 +151,20 @@ export function getPropertiesMetadata(ctor: Function): Record<string, PropertyMe
         current = Object.getPrototypeOf(current);
     }
     for (const c of chain) {
-        const meta = propertyRegistry.get(c);
+        const meta = registry.get(c);
         if (meta) Object.assign(result, meta);
     }
-    propertiesMetadataCache.set(ctor, result);
+    cache.set(ctor, result);
     return result;
+}
+
+/**
+ * Retrieve property metadata for a given class constructor.
+ * Walks the prototype chain so subclass decorators compose with parent decorators.
+ * Results are memoised per class constructor.
+ */
+export function getPropertiesMetadata(ctor: Function): Record<string, PropertyMetadataEntry> {
+    return collectMetadata(ctor, propertyRegistry, propertiesMetadataCache);
 }
 
 /**
@@ -159,22 +173,7 @@ export function getPropertiesMetadata(ctor: Function): Record<string, PropertyMe
  * Results are memoised per class constructor.
  */
 export function getRelationsMetadata(ctor: Function): Record<string, RelationMetadataEntry> {
-    const cached = relationsMetadataCache.get(ctor);
-    if (cached) return cached;
-
-    const result: Record<string, RelationMetadataEntry> = {};
-    const chain: Function[] = [];
-    let current = ctor;
-    while (current && current !== Object) {
-        chain.unshift(current);
-        current = Object.getPrototypeOf(current);
-    }
-    for (const c of chain) {
-        const meta = relationRegistry.get(c);
-        if (meta) Object.assign(result, meta);
-    }
-    relationsMetadataCache.set(ctor, result);
-    return result;
+    return collectMetadata(ctor, relationRegistry, relationsMetadataCache);
 }
 
 /**
