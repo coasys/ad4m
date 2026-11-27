@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 use super::containment::{contains_patterns, has_child_only};
 use super::link_author::{
     instance_author_filter, is_link_leaf, link_author_join, may_hold_link_author,
-    side_by_side_author, side_by_side_scopes, split_leaf, LinkAuthorState,
+    side_by_side_author, side_by_side_scopes, split_leaf, StoreOnlyState,
 };
 use super::types::{
     ContainedScope, InstanceQueryPlan, ModelQueryInput, ModelShape, OrderDirection, Scope,
@@ -209,12 +209,21 @@ fn keyset_suffix(direction: OrderDirection, after: &Option<super::cursor::Keyset
 /// - [`TwoPhase`](InstanceQueryPlan::TwoPhase) when `sparql_pagination` is
 ///   provided, splitting the work into a lightweight pagination sub-query
 ///   and a `VALUES`-based property fetch.
+///
+/// `link_columns` selects the reifier's provenance columns (`?wireTarget
+/// ?proofKey ?proofSig ?proofValid ?rowStatus`) alongside the columns
+/// hydration always binds, so a `links` request on a fetched predicate can
+/// be served from these rows (`links::attach_links`) rather than re-read.
+/// The caller decides it once (`links::hydration_carries_links`); a two-phase
+/// plan applies it in its phase-2 query, which this builder does not emit.
 pub(super) fn build_instance_sparql(
     shape: &ModelShape,
     query: &ModelQueryInput,
     sparql_pagination: Option<&SparqlPagination>,
     resolver: Option<&dyn ShapeResolver>,
+    link_predicates: &[String],
 ) -> InstanceQueryPlan {
+    let link_columns = !link_predicates.is_empty();
     let (conformance, where_extra) = build_query_patterns(shape, query, resolver);
     let guard = LinkGuard::of(query);
 
@@ -318,7 +327,7 @@ pub(super) fn build_instance_sparql(
                 )
             }
             SortKey::CreatedAt => {
-                let links = hydrated_links(shape, query, &predicate_filter);
+                let links = hydrated_links(shape, query, &predicate_filter, "");
                 format!(
                     r#"SELECT DISTINCT ?source{anchor_select} (MIN(?timestamp) AS ?_first_ts) WHERE {{
 {conformance}
@@ -376,32 +385,75 @@ pub(super) fn build_instance_sparql(
             predicate_filter,
         }
     } else {
-        let links = hydrated_links(shape, query, &predicate_filter);
+        // Required patterns before the first OPTIONAL, the same ordering
+        // `links::attach_links` gives its own query.
+        let (link_select, link_optionals) = if link_columns {
+            (
+                " ?wireTarget ?proofKey ?proofSig ?proofValid ?rowStatus",
+                "    OPTIONAL { ?_reifier <ad4m://ontology/proofKey> ?proofKey . }\n    OPTIONAL { ?_reifier <ad4m://ontology/proofSignature> ?proofSig . }\n    OPTIONAL { ?_reifier <ad4m://ontology/proofValid> ?proofValid . }\n    OPTIONAL { ?_reifier <ad4m://ontology/wireTarget> ?wireTarget . }\n    OPTIONAL { ?_reifier <ad4m://ontology/status> ?rowStatus . }\n",
+            )
+        } else {
+            ("", "")
+        };
+        let values_of = |predicates: Vec<&str>| {
+            let values: String = predicates
+                .iter()
+                .map(|p| format!("<{p}>"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("    VALUES ?predicate {{ {values} }}\n")
+        };
+        // The provenance columns join every hydrated row (the reifier's
+        // five optional annotations), so they are bound only for the
+        // predicates a `links` key serves: the rows split in two groups, and
+        // the rest (a class flag's `rdf:type` row on every instance, say)
+        // skips the joins. A wildcard fetch has no predicate list to split.
+        let others: Vec<&str> = needed
+            .iter()
+            .copied()
+            .filter(|p| !link_predicates.iter().any(|l| l == p))
+            .collect();
+        let rows = if link_columns && !needed.is_empty() && !others.is_empty() {
+            let served: Vec<&str> = link_predicates.iter().map(String::as_str).collect();
+            format!(
+                "    {{\n{}    }} UNION {{\n{}    }}\n",
+                hydrated_links(shape, query, &values_of(served), link_optionals),
+                hydrated_links(shape, query, &values_of(others), "")
+            )
+        } else {
+            hydrated_links(shape, query, &predicate_filter, link_optionals)
+        };
         InstanceQueryPlan::Single(format!(
-            r#"SELECT DISTINCT ?source ?predicate ?target ?author ?timestamp WHERE {{
+            r#"SELECT DISTINCT ?source ?predicate ?target ?author ?timestamp{link_select} WHERE {{
 {conformance}
 {where_extra}
-{links}}}"#
+{rows}}}"#
         ))
     }
 }
 
 /// The links the single plan hydrates an instance from, each bound as
 /// `?source ?predicate ?target` with its `?author` and `?timestamp`: the
-/// shape's predicates (`predicate_filter`), under the read's link status,
-/// proof and `local` filters. [`SortKey::CreatedAt`] takes its `MIN` over the
-/// same links, so it is the `timestamp` / `createdAt` the hydrated row carries.
-fn hydrated_links(shape: &ModelShape, query: &ModelQueryInput, predicate_filter: &str) -> String {
+/// predicates `values` names, under the read's link status, proof and `local`
+/// filters, with `optionals` binding further reifier columns. [`SortKey::CreatedAt`]
+/// takes its `MIN` over the same links, so it is the `timestamp` / `createdAt`
+/// the hydrated row carries.
+fn hydrated_links(
+    shape: &ModelShape,
+    query: &ModelQueryInput,
+    values: &str,
+    optionals: &str,
+) -> String {
     let local_status = local_status_filter(shape);
     let link_status = link_status_filter(query.link_status.as_ref());
     let proof_valid = proof_valid_filter(query.include_unverified);
     format!(
-        r#"{predicate_filter}    ?source ?predicate ?target .
+        r#"{values}    ?source ?predicate ?target .
     ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
     FILTER(isIRI(?source) && isIRI(?predicate))
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-{link_status}{proof_valid}{local_status}"#
+{link_status}{proof_valid}{optionals}{local_status}"#
     )
 }
 
@@ -837,6 +889,7 @@ pub(super) fn build_query_patterns(
                 limit_per_anchor: _,
                 levels: _,
                 max_depth: _,
+                path: _,
             } => {
                 // An anchor that cannot be written as a term contributes no
                 // results; it must not widen the query to everything else.
@@ -1190,23 +1243,37 @@ pub(super) struct CompiledWhere {
     /// conjunctive constraint, so a partial set narrows the candidates without
     /// ever excluding a row the full clause would have kept.
     pub(super) patterns: Vec<String>,
-    /// Whether *every* condition in the clause reached `patterns`.
+    /// Whether the store alone decides the row: every condition reached
+    /// `patterns`. A declined leaf (an unknown property, a getter, an
+    /// expression-backed comparison — [`compile_leaf_condition`]) falls to the
+    /// post-hydration filter instead.
     ///
     /// When false the caller must still filter post-hydration, and must not push
     /// pagination — a `LIMIT` over a partially-filtered set returns the wrong
-    /// rows, silently. This flag is the single source of that answer; deriving it
-    /// separately from the emission is what let the two disagree.
+    /// rows, silently — nor an exact `COUNT` over rows that may yet drop.
+    /// This flag is the single source of that answer; deriving it separately
+    /// from the emission is what let the two disagree.
     pub(super) complete: bool,
-    /// Whether a per-link `author` condition was compiled anywhere in the
-    /// clause, including a relation quantifier's nested clause (see
-    /// [`super::link_author`]).
+    /// The leaves declined because their property stores an expression on a
+    /// `resolveLanguage`: the store can compare only the raw expression IRI,
+    /// never the resolved value, so no comparison on them is pushed. They are
+    /// decided after hydration — a fine answer for an ordinary leaf, but not
+    /// for a construct nothing re-checks there (a relation quantifier's nested
+    /// clause), which reads this list to refuse instead.
+    pub(super) expression_backed: Vec<String>,
+    /// Whether a construct only the store can decide was compiled anywhere in
+    /// the clause, at any depth: a per-link `author` (see
+    /// [`super::link_author`]) or a `some`/`none` relation quantifier.
     ///
-    /// Such a condition cannot be re-checked after hydration, so a clause that
-    /// sets this and is not `complete` is refused rather than run.
-    pub(super) link_author_scoped: bool,
-    /// A malformed `author` or `eq` condition, with the reason. The query is
-    /// refused with it.
-    pub(super) link_author_error: Option<String>,
+    /// Neither can be re-checked after hydration — the instance carries one
+    /// `author`, and the linked records a quantifier asks about are gone — so
+    /// a clause that sets this and is not `complete` is refused rather than
+    /// run.
+    pub(super) store_only: bool,
+    /// The first malformed or unanswerable condition met (`author`, `eq`, a
+    /// quantifier's nested clause), with the reason. The query is refused
+    /// with it.
+    pub(super) error: Option<String>,
 }
 
 /// `None` when a condition produced no patterns at all.
@@ -1264,14 +1331,23 @@ pub(super) fn compile_where_clause(
     guard: LinkGuard,
 ) -> CompiledWhere {
     let mut seq = 0usize;
-    let mut la = LinkAuthorState::default();
-    let (patterns, complete) =
-        compile_where_clause_seq(wc, shape, resolver, guard, &mut seq, &mut la);
+    let mut la = StoreOnlyState::default();
+    let mut expression_backed = Vec::new();
+    let (patterns, complete) = compile_where_clause_seq(
+        wc,
+        shape,
+        resolver,
+        guard,
+        &mut seq,
+        &mut la,
+        &mut expression_backed,
+    );
     CompiledWhere {
         patterns,
         complete,
-        link_author_scoped: la.per_link,
-        link_author_error: la.error,
+        expression_backed,
+        store_only: la.store_only,
+        error: la.error,
     }
 }
 
@@ -1288,18 +1364,27 @@ pub(super) fn compile_where_clause(
 /// The counter advances once per leaf, so variables *within* a leaf still share a
 /// suffix and correlate as they must.
 ///
-/// `la` collects what [`super::link_author`] needs to know about `author`:
-/// whether a per-link one was compiled, and any malformed one. A top-level
-/// `author` is side-by-side when this object has a link-backed sibling: it then
-/// adds its instance-level filter here and scopes those siblings' links. It
-/// never reaches into a sub-clause, and a sub-clause's never reaches out.
+/// `la` collects what [`super::link_author`] needs to know about store-only
+/// constructs: whether a per-link `author` or a relation quantifier was
+/// compiled, and any malformed one. A top-level `author` is side-by-side when
+/// this object has a link-backed sibling: it then adds its instance-level
+/// filter here and scopes those siblings' links. It never reaches into a
+/// sub-clause, and a sub-clause's never reaches out.
+/// `expression_backed` collects the leaves declined because their property
+/// stores an expression on a `resolveLanguage` (see [`compile_leaf_condition`]).
+///
+/// The bool the seq reports is "every condition produced patterns" — the
+/// coverage a store-only construct (a per-link `author`, a relation
+/// quantifier's nested clause) needs before the clause may run at all, and
+/// what `CompiledWhere::complete` reports.
 fn compile_where_clause_seq(
     wc: &BTreeMap<String, WhereCondition>,
     shape: &ModelShape,
     resolver: Option<&dyn ShapeResolver>,
     guard: LinkGuard,
     seq: &mut usize,
-    la: &mut LinkAuthorState,
+    la: &mut StoreOnlyState,
+    expression_backed: &mut Vec<String>,
 ) -> (Vec<String>, bool) {
     let mut patterns = Vec::new();
     let mut complete = true;
@@ -1309,7 +1394,7 @@ fn compile_where_clause_seq(
     // because the per-link half forbids the post-hydration fallback.
     let side_author = side_by_side_author(wc, shape);
     if let Some(author) = side_author {
-        la.per_link = true;
+        la.store_only = true;
         let tag = *seq;
         *seq += 1;
         match instance_author_filter(shape, author, &tag.to_string(), guard) {
@@ -1330,10 +1415,17 @@ fn compile_where_clause_seq(
             "AND" => match condition {
                 WhereCondition::SubClauses(branches) => {
                     for branch in branches {
-                        let (p, c) =
-                            compile_where_clause_seq(branch, shape, resolver, guard, seq, la);
+                        let (p, emitted) = compile_where_clause_seq(
+                            branch,
+                            shape,
+                            resolver,
+                            guard,
+                            seq,
+                            la,
+                            expression_backed,
+                        );
                         patterns.extend(p);
-                        complete &= c;
+                        complete &= emitted;
                     }
                 }
                 _ => complete = false,
@@ -1347,9 +1439,16 @@ fn compile_where_clause_seq(
                     // what decides whether the declined `OR` may fall back to
                     // post-hydration at all.
                     for branch in branches {
-                        let (p, c) =
-                            compile_where_clause_seq(branch, shape, resolver, guard, seq, la);
-                        if !c || !binds_source(&p) {
+                        let (p, emitted) = compile_where_clause_seq(
+                            branch,
+                            shape,
+                            resolver,
+                            guard,
+                            seq,
+                            la,
+                            expression_backed,
+                        );
+                        if !emitted || !binds_source(&p) {
                             ok = false;
                             continue;
                         }
@@ -1365,8 +1464,16 @@ fn compile_where_clause_seq(
             },
             "NOT" => match condition.as_not_clause() {
                 Some(branch) => {
-                    let (p, c) = compile_where_clause_seq(&branch, shape, resolver, guard, seq, la);
-                    if c && !p.is_empty() {
+                    let (p, emitted) = compile_where_clause_seq(
+                        &branch,
+                        shape,
+                        resolver,
+                        guard,
+                        seq,
+                        la,
+                        expression_backed,
+                    );
+                    if emitted && !p.is_empty() {
                         patterns.push(format!(
                             "    FILTER NOT EXISTS {{\n{}\n    }}",
                             p.join("\n")
@@ -1395,6 +1502,7 @@ fn compile_where_clause_seq(
                     seq,
                     &scoping,
                     la,
+                    expression_backed,
                 ) {
                     Some(p) => patterns.extend(p),
                     None => complete = false,
@@ -1417,7 +1525,14 @@ fn compile_where_clause_seq(
 /// The condition's own nested `author` (`{ eq: X, author: A }`) and the
 /// `scoping` authors of a side-by-side `author` restrict the link that
 /// satisfies the value condition; see [`super::link_author`]. A per-link author
-/// sets `la.per_link`, and a malformed one is recorded in `la.error`.
+/// sets `la.store_only`, and a malformed one is recorded in `la.error`.
+///
+/// `expression_backed` records the one decline that is a rule, not a gap: a
+/// value comparison on a property whose `resolveLanguage` is a language. The
+/// store holds the raw expression IRI and can compare only that — never the
+/// resolved value — so the comparison is decided after hydration or not at
+/// all. That "not at all" is what a nested-clause construct (a quantifier)
+/// reads the list for, to refuse rather than silently not filter.
 fn compile_leaf_condition(
     prop_name: &str,
     condition: &WhereCondition,
@@ -1426,9 +1541,18 @@ fn compile_leaf_condition(
     guard: LinkGuard,
     seq: &mut usize,
     scoping: &[&WhereCondition],
-    la: &mut LinkAuthorState,
+    la: &mut StoreOnlyState,
+    expression_backed: &mut Vec<String>,
 ) -> Option<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
+    macro_rules! or_decline {
+        ($e:expr) => {
+            match $e {
+                Some(v) => v,
+                None => return None,
+            }
+        };
+    }
     // One id per leaf: variables inside a leaf share it, because they are meant
     // to correlate. Variables across leaves never do.
     let leaf_id = *seq;
@@ -1455,7 +1579,7 @@ fn compile_leaf_condition(
         .chain(scoping.iter().copied())
         .collect();
     if !authors.is_empty() {
-        la.per_link = true;
+        la.store_only = true;
     }
 
     // What restricts the link behind a triple this leaf emits: its author when
@@ -1480,7 +1604,7 @@ fn compile_leaf_condition(
     let condition: Option<&WhereCondition> = value.as_deref();
 
     if prop_name == "base" || prop_name == "id" {
-        match condition? {
+        match or_decline!(condition) {
             WhereCondition::String(val) => {
                 if emittable_iri(val) {
                     // `VALUES` rather than `FILTER(?source = <val>)`:
@@ -1547,7 +1671,7 @@ fn compile_leaf_condition(
         if prop.predicate.is_empty() {
             return None;
         }
-        let safe_pred = validate_iri(&prop.predicate).ok()?;
+        let safe_pred = or_decline!(validate_iri(&prop.predicate).ok());
         let direction = prop.direction.as_deref().unwrap_or("forward");
         // `{ author: A }` alone: A wrote some link on the relation.
         let Some(condition) = condition else {
@@ -1557,18 +1681,43 @@ fn compile_leaf_condition(
             } else {
                 ("?source", far.as_str())
             };
-            let join = author_join(subject, safe_pred, object, "")?;
+            let join = or_decline!(author_join(subject, safe_pred, object, ""));
             out.push(format!("    {subject} <{safe_pred}> {object} .{join}"));
             return finish(out);
         };
+        // A value comparison on a property whose `resolveLanguage` is a
+        // language compares the raw expression IRI — the store never sees the
+        // resolved value — so it is declined, not approximated. `some`/`none`
+        // passes through to `compile_relation_quantifier`, which answers for
+        // its own nested clause: refusing, because no post-hydration pass
+        // re-checks a quantifier.
+        if prop
+            .resolve_language
+            .as_deref()
+            .is_some_and(|lang| lang != "literal")
+            && !matches!(condition, WhereCondition::Ops(ops) if ops.some.is_some() || ops.none.is_some())
+        {
+            expression_backed.push(prop_name.to_string());
+            if !authors.is_empty() {
+                la.fail(format!(
+                    "where: `{prop_name}` asks a value condition and a per-link `author` on a \
+                     property stored as expressions on a `resolveLanguage`: post-hydration \
+                     cannot re-check which authored link carried the value, so the pair \
+                     cannot be answered."
+                ));
+            }
+            return None;
+        }
         match condition {
             WhereCondition::String(val) => {
                 if emittable_iri(val) {
                     if direction == "reverse" {
-                        let join = author_join(&format!("<{val}>"), safe_pred, "?source", "")?;
+                        let join =
+                            or_decline!(author_join(&format!("<{val}>"), safe_pred, "?source", ""));
                         out.push(format!("    <{val}> <{safe_pred}> ?source .{join}"));
                     } else {
-                        let join = author_join("?source", safe_pred, &format!("<{val}>"), "")?;
+                        let join =
+                            or_decline!(author_join("?source", safe_pred, &format!("<{val}>"), ""));
                         out.push(format!("    ?source <{safe_pred}> <{val}> .{join}"));
                     }
                 } else {
@@ -1578,14 +1727,22 @@ fn compile_leaf_condition(
                     );
                     let escaped = escape_sparql_string(val);
                     if direction == "reverse" {
-                        let join =
-                            author_join(&format!("?_rv_{safe_name}"), safe_pred, "?source", "")?;
+                        let join = or_decline!(author_join(
+                            &format!("?_rv_{safe_name}"),
+                            safe_pred,
+                            "?source",
+                            ""
+                        ));
                         out.push(format!(
                             "    ?_rv_{safe_name} <{safe_pred}> ?source . FILTER(STR(?_rv_{safe_name}) = \"{escaped}\"){join}"
                         ));
                     } else {
-                        let join =
-                            author_join("?source", safe_pred, &format!("?_ft_{safe_name}"), "")?;
+                        let join = or_decline!(author_join(
+                            "?source",
+                            safe_pred,
+                            &format!("?_ft_{safe_name}"),
+                            ""
+                        ));
                         out.push(format!(
                             "    ?source <{safe_pred}> ?_ft_{safe_name} . FILTER(STR(?_ft_{safe_name}) = \"{escaped}\"){join}"
                         ));
@@ -1601,9 +1758,19 @@ fn compile_leaf_condition(
                 // Every form below binds `?_rv_`/`?_ft_` as the far end of the
                 // link, so one join covers them.
                 let join = if direction == "reverse" {
-                    author_join(&format!("?_rv_{safe_name}"), safe_pred, "?source", "")?
+                    or_decline!(author_join(
+                        &format!("?_rv_{safe_name}"),
+                        safe_pred,
+                        "?source",
+                        ""
+                    ))
                 } else {
-                    author_join("?source", safe_pred, &format!("?_ft_{safe_name}"), "")?
+                    or_decline!(author_join(
+                        "?source",
+                        safe_pred,
+                        &format!("?_ft_{safe_name}"),
+                        ""
+                    ))
                 };
                 if all_valid {
                     let iris = vals
@@ -1638,6 +1805,12 @@ fn compile_leaf_condition(
                 }
             }
             WhereCondition::Ops(ops) if ops.some.is_some() || ops.none.is_some() => {
+                // The `FILTER [NOT] EXISTS` this becomes is the only answer a
+                // quantifier ever gets: post-hydration the linked records are
+                // gone and `matches_ops` fails closed on `some`/`none`. That
+                // makes the clause store-only, so any decline below — or beside
+                // this leaf — is refused rather than returned as an empty page.
+                la.store_only = true;
                 // Every decline below ends the same way for the caller: the
                 // clause is incomplete, the post-hydration filter rejects every
                 // row, and the query returns nothing. That is the sound answer
@@ -1678,9 +1851,9 @@ fn compile_leaf_condition(
                         return None;
                     }
                 };
-                let quantified = compile_relation_quantifier(
+                let quantified = or_decline!(compile_relation_quantifier(
                     shape, prop, safe_pred, inner, negate, resolver, guard, leaf_id, &authors, la,
-                )?;
+                ));
                 out.push(quantified);
             }
             _ => {}
@@ -1708,10 +1881,33 @@ fn compile_leaf_condition(
             out.push(format!(
                 "    ?source <{}> {var} .{}",
                 prop.predicate,
-                author_join("?source", &prop.predicate, &var, "")?
+                or_decline!(author_join("?source", &prop.predicate, &var, ""))
             ));
             return finish(out);
         };
+        // A value comparison on a property whose `resolveLanguage` is a
+        // language can compare only the raw expression IRI — never the
+        // resolved value — so it is declined, not approximated: the row is
+        // decided after hydration, where the resolved value lives. With an
+        // `author` on the leaf there is no second chance at all: post-hydration
+        // cannot tell which authored link carried the value, so the pair is
+        // refused rather than answered against the wrong link.
+        if prop
+            .resolve_language
+            .as_deref()
+            .is_some_and(|lang| lang != "literal")
+        {
+            expression_backed.push(prop_name.to_string());
+            if !authors.is_empty() {
+                la.fail(format!(
+                    "where: `{prop_name}` asks a value condition and a per-link `author` on a \
+                     property stored as expressions on a `resolveLanguage`: post-hydration \
+                     cannot re-check which authored link carried the value, so the pair \
+                     cannot be answered."
+                ));
+            }
+            return None;
+        }
         match condition {
             WhereCondition::String(val) => {
                 if is_literal_prop {
@@ -1723,10 +1919,14 @@ fn compile_leaf_condition(
                     // resolve.
                     let escaped = escape_sparql_string(val);
                     let typed = format!("\"{escaped}\"^^<{XSD_STRING}>");
-                    let join = author_join("?source", &prop.predicate, &typed, "")?;
+                    let join = or_decline!(author_join("?source", &prop.predicate, &typed, ""));
                     if looks_like_absolute_iri(val) {
-                        let iri_join =
-                            author_join("?source", &prop.predicate, &format!("<{val}>"), "b")?;
+                        let iri_join = or_decline!(author_join(
+                            "?source",
+                            &prop.predicate,
+                            &format!("<{val}>"),
+                            "b"
+                        ));
                         out.push(format!(
                                     "    {{ ?source <{0}> {typed} .{join} }} UNION {{ ?source <{0}> <{val}> .{iri_join} }}",
                                     prop.predicate
@@ -1735,18 +1935,18 @@ fn compile_leaf_condition(
                         out.push(format!("    ?source <{}> {typed} .{join}", prop.predicate));
                     }
                 } else {
-                    // Expression-resolved storage (signed literal envelope
-                    // or custom resolveLanguage): the stored term is the
-                    // envelope/expression, never a NamedNode equal to
-                    // `val`. Unwrap with `fn/parse_literal` and compare on
-                    // the decoded value. (Emitting `<val>` here would also
-                    // be an invalid relative IRI for non-absolute values.)
+                    // `resolveLanguage: "literal"` storage (signed literal
+                    // envelope): the stored term is the envelope, never a
+                    // NamedNode equal to `val`. Unwrap with `fn/parse_literal`
+                    // and compare on the decoded value. (Emitting `<val>` here
+                    // would also be an invalid relative IRI for non-absolute
+                    // values.)
                     let var = format!("?_pw_{safe_name}");
                     let escaped = escape_sparql_string(val);
                     out.push(format!(
                         "    ?source <{}> {var} .{}",
                         prop.predicate,
-                        author_join("?source", &prop.predicate, &var, "")?
+                        or_decline!(author_join("?source", &prop.predicate, &var, ""))
                     ));
                     out.push(format!(
                         "    FILTER(<ad4m://fn/parse_literal>({var}) = \"{escaped}\")"
@@ -1756,7 +1956,7 @@ fn compile_leaf_condition(
             WhereCondition::Number(n) => {
                 if is_literal_prop {
                     if let Some(typed) = typed_number_literal(*n) {
-                        let join = author_join("?source", &prop.predicate, &typed, "")?;
+                        let join = or_decline!(author_join("?source", &prop.predicate, &typed, ""));
                         out.push(format!("    ?source <{}> {typed} .{join}", prop.predicate));
                     } else {
                         out.push("    FILTER(false)".to_string());
@@ -1766,7 +1966,7 @@ fn compile_leaf_condition(
                     out.push(format!(
                         "    ?source <{}> {var} .{}",
                         prop.predicate,
-                        author_join("?source", &prop.predicate, &var, "")?
+                        or_decline!(author_join("?source", &prop.predicate, &var, ""))
                     ));
                     out.push(format!(
                         "    FILTER(<ad4m://fn/parse_literal>({var}) = \"{n}\")"
@@ -1776,14 +1976,14 @@ fn compile_leaf_condition(
             WhereCondition::Bool(b) => {
                 if is_literal_prop {
                     let typed = format!("\"{b}\"^^<{XSD_BOOLEAN}>");
-                    let join = author_join("?source", &prop.predicate, &typed, "")?;
+                    let join = or_decline!(author_join("?source", &prop.predicate, &typed, ""));
                     out.push(format!("    ?source <{}> {typed} .{join}", prop.predicate));
                 } else {
                     let var = format!("?_pw_{safe_name}");
                     out.push(format!(
                         "    ?source <{}> {var} .{}",
                         prop.predicate,
-                        author_join("?source", &prop.predicate, &var, "")?
+                        or_decline!(author_join("?source", &prop.predicate, &var, ""))
                     ));
                     out.push(format!(
                         "    FILTER(<ad4m://fn/parse_literal>({var}) = \"{b}\")"
@@ -1805,7 +2005,7 @@ fn compile_leaf_condition(
                     out.push(format!(
                         "    ?source <{}> {iv_var} .{}",
                         prop.predicate,
-                        author_join("?source", &prop.predicate, &iv_var, "")?
+                        or_decline!(author_join("?source", &prop.predicate, &iv_var, ""))
                     ));
                 } else {
                     let values_list = vals
@@ -1817,7 +2017,7 @@ fn compile_leaf_condition(
                     out.push(format!(
                         "    ?source <{}> {var} .{}",
                         prop.predicate,
-                        author_join("?source", &prop.predicate, &var, "")?
+                        or_decline!(author_join("?source", &prop.predicate, &var, ""))
                     ));
                     out.push(format!(
                         "    FILTER(<ad4m://fn/parse_literal>({var}) IN ({values_list}))"
@@ -1838,7 +2038,7 @@ fn compile_leaf_condition(
                         out.push(format!(
                             "    ?source <{}> {iv_var} .{}",
                             prop.predicate,
-                            author_join("?source", &prop.predicate, &iv_var, "")?
+                            or_decline!(author_join("?source", &prop.predicate, &iv_var, ""))
                         ));
                     }
                 } else {
@@ -1851,7 +2051,7 @@ fn compile_leaf_condition(
                     out.push(format!(
                         "    ?source <{}> {var} .{}",
                         prop.predicate,
-                        author_join("?source", &prop.predicate, &var, "")?
+                        or_decline!(author_join("?source", &prop.predicate, &var, ""))
                     ));
                     out.push(format!(
                         "    FILTER(<ad4m://fn/parse_literal>({var}) IN ({values_list}))"
@@ -1864,7 +2064,7 @@ fn compile_leaf_condition(
                 out.push(format!(
                     "    ?source <{}> {var} .{}",
                     prop.predicate,
-                    author_join("?source", &prop.predicate, &var, "")?
+                    or_decline!(author_join("?source", &prop.predicate, &var, ""))
                 ));
                 // Compare on the lexical string rather than on a typed
                 // literal term: Oxigraph treats a simple literal and an
@@ -1982,7 +2182,8 @@ fn compile_leaf_condition(
                 if filters.is_empty() || unhandled {
                     return None;
                 }
-                out.push(format!("    FILTER({})", filters.join(" && ")));
+                let conjunction = filters.join(" && ");
+                out.push(format!("    FILTER({conjunction})"));
             }
             // SubClauses/SubClause are OR/AND/NOT combinators evaluated
             // Rust-side; the outer loop skips them before reaching here.
@@ -2010,7 +2211,7 @@ mod tests {
     }
 
     fn pagination_subquery(shape: &ModelShape, pg: &SparqlPagination) -> String {
-        match build_instance_sparql(shape, &ModelQueryInput::default(), Some(pg), None) {
+        match build_instance_sparql(shape, &ModelQueryInput::default(), Some(pg), None, &[]) {
             InstanceQueryPlan::TwoPhase {
                 pagination_subquery,
                 ..
@@ -2159,7 +2360,7 @@ mod tests {
     #[test]
     fn flag_initial_that_is_not_an_iri_takes_the_str_fallback() {
         let s = shape("Todo", vec![flag("done", "todo://done", "true")]);
-        let plan = build_instance_sparql(&s, &ModelQueryInput::default(), None, None);
+        let plan = build_instance_sparql(&s, &ModelQueryInput::default(), None, None, &[]);
         let sparql = match plan {
             InstanceQueryPlan::Single(q) => q,
             InstanceQueryPlan::TwoPhase { .. } => panic!("expected Single plan"),
@@ -2174,7 +2375,7 @@ mod tests {
         );
         // And an initial that IS a real IRI keeps the seekable form.
         let s = shape("Todo", vec![flag("done", "todo://done", "todo://yes")]);
-        let plan = build_instance_sparql(&s, &ModelQueryInput::default(), None, None);
+        let plan = build_instance_sparql(&s, &ModelQueryInput::default(), None, None, &[]);
         let sparql = match plan {
             InstanceQueryPlan::Single(q) => q,
             InstanceQueryPlan::TwoPhase { .. } => panic!("expected Single plan"),
@@ -2214,6 +2415,7 @@ mod tests {
 mod where_compiler_tests {
     use super::*;
     use crate::perspectives::model_query::test_helpers::{prop, relation, shape};
+    use crate::perspectives::model_query::types::WhereOps;
 
     fn wc(pairs: Vec<(&str, WhereCondition)>) -> BTreeMap<String, WhereCondition> {
         pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
@@ -2288,6 +2490,96 @@ mod where_compiler_tests {
 
         assert!(!compiled.patterns.is_empty(), "the known key still pushes");
         assert!(!compiled.complete, "but the clause is not fully covered");
+    }
+
+    // ---- expression-backed leaves are never pushed ----
+
+    /// A `resolveLanguage: "literal"` property — the signed-envelope storage
+    /// the store can decode — keeps its exact pushdown.
+    fn literal_expr_shape() -> ModelShape {
+        let mut body = prop("body", "we://body");
+        body.resolve_language = Some("literal".to_string());
+        shape("Post", vec![prop("title", "we://title"), body])
+    }
+
+    /// A property on a real `resolveLanguage`: the store holds the raw
+    /// expression IRI, which is all it could ever compare.
+    fn lang_shape() -> ModelShape {
+        let mut body = prop("body", "we://body");
+        body.resolve_language = Some("lang://words".to_string());
+        shape("Post", vec![prop("title", "we://title"), body])
+    }
+
+    #[test]
+    fn a_literal_expression_property_keeps_its_pushdown() {
+        let s = literal_expr_shape();
+        let clause = wc(vec![("body", WhereCondition::String("x".to_string()))]);
+
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
+
+        assert!(compiled.complete);
+        assert!(
+            compiled.patterns.join("\n").contains("parse_literal"),
+            "the envelope is unwrapped in the store: {}",
+            compiled.patterns.join("\n")
+        );
+    }
+
+    #[test]
+    fn a_language_backed_leaf_is_never_pushed() {
+        // The store can compare only the raw expression IRI — which can
+        // neither prove a match nor a non-match — so the comparison is
+        // decided on the resolved value after hydration.
+        let s = lang_shape();
+        let clause = wc(vec![("body", WhereCondition::String("x".to_string()))]);
+
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
+
+        assert!(compiled.patterns.is_empty());
+        assert!(!compiled.complete);
+        assert_eq!(compiled.expression_backed, vec!["body".to_string()]);
+    }
+
+    #[test]
+    fn a_language_backed_leaf_under_not_is_decided_on_the_value() {
+        // A pushed `NOT EXISTS` would test the raw IRI — `NOT {body: "expr"}`
+        // must read the resolved value, so the clause falls to the
+        // post-hydration filter instead of emitting a partial pattern.
+        let s = lang_shape();
+        let clause = wc(vec![(
+            "NOT",
+            WhereCondition::SubClause(branch(vec![(
+                "body",
+                WhereCondition::String("x".to_string()),
+            )])),
+        )]);
+
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
+
+        assert!(compiled.patterns.is_empty());
+        assert!(!compiled.complete);
+    }
+
+    #[test]
+    fn author_plus_value_on_a_language_backed_property_is_refused() {
+        // The per-link answer — did *this authored link* carry the value —
+        // exists in the store only, but the value exists post-hydration only:
+        // neither layer can answer the pair, so the query is refused.
+        let s = lang_shape();
+        let clause = wc(vec![(
+            "body",
+            WhereCondition::Ops(WhereOps {
+                eq: Some(Box::new(WhereCondition::String("x".to_string()))),
+                author: Some(Box::new(WhereCondition::String("did:a".to_string()))),
+                ..Default::default()
+            }),
+        )]);
+
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
+
+        assert!(!compiled.complete);
+        let error = compiled.error.expect("the pair is refused");
+        assert!(error.contains("`body`"), "{error}");
     }
 
     // ---- OR -> UNION -----------------------------------------------------
@@ -2614,7 +2906,7 @@ fn compile_relation_quantifier(
     guard: LinkGuard,
     leaf_id: usize,
     authors: &[&WhereCondition],
-    la: &mut LinkAuthorState,
+    la: &mut StoreOnlyState,
 ) -> Option<String> {
     // The caller found `prop` *by* this name, so the two cannot disagree.
     let prop_name = prop.name.as_str();
@@ -2708,20 +3000,32 @@ fn compile_relation_quantifier(
             );
             // Uncompiled, the clause can still hold a per-link `author`, and
             // the refusal must hear of it from its syntax.
-            la.per_link |= may_hold_link_author(inner);
+            la.store_only |= may_hold_link_author(inner);
             return None;
         };
 
         let compiled = compile_where_clause(inner, target_shape.as_ref(), resolver, guard);
-        // Carried up before the clause can be declined below: a per-link
-        // `author` in a nested clause the store cannot answer in full must
+        // Carried up before the clause can be declined below: a store-only
+        // construct in a nested clause the store cannot answer in full must
         // reach `refuse_unanswerable_link_author`. The post-hydration filter
         // happens to fail closed on every quantifier too, but that is not what
         // this refusal may rest on.
-        la.merge(
-            compiled.link_author_scoped,
-            compiled.link_author_error.clone(),
-        );
+        la.merge(compiled.store_only, compiled.error.clone());
+        // An expression-backed leaf is the one decline that is a rule, not a
+        // gap: the store can compare only the raw expression IRI, and no
+        // post-hydration pass re-checks a quantifier — so the query would
+        // silently not filter what it was asked to. Refuse it, naming the
+        // property, rather than returning no rows with no reason.
+        if !compiled.expression_backed.is_empty() {
+            la.fail(format!(
+                "where: the `some`/`none` quantifier on `{prop_name}` asks about `{}`, \
+                 whose values are stored as expressions on a `resolveLanguage`: the store \
+                 can compare only the raw expression IRI and nothing re-checks a quantifier \
+                 after hydration, so the condition cannot be answered.",
+                compiled.expression_backed.join("`, `")
+            ));
+            return None;
+        }
         if !compiled.complete || compiled.patterns.is_empty() {
             log::warn!(
                 "where: the nested clause on relation `{prop_name}` could not be compiled to \
@@ -2932,6 +3236,32 @@ mod relation_quantifier_tests {
         let compiled = compile_where_clause(&clause, &s, Some(&r), LinkGuard::ANY);
         assert!(!compiled.complete);
         assert!(compiled.patterns.is_empty());
+    }
+
+    #[test]
+    fn a_quantifier_over_a_language_backed_property_is_refused() {
+        // The nested `body` is stored as an expression on a `resolveLanguage`,
+        // so the store can compare only the raw IRI — and no post-hydration
+        // pass re-checks a quantifier. Returning no rows silently would look
+        // like "no comments match"; it is refused instead, naming `body`.
+        let s = post_shape();
+        let mut body = prop("body", "we://body");
+        body.resolve_language = Some("lang://words".to_string());
+        let r = StaticShapeResolver::new();
+        r.register("Comment", shape("Comment", vec![body]));
+        let clause = wc(vec![(
+            "comments",
+            ops_with(
+                Some(vec![("body", WhereCondition::String("x".to_string()))]),
+                None,
+            ),
+        )]);
+
+        let compiled = compile_where_clause(&clause, &s, Some(&r), LinkGuard::ANY);
+
+        assert!(!compiled.complete);
+        let error = compiled.error.expect("the quantifier is refused");
+        assert!(error.contains("`body`"), "{error}");
     }
 
     #[test]
@@ -3348,6 +3678,7 @@ mod traverse_scope_tests {
             limit_per_anchor,
             levels: None,
             max_depth: None,
+            path: None,
         }
     }
 
@@ -3362,7 +3693,7 @@ mod traverse_scope_tests {
             Some(3),
         ));
         let pg = make_pg(SortKey::Timestamp, OrderDirection::ASC);
-        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None) {
+        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None, &[]) {
             InstanceQueryPlan::TwoPhase {
                 pagination_subquery,
                 ..
@@ -3448,7 +3779,7 @@ mod traverse_scope_tests {
             SortKey::Projection("test://has-like".to_string()),
             OrderDirection::DESC,
         );
-        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None) {
+        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None, &[]) {
             InstanceQueryPlan::TwoPhase {
                 pagination_subquery,
                 ..
@@ -3475,7 +3806,7 @@ mod traverse_scope_tests {
             SortKey::Projection("test://has-like".to_string()),
             OrderDirection::DESC,
         );
-        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None) {
+        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None, &[]) {
             InstanceQueryPlan::TwoPhase {
                 pagination_subquery,
                 ..
@@ -3491,6 +3822,32 @@ mod traverse_scope_tests {
             sparql.contains("GROUP BY ?source\n") || sparql.contains("GROUP BY ?source "),
             "the GROUP BY should be unchanged: {sparql}"
         );
+    }
+
+    /// A `path` refuses every field it replaces when the field is present,
+    /// whatever its value: `transitive: false` parses to the same `false` as
+    /// an absent key, so a check on the parsed value lets it through.
+    #[test]
+    fn a_path_scope_refuses_a_competing_key_whatever_its_value() {
+        for (key, value) in [
+            ("transitive", serde_json::json!(false)),
+            ("predicate", serde_json::json!("test://child")),
+            ("levels", serde_json::json!([2])),
+            ("limitPerAnchor", serde_json::json!(3)),
+            ("maxDepth", serde_json::json!(1)),
+        ] {
+            let mut json = serde_json::json!({ "ids": "test://a", "path": ["test://child"] });
+            json[key] = value;
+            let err = serde_json::from_value::<Scope>(json)
+                .expect_err("a competing key beside `path` must be refused");
+            assert!(err.to_string().contains(key), "{key}: {err}");
+        }
+        serde_json::from_value::<Scope>(serde_json::json!({
+            "ids": "test://a",
+            "path": ["test://child"],
+            "direction": "out",
+        }))
+        .expect("`direction` applies to every hop of a path");
     }
 
     #[test]

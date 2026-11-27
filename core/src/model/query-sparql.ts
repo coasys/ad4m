@@ -333,6 +333,18 @@ export function buildSPARQLQuery(
 
   // Parent filter — direct triple pattern
   if (query.parent) {
+    // A path walk is a different predicate at each hop, so it names no
+    // single predicate for `resolveParentPredicate` — and the walk itself is
+    // evaluated by the executor between query phases, a shape this path
+    // does not have. Refuse it up front: without this check it falls into
+    // the model-form lookup and fails on `model` being absent, reading like
+    // a caller error rather than an unsupported scope.
+    if (isTraverseScope(query.parent) && 'path' in query.parent) {
+      throw new Error(
+        'buildSPARQLQuery: path is walked by the executor between query phases and ' +
+          'has no equivalent here. Use the model query path (findAll / query / subscribe).',
+      );
+    }
     const parentPredicate = resolveParentPredicate(query.parent, modelClass);
     if (isTraverseScope(query.parent)) {
       const { ids, transitive, direction, limitPerAnchor, levels } = query.parent;

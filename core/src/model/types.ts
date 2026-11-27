@@ -131,9 +131,14 @@ export interface ContainedScope {
   field?: never;
 }
 
-/** Whether this traversal follows containment rather than a named predicate. */
+/** Whether this traversal follows containment rather than named predicates. */
 export function isContainmentTraversal(scope: Scope): scope is TraverseByContainment {
-  return isTraverseScope(scope) && !('predicate' in scope && scope.predicate) && !('model' in scope && scope.model);
+  return (
+    isTraverseScope(scope) &&
+    !('predicate' in scope && scope.predicate) &&
+    !('model' in scope && scope.model) &&
+    !('path' in scope && scope.path)
+  );
 }
 
 /** Whether this scope is the containment form, `{ id }` alone. */
@@ -153,7 +158,11 @@ export function isContainedScope(scope: Scope): scope is ContainedScope {
  * or by the model and relation that own it. See {@link TraverseByPredicate} and
  * {@link TraverseByModel}.
  */
-export type TraverseScope = TraverseByPredicate | TraverseByModel | TraverseByContainment;
+export type TraverseScope =
+  | TraverseByPredicate
+  | TraverseByModel
+  | TraverseByContainment
+  | TraverseByPath;
 
 /**
  * A traversal over containment, through the built-in `Container`: it names no
@@ -190,6 +199,47 @@ export interface TraverseByPredicate extends TraverseOptions {
 export interface TraverseByModel extends TraverseOptions {
   model: typeof Ad4mModel;
   field?: string;
+}
+
+/**
+ * A traversal naming a different predicate at each hop — the form a thread
+ * read takes: `['we://children', 'we://thread']` from a conversation is its
+ * direct children through the first predicate **and** their replies through
+ * the second, as one flat result in breadth-first order.
+ *
+ * The result is the union of every hop, not only the deepest: a two-predicate
+ * path reports the level-1 records and the level-2 records alike, each once.
+ * `direction` applies to every hop; the anchors are excluded from their own
+ * result, as with `transitive` and `levels`.
+ *
+ * A path read is an edge walk: class conformance and `where` decide only
+ * which reached nodes are *returned*, never which are walked through — a
+ * reply under a direct child that fails the class or `where` is still
+ * returned when the reply itself passes. Every edge keeps the proof and
+ * link-status guards the rest of the query honours, and only the edges are
+ * guarded: an intermediate node of a foreign class, or one carrying a forged
+ * class flag, is walked through when its membership edges are valid. `levels`
+ * answers differently on purpose: each of its levels is a scoped read, so a
+ * node it filters out does end that walk.
+ *
+ * The walk has no frontier cap beyond the path's length: each hop is one
+ * guarded query over the whole frontier of the hop before it, so its cost
+ * grows with the number of nodes reached, not with the page asked for.
+ *
+ * The path's length is the depth, so it is refused alongside `predicate` and
+ * `levels` (other ways to name the relation), `transitive` and `maxDepth`
+ * (other ways to bound it), and `limitPerAnchor` (it follows every link at
+ * each hop — a per-anchor breadth would need one number per hop).
+ */
+export interface TraverseByPath extends TraverseOptions {
+  path: string[];
+  predicate?: never;
+  model?: never;
+  field?: never;
+  transitive?: never;
+  limitPerAnchor?: never;
+  maxDepth?: never;
+  levels?: never;
 }
 
 /** Everything a traversal says that is not how it names its predicate. */

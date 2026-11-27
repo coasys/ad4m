@@ -42,23 +42,18 @@ import {
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { addE2eLlm, E2E_PASS_TIMEOUT_MS, waitUntil } from "../helpers/index";
 import { ChildProcess } from "node:child_process";
-import { ConversationSubgroup } from "./model/auto-processor-models";
+import { ChannelMessage, ConversationSubgroup } from "./model/auto-processor-models";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const ADMIN_CREDENTIAL = "auto-processor-multi-user-admin";
 
-// Same shape as the two-executor test uses: speaker + timestamp come off the
-// body link's reifier, so `?speaker` is the DID that signed the body — which
-// is what election walks.
-const SCOPE_QUERY = `SELECT ?speaker ?text ?timestamp WHERE {
-  ?m <ns://body> ?text .
-  ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?m <ns://body> ?text )>> .
-  ?r <ad4m://ontology/author> ?speaker .
-  ?r <ad4m://ontology/timestamp> ?timestamp .
-}
-ORDER BY ?timestamp`;
+// Same scope as the two-executor test uses, as a model query now (#1794):
+// the processor reads `ns://Message` instances and each turn's speaker is the
+// DID that signed the instance's links — which is what election walks.
+const SOURCE_CLASS = "ns://Message";
+const SOURCE_TEXT = "body";
 
 // LLM E2E gate — this suite drives the executor's real LLM path. Skipped by
 // default (unset `LLM_E2E`); the nightly `llm-e2e` workflow on `dev` runs it
@@ -178,13 +173,15 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
 
     const aliceP = (await alice!.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
     await ConversationSubgroup.register(aliceP);
+    await ChannelMessage.register(aliceP);
 
     const events: AutoProcessorEvent[] = [];
     aliceP.on("auto-processor-event", (e) => events.push(e));
 
     await aliceP.addAutoProcessor({
       processorId: "managed-users-channel",
-      sourceScopeQuery: SCOPE_QUERY,
+      sourceClass: SOURCE_CLASS,
+      sourceText: SOURCE_TEXT,
       interpretationClasses: ["ns://ConversationSubgroup"],
       debounceMs: 200,
       batchMin: 2,
@@ -205,14 +202,28 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
     bobP.on("auto-processor-event", (e) => events.push(e));
 
     // One turn from each managed user's own JWT'd client — so each link is
-    // signed by that user's DID and the body link's reifier carries the
-    // managed user (not the host) as `?speaker` for election.
+    // signed by that user's DID and the instance carries the managed user
+    // (not the host) as its speaker for election.
+    await aliceP.add(
+      new Link({
+        source: "msg://alice-1",
+        predicate: "ns://type",
+        target: "ns://message",
+      }),
+    );
     await aliceP.add(
       new Link({
         source: "msg://alice-1",
         predicate: "ns://body",
         target:
           "literal:string:Our webhook retries keep dropping during payment outages — we lose the failed events.",
+      }),
+    );
+    await bobP.add(
+      new Link({
+        source: "msg://bob-1",
+        predicate: "ns://type",
+        target: "ns://message",
       }),
     );
     await bobP.add(

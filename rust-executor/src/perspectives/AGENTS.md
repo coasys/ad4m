@@ -11,8 +11,8 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 | `mod.rs` | Global registry `PERSPECTIVES` (uuid → `PerspectiveInstance`), `add/update/remove_perspective`, `get_perspective(uuid)`, `all_perspectives()`, link-language signal routing (`handle_*_from_link_language`), telepresence publish, import/export |
 | `perspective_instance.rs` (7.6k) | **The** instance: link CRUD + batches, neighbourhood sync/commit loops, SDNA/SHACL registration, subject create/update/read, `execute_commands`, query subscriptions, notifications, telepresence signals, Prolog facade, auto-processor tick. One `impl`; being split into `perspective_instance/` |
 | `sparql_store.rs` | Per-perspective oxigraph store. Links stored as reified triples. `add_link/remove_link`, `query_links`, `query_arbitrary` (read-only SPARQL from clients), custom SPARQL fns (`parse_literal`, `strip_html`), named-graph → reifier migration |
-| `write_log.rs` | The store's log of recent writes by generation: the links each one only added, or `Other` (`SparqlStore::additions_since`) |
-| `model_query/` | Typed queries over SHACL shapes: `shape.rs` loads `ModelShape` from SHACL triples → `sparql_builder.rs` → `SparqlStore` → `hydration.rs` → `filtering.rs` → `getters.rs`/`relations.rs`/`projection.rs`. Entry: `execute_model_query` (`query.rs`). `mod.rs` has the pipeline diagram |
+| `write_log.rs` | Removed (#1794): the auto-processor's wake feed is now `subscription_triggers::Writes`, the per-commit write info `check_subscribed_queries` already builds |
+| `model_query/` | Typed queries over SHACL shapes: `shape.rs` loads `ModelShape` from SHACL triples → `sparql_builder.rs` → `SparqlStore` → `hydration.rs` → `filtering.rs` → `getters.rs`/`relations.rs`/`projection.rs`. Entry: `execute_model_query` (`query.rs`). `mod.rs` has the pipeline diagram. A `path` read is an edge walk: every edge keeps the proof and link-status guards, but class conformance and `where` apply only to the reached nodes that are returned — an intermediate that fails either is walked through (`levels` keeps its per-level cut). Traversal (`walk_levels`): output de-dupes per node; the next-depth frontier de-dupes per depth — under a multi-hop `path` a node reported at one depth still walks at the next (its hop predicates differ); under `levels` only newly reported nodes walk on. A pushed `where` comparison on a `resolveLanguage` property keeps an undecodable expression IRI (a raw IRI, not a `literal:` value) for hydration to mark `__unresolved` rather than rejecting it at the store, so the retry clock can admit the row when the language arrives |
 | `shacl_parser.rs` | Writer side: a class's links (`shape_links`; `parse_shacl_to_links` from JSON), which links on a class node are its own (`is_own_link`), links → shape (`shape_from_links`), `canonical_json`; flow JSON ↔ links (`parse_flow_to_links`, `parse_flow_from_links`). Types `SHACLShape`, `SHACLFlow`, `AD4MAction` |
 | `perspective_instance/shapes.rs` | Class registration: `register_shapes` (all-unchanged fast path over the cached registry link sets, otherwise a diff under `sdna_change_mutex`) and `shapes` / `class_names` over the cached registry |
 | `instances/` | Validated instance writes (create, update, remove, collection items) against a class's SHACL shape: the shared core of the MCP `instance_*` tools and the `perspective.instance*` RPC methods. See `instances/AGENTS.md` |
@@ -21,7 +21,7 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 | `flow_classes.rs`, `flow_evaluator.rs`, `flow_spawn.rs`, `flow_semantic_check.rs`, `flow_context/` | SHACLFlow state machines: hard-wired classes, deterministic transition evaluation, spawn candidates, LLM flow context. Moving to `agentic/` (spec item 7) |
 | `interpretation/` | LLM interpretation: text → typed subjects. `run.rs` orchestrates, `prompt.rs`, `parse.rs`, `dedup.rs`, `graph/{read,write}.rs`, `overlay/` (provenance + human accept). Depends on `ai_service::harness` |
 | `agent_session.rs` | `perspective.runAgent`: a conversation with a model in one perspective over the static MCP tools in `SESSION_READS`, plus the writes the caller names from `SESSION_WRITES`. Both lists are explicit and perspective-scoped (a tool joins only by being added there), and `perspective_id` is forced. Same harness as interpretation, neutral prompt. Tests with a scripted model in `agent_session_tests.rs` |
-| `auto_processor/` | Runs interpretation automatically over neighbourhood conversations: `config.rs`, `watcher.rs` (debounce/batch), `cursor.rs`, `claim.rs` (multi-agent claim), `events.rs` (pubsub step signals), `delta_read.rs` (a scope query's read of what added links gain it) |
+| `auto_processor/` | Runs interpretation automatically over neighbourhood conversations: `config.rs`, `watcher.rs` (debounce/batch), `cursor.rs`, `claim.rs` (multi-agent claim), `events.rs` (pubsub step signals). The transcript scope is a model query built from `source_class` / `source_text` / `source_query` (#1794) |
 | `ordering/` | CRDT ordering for `@HasMany`. Parsed into `ModelShape.ordering` but **not wired** into hydration/writes yet (spec D2) |
 | `hardwired_class.rs` | Registration of hard-wired subject classes (used by flows and overlay) |
 | `migration.rs` | rusqlite → SPARQL link migration and other one-shot data migrations |
@@ -171,22 +171,62 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   eval bound (flow passes, role gates, `flow_valid_outputs`, `mint_flow_receipt`,
   `verify_flow_receipt`) pass `EvalStop::none()`.
 - `SparqlStore` bumps a write generation after every committed write (`write_generation`,
-  `watch_writes`). The auto-processor watch loop sleeps on it while idle (60 s fallback); a
-  write-woken idle tick still waits out the old idle back-off (doubling 0.5 s to 4 s) since the
-  last tick that read the store, so writes that add no turn never read more often than the poll
-  did. It keeps its config, transcript and cursor reads in `WatcherState` (`TickReads`) while the
-  generation is unchanged; the transcript keeps text only for turns that may still be queued
-  (consumed or out-of-window turns are id + timestamp), one copy per processor per loop (one loop
-  per perspective and per online managed user). After writes that only added links, the tick
-  reads only what they add to the kept transcript (`SparqlStore::additions_since`,
-  `auto_processor/delta_read.rs`: the scope query with one triple pattern at a time restricted
-  by `VALUES` to the added terms) and merges it where a fresh read puts each turn (`ORDER BY
-  ?timestamp` transcripts are kept sorted by timestamp, then turn id; any other `ORDER BY` is read
-  whole: `delta_read::transcript_order`); a removal, a reload, a log that no longer reaches
-  back (1024 links or 1024 writes; an `Other` write drops everything before it), or a scope query that is not monotone (`OPTIONAL`, `MINUS`, `EXISTS`,
-  `LIMIT`, aggregates, paths) reads it whole. A new store write path must call
-  `note_write(WriteDelta)`, `Added` only when it removed nothing and every reifier is new, or the
-  loop misses that change until some other write lands. With turns pending but no default
+  `watch_writes`). The auto-processor watch loop no longer wakes on the generation alone:
+  `write_link_diff` and `persist_remote_diff` broadcast each batch's
+  `subscription_triggers::Writes` (added and removed link terms) on `commit_writes`
+  right where its store writes commit (`broadcast_commit_write`, under `persist_lock`,
+  so an entry's place in the channel is its commit's place in the write order), each
+  entry carrying `generations` — the write generations its own writes took, one for a
+  transactional diff, one per link for the fallback — a **bounded** `broadcast` channel
+  (`COMMIT_WRITES_CAPACITY`, 256 commits — it bounds memory, not correctness), and the loop
+  sleeps on that (60 s fallback). Entries are drained independently: a matching diff is
+  still readable after any number of unrelated diffs while all of them fit in the buffer —
+  an unrelated write costs an evaluation, never coverage. A receiver that lags past the
+  buffer gets `Lagged`, which must be treated as a wake: a missed write could have matched. A processor builds a
+  `subscription_triggers::ModelTrigger` from its
+  `source_class` + `source_query` — the same rules a model subscription would get — and the
+  loop wakes only when a committed write's `Writes` match it (`ModelTrigger::matches`) or
+  carry a config predicate (`config_write_predicates` → reload). `None` writes (a diff
+  carried a predicate-less link) and an unbuilt trigger wake conservatively. A
+  one-hop `parent` scope also gates `joins`/`scan` matches to nodes linked to a
+  scope anchor through the scope's edge predicates (`TriggerRules::scoped`), so
+  a class-flag write under another parent does not wake a scoped subscription
+  or processor; deeper walks (`transitive`, `levels`, a multi-hop `path`) stay
+  ungated, because one neighbour read cannot prove membership. While turns are
+  pending, the kept transcript's freshness is decided by the same trigger —
+  `auto_processor_mark_stale` records a matched write, a schema write
+  (`Writes::touches_shacl`, the `shacl_write_link` classification, a
+  subset of `touches_shape`: a SHACL/SDNA batch changes the shape every kept read ran under, whatever the
+  trigger's predicates), or a `Lagged` / unclassifiable one against the
+  read's scope key so the tick re-reads instead
+  of draining stale turns. The tick's own feed drain (`watcher.commit_feed`)
+  must first prove coverage: the `generations` of all drained entries have to
+  account for every generation in `(seen, current]`, `seen` being the
+  watermark the last drain proved. On full coverage only matched transcripts
+  stale and `seen` advances through the proven generations — including any
+  proven above the generation the tick read (a fed write that landed
+  mid-tick), which the drain keeps so the next tick does not owe it. A gap —
+  a store write outside the commit path, a `Lagged` hole, a `None` entry —
+  stales everything and moves `seen` past the tick's generation. There is no
+  in-flight wait: a write that has taken its generation but not yet broadcast
+  reads as a gap and stales all once, conservatively. Pending turns that fell out of the scope are dropped
+  before drain, and a failed re-read keeps them pending and skips the drain. A wake re-runs
+  the transcript as a full model query; `TickReads` (config, transcript, cursor) is still
+  kept while the generation is unchanged, the transcript keeping text only for turns that
+  may still be queued. The transcript query requests `links` provenance for
+  `source_text`, and each turn's speaker/timestamp come from the link row hydration
+  selected for the text — a `links` predicate the instance query already
+  fetches is served from those same rows (one read, no second query), so the
+  signer is provably the text link's; a body link signed by someone other
+  than the instance creator attributes to its own signer; an instance with
+  no provable text-link row is skipped.
+  A turn whose `source_text` `resolveLanguage` fails (the resolver marks the property
+  under `__unresolved`) is likewise skipped: it is never queued or cursor-recorded, and
+  a transcript read that held unresolved turns expires on `UNRESOLVED_TEXT_RETRY_MS`
+  rather than the write generation, so a later language install admits the turn without
+  a store write. The cursor is a model query too (`load_processed_sources` over
+  `InterpretationRun`, scoped `where processor = …`), so unverifiable run links cannot
+  mark turns processed. With turns pending but no default
   LLM set and spawned (`watcher::model_available`), a tick drains nothing and returns
   `TickOutcome::NoModel`, and the loop backs off as if idle, waiting on writes and on
   `AIService::watch_llm_readiness` (bumped by `set_default_model` and by every LLM worker

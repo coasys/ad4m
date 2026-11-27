@@ -6,7 +6,7 @@
 
 use super::shape::parse_shape_from_json;
 use super::test_helpers::{execute_model_query_from_json, StaticShapeResolver};
-use super::types::{ModelQueryInput, OrderDirection, WhereCondition};
+use super::types::{ModelQueryInput, OrderDirection, Scope, ScopeDirection, WhereCondition};
 use crate::agent::signatures::TestSigner;
 use crate::perspectives::sparql_store::SparqlStore;
 use crate::types::{Link, LinkExpression};
@@ -931,4 +931,75 @@ async fn proof_valid_a_link_with_no_verdict_does_not_hydrate_by_default() {
 
     assert_eq!(name_of(None).await, None, "no verdict reads as unverified");
     assert_eq!(name_of(Some(true)).await, Some(json!("real")));
+}
+
+/// #1113 on a `path` walk's membership edge. The hop queries are ordinary
+/// scoped instance queries, so each hop's edge carries the same guard:
+///
+/// ```text
+/// root ──p──> a ──q──> b ──s──> c     (the q link is forged)
+/// ```
+///
+/// The forged hop-2 link does not admit `b`, so `b` is neither reported nor
+/// walked from and `c` is never reached — under the opt-in the same graph
+/// reads `a`, `b`, `c`, which is what makes the withholding visible.
+#[tokio::test]
+async fn proof_valid_a_forged_membership_link_does_not_admit_a_path_hop() {
+    let store = SparqlStore::new(None).unwrap();
+    let signer = TestSigner::generate();
+    for l in [
+        pv_signed(&signer, "pv://root", "pv://p", "pv://a", 0),
+        pv_signed(&signer, "pv://a", "ad4m://type", "pv://Recipe", 0),
+        pv_forged(&signer, "pv://a", "pv://q", "pv://b", 1),
+        pv_signed(&signer, "pv://b", "ad4m://type", "pv://Recipe", 1),
+        pv_signed(&signer, "pv://b", "pv://s", "pv://c", 2),
+        pv_signed(&signer, "pv://c", "ad4m://type", "pv://Recipe", 2),
+    ] {
+        store.add_link(&l).unwrap();
+    }
+
+    let walk = |include_unverified: Option<bool>| {
+        let store = &store;
+        async move {
+            let query = ModelQueryInput {
+                parent: Some(Scope::Traverse {
+                    ids: vec!["pv://root".to_string()],
+                    predicate: None,
+                    transitive: false,
+                    direction: ScopeDirection::Out,
+                    limit_per_anchor: None,
+                    levels: None,
+                    max_depth: None,
+                    path: Some(vec![
+                        "pv://p".to_string(),
+                        "pv://q".to_string(),
+                        "pv://s".to_string(),
+                    ]),
+                }),
+                include_unverified,
+                ..Default::default()
+            };
+            let mut ids: Vec<String> =
+                execute_model_query_from_json(store, "Recipe", &query, PV_SHAPE_JSON)
+                    .await
+                    .unwrap()
+                    .instances
+                    .iter()
+                    .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
+                    .collect();
+            ids.sort();
+            ids
+        }
+    };
+
+    assert_eq!(
+        walk(None).await,
+        vec!["pv://a"],
+        "a forged hop-2 membership link neither reports `b` nor walks on to `c`"
+    );
+    assert_eq!(
+        walk(Some(true)).await,
+        vec!["pv://a", "pv://b", "pv://c"],
+        "the opt-in admits the forged hop and reaches `c` through it"
+    );
 }

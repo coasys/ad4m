@@ -28,7 +28,7 @@ mod side_by_side;
 
 use super::query::execute_model_query;
 use super::shape::parse_shape_from_json;
-use super::test_helpers::StaticShapeResolver;
+use super::test_helpers::{prop, StaticShapeResolver};
 use super::types::{ModelQueryInput, ModelQueryResult, ModelShape};
 use super::utils::literal_percent_encode;
 use crate::perspectives::sparql_store::SparqlStore;

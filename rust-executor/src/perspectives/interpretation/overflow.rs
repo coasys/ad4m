@@ -235,7 +235,7 @@ mod tests {
     use super::super::{
         build_interpretation_input, build_speaker_name_map, ensure_interpretation_task_for_model,
         run_interpretation_with_strategy_and_model, DedupStrategy, ExistingInstances,
-        InterpretationRunCursor, TranscriptTurn, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY,
+        InterpretationRunCursor, TranscriptTurn,
     };
     use crate::ai_service::{estimate_token_count, AIService};
     use crate::db::Ad4mDb;
@@ -247,10 +247,9 @@ mod tests {
         subscribe, AutoProcessorEvent, AutoProcessorStep,
     };
     use crate::perspectives::auto_processor::watcher::{PendingTurn, WatcherState};
-    use crate::perspectives::interpretation::decode_literal_string;
-    use crate::perspectives::interpretation::gather_transcript_sparql;
+    use crate::perspectives::interpretation::{decode_transcript_body, gather_transcript_model};
     use crate::perspectives::interpretation_test_support::{
-        ensure_db_init, graph_titles_lower, setup_perspective_no_llm, TASK_SDNA,
+        ensure_db_init, graph_titles_lower, setup_perspective_no_llm, MESSAGE_SDNA, TASK_SDNA,
     };
     use crate::perspectives::model_query::types::Scope;
     use crate::types::{
@@ -605,7 +604,7 @@ mod tests {
         rows.into_iter()
             .filter_map(|row| {
                 let raw = row.get("resp")?.as_str()?.to_string();
-                Some(decode_literal_string(&raw).unwrap_or(raw))
+                Some(decode_transcript_body(&raw).unwrap_or(raw))
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -615,7 +614,11 @@ mod tests {
     /// again on the next tick.
     #[tokio::test]
     async fn a_single_item_over_the_window_fails_once_and_is_not_retried() {
-        let (mut perspective, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        // `ns://Message` is the source class the processor reads, not an
+        // output: only Task goes into the prompt.
+        let (mut perspective, mut shapes, ctx) =
+            setup_perspective_no_llm(&[("Task", TASK_SDNA), ("ns://Message", MESSAGE_SDNA)]).await;
+        shapes.truncate(1);
         crate::perspectives::interpretation_test_support::seed_message(
             &mut perspective,
             &ctx,
@@ -625,9 +628,10 @@ mod tests {
             "ns://body",
         )
         .await;
-        let turns = gather_transcript_sparql(&perspective, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY)
+        let turns = gather_transcript_model(&perspective, "ns://Message", "body", "{}")
             .await
-            .expect("gather");
+            .expect("gather")
+            .turns;
         assert_eq!(turns.len(), 1, "the seeded message is the only turn");
         let source_id = PendingTurn::from_transcript(&turns[0]).id;
 
@@ -644,7 +648,8 @@ mod tests {
 
         let cfg = AutoProcessorConfig {
             processor_id: "overflow-once".into(),
-            source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            source_class: "ns://Message".into(),
+            source_text: "body".into(),
             interpretation_classes: vec![shapes[0].target_class.clone()],
             debounce_ms: 0,
             batch_min: 1,
@@ -784,7 +789,11 @@ mod tests {
         emit_debug: bool,
         second_must_overflow_alone: bool,
     ) -> PreparedBatch {
-        let (mut perspective, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        // `ns://Message` is the source class the processor reads, not an
+        // output: only Task goes into the prompt.
+        let (mut perspective, mut shapes, ctx) =
+            setup_perspective_no_llm(&[("Task", TASK_SDNA), ("ns://Message", MESSAGE_SDNA)]).await;
+        shapes.truncate(1);
         seed_marked(
             &mut perspective,
             &ctx,
@@ -804,9 +813,10 @@ mod tests {
             'b',
         )
         .await;
-        let turns = gather_transcript_sparql(&perspective, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY)
+        let turns = gather_transcript_model(&perspective, "ns://Message", "body", "{}")
             .await
-            .expect("gather");
+            .expect("gather")
+            .turns;
         assert_eq!(turns.len(), 2, "two seeded messages");
         assert!(
             turns[0].text.contains("TURN_ALPHA") && turns[1].text.contains("TURN_BETA"),
@@ -838,7 +848,8 @@ mod tests {
         let mint = scope();
         let cfg = AutoProcessorConfig {
             processor_id: processor_id.into(),
-            source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            source_class: "ns://Message".into(),
+            source_text: "body".into(),
             interpretation_classes: vec![shapes[0].target_class.clone()],
             debounce_ms: 0,
             batch_min: 1,

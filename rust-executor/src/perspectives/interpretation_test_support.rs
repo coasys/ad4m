@@ -1161,10 +1161,22 @@ pub(crate) fn proposal(
     }
 }
 
-/// Seed the perspective with `(msg_uri, author, body_text)` triples wired as
-/// two direct links per message: `<msg> <ns://body> <literal:string:...>` and
-/// `<msg> <ns://author> <did:key:...>`. Mirrors the shape a Flux-style channel
-/// perspective would present and the SPARQL queries in these tests target.
+/// The source class of the auto-processor transcript tests: a `ns://Message`
+/// instance is its `ns://type` flag plus a `ns://body` literal. The transcript
+/// reader takes a turn's speaker and timestamp from the instance's link
+/// metadata (the writer's DID and the link's time), so `author` below stays a
+/// plain link — it no longer reaches the transcript.
+pub(crate) const MESSAGE_SDNA: &str = r#"{
+  "target_class":"ns://Message",
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://message","min_count":1,"max_count":1},
+    {"path":"ns://body","name":"body","resolve_language":"literal","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://body","target":"value"}]}
+  ]
+}"#;
+
+/// Seed the perspective with a conforming `ns://Message`: the `ns://type`
+/// flag plus `<msg> <ns://body> <literal:string:...>` and
+/// `<msg> <ns://author> <did:key:...>` links, signed by `ctx`'s agent.
 pub(crate) async fn seed_message(
     perspective: &mut crate::perspectives::perspective_instance::PerspectiveInstance,
     ctx: &crate::agent::AgentContext,
@@ -1174,6 +1186,19 @@ pub(crate) async fn seed_message(
     body_predicate: &str,
 ) {
     use crate::types::{Link, LinkStatus};
+    perspective
+        .add_link(
+            Link {
+                source: msg_uri.into(),
+                predicate: Some("ns://type".into()),
+                target: "ns://message".into(),
+            },
+            LinkStatus::Local,
+            None,
+            ctx,
+        )
+        .await
+        .expect("seed_message type");
     perspective
         .add_link(
             Link {
@@ -1246,4 +1271,40 @@ pub(crate) async fn seed_flow(
             .await
             .expect("add_link(flow definition)");
     }
+}
+
+/// Serve `lang` as a loaded language whose `expressionGet` answers
+/// `expression_json` (and `isImmutableExpression` `false`): the "language
+/// becomes available" half of a `resolveLanguage` test. The runtime map is
+/// global, so a test must remove it again with [`stop_test_language`]; the
+/// answerer task ends when the channel closes with it.
+pub(crate) async fn serve_test_language(lang: &str, expression_json: String) {
+    use crate::languages::language_runtime::{LanguageOperation, LanguageRuntimeRequest};
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<LanguageRuntimeRequest>();
+    let handle = crate::languages::language_runtime_handle::LanguageRuntimeHandle::from_channel(
+        lang.to_string(),
+        tx,
+    );
+    crate::languages::LanguageController::global_instance()
+        .set_runtime_for_test(lang, Some(handle))
+        .await;
+    tokio::spawn(async move {
+        while let Some(req) = rx.recv().await {
+            if let LanguageOperation::Execute(script, ..) = req.operation {
+                let result = if script.contains("isImmutableExpression") {
+                    "false".to_string()
+                } else {
+                    expression_json.clone()
+                };
+                let _ = req.response_tx.send(Ok(result));
+            }
+        }
+    });
+}
+
+/// Remove the runtime [`serve_test_language`] registered for `lang`.
+pub(crate) async fn stop_test_language(lang: &str) {
+    crate::languages::LanguageController::global_instance()
+        .set_runtime_for_test(lang, None)
+        .await;
 }

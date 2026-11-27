@@ -3380,6 +3380,46 @@ describe("Ad4mModel.prepareModelQueryParams() — traverse scope", () => {
     expect(parent).not.toHaveProperty("transitive");
     expect(parent).not.toHaveProperty("limitPerAnchor");
   });
+
+  it("sends a path as its ids, hops and direction", () => {
+    expect(
+      parentOf({
+        parent: { ids: ["we://a"], path: ["we://children", "we://thread"], direction: "in" },
+      }),
+    ).toEqual({
+      ids: ["we://a"],
+      path: ["we://children", "we://thread"],
+      direction: "in",
+    });
+  });
+
+  it("forwards the fields a path refuses, so the executor refuses them", () => {
+    // Typed `never`, these reach the serializer only through a cast or a
+    // plain object — and dropped here `{ids, path, limitPerAnchor: 1}` would
+    // run the full walk unlimited, a wrong answer wearing the shape of a
+    // right one. On the wire they hit the same mutual-exclusion check the
+    // executor makes for the other traverse forms.
+    const parent = parentOf({
+      parent: {
+        ids: "we://a",
+        path: ["we://children", "we://thread"],
+        predicate: "we://children",
+        transitive: true,
+        limitPerAnchor: 1,
+        maxDepth: 2,
+        levels: [3],
+      },
+    });
+    expect(parent).toEqual({
+      ids: "we://a",
+      path: ["we://children", "we://thread"],
+      predicate: "we://children",
+      transitive: true,
+      limitPerAnchor: 1,
+      maxDepth: 2,
+      levels: [3],
+    });
+  });
 });
 
 // ──────────────────────────────────────────────────────────

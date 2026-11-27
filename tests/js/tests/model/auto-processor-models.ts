@@ -31,3 +31,18 @@ export class ConversationSubgroup extends Ad4mModel {
   })
   summary: string = "";
 }
+
+/**
+ * ChannelMessage — the source class the auto-processor transcript tests read:
+ * a message is its `ns://type` flag plus a `ns://body` literal. The transcript's
+ * speaker and timestamp come from the instance's own link metadata (the signing
+ * agent and its time), not a property.
+ */
+@Model({ name: "Message" })
+export class ChannelMessage extends Ad4mModel {
+  @Flag({ through: "ns://type", value: "ns://message" })
+  type: string = "ns://message";
+
+  @Property({ through: "ns://body", required: true, resolveLanguage: "literal" })
+  body: string = "";
+}

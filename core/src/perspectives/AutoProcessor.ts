@@ -132,31 +132,34 @@ export interface AddAutoProcessorConfig {
   /** Human-meaningful processor id (unique per perspective). */
   processorId: string;
   /**
-   * SPARQL `SELECT ?speaker ?text ?timestamp` over the source items to
-   * interpret. All three bindings are required: `?timestamp` is what makes a
-   * turn identifiable, so the processed-turn cursor can tell a re-gathered
-   * turn from the same wording said again later. Read the body link's reifier
-   * for author and timestamp rather than an app-level `ns://author`:
-   *
-   * ```sparql
-   * SELECT ?speaker ?text ?timestamp WHERE {
-   *   ?m <ns://body> ?text .
-   *   ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?m <ns://body> ?text )>> .
-   *   ?r <ad4m://ontology/author> ?speaker .
-   *   ?r <ad4m://ontology/timestamp> ?timestamp .
-   * }
-   * ORDER BY ?timestamp
-   * ```
-   *
-   * Swap `ns://body` for your own body predicate. A query binding only
-   * speaker+text fails the gather.
+   * The class of the source items to interpret: a class name or
+   * target-class IRI, resolved the way a model query resolves a class.
+   * Each conforming instance is one transcript turn; its `speaker` and
+   * `timestamp` come from the instance's own link metadata (the signing
+   * agent and its time), so a forged link never reaches the transcript.
    */
-  sourceScopeQuery: string;
+  sourceClass: string;
+  /** The name of the class property that holds a source item's text. */
+  sourceText: string;
   /**
-   * URI namespace new interpreted instances are minted under (the "spawn
-   * scope"), e.g. `soa://project/42/`. Omit for a per-processor default
-   * (`ad4m://autoprocessor/<processorId>/instance/`). Point this and
-   * `sourceScopeQuery` at the same subtree to confine a processor to it.
+   * Optional model-query JSON object restricting the source scope —
+   * limited to `parent` and `where` (`{ "parent": {"id": "...", "predicate": "..."} }`,
+   * `{ "where": { "body": {"contains": "..."} } }`). The processor owns
+   * ordering, hydration and pagination; any other key is refused.
+   *
+   * This narrows what the processor READS, not where it writes: upsert
+   * candidates and minted children are configured with `existingScope`
+   * and `mintScope` below.
+   */
+  sourceQuery?: string;
+  /**
+   * URI namespace new interpreted instances are minted under, e.g.
+   * `soa://project/42/` — a prefix on the generated ids, not a scope:
+   * nothing is linked under it. Omit for a per-processor default
+   * (`ad4m://autoprocessor/<processorId>/instance/`). To confine the
+   * writes themselves, set `existingScope` (which existing instances may
+   * be upserted) and `mintScope` (which parent new instances are linked
+   * under) below.
    */
   basePrefix?: string;
   /** Class URIs (SHACL `target_class`) to materialize each pass. */

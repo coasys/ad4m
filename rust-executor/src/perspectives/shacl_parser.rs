@@ -1539,7 +1539,9 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
 ///
 /// `__links` is written only when a query asks for `links` (#1046 §3/§4), after
 /// every property — the same silent-overwrite direction as the second group.
-const RESERVED_PROPERTY_NAMES: [&str; 7] = [
+/// `__unresolved` is written whenever a `resolveLanguage` fetch fails: a class
+/// property of that name would mask the marker the transcript read retires on.
+const RESERVED_PROPERTY_NAMES: [&str; 8] = [
     "id",
     "baseExpression",
     "createdAt",
@@ -1547,6 +1549,7 @@ const RESERVED_PROPERTY_NAMES: [&str; 7] = [
     "author",
     "timestamp",
     "__links",
+    "__unresolved",
 ];
 
 /// Make the property-shape-level `local: true` authoritative by pushing it
@@ -1707,7 +1710,11 @@ pub fn shape_links(mut shape: SHACLShape, class_name: &str) -> Result<Vec<Link>,
                 .clone()
                 .unwrap_or_else(|| extract_local_name(&prop.path))
         })
-        .filter(|name| RESERVED_PROPERTY_NAMES.contains(&name.as_str()))
+        .filter(|name| {
+            let loaded =
+                crate::perspectives::model_query::shape::loaded_property_name(name).unwrap_or(name);
+            RESERVED_PROPERTY_NAMES.contains(&loaded)
+        })
         .collect();
     if !reserved_collisions.is_empty() {
         return Err(anyhow::anyhow!(
@@ -2746,6 +2753,27 @@ mod tests {
         }"#;
         let err = parse_shacl_to_links(shacl_json, "Post").unwrap_err();
         assert!(format!("{err}").contains("timestamp"));
+    }
+
+    /// The loader reads a property's name off its shape URI
+    /// (`namespace://Class.name`) after the last `.`, so `prefix.__links`
+    /// loads as `__links`: the guard checks the name the loader will see.
+    #[test]
+    fn parse_shacl_to_links_rejects_a_reserved_name_after_a_dot() {
+        for reserved in RESERVED_PROPERTY_NAMES {
+            let shacl_json = format!(
+                r#"{{
+                    "target_class": "book://Post",
+                    "properties": [
+                        {{ "path": "book://x", "name": "prefix.{reserved}", "datatype": "xsd://string" }}
+                    ]
+                }}"#
+            );
+            assert!(
+                parse_shacl_to_links(&shacl_json, "Post").is_err(),
+                "'prefix.{reserved}' loads as '{reserved}' and should be rejected"
+            );
+        }
     }
 
     /// A property with an ordinary name is unaffected — the guard must not

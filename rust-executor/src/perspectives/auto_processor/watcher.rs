@@ -30,7 +30,6 @@ use crate::types::{Link, LinkQuery, LinkStatus};
 use super::claim::{batch_key, confirm_claim, renew_claim, settle_claim, try_claim, ClaimOutcome};
 use super::config::AutoProcessorConfig;
 use super::cursor::ProcessedSource;
-use super::delta_read::{transcript_order, TranscriptOrder};
 use super::events::{
     emit, emit_neighbourhood_state, AutoProcessorEvent, AutoProcessorNeighbourhoodState,
     AutoProcessorStep, NeighbourhoodPhase,
@@ -246,7 +245,7 @@ pub struct ProcessorPending {
 /// processor and hands back a ready batch when the debounce window elapses.
 /// Pure state — no I/O, no clock — so the debounce + cap rules are testable
 /// with hand-picked `now_ms` values.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct WatcherState {
     per_processor: BTreeMap<String, ProcessorPending>,
     /// Per-batch (keyed by [`crate::perspectives::auto_processor::claim::batch_key`])
@@ -274,6 +273,53 @@ pub struct WatcherState {
     /// The last tick found turns waiting and no model to run them
     /// ([`TickOutcome::NoModel`]); logged once when it starts and ends.
     pub(crate) waiting_for_model: bool,
+    /// Each declared processor's wake trigger, by processor id: the
+    /// `ModelTrigger` a model subscription over its transcript scope would
+    /// build. The watch loop tests committed write batches against them and
+    /// wakes only on a match (#1794). Rebuilt whenever the config set is
+    /// re-read, and fed each fresh transcript result
+    /// ([`Self::set_trigger_result`]) so their `near`/`via` rules cover the
+    /// in-scope instances.
+    pub(crate) triggers: BTreeMap<
+        String,
+        crate::perspectives::perspective_instance::subscription_triggers::ModelTrigger,
+    >,
+    /// The tick's own feed of committed writes, subscribed on first use and
+    /// drained at the start of `run_auto_processor_tick` — the receiver,
+    /// the write generation the drained entries provably cover through
+    /// (`seen`), and any generations proven above it that a mid-tick write
+    /// left over. The writes a tick runs after are evaluated against
+    /// `triggers` whether the tick came from the loop's wait or a direct
+    /// drive (`run_one_pass` in tests). A generation past `seen` that no
+    /// drained entry accounts for is a write that bypassed the commit path
+    /// entirely (a store write applied directly, as a peer's link sync does
+    /// in tests, or a `Lagged` hole): nothing classified it, so every kept
+    /// transcript is stale.
+    pub(crate) commit_feed: Option<(
+        tokio::sync::broadcast::Receiver<crate::perspectives::perspective_instance::CommitWrite>,
+        u64,
+        std::collections::BTreeSet<u64>,
+    )>,
+    /// Per processor, the `now_ms` of the tick that last ran a pass for it.
+    /// A tick drains the processor with the oldest pass first and stops
+    /// draining once a pass moved the store, so every processor gets its
+    /// turn at the front.
+    pub(crate) last_pass_ms: BTreeMap<String, i64>,
+}
+
+impl WatcherState {
+    /// Feed the `instances` of a `model_query` result to `processor_id`'s
+    /// trigger, so its `near`/`via` rules match writes on the instances the
+    /// last transcript read returned — e.g. an edit to a message's text.
+    pub(crate) fn set_trigger_result(
+        &mut self,
+        processor_id: &str,
+        instances: &[serde_json::Value],
+    ) {
+        if let Some(trigger) = self.triggers.get_mut(processor_id) {
+            *trigger = trigger.with_instances(instances);
+        }
+    }
 }
 
 /// Store reads a tick keeps for the next one, each tagged with the store's
@@ -284,27 +330,46 @@ pub struct WatcherState {
 /// `source_window_ms` filters, deferrals) is applied to the kept rows at
 /// each tick, exactly as to fresh ones.
 ///
-/// The configs and cursor rows are read again after any write. A kept
-/// transcript is brought up to date instead when every write since only
-/// added links ([`SparqlStore::additions_since`](crate::perspectives::sparql_store::SparqlStore::additions_since)):
-/// the tick reads only the rows those links can add
-/// ([`delta_query`](super::delta_read::delta_query)) and merges them in
-/// ([`Self::merge_transcript`]), so a busy conversation costs a read of its
-/// new turns, not of all of them. A removal (an edit or a delete), a reload,
-/// a log that no longer reaches back to the kept read, or a scope query a
-/// delta cannot follow, reads the whole transcript again.
+/// The configs and cursor rows are read again whenever the generation moved;
+/// a transcript is read again only when a write could change it — the
+/// loop's wake trigger decides (`stale_transcripts`), so an unrelated write
+/// that moves the generation does not re-read a kept scope, while a schema
+/// write (the shape the read ran under is gone), a predicate-less batch or
+/// `Lagged` stales them all conservatively.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct TickReads {
     configs: Option<(u64, Arc<Vec<AutoProcessorConfig>>)>,
-    /// Per processor id: the generation it is up to date with, its scope
-    /// query, and the turns it returned. Only the turns that could still be
-    /// queued keep their text (see [`CachedTurn`]). One copy per processor
-    /// and per loop, and one loop runs per perspective and per online
-    /// managed user.
-    transcripts: BTreeMap<String, (u64, String, Arc<Vec<CachedTurn>>)>,
+    /// One copy per processor and per loop, and one loop runs per
+    /// perspective and per online managed user.
+    transcripts: BTreeMap<String, KeptTranscript>,
     /// Per processor id: the cursor rows, not yet windowed.
     processed: BTreeMap<String, (u64, Arc<Vec<ProcessedSource>>)>,
+    /// Processor ids whose kept transcript a matching (or unclassifiable)
+    /// write invalidated since it was read.
+    stale_transcripts: HashSet<String>,
 }
+
+/// A transcript read [`TickReads`] keeps: the generation it is up to date
+/// with, the scope it read (`AutoProcessorConfig::scope_key`), and the
+/// turns it returned — only turns that could still be queued keep their
+/// text (see [`CachedTurn`]).
+#[derive(Debug, Clone)]
+struct KeptTranscript {
+    generation: u64,
+    scope: ScopeKey,
+    turns: Arc<Vec<CachedTurn>>,
+    /// Wall-clock ms at which this read stops being trusted even though the
+    /// generation holds, `Some` when it dropped an unresolved text: an
+    /// expression becoming fetchable is not a store write, so the
+    /// generation does not move and the kept read would hide that turn
+    /// forever without a retry clock.
+    retry_unresolved_ms: Option<i64>,
+}
+
+/// What defines the scope a kept transcript was read for
+/// ([`AutoProcessorConfig::scope_key`]): a config whose scope changed since
+/// is stale whatever its generation says.
+type ScopeKey = (String, String, Option<String>);
 
 /// A transcript turn as [`TickReads`] keeps it. A turn that was already
 /// consumed (in the processor's cursor) or outside its `source_window_ms` when
@@ -343,6 +408,12 @@ impl TickReads {
             .map(|(_, c)| c.clone())
     }
 
+    /// The last-loaded config set whatever its generation — for comparing a
+    /// reload against what the watcher already knew.
+    pub(crate) fn configs_snapshot(&self) -> Option<Arc<Vec<AutoProcessorConfig>>> {
+        self.configs.as_ref().map(|(_, c)| c.clone())
+    }
+
     /// Keep `configs`, and drop the reads of processors no longer declared.
     pub(crate) fn set_configs(
         &mut self,
@@ -354,88 +425,51 @@ impl TickReads {
             .retain(|id, _| declared.contains(id.as_str()));
         self.processed
             .retain(|id, _| declared.contains(id.as_str()));
+        self.stale_transcripts
+            .retain(|id| declared.contains(id.as_str()));
         let configs = Arc::new(configs);
         self.configs = Some((generation, configs.clone()));
         configs
     }
 
-    /// The kept transcript of `cfg`'s scope query, with the generation it is
-    /// up to date with.
+    /// The kept transcript of `cfg`'s scope: the generation it is up to date
+    /// with, the turns, and the retry clock a read that dropped unresolved
+    /// text carries (see [`KeptTranscript`]).
     pub(crate) fn transcript(
         &self,
         cfg: &AutoProcessorConfig,
-    ) -> Option<(u64, Arc<Vec<CachedTurn>>)> {
+    ) -> Option<(u64, Arc<Vec<CachedTurn>>, Option<i64>)> {
         self.transcripts
             .get(&cfg.processor_id)
-            .filter(|(_, query, _)| *query == cfg.source_scope_query)
-            .map(|(g, _, turns)| (*g, turns.clone()))
+            .filter(|k| k.scope == cfg.scope_key())
+            .map(|k| (k.generation, k.turns.clone(), k.retry_unresolved_ms))
     }
 
-    /// Bring the kept transcript of `cfg` up to `generation` with the turns
-    /// the links added since gave its scope query (`gained`): each it does not
-    /// hold yet goes where [`Self::set_transcript`] would put it over the same
-    /// turns (in timestamp order for `ORDER BY ?timestamp`, see
-    /// [`TranscriptOrder`]; appended for a query without `ORDER BY`). A kept
-    /// turn that is no longer `queueable` drops its text, as a fresh read
-    /// would keep it. Without a kept transcript this is `set_transcript`.
-    pub(crate) fn merge_transcript(
-        &mut self,
-        cfg: &AutoProcessorConfig,
-        generation: u64,
-        gained: Vec<PendingTurn>,
-        queueable: impl Fn(&str, &str) -> bool,
-    ) -> Arc<Vec<CachedTurn>> {
-        let Some((_, query, kept)) = self
-            .transcripts
-            .remove(&cfg.processor_id)
-            .filter(|(_, query, _)| *query == cfg.source_scope_query)
-        else {
-            return self.set_transcript(cfg, generation, gained, queueable);
-        };
-        let mut turns = Arc::try_unwrap(kept).unwrap_or_else(|shared| (*shared).clone());
-        for turn in turns.iter_mut() {
-            if let CachedTurn::Full(t) = turn {
-                if !queueable(&t.id, &t.timestamp) {
-                    *turn = CachedTurn::Consumed {
-                        id: std::mem::take(&mut t.id),
-                        timestamp: std::mem::take(&mut t.timestamp),
-                    };
-                }
-            }
-        }
-        if !gained.is_empty() {
-            let order = transcript_order(&cfg.source_scope_query);
-            let mut known: HashSet<String> = turns.iter().map(|t| t.id().to_string()).collect();
-            for t in gained {
-                if known.insert(t.id.clone()) {
-                    let turn = cached(t, &queueable);
-                    // Where a fresh read, sorted the same way, puts it.
-                    let at = match order {
-                        Some(TranscriptOrder::Timestamp { descending }) => {
-                            turns.partition_point(|k| {
-                                transcript_cmp(k, &turn, descending) == std::cmp::Ordering::Less
-                            })
-                        }
-                        _ => turns.len(),
-                    };
-                    turns.insert(at, turn);
-                }
-            }
-        }
-        let turns = Arc::new(turns);
-        self.transcripts
-            .insert(cfg.processor_id.clone(), (generation, query, turns.clone()));
-        turns
+    /// Mark `ids`' kept transcripts stale: a write that could change their
+    /// scope landed since they were read, so the next tick reads them again
+    /// even though nothing else may have changed. Called from the loop when
+    /// a committed batch matches a processor's wake trigger, and for every
+    /// declared processor when a batch could not be classified.
+    pub(crate) fn mark_transcripts_stale(&mut self, ids: impl IntoIterator<Item = String>) {
+        self.stale_transcripts.extend(ids);
+    }
+
+    /// Whether `processor_id`'s kept transcript was invalidated since it was
+    /// read.
+    pub(crate) fn transcript_stale(&self, processor_id: &str) -> bool {
+        self.stale_transcripts.contains(processor_id)
     }
 
     /// Keep `turns`, with the text only of those `queueable` accepts, one per
-    /// turn id, sorted as [`TranscriptOrder`] says for the scope query.
+    /// turn id, in [`transcript_cmp`] order (text-link timestamp, then id).
+    /// `retry_unresolved_ms` is [`KeptTranscript::retry_unresolved_ms`].
     pub(crate) fn set_transcript(
         &mut self,
         cfg: &AutoProcessorConfig,
         generation: u64,
         turns: Vec<PendingTurn>,
         queueable: impl Fn(&str, &str) -> bool,
+        retry_unresolved_ms: Option<i64>,
     ) -> Arc<Vec<CachedTurn>> {
         let mut seen = HashSet::new();
         let mut turns: Vec<CachedTurn> = turns
@@ -443,15 +477,17 @@ impl TickReads {
             .filter(|t| seen.insert(t.id.clone()))
             .map(|t| cached(t, &queueable))
             .collect();
-        if let Some(TranscriptOrder::Timestamp { descending }) =
-            transcript_order(&cfg.source_scope_query)
-        {
-            turns.sort_by(|a, b| transcript_cmp(a, b, descending));
-        }
+        turns.sort_by(transcript_cmp);
         let turns = Arc::new(turns);
+        self.stale_transcripts.remove(&cfg.processor_id);
         self.transcripts.insert(
             cfg.processor_id.clone(),
-            (generation, cfg.source_scope_query.clone(), turns.clone()),
+            KeptTranscript {
+                generation,
+                scope: cfg.scope_key(),
+                turns: turns.clone(),
+                retry_unresolved_ms,
+            },
         );
         turns
     }
@@ -480,15 +516,12 @@ impl TickReads {
     }
 }
 
-/// [`TranscriptOrder::Timestamp`]: by timestamp, then by turn id.
-fn transcript_cmp(a: &CachedTurn, b: &CachedTurn, descending: bool) -> std::cmp::Ordering {
-    let by_time = a.timestamp().cmp(b.timestamp());
-    let by_time = if descending {
-        by_time.reverse()
-    } else {
-        by_time
-    };
-    by_time.then_with(|| a.id().cmp(b.id()))
+/// The transcript's total order: creation timestamp, then turn id (#1794 —
+/// the processor owns the order; no config sets it any more).
+fn transcript_cmp(a: &CachedTurn, b: &CachedTurn) -> std::cmp::Ordering {
+    a.timestamp()
+        .cmp(b.timestamp())
+        .then_with(|| a.id().cmp(b.id()))
 }
 
 /// `turn` as [`TickReads`] keeps it: with its text only when `queueable`.
@@ -780,6 +813,14 @@ pub async fn model_readiness() -> Option<tokio::sync::watch::Receiver<u64>> {
 /// time-based filters (`source_window_ms`) to what the loop already read.
 pub const AUTO_PROCESSOR_IDLE_FALLBACK_MS: u64 = 60_000;
 
+/// How long a kept transcript read that dropped an unresolved text
+/// (`resolveLanguage` fetch failed) stays trusted before the tick re-reads
+/// it, on the idle fallback's cadence. An expression becoming fetchable is
+/// not a store write, so the write generation does not move and the kept
+/// read would hide the turn forever without this; re-reading every poll
+/// would run the transcript query twice a second while any turn is pending.
+pub(crate) const UNRESOLVED_TEXT_RETRY_MS: i64 = AUTO_PROCESSOR_IDLE_FALLBACK_MS as i64;
+
 /// How long an idle loop (no turn pending) waits for a link write before it
 /// ticks anyway: [`AUTO_PROCESSOR_IDLE_FALLBACK_MS`], or less when a deferral
 /// ends sooner, since its turns may be queued again without any write.
@@ -796,7 +837,7 @@ pub fn idle_wait_ms(watcher: &WatcherState, now_ms: i64) -> u64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitEnd {
     Teardown,
-    /// The store took a write.
+    /// A committed write matched a wake trigger (or could not be ruled out).
     Write,
     /// A model may have become available ([`model_readiness`]).
     ModelReady,
@@ -804,15 +845,25 @@ pub enum WaitEnd {
 }
 
 /// Sleep up to `ms`, in slices of at most [`AUTO_PROCESSOR_TICK_MS`] so
-/// `teardown` is seen promptly. With `writes`, return as soon as the store's
-/// write generation moves past what the receiver has seen; with `model`, as
-/// soon as the model readiness watch does.
-pub async fn wait_for_tick(
+/// `teardown` is seen promptly. With `commits`, return as soon as a
+/// committed write batch `matches` (a processor's wake trigger or a config
+/// predicate — see `PerspectiveInstance::auto_processor_writes_match`), when
+/// a batch cannot be ruled out (a predicate-less link, or a `Lagged`
+/// receiver), or as soon as `model`'s readiness watch changes.
+pub(crate) async fn wait_for_tick<M>(
     teardown: &AtomicBool,
     ms: u64,
-    mut writes: Option<&mut tokio::sync::watch::Receiver<u64>>,
+    mut commits: Option<
+        &mut tokio::sync::broadcast::Receiver<
+            crate::perspectives::perspective_instance::CommitWrite,
+        >,
+    >,
     mut model: Option<&mut tokio::sync::watch::Receiver<u64>>,
-) -> WaitEnd {
+    matches: M,
+) -> WaitEnd
+where
+    M: Fn(&crate::perspectives::perspective_instance::subscription_triggers::Writes) -> bool,
+{
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(ms);
     loop {
         if teardown.load(Ordering::Acquire) {
@@ -823,12 +874,29 @@ pub async fn wait_for_tick(
             return WaitEnd::Elapsed;
         }
         let slice = (deadline - now).min(std::time::Duration::from_millis(AUTO_PROCESSOR_TICK_MS));
-        let (mut writes_closed, mut model_closed) = (false, false);
+        let (mut commits_closed, mut model_closed) = (false, false);
         tokio::select! {
-            changed = async { writes.as_deref_mut()?.changed().await.ok() }, if writes.is_some() => match changed {
+            matched = async {
+                let rx = commits.as_deref_mut()?;
+                loop {
+                    use tokio::sync::broadcast::error::RecvError;
+                    match rx.recv().await {
+                        // A predicate-less link: no trigger can rule it out.
+                        Ok(None) => return Some(()),
+                        Ok(Some(writes)) => {
+                            if matches(&writes) {
+                                return Some(());
+                            }
+                        }
+                        // Missed diffs: wake conservatively.
+                        Err(RecvError::Lagged(_)) => return Some(()),
+                        Err(RecvError::Closed) => return None,
+                    }
+                }
+            }, if commits.is_some() => match matched {
                 Some(()) => return WaitEnd::Write,
                 // The store is gone; only the timer is left.
-                None => writes_closed = true,
+                None => commits_closed = true,
             },
             changed = async { model.as_deref_mut()?.changed().await.ok() }, if model.is_some() => match changed {
                 Some(()) => return WaitEnd::ModelReady,
@@ -836,8 +904,8 @@ pub async fn wait_for_tick(
             },
             _ = tokio::time::sleep(slice) => {}
         }
-        if writes_closed {
-            writes = None;
+        if commits_closed {
+            commits = None;
         }
         if model_closed {
             model = None;
@@ -1977,9 +2045,9 @@ mod tests {
     fn cfg(id: &str, debounce_ms: i64, batch_max: usize) -> AutoProcessorConfig {
         AutoProcessorConfig {
             processor_id: id.into(),
-            source_scope_query: format!(
-                "SELECT ?speaker ?text WHERE {{ ?s <ns://{id}/turn> ?t . }}"
-            ),
+            source_class: format!("ns://{id}/Turn"),
+            source_text: "body".into(),
+            source_query: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms,
             batch_min: 1,
@@ -3229,33 +3297,5 @@ mod tests {
             msg.contains("must be a `Raw` scope"),
             "error mentions the shape mismatch: {msg}"
         );
-    }
-
-    /// A merged transcript keeps each turn as a fresh read would: a kept
-    /// turn that is no longer queueable (consumed since, or out of the
-    /// window) drops its text, and the result equals `set_transcript` over
-    /// the same turns.
-    #[test]
-    fn a_merged_transcript_drops_the_text_of_turns_no_longer_queueable() {
-        let c = cfg("merge", 0, 32);
-        let mut reads = TickReads::default();
-        reads.set_transcript(&c, 1, vec![pt("a"), pt("b")], |_, _| true);
-
-        // Since then "a" was consumed, and "c" was added.
-        let queueable = |id: &str, _: &str| id != "a";
-        let merged = reads.merge_transcript(&c, 2, vec![pt("c")], queueable);
-        assert_eq!(
-            merged[0],
-            CachedTurn::Consumed {
-                id: "a".into(),
-                timestamp: "ts".into(),
-            },
-            "a turn no longer queueable keeps no text"
-        );
-
-        let mut fresh = TickReads::default();
-        let read = fresh.set_transcript(&c, 2, vec![pt("a"), pt("b"), pt("c")], queueable);
-        assert_eq!(*merged, *read, "the merge holds what a fresh read holds");
-        assert_eq!(reads.transcript(&c), Some((2, merged)));
     }
 }
