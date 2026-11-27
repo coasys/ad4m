@@ -478,16 +478,24 @@ impl std::fmt::Debug for WsRpcClient {
 }
 
 fn to_ws_url(executor_url: &str, token: &str) -> String {
-    let ws_base = executor_url
-        .replace("http://", "ws://")
-        .replace("https://", "wss://")
-        .trim_end_matches('/')
-        .to_string();
-    if token.is_empty() {
-        format!("{}/api/v1/ws", ws_base)
+    // Canonicalize first, so a password, query, or fragment in the input
+    // is not dialed and is not printed when the dial fails. `/api/v1/ws`
+    // is then a path, not a suffix of the query or the fragment.
+    let base = crate::connect::normalize_base_url(executor_url);
+    let ws_base = if let Some(rest) = base.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = base.strip_prefix("http://") {
+        format!("ws://{rest}")
     } else {
-        format!("{}/api/v1/ws?token={}", ws_base, urlencoding::encode(token))
+        base
+    };
+    let mut url = format!("{}/api/v1/ws", ws_base.trim_end_matches('/'));
+    if !token.is_empty() {
+        url.push('?');
+        url.push_str("token=");
+        url.push_str(&urlencoding::encode(token));
     }
+    url
 }
 
 fn ws_config() -> WebSocketConfig {
@@ -1615,8 +1623,9 @@ mod tests {
 
     #[test]
     fn to_ws_url_converts_https_to_wss() {
+        // 443 is the default for https and wss, so the canonical URL omits it.
         let url = to_ws_url("https://remote.host:443", "");
-        assert_eq!(url, "wss://remote.host:443/api/v1/ws");
+        assert_eq!(url, "wss://remote.host/api/v1/ws");
     }
 
     #[test]
@@ -1667,6 +1676,24 @@ mod tests {
         let url = to_ws_url("http://localhost:12000", "");
         assert!(!url.contains("?token="));
         assert!(!url.contains("?token"));
+    }
+
+    /// A password, query, or fragment already in the executor URL must not
+    /// be dialed or printed. The token is the only query this function adds.
+    #[test]
+    fn to_ws_url_drops_userinfo_query_and_fragment() {
+        let url = to_ws_url(
+            "http://alice:password@NODE.example/path?token=secret#frag",
+            "jwt",
+        );
+        assert!(!url.contains("password"), "{url}");
+        assert!(!url.contains("alice"), "{url}");
+        assert!(!url.contains("secret"), "{url}");
+        assert!(
+            url.starts_with("ws://node.example/path/api/v1/ws?token="),
+            "{url}"
+        );
+        assert!(url.contains("token=jwt"), "{url}");
     }
 
     #[test]

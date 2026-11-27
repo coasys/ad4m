@@ -100,7 +100,9 @@ impl AppInfo {
 pub struct ConnectOptions {
     pub app: AppInfo,
     /// An explicit executor URL (`http(s)://` or `ws(s)://` — the latter is
-    /// normalized like TS `wsUrlToHttpBase`); wins over every other source.
+    /// normalized like TS `wsUrlToHttpBase`). When set, it is the only
+    /// candidate: a failure is not replaced by a remembered URL or the
+    /// local executor.
     pub url: Option<String>,
     /// An explicit port → `http://127.0.0.1:{port}`.
     pub port: Option<u16>,
@@ -169,6 +171,10 @@ pub trait ConnectPrompts {
     }
 
     /// `email` was sent a sign-in code: return what the user typed.
+    ///
+    /// The answer `resend` (any letter case) is not sent to the executor.
+    /// The flow emails a new code and asks again. A sign-in code is six
+    /// digits, so this word is not a code.
     fn email_code<'a>(
         &'a mut self,
         email: &'a str,
@@ -202,22 +208,18 @@ pub enum ConnectStatus {
     WaitingForApproval { request_id: String },
     /// `email` was sent a sign-in code.
     WaitingForEmailCode { email: String },
-    /// The last code was refused — the prompt shows again. An emailed code
-    /// that expired by time also ends here, and so does every code after it:
-    /// see [`EmailCodeExpired`](Self::EmailCodeExpired).
+    /// The last code was refused. The prompt shows again. The user may type
+    /// another code, or `resend` to email a new one. A code that expired by
+    /// time is reported the same way: the executor deletes the challenge,
+    /// so another guess cannot succeed until the user asks for a new code.
     CodeRejected,
     /// The pending request died (expired, or five wrong codes); a fresh one
     /// is requested next.
     RequestExpired,
-    /// The emailed code's challenge is no longer valid: the executor
-    /// invalidated it after five wrong codes. A new code is requested next.
-    ///
-    /// Despite the name, this does not detect a code that expired by time.
-    /// The executor answers an expired code like a wrong one ("Invalid
-    /// verification code"), and deletes the challenge, so the flow reports
-    /// [`CodeRejected`](Self::CodeRejected) and asks again, and no later code
-    /// can succeed. The user ends that by cancelling (the prompt returns an
-    /// error) and running `connect` again, which emails a new code.
+    /// A new email code is being requested. The executor says this after
+    /// five wrong codes. The user can also ask for it by answering `resend`
+    /// after [`CodeRejected`](Self::CodeRejected), which covers a code that
+    /// expired by time.
     EmailCodeExpired,
 }
 
@@ -424,8 +426,8 @@ pub fn default_executor_port_file() -> PathBuf {
         .join("executor-port")
 }
 
-/// Tokens in `tokens.json`, one per executor-URL + app pair. Mirrors TS's
-/// `ad4m-token`/`ad4m-url` localStorage keys.
+/// Tokens in `tokens.json`, one per executor-URL + app pair, under the
+/// package version that stored them (`#1610`, TS `${version}/ad4m-token`).
 ///
 /// Safe across processes (F1): every change is one transaction under an
 /// advisory lock on the sibling `tokens.json.lock` (read, modify, write), and
@@ -449,16 +451,43 @@ pub fn default_executor_port_file() -> PathBuf {
 #[derive(Clone, Debug)]
 pub struct TokenStore {
     path: PathBuf,
+    /// Package version whose session this store reads and writes.
+    version: String,
 }
 
 #[derive(Default, Serialize, Deserialize)]
 struct StoreFile {
-    /// Per app (like `tokens`), the URL it last connected to. (A global
-    /// `last_url` from an older file is ignored.)
+    /// Sessions keyed by the package version that wrote them.
+    #[serde(default)]
+    versions: BTreeMap<String, VersionSession>,
+    /// A file from before the version rule. Folded into the current version
+    /// when `versions` is empty. Not written back.
+    #[serde(default, skip_serializing)]
+    urls: BTreeMap<String, RememberedUrl>,
+    #[serde(default, skip_serializing)]
+    tokens: BTreeMap<String, String>,
+    /// Set when [`TokenStore::fold_legacy`] moved a pre-version file into
+    /// the current version in memory, so the next write persists that move.
+    #[serde(skip)]
+    legacy_folded: bool,
+}
+
+/// One package version's tokens and remembered URLs.
+#[derive(Default, Clone, Serialize, Deserialize)]
+struct VersionSession {
     #[serde(default)]
     urls: BTreeMap<String, RememberedUrl>,
     #[serde(default)]
     tokens: BTreeMap<String, String>,
+}
+
+/// What [`TokenStore::token`] copies out of older versions.
+struct AdoptPlan {
+    token: String,
+    remembered: Option<RememberedUrl>,
+    /// Older versions of the same minor line that held a token for this
+    /// executor. Their copy is removed so a later logout stays logged out.
+    drop_versions: Vec<String>,
 }
 
 /// The URL an app last connected to, and how it was found.
@@ -472,10 +501,17 @@ pub struct RememberedUrl {
 }
 
 impl TokenStore {
-    /// A store at `{dir}/tokens.json`.
+    /// A store at `{dir}/tokens.json` for this package's version.
     pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self::with_version(dir, env!("CARGO_PKG_VERSION"))
+    }
+
+    /// A store that reads and writes the session of `version`. Tests pass
+    /// another version; apps use [`new`](Self::new).
+    pub fn with_version(dir: impl Into<PathBuf>, version: impl Into<String>) -> Self {
         Self {
             path: dir.into().join("tokens.json"),
+            version: version.into(),
         }
     }
 
@@ -483,8 +519,13 @@ impl TokenStore {
         &self.path
     }
 
+    /// The package version whose session this store reads and writes.
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
     fn key(url: &str, app: &str) -> String {
-        format!("{url}|{app}")
+        format!("{}|{app}", normalize_base_url(url))
     }
 
     fn dir(&self) -> &std::path::Path {
@@ -494,16 +535,39 @@ impl TokenStore {
     }
 
     /// The current file: missing = empty; unreadable or unparsable = error.
+    /// A pre-version file is folded into this version in memory.
     fn load(&self) -> Result<StoreFile> {
-        match std::fs::read_to_string(&self.path) {
+        let mut store = match std::fs::read_to_string(&self.path) {
             Ok(s) => serde_json::from_str(&s)
-                .map_err(|e| anyhow!("token store {} is corrupt: {e}", self.path.display())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(StoreFile::default()),
-            Err(e) => Err(anyhow!(
-                "cannot read token store {}: {e}",
-                self.path.display()
-            )),
+                .map_err(|e| anyhow!("token store {} is corrupt: {e}", self.path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => StoreFile::default(),
+            Err(e) => {
+                return Err(anyhow!(
+                    "cannot read token store {}: {e}",
+                    self.path.display()
+                ))
+            }
+        };
+        self.fold_legacy(&mut store);
+        Ok(store)
+    }
+
+    /// Move a pre-version `{tokens, urls}` file into this version when no
+    /// versioned session is stored yet. A file that already has `versions`
+    /// drops the legacy maps in memory so a later write does not keep them.
+    fn fold_legacy(&self, store: &mut StoreFile) {
+        if store.tokens.is_empty() && store.urls.is_empty() {
+            return;
         }
+        if !store.versions.is_empty() {
+            store.tokens.clear();
+            store.urls.clear();
+            return;
+        }
+        let session = store.versions.entry(self.version.clone()).or_default();
+        session.tokens.append(&mut store.tokens);
+        session.urls.append(&mut store.urls);
+        store.legacy_folded = true;
     }
 
     /// Create the directory if needed and force it private (0700 on Unix).
@@ -570,65 +634,412 @@ impl TokenStore {
     }
 
     /// The stored token for this executor + app, if any.
+    ///
+    /// When this version has none, the newest older version of the same minor
+    /// line that stored one for this executor is copied here and removed from
+    /// those older versions (`#1610`). `ws://` and `http://` name one executor.
+    /// An empty token does not count. A read that finds nothing does not
+    /// create the store.
     pub fn token(&self, url: &str, app: &str) -> Result<Option<String>> {
-        Ok(self.load()?.tokens.get(&Self::key(url, app)).cloned())
+        let loaded = self.load()?;
+        let have = token_in(&loaded, &self.version, url, app);
+        let will_adopt = have.is_none() && plan_adopt(&loaded, &self.version, url, app).is_some();
+        if !loaded.legacy_folded && !will_adopt {
+            return Ok(have);
+        }
+        let version = self.version.clone();
+        let url = url.to_string();
+        let app = app.to_string();
+        self.transact(move |store| {
+            let mut changed = store.legacy_folded;
+            if token_in(store, &version, &url, &app).is_none() {
+                if let Some(plan) = plan_adopt(store, &version, &url, &app) {
+                    apply_adopt(store, &version, &url, &app, plan);
+                    changed = true;
+                }
+            }
+            let tok = token_in(store, &version, &url, &app);
+            (changed, tok)
+        })
     }
 
     pub fn set_token(&self, url: &str, app: &str, token: &str) -> Result<()> {
-        self.transact(|store| {
-            let old = store.tokens.insert(Self::key(url, app), token.to_string());
-            (old.as_deref() != Some(token), ())
+        let version = self.version.clone();
+        let canonical = normalize_base_url(url);
+        let app = app.to_string();
+        let token = token.to_string();
+        let key = Self::key(&canonical, &app);
+        self.transact(move |store| {
+            let session = store.versions.entry(version).or_default();
+            // Drop any other spelling of this executor, including one that
+            // still carries a password or a query.
+            let extras = session
+                .tokens
+                .keys()
+                .any(|existing| existing != &key && key_matches(existing, &canonical, &app));
+            let changed = extras || session.tokens.get(&key) != Some(&token);
+            if extras {
+                session.tokens.retain(|existing, _| {
+                    existing == &key || !key_matches(existing, &canonical, &app)
+                });
+            }
+            session.tokens.insert(key, token);
+            (changed, ())
         })
     }
 
     pub fn remove_token(&self, url: &str, app: &str) -> Result<()> {
-        self.transact(|store| (store.tokens.remove(&Self::key(url, app)).is_some(), ()))
+        let version = self.version.clone();
+        let url = url.to_string();
+        let app = app.to_string();
+        self.transact(move |store| {
+            let Some(session) = store.versions.get_mut(&version) else {
+                return (false, ());
+            };
+            let before = session.tokens.len();
+            session
+                .tokens
+                .retain(|key, _| !key_matches(key, &url, &app));
+            (session.tokens.len() != before, ())
+        })
     }
 
     /// Remove the token for this executor + app only while it is still
     /// `token`: a refused socket drops its own token, never a newer one
     /// another session stored meanwhile. Returns whether it removed one.
+    /// Every spelling of the executor URL (`ws://` and `http://`) is removed.
     pub fn remove_token_if(&self, url: &str, app: &str, token: &str) -> Result<bool> {
-        self.transact(|store| {
-            let key = Self::key(url, app);
-            if store.tokens.get(&key).map(String::as_str) != Some(token) {
+        let version = self.version.clone();
+        let url = url.to_string();
+        let app = app.to_string();
+        let token = token.to_string();
+        self.transact(move |store| {
+            let Some(session) = store.versions.get_mut(&version) else {
                 return (false, false);
-            }
-            store.tokens.remove(&key);
-            (true, true)
+            };
+            let mut removed = false;
+            session.tokens.retain(|key, value| {
+                if key_matches(key, &url, &app) && value == &token {
+                    removed = true;
+                    false
+                } else {
+                    true
+                }
+            });
+            (removed, removed)
         })
     }
 
-    /// The URL `app` last connected to — TS `ad4m-url`, per app.
+    /// The URL `app` last connected to — TS `ad4m-url`, per app, for this version.
     pub fn last_url(&self, app: &str) -> Result<Option<RememberedUrl>> {
-        Ok(self.load()?.urls.get(app).cloned())
+        Ok(self
+            .load()?
+            .versions
+            .get(&self.version)
+            .and_then(|session| session.urls.get(app))
+            .cloned())
     }
 
     pub fn set_last_url(&self, app: &str, url: &str, pinned: bool) -> Result<()> {
+        let version = self.version.clone();
+        let app = app.to_string();
         let entry = RememberedUrl {
-            url: url.to_string(),
+            url: normalize_base_url(url),
             pinned,
         };
-        self.transact(|store| {
-            let changed = store.urls.get(app) != Some(&entry);
-            store.urls.insert(app.to_string(), entry);
+        self.transact(move |store| {
+            let session = store.versions.entry(version).or_default();
+            let changed = session.urls.get(&app) != Some(&entry);
+            session.urls.insert(app, entry);
             (changed, ())
         })
     }
 }
 
+/// Package versions by semver precedence: a release ranks above its own
+/// prereleases (TS `compareVersions`).
+pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    fn split(v: &str) -> (&str, &str) {
+        match v.split_once('-') {
+            Some((core, pre)) => (core, pre),
+            None => (v, ""),
+        }
+    }
+    let (a_core, a_pre) = split(a);
+    let (b_core, b_pre) = split(b);
+    let by_core = compare_numeric(a_core, b_core);
+    if by_core != std::cmp::Ordering::Equal || a_pre == b_pre {
+        return by_core;
+    }
+    if a_pre.is_empty() {
+        return std::cmp::Ordering::Greater;
+    }
+    if b_pre.is_empty() {
+        return std::cmp::Ordering::Less;
+    }
+    compare_numeric(a_pre, b_pre)
+}
+
+/// `localeCompare` with `numeric: true`: digit runs compare as integers.
+fn compare_numeric(a: &str, b: &str) -> std::cmp::Ordering {
+    let (mut a, mut b) = (a.chars().peekable(), b.chars().peekable());
+    loop {
+        match (a.peek().copied(), b.peek().copied()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(x), Some(y)) if x.is_ascii_digit() && y.is_ascii_digit() => {
+                let na = take_number(&mut a);
+                let nb = take_number(&mut b);
+                if na != nb {
+                    return na.cmp(&nb);
+                }
+            }
+            (Some(x), Some(y)) => {
+                a.next();
+                b.next();
+                if x != y {
+                    return x.cmp(&y);
+                }
+            }
+        }
+    }
+}
+
+fn take_number(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> u128 {
+    let mut n: u128 = 0;
+    while let Some(c) = chars.peek().copied() {
+        if !c.is_ascii_digit() {
+            break;
+        }
+        chars.next();
+        n = n
+            .saturating_mul(10)
+            .saturating_add(u128::from(c as u8 - b'0'));
+    }
+    n
+}
+
+/// `major.minor` of a version (`0.13` for `0.13.1-staging.5`). `None` when
+/// `version` is not `major.minor.patch` with an optional `-prerelease`.
+///
+/// Matches TS `minorLine`: the patch must be followed by `-` or the end of
+/// the string. `0.13.0.1` and `0.13.0+build` are not prefixes.
+fn minor_line(version: &str) -> Option<&str> {
+    let bytes = version.as_bytes();
+    let mut i = 0;
+    let major_len = count_digits(bytes, i);
+    if major_len == 0 || bytes.get(i + major_len) != Some(&b'.') {
+        return None;
+    }
+    i += major_len + 1;
+    let minor_len = count_digits(bytes, i);
+    if minor_len == 0 || bytes.get(i + minor_len) != Some(&b'.') {
+        return None;
+    }
+    let minor_end = i + minor_len;
+    i = minor_end + 1;
+    let patch_len = count_digits(bytes, i);
+    if patch_len == 0 {
+        return None;
+    }
+    i += patch_len;
+    match bytes.get(i) {
+        None | Some(b'-') => version.get(..minor_end),
+        _ => None,
+    }
+}
+
+fn count_digits(bytes: &[u8], start: usize) -> usize {
+    let Some(tail) = bytes.get(start..) else {
+        return 0;
+    };
+    tail.iter().take_while(|byte| byte.is_ascii_digit()).count()
+}
+
+/// Whether `prefix` may give its session to `current`: an older version of
+/// the same minor line (TS `adoptableFrom`).
+fn adoptable_from(prefix: &str, current: &str) -> bool {
+    match (minor_line(current), minor_line(prefix)) {
+        (Some(line), Some(prefix_line)) if line == prefix_line => {
+            compare_versions(prefix, current) == std::cmp::Ordering::Less
+        }
+        _ => false,
+    }
+}
+
+fn key_matches(key: &str, url: &str, app: &str) -> bool {
+    let Some((stored_url, stored_app)) = key.split_once('|') else {
+        return false;
+    };
+    stored_app == app && normalize_base_url(stored_url) == normalize_base_url(url)
+}
+
+fn token_in(store: &StoreFile, version: &str, url: &str, app: &str) -> Option<String> {
+    store
+        .versions
+        .get(version)
+        .and_then(|session| token_in_session(session, url, app))
+}
+
+fn token_in_session(session: &VersionSession, url: &str, app: &str) -> Option<String> {
+    let exact = format!("{}|{app}", normalize_base_url(url));
+    if let Some(token) = session.tokens.get(&exact).filter(|token| !token.is_empty()) {
+        return Some(token.clone());
+    }
+    session.tokens.iter().find_map(|(key, token)| {
+        if token.is_empty() || !key_matches(key, url, app) {
+            return None;
+        }
+        Some(token.clone())
+    })
+}
+
+fn plan_adopt(store: &StoreFile, version: &str, url: &str, app: &str) -> Option<AdoptPlan> {
+    if token_in(store, version, url, app).is_some() {
+        return None;
+    }
+    let want = normalize_base_url(url);
+    let mut best_version: Option<String> = None;
+    let mut best_token: Option<String> = None;
+    let mut drop_versions = Vec::new();
+    for (prefix, session) in &store.versions {
+        if !adoptable_from(prefix, version) {
+            continue;
+        }
+        let Some(token) = token_in_session(session, &want, app) else {
+            continue;
+        };
+        drop_versions.push(prefix.clone());
+        let better = match &best_version {
+            None => true,
+            Some(best) => compare_versions(prefix, best) == std::cmp::Ordering::Greater,
+        };
+        if better {
+            best_version = Some(prefix.clone());
+            best_token = Some(token);
+        }
+    }
+    let token = best_token?;
+    let source = best_version?;
+    let remembered = store
+        .versions
+        .get(&source)
+        .and_then(|session| session.urls.get(app))
+        .filter(|remembered| normalize_base_url(&remembered.url) == want)
+        .cloned();
+    Some(AdoptPlan {
+        token,
+        remembered,
+        drop_versions,
+    })
+}
+
+fn apply_adopt(store: &mut StoreFile, version: &str, url: &str, app: &str, plan: AdoptPlan) {
+    let want = normalize_base_url(url);
+    {
+        let session = store.versions.entry(version.to_string()).or_default();
+        session.tokens.insert(format!("{want}|{app}"), plan.token);
+        if let Some(remembered) = plan.remembered {
+            session.urls.entry(app.to_string()).or_insert(remembered);
+        }
+    }
+    for prefix in plan.drop_versions {
+        if let Some(session) = store.versions.get_mut(&prefix) {
+            session
+                .tokens
+                .retain(|key, _| !key_matches(key, &want, app));
+            if session
+                .urls
+                .get(app)
+                .is_some_and(|remembered| normalize_base_url(&remembered.url) == want)
+            {
+                session.urls.remove(app);
+            }
+        }
+    }
+    store
+        .versions
+        .retain(|_, session| !session.tokens.is_empty() || !session.urls.is_empty());
+}
+
 // ── URL resolution ──
 
-/// `ws(s)://` → `http(s)://`, trailing `/` off (TS `wsUrlToHttpBase`).
+/// One canonical executor identity (TS `wsUrlToHttpBase`, plus host case,
+/// default ports, and no secrets).
+///
+/// Parsed once, before a connection, a token key, or an error line.
+/// `ws(s)://` becomes `http(s)://`. Userinfo, query, and fragment are
+/// dropped, so a password cannot reach a token key or a diagnostic. The
+/// host is lower case. A default port (`:80` for `http`/`ws`, `:443` for
+/// `https`/`wss`) is omitted. A trailing slash that is only the empty
+/// path is omitted.
 pub fn normalize_base_url(url: &str) -> String {
-    let u = url.trim().trim_end_matches('/');
-    u.strip_prefix("ws://")
-        .map(|rest| format!("http://{rest}"))
-        .or_else(|| {
-            u.strip_prefix("wss://")
-                .map(|rest| format!("https://{rest}"))
-        })
-        .unwrap_or_else(|| u.to_string())
+    let trimmed = url.trim();
+    let Ok(parsed) = reqwest::Url::parse(trimmed) else {
+        return redact_unparsed(trimmed);
+    };
+    let scheme = match parsed.scheme() {
+        "ws" => "http",
+        "wss" => "https",
+        other => other,
+    };
+    let Some(host) = parsed.host_str() else {
+        return redact_unparsed(trimmed);
+    };
+    // `host_str` already brackets an IPv6 address (`[::1]`). Wrapping again
+    // turns `http://[::1]:12000` into `http://[[::1]]:12000`. Wrap only when
+    // the host is not already bracketed. A colon still means an IPv6
+    // literal; a domain host has none.
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    let mut out = format!("{scheme}://{host}");
+    // `port()` is `None` when the port is the default for the scheme, so
+    // `:80` and `:443` fall out after the ws→http / wss→https rename.
+    if let Some(port) = parsed.port() {
+        out.push(':');
+        out.push_str(&port.to_string());
+    }
+    let path = parsed.path().trim_end_matches('/');
+    if !path.is_empty() && path != "/" {
+        out.push_str(path);
+    }
+    out
+}
+
+/// A string that is not a URL. Still drop a userinfo, query, or fragment
+/// so a password is not echoed when parsing fails.
+fn redact_unparsed(raw: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('/');
+    let (scheme, rest) = match trimmed.split_once("://") {
+        Some((scheme, rest)) => (Some(scheme), rest),
+        None => (None, trimmed),
+    };
+    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+    let rest = rest.rsplit_once('@').map(|(_, host)| host).unwrap_or(rest);
+    let rest = rest.trim_end_matches('/');
+    match scheme {
+        Some(scheme) => format!("{scheme}://{rest}"),
+        None => rest.to_string(),
+    }
+}
+
+/// Refuse to send credentials to a plaintext executor that is not on
+/// loopback, unless `allow_insecure_remote` is set.
+///
+/// `ad4m login` calls this before either path opens a socket. The admin
+/// credential would otherwise ride the socket URL.
+pub fn refuse_insecure_remote(base_url: &str, allow_insecure_remote: bool) -> Result<()> {
+    if allow_insecure_remote || !plaintext_remote(base_url) {
+        return Ok(());
+    }
+    Err(ConnectError::InsecureTransport {
+        url: base_url.to_string(),
+    }
+    .into())
 }
 
 /// Whether credentials sent to `base_url` travel unencrypted off this
@@ -769,9 +1180,7 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
         let (url, pinned) = self.resolve_url().await?;
         // Before any token goes out (it rides the socket URL) or any prompt
         // is asked (F5).
-        if !self.opts.insecure_remote && plaintext_remote(&url) {
-            return Err(ConnectError::InsecureTransport { url }.into());
-        }
+        refuse_insecure_remote(&url, self.opts.insecure_remote)?;
         self.url = Some(url.clone());
         self.pinned = pinned;
 
@@ -954,19 +1363,20 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
     }
 
     /// Ordered candidates, each with whether it was chosen (pinned) rather
-    /// than discovered: explicit url → explicit port → this app's pinned
-    /// remembered URL → `~/.ad4m/executor-port` → this app's discovered
-    /// remembered URL → the default port. First `/health` win.
+    /// than discovered. An explicit URL is the only candidate. Otherwise:
+    /// explicit port → this app's pinned remembered URL →
+    /// `~/.ad4m/executor-port` → this app's discovered remembered URL →
+    /// the default port. First `/health` win.
     fn candidates(&self) -> Result<Vec<(String, bool)>> {
+        if let Some(url) = &self.opts.url {
+            return Ok(vec![(normalize_base_url(url), true)]);
+        }
         let mut out: Vec<(String, bool)> = Vec::new();
         let mut push = |u: String, pinned: bool| {
             if !out.iter().any(|(seen, _)| *seen == u) {
                 out.push((u, pinned));
             }
         };
-        if let Some(url) = &self.opts.url {
-            push(normalize_base_url(url), true);
-        }
         if let Some(port) = self.opts.port {
             push(format!("http://127.0.0.1:{port}"), true);
         }
@@ -1174,6 +1584,17 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
         });
         loop {
             let code = prompts.email_code(&email).await?;
+            // `resend` is not a code. An expired challenge is reported as a
+            // wrong code and then deleted, so the user must be able to ask
+            // for a new email instead of typing guesses that cannot succeed.
+            if code.eq_ignore_ascii_case("resend") {
+                prompts.status(ConnectStatus::EmailCodeExpired);
+                self.request_verification(rpc, &email).await?;
+                prompts.status(ConnectStatus::WaitingForEmailCode {
+                    email: email.clone(),
+                });
+                continue;
+            }
             match rpc
                 .call(
                     "user.verifyEmail",
@@ -1192,8 +1613,9 @@ impl<E: ExecutorIo> Ad4mConnect<E> {
                         .ok_or_else(|| anyhow!("user.verifyEmail did not answer a string"))?
                         .to_string())
                 }
-                // A wrong code (the executor says the same for one past its
-                // expiry): ask again.
+                // A wrong code, or one past its expiry (the executor says
+                // the same and deletes the challenge). Ask again. The user
+                // can answer `resend`.
                 Err(e) if says_rpc(&e, EMAIL_CODE_INVALID) => {
                     prompts.status(ConnectStatus::CodeRejected)
                 }
@@ -1584,16 +2006,9 @@ mod tests {
         o.token_dir = Some(store_dir.clone());
         let s: Ad4mConnect<FakeIo> = Ad4mConnect::with_io(o, FakeIo::unhealthy()).unwrap();
         let urls = |s: &Ad4mConnect<FakeIo>| -> Vec<(String, bool)> { s.candidates().unwrap() };
-        assert_eq!(
-            urls(&s),
-            vec![
-                ("http://explicit:1".to_string(), true), // normalized (trailing /)
-                ("http://127.0.0.1:2000".to_string(), true), // explicit port
-                ("http://stored.example:9000".to_string(), true), // pinned, ws→http
-                ("http://127.0.0.1:14444".to_string(), false), // executor-port file
-                ("http://127.0.0.1:12000".to_string(), false), // default
-            ]
-        );
+        // The named URL is the only candidate. Port, remembered URL, the
+        // port file, and the default port are not fallbacks.
+        assert_eq!(urls(&s), vec![("http://explicit:1".to_string(), true)]);
 
         // Found by discovery last time: after the port file.
         remember_discovered(&store, "http://127.0.0.1:14111");
@@ -2489,7 +2904,10 @@ mod tests {
 
         let raw = std::fs::read_to_string(dir.path().join("tokens.json")).unwrap();
         let parsed: Value = serde_json::from_str(&raw).expect("the store is not JSON");
-        let tokens = parsed["tokens"].as_object().unwrap();
+        let version = env!("CARGO_PKG_VERSION");
+        let tokens = parsed["versions"][version]["tokens"]
+            .as_object()
+            .unwrap_or_else(|| panic!("no tokens for {version} in {raw}"));
         let mut lost = Vec::new();
         for who in ["a", "b"] {
             for i in 0..N {
@@ -2558,5 +2976,504 @@ mod tests {
             "https://host.example"
         );
         assert_eq!(normalize_base_url("http://a/"), "http://a");
+    }
+
+    #[test]
+    fn compare_versions_orders_by_semver_precedence() {
+        let mut versions = [
+            "0.10.0",
+            "0.13.1",
+            "0.9.0",
+            "0.13.1-staging.10",
+            "0.13.1-staging.5",
+            "0.13.0",
+        ];
+        versions.sort_by(|a, b| compare_versions(a, b));
+        assert_eq!(
+            versions,
+            [
+                "0.9.0",
+                "0.10.0",
+                "0.13.0",
+                "0.13.1-staging.5",
+                "0.13.1-staging.10",
+                "0.13.1",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_default_store_uses_the_package_version() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            TokenStore::new(dir.path()).version(),
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+
+    fn write_store(dir: &Path, body: &str) {
+        std::fs::write(dir.join("tokens.json"), body).unwrap();
+    }
+
+    /// A second executor's token stays when this version adopts another URL.
+    #[test]
+    fn token_store_keeps_each_executor_when_a_version_is_adopted() {
+        let dir = tempfile::tempdir().unwrap();
+        write_store(
+            dir.path(),
+            r#"{
+                "versions": {
+                    "0.13.0": {
+                        "tokens": { "http://node:1|cli": "same-executor" },
+                        "urls": { "cli": { "url": "http://node:1", "pinned": true } }
+                    },
+                    "0.13.1-staging.5": {
+                        "tokens": { "http://other:1|cli": "other-executor" },
+                        "urls": { "cli": { "url": "http://other:1", "pinned": false } }
+                    }
+                }
+            }"#,
+        );
+        let store = TokenStore::with_version(dir.path(), "0.13.1");
+        assert_eq!(
+            store.token("http://node:1", "cli").unwrap().as_deref(),
+            Some("same-executor")
+        );
+        assert_eq!(
+            store.last_url("cli").unwrap(),
+            Some(RememberedUrl {
+                url: "http://node:1".to_string(),
+                pinned: true
+            })
+        );
+        // Logout clears this version. The old copy is already gone, so the
+        // next read does not log the user back in.
+        store.remove_token("http://node:1", "cli").unwrap();
+        assert_eq!(store.token("http://node:1", "cli").unwrap(), None);
+        let staging = TokenStore::with_version(dir.path(), "0.13.1-staging.5");
+        assert_eq!(
+            staging.token("http://other:1", "cli").unwrap().as_deref(),
+            Some("other-executor")
+        );
+    }
+
+    #[test]
+    fn token_store_adopts_ws_and_http_as_one_executor() {
+        let dir = tempfile::tempdir().unwrap();
+        write_store(
+            dir.path(),
+            r#"{
+                "versions": {
+                    "0.13.1-staging.4": {
+                        "tokens": { "ws://node:1|cli": "from-ws" }
+                    }
+                }
+            }"#,
+        );
+        let store = TokenStore::with_version(dir.path(), "0.13.1-staging.5");
+        assert_eq!(
+            store.token("http://node:1", "cli").unwrap().as_deref(),
+            Some("from-ws")
+        );
+        let old = TokenStore::with_version(dir.path(), "0.13.1-staging.4");
+        assert_eq!(old.token("ws://node:1", "cli").unwrap(), None);
+    }
+
+    #[test]
+    fn token_store_ranks_a_release_above_its_prerelease() {
+        let dir = tempfile::tempdir().unwrap();
+        write_store(
+            dir.path(),
+            r#"{
+                "versions": {
+                    "0.13.1-staging.10": { "tokens": { "http://node:1|cli": "prerelease" } },
+                    "0.13.1": { "tokens": { "http://node:1|cli": "release" } }
+                }
+            }"#,
+        );
+        // 0.13.2 adopts the release, not the older prerelease of that release.
+        let store = TokenStore::with_version(dir.path(), "0.13.2");
+        assert_eq!(
+            store.token("http://node:1", "cli").unwrap().as_deref(),
+            Some("release")
+        );
+        assert_eq!(
+            TokenStore::with_version(dir.path(), "0.13.1-staging.10")
+                .token("http://node:1", "cli")
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn token_store_leaves_another_line_a_newer_version_and_this_version() {
+        let dir = tempfile::tempdir().unwrap();
+        write_store(
+            dir.path(),
+            r#"{
+                "versions": {
+                    "0.12.9": { "tokens": { "http://node:1|cli": "older-minor" } },
+                    "0.13.0": { "tokens": { "http://node:1|cli": "same-line" } },
+                    "0.13.1": { "tokens": { "http://node:1|cli": "current" } },
+                    "0.13.2": { "tokens": { "http://node:1|cli": "newer" } },
+                    "1.13.0": { "tokens": { "http://node:1|cli": "other-major" } },
+                    "some-app": { "tokens": { "http://node:1|cli": "not-a-version" } }
+                }
+            }"#,
+        );
+        let store = TokenStore::with_version(dir.path(), "0.13.1");
+        assert_eq!(
+            store.token("http://node:1", "cli").unwrap().as_deref(),
+            Some("current")
+        );
+        assert_eq!(
+            TokenStore::with_version(dir.path(), "0.13.0")
+                .token("http://node:1", "cli")
+                .unwrap()
+                .as_deref(),
+            Some("same-line")
+        );
+        assert_eq!(
+            TokenStore::with_version(dir.path(), "0.12.9")
+                .token("http://node:1", "cli")
+                .unwrap()
+                .as_deref(),
+            Some("older-minor")
+        );
+        assert_eq!(
+            TokenStore::with_version(dir.path(), "0.13.2")
+                .token("http://node:1", "cli")
+                .unwrap()
+                .as_deref(),
+            Some("newer")
+        );
+        assert_eq!(
+            TokenStore::with_version(dir.path(), "some-app")
+                .token("http://node:1", "cli")
+                .unwrap()
+                .as_deref(),
+            Some("not-a-version")
+        );
+    }
+
+    #[test]
+    fn token_store_picks_the_newest_older_session_of_the_same_minor_line() {
+        let dir = tempfile::tempdir().unwrap();
+        write_store(
+            dir.path(),
+            r#"{
+                "versions": {
+                    "0.12.9": { "tokens": { "http://node:1|cli": "older-minor" } },
+                    "0.13.0": { "tokens": { "http://node:1|cli": "same-line" } },
+                    "0.13.3": { "tokens": { "http://node:1|cli": "newer" } }
+                }
+            }"#,
+        );
+        let store = TokenStore::with_version(dir.path(), "0.13.1");
+        assert_eq!(
+            store.token("http://node:1", "cli").unwrap().as_deref(),
+            Some("same-line")
+        );
+        assert_eq!(
+            TokenStore::with_version(dir.path(), "0.13.0")
+                .token("http://node:1", "cli")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            TokenStore::with_version(dir.path(), "0.12.9")
+                .token("http://node:1", "cli")
+                .unwrap()
+                .as_deref(),
+            Some("older-minor")
+        );
+        assert_eq!(
+            TokenStore::with_version(dir.path(), "0.13.3")
+                .token("http://node:1", "cli")
+                .unwrap()
+                .as_deref(),
+            Some("newer")
+        );
+    }
+
+    #[test]
+    fn an_empty_token_is_not_adopted() {
+        let dir = tempfile::tempdir().unwrap();
+        write_store(
+            dir.path(),
+            r#"{ "versions": { "0.13.0": { "tokens": { "http://node:1|cli": "" } } } }"#,
+        );
+        let store = TokenStore::with_version(dir.path(), "0.13.1");
+        assert_eq!(store.token("http://node:1", "cli").unwrap(), None);
+    }
+
+    #[test]
+    fn a_pre_version_file_is_read_as_this_version() {
+        let dir = tempfile::tempdir().unwrap();
+        write_store(
+            dir.path(),
+            r#"{
+                "tokens": { "http://a:1|app": "tok-a", "http://b:2|app": "tok-b" },
+                "urls": { "app": { "url": "http://b:2", "pinned": true } }
+            }"#,
+        );
+        let store = TokenStore::with_version(dir.path(), "0.13.1");
+        assert_eq!(
+            store.token("http://a:1", "app").unwrap().as_deref(),
+            Some("tok-a")
+        );
+        assert_eq!(
+            store.token("http://b:2", "app").unwrap().as_deref(),
+            Some("tok-b")
+        );
+        let raw: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("tokens.json")).unwrap())
+                .unwrap();
+        assert!(
+            raw.get("tokens").is_none(),
+            "legacy tokens were written back: {raw}"
+        );
+        assert_eq!(
+            raw["versions"]["0.13.1"]["tokens"]["http://b:2|app"],
+            "tok-b"
+        );
+        assert_eq!(
+            store.last_url("app").unwrap(),
+            Some(RememberedUrl {
+                url: "http://b:2".to_string(),
+                pinned: true
+            })
+        );
+    }
+
+    /// A password, query, or fragment in the login URL must not survive
+    /// into a token key or a later error line. Host case and default ports
+    /// name one executor.
+    #[test]
+    fn normalize_base_url_strips_secrets_and_canonicalizes_host_and_port() {
+        assert_eq!(
+            normalize_base_url("https://alice:password@NODE.example:443/api?token=secret#frag"),
+            "https://node.example/api"
+        );
+        assert_eq!(
+            normalize_base_url("HTTP://Node.Example:80/"),
+            "http://node.example"
+        );
+        assert_eq!(
+            normalize_base_url("ws://NODE.example:80/"),
+            "http://node.example"
+        );
+        assert_eq!(
+            normalize_base_url("wss://NODE.example:443"),
+            "https://node.example"
+        );
+        let with_secret = normalize_base_url("http://alice:password@node.example/x?y=secret#z");
+        assert!(
+            !with_secret.contains("password") && !with_secret.contains("secret"),
+            "{with_secret}"
+        );
+    }
+
+    /// IPv6 loopback with an explicit port stays singly bracketed.
+    /// `Url::host_str` already includes `[` `]`, so a second wrap would
+    /// turn this into `http://[[::1]]:12000`.
+    #[test]
+    fn normalize_base_url_keeps_ipv6_loopback_with_an_explicit_port() {
+        assert_eq!(
+            normalize_base_url("http://[::1]:12000"),
+            "http://[::1]:12000"
+        );
+        assert_eq!(
+            normalize_base_url("http://[::1]:12000/"),
+            "http://[::1]:12000"
+        );
+    }
+
+    /// An IPv6 host whose port is the scheme default stays singly
+    /// bracketed, and that default port is omitted.
+    #[test]
+    fn normalize_base_url_keeps_ipv6_with_a_default_port() {
+        assert_eq!(normalize_base_url("http://[::1]:80"), "http://[::1]");
+        assert_eq!(normalize_base_url("https://[::1]:443"), "https://[::1]");
+        assert_eq!(normalize_base_url("ws://[::1]:80/"), "http://[::1]");
+    }
+
+    /// `set_token` keys the store on the canonical URL, so a password in the
+    /// login URL is not written, and another spelling of that host finds it.
+    #[test]
+    fn a_url_password_does_not_become_the_token_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TokenStore::new(dir.path());
+        store
+            .set_token("https://alice:password@NODE.example:443/?x=1", "cli", "jwt")
+            .unwrap();
+        let raw = std::fs::read_to_string(store.path()).unwrap();
+        assert!(!raw.contains("password"), "{raw}");
+        assert!(!raw.contains("alice"), "{raw}");
+        assert!(!raw.contains("x=1"), "{raw}");
+        assert_eq!(
+            store
+                .token("https://node.example", "cli")
+                .unwrap()
+                .as_deref(),
+            Some("jwt")
+        );
+        assert_eq!(
+            store
+                .token("HTTPS://NODE.example:443", "cli")
+                .unwrap()
+                .as_deref(),
+            Some("jwt")
+        );
+    }
+
+    /// `ad4m login <url>` names one executor. A down remote must not become
+    /// a successful login to the healthy local executor.
+    #[tokio::test]
+    async fn an_explicit_url_does_not_fall_back_to_a_healthy_local_executor() {
+        let dir = tempfile::tempdir().unwrap();
+        let port_file = dir.path().join("executor-port");
+        std::fs::write(&port_file, "12000").unwrap();
+        let mut o = opts();
+        o.url = Some("http://remote.example:12000".to_string());
+        o.use_stored_url = false;
+        o.executor_port_file = Some(port_file);
+        o.token_dir = Some(dir.path().join("tokens"));
+        let mut io = FakeIo::new(|token, method, _| match (token, method) {
+            ("", "agent.status") => Ok(authed_status()),
+            (_, other) => Err(rpc_err(404, &format!("unexpected {other}"))),
+        });
+        io.healthy = Arc::new(|url| {
+            if url.contains("127.0.0.1") || url.contains("localhost") {
+                Ok(())
+            } else {
+                Err(anyhow!("connection refused"))
+            }
+        });
+        let mut s = Ad4mConnect::with_io(o, io).unwrap();
+        match s.connect(&mut NoPrompts).await {
+            Ok(state) => panic!(
+                "logged in via a fallback executor: {state:?} url={:?}",
+                s.url()
+            ),
+            Err(err) => match err.downcast_ref::<ConnectError>() {
+                Some(ConnectError::ExecutorNotFound { tried }) => {
+                    assert!(
+                        tried.iter().any(|url| url.contains("remote.example")),
+                        "{tried:?}"
+                    );
+                    assert!(
+                        tried.iter().all(|url| !url.contains("127.0.0.1")),
+                        "fell back to a local executor: {tried:?}"
+                    );
+                }
+                other => panic!("expected ExecutorNotFound, got {other:?}: {err}"),
+            },
+        }
+        assert!(
+            s.io.opened().is_empty(),
+            "opened a socket on a fallback: {:?}",
+            s.io.opened()
+        );
+    }
+
+    /// An expired email code is reported like a wrong one, and the challenge
+    /// is gone. The user can ask for a new code instead of typing forever.
+    #[tokio::test]
+    async fn an_expired_email_code_can_be_resent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut o = opts();
+        o.email = Some("ada@example.com".to_string());
+        let requests = Arc::new(Mutex::new(0u32));
+        let requests2 = requests.clone();
+        let codes = Arc::new(Mutex::new(Vec::new()));
+        let codes2 = codes.clone();
+        let io = FakeIo::new(move |token, method, params| match (token, method) {
+            (_, "agent.status") if token.is_empty() => Err(rpc_err(403, "missing capability")),
+            (_, "agent.status") => Ok(authed_status()),
+            (_, "agent.isLocked") => Ok(Value::Bool(false)),
+            (_, "user.multiUserEnabled") => Ok(Value::Bool(true)),
+            (_, "user.requestVerification") => {
+                *requests2.lock().unwrap() += 1;
+                Ok(json!({
+                    "success": true,
+                    "message": "sent",
+                    "requiresPassword": false,
+                    "isExistingUser": true,
+                }))
+            }
+            (_, "user.verifyEmail") => {
+                let code = params["code"].as_str().unwrap_or("").to_string();
+                codes2.lock().unwrap().push(code.clone());
+                if code == "222222" {
+                    Ok(Value::String("jwt-new".to_string()))
+                } else {
+                    Err(rpc_err(500, "Invalid verification code"))
+                }
+            }
+            (_, other) => Err(rpc_err(404, &format!("unknown {other}"))),
+        });
+        let mut s = session(dir.path(), io, o);
+        let mut prompts = ScriptedPrompts {
+            email_codes: ["111111".into(), "resend".into(), "222222".into()].into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            s.connect(&mut prompts).await.unwrap(),
+            AuthState::Authenticated
+        );
+        assert_eq!(
+            *requests.lock().unwrap(),
+            2,
+            "typing resend must email a new code"
+        );
+        assert_eq!(
+            codes.lock().unwrap().clone(),
+            vec!["111111".to_string(), "222222".to_string()],
+            "resend must not be submitted as a code"
+        );
+        assert!(prompts.statuses.contains(&ConnectStatus::CodeRejected));
+    }
+
+    /// #1610's prefix is `major.minor.patch` then `-` or the end. `0.13.0.1`
+    /// is not that prefix, so it is not adopted and not removed.
+    #[test]
+    fn a_four_component_version_is_not_a_minor_line() {
+        assert_eq!(
+            minor_line("0.13.0.1"),
+            None,
+            "0.13.0.1 is not major.minor.patch"
+        );
+        assert_eq!(minor_line("0.13.0.1-extra"), None);
+        assert_eq!(minor_line("0.13.0+build"), None);
+        assert_eq!(minor_line("0.13.0"), Some("0.13"));
+        assert_eq!(minor_line("0.13.1-staging.5"), Some("0.13"));
+        assert_eq!(minor_line("some-app"), None);
+
+        let dir = tempfile::tempdir().unwrap();
+        write_store(
+            dir.path(),
+            r#"{
+                "versions": {
+                    "0.13.0.1": { "tokens": { "http://node:1|cli": "malformed" } },
+                    "0.13.0": { "tokens": { "http://node:1|cli": "real-older" } }
+                }
+            }"#,
+        );
+        let store = TokenStore::with_version(dir.path(), "0.13.1");
+        assert_eq!(
+            store.token("http://node:1", "cli").unwrap().as_deref(),
+            Some("real-older"),
+            "0.13.0.1 must not beat the real older prefix"
+        );
+        let raw = std::fs::read_to_string(dir.path().join("tokens.json")).unwrap();
+        assert!(
+            raw.contains("\"0.13.0.1\""),
+            "the malformed prefix was removed: {raw}"
+        );
+        assert!(
+            raw.contains("malformed"),
+            "the malformed token was removed: {raw}"
+        );
     }
 }
