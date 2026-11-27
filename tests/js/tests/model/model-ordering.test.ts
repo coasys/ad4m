@@ -3,7 +3,7 @@
  *
  * The ordering feature is declared in `core` (the `@HasMany({ ordering })`
  * decorator and the SHACL it generates) and acted on in the executor (entries
- * written by `collectionSetter`, order reconstructed in `hydrate_one`). Until
+ * written by `collectionSetter` and by `add*`, order reconstructed on read). Until
  * this file nothing exercised the join: the Rust tests build their shape from
  * JSON, and the `core` tests assert what the decorator emits. Both were green
  * for a period in which the feature did nothing at all, because the declaration
@@ -269,6 +269,32 @@ describe("Ad4mModel — CRDT-ordered collections", function () {
     expect(await readTasks(column.id)).to.deep.equal([c.id, b.id]);
   });
 
+  it("appends a removed member again without losing the chain", async () => {
+    const { a, b, c } = await seedTasks();
+    const column = await OrderColumn.create(perspective, {});
+    await (column as any).addTasks(a.id);
+    await (column as any).addTasks(b.id);
+    await (column as any).addTasks(c.id);
+    await (column as any).removeTasks(a.id);
+    await (column as any).addTasks(a.id);
+
+    // a still had an entry. Appending it has to retarget the neighbour that
+    // pointed through the hole, or the entries loop and the read falls off
+    // the head. a comes back at the end: b, c, a.
+    expect(await readTasks(column.id)).to.deep.equal([b.id, c.id, a.id]);
+  });
+
+  it("moves an existing non-tail member to the end when it is added again", async () => {
+    const { a, b, c } = await seedTasks();
+    const column = await OrderColumn.create(perspective, {});
+    await (column as any).addTasks(a.id);
+    await (column as any).addTasks(b.id);
+    await (column as any).addTasks(c.id);
+    await (column as any).addTasks(a.id);
+
+    expect(await readTasks(column.id)).to.deep.equal([b.id, c.id, a.id]);
+  });
+
   it("survives a reorder saved twice in a row", async () => {
     const { a, b, c } = await seedTasks();
     const column = await OrderColumn.create(perspective, {
@@ -308,7 +334,35 @@ describe("Ad4mModel — CRDT-ordered collections", function () {
     );
   });
 
-  // ── 5. The migration path ───────────────────────────────────────────────────
+  // ── 5. One member at a time, on a fresh perspective (#1304) ─────────────────
+
+  it("keeps add order and one-at-a-time set order in a new perspective", async () => {
+    const fresh = await ad4m.perspective.add("ordering-first-write");
+    try {
+      for (const M of ALL_MODELS) await (M as any).register(fresh);
+      const a = await OrderTask.create(fresh, { title: "a" });
+      const b = await OrderTask.create(fresh, { title: "b" });
+      const c = await OrderTask.create(fresh, { title: "c" });
+
+      const added = await OrderColumn.create(fresh, {});
+      await (added as any).addTasks(c.id);
+      await (added as any).addTasks(b.id);
+      await (added as any).addTasks(a.id);
+      const foundAdded = await OrderColumn.findOne(fresh, { where: { id: added.id } });
+      expect(foundAdded!.tasks as string[]).to.deep.equal([c.id, b.id, a.id]);
+
+      const set = await OrderColumn.create(fresh, {});
+      await (set as any).setTasks([c.id]);
+      await (set as any).setTasks([c.id, b.id]);
+      await (set as any).setTasks([c.id, b.id, a.id]);
+      const found = await OrderColumn.findOne(fresh, { where: { id: set.id } });
+      expect(found!.tasks as string[]).to.deep.equal([c.id, b.id, a.id]);
+    } finally {
+      await ad4m.perspective.remove(fresh.uuid);
+    }
+  });
+
+  // ── 6. The migration path ───────────────────────────────────────────────────
 
   it("still returns every member when a collection has no entries yet", async () => {
     const { a, b, c } = await seedTasks();

@@ -48,6 +48,12 @@ pub(super) struct AbstractCache {
     /// `register_shapes` compares a registration's expected links against
     /// it instead of reading the store again.
     pub(super) own_links: Option<Arc<super::shapes::OwnLinks>>,
+    /// Predicates at least one installed concrete class orders. `None`
+    /// until computed for this generation. An `addLink` whose predicate is
+    /// absent skips class and shape lookups; one that is present still
+    /// classifies, because the predicate may be ordered only on a class
+    /// this subject is not.
+    ordered_predicates: Option<Arc<HashSet<String>>>,
 }
 
 /// The classes a model query or subscription reads: those it names, or an
@@ -84,6 +90,51 @@ impl PerspectiveInstance {
         cache.containment = None;
         cache.registry = None;
         cache.own_links = None;
+        cache.ordered_predicates = None;
+    }
+
+    /// Predicates some installed concrete class orders, cached until the
+    /// shapes change.
+    ///
+    /// `Ok(None)` means this call must not trust a set: the store could not
+    /// be read, or the shapes changed while the set was built. The caller
+    /// classifies, which is the slower answer and still a correct one. A
+    /// set that omits a predicate that is ordered would skip that write.
+    pub(super) fn ordered_predicate_set(&self) -> Result<Option<Arc<HashSet<String>>>, AnyError> {
+        let generation = {
+            let cache = self.abstract_cache.read().unwrap();
+            if let Some(set) = &cache.ordered_predicates {
+                return Ok(Some(set.clone()));
+            }
+            cache.generation
+        };
+        let set = Arc::new(self.collect_ordered_predicates()?);
+        let mut cache = self.abstract_cache.write().unwrap();
+        if cache.generation != generation {
+            return Ok(None);
+        }
+        cache.ordered_predicates = Some(set.clone());
+        Ok(Some(set))
+    }
+
+    /// Every predicate a concrete class declares an ordering strategy for.
+    /// One class that fails to load fails the whole collection, so the
+    /// caller classifies instead of caching a set with a hole in it.
+    fn collect_ordered_predicates(&self) -> Result<HashSet<String>, AnyError> {
+        let classes = crate::perspectives::subject_classes_of::concrete_subject_classes(
+            &EvalStop::none(),
+            &self.sparql_store,
+        )?;
+        let mut predicates = HashSet::new();
+        for class_name in classes {
+            let shape = self.get_shape(&class_name)?;
+            for property in &shape.properties {
+                if property.ordering.is_some() {
+                    predicates.insert(property.predicate.clone());
+                }
+            }
+        }
+        Ok(predicates)
     }
 
     /// How many times the installed shapes have changed. Read it *before*

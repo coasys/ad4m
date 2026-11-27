@@ -100,6 +100,12 @@ pub trait OrderingStrategy: Send + Sync {
     /// member, this reads as a move to the end, since the entry it returns
     /// carries a fresh `pid` and supersedes the item's current position. A
     /// caller wanting add-if-missing has to check membership itself.
+    ///
+    /// That single entry is not a complete move. The neighbour that followed
+    /// the item still points at it, and the two entries cycle, so a walk
+    /// from the head reaches nothing. A caller moving an item that already
+    /// has an entry has to diff the whole order and write every entry that
+    /// changes.
     fn generate_append(
         &self,
         item_uri: &str,
@@ -163,6 +169,30 @@ pub fn encode_ordering_entry(entry: &OrderingEntry) -> Result<String, Error> {
         "literal:json:{}",
         urlencoding::encode(&serde_json::to_string(entry)?)
     ))
+}
+
+/// Millisecond stamp for the entries one save writes.
+///
+/// `seq` restarts at 0 on every call, and an equal pid is tie-broken on
+/// `after`. A stamp that is not strictly newer than every entry already
+/// stored can lose that tie, so the save's order is not the one a reader
+/// reconstructs. Callers pass the wall clock; this moves it one millisecond
+/// past the newest pid in `entries`.
+///
+/// `collection_append_link` and `apply_collection_ordering` both go through
+/// here. An append that lands on millisecond `t` writes `t+1`. A setter that
+/// stamped `t` on its own would lose to that append, and reversing two
+/// members would leave them pointing at each other.
+pub fn ordering_timestamp_ms(now_ms: u64, entries: &[OrderingEntry]) -> u64 {
+    match entries
+        .iter()
+        .filter_map(|entry| entry.pid.split('_').next())
+        .filter_map(|millis| millis.parse::<u64>().ok())
+        .max()
+    {
+        Some(latest) if now_ms <= latest => latest.saturating_add(1),
+        _ => now_ms,
+    }
 }
 
 #[cfg(test)]
