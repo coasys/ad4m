@@ -171,7 +171,12 @@ export const e24ReceiverBandwidth = e2eScenario({
         const [a, b] = senders.map((name) => offered[name]);
         const fixed = a.audio + b.audio;
         const carried = (passedBytes * 8) / 1000 / seconds;
-        // The allocator steps a track down when the traffic exceeds the estimate (cost > estimate), and the estimate is at most the cap.
+        // The allocator steps a track down when the estimate falls under 0.85 of the traffic
+        // (STEP_DOWN_FRACTION in simulcast.rs). "Over the cap" alone does not give that when
+        // the cap is within 15 % of a cost (0.85 * lowAndMedium is about 680 here, under the
+        // 700 cap). It holds through the estimator: under overuse str0m's delay controller sets
+        // the estimate to about 0.85 * the observed rate, and the observed rate is under the
+        // cap (`carried`, about 500), so the estimate (about 420) is far under that line.
         const twoLows = a.low + b.low + fixed;
         const lowAndMedium = Math.min(a.low + b.medium, b.low + a.medium) + fixed;
         const twoMediums = a.medium + b.medium + fixed;
