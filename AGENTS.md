@@ -646,9 +646,9 @@ lowers the loop's timeout.
   wanted stopped), the cap drops to that layer: a layer that returns is
   measured again (2 s) and earns its upgrade again (4 s hold, `can_probe`).
 - `SetQualityPreference` is a ceiling, not a choice: `high`, `auto` and unset
-  let the estimate decide up to high; the receiver gets the best live layer at
-  or below the ceiling, else the lowest live one; a lowered ceiling applies on
-  the next keyframe. For a peer the loop no longer holds it is dropped (ids
+  let the estimate decide up to high. The estimate and the hold choose the
+  layer at or below the ceiling; with no live layer there, the receiver gets
+  the lowest live one. A lowered ceiling applies on the next keyframe. For a peer the loop no longer holds it is dropped (ids
   are never reused).
 - The receiver's probing target (`bwe().set_desired_bitrate`) is the estimate
   that satisfies the upgrade condition at the permitted maximum layers:
