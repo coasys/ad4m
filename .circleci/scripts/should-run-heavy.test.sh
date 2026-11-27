@@ -176,6 +176,38 @@ check "light cache: the heavy job of that workflow skips from the cache" 10 '^sk
   CIRCLE_BRANCH=feat/z CIRCLE_WORKFLOW_ID=wfl2 FAKE_FAIL=1
 [ -s "$TMP/curl.log" ] && { echo "  FAIL: cached heavy answer called the API"; FAILED=1; }
 
+# The full-ci decision goes to HEAVY_GATE_EXPORT ($BASH_ENV in CI), so the path
+# gate in the next step honours it too. Only an override writes it, cached or not.
+# exported <name> <expected CI_FULL_CI value, empty: none>
+exported() {
+  local got=""
+  # shellcheck disable=SC2016 # expanded by the inner shell
+  [ -s "$TMP/env" ] && got="$(env -i bash -c '. "$1"; printf %s "${CI_FULL_CI:-}"' _ "$TMP/env")"
+  if [ "$got" = "$2" ]; then echo "  ok: $1 -> CI_FULL_CI='$got'"
+  else echo "  FAIL: $1: CI_FULL_CI='$got' (want '$2'), file: $(cat "$TMP/env" 2>/dev/null)"; FAILED=1; fi
+  : > "$TMP/env"
+}
+: > "$TMP/env"
+check "export: full-ci label" 0 '^run: PR #21 has the full-ci label' CIRCLE_BRANCH=feat/x \
+  HEAVY_GATE_EXPORT="$TMP/env" FAKE_BODY="[$(pr 21 false dev full-ci)]"
+exported "full-ci label exported" "PR #21 has the full-ci label"
+check "export: [full-ci] in the commit message" 0 '^run: \[full-ci\]' CIRCLE_BRANCH=feat/x \
+  HEAVY_GATE_EXPORT="$TMP/env" HEAVY_GATE_COMMIT_MSG=$'fix: y\n\n[full-ci]'
+exported "[full-ci] message exported" "[full-ci] in the commit message"
+check "export: nightly force" 0 '^run: HEAVY_GATE_FORCE' CIRCLE_BRANCH=feat/x \
+  HEAVY_GATE_EXPORT="$TMP/env" HEAVY_GATE_FORCE=true
+exported "nightly force exported" "HEAVY_GATE_FORCE=true"
+check "export: a plain PR to dev" 0 '^run: PR #22 targets dev' CIRCLE_BRANCH=feat/x \
+  HEAVY_GATE_EXPORT="$TMP/env" FAKE_BODY="[$(pr 22 false dev)]"
+exported "a plain PR to dev exports nothing" ""
+rm -rf "$TMP/cache"
+check "export: label, first job" 0 'full-ci label' CIRCLE_BRANCH=feat/x CIRCLE_WORKFLOW_ID=wf9 \
+  HEAVY_GATE_EXPORT="$TMP/env" FAKE_BODY="[$(pr 23 true feat/base full-ci)]"
+exported "label exported by the first job" "PR #23 has the full-ci label"
+check "export: label, second job from the cache" 0 'cached for this workflow' CIRCLE_BRANCH=feat/x \
+  CIRCLE_WORKFLOW_ID=wf9 HEAVY_GATE_EXPORT="$TMP/env" FAKE_FAIL=1
+exported "label exported from the cache" "PR #23 has the full-ci label"
+
 if [ "$FAILED" != 0 ]; then
   echo "FAILED"
   exit 1

@@ -40,6 +40,10 @@
 #   HEAVY_GATE_REPO         owner/repo; default from CIRCLE_REPOSITORY_URL, else coasys/ad4m
 #   HEAVY_GATE_API          default https://api.github.com
 #   HEAVY_GATE_CACHE_DIR    default $CI_ARTIFACT_DIR/heavy-gate (no cache when not writable)
+#   HEAVY_GATE_EXPORT       a file ($BASH_ENV in CI). When the answer is an override
+#                           (HEAVY_GATE_FORCE, [full-ci], the full-ci label; cached or
+#                           not), it gets `export CI_FULL_CI=<reason>`, so later steps of
+#                           the job (the sfu-e2e path gate) honour the same decision.
 #
 # Test: bash .circleci/scripts/should-run-heavy.test.sh
 set -uo pipefail
@@ -55,6 +59,7 @@ read_cache() {
   local line
   if [ "$mode" = light ]; then line="$(sed -n 2p "$cache")"; else line="$(sed -n 1p "$cache")"; fi
   case "$line" in
+    "run: "*"has the full-ci label") forced "${line#run: }" "(cached for this workflow)" ;;
     "run: "*) echo "$line (cached for this workflow)"; exit 0 ;;
     "skip: "*) echo "$line (cached for this workflow)"; exit 10 ;;
     "unsure: "*) echo "run: ${line#unsure: } (cached for this workflow)"; exit 11 ;;
@@ -73,6 +78,13 @@ write_cache() { # heavy-line light-line
 }
 
 run() { echo "run: $*"; exit 0; }
+# forced <reason> [note]: an override; tell the job's later steps, then run.
+forced() {
+  if [ -n "${HEAVY_GATE_EXPORT:-}" ]; then
+    printf 'export CI_FULL_CI=%q\n' "$1" >> "$HEAVY_GATE_EXPORT" 2>/dev/null || true
+  fi
+  run "$1${2:+ $2}"
+}
 unsure() {
   write_cache "unsure: $*" "unsure: $*" || read_cache # another job may have answered first
   echo "run: $*"; exit 11
@@ -86,7 +98,7 @@ esac
 
 branch="${CIRCLE_BRANCH:-}"
 
-[ "${HEAVY_GATE_FORCE:-}" = true ] && run "HEAVY_GATE_FORCE=true"
+[ "${HEAVY_GATE_FORCE:-}" = true ] && forced "HEAVY_GATE_FORCE=true"
 [ -n "${CIRCLE_TAG:-}" ] && run "tag ${CIRCLE_TAG}"
 [ -z "$branch" ] && run "no CIRCLE_BRANCH"
 case "$branch" in
@@ -95,7 +107,7 @@ esac
 
 msg="${HEAVY_GATE_COMMIT_MSG-$(git log -1 --format=%B 2>/dev/null)}"
 case "$msg" in
-  *"[full-ci]"*) run "[full-ci] in the commit message" ;;
+  *"[full-ci]"*) forced "[full-ci] in the commit message" ;;
 esac
 
 repo="${HEAVY_GATE_REPO:-}"
@@ -172,6 +184,9 @@ if ! write_cache "$heavy_v" "$light_v"; then
   esac
 fi
 if [ "$mode" = light ]; then verdict="$light_v"; else verdict="$heavy_v"; fi
+case "$verdict" in
+  "run: "*"has the full-ci label") forced "${verdict#run: }" ;;
+esac
 echo "$verdict"
 case "$verdict" in
   "skip: "*)

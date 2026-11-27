@@ -102,6 +102,8 @@ case "$rc" in
   10) verdict=skip ;;
   *) verdict=unsure ;;
 esac
+override=false # the gate's answer names the label or [full-ci]
+case "$line" in *full-ci*) override=true ;; esac
 reason="${line#*: }"
 reason="${reason%%$'\n'*}"
 reason="${reason%% (http*}" # the request URL, too long for a status
@@ -149,11 +151,16 @@ start_pipeline() {
 # step last (`circleci-agent step halt` leaves exit 0 and status success, so the
 # step list is the only sign). Verified on real jobs of this project. The light
 # jobs' step is "Draft gate ...": GATE_PREFIX picks which one is looked for, so
-# a light job is never counted as a heavy one.
+# a light job is never counted as a heavy one. A job that passed Stack gate and
+# finished with the "Path gate" step last halted there (every changed file on its
+# skip list): it counts as ran, unless the PR now has the override ($o is
+# "true": the label or [full-ci]), which that run did not see: then it halted.
 # shellcheck disable=SC2016 # jq's $g, not the shell's
 JOB_STATE='if (.steps | type) != "array" then "unread" else
   ([.steps[]?.name] | map(startswith($p)) | index(true)) as $g
-  | if $g == null then "light" elif $g < ((.steps | length) - 1) then "ran"
+  | if $g == null then "light"
+    elif $o == "true" and .lifecycle == "finished" and (.steps[-1].name | startswith("Path gate")) then "halted"
+    elif $g < ((.steps | length) - 1) then "ran"
     elif .lifecycle == "finished" then "halted" else "gate" end end'
 GATE_PREFIX="Stack gate"
 ONLY_JOB="" # when set, workflow_state and look read only the job of this name
@@ -171,7 +178,7 @@ workflow_state() {
       js="$(cat "$cache/$num")"
     else
       past && { echo waiting; return; }
-      js="$(cci_job "$num" | jq -r --arg p "$GATE_PREFIX" "$JOB_STATE" 2>/dev/null)" || js=""
+      js="$(cci_job "$num" | jq -r --arg p "$GATE_PREFIX" --arg o "$override" "$JOB_STATE" 2>/dev/null)" || js=""
       case "$js" in light|ran|halted|gate) ;; *) unread=1; continue ;; esac
       case "$st" in running|queued|not_running|on_hold) ;; *) echo "$js" > "$cache/$num" ;; esac
     fi
