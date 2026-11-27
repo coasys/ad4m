@@ -122,7 +122,7 @@ ad4m perspectives watch <perspective-UUID>
 ad4m perspectives create
 
 # Add links to a perspective
-ad4m perspectives add-link <perspective-UUID> <source> <predicate> <target>
+ad4m perspectives add-link <perspective-UUID> <source> <target> <predicate>
 ```
 
 ### Languages
