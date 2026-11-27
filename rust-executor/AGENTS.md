@@ -4,9 +4,6 @@ Crate `ad4m-executor` (lib `rust_executor`). The AD4M runtime. Refactoring plan 
 conventions: `../planning/rust-executor-refactoring-spec-2026-09-04.md`. Read the
 "Conventions" section there before adding files.
 
-`CLAUDE.md` next to this file is a Claude Code entrypoint (`@AGENTS.md`). Edit this
-file; keep `CLAUDE.md` as `@AGENTS.md`.
-
 ## Build and test
 
 ```bash
@@ -226,7 +223,7 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 - Don't add to `perspective_instance.rs`, `db.rs`, `languages/mod.rs`, `ai_service/mod.rs`: they are
   being split (spec items 3, 4, 9). Put new code in a new file with its own `impl` block.
 - New directory ⇒ add an `AGENTS.md` (≤ 40 lines: purpose, files, entry points, invariants,
-  "do not") and a sibling `CLAUDE.md` containing only `@AGENTS.md`.
+  "do not"). No `CLAUDE.md` (see the root `AGENTS.md`).
 - Mechanical moves and behaviour changes in separate commits.
 - Stale docs in this dir: `LOGGING.md` is current. Anything named `PHASE1_*` is obsolete.
 

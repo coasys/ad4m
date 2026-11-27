@@ -1,8 +1,7 @@
 # AD4M monorepo — agent guide
 
-Canonical instructions for this directory. `CLAUDE.md` next to this file is a
-Claude Code entrypoint that contains only `@AGENTS.md` so Claude inlines this
-file. Edit this file; do not put unique rules in `CLAUDE.md`.
+Canonical instructions for this directory. Claude Code (v2.1.281 or later),
+Codex, Devin and Cursor read `AGENTS.md` files directly.
 
 Area detail lives in the `AGENTS.md` of the folder it describes. Read that file
 before you work there.
@@ -44,9 +43,12 @@ There is no `executor/` package any more: ignore references to it in older docs.
   changes for users, apps or operators; **Breaking:** first when it is; "none"
   for internal-only PRs). If a branch already carries an entry, leave it.
 - Design docs go to `planning/<topic>-<yyyy-mm-dd>.md`; delete stale ones.
-- Per-directory agent docs: canonical file is `AGENTS.md`. Sibling `CLAUDE.md`
-  contains only `@AGENTS.md`. `bash scripts/check-agents-claude.sh` checks every
-  pair (CI runs it).
+- Per-directory agent docs live in `AGENTS.md` only. Do not add a `CLAUDE.md`:
+  Claude Code reads `AGENTS.md` only when no `CLAUDE.md`, `.claude/CLAUDE.md` or
+  `CLAUDE.local.md` sits in the working folder or above it, so one such file
+  stops every `AGENTS.md` below it from loading. To keep a personal
+  `CLAUDE.local.md`, set Claude Code's Project instructions to
+  `claude-md-and-agents-md` (`/config`).
 - **RPC contracts are generated.** Every executor method registers
   `map.method::<Params, Result>(name, handler)` (`.read()`, `.long()`). After
   changing a method or a type it reaches, run `cd core && pnpm run generate:api-types`;

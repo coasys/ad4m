@@ -614,11 +614,6 @@ jobs:
           # ci/heavy-suites status: CircleCI reads, the new pipeline, every pending (heavy-suites.yml).
           name: Test heavy-suites-pr.sh
           command: bash .github/scripts/heavy-suites-pr.test.sh
-      - run:
-          # No build, no network; under a second. Each AGENTS.md has a CLAUDE.md that is
-          # exactly `@AGENTS.md`, so Claude Code loads it.
-          name: Check AGENTS.md and CLAUDE.md pairs
-          command: bash scripts/check-agents-claude.sh
       - build_adam
       - build_integration_inputs
       - run:
