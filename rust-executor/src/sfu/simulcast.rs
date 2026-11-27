@@ -1920,7 +1920,7 @@ mod tests {
         assert_eq!(sim.s.next_wake(), Some(measured));
         feed(&mut sim, RATE_WINDOW.as_millis() as u64 - 10, true);
         sim.s.run_due(measured);
-        // 1.5 + 1.0 Mbit/s exceed the estimate of 2 Mbit/s: the step-down.
+        // 0.85 * (1.5 + 1.0) = 2.125 Mbit/s is over the estimate of 2 Mbit/s: the step-down.
         assert_eq!(sim.caps(), [1]);
     }
 

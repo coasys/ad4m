@@ -23,12 +23,13 @@ const CAMERA: Size = { width: 1280, height: 720 };
 const LOW: Size = { width: CAMERA.width / 4, height: CAMERA.height / 4 };
 /**
  * The capped receiver's downlink. The premise, checked in the shaped step from
- * the senders' own numbers: the SFU steps a receiver down when its traffic
- * exceeds its estimate, and the estimate of a shaped link cannot exceed the
- * cap. So two low layers plus the audio must fit under the cap (the most the
- * estimate can be, and what the link carried in the shaped step is measured
- * beside it), while a low and a medium, or two mediums, plus the audio exceed
- * it, and must be stepped down.
+ * the senders' own numbers: the SFU steps a receiver down when its estimate
+ * falls under 0.85 of its traffic (`STEP_DOWN_FRACTION`), and the estimate of
+ * a shaped link stays near 0.85 of what the link carries, at most the cap. So
+ * two low layers plus the audio must fit under the cap (what the link carried
+ * in the shaped step is measured beside it), while a low and a medium, or two
+ * mediums, plus the audio exceed it, and must be stepped down (the shaped step
+ * explains why that holds although 0.85 of a low and a medium is under the cap).
  */
 const CAP_KBIT = 700;
 /** What the SFU budgets each audio track at least (`AUDIO_RESERVE_BPS`). */
