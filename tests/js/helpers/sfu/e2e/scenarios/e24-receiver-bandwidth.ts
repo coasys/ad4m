@@ -175,8 +175,8 @@ export const e24ReceiverBandwidth = e2eScenario({
         // (STEP_DOWN_FRACTION in simulcast.rs). "Over the cap" alone does not give that when
         // the cap is within 15 % of a cost (0.85 * lowAndMedium is about 680 here, under the
         // 700 cap). It holds through the estimator: under overuse str0m's delay controller sets
-        // the estimate to about 0.85 * the observed rate, and the observed rate is under the
-        // cap (`carried`, about 500), so the estimate (about 420) is far under that line.
+        // the estimate to about 0.85 * the observed rate, and the observed rate is at most the
+        // cap, so the estimate is at most about 0.85 * 700 = 595, under that line.
         const twoLows = a.low + b.low + fixed;
         const lowAndMedium = Math.min(a.low + b.medium, b.low + a.medium) + fixed;
         const twoMediums = a.medium + b.medium + fixed;
