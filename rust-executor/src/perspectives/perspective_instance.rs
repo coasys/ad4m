@@ -1,4 +1,6 @@
-use super::fallback_sync::{fallback_push_refused, ShareScope};
+use super::fallback_sync::{
+    fallback_push_refused, ShareScope, FALLBACK_FORCED_COMPARE_EVERY_N_PASSES,
+};
 use super::hosted_status;
 use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
@@ -695,14 +697,25 @@ pub struct PerspectiveInstance {
     // Fallback sync tracking for ensure_public_links_are_shared
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
     fallback_sync_interval: Arc<Mutex<Duration>>,
-    /// Bumped by `link_language_changed`. Starts at 1 so 0 can mean "never
-    /// compared". A compare records the value it started with
-    /// (`fallback_compared_generation`); a change during that compare stores
-    /// the old value, which no longer matches, so the new language is rendered.
+    /// Bumped when the link language changes, when a new one is stored, and
+    /// when an import writes links that were not committed. Starts at 1 so
+    /// 0 can mean "never compared". A compare records the value it started
+    /// with (`fallback_compared_generation`); a bump during that compare
+    /// stores the old value, which no longer matches.
     fallback_generation: Arc<AtomicU64>,
     /// Generation of the last completed compare. 0 means this process has not
-    /// compared yet. A refused or failed pass does not write it.
+    /// finished a compare of the current generation. A real compare clears it
+    /// when it starts, and only a pass that finishes stores the generation it
+    /// captured. A refused or failed pass leaves it cleared, so the next
+    /// fallback retries even after the queue that made the pass run has drained.
     fallback_compared_generation: Arc<AtomicU64>,
+    /// `current_revision` at that completed compare. An empty string is stored
+    /// as none. An idle fallback compares again when the language reports a
+    /// different revision.
+    fallback_compared_revision: Arc<std::sync::Mutex<Option<String>>>,
+    /// Idle passes since this process started. See
+    /// [`FALLBACK_FORCED_COMPARE_EVERY_N_PASSES`].
+    fallback_idle_passes: Arc<AtomicU64>,
     pub(crate) sparql_store: Arc<crate::perspectives::sparql_store::SparqlStore>,
     /// Held by every write to `sparql_store` ([`Self::persist_link_diff`]), and by
     /// [`Self::commit_batch_if`] from checking what it expects through its write, so no other
@@ -792,6 +805,12 @@ pub(super) fn links_missing_remotely(
         .collect()
 }
 
+/// An empty revision is the same as none: server-link-language reports `""`
+/// when its cursor has no revision.
+fn normalize_revision(revision: Option<String>) -> Option<String> {
+    revision.filter(|revision| !revision.is_empty())
+}
+
 /// Cache-backed `ShapeResolver` borrowed from a `PerspectiveInstance` for the
 /// lifetime of a single query.  On miss it parses SHACL from the perspective's
 /// store and memoizes the result.
@@ -853,6 +872,8 @@ impl PerspectiveInstance {
             fallback_sync_interval: Arc::new(Mutex::new(Duration::from_secs(30))),
             fallback_generation: Arc::new(AtomicU64::new(1)),
             fallback_compared_generation: Arc::new(AtomicU64::new(0)),
+            fallback_compared_revision: Arc::new(std::sync::Mutex::new(None)),
+            fallback_idle_passes: Arc::new(AtomicU64::new(0)),
             sparql_store: Arc::new(
                 crate::perspectives::sparql_store::SparqlStore::new(sparql_data_path.as_deref())
                     .expect("Failed to create per-perspective SPARQL service"),
@@ -1324,7 +1345,16 @@ impl PerspectiveInstance {
     ) {
         let registered = self.register_local_agents(&mut language, None).await;
 
-        *self.link_language.write().await = Some(language.clone());
+        {
+            let mut slot = self.link_language.write().await;
+            *slot = Some(language.clone());
+            // `link_language_changed` bumps before this function runs, and
+            // `register_local_agents` awaits before the store. A compare in
+            // that window clones the previous language and would record the
+            // bumped generation. Bumping after the store, while this lock is
+            // held, means only a compare that cloned this language can match.
+            self.fallback_generation.fetch_add(1, Ordering::AcqRel);
+        }
         // A user who joined while this attached (`install_neighbourhood_with_context`
         // adds them as an owner) found no link language to tell, and joins
         // now land straight after a publish. From here on the join tells it
@@ -1613,6 +1643,50 @@ impl PerspectiveInstance {
         }
     }
 
+    /// An idle fallback (this language was compared, nothing queued or parked)
+    /// still compares when the remote revision changed, and on every
+    /// [`FALLBACK_FORCED_COMPARE_EVERY_N_PASSES`]th such pass.
+    ///
+    /// `current_revision` does not render. server-link-language returns the
+    /// revision stored with its cursor; p-diff-sync returns the revision it
+    /// already holds. A failure here is not treated as a change: rendering
+    /// the room on a transient error would be the stall this skip exists to
+    /// stop, and the forced pass still runs.
+    async fn idle_fallback_must_compare(&self, link_language: &mut Language) -> bool {
+        let pass = self.fallback_idle_passes.fetch_add(1, Ordering::AcqRel) + 1;
+        if pass.is_multiple_of(FALLBACK_FORCED_COMPARE_EVERY_N_PASSES) {
+            return true;
+        }
+        if !link_language.has(crate::languages::capability::Capability::PerspectiveCurrentRevision)
+        {
+            return false;
+        }
+        match link_language.current_revision().await {
+            Ok(revision) => normalize_revision(revision) != self.recorded_fallback_revision(),
+            Err(e) => {
+                log::warn!(
+                    "ensure_public_links_are_shared: current_revision() failed on an idle pass for perspective {}: {:?} — not rendering; a later pass still compares",
+                    self.uuid, e
+                );
+                false
+            }
+        }
+    }
+
+    fn recorded_fallback_revision(&self) -> Option<String> {
+        self.fallback_compared_revision
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn record_fallback_revision(&self, revision: Option<String>) {
+        *self
+            .fallback_compared_revision
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = normalize_revision(revision);
+    }
+
     /// Commits the Shared links the link language's `render()` lacks. Callers:
     /// `ensure_public_links_are_shared` and `share_links_after_publish`
     /// (`fallback_sync.rs`); `scope` says how many it may send.
@@ -1636,13 +1710,19 @@ impl PerspectiveInstance {
             // the whole room on the language thread; repeating it on the
             // 5-minute fallback stalls every other call on that language
             // (staging 2026-11-27: ~35–55s every ~6 min on a 307k-link room,
-            // with nothing unsent). The next unsent diff, or a link-language
-            // change, compares again.
+            // with nothing unsent). Skip unless the remote revision changed
+            // or this is the periodic forced compare. An import, a
+            // link-language change, and a compare that failed leave the
+            // generation not matching, so they compare without this check.
             if scope == ShareScope::Fallback
                 && self.fallback_compared_generation.load(Ordering::Acquire) == language_generation
             {
                 match crate::db_backend::db_backend().get_unsent_additions(&uuid) {
-                    Ok(unsent) if unsent.is_empty() => return true,
+                    Ok(unsent) if unsent.is_empty() => {
+                        if !self.idle_fallback_must_compare(&mut link_language).await {
+                            return true;
+                        }
+                    }
                     Ok(_) => {}
                     Err(e) => {
                         log::warn!(
@@ -1653,6 +1733,13 @@ impl PerspectiveInstance {
                     }
                 }
             }
+
+            // This pass will compare. Clear the last success first. A failure
+            // returns below without storing, and the pending loop may then
+            // drain the row that made this pass run. The next fallback would
+            // otherwise see the old generation and an empty queue and skip.
+            self.fallback_compared_generation
+                .store(0, Ordering::Release);
 
             // Query SPARQL store for all links
             let decorated_links = match self.sparql_store.get_all_links(&EvalStop::none()) {
@@ -1783,11 +1870,28 @@ impl PerspectiveInstance {
             }
 
             //crate::db_backend::db_backend().add_many_links(&self.persisted.load().uuid, &remote_links).unwrap(); // Assuming add_many_links takes a reference to a Vec<LinkExpression> and returns Result<(), AnyError>
-            // Compared this generation. A later fallback with an empty queue
-            // does not render again. A refused or failed pass returns above
-            // without writing, so the backoff retries the compare. Storing the
-            // generation captured at the start means a change during this pass
-            // does not count as a compare of the new language.
+            // Compared this generation. The revision is read again after the
+            // commit: a catch-up changes it, and the next idle pass should
+            // see the revision this pass left. Storing the generation captured
+            // at the start means a bump during this pass does not count as a
+            // compare of the new language.
+            let revision = if link_language
+                .has(crate::languages::capability::Capability::PerspectiveCurrentRevision)
+            {
+                match link_language.current_revision().await {
+                    Ok(revision) => revision,
+                    Err(e) => {
+                        log::warn!(
+                            "ensure_public_links_are_shared: current_revision() failed after the compare for perspective {}: {:?} — the next idle pass compares if a revision appears",
+                            uuid, e
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            self.record_fallback_revision(revision);
             self.fallback_compared_generation
                 .store(language_generation, Ordering::Release);
             return true;
