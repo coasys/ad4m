@@ -81,6 +81,7 @@
 //! | [`projection`] | Computing projection aggregations (counts and filtered lists) |
 //! | [`links`] | Per-link rows on request (`links` → `__links`), including undeclared predicates |
 //! | [`query`] | Top-level orchestrator that wires the whole pipeline together |
+//! | [`index_path`] | The id phase from the scope index, for the newest (or oldest) page of a flagged class |
 //! | [`union`] | One query over several classes: per-class rows, one classification, one sort and page over the union |
 //! | [`cursor`] | Keyset cursors (`after` / `nextCursor`) for the timestamp order |
 //! | [`abstract_classes`] | Abstract classes: the concrete classes one reads, and the views it reads them through |
@@ -101,6 +102,9 @@ mod hydration;
 mod id_list_plan_tests;
 #[cfg(test)]
 mod include_limit_tests;
+pub(crate) mod index_path;
+#[cfg(test)]
+mod index_path_tests;
 #[cfg(test)]
 mod integration_tests;
 mod link_author;
