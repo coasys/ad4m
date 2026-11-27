@@ -1280,6 +1280,146 @@ describe('WakerSubscriptionManager', () => {
     ]);
   });
 
+  /**
+   * A composition carries its parts' text (a message its blocks, a document its paragraphs), so a
+   * name in a part matches twice: the record and the part. The agent is told once, about the
+   * record, under the record's own parents.
+   */
+  describe('a mention whose words its holder already carries', () => {
+    const composition = tree({
+      'test://message/text': ['test://message'],
+      'test://message': ['test://call'],
+    });
+    const said = 'Data, can you take the notes?';
+
+    it('wakes once, through the holder', async () => {
+      const { wakes } = await wakeWith(composition, 0, 'test://message', [
+        result(row('test://message/text', said), row('test://message', said)),
+      ]);
+      expect(wakes).toEqual([[{ address: 'test://message', parents: ['test://call'], ancestors: [], ...byOther, via: 'text' }]]);
+    });
+
+    it('wakes for a holder whose text does not hold the words: a place, not the same words', async () => {
+      const { wakes } = await wakeWith(
+        tree({ 'test://message': ['test://channel'] }),
+        0,
+        'test://message',
+        [result(row('test://channel', "Data's room"), row('test://message', 'hi Data!'))],
+      );
+      expect(wakes[0].map((m: any) => m.address).sort()).toEqual(['test://channel', 'test://message']);
+    });
+
+    it('wakes for the part when no result carried the holder', async () => {
+      const { wakes } = await wakeWith(composition, 0, 'test://message', [result(row('test://message/text', said))]);
+      expect(wakes).toEqual([[{ address: 'test://message/text', parents: ['test://message'], ancestors: [], ...byOther, via: 'text' }]]);
+    });
+
+    it('does not wake again for a part that arrives after its holder was woken for', async () => {
+      const containers = (_uuid: string, _class: string, queryJson: string) =>
+        Promise.resolve({ instances: composition(JSON.parse(queryJson).parent).map((id) => ({ id })) });
+      const h = await mentionHarness(10, undefined, { modelQuery: containers });
+      await h.deliver(result(row('test://message', said)));
+      await waitUntil(() => h.wakes.length > 0, 1000);
+      // The holder's row again, beside its part: the text query reports the window it holds.
+      await h.deliver(result(row('test://message', said), row('test://message/text', said), named('test://other')));
+      await waitUntil(() => h.wakes.length > 1, 1000);
+      await new Promise((r) => setTimeout(r, 50));
+      h.manager.disposeAll();
+      expect(h.wakes.map((w: any) => w.map((m: any) => m.address))).toEqual([['test://message'], ['test://other']]);
+      expect(h.persistedSeen.at(-1)).toEqual(expect.arrayContaining(['test://message', 'test://message/text', 'test://other']));
+    });
+
+    it('records a wake made only of parts as delivered, without calling onWake', async () => {
+      const containers = (_uuid: string, _class: string, queryJson: string) =>
+        Promise.resolve({ instances: composition(JSON.parse(queryJson).parent).map((id) => ({ id })) });
+      const h = await mentionHarness(10, undefined, { modelQuery: containers });
+      await h.deliver(result(row('test://message', said)));
+      await waitUntil(() => h.wakes.length > 0, 1000);
+      await h.deliver(result(row('test://message', said), row('test://message/text', said)));
+      await waitUntil(() => h.persistedSeen.some((seen) => seen.includes('test://message/text')), 1000);
+      h.manager.disposeAll();
+      expect(h.wakes).toHaveLength(1);
+    });
+
+    // The holder was woken for with its first words; the words added to it since are news, though
+    // the holder's text holds them now.
+    it('wakes for a part whose words were added to its holder after the holder was woken for', async () => {
+      const containers = (_uuid: string, _class: string, queryJson: string) =>
+        Promise.resolve({ instances: composition(JSON.parse(queryJson).parent).map((id) => ({ id })) });
+      const h = await mentionHarness(10, undefined, { modelQuery: containers });
+      await h.deliver(result(row('test://message', said)));
+      await waitUntil(() => h.wakes.length > 0, 1000);
+      const added = 'Data, and the summary too.';
+      await h.deliver(result(row('test://message', `${said} ${added}`), row('test://message/text', added)));
+      await waitUntil(() => h.wakes.length > 1, 1000);
+      h.manager.disposeAll();
+      expect(h.wakes.map((w: any) => w.map((m: any) => m.address))).toEqual([['test://message'], ['test://message/text']]);
+    });
+
+    // The holder's words change while its wake is in flight: the agent was told the words the wake
+    // carried, so a part with the words added meanwhile is news.
+    it('wakes for a part whose words reached its holder while the holder\'s wake was in flight', async () => {
+      const containers = (_uuid: string, _class: string, queryJson: string) =>
+        Promise.resolve({ instances: composition(JSON.parse(queryJson).parent).map((id) => ({ id })) });
+      let release!: () => void;
+      const held = new Promise<void>((r) => { release = r; });
+      let first = true;
+      const h = await mentionHarness(10, () => {
+        if (!first) return;
+        first = false;
+        return held;
+      }, { modelQuery: containers });
+      await h.deliver(result(row('test://message', said)));
+      await waitUntil(() => h.wakes.length > 0, 1000);
+      const added = 'Data, and the summary too.';
+      await h.deliver(result(row('test://message', `${said} ${added}`)));
+      release();
+      await new Promise((r) => setTimeout(r, 30));
+      await h.deliver(result(row('test://message', `${said} ${added}`), row('test://message/text', added)));
+      await waitUntil(() => h.wakes.length > 1, 1000);
+      h.manager.disposeAll();
+      expect(h.wakes.map((w: any) => w.map((m: any) => m.address))).toEqual([['test://message'], ['test://message/text']]);
+    });
+
+    // A row whose text reads empty forgets the holder's words: they no longer cover a part.
+    it('wakes for a part when its holder\'s text was emptied before the wake', async () => {
+      const containers = (_uuid: string, _class: string, queryJson: string) =>
+        Promise.resolve({ instances: composition(JSON.parse(queryJson).parent).map((id) => ({ id })) });
+      const h = await mentionHarness(100, undefined, { modelQuery: containers });
+      await h.deliver(result(row('test://message', said)));
+      await h.deliver(result({ id: 'test://message', text: '' }, row('test://message/text', said)));
+      await waitUntil(() => h.wakes.length > 0, 1000);
+      h.manager.disposeAll();
+      expect(h.wakes[0].map((m: any) => m.address).sort()).toEqual(['test://message', 'test://message/text']);
+    });
+
+    // Two records with the same words, each under the other: each is a part of the other, and the
+    // agent is woken once, for the least address, not for neither.
+    it('wakes once for records that hold one another round', async () => {
+      const { wakes } = await wakeWith(
+        tree({ 'test://b': ['test://a'], 'test://a': ['test://b'] }),
+        0,
+        'test://a',
+        [result(row('test://b', said), row('test://a', said))],
+      );
+      expect(wakes.map((w: any[]) => w.map((m: any) => m.address))).toEqual([['test://a']]);
+    });
+
+    // The order a wake covers is the holder's first or both together: a part delivered first woke
+    // the agent already, and its holder wakes it again.
+    it('wakes for the part and then its holder when the part arrives first', async () => {
+      const containers = (_uuid: string, _class: string, queryJson: string) =>
+        Promise.resolve({ instances: composition(JSON.parse(queryJson).parent).map((id) => ({ id })) });
+      const h = await mentionHarness(10, undefined, { modelQuery: containers });
+      await h.deliver(result(row('test://message/text', said)));
+      await waitUntil(() => h.wakes.length > 0, 1000);
+      await h.deliver(result(row('test://message/text', said), row('test://message', said)));
+      await waitUntil(() => h.wakes.length > 1, 1000);
+      h.manager.disposeAll();
+      expect(h.wakes.map((w: any) => w.map((m: any) => m.address))).toEqual([['test://message/text'], ['test://message']]);
+    });
+  });
+
   it('bounds the walk by ancestorDepth, and never reports the mention itself', async () => {
     const holders = {
       'test://message': ['test://a'],
