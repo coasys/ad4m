@@ -92,18 +92,25 @@ const OFFER_TTL_S: u64 = 300;
 
 /// Claims `offer` on the executor at `executor_url` (the operator's credential `token`), prints
 /// the match code, and unless `no_wait` waits until the holder confirms or the offer ends.
+///
+/// A plaintext executor that is not on loopback is refused unless
+/// `allow_insecure_remote` is set. [`ad4m_client::connect::refuse_insecure_remote`]
+/// runs first, before the credential is placed in the socket URL.
 pub async fn claim(
     executor_url: &str,
     token: &str,
     offer: &str,
     hint: Option<String>,
     no_wait: bool,
+    allow_insecure_remote: bool,
 ) -> Result<()> {
+    let executor_url = ad4m_client::connect::normalize_base_url(executor_url);
+    ad4m_client::connect::refuse_insecure_remote(&executor_url, allow_insecure_remote)?;
     // The offer was issued before now, so its confirm window closes at most this far ahead:
     // neither the handshake nor the claim may outlast it.
     let window = tokio::time::Instant::now() + Duration::from_secs(OFFER_TTL_S + CONFIRM_GRACE_S);
     let closed = || anyhow!("the executor did not answer before the offer's confirm window closed");
-    let client = tokio::time::timeout_at(window, WsRpcClient::connect(executor_url, token))
+    let client = tokio::time::timeout_at(window, WsRpcClient::connect(&executor_url, token))
         .await
         .map_err(|_| closed())?
         .with_context(|| format!("cannot reach the executor at {executor_url}"))?;
@@ -436,6 +443,7 @@ mod tests {
             "offer",
             None,
             true,
+            false,
         )
         .await
         .expect_err("the executor never answers");
@@ -507,5 +515,126 @@ mod tests {
         init_with_operator(path, Some("seed".into()), Some(A), init).unwrap();
         assert!(seed.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const SECRET: &str = "admin-secret-should-not-travel";
+
+    /// The error `claim` returns for `url`. The admin credential is never in it.
+    /// A call that blocks on a socket fails the test after 3s.
+    async fn claim_message(url: &str, allow_insecure_remote: bool) -> String {
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            claim(url, SECRET, "offer", None, true, allow_insecure_remote),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("claim blocked on a socket for {url}"));
+        let err = result.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            !msg.contains(SECRET),
+            "the admin credential leaked into the error for {url}: {msg}"
+        );
+        msg
+    }
+
+    /// A remote `http://` (and `ws://`) executor is refused before `claim` puts
+    /// the admin credential on a socket, and the credential is absent from the error.
+    #[tokio::test]
+    async fn claim_refuses_remote_http_and_omits_the_credential() {
+        for url in ["http://203.0.113.55:9", "ws://203.0.113.55:9"] {
+            let msg = claim_message(url, false).await;
+            assert!(
+                msg.contains("plaintext"),
+                "expected a plaintext refusal for {url}, got {msg}"
+            );
+            assert!(
+                msg.contains("allow_insecure_remote"),
+                "the refusal for {url} does not name the flag: {msg}"
+            );
+        }
+    }
+
+    /// `--allow-insecure-remote` lets `claim` dial a plaintext executor off loopback.
+    #[tokio::test]
+    async fn claim_allows_remote_http_when_the_flag_is_set() {
+        // `0.0.0.0` is not loopback. Nothing accepts the port, so the dial
+        // fails at once and the error is a reachability error.
+        let msg = claim_message("http://0.0.0.0:1", true).await;
+        assert!(
+            !msg.contains("plaintext"),
+            "the flag did not permit plaintext: {msg}"
+        );
+        assert!(msg.contains("cannot reach"), "the flag did not dial: {msg}");
+    }
+
+    /// Loopback `http://` is allowed: 127.0.0.0/8, `::1`, and `localhost`.
+    /// A listener on 127.0.0.1 sees the credential, which stays out of the error.
+    #[tokio::test]
+    async fn claim_allows_loopback_http() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(AtomicBool::new(false));
+        let seen_task = std::sync::Arc::clone(&seen);
+        tokio::spawn(async move {
+            let Ok(Ok((mut sock, _))) =
+                tokio::time::timeout(Duration::from_secs(2), listener.accept()).await
+            else {
+                return;
+            };
+            let mut got = Vec::new();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+            while tokio::time::Instant::now() < deadline {
+                let mut buf = [0u8; 1024];
+                match tokio::time::timeout(Duration::from_millis(200), sock.read(&mut buf)).await {
+                    Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                    Ok(Ok(n)) => {
+                        got.extend_from_slice(&buf[..n]);
+                        if got.windows(SECRET.len()).any(|w| w == SECRET.as_bytes()) {
+                            seen_task.store(true, Ordering::SeqCst);
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        let msg = claim_message(&format!("http://127.0.0.1:{port}"), false).await;
+        assert!(!msg.contains("plaintext"), "loopback was refused: {msg}");
+        assert!(
+            seen.load(Ordering::SeqCst),
+            "loopback did not dial the admin credential: {msg}"
+        );
+
+        for url in [
+            "http://127.0.0.1:1",
+            "http://127.8.0.1:1",
+            "http://localhost:1",
+            "http://[::1]:1",
+        ] {
+            let msg = claim_message(url, false).await;
+            assert!(
+                !msg.contains("plaintext"),
+                "loopback {url} was refused: {msg}"
+            );
+        }
+    }
+
+    /// `https://` and `wss://` to a non-loopback host are allowed.
+    #[tokio::test]
+    async fn claim_allows_https() {
+        for url in ["https://0.0.0.0:1", "wss://0.0.0.0:1"] {
+            let msg = claim_message(url, false).await;
+            assert!(
+                !msg.contains("plaintext"),
+                "TLS {url} was refused as plaintext: {msg}"
+            );
+            assert!(
+                msg.contains("cannot reach"),
+                "TLS {url} did not dial: {msg}"
+            );
+        }
     }
 }
