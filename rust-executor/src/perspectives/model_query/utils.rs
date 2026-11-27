@@ -154,6 +154,30 @@ pub(super) fn values_or_str_filter(var: &str, ids: &[String]) -> String {
     }
 }
 
+/// One SPARQL line (with its newline) keeping `?predicate` to `predicates`,
+/// for a read that binds `?source ?predicate ?target`. Empty for no predicates.
+///
+/// A `FILTER`, never `VALUES ?predicate`. Oxigraph orders joins greedily from
+/// the pattern it estimates smallest, and it estimates a `VALUES` by its row
+/// count. With `VALUES ?source` holding more ids than the predicate list holds
+/// predicates, it started from the predicates instead. Nothing joins them to
+/// `?source`, so it read every link of those predicates in the store and only
+/// then joined the ids: a 20-id read of an 18-predicate class took 430 ms at
+/// 5,000 instances against 0.7 ms for 10 ids, and grew with the store. A
+/// filter takes no part in the join order, so the ids stay the start and each
+/// is a seek.
+pub(crate) fn predicate_in_filter<S: AsRef<str>>(predicates: &[S]) -> String {
+    if predicates.is_empty() {
+        return String::new();
+    }
+    let iris = predicates
+        .iter()
+        .map(|p| format!("<{}>", p.as_ref()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("    FILTER(?predicate IN ({iris}))\n")
+}
+
 /// The complement of [`values_or_str_filter`]: one SPARQL line excluding `ids`
 /// from `?{var}`.
 ///

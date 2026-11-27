@@ -68,6 +68,14 @@ export interface NetLease {
    * the host are not touched. Replaces this lease's previous impairment.
    */
   impair(ports: (number | SocketPort)[], opts: NetemOptions): void;
+  /**
+   * Cap the bandwidth of traffic *to* the UDP `ports` (their downlink) at
+   * `rateKbit` with a token bucket filter; traffic from them is untouched, as
+   * is everything else on the host. Replaces this lease's previous impairment.
+   */
+  limitDownlink(ports: SocketPort[], rateKbit: number): void;
+  /** What the `limitDownlink` token bucket has passed and dropped since it was set; null when none is set. */
+  shaperCounters(): { sentBytes: number; sentPackets: number; droppedPackets: number } | null;
   /** Remove the impairment; the lease stays held. */
   clear(): void;
   /** Remove the impairment and let the next run have the interface. */
@@ -129,11 +137,11 @@ export async function leaseNet(
     if (ended) throw new Error(`the network lease on ${iface} has ended`);
   };
   /** Send traffic to or from `ports` through the netem band; a `SocketPort` matches its protocol too. */
-  const filter = (ports: (number | SocketPort)[]) => {
+  const filter = (ports: (number | SocketPort)[], fields = ["sport", "dport"]) => {
     for (const entry of ports) {
       const { port, protocol } = typeof entry === "number" ? { port: entry, protocol: undefined } : entry;
       const match = protocol ? `match ip protocol ${protocol === "tcp" ? 6 : 17} 0xff ` : "";
-      for (const field of ["sport", "dport"]) {
+      for (const field of fields) {
         tc(`filter add dev ${iface} parent ${HANDLE} protocol ip prio 1 u32 ${match}match ip ${field} ${port} 0xffff flowid ${HANDLE}4`);
       }
     }
@@ -161,6 +169,28 @@ export async function leaseNet(
         clear();
         throw new Error(`could not impair ports ${describePorts(ports)} on ${iface}: ${(e as Error).message}`);
       }
+    },
+    limitDownlink(ports, rateKbit) {
+      held();
+      if (ports.length === 0 || !(rateKbit > 0)) throw new Error("nothing to limit");
+      clear();
+      try {
+        tc(`qdisc add dev ${iface} root handle ${HANDLE} prio bands 4 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1`);
+        // A queue of 300 ms at the rate: past it packets drop, as a real bottleneck's do.
+        // The burst is the size of a few packets, not more: a bottleneck link has no bucket
+        // of line-rate credit, and with a 16 kB one a probe cluster (str0m's, about 18 kB)
+        // passed whole at line rate and the estimate read 2.7 to 4.7 Mbit/s on a 700 kbit/s cap.
+        tc(`qdisc add dev ${iface} parent ${HANDLE}4 handle 40: tbf rate ${rateKbit}kbit burst 3kb latency 300ms`);
+        filter(ports, ["dport"]);
+      } catch (e) {
+        clear();
+        throw new Error(`could not limit the downlink of ${describePorts(ports)} on ${iface}: ${(e as Error).message}`);
+      }
+    },
+    shaperCounters() {
+      held();
+      const block = /qdisc tbf 40:[^\n]*\n\s*Sent (\d+) bytes (\d+) pkt \(dropped (\d+)/.exec(tc(`-s qdisc show dev ${iface}`));
+      return block ? { sentBytes: Number(block[1]), sentPackets: Number(block[2]), droppedPackets: Number(block[3]) } : null;
     },
     clear,
     async release() {
