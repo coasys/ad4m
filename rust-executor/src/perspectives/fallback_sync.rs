@@ -10,9 +10,11 @@
 
 use super::perspective_instance::{links_missing_remotely, PerspectiveInstance};
 use super::sparql_store::EvalStop;
+use crate::db::link_identity;
 use crate::languages::capability::Capability;
 use crate::languages::language::Language;
 use crate::types::{LinkExpression, LinkStatus, PerspectiveDiff};
+use std::collections::HashSet;
 
 /// Who asks for the shared links the remote lacks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,7 +44,7 @@ pub(crate) fn fallback_push_refused(missing: usize, shared: usize, scope: ShareS
 /// The links of `links` the link language lacks, asked in calls of
 /// `MISSING_BATCH`. None when an answer is unknown (null) or fails: the links
 /// after it are not asked about.
-pub(super) async fn ask_missing(
+async fn ask_missing(
     link_language: &mut Language,
     links: &[LinkExpression],
     uuid: &str,
@@ -89,7 +91,7 @@ pub(super) async fn ask_missing(
 /// transient timeout resubmits the perspective's *entire* shared link set
 /// (SDNA included) as a fresh batch of creates. Return None and let the
 /// caller's backoff loop retry once the link language is reachable again.
-pub(super) async fn rendered_remote_links(
+async fn rendered_remote_links(
     link_language: &mut Language,
     uuid: &str,
 ) -> Option<Vec<LinkExpression>> {
@@ -146,26 +148,143 @@ impl PerspectiveInstance {
             || self.queue_unsent_shared_links()
     }
 
-    /// Queues, as one pending diff, every Shared link that no queued or parked
-    /// diff holds. A link the room already has is sent again; the link
-    /// language drops the duplicate. False when the queue could not be written.
-    fn queue_unsent_shared_links(&self) -> bool {
-        let shared: Vec<(LinkExpression, LinkStatus)> =
-            match self.sparql_store.get_all_links(&EvalStop::none()) {
-                Ok(links) => links
+    /// Commits the Shared links the link language lacks. Callers:
+    /// `ensure_public_links_are_shared` and `share_links_after_publish`;
+    /// `scope` says how many it may send. A language with
+    /// `perspectiveSyncMissing` is asked which links it lacks, in batches
+    /// (`ask_missing`), and asked again before the commit; one without it is
+    /// compared with its whole `render()` (`rendered_remote_links`).
+    pub(crate) async fn share_links_missing_remotely(&self, scope: ShareScope) -> bool {
+        let _sharing = self.share_links_mutex.lock().await;
+        let uuid = self.uuid.clone();
+
+        // Clone link_language without holding the lock
+        let Some(mut link_language) = self.link_language.read().await.clone() else {
+            return false;
+        };
+        let Some(local_links) = self.shared_links("ensure_public_links_are_shared") else {
+            return false;
+        };
+
+        // A queued or parked diff's links stay Shared in the store, but the queue owns
+        // them: a queued one would be sent twice, a parked one after its successors.
+        let unsent = match crate::db_backend::db_backend().get_unsent_additions(&uuid) {
+            Ok(unsent) => unsent,
+            Err(e) => {
+                log::warn!(
+                    "ensure_public_links_are_shared: could not read queued and parked diffs for perspective {}: {} — skipping this sync attempt",
+                    uuid, e
+                );
+                return false;
+            }
+        };
+
+        let asks_missing = link_language.has(Capability::PerspectiveMissing);
+        let missing = if asks_missing {
+            let candidates = links_missing_remotely(&local_links, &[], &unsent);
+            ask_missing(&mut link_language, &candidates, &uuid).await
+        } else {
+            rendered_remote_links(&mut link_language, &uuid)
+                .await
+                .map(|remote| links_missing_remotely(&local_links, &remote, &unsent))
+        };
+        let Some(mut links_to_commit) = missing else {
+            return false;
+        };
+        if links_to_commit.is_empty() {
+            return true;
+        }
+
+        // A fallback sync catches up the few links a commit missed. Most of
+        // the shared set missing means the language's view of the remote is
+        // wrong (an empty or partial mirror): sending would push the room's
+        // whole set again. Send nothing; the caller's backoff retries.
+        if fallback_push_refused(links_to_commit.len(), local_links.len(), scope) {
+            log::error!(
+                "ensure_public_links_are_shared: refusing to commit {} of {} local shared links for perspective {}: the link language lacks most of them, so its view of the remote is incomplete, not the remote",
+                links_to_commit.len(), local_links.len(), uuid
+            );
+            return false;
+        }
+
+        // The scan took many calls: ask again about the links it found, so a
+        // link the room got meanwhile is not sent twice. An immediate commit
+        // (outside `share_links_mutex`) that lands after this ask still makes
+        // a duplicate. The link server keeps one row and one revision for it
+        // (`applyDiffAndAppend`, `INSERT OR IGNORE`), but appends and
+        // broadcasts a second diff, which every member drops.
+        if asks_missing {
+            let Some(still_missing) =
+                ask_missing(&mut link_language, &links_to_commit, &uuid).await
+            else {
+                return false;
+            };
+            links_to_commit = still_missing;
+        }
+
+        // A link removed while the language was asked is no longer Shared here.
+        // The link server keeps no tombstone, so sending it would bring it back
+        // for every member. The commit await below still leaves a short window.
+        let Some(shared_now) = self.shared_links("ensure_public_links_are_shared") else {
+            return false;
+        };
+        let shared_now: HashSet<_> = shared_now.iter().map(|(l, _)| link_identity(l)).collect();
+        links_to_commit.retain(|l| shared_now.contains(&link_identity(l)));
+        if links_to_commit.is_empty() {
+            return true;
+        }
+
+        let links_count = links_to_commit.len();
+        if let Err(e) = link_language
+            .commit(PerspectiveDiff {
+                additions: links_to_commit,
+                removals: vec![],
+            })
+            .await
+        {
+            log::error!(
+                "Error calling link language's commit in ensure_public_links_are_shared: {:?}",
+                e
+            );
+            return false;
+        }
+        log::debug!(
+            "Successfully committed {} links to link language in fallback sync",
+            links_count
+        );
+        true
+    }
+
+    /// The perspective's Shared links, read from the SPARQL store. None, after
+    /// logging for `caller`, when the store cannot be read.
+    fn shared_links(&self, caller: &str) -> Option<Vec<(LinkExpression, LinkStatus)>> {
+        match self.sparql_store.get_all_links(&EvalStop::none()) {
+            Ok(links) => Some(
+                links
                     .into_iter()
                     .filter(|l| l.status == Some(LinkStatus::Shared))
                     .map(|l| (LinkExpression::from(l), LinkStatus::Shared))
                     .collect(),
-                Err(e) => {
-                    log::error!(
-                        "share_links_after_publish: could not read the links of perspective {}: {}",
-                        self.uuid,
-                        e
-                    );
-                    return false;
-                }
-            };
+            ),
+            Err(e) => {
+                log::error!(
+                    "{}: could not read the links of perspective {}: {}",
+                    caller,
+                    self.uuid,
+                    e
+                );
+                None
+            }
+        }
+    }
+
+    /// Queues, as one pending diff, every Shared link that no queued or parked
+    /// diff holds. A link the room already has is sent again; the link
+    /// language drops the duplicate. False when the queue could not be written.
+    fn queue_unsent_shared_links(&self) -> bool {
+        let Some(shared) = self.shared_links("share_links_after_publish") else {
+            return false;
+        };
         let db = crate::db_backend::db_backend();
         let unsent = match db.get_unsent_additions(&self.uuid) {
             Ok(unsent) => unsent,

@@ -1,4 +1,3 @@
-use super::fallback_sync::{ask_missing, fallback_push_refused, rendered_remote_links, ShareScope};
 use super::hosted_status;
 use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
@@ -660,13 +659,13 @@ pub struct PerspectiveInstance {
     /// each find the remote empty and commit every shared link. The commit
     /// loop holds it from sending the rest of a batch to parking the oldest
     /// diff, so a fallback sync either runs before the rest or sees the park.
-    share_links_mutex: Arc<Mutex<()>>,
+    pub(super) share_links_mutex: Arc<Mutex<()>>,
     /// Serialises `register_local_agents`. server-link-language replaces its
     /// local agent list (p-diff-sync adds to it), so a registration that
     /// read the owners earlier must not land after one that read them later.
     local_agents_mutex: Arc<Mutex<()>>,
     prolog_update_mutex: Arc<RwLock<()>>,
-    link_language: Arc<RwLock<Option<Language>>>,
+    pub(super) link_language: Arc<RwLock<Option<Language>>>,
     /// Remote telepresence broadcasts waiting on the link language, drained
     /// one at a time by a background task so `send_broadcast` never waits on
     /// the language's serial queue (see `language_broadcasts`).
@@ -1601,128 +1600,6 @@ impl PerspectiveInstance {
             }
             tokio::time::sleep_until(checked_at + NOTIFICATION_MIN_SPACING).await;
         }
-    }
-
-    /// Commits the Shared links the link language lacks. Callers:
-    /// `ensure_public_links_are_shared` and `share_links_after_publish`
-    /// (`fallback_sync.rs`); `scope` says how many it may send. A language with
-    /// `perspectiveSyncMissing` is asked which links it lacks, in batches
-    /// (`ask_missing`), and asked again before the commit; one without it is
-    /// compared with its whole `render()` (`rendered_remote_links`).
-    pub(crate) async fn share_links_missing_remotely(&self, scope: ShareScope) -> bool {
-        let _sharing = self.share_links_mutex.lock().await;
-        let uuid = self.uuid.clone();
-
-        // Clone link_language without holding the lock
-        let link_language_clone = {
-            let link_language_guard = self.link_language.read().await;
-            link_language_guard.clone()
-        };
-
-        if let Some(mut link_language) = link_language_clone {
-            // Query SPARQL store for all links
-            let decorated_links = match self.sparql_store.get_all_links(&EvalStop::none()) {
-                Ok(links) => links,
-                Err(e) => {
-                    log::error!(
-                        "Failed to get links from SPARQL store in ensure_public_links_are_shared for perspective {}: {}",
-                        uuid, e
-                    );
-                    return false;
-                }
-            };
-
-            let mut local_links: Vec<(LinkExpression, LinkStatus)> = decorated_links
-                .into_iter()
-                .map(|decorated| {
-                    let status = decorated.status.clone().unwrap_or(LinkStatus::Local);
-                    (LinkExpression::from(decorated), status)
-                })
-                .collect();
-
-            local_links.retain(|(_, status)| status == &LinkStatus::Shared);
-
-            // A queued or parked diff's links stay Shared in the store, but the queue owns
-            // them: a queued one would be sent twice, a parked one after its successors.
-            let unsent = match crate::db_backend::db_backend().get_unsent_additions(&uuid) {
-                Ok(unsent) => unsent,
-                Err(e) => {
-                    log::warn!(
-                        "ensure_public_links_are_shared: could not read queued and parked diffs for perspective {}: {} — skipping this sync attempt",
-                        uuid, e
-                    );
-                    return false;
-                }
-            };
-
-            let asks_missing =
-                link_language.has(crate::languages::capability::Capability::PerspectiveMissing);
-            let missing = if asks_missing {
-                let candidates = links_missing_remotely(&local_links, &[], &unsent);
-                ask_missing(&mut link_language, &candidates, &uuid).await
-            } else {
-                rendered_remote_links(&mut link_language, &uuid)
-                    .await
-                    .map(|remote| links_missing_remotely(&local_links, &remote, &unsent))
-            };
-            let Some(mut links_to_commit) = missing else {
-                return false;
-            };
-
-            if !links_to_commit.is_empty() {
-                let links_count = links_to_commit.len();
-
-                // A fallback sync catches up the few links a commit missed. Most of
-                // the shared set missing means the language's view of the remote is
-                // wrong (an empty or partial mirror): sending would push the room's
-                // whole set again. Send nothing; the caller's backoff retries.
-                if fallback_push_refused(links_count, local_links.len(), scope) {
-                    log::error!(
-                        "ensure_public_links_are_shared: refusing to commit {} of {} local shared links for perspective {}: the link language lacks most of them, so its view of the remote is incomplete, not the remote",
-                        links_count, local_links.len(), uuid
-                    );
-                    return false;
-                }
-
-                // The scan took many calls: ask again about the links it found, so a
-                // link the room got meanwhile is not sent twice. An immediate commit
-                // (outside `share_links_mutex`) that lands after this ask still makes
-                // a duplicate. The link server keeps one row and one revision for it
-                // (`applyDiffAndAppend`, `INSERT OR IGNORE`), but appends and
-                // broadcasts a second diff, which every member drops.
-                if asks_missing {
-                    let Some(still_missing) =
-                        ask_missing(&mut link_language, &links_to_commit, &uuid).await
-                    else {
-                        return false;
-                    };
-                    if still_missing.is_empty() {
-                        return true;
-                    }
-                    links_to_commit = still_missing;
-                }
-                let links_count = links_to_commit.len();
-
-                let result = link_language
-                    .commit(PerspectiveDiff {
-                        additions: links_to_commit,
-                        removals: vec![],
-                    })
-                    .await;
-
-                if let Err(e) = result {
-                    log::error!("Error calling link language's commit in ensure_public_links_are_shared: {:?}", e);
-                    return false;
-                }
-                log::debug!(
-                    "Successfully committed {} links to link language in fallback sync",
-                    links_count
-                );
-            }
-
-            return true;
-        }
-        false
     }
 
     pub async fn update_perspective_state(&self, state: PerspectiveState) -> Result<(), AnyError> {

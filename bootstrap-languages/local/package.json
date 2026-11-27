@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Local KV-backed bootstrap languages (agent, file-storage, language, link, neighbourhood, perspective) for running AD4M without Holochain in local/standalone/Docker/test scenarios",
   "scripts": {
-    "test-disabled": "echo \"No local bootstrap language integration tests\"",
+    "test": "node --test tests/*.test.mjs",
     "build": "node generate-seed.mjs . dist"
   },
   "author": "",

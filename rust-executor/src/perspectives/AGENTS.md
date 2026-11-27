@@ -128,10 +128,13 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   the same link again.
 - The fallback sync asks a language with `perspectiveSyncMissing` (`Capability::PerspectiveMissing`)
   which Shared links it lacks, in calls of `MISSING_BATCH` (500) links, leaving out the queued
-  and parked ones (`ask_missing` in `share_links_missing_remotely`). A null or failed answer to any call commits
-  nothing and returns false. Before the commit it asks again about the links it found and
-  commits only those still missing. It never calls `current_revision` or `render` then. A
-  language without the capability is compared with its whole `render()`.
+  and parked ones (`ask_missing` in `share_links_missing_remotely`, `fallback_sync.rs`). A null
+  or failed answer to any call commits nothing and returns false. Before the commit it asks
+  again about the links it found and commits only those still missing. It never calls
+  `current_revision` or `render` then. A language without the capability is compared with its
+  whole `render()`. On both paths, a link no longer Shared in the store when the answers are in
+  (removed during the asks) is not committed: the link server keeps no tombstone, so a commit
+  would bring it back for every member.
 - The fallback sync never pushes most of the shared set (`fallback_sync.rs`,
   `fallback_push_refused`, over the whole answer, not per call): more than 20 links and more
   than half of the Shared links missing remotely means the language's view of the remote is

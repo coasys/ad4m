@@ -12,6 +12,9 @@ standalone, Docker and test setups.
 (`dist/languages/<address>/bundle.js`), and a pre-filled KV file for the
 language-language.
 
+`pnpm test` runs the unit tests in `tests/` on Node (22.15 or later). `tests/ad4m-host.mjs`
+stands in for `ad4m:host` with an in-memory store.
+
 ## Shared mode: `storagePath`
 
 `language-language.js`, `neighbourhood-language.js` and `agent-language.js`

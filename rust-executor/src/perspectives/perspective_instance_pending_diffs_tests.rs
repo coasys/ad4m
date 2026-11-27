@@ -1524,6 +1524,37 @@ async fn a_fence_that_finds_nothing_missing_commits_nothing() {
     assert_eq!(fake.attempts(), 0);
 }
 
+/// A link removed while the language is asked is not sent: the link server
+/// keeps no tombstone, so a commit would bring it back for every member.
+#[tokio::test(start_paused = true)]
+async fn a_link_removed_during_the_ask_is_not_committed() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let shared = store_many_shared(&perspective, "l", 10);
+    let remote = MissingRemote::holding(shared[3..].to_vec());
+    let store = perspective.sparql_store.clone();
+    let removed = shared[0].clone();
+    let fake_in = fake.clone();
+    let remote_in = remote.clone();
+    *perspective.link_language.write().await = Some(
+        Language::with_test_commit(
+            "fake-link-language".to_string(),
+            Arc::new(move |diff| fake_in.commit(diff)),
+        )
+        .with_test_missing(Arc::new(move |links| {
+            // The user removes l0 while the scan runs.
+            store.remove_link(&removed).unwrap();
+            Ok(remote_in.missing(links))
+        })),
+    );
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+
+    let mut committed = fake.committed();
+    committed.sort();
+    assert_eq!(committed, vec!["+l1", "+l2"]);
+}
+
 /// Queued and parked links belong to the queue: they are never asked about
 /// and never sent by the fallback.
 #[tokio::test(start_paused = true)]
