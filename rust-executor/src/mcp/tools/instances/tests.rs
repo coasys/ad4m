@@ -5427,3 +5427,193 @@ async fn a_users_instance_calls_count_on_its_did() {
     );
     assert_eq!(user.queries.load(Ordering::Relaxed), u_queries_before + 1);
 }
+
+/// A required title, and a collection of other records: the class a tool's `writes` name below.
+const PLAN_NOTE_SDNA: &str = r#"{
+  "target_class": "ns://Note",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Note"}
+  ],
+  "properties": [
+    {"path":"ns://note_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://note_title","target":"value"}]},
+    {"path":"ns://item","name":"items","node_kind":"IRI","collection":true,"writable":true,
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://item","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://item","target":"value"}]}
+  ]
+}"#;
+
+/// A bundle tool answering with `writes`: the records it names are made, under one another, as
+/// the calling agent, and the answer says what each ref became.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_s_writes_are_made_and_named_in_its_answer() {
+    let (handler, uuid, _guard) = setup_with(&[("Note", PLAN_NOTE_SDNA)], false).await;
+    let answer = handler
+        .apply_tool_writes(
+            &uuid,
+            "a_tool",
+            "Posted.",
+            json!([
+                { "create": { "ref": "post", "className": "Note", "properties": { "title": "post" } } },
+                { "create": { "ref": "text", "className": "Note", "properties": { "title": "text" }, "parent": { "ref": "post" } } },
+            ]),
+        )
+        .await;
+    assert!(
+        answer.starts_with("Posted.\nWritten: Note post = "),
+        "{answer}"
+    );
+    let post = answer
+        .split("Note post = ")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+        .expect("the post's id")
+        .to_string();
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    let children = perspective
+        .get_links(&crate::types::LinkQuery {
+            source: Some(post),
+            predicate: Some("ad4m://has_child".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(children.len(), 1, "{answer}");
+}
+
+/// A tool that declares it writes nothing may not answer with writes, and an answer carries
+/// properties or writes, never both: either refusal is made before anything is written.
+#[test]
+fn a_tool_s_writes_are_refused_when_its_answer_may_not_carry_them() {
+    use super::template_tools::answered_writes;
+    let writes = json!([{ "create": { "ref": "a", "className": "Note" } }]);
+    let answer = json!({ "text": "t", "writes": writes });
+    assert_eq!(answered_writes("a_tool", true, &answer), Ok(Some(&writes)));
+    assert!(answered_writes("a_tool", false, &answer)
+        .unwrap_err()
+        .contains("says it writes nothing"));
+    let both = json!({ "text": "t", "writes": writes, "properties": { "title": "x" } });
+    assert!(answered_writes("a_tool", true, &both)
+        .unwrap_err()
+        .contains("both properties and writes"));
+    for none in [
+        json!({ "text": "t" }),
+        json!({ "text": "t", "writes": null }),
+    ] {
+        assert_eq!(answered_writes("a_tool", false, &none), Ok(None));
+    }
+}
+
+/// More writes than one answer may hold are refused whole, before any is made.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_s_writes_beyond_the_cap_write_nothing() {
+    use crate::perspectives::instances::plan::MAX_PLANNED_WRITES;
+    let (handler, uuid, _guard) = setup_with(&[("Note", PLAN_NOTE_SDNA)], false).await;
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    let before = perspective
+        .get_links(&Default::default())
+        .await
+        .unwrap()
+        .len();
+    let writes: Vec<Value> = (0..=MAX_PLANNED_WRITES)
+        .map(|i| json!({ "create": { "ref": format!("n{i}"), "className": "Note", "properties": { "title": "t" } } }))
+        .collect();
+    let answer = handler
+        .apply_tool_writes(&uuid, "a_tool", "Posted.", Value::Array(writes))
+        .await;
+    let error = parse(&answer)["error"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        error.starts_with(&format!(
+            "Nothing was written: {} writes is more than the {MAX_PLANNED_WRITES}",
+            MAX_PLANNED_WRITES + 1
+        )),
+        "{answer}"
+    );
+    assert_eq!(
+        perspective
+            .get_links(&Default::default())
+            .await
+            .unwrap()
+            .len(),
+        before
+    );
+}
+
+/// A caller who may only read the perspective gets the guard's refusal, and nothing is written.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_s_writes_are_refused_to_a_caller_who_may_only_read() {
+    use crate::agent::capabilities::{perspective_query_capability, WILD_CARD};
+    use crate::agent::session::{Principal, Session};
+    let (_admin, uuid, _guard) = setup_with(&[("Note", PLAN_NOTE_SDNA)], false).await;
+    let reader = handler_holding(
+        Session::for_test(Principal::Agent(crate::agent::AgentContext::main_agent()))
+            .with_caps(vec![perspective_query_capability(vec![WILD_CARD.into()])]),
+    );
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    let before = perspective
+        .get_links(&Default::default())
+        .await
+        .unwrap()
+        .len();
+    let answer = reader
+        .apply_tool_writes(
+            &uuid,
+            "a_tool",
+            "Posted.",
+            json!([{ "create": { "ref": "post", "className": "Note", "properties": { "title": "post" } } }]),
+        )
+        .await;
+    assert_eq!(parse(&answer)["status"], 403, "{answer}");
+    assert_eq!(
+        perspective
+            .get_links(&Default::default())
+            .await
+            .unwrap()
+            .len(),
+        before
+    );
+}
+
+/// A write the class refuses fails the whole answer, worded as instance_create words it, and
+/// nothing is written.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_s_writes_with_one_refused_write_nothing() {
+    let (handler, uuid, _guard) = setup_with(&[("Note", PLAN_NOTE_SDNA)], false).await;
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    let before = perspective
+        .get_links(&Default::default())
+        .await
+        .unwrap()
+        .len();
+    let answer = handler
+        .apply_tool_writes(
+            &uuid,
+            "a_tool",
+            "Posted.",
+            json!([
+                { "create": { "ref": "post", "className": "Note", "properties": { "title": "post" } } },
+                { "create": { "ref": "text", "className": "Note", "parent": { "ref": "post" } } },
+            ]),
+        )
+        .await;
+    let error = parse(&answer)["error"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        error.starts_with("Nothing was written: write 1 was refused: "),
+        "{answer}"
+    );
+    assert!(error.contains("title"), "{answer}");
+    assert_eq!(
+        perspective
+            .get_links(&Default::default())
+            .await
+            .unwrap()
+            .len(),
+        before
+    );
+}

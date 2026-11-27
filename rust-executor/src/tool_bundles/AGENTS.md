@@ -37,6 +37,8 @@ else. Not Languages: no network, storage, agent or holochain access.
 - Calls are typed: an export path and JSON arguments. Never build JS source with `format!`.
 
 - A bundle never touches a perspective; `mcp/tools/instances/template_tools.rs` reads and writes.
+  A tool answers with the properties to write to the record it was given, or with `writes`, the
+  records and links to make, which the host applies as one batch (`perspectives/instances/plan.rs`).
 - A record is seen by one call: every tool call runs in a fresh isolate that ends with it.
 - Template tool calls run one at a time (`builtin::CALLS_AT_ONCE`): each isolate has the whole
   memory cap, so concurrent callers queue instead of each starting one. The slot is held on the

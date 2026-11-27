@@ -12,6 +12,7 @@
 //! text (MCP its tool strings, the RPC its error message and data).
 //!
 //! - [`write`]: create, update, remove, add to and remove from a collection
+//! - [`plan`]: several creates and adds in one batch, all or none
 //! - [`validate`]: SHACL-derived property validation
 //! - [`error`]: [`InstanceError`] and the step a store failure happened in
 //! - this file: the borrowed [`PropView`] over a class shape, class resolution, instance URIs,
@@ -22,9 +23,12 @@
 #![allow(clippy::result_large_err)]
 
 pub mod error;
+pub mod plan;
 pub mod validate;
 pub mod write;
 
+#[cfg(test)]
+mod plan_tests;
 #[cfg(test)]
 mod tests;
 

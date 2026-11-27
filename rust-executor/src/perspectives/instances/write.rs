@@ -303,6 +303,18 @@ pub async fn create(
     agent: &AgentContext,
     params: InstanceCreate,
 ) -> Result<InstanceCreated, InstanceError> {
+    create_under(perspective, agent, params, None).await
+}
+
+/// [`create`], under a parent of the classes `parent_classes` (target class IRIs) when given,
+/// not those the store finds it to be: a write plan's parent created earlier in the plan's batch
+/// is not committed yet.
+pub(crate) async fn create_under(
+    perspective: &mut PerspectiveInstance,
+    agent: &AgentContext,
+    params: InstanceCreate,
+    parent_classes: Option<&[String]>,
+) -> Result<InstanceCreated, InstanceError> {
     // A hard-wired class (a flow run, an auto-processor) is the executor's to register: the
     // first instance written registers it, so resolving it below finds its shape.
     crate::perspectives::hardwired_class::ensure_before_write(
@@ -443,15 +455,20 @@ pub async fn create(
 
     let parent = params.parent.filter(|s| !s.trim().is_empty());
     if let Some(parent) = &parent {
-        if let Err(e) = perspective
-            .add_to_container(
-                &link_target(parent.trim()),
-                &base_uri,
-                Some(batch.id()),
-                agent,
-            )
-            .await
-        {
+        let parent_uri = link_target(parent.trim());
+        let added = match parent_classes {
+            Some(classes) => {
+                perspective
+                    .add_to_container_of(&parent_uri, classes, &base_uri, Some(batch.id()), agent)
+                    .await
+            }
+            None => {
+                perspective
+                    .add_to_container(&parent_uri, &base_uri, Some(batch.id()), agent)
+                    .await
+            }
+        };
+        if let Err(e) = added {
             batch.abandon(perspective).await;
             return Err(failed(
                 &class_name,
