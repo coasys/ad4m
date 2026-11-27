@@ -24,7 +24,7 @@ use crate::perspectives::model_query::abstract_classes::{
 use crate::perspectives::model_query::builtin_classes::{builtin, CONTAINER_URI};
 use crate::perspectives::model_query::containment::{self, ContainmentEdges};
 use crate::perspectives::model_query::types::ModelShape;
-use crate::perspectives::model_query::{ModelQueryInput, QueryClasses};
+use crate::perspectives::model_query::{LinkGuard, ModelQueryInput, QueryClasses};
 use crate::perspectives::perspective_instance::SubjectClassOption;
 use crate::perspectives::shacl_parser::class_name_of;
 use crate::perspectives::sparql_store::EvalStop;
@@ -266,6 +266,8 @@ impl PerspectiveInstance {
 
     /// The classes `base` is an instance of, by target class IRI: two
     /// classes of one name are told apart, as the resolution tells them.
+    /// Over every link: a write reaches the classes the record is in this
+    /// agent's whole perspective, Local links included; no read applies.
     fn own_classes(&self, base: &str) -> Result<Vec<String>, AnyError> {
         let resolver = self.shape_resolver();
         Ok(subject_class_iris_of(
@@ -273,6 +275,7 @@ impl PerspectiveInstance {
             &self.sparql_store,
             &resolver,
             &[base.to_string()],
+            LinkGuard::ANY,
         )?
         .remove(base)
         .unwrap_or_default())

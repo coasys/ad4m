@@ -5934,6 +5934,7 @@ async fn test_subject_classes_of_batch() {
         &store,
         &resolver,
         &uris,
+        super::LinkGuard::ANY,
     )
     .unwrap();
 
@@ -6000,6 +6001,7 @@ async fn test_subject_classes_of_mixed_absolute_and_unusable_uris() {
         &store,
         &resolver,
         &uris,
+        super::LinkGuard::ANY,
     )
     .expect("the batch still resolves");
 
@@ -6066,6 +6068,7 @@ async fn test_subject_classes_of_skips_class_with_unusable_predicate() {
         &store,
         &resolver,
         &["ns://a".to_string()],
+        super::LinkGuard::ANY,
     )
     .expect("the batch resolves");
 
@@ -6116,6 +6119,7 @@ async fn test_subject_classes_of_requires_every_triple_not_just_a_flag() {
         &store,
         &resolver,
         &["ns://a".to_string()],
+        super::LinkGuard::ANY,
     )
     .unwrap();
 
@@ -6179,6 +6183,7 @@ async fn test_subject_classes_of_returns_every_class_most_specific_first() {
         &store,
         &resolver,
         &["ns://a".to_string()],
+        super::LinkGuard::ANY,
     )
     .unwrap();
 
