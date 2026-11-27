@@ -125,18 +125,15 @@ fn forwarding_ip(headers: &axum::http::HeaderMap) -> Option<std::net::IpAddr> {
     if let Some(value) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
         return last_ip(value);
     }
+    // One address. A list or any other extra text is not that address.
     headers
         .get("x-real-ip")
         .and_then(|v| v.to_str().ok())
-        .and_then(first_ip)
+        .and_then(parse_ip)
 }
 
 fn last_ip(value: &str) -> Option<std::net::IpAddr> {
     value.split(',').next_back().and_then(parse_ip)
-}
-
-fn first_ip(value: &str) -> Option<std::net::IpAddr> {
-    value.split(',').next().and_then(parse_ip)
 }
 
 fn parse_ip(value: &str) -> Option<std::net::IpAddr> {
@@ -570,9 +567,17 @@ async fn write_to<S>(
                         _ = &mut grace => None,
                     };
                     let Some(msg) = msg else { break };
+                    // Count a reply that leaves during shutdown the same way as
+                    // one that left before it. A failed send is not counted.
+                    let len = msg.len();
+                    let pong = msg == PONG;
                     if sink.send(Message::Text(msg.into())).await.is_err() {
                         return;
                     }
+                    if pong {
+                        diag.stats.pong_left(diag.ctx.as_deref(), rx.len());
+                    }
+                    diag.stats.sent(len);
                 }
                 let _ = sink.send(Message::Close(Some(token_ended_frame()))).await;
                 return;
@@ -2113,6 +2118,57 @@ mod liveness_tests {
         stats.pong_left(Some(&ctx), 0);
         assert_eq!(capture::lines("ws.pong-late", &[conn]).len(), before);
     }
+
+    /// A reply already queued when the session ends still leaves, and that send
+    /// is counted. The close frame is not a reply. A send that fails adds nothing.
+    #[tokio::test]
+    async fn a_reply_sent_after_the_session_ends_is_counted() {
+        let reply = r#"{"id":"1","error":{"code":401,"message":"ended"}}"#;
+
+        let stats = Arc::new(ConnStats::default());
+        let (tx, rx) = mpsc::unbounded_channel::<String>();
+        tx.send(reply.to_string()).unwrap();
+        drop(tx);
+        let session_over = CancellationToken::new();
+        session_over.cancel();
+        let sink = futures::sink::unfold((), |(), _msg: Message| async {
+            Ok::<(), std::convert::Infallible>(())
+        });
+        write_to(
+            Box::pin(sink),
+            rx,
+            session_over,
+            fresh(),
+            WriterDiag {
+                stats: stats.clone(),
+                ctx: None,
+            },
+        )
+        .await;
+        assert_eq!(stats.frames_sent(), 1);
+        assert_eq!(stats.bytes_sent(), reply.len() as u64);
+
+        let stats = Arc::new(ConnStats::default());
+        let (tx, rx) = mpsc::unbounded_channel::<String>();
+        tx.send(reply.to_string()).unwrap();
+        drop(tx);
+        let session_over = CancellationToken::new();
+        session_over.cancel();
+        let sink = futures::sink::unfold((), |(), _msg: Message| async { Err::<(), ()>(()) });
+        write_to(
+            Box::pin(sink),
+            rx,
+            session_over,
+            fresh(),
+            WriterDiag {
+                stats: stats.clone(),
+                ctx: None,
+            },
+        )
+        .await;
+        assert_eq!(stats.frames_sent(), 0);
+        assert_eq!(stats.bytes_sent(), 0);
+    }
 }
 
 #[cfg(test)]
@@ -2180,6 +2236,18 @@ mod client_ip_tests {
         let headers = headers(&[("x-forwarded-for", "198.51.100.7")]);
         assert_eq!(client_ip(peer, &headers, &trusted), "198.51.100.7");
         assert_eq!(client_ip(peer, &headers, &[]), "192.0.2.10");
+    }
+
+    /// `X-Real-IP` is one address. A trusted peer that sends anything else, including
+    /// `198.51.100.7, garbage`, is treated as if the header were missing.
+    #[test]
+    fn a_trusted_peer_x_real_ip_with_extra_text_keeps_the_socket_peer() {
+        let peer = peer("192.0.2.10:443");
+        let trusted = parse_trusted_proxies("192.0.2.10");
+        let malformed = headers(&[("x-real-ip", "198.51.100.7, garbage")]);
+        assert_eq!(client_ip(peer, &malformed, &trusted), "192.0.2.10");
+        let one = headers(&[("x-real-ip", "198.51.100.7")]);
+        assert_eq!(client_ip(peer, &one, &trusted), "198.51.100.7");
     }
 }
 
