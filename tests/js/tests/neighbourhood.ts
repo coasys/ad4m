@@ -336,8 +336,9 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 })
                 
                 // No wait for burst mode to end: the poll above means every
-                // batch was committed, and each successful pending commit
-                // resets the immediate-commit counter (perspective_instance.rs).
+                // batch was committed. The commit tokens are spent by now
+                // (one comes back every 2 s, perspective_instance.rs), so the
+                // links below are queued and sent by the pending-diffs loop.
 
                 // Alice creates some links
                 console.log("Alice creating links...")

@@ -315,6 +315,107 @@ async fn a_failing_language_is_retried_with_backoff() {
     assert_eq!(pending(&perspective), 10, "an outage loses nothing");
 }
 
+/// A perspective sends at most `COMMIT_BURST` + 30 commits in any 60 s window
+/// (the server link language allows 60 a minute per room token), however long
+/// the writes keep coming, and every diff still arrives, in order.
+#[tokio::test(start_paused = true)]
+async fn a_steady_stream_stays_under_the_servers_commit_rate() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let times = Arc::new(std::sync::Mutex::new(Vec::<tokio::time::Instant>::new()));
+    {
+        let fake = fake.clone();
+        let times = times.clone();
+        *perspective.link_language.write().await = Some(Language::with_test_commit(
+            "fake-link-language".to_string(),
+            Arc::new(move |diff| {
+                times.lock().unwrap().push(tokio::time::Instant::now());
+                fake.commit(diff)
+            }),
+        ));
+    }
+    let task = start_loop(&perspective);
+
+    // One write every 100 ms for five minutes.
+    let stream = targets("steady", 3000);
+    for t in &stream {
+        perspective.commit(&add(t)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let drained = run_until(Duration::from_secs(120), || pending(&perspective) == 0).await;
+    task.abort();
+
+    assert!(drained.is_some(), "{} still pending", pending(&perspective));
+    let expected: Vec<String> = stream.iter().map(|t| format!("+{}", t)).collect();
+    assert_eq!(fake.committed(), expected, "every diff, in order");
+    let times = times.lock().unwrap();
+    let busiest = times
+        .iter()
+        .map(|start| {
+            times
+                .iter()
+                .filter(|t| **t >= *start && **t < *start + Duration::from_secs(60))
+                .count()
+        })
+        .max()
+        .unwrap();
+    assert!(
+        busiest <= COMMIT_BURST + 30,
+        "{} commits in one 60 s window",
+        busiest
+    );
+}
+
+/// A batch that goes through does not give the burst back: with the tokens
+/// spent, the next diff is queued, not sent at once.
+#[tokio::test(start_paused = true)]
+async fn a_batch_does_not_give_back_the_burst() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    perspective.set_commit_tokens(0).await;
+    perspective.commit(&add("a")).await.unwrap();
+    assert_eq!(queued_targets(&perspective), vec!["a"]);
+
+    let task = start_loop(&perspective);
+    let sent = run_until(Duration::from_secs(10), || {
+        fake.committed() == vec!["+a"] && pending(&perspective) == 0
+    })
+    .await;
+    assert!(sent.is_some(), "the batch goes out once a token is back");
+
+    perspective.commit(&add("b")).await.unwrap();
+    task.abort();
+    assert_eq!(fake.committed(), vec!["+a"], "b was not sent at once");
+    assert_eq!(queued_targets(&perspective), vec!["b"]);
+}
+
+/// A batch with no token to send with is not a failure: the queue waits, and
+/// goes out on the first tick after the token is back, not after a backoff.
+#[tokio::test(start_paused = true)]
+async fn a_batch_waiting_for_a_token_is_not_a_failure() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    perspective.set_commit_tokens(0).await;
+    enqueue(&perspective, &add("a"));
+    let task = start_loop(&perspective);
+    let start = tokio::time::Instant::now();
+
+    // Many ticks with no token: nothing is sent, nothing is lost.
+    tokio::time::sleep(COMMIT_REFILL_INTERVAL - Duration::from_millis(300)).await;
+    assert_eq!(fake.attempts(), 0);
+    assert_eq!(pending(&perspective), 1);
+
+    let sent = run_until(Duration::from_secs(1), || fake.attempts() == 1).await;
+    task.abort();
+    assert!(sent.is_some(), "the batch is still waiting");
+    assert!(
+        start.elapsed() <= COMMIT_REFILL_INTERVAL + Duration::from_millis(300),
+        "sent {:?} after the start; the token was back after {:?}",
+        start.elapsed(),
+        COMMIT_REFILL_INTERVAL
+    );
+}
+
 /// The queue of commits a link language did not accept lives in the
 /// executor's database, not in the language: a restart (a new instance over
 /// the same database, with a new language instance) sends them, oldest
@@ -323,7 +424,7 @@ async fn a_failing_language_is_retried_with_backoff() {
 async fn a_restart_sends_the_diffs_the_language_did_not_accept() {
     let before = Arc::new(FakeLanguage::default());
     let perspective = neighbourhood_perspective(&before).await;
-    perspective.set_immediate_commits(10).await;
+    perspective.set_commit_tokens(10).await;
     perspective.commit(&add("accepted")).await.unwrap();
     before.down.store(true, Ordering::SeqCst);
     for t in ["first", "second", "third"] {
@@ -508,7 +609,7 @@ async fn a_link_added_with_an_empty_predicate_and_removed_does_not_reach_peers()
     let mut perspective = neighbourhood_perspective(&fake).await;
     // No immediate commits: every write is queued, and the loop is not
     // running yet, so both land in one batch.
-    perspective.set_immediate_commits(0).await;
+    perspective.set_commit_tokens(0).await;
 
     let mut added = link("did:key:alice", "x");
     added.data.predicate = Some(String::new());
@@ -895,14 +996,14 @@ async fn a_transient_failure_of_the_oldest_diff_parks_it_instead_of_deleting_it(
     assert_eq!(parked_targets(&perspective), vec!["a"]);
 }
 
-/// A slow link-language commit must not block `set_immediate_commits`, and
-/// the burst limit still holds: with one immediate commit allowed and that one
+/// A slow link-language commit must not block `set_commit_tokens`, and
+/// the burst limit still holds: with one token and that one
 /// in flight, a second commit goes to the pending queue, not to the language.
 ///
 /// The test seam's commit is synchronous, so the slow commit blocks a worker
 /// thread on a std channel; the multi-thread runtime keeps the others free.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_slow_commit_does_not_block_set_immediate_commits() {
+async fn a_slow_commit_does_not_block_set_commit_tokens() {
     use std::sync::mpsc;
 
     Ad4mDb::init_global_instance(":memory:").unwrap();
@@ -936,7 +1037,7 @@ async fn a_slow_commit_does_not_block_set_immediate_commits() {
             Ok(None)
         }),
     ));
-    perspective.set_immediate_commits(1).await;
+    perspective.set_commit_tokens(1).await;
 
     let slow = {
         let p = perspective.clone();
@@ -955,17 +1056,17 @@ async fn a_slow_commit_does_not_block_set_immediate_commits() {
     };
     let reset = tokio::time::timeout(
         Duration::from_secs(2),
-        perspective.set_immediate_commits(IMMEDIATE_COMMITS_COUNT),
+        perspective.set_commit_tokens(COMMIT_BURST),
     )
     .await;
     // Undo the reset so the second commit still finds the burst limit at 0.
-    perspective.set_immediate_commits(0).await;
+    perspective.set_commit_tokens(0).await;
 
     release_tx.send(()).unwrap();
     slow.await.unwrap().unwrap();
     second.await.unwrap().unwrap();
 
-    reset.expect("set_immediate_commits waited for the slow language call");
+    reset.expect("set_commit_tokens waited for the slow language call");
     assert_eq!(
         calls.load(Ordering::SeqCst),
         1,
@@ -1046,7 +1147,7 @@ async fn a_slow_failed_commit_stays_ahead_of_later_diffs() {
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         let (language, entered_rx, seen) = slow_then_failing_language(release_rx);
         *perspective.link_language.write().await = Some(language);
-        perspective.set_immediate_commits(budget).await;
+        perspective.set_commit_tokens(budget).await;
 
         let first = {
             let p = perspective.clone();
@@ -1089,7 +1190,7 @@ async fn a_removal_does_not_overtake_a_slow_failed_addition() {
     let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
     let (language, entered_rx, seen) = slow_then_failing_language(release_rx);
     *perspective.link_language.write().await = Some(language);
-    perspective.set_immediate_commits(1).await;
+    perspective.set_commit_tokens(1).await;
     let task = start_loop(&perspective);
 
     let add_x = {

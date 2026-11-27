@@ -85,6 +85,11 @@ pub(crate) use subscriptions::{result_json, SubscriptionIdTaken};
 mod subscription_triggers;
 // Registering this executor's owners with the link language.
 mod local_agents;
+// Pacing commits to the link language.
+mod commit_tokens;
+#[cfg(test)]
+use commit_tokens::COMMIT_REFILL_INTERVAL;
+use commit_tokens::{CommitTokens, COMMIT_BURST};
 mod persisted_handle;
 pub use persisted_handle::PersistedHandle;
 // Committing a batch only if the links it expects still stand.
@@ -132,7 +137,6 @@ mod telepresence_tests;
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
 static MAX_PENDING_SECONDS: u64 = 3;
-static IMMEDIATE_COMMITS_COUNT: usize = 20;
 static QUERY_SUBSCRIPTION_CHECK_INTERVAL: u64 = 200; // 200ms
 /// How long `model_query` will poll a shared perspective for a
 /// class's SHACL to arrive over p-diff-sync before erroring — see
@@ -683,7 +687,8 @@ pub struct PerspectiveInstance {
     /// Predicates of links changed since last subscription check.
     changed_predicates: Arc<Mutex<ChangedPredicates>>,
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
-    immediate_commits_remaining: Arc<Mutex<usize>>,
+    /// Own short lock: never held across a language call.
+    commit_tokens: Arc<Mutex<CommitTokens>>,
     /// Held by `commit` from its pending-queue check until the diff is sent or
     /// queued, so a diff that fails after a slow language call is queued ahead
     /// of every diff committed after it.
@@ -836,7 +841,7 @@ impl PerspectiveInstance {
             trigger_subscription_check: Arc::new(AtomicBool::new(false)),
             changed_predicates: Arc::new(Mutex::new(ChangedPredicates::NoneRecorded)),
             commit_debounce_timer: Arc::new(Mutex::new(None)),
-            immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
+            commit_tokens: Arc::new(Mutex::new(CommitTokens::new(COMMIT_BURST))),
             commit_order: Arc::new(Mutex::new(())),
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
             runs: runner::Runs::default(),
@@ -1440,7 +1445,10 @@ impl PerspectiveInstance {
                 };
 
                 match self.commit_pending_diffs().await {
-                    Ok(()) => {
+                    // No token: leave the queue and the timer as they are, so
+                    // the next tick tries again. Not a failure.
+                    Ok(false) => {}
+                    Ok(true) => {
                         last_diff_time = None;
                         failures = 0;
                         log::debug!("💾 committed diffs {}", reason);
@@ -1473,7 +1481,9 @@ impl PerspectiveInstance {
         link_language_guard.is_some()
     }
 
-    async fn commit_pending_diffs(&self) -> Result<(), AnyError> {
+    /// Send the queue as one batch. `Ok(false)`: no commit token, nothing was
+    /// sent; the queue stays and a later tick tries again (not a failure).
+    async fn commit_pending_diffs(&self) -> Result<bool, AnyError> {
         let uuid = self.uuid.clone();
 
         let (pending_diffs, pending_ids) = crate::db_backend::db_backend()
@@ -1492,6 +1502,9 @@ impl PerspectiveInstance {
                 // rest. It holds this lock across its read and commit, and never
                 // waits on this loop.
                 let _sharing = self.share_links_mutex.lock().await;
+                if !self.take_commit_token().await {
+                    return Ok(false);
+                }
                 log::debug!("💾 committing {} pending diffs...", pending_ids.len());
                 let committed_ids = match link_language.commit(pending_diffs.clone()).await {
                     // Spec §5.2 splits perspective-commit (write) from
@@ -1516,6 +1529,13 @@ impl PerspectiveInstance {
                     Err(e) if pending_ids.len() > 1 => {
                         let (oldest, oldest_ids) =
                             crate::db_backend::db_backend().get_pending_diffs(&uuid, Some(1))?;
+                        // The extra sends need tokens too. With none left, keep
+                        // the rows and fail like "down": the backoff retries the
+                        // batch, which is simpler than waiting here for a token
+                        // with the sharing lock held.
+                        if !self.take_commit_token().await {
+                            return Err(e.context("no commit token to send the oldest diff alone"));
+                        }
                         match link_language.commit(oldest.clone()).await {
                             Ok(_) => oldest_ids,
                             Err(refusal) => {
@@ -1529,6 +1549,9 @@ impl PerspectiveInstance {
                                     .collect();
                                 let rest = crate::db_backend::db_backend()
                                     .get_pending_diffs_among(&uuid, &rest_ids)?;
+                                if !self.take_commit_token().await {
+                                    return Err(e.context("no commit token to send the rest"));
+                                }
                                 if link_language.commit(rest).await.is_err() {
                                     return Err(e.context(format!(
                                         "a batch of {} diffs",
@@ -1555,15 +1578,13 @@ impl PerspectiveInstance {
                     }
                 };
                 crate::db_backend::db_backend().clear_pending_diffs(&uuid, committed_ids)?;
-                // Reset immediate commits counter after successful commit
-                self.set_immediate_commits(IMMEDIATE_COMMITS_COUNT).await;
                 log::debug!("✅ 💾 successfully committed pending diffs");
-                Ok(())
+                Ok(true)
             } else {
-                Ok(()) // Keep diffs if no link language
+                Ok(true) // Keep diffs if no link language
             }
         } else {
-            Ok(())
+            Ok(true)
         }
     }
 
@@ -1728,6 +1749,13 @@ impl PerspectiveInstance {
                     return false;
                 }
 
+                if !self.take_commit_token().await {
+                    log::debug!(
+                        "ensure_public_links_are_shared: no commit token for perspective {} — skipping this sync attempt",
+                        uuid
+                    );
+                    return false;
+                }
                 let result = link_language
                     .commit(PerspectiveDiff {
                         additions: links_to_commit,
@@ -1795,8 +1823,8 @@ impl PerspectiveInstance {
         // diff committed while a slow language call is in flight is queued
         // (or sent) first, and if that call then fails, its diff is queued
         // behind the newer one: peers see the newer diff first. The
-        // immediate-commit counter has its own short lock, so
-        // set_immediate_commits never waits for a language call.
+        // commit tokens have their own short lock, so
+        // set_commit_tokens never waits for a language call.
         let _commit_order = self.commit_order.lock().await;
 
         // Seeing if we already have pending diffs, to not overtake older commits but instead add this one to the queue
@@ -1831,27 +1859,17 @@ impl PerspectiveInstance {
                 // (a) slow and (b) architecturally wrong: the retry queue is
                 // for transient failures, not for gating healthy commits.
                 //
-                // Drop the pre-check. The DoS counter still throttles bursts
+                // Drop the pre-check. The commit tokens still throttle bursts
                 // independently, and link_language.commit() itself is the
                 // authoritative signal for whether the commit succeeded — if
                 // the underlying language isn't ready, it throws and the
                 // error path below queues the diff. Legacy languages that
                 // implement perspective-sync still behave correctly because
                 // they throw from commit() when not synced.
-                // Take the slot and release the counter lock before the
+                // The token is taken, and its lock released, before the
                 // language call: a slow commit must not hold up
-                // set_immediate_commits.
-                let immediate = {
-                    let mut immediate_commits_remaining =
-                        self.immediate_commits_remaining.lock().await;
-                    if *immediate_commits_remaining > 0 {
-                        *immediate_commits_remaining -= 1;
-                        true
-                    } else {
-                        false
-                    }
-                };
-                if immediate {
+                // set_commit_tokens.
+                if self.take_commit_token().await {
                     link_language.commit(diff.clone()).await
                 } else {
                     Err(anyhow!("Debouncing commit burst"))
@@ -1892,11 +1910,6 @@ impl PerspectiveInstance {
         }
 
         Ok(())
-    }
-
-    // Add method to configure immediate commits
-    pub async fn set_immediate_commits(&self, count: usize) {
-        *self.immediate_commits_remaining.lock().await = count;
     }
 
     fn spawn_commit_and_handle_error(&self, diff: &PerspectiveDiff) {
