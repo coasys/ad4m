@@ -8,7 +8,8 @@ A pipeline with `run-nightly-llm: true` runs only this workflow, on `coasys/marv
 Each job has its own serial group, except `llm-e2e` and `coasys-spaces`, which
 share `nightly-llm`. The jobs: `llm-e2e`,
 `integration-tests-sfu`, `integration-tests-sfu-browsers` (see below),
-`coasys-spaces`, `integration-tests-agent-harness` and `feed-scale`.
+`coasys-spaces`, `integration-tests-agent-harness`, `feed-scale` and `agent-scale`
+(see "Agent-scale wind tunnel" in `tests/js/AGENTS.md`).
 
 `llm-e2e` runs the ignored Rust interpretation suites and the JS suites gated
 by `LLM_E2E=1`. It does not start a model server. It prompts staging's
@@ -118,7 +119,7 @@ curl -X POST https://circleci.com/api/v2/project/circleci/VRkXSnZDyBKHhkHKBHTmLj
        "parameters": {"run-nightly-llm": true, "we-ref": "<WE branch>"}}'
 ```
 
-This runs all six nightly jobs.
+This runs all seven nightly jobs.
 
 
 ## K2 bootstrap server in CI (`install-hc-toolchain`)

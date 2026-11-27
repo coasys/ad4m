@@ -134,6 +134,23 @@ describe("thresholds.json", () => {
     assert.equal(limitsFor({ job: "llm-e2e", metric: "llm.js_model.failures" }, rules).factor, 2);
     assert.equal(limitsFor({ job: "integration-tests-sfu", metric: "sfu.suite.duration_ms" }, rules).ceiling, 1800000);
   });
+
+  test("the agent-scale rules: later rules win, a growth is a ratio, a leak has a ceiling of 0", () => {
+    const rules = loadThresholds();
+    const limits = (metric) => limitsFor({ job: "agent-scale", metric }, rules);
+    assert.deepEqual(limits("agent_scale.read.query_ms.median"), { factor: 1.5, min_delta: 5 });
+    assert.equal(limits("agent_scale.read.query_ms.p95").min_delta, 50);
+    assert.equal(limits("agent_scale.onboard.concurrent_login_ms.wall").min_delta, 500);
+    assert.equal(limits("agent_scale.restart.first_query_ms.p95").min_delta, 50);
+    assert.equal(limits("agent_scale.restart.ready_ms").min_delta, 1000);
+    assert.equal(limits("agent_scale.events.leaked").ceiling, 0);
+    assert.equal(limits("agent_scale.rss_peak_mib").factor, 1.3);
+    // A growth name also matches the rules of the metric it is the growth of: the last rule wins.
+    assert.deepEqual(limits("agent_scale.restart.ready_ms.growth_10_100"), { factor: 1.5, min_delta: 1 });
+    assert.deepEqual(limits("agent_scale.rss_peak_mib.growth_10_100"), { factor: 1.5, min_delta: 1 });
+    // Another job's metrics are not touched.
+    assert.deepEqual(limitsFor({ job: "feed-scale", metric: "agent_scale.read.query_ms.median" }, rules), { factor: 1.5, min_delta: 0 });
+  });
 });
 
 describe("results JSON", () => {

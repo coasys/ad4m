@@ -24,6 +24,23 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+/// A failure worded `"{label} ({kind}): {message}"` when the executor refused a flow move
+/// (409, `data.kind`), and `"{label}: {message}"` for any other failure.
+fn refusal_labelled(label: &'static str) -> impl FnOnce(WsRpcError) -> String {
+    move |e| {
+        let kind = e
+            .data
+            .as_ref()
+            .filter(|_| e.code == 409)
+            .and_then(|data| data.get("kind"))
+            .and_then(Value::as_str);
+        match kind {
+            Some(kind) => format!("{label} ({kind}): {}", e.message),
+            None => labelled(label)(e),
+        }
+    }
+}
+
 // ============================================================================
 // Parameter Types
 // ============================================================================
@@ -441,7 +458,7 @@ impl Ad4mMcpHandler {
     }
 
     #[tool(
-        description = "Accept a live FlowTransitionProposal on behalf of this agent: adds your DID to the proposal's acceptors (idempotent per DID) and immediately runs the flow consensus pass. When the flow's consensusRule threshold (distinct DIDs) is met, the transition fires and the fired outcomes are returned; otherwise 'fired' is empty and the proposal stays live for further acceptances. Errors on unknown proposal URIs, on proposals that are not engine-visible, on proposals that leave a state the flow is no longer standing in, and when the cited evidence does not recompute on this replica."
+        description = "Accept a live FlowTransitionProposal on behalf of this agent: adds your DID to the proposal's acceptors (idempotent per DID) and immediately runs the flow consensus pass. When the flow's consensusRule threshold (distinct DIDs) is met, the transition fires and the fired outcomes are returned; otherwise 'fired' is empty and the proposal stays live for further acceptances. Errors on unknown proposal URIs, on proposals that are not engine-visible, on proposals that leave a state the flow is no longer standing in, and when the cited evidence does not recompute on this replica. A refusal reads 'Error accepting proposal (<kind>): <reason>', where <kind> is the refusal's kind, such as stale-proposal or not-engine-visible."
     )]
     pub async fn flow_proposal_accept(&self, params: Parameters<FlowProposalParams>) -> String {
         let p = &params.0;
@@ -451,7 +468,7 @@ impl Ad4mMcpHandler {
             .call::<Value>(
                 "perspective.acceptFlowProposal",
                 params,
-                labelled("Error accepting proposal"),
+                refusal_labelled("Error accepting proposal"),
             )
             .await;
         match fired {
@@ -465,7 +482,7 @@ impl Ad4mMcpHandler {
     }
 
     #[tool(
-        description = "Withdraw this agent's own contribution to a FlowTransitionProposal: retracts only the links this DID signed — your vote, or your whole proposal if you opened it — by writing one signed ad4m://retracted tombstone per link, which removes it on every replica. It never touches another agent's links, and it does not 'cancel' the proposal for anyone else. Because flow state is recomputed from the links present now, withdrawing a vote that had helped an edge settle moves the flow back to where it stood before that vote. Returns retracted_links: how many of your links were retracted — one for a withdrawn vote, more when you retract a proposal you opened. Errors on unknown proposal URIs and when this DID signed nothing on the proposal."
+        description = "Withdraw this agent's own contribution to a FlowTransitionProposal: retracts only the links this DID signed — your vote, or your whole proposal if you opened it — by writing one signed ad4m://retracted tombstone per link, which removes it on every replica. It never touches another agent's links, and it does not 'cancel' the proposal for anyone else. Because flow state is recomputed from the links present now, withdrawing a vote that had helped an edge settle moves the flow back to where it stood before that vote. Returns retracted_links: how many of your links were retracted — one for a withdrawn vote, more when you retract a proposal you opened. Errors on unknown proposal URIs and when this DID signed nothing on the proposal (kind not-your-proposal). A refusal reads 'Error rejecting proposal (<kind>): <reason>'."
     )]
     pub async fn flow_proposal_reject(&self, params: Parameters<FlowProposalParams>) -> String {
         let p = &params.0;
@@ -475,7 +492,7 @@ impl Ad4mMcpHandler {
             .call::<Value>(
                 "perspective.rejectFlowProposal",
                 params,
-                labelled("Error rejecting proposal"),
+                refusal_labelled("Error rejecting proposal"),
             )
             .await;
         match rejected {
@@ -537,6 +554,25 @@ impl Ad4mMcpHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refusal_names_its_kind_and_a_failure_does_not() {
+        let refused = WsRpcError {
+            code: 409,
+            message: "stale".into(),
+            data: Some(json!({ "kind": "stale-proposal" })),
+        };
+        assert_eq!(
+            refusal_labelled("Error accepting proposal")(refused),
+            "Error accepting proposal (stale-proposal): stale"
+        );
+        let failed = WsRpcError::internal("store broke".to_string());
+        assert_eq!(
+            refusal_labelled("Error accepting proposal")(failed),
+            "Error accepting proposal: store broke"
+        );
+    }
+
     use crate::perspectives::flow_classes::mint_flow_instance;
     use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
     use crate::types::LinkStatus;

@@ -2,8 +2,8 @@
 
 ## Nightly performance history (`scripts/perf/`)
 
-`integration-tests-sfu` and `llm-e2e` record their numbers on every run (passed
-or failed), fail on a serious regression against their own history, and draw a
+`integration-tests-sfu`, `llm-e2e` and `agent-scale` record their numbers on every
+run (passed or failed), fail on a serious regression against their own history, and draw a
 trend page. The full contract is the header of `scripts/perf/perf.mjs`.
 
 - **The history is a git repository**: folder `nightly/` on branch `main` of
@@ -50,11 +50,16 @@ trend page. The full contract is the header of `scripts/perf/perf.mjs`.
 
     `scripts/perf/llm-e2e-results.mjs` turns them into metrics (calls, failures,
     latency, output tokens/s), with params `{model}`.
+  - `agent-scale`: the test writes `$PERF_RESULTS_DIR/agent-scale.json`
+    (`tests/js/helpers/agent-scale.ts`): every metric once per agent count (params
+    `{agents: N, links}`), and its growth between the smallest and the largest count
+    (`agent_scale.<metric>.growth_10_100`, params `{from, to, links}`). `links` is
+    `AGENT_SCALE_LINKS`: another link count is another workload, so a series of its own.
 - A new nightly measurement writes a results JSON file (`{"metrics": [...]}`)
   into `$PERF_RESULTS_DIR`. Wrap the job's tests in `perf_setup` and
   `perf_finish` (`.circleci/config.yml`).
 - **Tests**: run `pnpm run test-perf-unit` in `tests/js`. It runs mocha for
-  `sfu-perf.unit.test.ts` and `node --test 'scripts/perf/*.test.mjs'`. The git
+  `sfu-perf.unit.test.ts` and `agent-scale.unit.test.ts`, and `node --test 'scripts/perf/*.test.mjs'`. The git
   tests push only to bare repos in a temp directory. The `js-unit-tests` CI job
   runs them.
 

@@ -126,6 +126,7 @@ export type { DidResolutionMetadata } from "./DidResolutionMetadata";
 export type { DidResolutionResult } from "./DidResolutionResult";
 export type { DidVerificationMethod } from "./DidVerificationMethod";
 export type { ForkRecord } from "./ForkRecord";
+export type { FlowRefusal } from "./FlowRefusal";
 export type { IdentityForkEvent } from "./IdentityForkEvent";
 export type { IdentityLog } from "./IdentityLog";
 export type { IdentityStatus } from "./IdentityStatus";
