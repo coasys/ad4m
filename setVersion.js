@@ -84,6 +84,11 @@ vueHooks.version = VERSION
 vueHooks.dependencies["@coasys/ad4m"] = 'workspace:'+VERSION
 fs.writeFileSync('ad4m-hooks/vue/package.json', JSON.stringify(vueHooks, null, 2) + '\n')
 
+const ldk = JSON.parse(fs.readFileSync('ad4m-ldk/js/package.json', 'utf8'))
+console.log("Language Development Kit (JS) version: " + ldk.version + " -> " + VERSION)
+ldk.version = VERSION
+fs.writeFileSync('ad4m-ldk/js/package.json', JSON.stringify(ldk, null, 2) + '\n')
+
 const rustExecutor = JSON.parse(fs.readFileSync('rust-executor/package.json', 'utf8'))
 console.log("Executor version: " + rustExecutor.version + " -> " + VERSION)
 rustExecutor.version = VERSION
