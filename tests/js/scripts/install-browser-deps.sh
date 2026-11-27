@@ -1,6 +1,7 @@
 #!/bin/bash
 # Install the system libraries for Playwright's debian13-x64 Chromium, Firefox and WebKit
-# builds on CI's Ubuntu 25.04 runner (integration-tests-sfu-browsers).
+# builds on CI's Ubuntu 25.04 runner (integration-tests-sfu-browsers, coasys-spaces, feed-scale).
+# It refreshes apt's package lists first.
 #
 # Playwright has no 25.04 builds or package list. `install-deps` falls back to 24.04's list
 # (libicu74, libavcodec60: absent on 25.04) and aborts on the first missing name. Debian 13's
@@ -31,6 +32,27 @@ libevent-2.1-7t64 libavif16"
 # Debian name -> Ubuntu name, where they differ.
 declare -A RENAME=([libjpeg62-turbo]=libjpeg62)
 
+# Nightly jobs on one runner host run this at the same time. apt waits for dpkg's lock
+# (DPkg::Lock::Timeout) but not for the lists and archives locks: it fails at once with
+# "Could not get lock". So a run that finds apt busy tries again, for up to 10 minutes.
+apt_get() {
+  local out try
+  for ((try = 1; try <= 60; try++)); do
+    if out=$(sudo apt-get -o DPkg::Lock::Timeout=600 "$@" 2>&1); then
+      printf '%s\n' "$out"
+      return 0
+    fi
+    # Only a held lock: "Unable to lock directory" also follows a lock file apt cannot open.
+    grep -q 'Could not get lock' <<<"$out" || break
+    echo "apt is busy (another job on this host): trying again in ${APT_BUSY_WAIT_S:-10} s"
+    sleep "${APT_BUSY_WAIT_S:-10}"
+  done
+  printf '%s\n' "$out" >&2
+  return 1
+}
+
+apt_get update -qq || exit 1
+
 wanted=()
 for p in $PACKAGES; do
   p=${RENAME[$p]:-$p}
@@ -38,7 +60,7 @@ for p in $PACKAGES; do
   if apt-cache policy "$p" 2>/dev/null | grep 'Candidate: [^(]' >/dev/null; then wanted+=("$p")
   else echo "skipped (not in this release): $p"; fi
 done
-sudo apt-get install -y -qq --no-install-recommends "${wanted[@]}" || exit 1
+apt_get install -y -qq --no-install-recommends "${wanted[@]}" || exit 1
 
 # Libraries the browsers still cannot load. ldd without the browsers' rpath also reports the
 # libraries they ship themselves, so those are left out.

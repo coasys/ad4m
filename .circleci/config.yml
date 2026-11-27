@@ -606,6 +606,11 @@ jobs:
           name: Test feed-scale.sh
           command: bash scripts/feed-scale.test.sh
       - run:
+          # Fake sudo and apt, no root, no network; about a second. The browser libraries'
+          # install waits while another job on the runner host holds apt's lock.
+          name: Test install-browser-deps.sh
+          command: bash tests/js/scripts/install-browser-deps.test.sh
+      - run:
           # Fake curl with fixture PRs, no network; about a second. The heavy_gate decision.
           name: Test should-run-heavy.sh
           command: bash .circleci/scripts/should-run-heavy.test.sh
@@ -1044,7 +1049,6 @@ jobs:
             # The install's own host check knows no 25.04 package names, so it is skipped
             # here; the script installs the libraries, and the launch checks them again.
             PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1 pnpm exec playwright-core install chromium firefox webkit
-            sudo apt-get update -qq
             ./scripts/install-browser-deps.sh
       - run:
           name: Run cross-browser SFU and mesh call tests
@@ -1547,7 +1551,6 @@ jobs:
           # Usually a no-op: integration-tests-sfu-browsers installs the same libraries nightly.
           name: Install Chromium's system libraries
           command: |
-            sudo apt-get update -qq
             ./tests/js/scripts/install-browser-deps.sh
       - run:
           name: Build we-web with the Coasys seed
@@ -1624,7 +1627,6 @@ jobs:
       - run:
           name: Install Chromium's system libraries
           command: |
-            sudo apt-get update -qq
             ./tests/js/scripts/install-browser-deps.sh
       - run:
           name: Build we-web
