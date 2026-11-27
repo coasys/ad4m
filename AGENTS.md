@@ -612,12 +612,19 @@ it, F its fixed traffic. Constants (measured with the e2e source below):
   from the selector or a gap. A receiver's own PLI is not limited.
 - F: per audio track the larger of `AUDIO_RESERVE_BPS` 64 kbit/s and its
   measured rate, plus each video without simulcast; it is never touched.
-- `UPGRADE_HEADROOM` H = 1.25, `UPGRADE_HOLD` 4 s: the band between the
-  step-down line (C + F > E) and the upgrade line (E >= H * (C + F + step)).
-  The step-down line is the traffic itself: with no bottleneck, str0m's
-  estimate settles near the traffic it carries (about 1.5 times at full
-  state), and a line below the estimate (the earlier 0.85 * E) stepped
-  receivers down after almost every upgrade.
+- `UPGRADE_HEADROOM` H = 1.25, `UPGRADE_HOLD` 4 s, `STEP_DOWN_FRACTION` 0.85:
+  the band between the step-down line (E < 0.85 * (C + F)) and the upgrade
+  line (E >= H * (C + F + step)). With no bottleneck, str0m's estimate
+  settles near the traffic it carries (about 1.5 times at full state, 1.2 at
+  p10) and wobbles around it: a line below the estimate (the earlier
+  0.85 * E) stepped receivers down after almost every upgrade, and a line at
+  the traffic itself (C + F > E) still stepped them down on a reading a few
+  percent under it. Of 40 step-downs in 28 e2e runs of e9 on a free, loaded
+  host (8 cores, 40 busy loops), 35 had E at 0.85 to 1.0 of C + F and 5 at
+  0.55 to 0.8 (the collapse a real shortfall looks like); every one cost a 4 s
+  hold and a 2 s measurement to climb back, and e9 failed 3 of 12 runs there.
+  H stays 1.25: with 0.85 and H = 1.05, upgrades landed on the line and
+  stepped straight back down (e9 9 of 12 passed, against 10 of 12 at 1.25).
 
 Rules, per receiver, run on an estimate event, a track-set or ceiling change,
 a committed switch, a change in a track's set of live layers (a layer starts,
@@ -626,8 +633,8 @@ or stops after `LAYER_TIMEOUT`), a layer or video that resumes after
 deadline (the hold's end, or the moment a live layer's rate is first measured)
 lowers the loop's timeout.
 
-- When C + F > E, one video track drops one live layer (largest saving first,
-  ties by stable id), one per run.
+- When E < 0.85 * (C + F), one video track drops one live layer (largest
+  saving first, ties by stable id), one per run.
 - Upgrades: the receiver has one hold (`hold_since`). It runs while the
   cheapest step fits E >= H * (C + F + step), is re-checked at every run, and
   a dip, ceiling change, track-set change or completed switch resets it. When

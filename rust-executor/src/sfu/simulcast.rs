@@ -29,9 +29,10 @@
 //! - the fixed traffic is each audio track ([`AUDIO_RESERVE_BPS`], or its
 //!   measured rate when larger) and each video without simulcast (its
 //!   measured rate). It is never touched;
-//! - when the layers forwarded plus the fixed traffic cost more than the
-//!   estimate (the estimate says the path carries less than is sent), one
-//!   track steps down one flowing layer: the one that saves the most;
+//! - when the estimate falls under [`STEP_DOWN_FRACTION`] of the layers
+//!   forwarded plus the fixed traffic (the estimate says the path carries
+//!   clearly less than is sent), one track steps down one flowing layer: the
+//!   one that saves the most;
 //! - upgrades wait for one hold per receiver: the estimate must cover
 //!   [`UPGRADE_HEADROOM`] times the traffic with the cheapest step up (fixed
 //!   traffic included) for [`UPGRADE_HOLD`] without a dip, and only once an estimate arrived that
@@ -92,16 +93,29 @@ const RATE_WINDOW: Duration = Duration::from_secs(2);
 const PACKET_OVERHEAD_BYTES: u64 = 32;
 /// An upgrade needs an estimate this many times the traffic with the new
 /// layer. With forwarded cost C and fixed traffic F the receiver steps down
-/// only when C + F > E (the path carries less than is sent), and an upgrade
-/// needs E >= H * (C + F + step): H is the hysteresis band above the
-/// step-down line. On loopback, which has no bottleneck, the app-limited
-/// estimate stays within about 1.5 times the traffic acked (the estimator's
-/// ramp-up bound): at full state it read 1.2 times the traffic at p10 and 1.5
-/// at p50, so a rule that steps down above the traffic is unstable; the line
-/// must be the traffic itself, and H only keeps an upgrade from landing on it.
+/// only when E < STEP_DOWN_FRACTION * (C + F) (the path carries clearly less
+/// than is sent), and an upgrade needs E >= H * (C + F + step): H is the
+/// hysteresis band above the step-down line (H / STEP_DOWN_FRACTION = 1.235
+/// from the line to the upgrade point). On loopback, which has no bottleneck,
+/// the app-limited estimate stays within about 1.5 times the traffic acked
+/// (the estimator's ramp-up bound): at full state it read 1.2 times the
+/// traffic at p10 and 1.5 at p50. H stays at 1.25: lowering it to 1.05 (with
+/// the step-down line at 0.85) made upgrades land on the line and step
+/// straight back down (e9 9 of 12 runs passed, against 10 of 12 at 1.25).
 const UPGRADE_HEADROOM: f64 = 1.25;
 /// How long that headroom must hold, without a dip, before an upgrade.
 const UPGRADE_HOLD: Duration = Duration::from_secs(4);
+
+/// A receiver steps down when its estimate E falls under this fraction of the
+/// traffic (C + F). With no bottleneck, str0m's estimate is app-limited and
+/// wobbles around the traffic it carries, so a line at the traffic itself
+/// stepped receivers down on a reading a few percent under it (40 step-downs
+/// in 28 e2e runs of e9 on a free, loaded host: 35 with E at 0.85 to 1.0 of the
+/// traffic, 5 at 0.55 to 0.8, the collapses a real shortfall looks like).
+/// Each such step-down cost a 4 s hold and a 2 s measurement to climb back,
+/// and on a loaded host the receivers never all stood at full size at once.
+const STEP_DOWN_FRACTION: f64 = 0.85;
+
 /// What each forwarded audio track is budgeted at least.
 const AUDIO_RESERVE_BPS: u64 = 64_000;
 /// The layers' rids, lowest first. A layer's rank is its index.
@@ -633,9 +647,10 @@ impl LayerSelector {
         };
         let spent: u64 = videos.iter().map(|v| v.cost).sum();
 
-        if (spent + fixed) as f64 > estimate as f64 {
-            // The traffic exceeds the estimate: one track, one layer down, the
-            // largest saving first.
+        if ((spent + fixed) as f64) * STEP_DOWN_FRACTION > estimate as f64 {
+            // The traffic exceeds the estimate by more than the wobble of an
+            // app-limited reading: one track, one layer down, the largest
+            // saving first.
             state.hold_since = None;
             let lowered = videos
                 .iter()
@@ -1330,6 +1345,21 @@ mod tests {
     }
 
     #[test]
+    fn an_estimate_a_little_under_the_traffic_does_not_step_down() {
+        // One high layer of 1.5 Mbit/s. On a link with no bottleneck the
+        // app-limited estimate wobbles around the traffic it carries: a
+        // reading within STEP_DOWN_FRACTION of it is not a shortfall.
+        let mut sim = Sim::new(&[RATES]);
+        sim.place(2);
+        sim.estimate(1_400_000, true);
+        sim.estimate(1_300_000, true);
+        assert_eq!(sim.caps(), [2]);
+        // An estimate well under it (0.8 of the traffic) is one.
+        sim.estimate(1_200_000, true);
+        assert_eq!(sim.caps(), [1]);
+    }
+
+    #[test]
     fn the_old_layers_cost_counts_until_the_switch_commits() {
         let mut sim = Sim::new(&[RATES, BIG_HIGH]);
         sim.place(2);
@@ -1359,12 +1389,14 @@ mod tests {
         sim.advance(WARM_UP_MS);
         sim.place(1);
         assert_eq!(sim.s.route(sim.now, &RECEIVER, &audio, None, None), FORWARD);
-        // 0.72 Mbit/s carries medium (0.6) and the audio's rate (105.6
-        // kbit/s, above the 64 kbit/s reserve): 0.7056.
-        sim.estimate(720_000, true);
+        // Medium (0.6) and the audio's rate (105.6 kbit/s, above the 64
+        // kbit/s reserve) cost 0.7056; the step-down line is 0.85 of it,
+        // 0.5998. 0.60 Mbit/s is over it.
+        sim.estimate(600_000, true);
         assert_eq!(sim.caps(), [1]);
-        // 0.70 Mbit/s would carry medium alone, not with the audio.
-        sim.estimate(700_000, true);
+        // 0.59 Mbit/s is under it: with the audio, medium does not fit (the
+        // line for medium alone is 0.51).
+        sim.estimate(590_000, true);
         assert_eq!(sim.caps(), [0]);
         // Zero estimate: video at the floor, audio still forwarded.
         sim.estimate(0, true);
@@ -1525,9 +1557,9 @@ mod tests {
         sim.advance(10);
         let first = sim.now;
         sim.s.route(sim.now, &RECEIVER, &audio, None, None);
-        // 0.68 Mbit/s: medium (0.6) and the reserve (0.064) fit, medium and
-        // the audio's real rate (0.1056) do not.
-        sim.estimate(680_000, true);
+        // 0.58 Mbit/s: medium (0.6) and the reserve (0.064) fit (line 0.564),
+        // medium and the audio's real rate (0.1056) do not (line 0.5998).
+        sim.estimate(580_000, true);
         assert_eq!(sim.caps(), [1]);
         // The measurement is the wake: the allocation runs when it is known.
         assert_eq!(sim.s.next_wake(), Some(first + RATE_WINDOW));
@@ -1604,7 +1636,7 @@ mod tests {
         sim.estimate(3_200_000, true);
         let start = sim.now;
         sim.advance(2_000);
-        // A dip below the headroom (still above the traffic): no hold.
+        // A dip below the headroom (still above the step-down line): no hold.
         sim.estimate(1_200_000, true);
         assert_eq!(sim.s.next_wake(), None);
         sim.advance(1_000);
@@ -1796,11 +1828,13 @@ mod tests {
         sim.place(2);
         let track = sim.tracks[0].0.clone();
         let high = Rid::from("high");
-        // High's steady frames cost 1.5 Mbit/s, under the estimate 1.8.
-        sim.estimate(1_800_000, true);
+        // High's steady frames cost 1.5 Mbit/s: the estimate 1.5 is well
+        // over the step-down line (0.85 * 1.5).
+        sim.estimate(1_500_000, true);
         assert_eq!(sim.caps(), [2]);
         // A 150 kB keyframe every 3 s adds 0.6 Mbit/s to the 2 s window it
-        // is in: the rate goes over the estimate.
+        // is in: the rate goes over the estimate by more than the line's
+        // margin.
         for _ in 0..3 {
             sim.advance(3_000);
             sim.s
@@ -1810,7 +1844,7 @@ mod tests {
             .rate(sim.now)
             .expect("a rate");
         assert!(rate > 1_800_000, "{rate}");
-        sim.estimate(1_800_000, true);
+        sim.estimate(1_500_000, true);
         assert_eq!(sim.caps(), [1]);
     }
 
@@ -1951,10 +1985,13 @@ mod tests {
     }
 
     #[test]
-    fn an_estimate_just_below_the_traffic_steps_one_layer_down() {
+    fn an_estimate_just_under_the_step_down_line_steps_one_layer_down() {
+        // Two mediums cost 1.2 Mbit/s; the line is 0.85 of it, 1.02.
         let mut sim = Sim::new(&[RATES, RATES]);
         sim.place(1);
-        sim.estimate(1_199_999, true);
+        sim.estimate(1_020_000, true);
+        assert_eq!(sim.caps(), [1, 1]);
+        sim.estimate(1_019_999, true);
         // One track, one layer.
         assert_eq!(sim.caps(), [0, 1]);
     }

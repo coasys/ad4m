@@ -17,7 +17,6 @@
  */
 
 import { leaseNet, netAvailable, socketPorts } from "../../net.js";
-import { CAMERA } from "../media.js";
 import { e2eScenario } from "../scenario.js";
 
 const EVERYONE = ["u1", "u2", "u3"];
@@ -44,7 +43,7 @@ export const e17NetworkSwitch = e2eScenario({
         await call.join(EVERYONE);
         await call.eventually(call.rosterIsEveryone(), 60_000, "roster");
         await call.eventually(call.hearsEveryone(), 60_000, "audio");
-        await call.eventually(call.seesEveryone(CAMERA), 60_000, "video");
+        await call.eventually(call.seesEveryone(), 60_000, "video");
       });
 
       const departuresBefore = (await call.who("u2").snapshot()).departures;
