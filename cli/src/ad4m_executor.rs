@@ -4,10 +4,8 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-// Tune jemalloc to return freed memory to the OS more aggressively. jemalloc
-// reads `MALLOC_CONF` (or, with tikv-jemallocator's prefixed symbols on
-// macOS/Linux, `_RJEM_MALLOC_CONF`) at process start. With the defaults,
-// peak allocations from bursty work — most notably SPARQL queries that
+// Tune jemalloc to return freed memory to the OS more aggressively. With the
+// defaults, peak allocations from bursty work — most notably SPARQL queries that
 // materialise the full link set into a Vec<DecoratedLinkExpression> — sit
 // in jemalloc arenas indefinitely, inflating RSS even after the Rust-side
 // memory has been dropped. The wind tunnel was attributing this to a leak:
@@ -16,22 +14,43 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 //
 // jemalloc reads its config on first allocation, which happens before
 // main(), so the only reliable way to apply this from the binary itself
-// is to override the static `malloc_conf` symbol that jemalloc looks up
-// at init time. With tikv-jemallocator the symbol is exposed as
-// `_rjem_malloc_conf` on prefixed builds (default on macOS/Linux).
+// is to export the `malloc_conf` symbol that jemalloc looks up at init
+// time. Its name depends on how tikv-jemalloc-sys built jemalloc. Cargo.toml
+// enables `unprefixed_malloc_on_supported_platforms`, so jemalloc is
+// unprefixed and reads `malloc_conf` (env `MALLOC_CONF`) everywhere except
+// on the targets tikv-jemalloc-sys 0.6 always prefixes (`NO_UNPREFIXED_
+// MALLOC_TARGETS`: apple, android, dragonfly), where it reads
+// `_rjem_malloc_conf` (env `_RJEM_MALLOC_CONF`). A symbol jemalloc does not
+// read is silently ignored, so this must match the build.
 //
 // Operators / test harnesses can override these defaults by exporting
-// `_RJEM_MALLOC_CONF=...` (or `MALLOC_CONF=...` on unprefixed builds)
+// `MALLOC_CONF=...` (`_RJEM_MALLOC_CONF=...` on the prefixed targets)
 // before launching ad4m-executor.
 //
 // - background_thread:true   purge runs on a background thread
 // - dirty_decay_ms:1000      release dirty pages 10× faster than default
-// - muzzy_decay_ms:1000      same for muzzy pages
+//
+// muzzy_decay_ms stays at its default of 0 here: pages go straight from
+// dirty to released, never muzzy. A non-zero value would hold them longer.
 #[cfg(not(target_env = "msvc"))]
-#[allow(non_upper_case_globals)]
-#[export_name = "_rjem_malloc_conf"]
-pub static _rjem_malloc_conf: Option<&'static [u8]> =
-    Some(b"background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:1000\0");
+#[cfg_attr(
+    any(
+        target_vendor = "apple",
+        target_os = "android",
+        target_os = "dragonfly"
+    ),
+    export_name = "_rjem_malloc_conf"
+)]
+#[cfg_attr(
+    not(any(
+        target_vendor = "apple",
+        target_os = "android",
+        target_os = "dragonfly"
+    )),
+    export_name = "malloc_conf"
+)]
+pub static JEMALLOC_CONF: Option<&'static [u8]> =
+    Some(b"background_thread:true,dirty_decay_ms:1000\0");
 
 extern crate ad4m_client;
 extern crate anyhow;
