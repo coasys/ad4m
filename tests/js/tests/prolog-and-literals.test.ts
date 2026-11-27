@@ -17,6 +17,7 @@ import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     path as shaclPath,
 } from "@coasys/ad4m";
 import { readFileSync } from "node:fs";
+import { startExecutor, baseUrl, quitExecutor, pollUntil, assertAbsentBySentinel } from "../utils/utils";
 
 /** Opens the live query's first value, then calls `onChange` with every
  *  later result (`initial` false), and returns the opening value. */
@@ -30,7 +31,6 @@ async function watch<T>(
     });
     return opening;
 }
-import { startExecutor, baseUrl, quitExecutor, pollUntil, assertStaysFalse } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import path from "path";
 import { fileURLToPath } from 'url';
@@ -1772,6 +1772,9 @@ describe("Prolog + Literals", () => {
 
                     // Set up subscription for high-priority unread notifications
                     let updateCount = 0;
+                    // Every snapshot's length, so a wrong update that a later one overwrites
+                    // before a poll still counts.
+                    const seenLengths: number[] = [];
                     const live = Notification.query(perspective!, {
                         where: {
                             priority: { gt: 5 },
@@ -1780,6 +1783,7 @@ describe("Prolog + Literals", () => {
                     });
                     const initialResults = (await watch(live, (page) => {
                         notifications = page.results;
+                        seenLengths.push(page.results.length);
                         updateCount++;
                     })).results;
 
@@ -1820,17 +1824,15 @@ describe("Prolog + Literals", () => {
                     notification3.read = false;
                     await notification3.save();
 
-                    // Verify non-matching notification does not add to filtered results
-                    await assertStaysFalse(() => notifications.length > 2, {
-                        waitMs: 500, intervalMs: 50, label: "low-priority notification stays out of filtered results"
-                    });
-                    expect(notifications.length).to.equal(2);
-
-                    // Mark notification1 as read - should trigger subscription to remove it
+                    // Mark notification1 as read - should trigger subscription to remove it.
+                    // This is also the sentinel for the low-priority notification above, which
+                    // must not add to the filtered results: both are updates of this one
+                    // subscription, delivered in revision order, so a stray update for
+                    // notification3 would show up (length 3) before the removal's (length 1).
                     notification1.read = true;
                     await notification1.save();
-                    await pollUntil(() => notifications.length === 1, {
-                        timeoutMs: 5000, intervalMs: 50, label: "read notification removed from subscription"
+                    await assertAbsentBySentinel(() => notifications.length === 1, () => seenLengths.some((n) => n > 2), {
+                        timeoutMs: 5000, label: "low-priority notification stays out of filtered results"
                     });
                     expect(notifications.length).to.equal(1);
 
@@ -2009,27 +2011,20 @@ describe("Prolog + Literals", () => {
                     task3.assignee = "bob";
                     await task3.save();
 
-                    // Verify non-matching task does not trigger subscription
-                    await assertStaysFalse(() => updateCount > 2 || tasks.length > 2, {
-                        waitMs: 1000, intervalMs: 50, label: "wrong-assignee task does not trigger subscription"
-                    });
-                    expect(updateCount).to.equal(2);
-                    expect(tasks.length).to.equal(2);
-
-                    // Mark task1 as completed - should trigger subscription to remove it
+                    // Mark task1 as completed - should trigger subscription to remove it.
+                    // This is also the sentinel for the wrong-assignee task above, which must
+                    // not trigger the subscription: both are updates of this one subscription,
+                    // delivered in order, so a stray update for task3 would arrive first and
+                    // push updateCount past 3 (or tasks.length past 2).
                     task1.completed = true;
                     await task1.save();
-                    
-                    // Wait for subscription to fire with proper condition checking
-                    await waitForCondition(
-                        () => tasks.length === 1,
-                        { 
-                            timeoutMs: 60000, 
-                            errorMessage: 'Subscription did not fire after task update' 
-                        }
-                    );
 
-                    expect(tasks.length).to.equal(1);   
+                    await assertAbsentBySentinel(() => tasks.length === 1, () => updateCount > 3 || tasks.length > 2, {
+                        timeoutMs: 60000, label: "wrong-assignee task does not trigger subscription"
+                    });
+
+                    expect(tasks.length).to.equal(1);
+                    expect(updateCount).to.equal(3);
 
                     // Dispose the subscription to prevent cross-test interference
                     live.dispose();
@@ -2336,7 +2331,49 @@ describe("Prolog + Literals", () => {
                         }
                     });
 
+                    // Sentinel for "a disposed subscription stays silent": a live
+                    // subscription on every TestModel, started before the test saves
+                    // anything.
+                    const subscribeSentinel = async () => {
+                        const callback = sinon.fake();
+                        const live = TestModel.query(perspective);
+                        await watch(live, (page) => callback(page.results));
+                        return { callback, live };
+                    };
+
+                    // Saves two models after a dispose. A disposed subscription's stray
+                    // update would come from a different subscription than the sentinel's,
+                    // and the executor sends one pass's updates to every subscription in
+                    // no fixed order, so the sentinel seeing the first model proves
+                    // nothing about the stray. A second save is handled by a later pass
+                    // (passes run one after another, each sending all its updates before
+                    // the next starts), and updates share one socket: once the sentinel
+                    // has seen the second model, every update the first save caused has
+                    // already been delivered. `saved` is the number of models already in
+                    // the perspective.
+                    const saveAndExpectSilence = async (
+                        sentinel: { callback: sinon.SinonSpy },
+                        saved: number,
+                        unexpected: () => boolean,
+                        label: string,
+                    ) => {
+                        const seen = (n: number) => sentinel.callback.called && sentinel.callback.lastCall.args[0].length >= n;
+                        for (const [i, name] of ["Test 3", "Test 4"].entries()) {
+                            const model = new TestModel(perspective);
+                            model.name = name;
+                            model.status = "active";
+                            await model.save();
+                            if (i === 0) {
+                                await pollUntil(() => seen(saved + 1), { timeoutMs: 60000, intervalMs: 50, label: "sentinel sees first model after dispose" });
+                            } else {
+                                await assertAbsentBySentinel(() => seen(saved + 2), unexpected, { timeoutMs: 60000, label });
+                            }
+                        }
+                    };
+
                     it('handles subscriptions and disposal correctly', async () => {
+                        const sentinel = await subscribeSentinel();
+
                         // Set up callback spies
                         const callback1 = sinon.fake();
                         const callback2 = sinon.fake();
@@ -2402,25 +2439,19 @@ describe("Prolog + Literals", () => {
                         // Dispose subscription
                         live.dispose();
 
-                        // Add another model - should not trigger callback
-                        const model3 = new TestModel(perspective);
-                        model3.name = "Test 3";
-                        model3.status = "active";
-                        await model3.save();
-
-                        // Verify no callbacks fire after dispose
-                        await assertStaysFalse(() => callback1.callCount > 1 || callback2.callCount > 1, {
-                            waitMs: 1000, intervalMs: 50, label: "no callbacks after dispose"
-                        });
+                        // Add more models - should not trigger callbacks
+                        await saveAndExpectSilence(sentinel, 2, () => callback1.callCount > 1 || callback2.callCount > 1, "callbacks after dispose");
                         // callback1: 1 (model1 save only)
                         // callback2: 1 (model2 save only)
                         expect(callback1.callCount).to.equal(1);
                         expect(callback2.callCount).to.equal(1);
+                        sentinel.live.dispose();
                     });
 
                     // Live query A's dispose must leave live B's subscription on the
                     // same query running.
                     it('keeps another live on the same query alive when one disposes', async () => {
+                        const sentinel = await subscribeSentinel();
                         const liveA = TestModel.query(perspective, { where: { status: "active" } });
                         const liveB = TestModel.query(perspective, { where: { status: "active" } });
                         const callbackA = sinon.fake();
@@ -2449,16 +2480,12 @@ describe("Prolog + Literals", () => {
 
                         // B lets go too: nothing fires any more.
                         liveB.dispose();
-                        const model2 = new TestModel(perspective);
-                        model2.name = "Shared 2";
-                        model2.status = "active";
-                        await model2.save();
-                        await assertStaysFalse(() => callbackA.callCount > 0 || callbackB.callCount > 1, {
-                            waitMs: 1000, intervalMs: 50, label: "no callbacks after both disposed"
-                        });
+                        await saveAndExpectSilence(sentinel, 1, () => callbackA.callCount > 0 || callbackB.callCount > 1, "callbacks after both disposed");
+                        sentinel.live.dispose();
                     });
 
                     it('handles count subscriptions and disposal', async () => {
+                        const sentinel = await subscribeSentinel();
                         const live = TestModel.query(perspective, {
                             where: { status: "active" }, limit: 0, count: true,
                         });
@@ -2492,20 +2519,14 @@ describe("Prolog + Literals", () => {
                         // Dispose subscription
                         live.dispose();
 
-                        // Add another model - should not trigger callback
-                        const model2 = new TestModel(perspective);
-                        model2.name = "Test 2";
-                        model2.status = "active";
-                        await model2.save();
-
-                        // Verify no callbacks fire after dispose
-                        await assertStaysFalse(() => countCallback.callCount > count, {
-                            waitMs: 1000, intervalMs: 50, label: "no count callbacks after dispose"
-                        });
+                        // Add more models - should not trigger callback
+                        await saveAndExpectSilence(sentinel, 1, () => countCallback.callCount > count, "count callbacks after dispose");
                         expect(countCallback.callCount).to.equal(count);
+                        sentinel.live.dispose();
                     });
 
                     it('handles paginated subscriptions and disposal', async () => {
+                        const sentinel = await subscribeSentinel();
                         const live = TestModel.query(perspective, {
                             where: { status: "active" }, limit: 2, offset: 0, count: true,
                         });
@@ -2558,17 +2579,10 @@ describe("Prolog + Literals", () => {
                         // Dispose subscription
                         live.dispose();
 
-                        // Add another model - should not trigger callback
-                        const model3 = new TestModel(perspective);
-                        model3.name = "Test 3";
-                        model3.status = "active";
-                        await model3.save();
-
-                        // Verify no callbacks fire after dispose
-                        await assertStaysFalse(() => pageCallback.callCount > count, {
-                            waitMs: 1000, intervalMs: 50, label: "no page callbacks after dispose"
-                        });
+                        // Add more models - should not trigger callback
+                        await saveAndExpectSilence(sentinel, 2, () => pageCallback.callCount > count, "page callbacks after dispose");
                         expect(pageCallback.callCount).to.equal(count);
+                        sentinel.live.dispose();
                     });
                 });
 

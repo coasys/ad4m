@@ -306,18 +306,21 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
             const mockFunction = sinon.stub();
             ad4mClient.on('notification-triggered', ({ notification }) => mockFunction(notification))
 
-            // Negative: ensuring no false positives — control link should NOT trigger
+            // Negatives: windows, not sentinels. Each perspective runs its own check loop,
+            // and within one perspective the executor spawns the notification publish
+            // (`publish_notification_matches`), so no later notification is ordered after
+            // a wrong one and nothing says a check has finished.
             await notificationPerspective.add(new Link({source: "control://source", target: "control://target"}))
             await assertStaysFalse(() => mockFunction.called, { waitMs: 1000, label: "no false positive on control link" });
 
-            // Negative: ensuring only selected perspectives trigger
+            // Ensuring only selected perspectives trigger
             await otherPerspective.add(new Link({source: "control://source", predicate: triggerPredicate, target: "control://target"}))
             await assertStaysFalse(() => mockFunction.called, { waitMs: 1000, label: "other perspective should not trigger" });
 
             // Happy path
             await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target1"}))
             await pollUntil(() => mockFunction.called, { timeoutMs: 15000, label: "notification trigger fires for target1" });
-            expect(mockFunction.called).to.be.true
+            expect(mockFunction.callCount).to.equal(1)
             let triggeredNotification = mockFunction.getCall(0).args[0] as TriggeredNotification
             expect(triggeredNotification.notification.description).to.equal(notification.description)
             let triggerMatch = JSON.parse(triggeredNotification.triggerMatch)
@@ -331,9 +334,6 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
             // Ensuring we don't get old data on a new trigger
             await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target2"}))
             await pollUntil(() => mockFunction.callCount >= 2, { timeoutMs: 15000, label: "notification trigger fires for target2" });
-            // No third, stale trigger may follow
-            await assertStaysFalse(() => mockFunction.callCount > 2, { waitMs: 2000, label: "stale third notification trigger" });
-            expect(mockFunction.callCount).to.equal(2)
             triggeredNotification = mockFunction.getCall(1).args[0] as TriggeredNotification
             triggerMatch = JSON.parse(triggeredNotification.triggerMatch)
             expect(triggerMatch.length).to.equal(1)
@@ -342,6 +342,11 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
             expect(match.source).to.equal("test://source")
             //@ts-ignore
             expect(match.target).to.equal("test://target2")
+
+            // No third, stale trigger may follow target2's. A window (2 s): the publish is
+            // spawned, so no later notification is ordered after a stale one.
+            await assertStaysFalse(() => mockFunction.callCount > 2, { waitMs: 2000, label: "stale third notification trigger" });
+            expect(mockFunction.callCount).to.equal(2)
         })
 
         it("can detect mentions in notifications (Flux example)", async () => {
@@ -383,6 +388,8 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
                 predicate: "flux://has_message",
                 target: noMentionExprUrl
             }))
+            // A window (2 s): the notification publish is spawned, so no later
+            // notification is ordered after a wrong one for message://1.
             await assertStaysFalse(() => mockFunction.called, { waitMs: 2000, label: "no-mention message should not trigger" });
 
             // Create a message expression that mentions the agent (with HTML formatting like Flux)
@@ -394,7 +401,7 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
                 target: mentionExprUrl
             }))
             await pollUntil(() => mockFunction.called, { timeoutMs: 15000, label: "mention notification trigger fires" });
-            expect(mockFunction.called).to.be.true
+            expect(mockFunction.callCount).to.equal(1)
 
             let triggeredNotification = mockFunction.getCall(0).args[0] as TriggeredNotification
             expect(triggeredNotification.notification.description).to.equal(notification.description)

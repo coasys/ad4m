@@ -41,6 +41,7 @@ import chaiAsPromised from "chai-as-promised";
 import { Ad4mClient, LinkQuery, SHACLShape } from "@coasys/ad4m";
 import type { AISession, AISessionChanged, AISessionMessage } from "@coasys/ad4m";
 import { addE2eLlm, e2eMaxNumCtx, startAgent, waitUntil } from "../../helpers/index.js";
+import { assertAbsentBySentinel } from "../../utils/utils.js";
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);
@@ -198,6 +199,9 @@ describeIfLLM("ai.session* — persistent AI sessions (WS + real LLM)", function
   it("streams each change as an ai-session-changed event and stops on unsubscribe", async () => {
     const events: AISessionChanged[] = [];
     const unsub = ad4m.ai.onSessionChanged((e) => events.push(e));
+    // A second listener, kept past the unsubscribe: the sentinel.
+    const sentinelEvents: AISessionChanged[] = [];
+    const sentinelUnsub = ad4m.ai.onSessionChanged((e) => sentinelEvents.push(e));
 
     const s = await newSession({ title: "watched session" });
     await waitUntil(
@@ -231,11 +235,18 @@ describeIfLLM("ai.session* — persistent AI sessions (WS + real LLM)", function
     unsub();
 
     // After unsubscribing nothing more arrives — a fresh session's `created`
-    // event would land here within the wait if delivery had not stopped.
+    // event would reach this listener too if delivery had not stopped. The
+    // other listener is the sentinel: the client hands each event to its
+    // listeners one after the other within one message, so once the sentinel
+    // has the `created` event, the unsubscribed one has had its turn.
     const seen = events.length;
-    await newSession({ title: "unwatched session" });
-    await new Promise((r) => setTimeout(r, 800));
-    expect(events.length, "no events after unsubscribe").to.equal(seen);
+    const unwatched = await newSession({ title: "unwatched session" });
+    await assertAbsentBySentinel(
+      () => sentinelEvents.some((e) => e.sessionId === unwatched.id && e.kind === "created"),
+      () => events.length !== seen,
+      { timeoutMs: 10_000, label: "event after unsubscribe" },
+    );
+    sentinelUnsub();
   });
 
   it("stores a turn: the user's message and the assistant's reply, in order", async () => {

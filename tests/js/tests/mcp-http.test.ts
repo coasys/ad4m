@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { sleep, startExecutor, stopChildProcess } from "../utils/utils";
+import { assertAbsentBySentinel, assertStaysFalse, sleep, startExecutor, stopChildProcess } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import { createHash, generateKeyPairSync, sign as signBytes } from "node:crypto";
@@ -1590,36 +1590,64 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         });
 
         it("should create WakerSubscriptionManager and receive initial (empty) result via onWake", async function() {
-            this.timeout(15000);
+            this.timeout(30000);
 
             var config = await callMcpTool(MCP_BASE_URL, 'get_mention_waker_config', {
                 perspective_id: wakerPerspectiveUuid,
             }, mcpSessionId);
 
-            var wakeCount = 0;
+            // The shared waker perspective may already hold a mention, which would wake
+            // at once, so this runs in a perspective of its own (empty).
+            var emptyPerspId = (await callMcpTool(MCP_BASE_URL, 'add_perspective', {
+                name: "Waker Empty Result Test",
+            }, mcpSessionId)).uuid;
+            await callMcpTool(MCP_BASE_URL, 'add_model', { perspective_id: emptyPerspId, class_name: "Channel", shacl_json: CHANNEL_SHACL }, mcpSessionId);
+            await callMcpTool(MCP_BASE_URL, 'add_model', { perspective_id: emptyPerspId, class_name: "Message", shacl_json: MESSAGE_SHACL }, mcpSessionId);
+            var emptyChannel = "flux://empty-result-channel-" + Date.now();
+            await callMcpTool(MCP_BASE_URL, 'channel_create', {
+                perspective_id: emptyPerspId,
+                expression_address: emptyChannel,
+                name: "Empty Result Channel",
+            }, mcpSessionId);
+            var emptyConfig = await callMcpTool(MCP_BASE_URL, 'get_mention_waker_config', {
+                perspective_id: emptyPerspId,
+            }, mcpSessionId);
+
+            var wakes: any[] = [];
             var manager = new WakerSubscriptionManager({
                 perspectiveClient: wakerClient.perspective,
                 logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
                 debounceMs: 100,
-                onWake: function() { wakeCount++; },
+                onWake: function(sub: any, result: any, mentions?: any[]) { wakes.push({ result: result, mentions: mentions || [] }); },
             });
 
             await manager.subscribe({
                 id: "test-empty-" + Date.now(),
                 type: "mention" as const,
-                perspective: wakerPerspectiveUuid,
+                perspective: emptyPerspId,
                 channel: "",
-                query: config.query,
-                className: config.class,
-                terms: config.terms,
-                did: config.did,
-                mentionClass: config.mention_class,
-                mentionQuery: config.mention_query,
+                query: emptyConfig.query,
+                className: emptyConfig.class,
+                terms: emptyConfig.terms,
+                did: emptyConfig.did,
+                mentionClass: emptyConfig.mention_class,
+                mentionQuery: emptyConfig.mention_query,
             });
 
-            // Wait for subscription to initialize — should NOT fire onWake for empty result
-            await sleep(3000);
-            expect(wakeCount).to.equal(0, "onWake should not fire for empty initial result");
+            // onWake must not fire for the empty initial result. A mention (the
+            // sentinel) wakes the same subscription afterwards (more than once: the
+            // text and the mention link each match): wakes of one subscription
+            // arrive in order over its stream, so a wake for the empty result
+            // would come before the sentinel's, with no rows.
+            var emptySentinel = await peerSays(emptyPerspId, emptyChannel, "Hey @wakerbot, anyone there?", [agentDid]);
+            // With `className` the result is `{ instances: [...] }`: a wake with no
+            // instances is the empty result. The sentinel is a wake that names the
+            // sentinel message.
+            await assertAbsentBySentinel(
+                function() { return wakes.some(function(w) { return w.mentions.some(function(m: any) { return m.address === emptySentinel; }); }); },
+                function() { return wakes.some(function(w) { return (Array.isArray(w.result) ? w.result : (w.result && w.result.instances) || []).length === 0; }); },
+                { timeoutMs: 15000, label: "onWake for the empty initial result" },
+            );
             manager.disposeAll();
         });
 
@@ -1681,7 +1709,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         });
 
         it("should NOT fire onWake for messages without mentions", async function() {
-            this.timeout(20000);
+            this.timeout(40000);
 
             // Use a FRESH perspective to avoid shared subscription state
             var freshPerspResult = await callMcpTool(MCP_BASE_URL, 'add_perspective', {
@@ -1714,13 +1742,15 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
 
             var wakeCount = 0;
             var lastWake: any = null;
+            var allWakes: any[] = [];
             var manager = new WakerSubscriptionManager({
                 perspectiveClient: wakerClient.perspective,
                 logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
                 debounceMs: 100,
-                onWake: function(sub: any, result: any) {
+                onWake: function(sub: any, result: any, mentions?: any[]) {
                     wakeCount++;
                     lastWake = result;
+                    allWakes.push(mentions || []);
                     console.log("  [no-mention] onWake #" + wakeCount + ":", JSON.stringify(result).substring(0, 500));
                 },
             });
@@ -1741,22 +1771,36 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             // "wakerbots" and "WakerTesting" contain the agent's names but do not
             // name it, and there is no mention link. Nor is a mention link to
             // someone else a mention of the agent.
-            await peerSays(freshPerspId, freshChannel, "Just a normal message about wakerbots and WakerTesting metadata.");
-            await peerSays(freshPerspId, freshChannel, "Hey @someonei", [peer.did]);
+            var notMention1 = await peerSays(freshPerspId, freshChannel, "Just a normal message about wakerbots and WakerTesting metadata.");
+            var notMention2 = await peerSays(freshPerspId, freshChannel, "Hey @someonei", [peer.did]);
             console.log("Non-mention message created in fresh perspective");
 
-            await sleep(5000);
+            // A real mention, written after them, proves the subscription is live: a
+            // wake must name it. `allWakes` holds the mentions each wake delivered (its
+            // third argument, `MentionMessage`s with the message address), so the checks
+            // are by id: the sentinel's present, the two non-mentions' absent.
+            var mentionAddrs = function() { return allWakes.reduce(function(all: string[], ms: any[]) { return all.concat(ms.map(function(m) { return m.address; })); }, []); };
+            var sentinelId = await peerSays(freshPerspId, freshChannel, "Hey @wakerbot, this one is for you.", [agentDid]);
+            await assertAbsentBySentinel(
+                function() { return mentionAddrs().includes(sentinelId); },
+                function() { return mentionAddrs().some(function(a: string) { return a === notMention1 || a === notMention2; }); },
+                { timeoutMs: 15000, label: "onWake for a non-mention message" },
+            );
+            // The mention subscription has two live queries, each handled on its own
+            // (parent and ancestor lookups, then a debounce), and the manager exposes no
+            // signal that its handlers have settled: a wake for the earlier messages may
+            // still be resolving when the sentinel's arrives. A window (5 s, as before).
+            await assertStaysFalse(
+                function() { return mentionAddrs().some(function(a: string) { return a === notMention1 || a === notMention2; }); },
+                { waitMs: 5000, label: "onWake for a non-mention message (window)" },
+            );
 
             manager.disposeAll();
-
-            expect(wakeCount).to.equal(0,
-                "onWake fired " + wakeCount + " time(s) for non-mention message. " +
-                "Last wake: " + JSON.stringify(lastWake).substring(0, 300));
             console.log("Correctly did NOT fire for non-mention message");
         });
 
         it("should NOT fire onWake for the agent's own message that names itself", async function() {
-            this.timeout(20000);
+            this.timeout(40000);
 
             var ownPerspResult = await callMcpTool(MCP_BASE_URL, 'add_perspective', {
                 name: "Waker Own-Write Test",
@@ -1784,11 +1828,12 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }, mcpSessionId);
 
             var wakeCount = 0;
+            var allWakes: any[] = [];
             var manager = new WakerSubscriptionManager({
                 perspectiveClient: wakerClient.perspective,
                 logger: { info: console.log, warn: console.warn, error: console.error, debug: console.log },
                 debounceMs: 100,
-                onWake: function() { wakeCount++; },
+                onWake: function(sub: any, result: any, mentions?: any[]) { wakeCount++; allWakes.push(mentions || []); },
             });
             await manager.subscribe({
                 id: "test-own-write-" + Date.now(),
@@ -1817,9 +1862,23 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 target: agentDid,
             } as any);
 
-            await sleep(5000);
+            // A peer's mention of the agent, written after the own message, is the
+            // sentinel: same perspective and subscription, so its wake arrives in
+            // order after any wake for the own message, which would show its text.
+            var ownAddrs = function() { return allWakes.reduce(function(all: string[], ms: any[]) { return all.concat(ms.map(function(m) { return m.address; })); }, []); };
+            var ownSentinelId = await peerSays(ownPerspId, ownChannel, "Hey @wakerbot, a message from someone else.", [agentDid]);
+            await assertAbsentBySentinel(
+                function() { return ownAddrs().includes(ownSentinelId); },
+                function() { return ownAddrs().includes(createResult.expression_address); },
+                { timeoutMs: 15000, label: "onWake for the agent's own message" },
+            );
+            // Same missing drain signal as above (two live queries, handled apart): a
+            // window (5 s, as before) for a wake for the own message still resolving.
+            await assertStaysFalse(
+                function() { return ownAddrs().includes(createResult.expression_address); },
+                { waitMs: 5000, label: "onWake for the agent's own message (window)" },
+            );
             manager.disposeAll();
-            expect(wakeCount).to.equal(0, "onWake fired for the agent's own message");
         });
 
         it("should fire onWake on a mention link whatever name the text shows", async function() {
@@ -2167,8 +2226,12 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(String(error.message)).to.contain("re-attempting");
 
             // Refused, so: nothing woke, and it is queued for retry rather than
-            // silently dropped.
-            await sleep(500);
+            // silently dropped. A refused subscription has no proxy that could wake
+            // (the retry is 30 s away); a request that goes out on the same socket
+            // after the refusal and comes back (sentinel), then a macrotask, leave
+            // none of its replies or local promise chains pending.
+            await wakerClient.perspective.byUUID(wakerPerspectiveUuid);
+            await new Promise(function(r) { setImmediate(r); });
             expect(wakeCount).to.equal(0, "onWake should not fire for non-existent perspective");
             expect(manager.getPending().map(function(p: any) { return p.id; }))
                 .to.contain(subscriptionId, "a refused subscription must stay pending for retry");
@@ -2213,8 +2276,12 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 // Expected — subscribe should throw for non-existent perspective
             }
 
-            // Give the event loop a few ticks for any unhandled rejection to surface
-            await sleep(500);
+            // An unhandled rejection surfaces once the microtasks of the macrotask
+            // that rejected have run: a request that goes out on the same socket
+            // after the refusal and comes back (sentinel), then a macrotask, are
+            // after every reply and local promise chain of the refused subscribe.
+            await wakerClient.perspective.byUUID(wakerPerspectiveUuid);
+            await new Promise(function(r) { setImmediate(r); });
 
             process.removeListener("unhandledRejection", rejectionHandler);
             manager.disposeAll();
