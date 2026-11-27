@@ -134,7 +134,8 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   `current_revision` or `render` then. A language without the capability is compared with its
   whole `render()`. On both paths, a link no longer Shared in the store when the answers are in
   (removed during the asks) is not committed: the link server keeps no tombstone, so a commit
-  would bring it back for every member.
+  would bring it back for every member. Nor is a link that a commit queued during the asks: the
+  queue sends it.
 - The fallback sync never pushes most of the shared set (`fallback_sync.rs`,
   `fallback_push_refused`, over the whole answer, not per call): more than 20 links and more
   than half of the Shared links missing remotely means the language's view of the remote is

@@ -166,17 +166,8 @@ impl PerspectiveInstance {
             return false;
         };
 
-        // A queued or parked diff's links stay Shared in the store, but the queue owns
-        // them: a queued one would be sent twice, a parked one after its successors.
-        let unsent = match crate::db_backend::db_backend().get_unsent_additions(&uuid) {
-            Ok(unsent) => unsent,
-            Err(e) => {
-                log::warn!(
-                    "ensure_public_links_are_shared: could not read queued and parked diffs for perspective {}: {} — skipping this sync attempt",
-                    uuid, e
-                );
-                return false;
-            }
+        let Some(unsent) = self.unsent_additions("ensure_public_links_are_shared") else {
+            return false;
         };
 
         let asks_missing = link_language.has(Capability::PerspectiveMissing);
@@ -222,14 +213,23 @@ impl PerspectiveInstance {
             links_to_commit = still_missing;
         }
 
-        // A link removed while the language was asked is no longer Shared here.
-        // The link server keeps no tombstone, so sending it would bring it back
-        // for every member. The commit await below still leaves a short window.
-        let Some(shared_now) = self.shared_links("ensure_public_links_are_shared") else {
+        // The store and the queue may have changed while the language was asked.
+        // A link removed meanwhile is no longer Shared here: the link server keeps
+        // no tombstone, so sending it would bring it back for every member. A link
+        // a commit queued meanwhile is the queue's to send. The commit await below
+        // still leaves a short window.
+        let (Some(shared_now), Some(unsent_now)) = (
+            self.shared_links("ensure_public_links_are_shared"),
+            self.unsent_additions("ensure_public_links_are_shared"),
+        ) else {
             return false;
         };
         let shared_now: HashSet<_> = shared_now.iter().map(|(l, _)| link_identity(l)).collect();
-        links_to_commit.retain(|l| shared_now.contains(&link_identity(l)));
+        let unsent_now: HashSet<_> = unsent_now.iter().map(link_identity).collect();
+        links_to_commit.retain(|l| {
+            let id = link_identity(l);
+            shared_now.contains(&id) && !unsent_now.contains(&id)
+        });
         if links_to_commit.is_empty() {
             return true;
         }
@@ -278,6 +278,25 @@ impl PerspectiveInstance {
         }
     }
 
+    /// The additions of the queued and parked diffs: their links stay Shared in
+    /// the store, but the queue owns them. A queued one would be sent twice, a
+    /// parked one after its successors. None, after logging for `caller`, when
+    /// the queue cannot be read.
+    fn unsent_additions(&self, caller: &str) -> Option<Vec<LinkExpression>> {
+        match crate::db_backend::db_backend().get_unsent_additions(&self.uuid) {
+            Ok(unsent) => Some(unsent),
+            Err(e) => {
+                log::warn!(
+                    "{}: could not read the queued and parked diffs of perspective {}: {}",
+                    caller,
+                    self.uuid,
+                    e
+                );
+                None
+            }
+        }
+    }
+
     /// Queues, as one pending diff, every Shared link that no queued or parked
     /// diff holds. A link the room already has is sent again; the link
     /// language drops the duplicate. False when the queue could not be written.
@@ -286,15 +305,8 @@ impl PerspectiveInstance {
             return false;
         };
         let db = crate::db_backend::db_backend();
-        let unsent = match db.get_unsent_additions(&self.uuid) {
-            Ok(unsent) => unsent,
-            Err(e) => {
-                log::error!(
-                    "share_links_after_publish: could not read the queued diffs of perspective {}: {}",
-                    self.uuid, e
-                );
-                return false;
-            }
+        let Some(unsent) = self.unsent_additions("share_links_after_publish") else {
+            return false;
         };
         let additions = links_missing_remotely(&shared, &[], &unsent);
         if additions.is_empty() {

@@ -1524,35 +1524,45 @@ async fn a_fence_that_finds_nothing_missing_commits_nothing() {
     assert_eq!(fake.attempts(), 0);
 }
 
-/// A link removed while the language is asked is not sent: the link server
-/// keeps no tombstone, so a commit would bring it back for every member.
+/// The store and the queue can change while the language is asked, up to the
+/// last ask (the fence). A link removed meanwhile is not sent: the link server
+/// keeps no tombstone, so a commit would bring it back for every member. A
+/// link a commit queued meanwhile is left to the queue.
 #[tokio::test(start_paused = true)]
-async fn a_link_removed_during_the_ask_is_not_committed() {
+async fn links_removed_or_queued_during_the_fence_are_not_committed() {
     let fake = Arc::new(FakeLanguage::default());
     let perspective = neighbourhood_perspective(&fake).await;
     let shared = store_many_shared(&perspective, "l", 10);
     let remote = MissingRemote::holding(shared[3..].to_vec());
     let store = perspective.sparql_store.clone();
+    let uuid = perspective.uuid.clone();
     let removed = shared[0].clone();
     let fake_in = fake.clone();
     let remote_in = remote.clone();
+    let asks = Arc::new(AtomicUsize::new(0));
     *perspective.link_language.write().await = Some(
         Language::with_test_commit(
             "fake-link-language".to_string(),
             Arc::new(move |diff| fake_in.commit(diff)),
         )
         .with_test_missing(Arc::new(move |links| {
-            // The user removes l0 while the scan runs.
-            store.remove_link(&removed).unwrap();
+            // During the fence, the user removes l0 and a commit queues l1.
+            if asks.fetch_add(1, Ordering::SeqCst) == 1 {
+                store.remove_link(&removed).unwrap();
+                Ad4mDb::with_global_instance(|db| db.add_pending_diff(&uuid, &add("l1"))).unwrap();
+            }
             Ok(remote_in.missing(links))
         })),
     );
 
     assert!(perspective.ensure_public_links_are_shared().await);
 
-    let mut committed = fake.committed();
-    committed.sort();
-    assert_eq!(committed, vec!["+l1", "+l2"]);
+    assert_eq!(
+        remote.ask_sizes(),
+        vec![10, 3],
+        "l0 and l1 are still asked in the fence"
+    );
+    assert_eq!(fake.committed(), vec!["+l2"]);
 }
 
 /// Queued and parked links belong to the queue: they are never asked about

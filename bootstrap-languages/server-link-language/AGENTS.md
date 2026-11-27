@@ -148,11 +148,14 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   room again (12,303 of 12,803 links on staging, 2026-11-10).
   The store keeps that XOR as it changes (`links-xor`: `putLink` of a link it
   lacked, `removeLink` of one it held; a store without the key computes it
-  once from `allLinks()`), and the held ops in memory, so the check lists no
-  keys. The executor asks `missing` (export `perspectiveSyncMissing`) in
-  batches of 500 links instead of reading `render()`; it answers the links
-  of the batch the store lacks, one lookup each, a link with an empty
-  predicate matching the same link without one. `currentRevision()` stays the stored revision, never null:
+  once from `allLinks()`), and the held ops in memory. With no link held, the
+  check lists no keys. While any link is held, `linksRevision` reads the wire
+  hashes of all stored links from `allLinks()` once and keeps them until the
+  held set is empty again. The executor asks `missing` (export
+  `perspectiveSyncMissing`) in batches of 500 links instead of reading
+  `render()`; it answers the links of the batch the store lacks with one
+  `hasLink` lookup each, or two for a link whose predicate is empty or absent:
+  such a link matches the same link stored with the other form. `currentRevision()` stays the stored revision, never null:
   the executor reads a null revision as "nothing committed yet".
   `healIfShort`: once per start, after a catch-up that reached the room's
   head, a store that does not hash to the room's revision stores a render
