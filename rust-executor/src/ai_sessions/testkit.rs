@@ -69,14 +69,35 @@ pub(super) struct Scripted {
     released: Arc<AtomicBool>,
     /// What each completion was asked with: the messages and the tools on offer.
     pub(super) asked: Mutex<Vec<(Vec<Value>, Vec<ToolSchema>)>>,
+    /// Replaces the default per-result cap when `Some`, so a follow-up can
+    /// replay a stored result whole and meet the history budget.
+    result_cap: Option<usize>,
 }
 
 impl Scripted {
     pub(super) fn answering(script: Vec<HarnessCompletion>) -> Arc<Self> {
+        Self::build(script, Arc::new(AtomicBool::new(true)), None)
+    }
+
+    /// [`Self::answering`] with `cap` as the bytes one replayed tool result
+    /// may take. `usize::MAX` replays a stored result whole.
+    pub(super) fn answering_with_result_cap(
+        script: Vec<HarnessCompletion>,
+        cap: usize,
+    ) -> Arc<Self> {
+        Self::build(script, Arc::new(AtomicBool::new(true)), Some(cap))
+    }
+
+    fn build(
+        script: Vec<HarnessCompletion>,
+        released: Arc<AtomicBool>,
+        result_cap: Option<usize>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             script: Mutex::new(script),
-            released: Arc::new(AtomicBool::new(true)),
+            released,
             asked: Mutex::new(Vec::new()),
+            result_cap,
         })
     }
 
@@ -86,11 +107,7 @@ impl Scripted {
         released: Arc<AtomicBool>,
         script: Vec<HarnessCompletion>,
     ) -> Arc<Self> {
-        Arc::new(Self {
-            script: Mutex::new(script),
-            released,
-            asked: Mutex::new(Vec::new()),
-        })
+        Self::build(script, released, None)
     }
 
     pub(super) fn holding(released: Arc<AtomicBool>) -> Arc<Self> {
@@ -131,6 +148,11 @@ impl CompletionSource for Scripted {
         } else {
             script.remove(0)
         })
+    }
+
+    async fn tool_result_max_bytes(&self, _model_id: &str) -> usize {
+        self.result_cap
+            .unwrap_or(crate::ai_service::DEFAULT_TOOL_RESULT_MAX_BYTES)
     }
 }
 
@@ -173,6 +195,8 @@ fn schema(name: &str) -> ToolSchema {
 pub(super) struct StubProvider {
     tools: Vec<ToolSchema>,
     pub(super) calls: Mutex<Vec<String>>,
+    /// When set, every known call returns this text instead of `ok:<name>`.
+    answer: Option<String>,
 }
 
 impl StubProvider {
@@ -180,6 +204,17 @@ impl StubProvider {
         Arc::new(Self {
             tools: names.iter().map(|name| schema(name)).collect(),
             calls: Mutex::new(Vec::new()),
+            answer: None,
+        })
+    }
+
+    /// One tool `name` that returns `answer` — a stored result the next turn
+    /// should still be able to read.
+    pub(super) fn answering(name: &str, answer: String) -> Arc<Self> {
+        Arc::new(Self {
+            tools: vec![schema(name)],
+            calls: Mutex::new(Vec::new()),
+            answer: Some(answer),
         })
     }
 }
@@ -193,6 +228,9 @@ impl ToolProvider for StubProvider {
         self.calls.lock().unwrap().push(name.to_string());
         if !self.tools.iter().any(|t| t.name == name) {
             anyhow::bail!("tool `{name}` is not in the current provider's surface");
+        }
+        if let Some(answer) = &self.answer {
+            return Ok(answer.clone());
         }
         Ok(format!("ok:{name}"))
     }

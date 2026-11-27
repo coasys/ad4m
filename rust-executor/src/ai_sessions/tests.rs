@@ -612,6 +612,79 @@ async fn the_transcript_a_turn_leaves_and_the_next_one_reads() {
     assert_eq!(messages[6]["content"], "and now?");
 }
 
+/// Turn 1 reads a payload bigger than [`HISTORY_MAX_BYTES`]. Turn 2 asks about
+/// it. The rebuilt transcript must still carry that payload, or a faithful cut
+/// of it: the call stays on the transcript, so its result cannot vanish.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_follow_up_keeps_an_earlier_tool_result() {
+    setup();
+    let did = "did:key:alice-history";
+    let alice = user(did, everything());
+    let session = create(&alice);
+    let marker = "WIRE_TARGETS Josh and Data decided the wire target stays a typed literal";
+    let body = format!("{marker}\n{}", "x".repeat(super::run::HISTORY_MAX_BYTES));
+
+    let first = service::send(
+        &alice,
+        &session.id,
+        "what did they decide about wire targets?",
+        tooling(
+            Scripted::answering(vec![calls("query_links", json!({"perspective_id": "px"}))]),
+            StubProvider::answering("query_links", body.clone()),
+            None,
+        ),
+    )
+    .await
+    .unwrap();
+    let reply = settled(Some(did), &first.reply_id).await;
+    assert_eq!(reply.status, Some(Done), "{reply:?}");
+
+    // Replay the stored result whole, so the history budget — not the
+    // per-result cap — is what has to keep it.
+    let model = Scripted::answering_with_result_cap(vec![], usize::MAX);
+    let second = service::send(
+        &alice,
+        &session.id,
+        "what exactly did Josh and Data decide?",
+        deps(model.clone()),
+    )
+    .await
+    .unwrap();
+    settled(Some(did), &second.reply_id).await;
+
+    let asked = model.asked.lock().unwrap();
+    let (messages, _) = &asked[0];
+    assert!(
+        messages
+            .iter()
+            .any(|m| m["content"] == "what exactly did Josh and Data decide?"),
+        "the follow-up question fell off: {messages:?}"
+    );
+    let tool = messages
+        .iter()
+        .find(|m| m["role"] == "tool")
+        .expect("the follow-up transcript dropped the earlier tool result");
+    let content = tool["content"].as_str().unwrap_or("");
+    assert!(
+        content.contains(marker),
+        "the follow-up lost the tool result: {content:.240}"
+    );
+    assert!(
+        content.len() < body.len(),
+        "the history budget did not cut a result past {} bytes",
+        super::run::HISTORY_MAX_BYTES
+    );
+    let call_shown = messages.iter().any(|m| {
+        m.get("tool_calls")
+            .and_then(|c| c.as_array())
+            .is_some_and(|calls| calls.iter().any(|c| c["id"] == tool["tool_call_id"]))
+    });
+    assert!(
+        call_shown,
+        "the result's call is not on the transcript: {messages:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_tool_step_row_says_whether_its_call_writes() {
     setup();
