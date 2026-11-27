@@ -1875,10 +1875,6 @@ export class Ad4mModel {
     await flush();
   }
 
-  private async setProperty(key: string, value: any, batchId?: string) {
-    await this.sendWrites(await this.planProperty(key, value), batchId);
-  }
-
   /** Resolve a relation argument to a plain string ID. Accepts either a raw
    * string ID or an Ad4mModel instance (in which case `.id` is used). */
   private resolveRelationId(value: any): string {
@@ -2014,7 +2010,8 @@ export class Ad4mModel {
 
     // Track properties resolved through expression_create — a signed literal
     // envelope or a custom (non-"literal") resolveLanguage. These may fail
-    // inside a batch context, so defer them to setProperty after createSubject.
+    // inside a batch context, so their planProperty writes are collected
+    // after createSubject and sent together via sendWrites.
     const deferredExpressionProps: string[] = [];
 
     const initialValues = {};
