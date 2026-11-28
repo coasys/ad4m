@@ -13,7 +13,7 @@ Publish (`neighbourhood.publish(perspectiveUuid, linkLanguage, meta)`):
 1. `LanguageController::install_language(linkLanguage)`. The client normally creates a unique link language from a template first ([Language trust and templates](../../languages/runtime/installing/trust-and-templates.md)).
 2. `create_neighbourhood_with_context` stores `Neighbourhood { link_language, meta }`, signed as the caller's agent.
 3. Set `shared_url`, `neighbourhood`, state `NeighbourhoodCreationInitiated`; add the caller's DID to `owners`.
-4. `share_links_after_publish`: commit every existing shared link the link language lacks; if that commit fails, queue them as one pending diff. `attach_link_language` does it again when the link language attaches while the state is still `NeighbourhoodCreationInitiated`.
+4. `share_links_after_publish`: commit every existing shared link the link language lacks. If that commit fails, or the language cannot render yet, `queue_unsent_shared_links` queues every shared link that no queued or parked diff holds as one pending diff; the link language drops the links the room already has. `attach_link_language` does it again when the link language attaches while the state is still `NeighbourhoodCreationInitiated`.
 
 Join (`neighbourhood.join(url)`):
 

@@ -190,6 +190,8 @@ This file defines each term that ADAM uses in its own way, once, in alphabetical
 
 **Person identity** (`did:scid:coasys:1`, `rust-executor/src/identity/`): A person's DID, defined by a key log that the person's master keys sign. Agents whose keys the log lists as devices speak for the person. Example: "The laptop and phone agents speak for one person identity." [Person identity](agents/identity/person-identity.md)
 
+**Person profile** (`IdentityService::publish_person_profile` in `identity/person.rs`): The agent record published under a person's `did:scid`, signed by one of its device keys. A device agent's profile publish writes it too. Example: "The phone's new name shows on the person profile." [Person identity](agents/identity/person-identity.md)
+
 **Perspective** (`PerspectiveInstance`, `PerspectiveHandle`): A graph of signed links that the executor stores for one or more owners. Example: "Alice's perspective holds her notes as links." [Perspectives](perspectives/README.md)
 
 **Perspective diff** (`PerspectiveDiff`, `DecoratedPerspectiveDiff`): A set of link additions and link removals. Example: "A batch commit sends one perspective diff to the link language." [Links and store](perspectives/links/README.md)
@@ -241,6 +243,8 @@ This file defines each term that ADAM uses in its own way, once, in alphabetical
 **Transition proposal** (`FlowTransitionProposal`): A set of signed links that proposes to move a flow instance to a state and carries the votes on it. Example: "Two DIDs voted on the transition proposal." [Flow consensus](perspectives/social-dna/flows/consensus.md)
 
 **Trusted agent** (`RuntimeService::get_trusted_agents`): A DID whose languages this executor installs with no template check. The list holds the seed's agents, the main agent and the agents in the database. Example: "The executor installs the language with no template check because its author is a trusted agent." [Language trust and templates](languages/runtime/installing/trust-and-templates.md)
+
+**Trusted seq** (`KelCache::trusted`): The seq of the last key-log head that one of `identity.storeKeys` signed and the executor accepted. The executor checks device keys at this seq, not at a newer event it has not accepted. Example: "The new device key signs only after the trusted seq reaches its event." [Person identity](agents/identity/person-identity.md)
 
 **TypeScript SDK** (`@coasys/ad4m`, `core/`, `Ad4mClient`, `ApiClient`): The TypeScript client of the RPC API, with the shared types and the model class decorators. Example: "The app uses `Ad4mClient` from the TypeScript SDK." [TypeScript SDK](agents/interfaces/typescript-sdk/README.md)
 
