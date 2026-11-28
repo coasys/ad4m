@@ -36,7 +36,7 @@ export * from "./model";
 export * from "./neighbourhood/Neighbourhood";
 export * from "./neighbourhood/NeighbourhoodProxy";
 export * from "./neighbourhood/SfuTypes";
-export type { SfuNeighbourhoodApi, SfuCallEnded } from "./neighbourhood/SfuManager";
+export type { SfuNeighbourhoodApi, CallEnded } from "./neighbourhood/SfuManager";
 export type { Session, SessionTopology, SessionState, SessionEvent, SessionEventCallback, SessionCreateOptions } from "./neighbourhood/Session";
 export { MeshManager, createTelepresenceChannel, parseCallMessage, CALL_PROTOCOL_VERSION, DEFAULT_ICE_SERVERS } from "./neighbourhood/MeshManager";
 export type { SignallingChannel, TelepresenceProxy, MeshManagerOptions, MeshEvent, MeshEventCallback, MeshParticipant, RecoveryRung, CallBody, CallMessage, CallEnvelope, CallGenerations } from "./neighbourhood/MeshManager";

@@ -474,7 +474,7 @@ describe("mesh path", () => {
                 ...overrides,
             }))
             const replaced: unknown[] = []
-            session.on("replaced", (event: unknown) => replaced.push(event))
+            session.on("ended", (event: unknown) => replaced.push(event))
             return { session, setOnlineStatus, replaced }
         }
 
@@ -487,7 +487,8 @@ describe("mesh path", () => {
             await delivered()
 
             expect(a.replaced).toEqual([{
-                targetDid: "did:me", neighbourhoodUrl: "neighbourhood://test", roomName: "tab-room", participantId: "did:me#this-device",
+                reason: "replaced",
+                session: { targetDid: "did:me", neighbourhoodUrl: "neighbourhood://test", roomName: "tab-room", participantId: "did:me#this-device" },
             }])
             expect(a.session.getState()).toBe("idle")
             expect(mockMeshManagerInstance.leave).toHaveBeenCalledTimes(1)
@@ -744,17 +745,17 @@ describe("SFU path", () => {
         ])
     })
 
-    it("a replaced call says so and goes idle without leaving, and can be joined again", async () => {
+    it("a replaced call ends with reason replaced and goes idle without leaving, and can be joined again", async () => {
         const session = createSession(baseConfig({ topology: "sfu" }))
         const dataUnsubscribe = jest.fn()
         mockSfuManagerInstance.subscribeDataChannel.mockReturnValue(dataUnsubscribe)
         await session.join(fakeMediaStream())
         const states = collectStates(session)
         const replacedEvents: unknown[] = []
-        session.on("replaced", (event: unknown) => replacedEvents.push(event))
+        session.on("ended", (event: unknown) => replacedEvents.push(event))
 
-        const event = { targetDid: "did:test", neighbourhoodUrl: "neighbourhood://test", roomName: "test-room", participantId: "P1" }
-        for (const [name, handler] of mockSfuManagerInstance.on.mock.calls) if (name === "replaced") handler(event)
+        const event = { reason: "replaced", session: { targetDid: "did:test", neighbourhoodUrl: "neighbourhood://test", roomName: "test-room", participantId: "P1" } }
+        for (const [name, handler] of mockSfuManagerInstance.on.mock.calls) if (name === "ended") handler(event)
 
         expect(replacedEvents).toEqual([event])
         expect(states).toEqual(["idle"])
@@ -767,17 +768,17 @@ describe("SFU path", () => {
         expect(SfuManager).toHaveBeenCalledTimes(2)
     })
 
-    it("an SFU call that gave up says call-ended and goes idle, and can be joined again", async () => {
+    it("an SFU call that gave up ends with reason gave-up and goes idle, and can be joined again", async () => {
         const session = createSession(baseConfig({ topology: "sfu" }))
         const dataUnsubscribe = jest.fn()
         mockSfuManagerInstance.subscribeDataChannel.mockReturnValue(dataUnsubscribe)
         await session.join(fakeMediaStream())
         const states = collectStates(session)
         const ended: unknown[] = []
-        session.on("call-ended", (event: unknown) => ended.push(event))
+        session.on("ended", (event: unknown) => ended.push(event))
 
         const event = { reason: "gave-up", error: new Error("SFU reconnect attempts exhausted") }
-        for (const [name, handler] of mockSfuManagerInstance.on.mock.calls) if (name === "call-ended") handler(event)
+        for (const [name, handler] of mockSfuManagerInstance.on.mock.calls) if (name === "ended") handler(event)
 
         expect(ended).toEqual([event])
         expect(states).toEqual(["idle"])
@@ -793,13 +794,13 @@ describe("SFU path", () => {
         await session.join(fakeMediaStream())
         let rejoin: Promise<unknown> = Promise.resolve()
         let stateHeard: string | null = null
-        session.on("replaced", () => {
+        session.on("ended", () => {
             stateHeard = session.getState()
             rejoin = session.join(fakeMediaStream()).then(() => "joined", (e: Error) => e.message)
         })
 
-        const event = { targetDid: "did:test", neighbourhoodUrl: "neighbourhood://test", roomName: "test-room", participantId: "P1" }
-        for (const [name, handler] of mockSfuManagerInstance.on.mock.calls) if (name === "replaced") handler(event)
+        const event = { reason: "replaced", session: { targetDid: "did:test", neighbourhoodUrl: "neighbourhood://test", roomName: "test-room", participantId: "P1" } }
+        for (const [name, handler] of mockSfuManagerInstance.on.mock.calls) if (name === "ended") handler(event)
 
         expect(await rejoin).toBe("joined")
         expect(stateHeard).toBe("idle")
@@ -813,8 +814,8 @@ describe("SFU path", () => {
         session.on("error", heard)
         session.on("participant-left", heard)
         const handlers = [...mockSfuManagerInstance.on.mock.calls]
-        const event = { targetDid: "did:test", neighbourhoodUrl: "neighbourhood://test", roomName: "test-room", participantId: "P1" }
-        for (const [name, handler] of handlers) if (name === "replaced") handler(event)
+        const event = { reason: "replaced", session: { targetDid: "did:test", neighbourhoodUrl: "neighbourhood://test", roomName: "test-room", participantId: "P1" } }
+        for (const [name, handler] of handlers) if (name === "ended") handler(event)
 
         // A sendData or quality call made before the replacement rejects after it.
         for (const [name, handler] of handlers) if (name === "error") handler(new Error("late"))
@@ -828,8 +829,8 @@ describe("SFU path", () => {
         ;(SfuManager as unknown as jest.Mock).mockImplementationOnce(() => first)
         const session = createSession(baseConfig({ topology: "sfu" }))
         await session.join(fakeMediaStream())
-        const event = { targetDid: "did:test", neighbourhoodUrl: "neighbourhood://test", roomName: "test-room", participantId: "P1" }
-        for (const [name, handler] of first.on.mock.calls) if (name === "replaced") handler(event)
+        const event = { reason: "replaced", session: { targetDid: "did:test", neighbourhoodUrl: "neighbourhood://test", roomName: "test-room", participantId: "P1" } }
+        for (const [name, handler] of first.on.mock.calls) if (name === "ended") handler(event)
         await session.join(fakeMediaStream())
         expect(session.getState()).toBe("active")
 
@@ -844,9 +845,9 @@ describe("SFU path", () => {
 
     it("a call replaced while it joins stays idle", async () => {
         const session = createSession(baseConfig({ topology: "sfu" }))
-        const event = { targetDid: "did:test", neighbourhoodUrl: "neighbourhood://test", roomName: "test-room", participantId: "P1" }
+        const event = { reason: "replaced", session: { targetDid: "did:test", neighbourhoodUrl: "neighbourhood://test", roomName: "test-room", participantId: "P1" } }
         mockSfuManagerInstance.join.mockImplementationOnce(async () => {
-            for (const [name, handler] of mockSfuManagerInstance.on.mock.calls) if (name === "replaced") handler(event)
+            for (const [name, handler] of mockSfuManagerInstance.on.mock.calls) if (name === "ended") handler(event)
         })
         const states = collectStates(session)
 

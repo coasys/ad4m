@@ -60,6 +60,15 @@ class FakePeerConnection {
     onicecandidate: ((e: { candidate: null }) => void) | null = null
     ontrack: ((e: unknown) => void) | null = null
     closed = false
+    /** Unset until a test drives it, as the receive-stall watchdog then has nothing to read. */
+    connectionState: RTCPeerConnectionState | undefined = undefined
+    /** What flows while time passes: each `getStats` sees the flowing counters grow. */
+    flow: { inbound: boolean; outbound: boolean; feedback: boolean; video?: boolean } = {
+        inbound: false,
+        outbound: false,
+        feedback: false,
+    }
+    private counters = { inbound: 0, outbound: 0, video: 0, reports: 0 }
 
     constructor(readonly configuration?: RTCConfiguration) {
         FakePeerConnection.instances.push(this)
@@ -80,7 +89,25 @@ class FakePeerConnection {
     async createAnswer() { return { type: "answer", sdp: "local-answer" } }
     async setLocalDescription(d: RTCSessionDescriptionInit) { this.localDescription = d }
     async setRemoteDescription(d: RTCSessionDescriptionInit) { this.remoteDescriptions.push(d) }
-    close() { this.closed = true }
+    close() {
+        this.closed = true
+        this.connectionState = "closed"
+    }
+    /** The transport's RTP both ways, and the RTCP reports the SFU sends on this client's own media. */
+    async getStats() {
+        if (this.flow.inbound) this.counters.inbound += 50
+        if (this.flow.outbound) this.counters.outbound += 50
+        if (this.flow.video) this.counters.video += 90
+        if (this.flow.feedback) this.counters.reports++
+        const { inbound, outbound, video, reports } = this.counters
+        return new Map<string, Record<string, unknown>>([
+            ["in-a", { type: "inbound-rtp", kind: "audio", packetsReceived: inbound / 2 }],
+            ["in-v", { type: "inbound-rtp", kind: "video", packetsReceived: inbound / 2 }],
+            ["out-a", { type: "outbound-rtp", kind: "audio", packetsSent: outbound }],
+            ["out-v", { type: "outbound-rtp", kind: "video", packetsSent: video }],
+            ["remote-in-a", { type: "remote-inbound-rtp", kind: "audio", timestamp: 1_000 * reports, packetsLost: 0 }],
+        ])
+    }
 
     /** A remote track arriving on the media section `mid`. */
     receive(track: FakeTrack, mid: string | null) {
@@ -98,7 +125,7 @@ class FakePeerConnection {
 }
 
 import { RpcError } from "../apiClient"
-import { defaultDeviceId, SfuManager, type SfuNeighbourhoodApi, type SfuParticipantState } from "./SfuManager"
+import { defaultDeviceId, SfuManager, type CallEnded, type SfuNeighbourhoodApi, type SfuParticipantState } from "./SfuManager"
 import type {
     CallSessionInfo,
     SfuAnswerResult,
@@ -191,6 +218,11 @@ function resumeListed(overrides: Partial<SfuResumeResult> = {}): SfuResumeResult
 
 function replaced(participantId: string, overrides: Partial<SfuSessionReplaced> = {}): SfuSessionReplaced {
     return { targetDid: ME, neighbourhoodUrl: URL, roomName: ROOM, participantId, ...overrides }
+}
+
+/** The `ended` event of a session another tab replaced. */
+function endedReplaced(participantId: string): CallEnded {
+    return { reason: "replaced", session: replaced(participantId) }
 }
 
 function deferred<T>() {
@@ -889,216 +921,202 @@ test("a failed connection leaves, then joins this executor again", async () => {
     expect(FakePeerConnection.instances).toHaveLength(2)
 })
 
-test("a roster that leaves this session out rebuilds the call after the grace", async () => {
+test("a roster that leaves this session out asks sfu.callResume at once, and listed:false rebuilds the call", async () => {
     // The server dropped this session; ICE never said so (E6, CI job 53158).
-    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
-    try {
-        const api = fakeApi()
-        // The executor's answer to the resume: the session is gone.
-        api.sfuCallResume.mockImplementation(async () => {
-            api.log.push("sfuCallResume")
-            return { listed: false }
-        })
-        const manager = new SfuManager(api, ROOM, ME, URL)
-        await manager.join(fakeStream())
-        const dropped = currentPc()
-        api.log.length = 0
+    // No grace timer: the reply is the event that says whether it is gone.
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    const dropped = currentPc()
+    api.sfuCallResume.mockImplementation(async () => {
+        api.log.push("sfuCallResume")
+        return { listed: false }
+    })
+    api.log.length = 0
 
-        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
-        await flush()
-        await jest.advanceTimersByTimeAsync(2_999)
-        expect(api.log).toEqual([])
+    api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+    await flush()
 
-        await jest.advanceTimersByTimeAsync(1)
-        expect(dropped.closed).toBe(true)
-        expect(api.log).toEqual([
-            "sfuCallResume",
-            "unsubscribe-offer",
-            "unsubscribe-roster",
-            "sfuCallLeave",
-            "subscribe-offer",
-            "subscribe-roster",
-            "sfuCallJoin",
-        ])
-    } finally {
-        jest.useRealTimers()
-    }
+    expect(dropped.closed).toBe(true)
+    expect(api.log).toEqual([
+        "sfuCallResume",
+        "unsubscribe-offer",
+        "unsubscribe-roster",
+        "sfuCallLeave",
+        "subscribe-offer",
+        "subscribe-roster",
+        "sfuCallJoin",
+    ])
 })
 
-test("a roster that lists this session again within the grace cancels the rebuild", async () => {
+test("a roster that leaves this session out does nothing more while the resume is unanswered", async () => {
+    // No event, no action: the reply is what decides.
+    const api = fakeApi()
+    const reply = deferred<SfuResumeResult>()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    api.sfuCallResume.mockImplementation(() => reply.promise)
+    api.log.length = 0
+
+    api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+    await flush()
+    expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+    expect(currentPc().closed).toBe(false)
+
+    reply.resolve(resumeListed())
+    await flush()
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+    expect(currentPc().closed).toBe(false)
+})
+
+test("a resume that says the session is still listed keeps the call", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    api.log.length = 0
+
+    api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+    await flush()
+
+    expect(api.log).toEqual(["sfuCallResume"])
+    expect(currentPc().closed).toBe(false)
+})
+
+test("a roster that lists this session again before the reply cancels the rebuild", async () => {
     // A roster published just before this join landed can arrive after it.
-    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
-    try {
-        const api = fakeApi()
-        const manager = new SfuManager(api, ROOM, ME, URL)
-        await manager.join(fakeStream())
-        api.log.length = 0
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    const reply = deferred<SfuResumeResult>()
+    api.sfuCallResume.mockImplementation(() => reply.promise)
+    api.log.length = 0
 
-        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
-        await flush()
-        await jest.advanceTimersByTimeAsync(1_000)
-        api.emitRoster(roster([ALICE, ME]))
-        await flush()
-        await jest.advanceTimersByTimeAsync(10_000)
+    api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+    await flush()
+    api.emitRoster(roster([ALICE, ME]))
+    await flush()
+    reply.resolve({ listed: false })
+    await flush()
 
-        expect(api.log).toEqual([])
-        expect(currentPc().closed).toBe(false)
-    } finally {
-        jest.useRealTimers()
-    }
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+    expect(currentPc().closed).toBe(false)
 })
 
-test("leaving stops a pending rebuild for an unlisted session", async () => {
-    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
-    try {
-        const api = fakeApi()
-        const manager = new SfuManager(api, ROOM, ME, URL)
-        await manager.join(fakeStream())
-        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
-        await flush()
+test("leaving while the resume is out rebuilds nothing when the reply lands", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    const reply = deferred<SfuResumeResult>()
+    api.sfuCallResume.mockImplementation(() => reply.promise)
+    api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+    await flush()
 
-        await manager.leave()
-        await jest.advanceTimersByTimeAsync(10_000)
+    await manager.leave()
+    reply.resolve({ listed: false })
+    await flush()
 
-        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
-    } finally {
-        jest.useRealTimers()
-    }
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
 })
 
-test("after a cancelled grace, a later roster without this session starts a new one", async () => {
-    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
-    try {
-        const api = fakeApi()
-        const manager = new SfuManager(api, ROOM, ME, URL)
-        await manager.join(fakeStream())
+test("after a roster that lists this session, a later roster without it asks again", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
 
-        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
-        await flush()
-        api.emitRoster(roster([ALICE, ME]))
-        await flush()
-        await jest.advanceTimersByTimeAsync(10_000)
-        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+    api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+    await flush()
+    api.emitRoster(roster([ALICE, ME]))
+    await flush()
+    expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
 
-        api.sfuCallResume.mockResolvedValue({ listed: false })
-        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
-        await flush()
-        await jest.advanceTimersByTimeAsync(3_000)
-        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
-    } finally {
-        jest.useRealTimers()
-    }
+    api.sfuCallResume.mockResolvedValue({ listed: false })
+    api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+    await flush()
+    expect(api.sfuCallResume).toHaveBeenCalledTimes(2)
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
 })
 
-test("a second roster without this session keeps the first grace, and one listing it cancels both", async () => {
+test("rosters without this session while a resume is out ask once more after it, not once each", async () => {
     // Others leaving while this session is unlisted publish more rosters without it.
-    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
-    try {
-        const api = fakeApi()
-        const manager = new SfuManager(api, ROOM, ME, URL)
-        await manager.join(fakeStream())
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    const first = deferred<SfuResumeResult>()
+    api.sfuCallResume.mockImplementationOnce(() => first.promise)
 
-        api.emitRoster(roster([ALICE, BOB], {}, { withoutMe: true }))
-        await flush()
-        await jest.advanceTimersByTimeAsync(1_000)
-        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
-        await flush()
-        await jest.advanceTimersByTimeAsync(1_000)
-        api.emitRoster(roster([ALICE, ME]))
-        await flush()
-        await jest.advanceTimersByTimeAsync(10_000)
+    api.emitRoster(roster([ALICE, BOB], {}, { withoutMe: true }))
+    await flush()
+    api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+    api.emitRoster(roster([], {}, { withoutMe: true }))
+    await flush()
+    expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
 
-        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
-        expect(currentPc().closed).toBe(false)
-    } finally {
-        jest.useRealTimers()
-    }
+    first.resolve(resumeListed())
+    await flush()
+    expect(api.sfuCallResume).toHaveBeenCalledTimes(2)
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
 })
 
-test("a rebuild for ICE ends the old grace, and the new connection gets its own", async () => {
-    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
-    try {
-        const api = fakeApi()
-        const manager = new SfuManager(api, ROOM, ME, URL)
-        await manager.join(fakeStream())
+test("a rebuild for ICE gives the new connection its own resume", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
 
-        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
-        await flush()
-        await jest.advanceTimersByTimeAsync(1_000)
-        await iceState("failed")
-        expect(FakePeerConnection.instances).toHaveLength(2)
+    await iceState("failed")
+    expect(FakePeerConnection.instances).toHaveLength(2)
 
-        api.sfuCallResume.mockResolvedValue({ listed: false })
-        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
-        await flush()
-        await jest.advanceTimersByTimeAsync(2_999)
-        expect(FakePeerConnection.instances).toHaveLength(2)
-        await jest.advanceTimersByTimeAsync(1)
-        expect(FakePeerConnection.instances).toHaveLength(3)
-    } finally {
-        jest.useRealTimers()
-    }
+    api.sfuCallResume.mockResolvedValue({ listed: false })
+    api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+    await flush()
+    expect(FakePeerConnection.instances).toHaveLength(3)
 })
 
-test("a roster that lists another device of this agent but not this session rebuilds after the grace", async () => {
+test("a roster that lists another device of this agent but not this session asks, and listed:false rebuilds", async () => {
     // The DID stays listed through the other device: only the participant id tells.
-    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
-    try {
-        const api = fakeApi()
-        const manager = new SfuManager(api, ROOM, ME, URL, undefined, undefined, DEVICE)
-        api.sfuCallResume.mockResolvedValue({ listed: false })
-        await manager.join(fakeStream())
-        const dropped = currentPc()
-        api.log.length = 0
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL, undefined, undefined, DEVICE)
+    api.sfuCallResume.mockResolvedValue({ listed: false })
+    await manager.join(fakeStream())
+    const dropped = currentPc()
 
-        api.emitRoster(roster([ALICE, ["P2", ME]], {}, { withoutMe: true }))
-        await flush()
-        await jest.advanceTimersByTimeAsync(2_999)
-        expect(api.log).toEqual([])
-        expect(manager.getParticipants().map((p) => p.participantId).sort()).toEqual(["P2", pid(ALICE)].sort())
+    api.emitRoster(roster([ALICE, ["P2", ME]], {}, { withoutMe: true }))
+    await flush()
 
-        await jest.advanceTimersByTimeAsync(1)
-        expect(dropped.closed).toBe(true)
-        expect(api.sfuCallLeave).toHaveBeenCalledWith(URL, ROOM, MINE)
-        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
-    } finally {
-        jest.useRealTimers()
-    }
+    expect(dropped.closed).toBe(true)
+    expect(api.sfuCallLeave).toHaveBeenCalledWith(URL, ROOM, MINE)
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+    expect(manager.getParticipants().map((p) => p.participantId).sort()).toEqual(["P2", pid(ALICE)].sort())
 })
 
 for (const order of ["roster first", "notice first"] as const) {
     test(`a replaced session left out of the roster never rebuilds (${order})`, async () => {
         // A later tab on this device took the call: the executor sends this
         // agent the notice and a roster listing the new session, not this one.
-        // Rejoining would replace the newer tab in turn.
-        jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
-        try {
-            const api = fakeApi()
-            const manager = new SfuManager(api, ROOM, ME, URL, undefined, undefined, DEVICE)
-            await manager.join(fakeStream())
-            const pc = currentPc()
-            const newerTab = roster([ALICE, ["P2", ME]], {}, { withoutMe: true })
+        // Rejoining would replace the newer tab in turn. The resume's reply
+        // says unlisted either way; the replaced notice has stopped the call.
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL, undefined, undefined, DEVICE)
+        await manager.join(fakeStream())
+        const pc = currentPc()
+        const newerTab = roster([ALICE, ["P2", ME]], {}, { withoutMe: true })
+        api.sfuCallResume.mockResolvedValue({ listed: false })
 
-            if (order === "roster first") {
-                api.emitRoster(newerTab)
-                await flush()
-                await jest.advanceTimersByTimeAsync(1_000)
-                api.emitReplaced(replaced(MINE))
-            } else {
-                api.emitReplaced(replaced(MINE))
-                api.emitRoster(newerTab)
-            }
-            await flush()
-            await jest.advanceTimersByTimeAsync(10_000)
-
-            expect(pc.closed).toBe(true)
-            expect(manager.getState().participantId).toBeNull()
-            expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
-            expect(api.sfuCallLeave).not.toHaveBeenCalled()
-            expect(FakePeerConnection.instances).toHaveLength(1)
-        } finally {
-            jest.useRealTimers()
+        if (order === "roster first") {
+            api.emitRoster(newerTab)
+            api.emitReplaced(replaced(MINE))
+        } else {
+            api.emitReplaced(replaced(MINE))
+            api.emitRoster(newerTab)
         }
+        await flush()
+
+        expect(pc.closed).toBe(true)
+        expect(manager.getState().participantId).toBeNull()
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        expect(FakePeerConnection.instances).toHaveLength(1)
     })
 }
 
@@ -1174,7 +1192,7 @@ test("a rejoin that keeps failing reports the error after the window, its connec
     }
 })
 
-test("a rejoin that runs out the window ends the call like a spent budget: error, then call-ended gave-up", async () => {
+test("a rejoin that runs out the window ends the call like a spent budget: error, then ended gave-up", async () => {
     jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
     try {
         const api = fakeApi()
@@ -1183,7 +1201,7 @@ test("a rejoin that runs out the window ends the call like a spent budget: error
         manager.on("participant-left", (p: SfuParticipantState) => order.push(`left:${p.did}`))
         manager.on("error", () => order.push("error"))
         const ended: unknown[] = []
-        manager.on("call-ended", (event: unknown) => { ended.push(event); order.push("call-ended") })
+        manager.on("ended", (event: unknown) => { ended.push(event); order.push("ended") })
         await manager.join(fakeStream())
         api.emitRoster(roster([ALICE, BOB]))
         await flush()
@@ -1194,8 +1212,8 @@ test("a rejoin that runs out the window ends the call like a spent budget: error
 
         // The same terminal give-up as a spent budget: the participants are
         // told first — no rejoin means no roster will settle them — then the
-        // error, then call-ended gave-up, and no later signal rebuilds it.
-        expect(order).toEqual(["left:did:key:alice", "left:did:key:bob", "error", "call-ended"])
+        // error, then ended gave-up, and no later signal rebuilds it.
+        expect(order).toEqual(["left:did:key:alice", "left:did:key:bob", "error", "ended"])
         expect(ended).toEqual([{ reason: "gave-up", error: new Error("Room is full") }])
         expect(left).toEqual([ALICE, BOB])
         expect(participants()).toEqual([])
@@ -1318,7 +1336,7 @@ test("replaced while a reconnect waits between leave and join: it stops, and nev
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL, undefined, undefined, DEVICE)
     const replacedEvents: unknown[] = []
-    manager.on("replaced", (event: unknown) => replacedEvents.push(event))
+    manager.on("ended", (event: unknown) => replacedEvents.push(event))
     await manager.join(fakeStream())
     const leaving = deferred<boolean>()
     api.sfuCallLeave.mockImplementationOnce(() => leaving.promise)
@@ -1329,7 +1347,7 @@ test("replaced while a reconnect waits between leave and join: it stops, and nev
     await flush()
 
     expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
-    expect(replacedEvents).toEqual([replaced(MINE)])
+    expect(replacedEvents).toEqual([endedReplaced(MINE)])
     expect(manager.getState().peerConnection).toBeNull()
     expect(api.replacedHandlers.size).toBe(0)
 })
@@ -1337,31 +1355,25 @@ test("replaced while a reconnect waits between leave and join: it stops, and nev
 test("a rebuild's join refused as replaced stops the call, says so, and never joins again", async () => {
     // The replaced notice was missed (the socket was down): only the refusal
     // tells this tab that another tab of the device took the call.
-    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
-    try {
-        const api = fakeApi()
-        const manager = new SfuManager(api, ROOM, ME, URL, undefined, undefined, DEVICE)
-        const replacedEvents: unknown[] = []
-        const errors: unknown[] = []
-        manager.on("replaced", (event: unknown) => replacedEvents.push(event))
-        manager.on("error", (e: unknown) => errors.push(e))
-        await manager.join(fakeStream())
-        api.sfuCallLeave.mockResolvedValueOnce(false)
-        api.sfuCallJoin.mockRejectedValueOnce(new RpcError(409, "This call session was replaced"))
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL, undefined, undefined, DEVICE)
+    const replacedEvents: unknown[] = []
+    const errors: unknown[] = []
+    manager.on("ended", (event: unknown) => replacedEvents.push(event))
+    manager.on("error", (e: unknown) => errors.push(e))
+    await manager.join(fakeStream())
+    api.sfuCallLeave.mockResolvedValueOnce(false)
+    api.sfuCallJoin.mockRejectedValueOnce(new RpcError(409, "This call session was replaced"))
 
-        await iceState("failed")
-        await flush()
-        await jest.advanceTimersByTimeAsync(180_000)
+    await iceState("failed")
+    await flush()
 
-        expect(replacedEvents).toEqual([replaced(MINE)])
-        expect(errors).toEqual([])
-        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
-        expect(manager.getState().participantId).toBeNull()
-        expect(manager.getState().peerConnection).toBeNull()
-        expect(api.offerHandlers.size + api.rosterHandlers.size + api.replacedHandlers.size).toBe(0)
-    } finally {
-        jest.useRealTimers()
-    }
+    expect(replacedEvents).toEqual([endedReplaced(MINE)])
+    expect(errors).toEqual([])
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+    expect(manager.getState().participantId).toBeNull()
+    expect(manager.getState().peerConnection).toBeNull()
+    expect(api.offerHandlers.size + api.rosterHandlers.size + api.replacedHandlers.size).toBe(0)
 })
 
 test("a rebuild joins with the session key of its call; a new join takes a new key", async () => {
@@ -1383,7 +1395,7 @@ test("replaced while a reconnect's join is out: the session that join got is lef
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL, undefined, undefined, DEVICE)
     const replacedEvents: unknown[] = []
-    manager.on("replaced", (event: unknown) => replacedEvents.push(event))
+    manager.on("ended", (event: unknown) => replacedEvents.push(event))
     await manager.join(fakeStream())
     api.sfuCallLeave.mockResolvedValueOnce(false)
     const rejoining = deferred<CallSessionInfo>()
@@ -1395,7 +1407,7 @@ test("replaced while a reconnect's join is out: the session that join got is lef
     rejoining.resolve(session({ participantId: "P2" }))
     await flush()
 
-    expect(replacedEvents).toEqual([replaced(MINE)])
+    expect(replacedEvents).toEqual([endedReplaced(MINE)])
     expect(api.sfuCallLeave.mock.calls).toEqual([
         [URL, ROOM, MINE],
         [URL, ROOM, "P2"],
@@ -1409,7 +1421,7 @@ test("a reconnect whose leave never landed is not stopped by its own rejoin repl
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL, undefined, undefined, DEVICE)
     const replacedEvents: unknown[] = []
-    manager.on("replaced", (event: unknown) => replacedEvents.push(event))
+    manager.on("ended", (event: unknown) => replacedEvents.push(event))
     await manager.join(fakeStream())
     api.sfuCallLeave.mockRejectedValueOnce(new Error("socket closed"))
     const rejoining = deferred<CallSessionInfo>()
@@ -1471,7 +1483,7 @@ test("replaced while the join applies its answer: the join resolves, and leaves 
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL, undefined, undefined, DEVICE)
     const replacedEvents: unknown[] = []
-    manager.on("replaced", (event: unknown) => replacedEvents.push(event))
+    manager.on("ended", (event: unknown) => replacedEvents.push(event))
     const original = FakePeerConnection.prototype.setRemoteDescription
     // The notice lands while the answer is applied: stop() closes the connection under it.
     FakePeerConnection.prototype.setRemoteDescription = async () => {
@@ -1485,7 +1497,7 @@ test("replaced while the join applies its answer: the join resolves, and leaves 
     }
     await flush()
 
-    expect(replacedEvents).toEqual([replaced(MINE)])
+    expect(replacedEvents).toEqual([endedReplaced(MINE)])
     expect(api.sfuCallLeave).not.toHaveBeenCalled()
     expect(manager.getState().participantId).toBeNull()
     expect(manager.getState().peerConnection).toBeNull()
@@ -1506,46 +1518,44 @@ test("a join whose answer cannot be applied leaves the session it made, once", a
     expect(api.sfuCallLeave.mock.calls).toEqual([[URL, ROOM, MINE]])
 })
 
-test("replaced: the session ends without a leave or a rejoin, and says so", async () => {
-    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick", "setImmediate"] })
-    try {
-        const api = fakeApi()
-        const { manager, left } = recordedManager(api)
-        const replacedEvents: unknown[] = []
-        manager.on("replaced", (event: unknown) => replacedEvents.push(event))
-        await manager.join(fakeStream())
-        api.emitRoster(roster([ALICE]))
-        await flush()
-        const pc = currentPc()
+test("replaced: the session ends once, without a leave or a rejoin, and says so", async () => {
+    const api = fakeApi()
+    const { manager, left } = recordedManager(api)
+    const ended: unknown[] = []
+    manager.on("ended", (event: unknown) => ended.push(event))
+    await manager.join(fakeStream())
+    api.emitRoster(roster([ALICE]))
+    await flush()
+    const pc = currentPc()
 
-        api.emitReplaced(replaced(MINE))
-        await flush()
+    api.emitReplaced(replaced(MINE))
+    await flush()
 
-        expect(replacedEvents).toEqual([replaced(MINE)])
-        expect(pc.closed).toBe(true)
-        expect(left).toEqual([ALICE])
-        expect(manager.getState().participantId).toBeNull()
-        expect(manager.getState().peerConnection).toBeNull()
-        expect(api.offerHandlers.size + api.rosterHandlers.size + api.replacedHandlers.size).toBe(0)
+    expect(ended).toEqual([endedReplaced(MINE)])
+    expect(pc.closed).toBe(true)
+    expect(left).toEqual([ALICE])
+    expect(manager.getState().participantId).toBeNull()
+    expect(manager.getState().peerConnection).toBeNull()
+    expect(api.offerHandlers.size + api.rosterHandlers.size + api.replacedHandlers.size).toBe(0)
 
-        // Nothing brings it back: not its dead connection, not time.
-        ;(pc as any).iceConnectionState = "failed"
-        ;(pc as any).oniceconnectionstatechange()
-        await jest.advanceTimersByTimeAsync(180_000)
-        await manager.destroy()
-        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
-        expect(api.sfuCallLeave).not.toHaveBeenCalled()
-        expect(FakePeerConnection.instances).toHaveLength(1)
-    } finally {
-        jest.useRealTimers()
-    }
+    // Nothing brings it back: not its dead connection's ICE state, not the socket.
+    ;(pc as any).iceConnectionState = "failed"
+    ;(pc as any).oniceconnectionstatechange()
+    api.emitNetworkChange()
+    api.emitReconnect()
+    await flush()
+    await manager.destroy()
+    expect(ended).toHaveLength(1)
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+    expect(api.sfuCallLeave).not.toHaveBeenCalled()
+    expect(FakePeerConnection.instances).toHaveLength(1)
 })
 
 test("a replaced event for another session, or another call, is ignored", async () => {
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL)
     const replacedEvents: unknown[] = []
-    manager.on("replaced", (event: unknown) => replacedEvents.push(event))
+    manager.on("ended", (event: unknown) => replacedEvents.push(event))
     await manager.join(fakeStream())
 
     api.emitReplaced(replaced("P9"))
@@ -1801,7 +1811,9 @@ test("a lost restart offer stays open until the executor can resend it", async (
     }
 })
 
-test("a restart that has not brought the connection back after 15 s falls back to a rebuild", async () => {
+test("a restart is judged by ICE: no deadline rebuilds it, `failed` does", async () => {
+    // The restart's outcome is an ICE event. Time passing says nothing the
+    // ICE state has not said, so a restart that is still working is left alone.
     fakeTimers()
     try {
         const api = fakeApi()
@@ -1810,9 +1822,11 @@ test("a restart that has not brought the connection back after 15 s falls back t
         await iceState("connected")
 
         await iceState("disconnected")
-        await jest.advanceTimersByTimeAsync(14_900)
+        await jest.advanceTimersByTimeAsync(120_000)
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
-        await jest.advanceTimersByTimeAsync(200)
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+
+        await iceState("failed")
         expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
         expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
     } finally {
@@ -1871,8 +1885,8 @@ test("a restart's offer does not wait behind an answer's send still out: its SDP
     }
 })
 
-test("a refused restart also waits for the timeout before rebuilding", async () => {
-    // The executor no longer knows this session: a blip that heals keeps the call.
+test("a refused restart leaves the call to ICE: a blip that heals keeps it, `failed` rebuilds", async () => {
+    // The executor no longer knows this session: ICE says whether the path heals.
     fakeTimers()
     try {
         const api = fakeApi()
@@ -1886,16 +1900,16 @@ test("a refused restart also waits for the timeout before rebuilding", async () 
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
 
         await iceState("disconnected")
-        await jest.advanceTimersByTimeAsync(14_900)
+        await jest.advanceTimersByTimeAsync(60_000)
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
-        await jest.advanceTimersByTimeAsync(200)
+        await iceState("failed")
         expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
     } finally {
         jest.useRealTimers()
     }
 })
 
-test("a network change asks again during a restart, and its timeout starts over", async () => {
+test("a network change asks again during a restart", async () => {
     // ICE noticed first, and its restart went out over the old network:
     // the network change is the one that can reach the executor.
     fakeTimers()
@@ -1960,13 +1974,12 @@ test("ICE going disconnected during a restart asks the executor, whose offer-les
     }
 })
 
-test("a restart a network change sent while ICE still read connected is re-asked when ICE drops, inside the same deadline", async () => {
+test("a restart a network change sent while ICE still read connected is re-asked when ICE drops", async () => {
     // The change's request went out at once but never reached the
     // executor, and ICE kept reading `connected` — the old path's state —
     // until consent checks failed. `restartIce` does not run twice, so
     // the drop asks the executor instead: its offer-less reply says the
-    // request never arrived, and a fresh one goes out without moving the
-    // restart's deadline.
+    // request never arrived, and a fresh one goes out.
     fakeTimers()
     try {
         const api = fakeApi()
@@ -1987,11 +2000,10 @@ test("a restart a network change sent while ICE still read connected is re-asked
         expect(api.sfuCallResume).toHaveBeenCalledWith(URL, ROOM, MINE)
         expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
 
-        // The second request did not start the window over: the restart
-        // still has only its first 15 s.
-        await jest.advanceTimersByTimeAsync(11_900)
+        // Nothing rebuilds on time: ICE failing is the event that does.
+        await jest.advanceTimersByTimeAsync(60_000)
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
-        await jest.advanceTimersByTimeAsync(200)
+        await iceState("failed")
         expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
         expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
     } finally {
@@ -2025,9 +2037,9 @@ test("a roster that lists this agent during a restart lets the restart finish in
     }
 })
 
-test("a roster that leaves this agent out during a restart rebuilds after its grace, once", async () => {
+test("a roster that leaves this agent out during a restart rebuilds on the resume's reply, once", async () => {
     // The server dropped the session: the restart cannot heal it, so the
-    // roster's grace (3 s) ends it before the restart's timeout (15 s).
+    // reply's listed:false ends it, with no timer.
     fakeTimers()
     try {
         const api = fakeApi()
@@ -2039,13 +2051,10 @@ test("a roster that leaves this agent out during a restart rebuilds after its gr
         await iceState("disconnected")
         api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
         await flush()
-        await jest.advanceTimersByTimeAsync(2_999)
-        expect(api.sfuCallLeave).not.toHaveBeenCalled()
-        await jest.advanceTimersByTimeAsync(1)
         expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
         expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
 
-        // The rebuild ended the restart: its timeout does not rebuild again.
+        // The rebuild ended the restart: nothing rebuilds again.
         await jest.advanceTimersByTimeAsync(30_000)
         expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
         expect(FakePeerConnection.instances).toHaveLength(2)
@@ -2516,9 +2525,9 @@ test("a network change restarts ICE at once, though ICE still reports connected"
     }
 })
 
-test("a socket reconnect with no network change still gives ICE 2 s before restarting", async () => {
-    // The path is the one the socket already used: media that kept flowing
-    // is left alone, and only ICE still down after the wait is restarted.
+test("a socket reconnect with no network change asks for the resume and leaves ICE to its own events", async () => {
+    // The path is the one the socket already used. ICE reports its own loss
+    // (`disconnected` restarts); the reconnect does not guess at it with a timer.
     fakeTimers()
     try {
         const api = fakeApi()
@@ -2528,9 +2537,12 @@ test("a socket reconnect with no network change still gives ICE 2 s before resta
         ;(currentPc() as any).iceConnectionState = "checking"
 
         api.emitReconnect()
-        await jest.advanceTimersByTimeAsync(1_999)
+        await flush()
+        await jest.advanceTimersByTimeAsync(30_000)
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
         expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
-        await jest.advanceTimersByTimeAsync(1)
+
+        await iceState("disconnected")
         expect(api.sfuCallRestartIce.mock.calls).toEqual([[URL, ROOM, MINE]])
     } finally {
         jest.useRealTimers()
@@ -2558,7 +2570,7 @@ test("a redial after a silent socket, with ICE connected, sends no ICE restart",
     }
 })
 
-test("ICE that comes back within the 2 s after the socket does is not restarted", async () => {
+test("ICE that comes back after the socket does is not restarted", async () => {
     fakeTimers()
     try {
         const api = fakeApi()
@@ -2783,7 +2795,7 @@ test("a resume reply with no offer while a restart runs and ICE is checking asks
     }
 })
 
-test("leave drops a pending check of ICE after the socket", async () => {
+test("after a socket reconnect, leave leaves no timer of the call behind", async () => {
     fakeTimers()
     try {
         const api = fakeApi()
@@ -2952,7 +2964,7 @@ test("a resume refused with 403 ends the call: the session is another agent's", 
         api.sfuCallResume.mockRejectedValue(new RpcError(403, "Session P1 belongs to another agent"))
         const { manager } = recordedManager(api)
         const ended: unknown[] = []
-        manager.on("call-ended", (event: unknown) => ended.push(event))
+        manager.on("ended", (event: unknown) => ended.push(event))
         await manager.join(fakeStream())
 
         api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
@@ -3308,12 +3320,12 @@ test("an SDP step that never settles on a dropped connection does not hold the r
     await manager.leave()
 })
 
-test("a call that gave up rebuilding ends: `call-ended` with reason gave-up, its connection closed and its session left", async () => {
+test("a call that gave up rebuilding ends: `ended` with reason gave-up, its connection closed and its session left", async () => {
     // Before, the manager kept a dead connection and only said `error`: the UI spun for ever.
     const api = fakeApi()
     const { manager, left } = recordedManager(api)
     const ended: unknown[] = []
-    manager.on("call-ended", (event: unknown) => ended.push(event))
+    manager.on("ended", (event: unknown) => ended.push(event))
     await manager.join(fakeStream())
     api.emitRoster(roster([ALICE]))
     await flush()
@@ -3342,10 +3354,7 @@ test("a resume that says the session is not listed rejoins the call", async () =
     api.sfuCallJoin.mockResolvedValueOnce(session()).mockResolvedValueOnce(session({ participantId: "P2" }))
     const manager = new SfuManager(api, ROOM, ME, URL)
     await manager.join(fakeStream())
-    // The session is gone from the room: the last roster did not list it.
-    api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
-    await flush()
-
+    // The session is gone from the room, and no roster said so.
     api.emitReconnect()
     await flush()
     await flush()
@@ -3380,11 +3389,9 @@ test("a resume that says the session is not listed rejoins though the last roste
 test("a roster newer than the resume's ask that lists this session again cancels the listed:false rebuild", async () => {
     const api = fakeApi()
     const resuming = deferred<SfuResumeResult>()
-    api.sfuCallResume.mockImplementation(() => resuming.promise)
+    api.sfuCallResume.mockImplementationOnce(() => resuming.promise)
     const manager = new SfuManager(api, ROOM, ME, URL)
     await manager.join(fakeStream())
-    api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
-    await flush()
 
     api.emitReconnect()
     await flush()
@@ -3432,11 +3439,30 @@ test("a resume the socket fails (503) changes nothing: the next reconnect asks a
     await manager.leave()
 })
 
-test("an unlisted-session ask the socket faults is asked again within the grace, not left for a reconnect", async () => {
-    // The roster still omits this session and the ask's reply never arrived
-    // (408): nothing resolved the omission, so the grace asks again rather
-    // than waiting for a socket reconnect — and the fault alone rebuilds
-    // nothing.
+test("an unlisted-session ask that times out (408) on an open socket asks once more, then rebuilds the call; no event is needed", async () => {
+    // A 408 raises on a socket that stays open, and a departed session gets no
+    // further rosters: nothing else is guaranteed to come. The omission ends
+    // in a decision by itself: one more ask, then a rebuild.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        api.sfuCallResume.mockRejectedValue(new RpcError(408, "request timed out"))
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await jest.advanceTimersByTimeAsync(1_000)
+
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(2)
+        expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("an unlisted-session ask that times out once and then answers listed keeps the call", async () => {
     fakeTimers()
     try {
         const api = fakeApi()
@@ -3445,129 +3471,28 @@ test("an unlisted-session ask the socket faults is asked again within the grace,
         await manager.join(fakeStream())
 
         api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
-        await flush()
-        await jest.advanceTimersByTimeAsync(3_000)
-        await flush()
-        await flush()
-        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+        await jest.advanceTimersByTimeAsync(1_000)
 
-        await jest.advanceTimersByTimeAsync(3_000)
-        await flush()
-        await flush()
         expect(api.sfuCallResume).toHaveBeenCalledTimes(2)
         expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
-        expect(api.sfuCallLeave).not.toHaveBeenCalled()
         await manager.leave()
     } finally {
         jest.useRealTimers()
     }
 })
 
-test("an unlisted-session ask that outlives its box is asked again within the grace", async () => {
-    // A reply that never landed inside its bound resolved the omission as
-    // little as a socket fault did: the same guarded retry, and the late
-    // reply then lands on the dropped ask.
-    fakeTimers()
-    try {
-        const api = fakeApi()
-        const resuming = deferred<SfuResumeResult>()
-        api.sfuCallResume.mockImplementationOnce(() => resuming.promise)
-        const manager = new SfuManager(api, ROOM, ME, URL)
-        await manager.join(fakeStream())
+test("a resume that times out after the socket's return (the session was not found unlisted) keeps the call for the next trigger", async () => {
+    const api = fakeApi()
+    api.sfuCallResume.mockRejectedValueOnce(new RpcError(408, "request timed out"))
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
 
-        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
-        await flush()
-        await jest.advanceTimersByTimeAsync(3_000)
-        await flush()
-        await flush()
-        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
-
-        // The ask's 10 s box wins over the reply still out.
-        await jest.advanceTimersByTimeAsync(10_000)
-        await flush()
-        await flush()
-        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
-
-        // The grace asks again; the reply landing after its box changes nothing.
-        await jest.advanceTimersByTimeAsync(3_000)
-        await flush()
-        await flush()
-        expect(api.sfuCallResume).toHaveBeenCalledTimes(2)
-        resuming.resolve({ listed: false })
-        await jest.advanceTimersByTimeAsync(10_000)
-        await flush()
-        await flush()
-        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
-        expect(api.sfuCallLeave).not.toHaveBeenCalled()
-        await manager.leave()
-    } finally {
-        jest.useRealTimers()
-    }
-})
-
-test("an old session's late box expiry arms no retry the rebuilt session's own ask then loses", async () => {
-    // The old session's ask outlives its box only after the call rebuilt:
-    // the new session is the unlisted one then, with its own ask still
-    // out. A retry armed for the dead session would hold the timer when
-    // the new session's ask faults, then die at its identity check with
-    // no retry left for the new one — the expiry must check first whose
-    // session it is.
-    fakeTimers()
-    try {
-        const api = fakeApi()
-        api.sfuCallJoin
-            .mockResolvedValueOnce(session())
-            .mockResolvedValue(session({ participantId: "P9" }))
-        const firstAsk = deferred<SfuResumeResult>()
-        const secondAsk = deferred<SfuResumeResult>()
-        api.sfuCallResume
-            .mockImplementationOnce(() => firstAsk.promise)
-            .mockImplementationOnce(() => secondAsk.promise)
-            .mockResolvedValue(resumeListed())
-        const manager = new SfuManager(api, ROOM, ME, URL)
-        await manager.join(fakeStream())
-
-        // The roster drops this session; the grace sends the ask, which stays out.
-        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
-        await flush()
-        await jest.advanceTimersByTimeAsync(3_000)
-        await flush()
-        await flush()
-        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
-
-        // The call rebuilds to a new session while the ask is out.
-        await iceState("failed")
-        for (let i = 0; i < 6; i++) await flush()
-        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
-        expect(manager.getState().participantId).toBe("P9")
-
-        // The new session is unlisted too; its grace sends its own ask, still out.
-        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
-        await flush()
-        await jest.advanceTimersByTimeAsync(3_000)
-        await flush()
-        await flush()
-        expect(api.sfuCallResume).toHaveBeenCalledTimes(2)
-
-        // The old ask's box wins now (10 s from when it went out): its
-        // retry belongs to the dead session and must arm nothing.
-        await jest.advanceTimersByTimeAsync(7_000)
-        await flush()
-        await flush()
-
-        // The new session's ask faults: its retry arms and asks again.
-        secondAsk.reject(new RpcError(408, "request timed out"))
-        await flush()
-        await flush()
-        await jest.advanceTimersByTimeAsync(3_000)
-        await flush()
-        await flush()
-        expect(api.sfuCallResume).toHaveBeenCalledTimes(3)
-        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
-        await manager.leave()
-    } finally {
-        jest.useRealTimers()
-    }
+    api.emitReconnect()
+    await flush()
+    await flush()
+    expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+    await manager.leave()
 })
 
 test("a resume refused with 403 ends the call, not a rebuild: the session is another agent's", async () => {
@@ -3575,7 +3500,7 @@ test("a resume refused with 403 ends the call, not a rebuild: the session is ano
     api.sfuCallResume.mockRejectedValue(new RpcError(403, "Session P1 belongs to another agent"))
     const manager = new SfuManager(api, ROOM, ME, URL)
     const ended: unknown[] = []
-    manager.on("call-ended", (event: unknown) => ended.push(event))
+    manager.on("ended", (event: unknown) => ended.push(event))
     await manager.join(fakeStream())
 
     api.emitReconnect()
@@ -3595,7 +3520,7 @@ test("a resume refused with 403 that names no other agent still ends refused, wi
     api.sfuCallResume.mockRejectedValue(new RpcError(403, "Not a member of this neighbourhood"))
     const manager = new SfuManager(api, ROOM, ME, URL)
     const ended: { reason: string; error: Error }[] = []
-    manager.on("call-ended", (event: { reason: string; error: Error }) => ended.push(event))
+    manager.on("ended", (event: { reason: string; error: Error }) => ended.push(event))
     await manager.join(fakeStream())
 
     api.emitReconnect()
@@ -3670,11 +3595,11 @@ test("a resume from before a rebuild is not used for the rebuilt session", async
 
 // ── Round 4: the resume's RPC is time-boxed ─────────────────────────────────
 
-test("a restart's offer never waits for the resume's ask, and a reply outliving its box applies nothing", async () => {
-    // The resume's ask could wait out the executor's 30 s timeout while an
-    // ICE restart has 15 s to bring media back; the offer it triggers on the
-    // executor must be answered while the reply is still out, and a reply
-    // landing after its bound is the call that already went on.
+test("a restart's offer never waits for the resume's ask, and the reply applies its roster when it lands", async () => {
+    // The resume's ask can wait out the socket layer's timeout while an ICE
+    // restart runs; the offer it triggers on the executor must be answered
+    // while the reply is still out. The reply has no bound of its own: it
+    // applies when it lands, if this is still its call.
     fakeTimers()
     try {
         const api = fakeApi()
@@ -3700,9 +3625,6 @@ test("a restart's offer never waits for the resume's ask, and a reply outliving 
         expect(pc.remoteSdps()).toEqual(["server-answer", "restart-offer"])
         expect(api.sfuCallAnswerServerOffer).toHaveBeenCalledWith(URL, ROOM, MINE, offer("restart-offer").offerId, expect.any(String))
 
-        // The ask's bound spent at 10 s (a restart started with it): the
-        // reply landing after it applies no one.
-        await jest.advanceTimersByTimeAsync(10_000)
         resuming.resolve(
             resumeListed({
                 roster: { revision: nextRevision++, participants: [{ participantId: MINE, agentDid: ME }, { participantId: pid(ALICE), agentDid: ALICE }] },
@@ -3710,84 +3632,12 @@ test("a restart's offer never waits for the resume's ask, and a reply outliving 
         )
         await flush()
         await flush()
-        expect(joined).toEqual([])
+        expect(joined).toEqual([ALICE])
 
         // Media back ends the restart: nothing rebuilds.
         await iceState("connected")
         await jest.advanceTimersByTimeAsync(20_000)
         expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
-        await manager.leave()
-    } finally {
-        jest.useRealTimers()
-    }
-})
-
-test("a resume's reply that lands after its box applies no roster and no offer", async () => {
-    // Whatever the RPC says once the queue went on belongs to a call that is
-    // not this one any more: it must not join anyone or negotiate.
-    fakeTimers()
-    try {
-        const api = fakeApi()
-        const resuming = deferred<SfuResumeResult>()
-        api.sfuCallResume.mockImplementation(() => resuming.promise)
-        const { manager, joined } = recordedManager(api)
-        await manager.join(fakeStream())
-        const pc = currentPc()
-
-        // The unlisted-roster grace sends the ask. The room is empty but for
-        // this session gone, so only the reply's roster could join anyone.
-        api.emitRoster(roster([], {}, { withoutMe: true }))
-        await flush()
-        await jest.advanceTimersByTimeAsync(3_000)
-        await flush()
-        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
-
-        await jest.advanceTimersByTimeAsync(10_000)
-        resuming.resolve(
-            resumeListed({
-                roster: { revision: nextRevision++, participants: [{ participantId: MINE, agentDid: ME }, { participantId: pid(ALICE), agentDid: ALICE }] },
-                offer: offer("late"),
-            }),
-        )
-        await flush()
-        await flush()
-        await jest.advanceTimersByTimeAsync(1_000)
-
-        expect(joined).toEqual([])
-        expect(pc.remoteSdps()).toEqual(["server-answer"])
-        expect(api.sfuCallAnswerServerOffer).not.toHaveBeenCalled()
-        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
-        await manager.leave()
-    } finally {
-        jest.useRealTimers()
-    }
-})
-
-test("a listed:false that lands after the box rebuilds nothing", async () => {
-    fakeTimers()
-    try {
-        const api = fakeApi()
-        const resuming = deferred<SfuResumeResult>()
-        api.sfuCallResume.mockImplementation(() => resuming.promise)
-        const manager = new SfuManager(api, ROOM, ME, URL)
-        await manager.join(fakeStream())
-        const pc = currentPc()
-        ;(pc as any).iceConnectionState = "connected"
-
-        api.emitReconnect()
-        await flush()
-        await flush()
-        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
-
-        await jest.advanceTimersByTimeAsync(10_000)
-        resuming.resolve({ listed: false })
-        await flush()
-        await flush()
-        await jest.advanceTimersByTimeAsync(1_000)
-
-        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
-        expect(api.sfuCallLeave).not.toHaveBeenCalled()
-        expect(currentPc().closed).toBe(false)
         await manager.leave()
     } finally {
         jest.useRealTimers()
@@ -3828,43 +3678,9 @@ test("a restart's offer is answered while the resume's ask is still out", async 
     }
 })
 
-test("a wall-clock jump does not eat the restart's window: its remaining time is measured on a monotonic clock", async () => {
-    // The restart timer counts elapsed time on its own clock; a remaining
-    // window read off `Date.now` lies whenever the wall clock moves — a
-    // forward jump ends it early, a backward one lets an ask outlive the
-    // window. `performance.now` cannot jump.
-    fakeTimers()
-    try {
-        const api = fakeApi()
-        const manager = new SfuManager(api, ROOM, ME, URL)
-        await manager.join(fakeStream())
-
-        await iceState("disconnected") // restart at t=0, deadline t=15
-        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
-        await jest.advanceTimersByTimeAsync(11_000)
-
-        // The wall clock jumps 20 s ahead; the restart still has 4 s, so
-        // the socket's return still asks the resume.
-        const wallNow = Date.now
-        try {
-            Date.now = () => wallNow() + 20_000
-            api.emitReconnect()
-            await flush()
-            await flush()
-        } finally {
-            Date.now = wallNow
-        }
-        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
-        await manager.leave()
-    } finally {
-        jest.useRealTimers()
-    }
-})
-
-test("a socket back late in a restart bounds the resume's wait by the restart's remaining time", async () => {
-    // The restart had 15 s from its start; the socket came back at t=11,
-    // so the ask's bound is the restart's remaining 4 s — a reply after
-    // it is the call the restart already settled, whatever ICE did.
+test("a resume's reply that lands after ICE recovered still applies its roster", async () => {
+    // The reply is current while this is still the call's connection and
+    // session, whatever ICE did meanwhile: no timer judges it stale.
     fakeTimers()
     try {
         const api = fakeApi()
@@ -3873,16 +3689,13 @@ test("a socket back late in a restart bounds the resume's wait by the restart's 
         const { manager, joined } = recordedManager(api)
         await manager.join(fakeStream())
 
-        await iceState("disconnected") // restart at t=0, deadline t=15
-        await jest.advanceTimersByTimeAsync(11_000)
+        await iceState("disconnected")
         api.emitReconnect()
         await flush()
         expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
 
-        // ICE comes back before the deadline, so the restart ends without a
-        // rebuild — but the ask's bound was the restart's, spent at t=15.
-        ;(currentPc() as any).iceConnectionState = "connected"
-        await jest.advanceTimersByTimeAsync(4_000)
+        // ICE comes back, so the restart ends without a rebuild.
+        await iceState("connected")
         resuming.resolve(
             resumeListed({
                 roster: { revision: nextRevision++, participants: [{ participantId: MINE, agentDid: ME }, { participantId: pid(ALICE), agentDid: ALICE }] },
@@ -3891,8 +3704,8 @@ test("a socket back late in a restart bounds the resume's wait by the restart's 
         await flush()
         await flush()
 
-        // The reply landed after its bound: it applies no one.
-        expect(joined).toEqual([])
+        expect(joined).toEqual([ALICE])
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
         await manager.leave()
     } finally {
         jest.useRealTimers()
@@ -3995,4 +3808,203 @@ test("a trigger for the connection a rebuild replaced starts no ask — its foll
     } finally {
         jest.useRealTimers()
     }
+})
+
+// ── The call layer holds one timer: the receive-stall watchdog ────────────────────────────────
+//
+// RTP statistics raise no event, so the watchdog polls them. Every other
+// recovery step follows an event: ICE state, the roster, a call's reply.
+
+test("a joined call holds one timer, the receive watch, and leave takes it away", async () => {
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        api.emitReconnect()
+        api.emitNetworkChange()
+        await iceState("disconnected")
+        await flush()
+        expect(jest.getTimerCount()).toBe(1)
+
+        await manager.leave()
+        expect(jest.getTimerCount()).toBe(0)
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+/** The current connection, joined: ALICE's audio on mid 1 and video on mid 2 arrive, ICE connected. */
+async function bringUp(api: ReturnType<typeof fakeApi>) {
+    const pc = currentPc()
+    api.emitOffer(offer(`alice-${FakePeerConnection.instances.length}`, [mapped("1", ALICE, "audio"), mapped("2", ALICE, "video")]))
+    api.emitRoster(roster([ALICE]))
+    await flush()
+    pc.receive(new FakeTrack("audio"), "1")
+    pc.receive(new FakeTrack("video"), "2")
+    await iceState("connected")
+    pc.connectionState = "connected"
+    return pc
+}
+
+/** A joined call, connected, where ALICE sends and this client sends audio and video, all of it flowing. */
+async function flowingCall(api = fakeApi()) {
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream(new FakeTrack("audio"), new FakeTrack("video")))
+    const pc = await bringUp(api)
+    pc.flow = { inbound: true, outbound: true, video: true, feedback: true }
+    await jest.advanceTimersByTimeAsync(3_000)
+    return { api, manager, pc }
+}
+
+/** The SFU sends this client nothing any more: no media, no reports; this client still sends. */
+function cutOff(pc: FakePeerConnection) {
+    pc.flow = { ...pc.flow, inbound: false, feedback: false }
+}
+
+describe("the receive-stall watchdog", () => {
+    beforeEach(fakeTimers)
+    afterEach(() => jest.useRealTimers())
+
+    test("restarts ICE on the same connection once it has received nothing for 5 s while it sends", async () => {
+        const { api, pc } = await flowingCall()
+        cutOff(pc)
+
+        await jest.advanceTimersByTimeAsync(4_500)
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+        await jest.advanceTimersByTimeAsync(2_500)
+        expect(api.sfuCallRestartIce.mock.calls).toEqual([[URL, ROOM, MINE]])
+
+        // The restart's offer is answered on this connection; media returning ends the stall.
+        api.emitOffer(offer("restart-offer"))
+        await flush()
+        pc.flow = { inbound: true, outbound: true, video: true, feedback: true }
+        await jest.advanceTimersByTimeAsync(60_000)
+        expect(pc.remoteSdps()).toContain("restart-offer")
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+        expect(FakePeerConnection.instances).toHaveLength(1)
+    })
+
+    test("a stall restart that brings nothing back is followed by a rebuild, one of the rebuild budget", async () => {
+        const { api, pc } = await flowingCall()
+        cutOff(pc)
+        await jest.advanceTimersByTimeAsync(7_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+
+        await jest.advanceTimersByTimeAsync(8_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+        expect(pc.closed).toBe(true)
+    })
+
+    test("a stall restart that brings media back ends the stall: the next one gets a restart of its own", async () => {
+        const { api, pc } = await flowingCall()
+        cutOff(pc)
+        await jest.advanceTimersByTimeAsync(7_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+
+        pc.flow = { inbound: true, outbound: true, video: true, feedback: true }
+        await jest.advanceTimersByTimeAsync(3_000)
+        cutOff(pc)
+        await jest.advanceTimersByTimeAsync(7_000)
+
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(2)
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+    })
+
+    test("a client that sends nothing is left alone: it cannot tell silence from a dead path", async () => {
+        const { api, pc } = await flowingCall()
+        pc.flow = { inbound: false, outbound: false, video: false, feedback: false }
+
+        await jest.advanceTimersByTimeAsync(60_000)
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+        expect(api.sfuCallLeave).not.toHaveBeenCalled()
+    })
+
+    test("audio unmuted after a silence of both sides gets a full report interval before a restart", async () => {
+        const { api, pc } = await flowingCall()
+        // Both sides muted (replaceTrack(null)) well past every window.
+        pc.flow = { inbound: false, outbound: false, video: false, feedback: false }
+        await jest.advanceTimersByTimeAsync(20_000)
+
+        // One side unmutes; the SFU owes no report yet.
+        pc.flow = { inbound: false, outbound: true, video: false, feedback: false }
+        await jest.advanceTimersByTimeAsync(8_000)
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+
+        await jest.advanceTimersByTimeAsync(6_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+    })
+
+    test("video unmuted after a silence of both sides gets its windows from the unmute, not from before", async () => {
+        const { api, pc } = await flowingCall()
+        pc.flow = { inbound: false, outbound: false, video: false, feedback: false }
+        await jest.advanceTimersByTimeAsync(20_000)
+
+        pc.flow = { inbound: false, outbound: true, video: true, feedback: false }
+        await jest.advanceTimersByTimeAsync(3_000)
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+
+        await jest.advanceTimersByTimeAsync(5_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+    })
+
+    test("a room where nobody else sends is left alone", async () => {
+        const api = fakeApi()
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream(new FakeTrack("audio")))
+        const pc = currentPc()
+        await iceState("connected")
+        pc.connectionState = "connected"
+        pc.flow = { inbound: false, outbound: true, feedback: false }
+
+        await jest.advanceTimersByTimeAsync(60_000)
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+        await manager.leave()
+    })
+
+    test("a connection that is not `connected` is not read", async () => {
+        const { api, pc } = await flowingCall()
+        pc.connectionState = "connecting"
+        cutOff(pc)
+
+        await jest.advanceTimersByTimeAsync(60_000)
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+    })
+
+    test("stall rebuilds count against the rebuild budget; when it runs out the call ends gave-up", async () => {
+        const { api, manager, pc: first } = await flowingCall()
+        const ended: unknown[] = []
+        manager.on("ended", (event: unknown) => ended.push(event))
+        let pc = first
+        for (let rebuild = 0; rebuild < 3; rebuild++) {
+            cutOff(pc)
+            await jest.advanceTimersByTimeAsync(16_000)
+            expect(api.sfuCallJoin).toHaveBeenCalledTimes(rebuild + 2)
+            pc = await bringUp(api)
+            pc.flow = { inbound: true, outbound: true, video: true, feedback: true }
+            await jest.advanceTimersByTimeAsync(3_000)
+        }
+        expect(ended).toEqual([])
+
+        cutOff(pc)
+        await jest.advanceTimersByTimeAsync(16_000)
+        expect(ended).toEqual([{ reason: "gave-up", error: new Error("SFU reconnect attempts exhausted") }])
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(4)
+        expect(jest.getTimerCount()).toBe(0)
+    })
+
+    test("leave stops the watchdog", async () => {
+        const { api, manager, pc } = await flowingCall()
+        await manager.leave()
+        cutOff(pc)
+
+        await jest.advanceTimersByTimeAsync(60_000)
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+        expect(jest.getTimerCount()).toBe(0)
+    })
 })
