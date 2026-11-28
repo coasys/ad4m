@@ -22,6 +22,14 @@ use std::fmt;
 #[derive(Clone)]
 pub struct Secret(String);
 
+/// The value is wiped from memory when the secret is dropped, so a credential does not linger
+/// in freed heap memory (a clone wipes its own copy when it goes).
+impl Drop for Secret {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0);
+    }
+}
+
 impl Secret {
     pub fn new(value: impl Into<String>) -> Self {
         Secret(value.into())
@@ -42,8 +50,8 @@ impl Secret {
     }
 
     /// The value, for its one rightful receiver. Consumes the secret.
-    pub fn expose_once(self) -> String {
-        self.0
+    pub fn expose_once(mut self) -> String {
+        std::mem::take(&mut self.0)
     }
 
     /// The value, read in place. Every caller documents why it must read it.

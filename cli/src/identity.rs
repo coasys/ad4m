@@ -1,6 +1,7 @@
-//! `ad4m-executor init --operator <did>` and `ad4m-executor claim <link>`: name the identity
-//! that operates this executor, and join it by claiming an offer link that identity's app
-//! opened.
+//! `ad4m-executor init --operator <did>`, `ad4m-executor claim <link>` and
+//! `ad4m-executor link-code`: name the identity that operates this executor, and join it by
+//! claiming an offer link that identity's app opened, or by showing a device string the app
+//! scans.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -72,6 +73,10 @@ struct Claimed {
     match_code: String,
     kind: String,
     expires: u64,
+    /// The claim would make its identity the operator: it binds only after
+    /// `identity.acceptJoin`.
+    #[serde(default)]
+    needs_accept: bool,
 }
 
 #[derive(Deserialize)]
@@ -118,6 +123,23 @@ pub async fn claim(
     println!("Claimed a {} offer of {}.", claimed.kind, claimed.did);
     println!("Match code: {}", claimed.match_code);
     println!("Confirm on the device that opened the offer that it shows the same code.");
+    if claimed.needs_accept {
+        // The person running this command pasted the offer: that is the accept the executor
+        // waits for before the identity becomes its operator.
+        tokio::time::timeout_at(
+            window,
+            client.call::<serde_json::Value>(
+                "identity.acceptJoin",
+                json!({ "offerId": claimed.offer_id }),
+            ),
+        )
+        .await
+        .map_err(|_| closed())??;
+        println!(
+            "Accepted: once confirmed, {} is this executor's operator.",
+            claimed.did
+        );
+    }
     if no_wait {
         println!(
             "Offer {}: confirm on the app's device; identity.joinStatus reports when this executor has joined.",
@@ -125,9 +147,36 @@ pub async fn claim(
         );
         return Ok(());
     }
-    let offer_id = claimed.offer_id.clone();
-    let joined = follow_join(
-        &claimed,
+    let joined = follow_claim(
+        &client,
+        &claimed.did,
+        &claimed.offer_id,
+        confirm_deadline(claimed.expires),
+    )
+    .await?;
+    println!("{joined}");
+    Ok(())
+}
+
+/// The end of the confirm window of an offer that expires at `expires`: the store takes the
+/// `add` until `expires + CONFIRM_GRACE_S` (saturating: an `expires` near `u64::MAX` does not
+/// wrap it).
+fn confirm_deadline(expires: u64) -> u64 {
+    expires.saturating_add(CONFIRM_GRACE_S)
+}
+
+/// Follows this executor's claim of `offer_id` (of `did`) through `identity.joinStatus` until
+/// the holder confirms, the offer ends, or `deadline` passes.
+async fn follow_claim(
+    client: &WsRpcClient,
+    did: &str,
+    offer_id: &str,
+    deadline: u64,
+) -> Result<String> {
+    let offer_id = offer_id.to_string();
+    follow_join(
+        did,
+        deadline,
         || {
             client.call::<Join>(
                 "identity.joinStatus",
@@ -137,9 +186,7 @@ pub async fn claim(
         unix_now,
         Duration::from_secs(2),
     )
-    .await?;
-    println!("{joined}");
-    Ok(())
+    .await
 }
 
 fn unix_now() -> u64 {
@@ -149,13 +196,15 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-/// Follows the claim through `join_status` every `poll` until the holder confirms it (the
-/// "Joined …" line), the offer ends, or its confirm window (`expires + CONFIRM_GRACE_S` by
-/// `now`) closes. Each call and each wait between calls is cut off at the window's end, so an
-/// executor that never answers cannot hold the command past it. A spent offer whose log does not list this executor's key
-/// (`keyId: null`) is an error: the executor did not join.
+/// Follows the claim of an offer of `did` through `join_status` every `poll` until the holder
+/// confirms it (the "Joined …" line), the offer ends, or its confirm window (`deadline` by
+/// `now`, see [`confirm_deadline`]) closes. Each call and each wait between calls is cut off
+/// at the window's end, so an executor that never answers cannot hold the command past it. A
+/// spent offer whose log does not list this executor's key (`keyId: null`) is an error: the
+/// executor did not join.
 async fn follow_join<F, Fut>(
-    claimed: &Claimed,
+    did: &str,
+    deadline: u64,
     mut join_status: F,
     now: impl Fn() -> u64,
     poll: Duration,
@@ -165,7 +214,6 @@ where
     Fut: std::future::Future<Output = Result<Join>>,
 {
     let closed = || anyhow!("the holder did not confirm before the offer's confirm window closed");
-    let deadline = claimed.expires.saturating_add(CONFIRM_GRACE_S);
     loop {
         let left = deadline.saturating_sub(now());
         if left == 0 {
@@ -175,9 +223,11 @@ where
             .await
             .map_err(|_| closed())??;
         match join.state.as_str() {
-            "claimed" => {}
+            // `awaiting-accept`: the executor holds a first-run claim until the person at its
+            // computer accepts it (`identity.acceptJoin`); the caller accepts or cancels.
+            "claimed" | "awaiting-accept" => {}
             "spent" => {
-                let did = join.did.unwrap_or_else(|| claimed.did.clone());
+                let did = join.did.unwrap_or_else(|| did.to_string());
                 let Some(key_id) = join.key_id else {
                     bail!(
                         "the offer was spent, but the log of {did} does not list this executor's key"
@@ -194,6 +244,121 @@ where
         let left = Duration::from_secs(deadline.saturating_sub(now()));
         tokio::time::sleep(poll.min(left)).await;
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PreparedDevice {
+    device: String,
+    expires: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LinkTicket {
+    did: String,
+    offer_id: String,
+    match_code: String,
+    #[serde(default)]
+    needs_accept: bool,
+}
+
+/// Whether the person's answer to the accept question is yes.
+fn accepts(answer: &str) -> bool {
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// Asks the person at this terminal whether this computer joins `did`; a closed stdin is no.
+async fn ask_accept(did: &str) -> Result<bool> {
+    println!("Join {did} and make it this executor's operator? Only if the app shows the same code. [y/N]");
+    let answer = tokio::task::spawn_blocking(|| {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).map(|_| line)
+    })
+    .await
+    .map_err(|e| anyhow!("the question was not answered: {e}"))??;
+    Ok(accepts(&answer))
+}
+
+/// `text` as a QR code of Unicode half blocks, with its quiet zone.
+pub fn qr_code(text: &str) -> Result<String> {
+    let code = qrcode::QrCode::new(text.as_bytes())
+        .map_err(|e| anyhow!("the device string does not fit a QR code: {e}"))?;
+    Ok(code
+        .render::<qrcode::render::unicode::Dense1x2>()
+        .quiet_zone(true)
+        .build())
+}
+
+/// `ad4m-executor link-code`: asks the executor at `executor_url` (a loopback address) for a
+/// fresh device string, prints it with its QR code, and once the executor claimed the offer
+/// of the holder that scanned it (`link-ticket`), prints the identity and the match code and
+/// follows the claim until the holder confirms.
+pub async fn link_code(executor_url: &str, token: &str) -> Result<()> {
+    if !is_loopback_url(executor_url) {
+        bail!(
+            "link-code runs only on the executor's own machine: {executor_url} is not a \
+             loopback address (use ws://127.0.0.1:<port>/api/v1/ws)"
+        );
+    }
+    let client = WsRpcClient::connect(executor_url, token)
+        .await
+        .with_context(|| format!("cannot reach the executor at {executor_url}"))?;
+    let mut events = client.watch_events(json!({ "link-ticket": null })).await?;
+    let prepared: PreparedDevice = client.call("identity.prepareDevice", json!({})).await?;
+    println!("Scan this code with an app that holds your master key, or paste the string:");
+    println!("{}", qr_code(&prepared.device)?);
+    println!("{}", prepared.device);
+    println!(
+        "It is valid for {} minutes; run `ad4m-executor link-code` again for a new one.",
+        prepared.expires.saturating_sub(unix_now()).div_ceil(60)
+    );
+    let wait = Duration::from_secs(prepared.expires.saturating_sub(unix_now()));
+    let ticket = tokio::time::timeout(wait, async {
+        loop {
+            match events.recv().await {
+                Ok(event) if event["type"] == "link-ticket" => {
+                    return serde_json::from_value::<LinkTicket>(event).map_err(Into::into);
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(e) => return Err(anyhow!("the executor closed the connection: {e}")),
+            }
+        }
+    })
+    .await
+    .map_err(|_| {
+        anyhow!(
+            "no app's offer was claimed before the device string expired (the executor's log \
+             says why it refused one)"
+        )
+    })??;
+    println!("Claimed the offer of {}.", ticket.did);
+    println!("Match code: {}", ticket.match_code);
+    println!("Confirm on the app that it shows the same code.");
+    if ticket.needs_accept {
+        // Whoever saw the device string may have sent this ticket: the executor joins only
+        // once the person here accepts it.
+        let offer = json!({ "offerId": ticket.offer_id });
+        if !ask_accept(&ticket.did).await? {
+            client
+                .call::<serde_json::Value>("identity.cancelJoin", offer)
+                .await?;
+            bail!("cancelled: this executor does not join {}", ticket.did);
+        }
+        client
+            .call::<serde_json::Value>("identity.acceptJoin", offer)
+            .await?;
+    }
+    // The event names no expiry: the offer lives at most `OFFER_TTL_S` from its claim.
+    let joined = follow_claim(
+        &client,
+        &ticket.did,
+        &ticket.offer_id,
+        confirm_deadline(unix_now().saturating_add(OFFER_TTL_S)),
+    )
+    .await?;
+    println!("{joined}");
+    Ok(())
 }
 
 /// The admin credential a subcommand presents: the file `AD4M_ADMIN_CREDENTIAL_FILE` names
@@ -253,6 +418,19 @@ pub async fn rekey(executor_url: &str, token: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The device string's QR code is Unicode half blocks with a quiet zone, one text line
+    /// per two module rows.
+    #[test]
+    fn a_device_string_prints_as_a_qr_code() {
+        let text = qr_code("coasys:device:1:abc").unwrap();
+        assert!(text.contains('█') || text.contains('▀') || text.contains('▄'));
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines.len() > 10);
+        assert!(lines
+            .iter()
+            .all(|l| l.chars().count() == lines[0].chars().count()));
+    }
 
     #[test]
     fn rekey_reaches_only_a_loopback_executor() {
@@ -318,16 +496,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn claimed(expires: u64) -> Claimed {
-        Claimed {
-            did: A.into(),
-            offer_id: "o1".into(),
-            match_code: "R7K Q2M".into(),
-            kind: "node".into(),
-            expires,
-        }
-    }
-
     fn join(state: &str, key_id: Option<&str>) -> Join {
         Join {
             state: state.into(),
@@ -347,13 +515,14 @@ mod tests {
             let answer = answers.borrow_mut().pop().unwrap();
             async move { Ok(answer) }
         };
-        let joined = follow_join(&claimed(200), next, now, Duration::ZERO)
+        let joined = follow_join(A, confirm_deadline(200), next, now, Duration::ZERO)
             .await
             .unwrap();
         assert_eq!(joined, format!("Joined {A} as d2 (event 1)."));
 
         let refused = follow_join(
-            &claimed(200),
+            A,
+            confirm_deadline(200),
             || async { Ok(join("spent", None)) },
             now,
             Duration::ZERO,
@@ -361,13 +530,53 @@ mod tests {
         .await;
         assert!(refused.is_err(), "{refused:?}");
         let ended = follow_join(
-            &claimed(200),
+            A,
+            confirm_deadline(200),
             || async { Ok(join("expired", None)) },
             now,
             Duration::ZERO,
         )
         .await;
         assert!(ended.unwrap_err().to_string().contains("expired"));
+    }
+
+    /// A held first-run claim (`awaiting-accept`) is followed like a claimed one until it is
+    /// spent; a cancelled one ends the follow.
+    #[tokio::test]
+    async fn an_awaiting_accept_claim_is_followed_until_it_is_spent() {
+        let now = || 100;
+        let answers = std::cell::RefCell::new(vec![
+            join("spent", Some("d3")),
+            join("awaiting-accept", None),
+            join("claimed", None),
+        ]);
+        let next = || {
+            let answer = answers.borrow_mut().pop().unwrap();
+            async move { Ok(answer) }
+        };
+        let joined = follow_join(A, confirm_deadline(200), next, now, Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(joined, format!("Joined {A} as d3 (event 1)."));
+        let ended = follow_join(
+            A,
+            confirm_deadline(200),
+            || async { Ok(join("cancelled", None)) },
+            now,
+            Duration::ZERO,
+        )
+        .await;
+        assert!(ended.unwrap_err().to_string().contains("cancelled"));
+    }
+
+    #[test]
+    fn only_yes_accepts() {
+        for yes in ["y\n", "Y", " yes ", "YES\r\n"] {
+            assert!(accepts(yes), "{yes:?}");
+        }
+        for no in ["", "\n", "n", "no", "yep", "ok"] {
+            assert!(!accepts(no), "{no:?}");
+        }
     }
 
     /// An executor that never answers `identity.joinStatus` cannot hold `claim` past the
@@ -377,7 +586,8 @@ mod tests {
         let start = std::time::Instant::now();
         let t0 = unix_now();
         let silent = follow_join(
-            &claimed(t0 + 1 - CONFIRM_GRACE_S),
+            A,
+            confirm_deadline(t0 + 1 - CONFIRM_GRACE_S),
             std::future::pending::<Result<Join>>,
             unix_now,
             Duration::ZERO,
@@ -391,7 +601,8 @@ mod tests {
         );
 
         let far = follow_join(
-            &claimed(u64::MAX),
+            A,
+            confirm_deadline(u64::MAX),
             || async { Ok(join("spent", Some("d2"))) },
             // Past the confirm grace: a deadline that wrapped (a release build does not check
             // overflow) would lie behind this and end the claim.
@@ -409,7 +620,8 @@ mod tests {
         let start = tokio::time::Instant::now();
         let now = || 1_000 + start.elapsed().as_secs();
         let unconfirmed = follow_join(
-            &claimed(1_000 + 1 - CONFIRM_GRACE_S),
+            A,
+            confirm_deadline(1_000 + 1 - CONFIRM_GRACE_S),
             || async { Ok(join("claimed", None)) },
             now,
             Duration::from_secs(60),

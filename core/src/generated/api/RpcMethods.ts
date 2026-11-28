@@ -10,6 +10,7 @@ import type { AISessionSendParams } from "./AISessionSendParams";
 import type { AISessionSendStarted } from "./AISessionSendStarted";
 import type { AISessionUpdateRequest } from "./AISessionUpdateRequest";
 import type { AITask } from "./AITask";
+import type { AcceptJoinParams } from "./AcceptJoinParams";
 import type { AddAgentInfosRequest } from "./AddAgentInfosRequest";
 import type { Agent } from "./Agent";
 import type { AgentAddEntanglementProofsParams } from "./AgentAddEntanglementProofsParams";
@@ -39,6 +40,7 @@ import type { AiUpstreamModelParams } from "./AiUpstreamModelParams";
 import type { ApplyTemplateRequest } from "./ApplyTemplateRequest";
 import type { Apps } from "./Apps";
 import type { CallSessionInfo } from "./CallSessionInfo";
+import type { CancelJoinParams } from "./CancelJoinParams";
 import type { ClaimOfferParams } from "./ClaimOfferParams";
 import type { ClaimOfferResult } from "./ClaimOfferResult";
 import type { CollectionItemAdded } from "./CollectionItemAdded";
@@ -50,13 +52,16 @@ import type { CreatePerspectiveRequest } from "./CreatePerspectiveRequest";
 import type { CreateUserRequest } from "./CreateUserRequest";
 import type { DecoratedLinkExpression } from "./DecoratedLinkExpression";
 import type { DecoratedPerspective } from "./DecoratedPerspective";
+import type { DeleteRequestParams } from "./DeleteRequestParams";
 import type { DetectedEndpoint } from "./DetectedEndpoint";
 import type { DeviceKeys } from "./DeviceKeys";
+import type { DeviceRequest } from "./DeviceRequest";
 import type { DeviceView } from "./DeviceView";
 import type { DidResolutionResult } from "./DidResolutionResult";
 import type { DiscoveredModel } from "./DiscoveredModel";
 import type { EmbedRequest } from "./EmbedRequest";
 import type { EndAllSessionsParams } from "./EndAllSessionsParams";
+import type { EndPreparedParams } from "./EndPreparedParams";
 import type { EndedSessions } from "./EndedSessions";
 import type { EntanglementProof } from "./EntanglementProof";
 import type { EntanglementProofPreflightRequest } from "./EntanglementProofPreflightRequest";
@@ -82,10 +87,16 @@ import type { IdentityLog } from "./IdentityLog";
 import type { IdentityStatus } from "./IdentityStatus";
 import type { ImportAgentRequest } from "./ImportAgentRequest";
 import type { ImportRequest } from "./ImportRequest";
+import type { InboxAckParams } from "./InboxAckParams";
+import type { InboxEntry } from "./InboxEntry";
+import type { InboxPutParams } from "./InboxPutParams";
+import type { InboxStored } from "./InboxStored";
 import type { InstanceCreated } from "./InstanceCreated";
 import type { InstanceRemoved } from "./InstanceRemoved";
 import type { InstanceUpdated } from "./InstanceUpdated";
 import type { InteractionMeta } from "./InteractionMeta";
+import type { JoinAccepted } from "./JoinAccepted";
+import type { JoinCancelled } from "./JoinCancelled";
 import type { JoinNeighbourhoodRequest } from "./JoinNeighbourhoodRequest";
 import type { JoinStatus } from "./JoinStatus";
 import type { JoinStatusParams } from "./JoinStatusParams";
@@ -174,16 +185,25 @@ import type { PerspectiveUpdateParams } from "./PerspectiveUpdateParams";
 import type { PerspectiveUpdateSubjectParams } from "./PerspectiveUpdateSubjectParams";
 import type { PerspectiveUuidParams } from "./PerspectiveUuidParams";
 import type { PerspectiveVerifyFlowReceiptParams } from "./PerspectiveVerifyFlowReceiptParams";
+import type { PostRequestParams } from "./PostRequestParams";
+import type { PrepareDeviceParams } from "./PrepareDeviceParams";
+import type { PreparedDevice } from "./PreparedDevice";
+import type { PreparedEnded } from "./PreparedEnded";
 import type { PromptRequest } from "./PromptRequest";
 import type { ProposeOutcome } from "./ProposeOutcome";
 import type { PublishLanguageRequest } from "./PublishLanguageRequest";
 import type { PublishNeighbourhoodRequest } from "./PublishNeighbourhoodRequest";
 import type { PublishParams } from "./PublishParams";
+import type { RecordParams } from "./RecordParams";
+import type { RecordPutParams } from "./RecordPutParams";
+import type { RecordStored } from "./RecordStored";
 import type { RegisterResult } from "./RegisterResult";
 import type { RenewSessionParams } from "./RenewSessionParams";
 import type { RenewedSession } from "./RenewedSession";
 import type { RequestCapabilityRequest } from "./RequestCapabilityRequest";
 import type { RequestPaymentRequest } from "./RequestPaymentRequest";
+import type { RequestPosted } from "./RequestPosted";
+import type { RequestsParams } from "./RequestsParams";
 import type { ResetLogParams } from "./ResetLogParams";
 import type { ResolveParams } from "./ResolveParams";
 import type { RunAgentRequest } from "./RunAgentRequest";
@@ -201,6 +221,7 @@ import type { RuntimeSetFreeHostingEnabledParams } from "./RuntimeSetFreeHosting
 import type { RuntimeUnytSendHotParams } from "./RuntimeUnytSendHotParams";
 import type { RuntimeUnytWalletHistoryParams } from "./RuntimeUnytWalletHistoryParams";
 import type { RuntimeUpdateNotificationParams } from "./RuntimeUpdateNotificationParams";
+import type { SealedInboxMessage } from "./SealedInboxMessage";
 import type { SentMessage } from "./SentMessage";
 import type { SessionChallenge } from "./SessionChallenge";
 import type { SessionInfo } from "./SessionInfo";
@@ -238,6 +259,7 @@ import type { SignMessageRequest } from "./SignMessageRequest";
 import type { SignSessionStatementParams } from "./SignSessionStatementParams";
 import type { SignedHead } from "./SignedHead";
 import type { SignedKeyStatement } from "./SignedKeyStatement";
+import type { StoredRecord } from "./StoredRecord";
 import type { TrustedAgentsWrapper } from "./TrustedAgentsWrapper";
 import type { UnlockAgentRequest } from "./UnlockAgentRequest";
 import type { UnytVersionInfo } from "./UnytVersionInfo";
@@ -334,16 +356,29 @@ export interface RpcMethods {
   "hosting.setHotWallet": { params: SetHotWalletAddressRequest; result: boolean };
   "hosting.wallet": { params: Record<string, never>; result: HostingWalletResult };
   "hosting.walletHistory": { params: Record<string, never>; result: JsonValue };
+  "identity.acceptJoin": { params: AcceptJoinParams; result: JoinAccepted };
+  "identity.cancelJoin": { params: CancelJoinParams; result: JoinCancelled };
   "identity.claimOffer": { params: ClaimOfferParams; result: ClaimOfferResult };
   "identity.cosignIncept": { params: CosignInceptParams; result: JsonValue };
   "identity.custodyStatus": { params: Record<string, never>; result: DeviceKeys };
+  "identity.deleteRequest": { params: DeleteRequestParams; result: boolean };
   "identity.devices": { params: Record<string, never>; result: Array<DeviceView> };
+  "identity.endPrepared": { params: EndPreparedParams; result: PreparedEnded };
+  "identity.inbox": { params: Record<string, never>; result: Array<InboxEntry> };
+  "identity.inboxAck": { params: InboxAckParams; result: boolean };
+  "identity.inboxPut": { params: InboxPutParams; result: InboxStored };
+  "identity.inboxSealed": { params: Record<string, never>; result: Array<SealedInboxMessage> };
   "identity.joinStatus": { params: JoinStatusParams; result: JoinStatus };
   "identity.log": { params: LogParams; result: IdentityLog };
   "identity.offers": { params: OffersParams; result: Array<OfferListing> };
   "identity.openOffer": { params: OpenOfferParams; result: OfferOpened };
+  "identity.postRequest": { params: PostRequestParams; result: RequestPosted };
+  "identity.prepareDevice": { params: PrepareDeviceParams; result: PreparedDevice };
   "identity.publish": { params: PublishParams; result: SignedHead };
+  "identity.record": { params: RecordParams; result: StoredRecord | null };
+  "identity.recordPut": { params: RecordPutParams; result: RecordStored };
   "identity.rekey": { params: Record<string, never>; result: DeviceKeys };
+  "identity.requests": { params: RequestsParams; result: Array<DeviceRequest> };
   "identity.resetLog": { params: ResetLogParams; result: boolean };
   "identity.resolve": { params: ResolveParams; result: DidResolutionResult };
   "identity.status": { params: Record<string, never>; result: IdentityStatus };
@@ -541,9 +576,12 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "hosting.walletHistory",
   "identity.custodyStatus",
   "identity.devices",
-  "identity.joinStatus",
+  "identity.inbox",
+  "identity.inboxSealed",
   "identity.log",
   "identity.offers",
+  "identity.record",
+  "identity.requests",
   "identity.resolve",
   "identity.status",
   "language.all",

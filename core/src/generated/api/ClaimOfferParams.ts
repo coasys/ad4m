@@ -11,4 +11,16 @@ offer: string,
 /**
  * A name for this device the holder sees on the confirm card (at most 64 characters).
  */
-hint?: string, };
+hint?: string, 
+/**
+ * The claim says this device may keep the master key: only the custody service of an
+ * executor started with `--custody-channel` (the desktop app's) may say so, with `enc`.
+ * Default `false`.
+ */
+canKeepMaster?: boolean, 
+/**
+ * The custody service's own X25519 key (`z6LS…`): the claim carries it as `encKey`, so the
+ * log lists it and a master key is sealed to it, never to a key this executor opens.
+ * Required with `canKeepMaster: true` (`no-custody-enc`), refused without it.
+ */
+enc?: string, };

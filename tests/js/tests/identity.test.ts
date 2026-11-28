@@ -776,3 +776,202 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
         expect((await a.client.agent.status()).identity).to.equal(did);
     });
 });
+
+/**
+ * The device inbox end to end, on a store of its own: a desktop executor (started with an admin
+ * credential, the custody channel and its custody credential) shows its device string, the
+ * holder scans it and pushes an offer ticket into its pre-join inbox, and the executor claims it
+ * with the custody service's own X25519 key; then the holder seals the master key to that key, and
+ * only the custody service (the custody credential, never the admin credential) reads the sealed
+ * message and opens it (the holder plays the custody service). The executor never opens it.
+ */
+describe("Identity: the device inbox, a ticket in the pre-join inbox and a master key for the custody service", function () {
+    this.timeout(600_000);
+    const CREDENTIAL = "desktop-admin-credential";
+    const CUSTODY = "custody-service-credential";
+
+    let store: IdentityStore;
+    let holder: Holder;
+    const nodes: Node[] = [];
+    let home: Node, desk: Node;
+    let custody: Ad4mClient;
+    let custodyEnc = "";
+    let did = "";
+
+    async function start(
+        name: string,
+        opts: {
+            credential?: string;
+            env?: Record<string, string>;
+            initArgs?: string[];
+            /** `--custody-channel`'s credential, written as the first line of stdin. */
+            custodyCredential?: string;
+        } = {},
+    ): Promise<Node> {
+        const ports = await getFreePorts(3);
+        registerPorts(ports);
+        const dataPath = path.join(TEST_DIR, "agents", `identity-${name}`);
+        fs.mkdirSync(path.dirname(dataPath), { recursive: true });
+        const process = await startExecutor(
+            dataPath, SEED_PATH, ports[0], ports[1], ports[2],
+            false, opts.credential, undefined, undefined, undefined, false, undefined, undefined,
+            false,          // runHolochain
+            true,           // sharedStores
+            { ...store.executorEnv(), ...(opts.env ?? {}) },
+            opts.initArgs ?? [],
+            opts.custodyCredential,
+        );
+        const client = new Ad4mClient(baseUrl(ports[0]), opts.credential);
+        await client.agent.generate("passphrase");
+        const node = { name, dataPath, ports, process, client };
+        nodes.push(node);
+        return node;
+    }
+
+    async function refused(call: Promise<unknown>): Promise<string> {
+        try {
+            await call;
+        } catch (e) {
+            return e instanceof Error ? e.message : String(e);
+        }
+        throw new Error("the call was not refused");
+    }
+
+    before(async () => {
+        if (!fs.existsSync(TEST_DIR)) throw Error("run prepare-test-local before the identity suite");
+        writeIdentitySeed();
+        buildIdentityTools();
+        const [storePort] = await getFreePorts(1);
+        registerPorts([storePort]);
+        store = await IdentityStore.start(path.join(TEST_DIR, "identity-store-inbox"), storePort);
+        home = await start("inbox-home");
+        holder = new Holder();
+        await holder.send({ cmd: "connect", url: baseUrl(home.ports[0]), token: "" });
+        did = (await holder.send({ cmd: "create" })).did;
+    });
+
+    after(async () => {
+        await holder?.stop();
+        for (const node of nodes) {
+            if (node.process) await quitExecutor(node.process, node.ports[0]);
+            deregisterPorts(node.ports);
+        }
+        await store?.stop();
+        if (store) deregisterPorts([store.port]);
+    });
+
+    it("links a desktop through its device string: its claim, then link-ticket with the match code", async () => {
+        // A desktop app's first run: the custody channel and no operator record, so the
+        // identity its first claim joins becomes its operator, once accepted on this computer.
+        desk = await start("inbox-desktop", {
+            credential: CREDENTIAL,
+            env: { AD4M_CUSTODY_CHANNEL: "true" },
+            custodyCredential: CUSTODY,
+        });
+        const tickets: any[] = [];
+        desk.client.on("link-ticket", (event) => tickets.push(event));
+        const status = await desk.client.identity.status();
+        custody = new Ad4mClient(baseUrl(desk.ports[0]), CUSTODY);
+        custodyEnc = (await holder.send({ cmd: "custodyKey" })).enc;
+
+        // The custody service's key comes from the custody service alone.
+        expect(await refused(desk.client.identity.prepareDevice(custodyEnc))).to.contain("no-custody-channel");
+        const prepared = await custody.identity.prepareDevice(custodyEnc);
+        expect(prepared.device).to.match(/^coasys:device:1:/);
+        expect(prepared.sign).to.equal(status.deviceKey);
+        expect(prepared.enc).to.equal(status.deviceEnc);
+        expect(prepared.expires - Math.floor(Date.now() / 1000)).to.be.within(200, 300);
+
+        const pushed = await holder.send({ cmd: "openBound", did, store: store.url, device: prepared.device });
+        await pollUntil(() => tickets.length > 0, { timeoutMs: 30_000, intervalMs: 200, label: "link-ticket event" });
+        expect(tickets[0].did).to.equal(did);
+        expect(tickets[0].offerId).to.equal(pushed.offerId);
+        // No operator record yet: this claim would make the identity the operator, so it
+        // binds only once the person on this computer accepts it.
+        expect(tickets[0].needsAccept).to.equal(true);
+
+        const claimed = await holder.send({ cmd: "waitClaim" });
+        expect(claimed.matchCode).to.equal(tickets[0].matchCode);
+        expect(claimed.deviceKey).to.equal(status.deviceKey);
+        expect((await holder.send({ cmd: "confirm" })).seq).to.equal(1);
+
+        // Confirmed but not accepted: nothing is bound.
+        await pollUntil(
+            async () => (await desk.client.identity.joinStatus(pushed.offerId)).state === "awaiting-accept",
+            { timeoutMs: 30_000, intervalMs: 500, label: "the confirmed claim held for accept" },
+        );
+        expect((await desk.client.identity.status()).did).to.not.equal(did);
+        expect(await desk.client.identity.acceptJoin(pushed.offerId)).to.deep.equal({ accepted: true });
+
+        await pollUntil(
+            async () => (await desk.client.identity.joinStatus(pushed.offerId)).state === "spent",
+            { timeoutMs: 30_000, intervalMs: 500, label: "the desktop's key in the log" },
+        );
+        const joined = await desk.client.identity.status();
+        expect(joined.did).to.equal(did);
+        expect(joined.keyId).to.equal("d2");
+        // `deviceEnc` still names the wallet's key; the log lists the custody service's key for
+        // d2, which the next test's seal to it shows.
+        expect(joined.deviceEnc).to.equal(status.deviceEnc);
+
+        // Ending the code now (a Cancel too late) does not undo the join, and says so each time.
+        for (let i = 0; i < 2; i++) {
+            expect(await desk.client.identity.endPrepared(prepared.device)).to.deep.equal({
+                state: "already-joined",
+                offerId: pushed.offerId,
+                did,
+            });
+        }
+        expect((await desk.client.identity.status()).did).to.equal(did);
+    });
+
+    it("hands the master key sealed to the custody service's key to the custody service only, still sealed, until it acknowledges it", async () => {
+        const announced: any[] = [];
+        desk.client.on("inbox-message", (event) => announced.push(event));
+        const sealed = await holder.send({ cmd: "sealMaster", did, keyId: "d2" });
+
+        const listed = await desk.client.identity.inbox();
+        expect(listed.map((m) => m.id)).to.deep.equal([sealed.id]);
+        expect(listed[0]).to.not.have.property("kind");
+        expect(JSON.stringify(listed)).to.not.contain(sealed.secret);
+        await pollUntil(() => announced.length > 0, { timeoutMs: 10_000, intervalMs: 200, label: "inbox-message event" });
+        expect(announced[0].id).to.equal(sealed.id);
+        expect(announced[0]).to.not.have.property("kind");
+
+        // A caller without a credential is not the custody service, and neither is the admin
+        // credential (an app's window may hold it).
+        const stranger = new Ad4mClient(baseUrl(desk.ports[0]));
+        expect(await refused(stranger.identity.inboxSealed())).to.match(/Admin credential required|403/);
+        expect(await refused(desk.client.identity.inboxSealed())).to.contain("no-custody-channel");
+
+        // The executor answers the message as the store holds it, sealed; the custody service
+        // opens it with its own key.
+        const messages = await custody.identity.inboxSealed();
+        expect(messages.map((m) => [m.id, m.keyId])).to.deep.equal([[sealed.id, "d2"]]);
+        expect(JSON.stringify(messages)).to.not.contain(sealed.secret);
+        const opened = await holder.send({ cmd: "openSealed", did, message: messages[0] });
+        expect(opened).to.deep.equal({ did, index: 0, secret: sealed.secret });
+        // It waits until the custody service acknowledges it: answered again until then, and
+        // the admin credential (the renderer's) cannot delete it before custody stored it.
+        expect((await desk.client.identity.inbox()).map((m) => m.id)).to.deep.equal([sealed.id]);
+        expect(await custody.identity.inboxSealed()).to.deep.equal(messages);
+        expect(await refused(desk.client.identity.inboxAck(sealed.id))).to.contain("no-custody-channel");
+        expect((await desk.client.identity.inbox()).map((m) => m.id)).to.deep.equal([sealed.id]);
+        // The custody credential reaches the custody calls only.
+        expect(await refused(custody.agent.status())).to.contain("not-a-custody-call");
+        expect(await custody.identity.inboxAck(sealed.id)).to.be.true;
+        expect(await desk.client.identity.inbox()).to.deep.equal([]);
+        expect(await custody.identity.inboxSealed()).to.deep.equal([]);
+    });
+
+    it("deletes a master key on an executor without the custody channel and never hands it out", async () => {
+        await holder.send({ cmd: "sealMaster", did, keyId: "d1" });
+        expect(await home.client.identity.inbox()).to.deep.equal([]);
+        expect(await refused(home.client.identity.inboxSealed())).to.contain("no-custody-channel");
+        // A claim saying it keeps the master key is refused there too, with or without a key.
+        expect(await refused(home.client.identity.claimOffer("coasys:offer:1:x", undefined, true)))
+            .to.contain("no-custody-channel");
+        expect(await refused(home.client.identity.claimOffer("coasys:offer:1:x", undefined, true, custodyEnc)))
+            .to.contain("no-custody-channel");
+    });
+});

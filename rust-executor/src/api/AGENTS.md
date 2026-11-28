@@ -86,7 +86,7 @@ handler. `HandlerMap::admit` runs the steps before the handler alone.
 | `Operator` | no capability; `ctx.is_operator()` (the admin credential, or no token on a loopback listener of an executor without one), else 403 "Admin credential required" (`guards::OPERATOR_ONLY`), whatever the caller's capabilities |
 | `Cap(cap)` | none: any caller holding `cap`. An anonymous caller holds only the anonymous set (request a capability, redeem it, sign up, log in, verify an email); the handler acts on `ctx.acts_as()` |
 | `Executor(cap)` | the operator or a grant on the main agent: 403 naming the method to a session on a managed agent, whatever its capabilities, and to an anonymous caller. A grant on the main agent passes (D5): WE web administers a local executor with an app token holding `*` |
-| `UserOrOperator(cap)` | the operator, or a session on a managed agent (a user, or an app the user approved): 403 "<method> for the main agent needs the admin credential" to a grant on the main agent, whatever its capabilities, and to an anonymous caller. For calls that bind the caller's agent for good (`identity.cosignIncept`, `identity.publish`): every app holds their capabilities by default |
+| `UserOrOperator(cap)` | the operator, or a session on a managed agent (a user, or an app the user approved): 403 "<method> for the main agent needs the admin credential" to a grant on the main agent, whatever its capabilities, and to an anonymous caller. For calls that bind the caller's agent for good (`identity.cosignIncept`, `identity.publish`) or speak for this device to its identity's other devices (`identity.postRequest`, `identity.deleteRequest`): every app holds their capabilities by default |
 | `UserLoginOrOperator(cap)` | the operator, or a user's own session on a managed agent (`LiveGrant::is_login`: a password login, which answers no capability request, or a key session, whose key binding is not delegated): 403 "<method> may not be called by an app, a user must call it" to an app the user approved, though it holds the capability; 403 "<method> for the main agent needs the admin credential" to a grant on the main agent and to an anonymous caller. For a call that ends the device's key for good (`identity.unlinkSelf`) |
 | `Owns { cap, id, owner }` | the resource `id` reads from the params exists and the operator or the session's agent owns it (`guards::owns`), else 404, missing or not |
 
@@ -130,10 +130,21 @@ that create or lock the executor's agent and move its data folder: `agent.genera
 `agent.lock`, `runtime.exportData` and `runtime.importData` are not local
 only, so a remote operator (a key login, or the admin credential on a network listener) may
 move the whole data folder. `agent.import` is not local only either — but it is not
-implemented: its handler answers "Agent import not yet implemented". The guard table marks the local-only methods "local only". `runtime.setConfig` is not local only as a whole: it refuses each
-`machine` key to a caller off this machine (`config_rpc`). `identity.custodyStatus` adds the
-custody channel's own check (`identity::custody::admit`: the admin credential, not a tokenless
-operator, and `--custody-channel`).
+implemented: its handler answers "Agent import not yet implemented". The guard table marks
+the local-only methods "local only". `runtime.setConfig` is not local only as a whole: it refuses each `machine` key to a caller
+off this machine (`config_rpc`). `identity.custodyStatus`, `identity.inboxSealed` (the
+joined inbox still sealed to the custody service's key), the custody key in
+`identity.claimOffer`, `identity.prepareDevice` and `identity.cosignIncept`, and, with the
+channel on, `identity.inboxAck` add the
+custody channel's own check (`identity::custody::admit`: the custody credential on a loopback
+listener of an executor started with `--custody-channel`); every other caller, the admin
+credential included, gets 403 `no-custody-channel`. The custody credential is its own
+principal (`Principal::Custody`), not an operator: `Session::open` refuses it off a loopback
+listener, it holds no capability, and dispatch (`admit_entry`) lets it reach only the methods
+in `identity::custody::CUSTODY_METHODS` (403 `not-a-custody-call` otherwise), acting as the
+main agent. Its sessions get only `Audience::LocalOperator` events. The events only
+local-only methods read (`link-ticket`, `inbox-message`) go to `Audience::LocalOperator`, the
+operator's sessions on this machine.
 
 Notes on some methods:
 
@@ -192,7 +203,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-244 methods: Cap 84, CapAnyPointer 1, Executor 43, Open 9, Operator 31, Owns 73, UserLoginOrOperator 1, UserOrOperator 2. Local only (the operator on this machine): 6.
+257 methods: Cap 88, CapAnyPointer 1, Executor 43, Open 9, Operator 38, Owns 73, UserLoginOrOperator 1, UserOrOperator 4. Local only (the operator on this machine): 13.
 
 | Method | Guard |
 |---|---|
@@ -270,16 +281,29 @@ the guard checked:
 | `hosting.setHotWallet` | `Cap(agent:UPDATE)` |
 | `hosting.wallet` | `Executor(runtime.hosting:READ)` |
 | `hosting.walletHistory` | `Executor(runtime.hosting:READ)` |
+| `identity.acceptJoin` | `Operator`, local only |
+| `identity.cancelJoin` | `Operator`, local only |
 | `identity.claimOffer` | `Operator` |
 | `identity.cosignIncept` | `UserOrOperator(agent:SIGN)` |
 | `identity.custodyStatus` | `Operator`, local only |
+| `identity.deleteRequest` | `UserOrOperator(agent:UPDATE)` |
 | `identity.devices` | `Cap(agent:READ)` |
+| `identity.endPrepared` | `Operator`, local only |
+| `identity.inbox` | `Operator`, local only |
+| `identity.inboxAck` | `Operator`, local only |
+| `identity.inboxPut` | `Cap(agent:UPDATE)` |
+| `identity.inboxSealed` | `Operator`, local only |
 | `identity.joinStatus` | `Cap(agent:READ)` |
 | `identity.log` | `Cap(agent:READ)` |
 | `identity.offers` | `Cap(agent:READ)` |
 | `identity.openOffer` | `Cap(agent:UPDATE)` |
+| `identity.postRequest` | `UserOrOperator(agent:UPDATE)` |
+| `identity.prepareDevice` | `Operator`, local only |
 | `identity.publish` | `UserOrOperator(agent:UPDATE)` |
+| `identity.record` | `Cap(agent:READ)` |
+| `identity.recordPut` | `Cap(agent:UPDATE)` |
 | `identity.rekey` | `Operator`, local only |
+| `identity.requests` | `Cap(agent:READ)` |
 | `identity.resetLog` | `Operator` |
 | `identity.resolve` | `Cap(agent:READ)` |
 | `identity.status` | `Cap(agent:READ)` |

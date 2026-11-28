@@ -467,6 +467,12 @@ pub const KEY_NAME_PLATFORM: &str = "platform";
 
 // ── WalletBackend trait ─────────────────────────────────────────────────────
 
+/// Every address [`WalletBackend::open_sealed`] was asked to open, by any wallet: a test shows
+/// with it that an inbox the executor must not open never was.
+#[cfg(test)]
+pub(crate) static OPENED_FOR_TEST: Mutex<Vec<ad4m_identity_core::inbox::InboxAddress>> =
+    Mutex::new(Vec::new());
+
 /// Abstracts key operations so different wallet implementations can coexist.
 /// `Send + Sync` required — accessed from multiple Deno worker threads.
 pub trait WalletBackend: Send + Sync {
@@ -562,6 +568,36 @@ pub trait WalletBackend: Send + Sync {
     /// main agent's old key). Shared mode cannot rename keys.
     fn retire_key(&self, _name: &str, _retired_name: &str) -> Result<(), AnyError> {
         Err(anyhow!("this wallet backend cannot rename keys"))
+    }
+
+    /// Opens a device-inbox message sealed for `address` to the X25519 `enc` key of the key
+    /// `name` (the key `did_key` derives from the Ed25519 key, no second secret). The secret
+    /// and its X25519 form stay inside this call and are wiped; only the payload leaves, and
+    /// the caller wipes a secret it carries.
+    fn open_sealed(
+        &self,
+        name: &str,
+        address: &ad4m_identity_core::inbox::InboxAddress,
+        sealed: &str,
+    ) -> Result<ad4m_identity_core::inbox::InboxPayload, AnyError> {
+        #[cfg(test)]
+        OPENED_FOR_TEST
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(address.clone());
+        let secret = Zeroizing::new(
+            self.get_secret_key(name)
+                .ok_or_else(|| anyhow!("{name} key not found"))?,
+        );
+        let seed: Zeroizing<[u8; 32]> = Zeroizing::new(
+            secret
+                .get(..32)
+                .and_then(|s| s.try_into().ok())
+                .ok_or_else(|| anyhow!("the {name} key is not an Ed25519 secret"))?,
+        );
+        let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let enc = ad4m_identity_core::x25519_secret_of_ed25519(&key);
+        ad4m_identity_core::inbox::open(&enc, address, sealed).map_err(|e| anyhow!("{e}"))
     }
 
     /// Deletes the secret of the key `name` and keeps its public key under that name (a key
