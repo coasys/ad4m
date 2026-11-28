@@ -1804,19 +1804,14 @@ impl SfuServer {
                                     data_received.push((pid.clone(), payload));
                                 }
                             }
-                            Event::MediaEgressStats(stats) => {
-                                // Downlink loss and NACKs for this client.
-                                // A pipe has no receiver budget. PLIs are the
-                                // selector's own keyframe requests, not loss.
-                                if !peer.is_pipe {
-                                    layers.note_egress_loss(
-                                        Instant::now(),
-                                        pid,
-                                        (stats.mid, stats.rid),
-                                        stats.nacks,
-                                        stats.loss,
-                                    );
-                                }
+                            Event::MediaEgressStats(_) => {
+                                // Same timer as PeerStats (PEER_STATS_INTERVAL,
+                                // 30 s; str0m has no separate egress cadence).
+                                // A NACK delta over that interval can predate
+                                // the shortfall the selector is judging, so it
+                                // is not a step-down signal. The two rate
+                                // windows stand alone. Do not shorten the
+                                // interval: it is also the stats line.
                             }
                             Event::PeerStats(stats) => {
                                 // The layer of each video track this peer receives.

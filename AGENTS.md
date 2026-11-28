@@ -613,15 +613,16 @@ it, F its fixed traffic. Constants (measured with the e2e source below):
 - F: per audio track the larger of `AUDIO_RESERVE_BPS` 64 kbit/s and its
   measured rate, plus each video without simulcast; it is never touched.
 - `UPGRADE_HEADROOM` H = 1.25, `UPGRADE_HOLD` 4 s, `STEP_DOWN_IMMEDIATE`
-  0.50, `STEP_DOWN_CONFIRM` 4 s (`2 * RATE_WINDOW`), `LOSS_GROWTH` 0.01.
-  A shortfall is an estimate strictly under the traffic (E < C + F). At the
-  traffic a link with no bottleneck settles, and that is not a cap. At or
-  under 0.50 of the traffic the step is immediate and backdated by
-  `STEP_DOWN_CONFIRM`, so the next layer does not wait while the collapse
-  continues. Above that and under the traffic the same step waits until two
-  non-overlapping rate windows have both shown the shortfall. Downlink NACK
-  growth, or a loss fraction up by `LOSS_GROWTH`, skips the wait the same
-  way. The upgrade line is E >= H * (C + F + step). An estimate under the
+  0.50, `STEP_DOWN_CONFIRM` 4 s (`2 * RATE_WINDOW`). A shortfall is an
+  estimate strictly under the traffic (E < C + F). At the traffic a link
+  with no bottleneck settles, and that is not a cap. At or under 0.50 of
+  the traffic the step is immediate and backdated by `STEP_DOWN_CONFIRM`,
+  so the next layer does not wait while the collapse continues. Above that
+  and under the traffic the same step waits until two fresh rate windows
+  have both shown the shortfall. Downlink NACKs are not a separate signal:
+  str0m emits `MediaEgressStats` on this same 30 s stats timer, and a NACK
+  in that interval can predate the shortfall. The upgrade line is
+  E >= H * (C + F + step). An estimate under the
   traffic cannot meet it, so a step does not oscillate with the climb back.
   With no bottleneck, str0m's estimate settles near the traffic it carries
   (about 1.5 times at full state). An overuse sets the estimate to 0.85 of
@@ -638,24 +639,23 @@ it, F its fixed traffic. Constants (measured with the e2e source below):
 Rules, per receiver, run on an estimate event, a track-set or ceiling change,
 a committed switch, a change in a track's set of live layers (a layer starts,
 or stops after `LAYER_TIMEOUT`), a layer or video that resumes after
-`LAYER_TIMEOUT`, a downlink loss or NACK sample that grew, or a deadline.
-There is no periodic tick: the earliest deadline (the hold's end, the
-step-down confirmation's next rate window, or the moment a live layer's
-rate is first measured) lowers the loop's timeout.
+`LAYER_TIMEOUT`, or a deadline. There is no periodic tick: the earliest
+deadline (the hold's end, the step-down confirmation's next rate window, or
+the moment a live layer's rate is first measured) lowers the loop's timeout.
 
-- When E <= 0.50 * (C + F) (`STEP_DOWN_IMMEDIATE`), or when downlink NACKs
-  or the loss fraction grew, one video track drops one live layer at once
-  (largest saving first, ties by stable id), one per run, and the shortfall
-  is backdated by `STEP_DOWN_CONFIRM`. A network cut and a shaped link still
-  forwarding the high layers land on the immediate line. When the estimate
-  is above half and strictly under the traffic, the same step waits for two
-  non-overlapping `RATE_WINDOW`s (`STEP_DOWN_CONFIRM`, 4 s). The loop wakes
-  at the end of the first fresh window, which shares no packets with the
-  window that armed the shortfall, and steps at the second. While the
-  shortfall keeps holding, the next layer does not wait again. One window
-  under the traffic, including a reading on the 0.85 floor, does not step
-  down. The first sample of an egress stream is the baseline; PLIs are not
-  loss. No estimate, or zero traffic, clears the timers and never steps.
+- When E <= 0.50 * (C + F) (`STEP_DOWN_IMMEDIATE`), one video track drops
+  one live layer at once (largest saving first, ties by stable id), one per
+  run, and the shortfall is backdated by `STEP_DOWN_CONFIRM`. A network cut
+  and a shaped link still forwarding the high layers land on the immediate
+  line. When the estimate is above half and strictly under the traffic, the
+  same step waits for two fresh `RATE_WINDOW`s (`STEP_DOWN_CONFIRM`, 4 s).
+  The window that armed the shortfall is `(since - RATE_WINDOW, since]`.
+  The next window, `(since, since + RATE_WINDOW]`, already shares no
+  packets with it. The loop wakes there and does not step. The step is one
+  window later. While the shortfall keeps holding, the next layer does not
+  wait again. One fresh window under the traffic, including a reading on
+  the 0.85 floor, does not step down. No estimate, or zero traffic, clears
+  the timers and never steps.
 - Upgrades: the receiver has one hold (`hold_since`). It runs while the
   cheapest step fits E >= H * (C + F + step), is re-checked at every run, and
   a dip, ceiling change, track-set change or completed switch resets it. When

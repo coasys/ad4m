@@ -31,13 +31,14 @@
 //!   measured rate). It is never touched;
 //! - when the estimate falls to [`STEP_DOWN_IMMEDIATE`] of the layers
 //!   forwarded plus the fixed traffic, or below it, one track steps down one
-//!   flowing layer at once: the one that saves the most. Downlink loss or
-//!   NACK growth does the same. Otherwise a shortfall is an estimate
-//!   strictly under the traffic, and it steps down only once two
-//!   non-overlapping [`RATE_WINDOW`]s have both shown it
+//!   flowing layer at once: the one that saves the most. Otherwise a
+//!   shortfall is an estimate strictly under the traffic, and it steps down
+//!   only once two fresh [`RATE_WINDOW`]s have both shown it
 //!   ([`STEP_DOWN_CONFIRM`]). At the traffic the estimate of a link with no
 //!   bottleneck settles, and that is not a cap. A single window of a
-//!   send-rate spike is not one either;
+//!   send-rate spike is not one either. Downlink loss is not a separate
+//!   signal: the only sample str0m emits is the 30 s stats event, and a
+//!   NACK in that interval may predate the shortfall;
 //! - upgrades wait for one hold per receiver: the estimate must cover
 //!   [`UPGRADE_HEADROOM`] times the traffic with the cheapest step up (fixed
 //!   traffic included) for [`UPGRADE_HOLD`] without a dip, and only once an estimate arrived that
@@ -115,24 +116,21 @@ const UPGRADE_HEADROOM: f64 = 1.25;
 /// rate window and does not step down.
 const STEP_DOWN_IMMEDIATE: f64 = 0.50;
 /// How long a shortfall strictly under the traffic must show before a step,
-/// unless it has collapsed or downlink loss grew.
+/// unless it has collapsed.
 ///
-/// Two non-overlapping [`RATE_WINDOW`]s. The window that first shows the
-/// shortfall is `(since - RATE_WINDOW, since]`. A burst stays in that
-/// sliding window for one more window after it ends, so the next window
-/// that shares no packets with the first is
-/// `(since + RATE_WINDOW, since + 2 * RATE_WINDOW]`. The wake at one window
-/// samples the first fresh window; the step is at two. A cap that holds,
-/// moderate (about 0.6 to 0.80 of the traffic) or mild (under the traffic,
-/// including a reading that stays on str0m's 0.85 overuse floor), is still
-/// there. At the traffic the estimate of a link with no bottleneck settles,
-/// and that is not a cap. No second meter: at `since + 2 * RATE_WINDOW` the
-/// meter's own window has dropped every packet from the first.
+/// Two fresh [`RATE_WINDOW`]s after the one that armed the shortfall. That
+/// window is `(since - RATE_WINDOW, since]`. The next one,
+/// `(since, since + RATE_WINDOW]`, already shares no packets with it: a
+/// packet timestamped at `since` is age [`RATE_WINDOW`] one window later,
+/// and [`Meter::rate`] drops it. Sampling that window does not step. One
+/// fresh window is the send-rate spike this wait exists to ignore. The
+/// step is at `since + 2 * RATE_WINDOW`, after
+/// `(since + RATE_WINDOW, since + 2 * RATE_WINDOW]` as well. A cap that
+/// holds, moderate (about 0.6 to 0.80 of the traffic) or mild (under the
+/// traffic, including a reading that stays on str0m's 0.85 overuse floor),
+/// is still there. At the traffic the estimate of a link with no bottleneck
+/// settles, and that is not a cap. No second meter.
 const STEP_DOWN_CONFIRM: Duration = Duration::from_secs(4);
-/// A downlink loss fraction this far above the previous sample confirms a
-/// shortfall at once. Any increase in the cumulative NACK count does too.
-/// The first sample of a stream is the baseline, not growth.
-const LOSS_GROWTH: f32 = 0.01;
 /// How long that headroom must hold, without a dip, before an upgrade.
 const UPGRADE_HOLD: Duration = Duration::from_secs(4);
 /// What each forwarded audio track is budgeted at least.
@@ -286,15 +284,8 @@ struct Receiver {
     /// Since when the estimate has been strictly under the traffic. A
     /// committed switch does not clear it: the shortfall is the estimate's,
     /// and the next layer steps as soon as [`STEP_DOWN_CONFIRM`] has elapsed.
-    /// A collapse, or downlink loss, backdates it by that long.
+    /// A collapse backdates it by that long.
     under_since: Option<Instant>,
-    /// Last cumulative NACK count and loss fraction of each egress stream.
-    loss_seen: HashMap<(Mid, Option<Rid>), (u64, Option<f32>)>,
-    /// Downlink NACKs or loss grew since the previous sample. While the
-    /// estimate is under the traffic, the next allocation steps down at
-    /// once. Cleared when that step runs, when the estimate recovers, and
-    /// when there is no estimate.
-    loss_bypass: bool,
     /// When the next allocation is due without an event.
     wake: Option<Instant>,
     /// The last probing demand handed out.
@@ -311,8 +302,6 @@ impl Default for Receiver {
             caps: HashMap::new(),
             hold_since: None,
             under_since: None,
-            loss_seen: HashMap::new(),
-            loss_bypass: false,
             wake: None,
             demand: 0,
         }
@@ -501,43 +490,6 @@ impl LayerSelector {
         self.allocate(now, receiver);
     }
 
-    /// One egress stream's downlink feedback for `receiver`. `nacks` is that
-    /// stream's cumulative NACK count. `loss` is the fraction in the latest
-    /// receiver report, or `None` when that report carried none.
-    ///
-    /// The first sample is the baseline. A later sample whose NACK count
-    /// rose, or whose loss fraction rose by at least [`LOSS_GROWTH`], makes
-    /// the next shortfall step down at once.
-    pub fn note_egress_loss(
-        &mut self,
-        now: Instant,
-        receiver: &ParticipantId,
-        stream: (Mid, Option<Rid>),
-        nacks: u64,
-        loss: Option<f32>,
-    ) {
-        let grew = {
-            let state = self.receivers.entry(receiver.clone()).or_default();
-            let prev = state.loss_seen.insert(stream, (nacks, loss));
-            match prev {
-                Some((prev_nacks, prev_loss)) => {
-                    nacks > prev_nacks
-                        || matches!(
-                            (prev_loss, loss),
-                            (Some(before), Some(after)) if after >= before + LOSS_GROWTH
-                        )
-                }
-                None => false,
-            }
-        };
-        if grew {
-            if let Some(state) = self.receivers.get_mut(receiver) {
-                state.loss_bypass = true;
-            }
-            self.allocate(now, receiver);
-        }
-    }
-
     /// `receiver` asked for at most the layer named by `preference` (`low`,
     /// `medium`; `high`, `auto` and anything else leave the budget to decide).
     pub fn set_ceiling(&mut self, now: Instant, receiver: &ParticipantId, preference: &str) {
@@ -715,7 +667,6 @@ impl LayerSelector {
         let Some((estimate, can_probe)) = state.estimate.filter(|_| state.bwe) else {
             state.hold_since = None;
             state.under_since = None;
-            state.loss_bypass = false;
             return demand;
         };
         let spent: u64 = videos.iter().map(|v| v.cost).sum();
@@ -723,14 +674,15 @@ impl LayerSelector {
 
         // A shortfall is an estimate strictly under the traffic. At the
         // traffic a link with no bottleneck settles, and that is not a cap.
-        // At or under half, or when downlink loss grew, step now and backdate
-        // so the next layer does not wait. Otherwise two non-overlapping
-        // rate windows have to agree.
+        // At or under half, step now and backdate so the next layer does not
+        // wait. Otherwise two fresh rate windows have to agree. Downlink
+        // loss is not consulted: str0m's only sample is the 30 s stats
+        // event, and a NACK in it may predate this shortfall.
         let short = traffic > 0 && (estimate as f64) < traffic as f64;
         let collapsed = traffic > 0 && (estimate as f64) <= traffic as f64 * STEP_DOWN_IMMEDIATE;
         if short {
             state.hold_since = None;
-            let since = if collapsed || state.loss_bypass {
+            let since = if collapsed {
                 now.checked_sub(STEP_DOWN_CONFIRM).unwrap_or(now)
             } else {
                 *state.under_since.get_or_insert(now)
@@ -738,9 +690,9 @@ impl LayerSelector {
             state.under_since = Some(since);
             let due = since + STEP_DOWN_CONFIRM;
             if now < due {
-                // The first fresh window ends one RATE_WINDOW after `since`
-                // and shares no packets with the window that armed this.
-                // Sample it, then the one after it.
+                // `(since, since + RATE_WINDOW]` shares no packets with the
+                // window that armed this. One such window does not step.
+                // The step is one window later.
                 let sample = if now < since + RATE_WINDOW {
                     since + RATE_WINDOW
                 } else {
@@ -749,7 +701,6 @@ impl LayerSelector {
                 state.wake = Some(state.wake.map_or(sample, |at| at.min(sample)));
                 return demand;
             }
-            state.loss_bypass = false;
             let lowered = videos
                 .iter()
                 .filter(|v| !v.pending)
@@ -774,7 +725,6 @@ impl LayerSelector {
             return demand;
         }
         state.under_since = None;
-        state.loss_bypass = false;
 
         // At or above the traffic: look for an upgrade, never while a switch is pending,
         // before the transport can probe, or while a forwarded track's cost is
@@ -2228,47 +2178,6 @@ mod tests {
     }
 
     #[test]
-    fn loss_or_nack_growth_steps_down_without_waiting() {
-        let note = |sim: &mut Sim, nacks: u64, loss: Option<f32>| {
-            let track = sim.tracks[0].0.clone();
-            sim.s.note_egress_loss(
-                sim.now,
-                &RECEIVER,
-                (track.1, Some(Rid::from("high"))),
-                nacks,
-                loss,
-            );
-        };
-        // 0.65 of the high layer would otherwise wait two windows.
-        let mut sim = on_high((RATES[2] as f64 * 0.65) as u64);
-        let at = sim.now;
-        note(&mut sim, 1, Some(0.0));
-        assert_eq!(sim.caps(), [2], "the first sample is the baseline");
-        note(&mut sim, 1, Some(0.005));
-        assert_eq!(sim.caps(), [2], "a loss rise under one point is not growth");
-        note(&mut sim, 2, Some(0.005));
-        assert_eq!(sim.caps(), [1]);
-        let since = sim.s.receivers[&RECEIVER].under_since.unwrap();
-        assert_eq!(at.saturating_duration_since(since), STEP_DOWN_CONFIRM);
-        assert!(!sim.s.receivers[&RECEIVER].loss_bypass);
-
-        // The loss fraction alone, with the NACK count unchanged.
-        let mut sim = on_high((RATES[2] as f64 * 0.70) as u64);
-        note(&mut sim, 4, Some(0.01));
-        note(&mut sim, 4, Some(0.01 + LOSS_GROWTH));
-        assert_eq!(sim.caps(), [1]);
-
-        // Growth while the estimate is above the traffic does not step, and
-        // it does not arm a later dip.
-        let mut sim = on_high(RATES[2] + 500_000);
-        note(&mut sim, 1, None);
-        note(&mut sim, 3, Some(0.05));
-        assert_eq!(sim.caps(), [2]);
-        assert!(!sim.s.receivers[&RECEIVER].loss_bypass);
-        assert!(sim.s.receivers[&RECEIVER].under_since.is_none());
-    }
-
-    #[test]
     fn exact_half_steps_at_once_and_just_above_half_waits() {
         let half = (RATES[2] as f64 * STEP_DOWN_IMMEDIATE) as u64;
         assert_eq!(half, RATES[2] / 2);
@@ -2313,7 +2222,6 @@ mod tests {
         assert_eq!(sim.caps(), [2]);
         sim.estimate(RATES[2] + 1, true);
         assert!(sim.s.receivers[&RECEIVER].under_since.is_none());
-        assert!(!sim.s.receivers[&RECEIVER].loss_bypass);
         sim.advance(STEP_DOWN_CONFIRM.as_millis() as u64);
         sim.s.run_due(sim.now);
         assert_eq!(sim.caps(), [2]);
@@ -2336,7 +2244,6 @@ mod tests {
         sim.advance_layers(LAYER_TIMEOUT.as_millis() as u64 + 500, &[]);
         sim.estimate((RATES[2] as f64 * 0.65) as u64, true);
         assert!(sim.s.receivers[&RECEIVER].under_since.is_none());
-        assert!(!sim.s.receivers[&RECEIVER].loss_bypass);
         assert_eq!(sim.caps(), [2]);
     }
 
