@@ -53,6 +53,12 @@ export interface World {
   users: Record<string, WorldUser>;
   /** A neighbourhood's URL, by name. */
   url(name: string): string;
+  /**
+   * Point user `name`'s next participant processes at `port` (a fault proxy in
+   * front of the executor's API) instead of the executor. The user's token and
+   * client are unchanged; only processes started afterwards dial the proxy.
+   */
+  routeThrough(name: string, port: number): void;
   /** Stop the executor and start it again on the same data, as an operator's restart does. */
   restartExecutor(): Promise<void>;
   /** The ports this world's traffic uses: the executor's API (TCP) and its SFU (UDP). */
@@ -160,6 +166,11 @@ export async function startWorld(spec: WorldSpec): Promise<World> {
         const url = urls.get(name);
         if (!url) throw new Error(`no neighbourhood "${name}"`);
         return url;
+      },
+      routeThrough: (name, proxyPort) => {
+        const user = users[name];
+        if (!user) throw new Error(`no user "${name}"`);
+        users[name] = { ...user, port: proxyPort };
       },
       ports: async () => {
         // The operator's view of the SFU, read only to aim the network impairment.

@@ -20,9 +20,9 @@
 import { leaseNet, netAvailable, type NetemOptions } from "../../net.js";
 import type { Check } from "../call.js";
 import { e2eScenario } from "../scenario.js";
+import { sleep } from "../time.js";
 
 const EVERYONE = ["u1", "u2", "u3", "u4", "u5", "u6"];
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export const e6Network = e2eScenario({
   id: "e6",

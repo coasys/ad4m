@@ -17,7 +17,6 @@
  */
 
 import { leaseNet, netAvailable, socketPorts } from "../../net.js";
-import { CAMERA } from "../media.js";
 import { e2eScenario } from "../scenario.js";
 
 const EVERYONE = ["u1", "u2", "u3"];
@@ -40,12 +39,7 @@ export const e17NetworkSwitch = e2eScenario({
     const net = await leaseNet({ onWait: () => console.log("e17: waiting for another run's impairment on this host to end") });
     const call = inSpace("space", "e17");
     try {
-      await step("three join and settle", async () => {
-        await call.join(EVERYONE);
-        await call.eventually(call.rosterIsEveryone(), 60_000, "roster");
-        await call.eventually(call.hearsEveryone(), 60_000, "audio");
-        await call.eventually(call.seesEveryone(CAMERA), 60_000, "video");
-      });
+      await step("three join and settle", () => call.settle(EVERYONE));
 
       const departuresBefore = (await call.who("u2").snapshot()).departures;
       metric("network_switch_recovery_ms", await step(`u2 switches networks: everyone hears and sees everyone again within ${RECOVERY_MS / 1000} s`, async () => {

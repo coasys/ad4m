@@ -7,11 +7,10 @@
  * the unanswered offer (10 s), carol answers, and she hears and sees dave
  * within the bound, on the same call (nobody leaves). See `lost-signal.ts`
  * for what the row asserts.
- *
- * Skipped while listed in `FAILS_ON_DEV`; `E2E_KNOWN_FAILURES=1` runs it.
  */
 
 import { matchEvent } from "../../faults/index.js";
+import { HOLD_PAST_RESEND_MS, RESEND_RECOVER_MS } from "../../faults/timing.js";
 import { lostSignalRow } from "./lost-signal.js";
 
 export const e28LostOffer = lostSignalRow({
@@ -21,9 +20,9 @@ export const e28LostOffer = lostSignalRow({
   kind: "lost-offer",
   // Offers go only to their target's sockets, so carol's proxy sees only hers.
   arm: (proxy) => ({
-    ...proxy.dropOnce({ direction: "down", match: matchEvent("sfu-call-renegotiation-offer") }),
+    ...proxy.intercept({ direction: "down", match: matchEvent("sfu-call-renegotiation-offer"), once: true, action: "drop" }),
     what: "the sfu-call-renegotiation-offer event to carol",
   }),
-  recoverMs: 25_000,
-  holdMs: 40_000,
+  recoverMs: RESEND_RECOVER_MS,
+  holdMs: HOLD_PAST_RESEND_MS,
 });

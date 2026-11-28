@@ -434,6 +434,22 @@ executor's `/metrics`.
   E18 makes the same cut, then fires `online` in the participant process
   (`Participant.networkChanged`). Both assert the call came back in place:
   u2 saw no departures, so no rebuild.
+- E25-E30 fault one participant's executor WebSocket and need no `sudo`. The
+  participant (carol) dials a `WsShaper` (`helpers/sfu/faults/wsproxy.ts`) that
+  forwards to the executor; `world.routeThrough(name, port)` swaps her port.
+  The proxy can `cut()` the sockets (E25), `silence()` them (forward nothing,
+  E26), `blackout()` (hold new dials until `restore()`, E30), and
+  `intercept({ direction, match, once, action })` a whole WebSocket message,
+  fragments included, so the stream stays valid: a lost answer request (E27), a
+  lost offer event (E28), a lost answer reply (E29, `replyTo(method)`), and the
+  state events eaten while only the `sfu.callResume` reply may bring them (E30).
+  Matching raw RPCs on the wire is exempt from the "no raw call RPCs" rule: the
+  participants still call only through the SDK. `RunChecks`
+  (`faults/checks.ts`) samples media through each fault window and fails on a
+  departure or a media stall; it is the seed of the shared Monitor of #1891
+  slice 2b. Every bound is in `faults/timing.ts`, with its source named. Unit
+  tests of the frame parser and the whole-message drop: `tests/sfu-faults.unit.test.ts`
+  (`test-perf-unit`).
 - `@roamhq/wrtc` fires `iceconnectionstatechange` when libwebrtc's legacy
   ICE state changes, but `iceConnectionState` returns the standardized
   state, which libwebrtc changes just after. On a loaded host a listener

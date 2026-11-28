@@ -57,7 +57,7 @@
     "test-ai-wind-tunnel-unit": "ts-mocha -p tsconfig.json --timeout 60000 --exit tests/ai-wind-tunnel.unit.test.ts",
     "test:agent-scale": "ts-mocha -p tsconfig.json --timeout 2700000 --exit tests/agent-scale.test.ts",
     "test-main-agent-scale": "export LOCAL_MODE=true && node scripts/cleanTestingData.js && pnpm run prepare-test-local && node scripts/cleanup.js && pnpm run test:agent-scale && node scripts/cleanup.js && node scripts/cleanTestingData.js",
-    "test-perf-unit": "ts-mocha -p tsconfig.json --timeout 60000 --exit tests/sfu-perf.unit.test.ts tests/agent-scale.unit.test.ts && node --test '../../scripts/perf/*.test.mjs'"
+    "test-perf-unit": "ts-mocha -p tsconfig.json --timeout 60000 --exit tests/sfu-perf.unit.test.ts tests/sfu-faults.unit.test.ts tests/agent-scale.unit.test.ts && node --test '../../scripts/perf/*.test.mjs'"
   },
   "devDependencies": {
     "@coasys/ad4m": "link:../../core",

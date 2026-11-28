@@ -137,6 +137,15 @@ export class Call {
     return new Map(entries);
   }
 
+  /** `names` join, then the call is an SFU call in which everyone lists, hears and sees everyone. */
+  async settle(names: string[]): Promise<void> {
+    await this.join(names);
+    await this.eventually(this.topologyIs("sfu"), 30_000, "topology");
+    await this.eventually(this.rosterIsEveryone(), 60_000, "roster");
+    await this.eventually(this.hearsEveryone(), 60_000, "audio");
+    await this.eventually(this.seesEveryone(CAMERA), 60_000, "video");
+  }
+
   async eventually(check: Check, timeoutMs: number, label: string): Promise<number> {
     const started = Date.now();
     let problems: string[] = [];
@@ -226,6 +235,28 @@ export class Call {
       if (theirs.length === 0) return `hears nothing from ${other}`;
       const heard = theirs.map((s) => (s.tone == null ? "silence" : `${s.tone} Hz (${this.toneOwner(s.tone)})`)).join(", ");
       return `hears ${heard} from ${other}, who sends ${expected} Hz`;
+    }, among);
+  }
+
+  /**
+   * Audio and video frames from every other participant grew since `since`
+   * (an earlier snapshot of the call, `spanMs` ago): the media flows now, not
+   * only did once. A pair is skipped while `since` has no counters for it
+   * (one of them joined after it) or while either process just stood still
+   * (`pausedMs`: the harness stopped, not the call). `among` narrows it to
+   * those participants.
+   */
+  framesGrow(since: Map<string, Snapshot>, spanMs: number, among?: string[]): Check {
+    return this.pairs((snapshot, other, me, snapshots) => {
+      if ([me, other].some((name) => (snapshots.get(name)?.pausedMs ?? 0) >= PAUSE_MS)) return null;
+      const did = this.did(other);
+      const now = snapshot.remotes[did];
+      const then = since.get(me)?.remotes[did];
+      if (!then) return null;
+      const problems = ([["audio", "audioFrames"], ["video", "videoFrames"]] as const)
+        .filter(([, key]) => !now || now[key] <= then[key])
+        .map(([kind]) => `${kind} frames from ${other} did not grow over ${spanMs}ms`);
+      return problems.length ? problems.join("; ") : null;
     }, among);
   }
 

@@ -5,14 +5,12 @@
  * `sfu.callAnswerServerOffer` request is eaten by the framing proxy, so the
  * executor never applies it. The executor resends the unanswered offer (10 s)
  * and carol's answer to that must land; her lost call must not cost the call
- * (on dev the call's 30 s timeout reads as a failed renegotiation and
- * rebuilds it). See `lost-signal.ts` for what the row asserts.
- *
- * Gates slice 3. Skipped while listed in `FAILS_ON_DEV`;
- * `E2E_KNOWN_FAILURES=1` runs it.
+ * (the call's 30 s RPC timeout must not read as a failed renegotiation and
+ * rebuild it). See `lost-signal.ts` for what the row asserts.
  */
 
 import { matchRpc } from "../../faults/index.js";
+import { HOLD_PAST_TIMEOUT_MS, RESEND_RECOVER_MS } from "../../faults/timing.js";
 import { lostSignalRow } from "./lost-signal.js";
 
 export const e27LostAnswer = lostSignalRow({
@@ -21,9 +19,9 @@ export const e27LostAnswer = lostSignalRow({
   description: "carol's sfu.callAnswerServerOffer request for the offer dave's join starts is eaten: the offer's resend carries the call without a rebuild",
   kind: "lost-answer",
   arm: (proxy) => ({
-    ...proxy.dropOnce({ direction: "up", match: matchRpc("sfu.callAnswerServerOffer") }),
+    ...proxy.intercept({ direction: "up", match: matchRpc("sfu.callAnswerServerOffer"), once: true, action: "drop" }),
     what: "carol's sfu.callAnswerServerOffer request",
   }),
-  recoverMs: 25_000,
-  holdMs: 45_000,
+  recoverMs: RESEND_RECOVER_MS,
+  holdMs: HOLD_PAST_TIMEOUT_MS,
 });

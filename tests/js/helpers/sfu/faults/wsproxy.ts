@@ -1,23 +1,30 @@
 /**
- * A WebSocket-aware proxy between one client and the executor's API port.
+ * A WebSocket-aware proxy between one client and the executor's API port:
+ * the no-sudo way to make socket and message faults (`tc` needs root).
  *
- * Message loss on the app's socket cannot be modelled by dropping TCP bytes:
- * a byte hole corrupts the WebSocket stream's framing for everything after
- * it. This proxy parses the framing itself, so a whole *message* can be
- * dropped while the stream stays valid — "the request never arrived" or "the
- * event never arrived", with every ping, pong and other message delivered.
+ * Socket faults, on the TCP connections the client holds through it:
+ *  - `cut()` destroys them both ways: the client's WebSocket dies while its
+ *    media (UDP, never proxied) keeps flowing;
+ *  - `silence()` keeps them open and forwards nothing on them, in either
+ *    direction, for good: the socket a browser reads as open that nobody
+ *    answers on. A new dial passes;
+ *  - `blackout()` cuts, and holds every new dial (no answer, as a SYN
+ *    retransmits) until `restore()`, then connects it;
+ *  - `connections()` lists every connection so far with the bytes that
+ *    crossed it, so a row sees the client dial a new one.
  *
- * `dropOnce` arms one predicate; the first message matching it, in the armed
- * direction, is eaten and every later message passes. `dropReplyOnce` eats
- * the executor's reply to the first request of a method instead: the call
- * was applied, its caller never hears so. `dropWhile` eats every matching
- * message until stopped, and `observeReply` lets a request's reply through
- * and reports it. Each eaten message carries the time it was eaten.
+ * Message faults: a byte hole corrupts the WebSocket stream's framing for
+ * everything after it, so the proxy parses the framing itself and `intercept`
+ * eats or reports a whole *message* while every ping, pong and other message
+ * is delivered. A rule has a direction, a `match` (see `matchRpc`,
+ * `matchEvent`, `replyTo`), `once` or not, and an action: `drop` eats the
+ * message, `observe` lets it through and reports it. Each message a rule hit
+ * carries the time it crossed.
  *
  * Scope: plaintext `ws` only (no TLS). It neither negotiates away nor
- * decodes permessage-deflate: a compressed message would not match a
- * predicate (the executor offers no extension today). A half-close is not
- * kept: either side's end destroys both.
+ * decodes permessage-deflate: a compressed message would not match (the
+ * executor offers no extension today). A half-close is not kept: either
+ * side's end destroys both.
  */
 
 import { connect, createServer, type AddressInfo, type Server, type Socket } from "node:net";
@@ -25,9 +32,15 @@ import { connect, createServer, type AddressInfo, type Server, type Socket } fro
 /** The client's WebSocket points at the proxy; `up` is client→executor. */
 export type WsDirection = "up" | "down";
 
-export type WsMatch = (text: string, opcode: number) => boolean;
+/**
+ * Whether a message matches. It is asked about every message, in both
+ * directions, so a match can learn from one (`replyTo` reads the request's
+ * id); a rule acts only on a message going in its own direction.
+ */
+export type WsMatch = (text: string, direction: WsDirection) => boolean;
 
-export interface DroppedMessage {
+/** A message a rule hit. */
+export interface InterceptedMessage {
   direction: WsDirection;
   opcode: number;
   /** Decoded payload; text decoded as UTF-8. */
@@ -35,37 +48,80 @@ export interface DroppedMessage {
   bytes: number;
   /** RFC 6455 frames the message was made of. */
   frames: number;
-  /** ms epoch when the proxy ate it. */
+  /** ms epoch when it crossed the proxy (or was eaten). */
   at: number;
+  /** True when a `drop` rule ate it. */
+  dropped: boolean;
 }
 
-/** A reply the proxy let through, as `observeReply` reports it. */
-export interface ObservedReply {
-  /** The reply's JSON: `result` on success, `error` on a refusal. */
-  reply: { id: unknown; result?: unknown; error?: unknown };
-  /** ms epoch when it crossed the proxy. */
-  at: number;
+export interface Interception {
+  /** Every message the rule hit so far. */
+  seen: InterceptedMessage[];
+  /** Resolves with the first one. */
+  first: Promise<InterceptedMessage>;
+  /** Remove the rule. */
+  stop(): void;
 }
 
-export interface WsProxyEvent {
-  t: string;
+export interface ShaperConnection {
   conn: number;
-  what: "open" | "close" | "drop";
-  direction?: WsDirection;
-  text?: string;
-  by?: "client" | "executor";
+  open: boolean;
+  /** Bytes forwarded client→executor and executor→client. */
+  upBytes: number;
+  downBytes: number;
 }
 
-const OPCODE_CONTINUATION = 0x0;
-const OPCODE_TEXT = 0x1;
-const OPCODE_BINARY = 0x2;
+/** A JSON-RPC message of the executor's socket: a request (`type` = method, `id`), an event (`type`), or a reply (`id`, `result` or `error`). */
+export interface RpcMessage {
+  type?: string;
+  id?: unknown;
+  result?: unknown;
+  error?: unknown;
+  [key: string]: unknown;
+}
+
+/** The message as an object, or null when it is not a JSON object (a binary frame, say). */
+export function parse(text: string): RpcMessage | null {
+  try {
+    const message = JSON.parse(text);
+    return message !== null && typeof message === "object" ? message : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A request for `method`. */
+export const matchRpc =
+  (method: string): WsMatch =>
+  (text) => {
+    const m = parse(text);
+    return m !== null && m.type === method && m.id !== undefined;
+  };
+
+/** An event named `name`. */
+export const matchEvent =
+  (name: string): WsMatch =>
+  (text) => parse(text)?.type === name;
+
+/** The reply to the first `method` request the client sends from now on: no `type`, the request's id. */
+export const replyTo = (method: string): WsMatch => {
+  const request = matchRpc(method);
+  let id: unknown;
+  return (text, direction) => {
+    if (direction === "up") {
+      if (id === undefined && request(text, direction)) id = parse(text)!.id;
+      return false;
+    }
+    const m = parse(text);
+    return id !== undefined && m !== null && m.type === undefined && m.id === id;
+  };
+};
+
 const OPCODE_CLOSE = 0x8;
-const OPCODE_PING = 0x9;
-const OPCODE_PONG = 0xa;
 
 const isControl = (opcode: number): boolean => opcode >= OPCODE_CLOSE;
 
-interface Frame {
+export interface Frame {
   fin: boolean;
   opcode: number;
   /** The frame's wire bytes, mask included: forwarded as they arrived. */
@@ -75,7 +131,7 @@ interface Frame {
 }
 
 /** Splits a byte stream into RFC 6455 frames. */
-class FrameParser {
+export class FrameParser {
   private buf = Buffer.alloc(0);
   feed(chunk: Buffer): Frame[] {
     this.buf = this.buf.length === 0 ? chunk : Buffer.concat([this.buf, chunk]);
@@ -123,68 +179,41 @@ interface PendingMessage {
   payloads: Buffer[];
 }
 
-interface DropRule {
+interface Rule {
   direction: WsDirection | "both";
   match: WsMatch;
-  resolve: (dropped: DroppedMessage) => void;
-  /** Eats every match until removed, not only the first. */
-  persistent?: boolean;
+  once: boolean;
+  action: "drop" | "observe";
+  hit: (message: InterceptedMessage) => void;
 }
 
-/** The reply to a JSON-RPC request with `id`: no `type`, same id. */
-const isReplyTo = (text: string, id: unknown): boolean => {
-  try {
-    const m = JSON.parse(text);
-    return m != null && typeof m === "object" && m.type === undefined && m.id === id;
-  } catch {
-    return false;
-  }
-};
-
-/** Predicates for the messages a scenario drops. */
-export const matchRpc =
-  (method: string): WsMatch =>
-  (text) => {
-    try {
-      const m = JSON.parse(text);
-      return m != null && typeof m === "object" && m.type === method && m.id !== undefined;
-    } catch {
-      return false;
-    }
-  };
-
-export const matchEvent =
-  (name: string): WsMatch =>
-  (text) => {
-    try {
-      const m = JSON.parse(text);
-      return m != null && typeof m === "object" && m.type === name;
-    } catch {
-      return false;
-    }
-  };
+interface Live {
+  info: ShaperConnection;
+  silent: boolean;
+  sever: () => void;
+}
 
 /** The most handshake bytes buffered before the proxy gives up upgrading. */
 const HANDSHAKE_LIMIT = 64 * 1024;
 
-/** A TCP proxy to `127.0.0.1:target` that can drop whole WebSocket messages. */
+/** A TCP proxy to `127.0.0.1:target` that parses the WebSocket framing on it and can fault the sockets and the messages. */
 export class WsShaper {
   private server: Server;
   private connSeq = 0;
   private sockets = new Set<Socket>();
-  private rules: DropRule[] = [];
-  /** Requests whose reply is to be eaten: armed by `dropReplyOnce`. */
-  private replyRules: { method: string; resolve: (dropped: DroppedMessage) => void }[] = [];
-  /** Requests whose reply is to be reported, and then the ids they were sent with. */
-  private replyWatches: { method: string; resolve: (observed: ObservedReply) => void }[] = [];
-  private watchedIds = new Map<unknown, (observed: ObservedReply) => void>();
+  private rules: Rule[] = [];
+  private conns = new Map<number, Live>();
+  private blackedOut = false;
+  /** Dials waiting out a blackout, with the listener that forgets one that goes away. */
+  private held = new Map<Socket, () => void>();
+  private closed = false;
   port = 0;
-  droppedLog: DroppedMessage[] = [];
-  constructor(
-    private target: number,
-    private onEvent: (e: WsProxyEvent) => void = () => {},
-  ) {
-    this.server = createServer((client) => this.attach(client));
+  constructor(private target: number) {
+    this.server = createServer((client) => {
+      if (this.closed) return void client.destroy();
+      if (this.blackedOut) return this.hold(client);
+      this.attach(client);
+    });
   }
 
   async listen(): Promise<number> {
@@ -193,87 +222,99 @@ export class WsShaper {
     return this.port;
   }
 
-  /**
-   * Arm a drop for the first message matching `match`, in `direction`
-   * (`"up"` client→executor, `"down"` executor→client, default both).
-   * `match` may be a substring, a RegExp, or `(text, opcode) => boolean`.
-   * The returned promise resolves once the message was eaten; only that one
-   * message is dropped.
-   */
-  dropOnce(opts: { direction?: WsDirection | "both"; match: string | RegExp | WsMatch }): { dropped: Promise<DroppedMessage> } {
-    const match: WsMatch =
-      typeof opts.match === "string"
-        ? (text) => text.includes(opts.match as string)
-        : opts.match instanceof RegExp
-          ? (text) => (opts.match as RegExp).test(text)
-          : opts.match;
-    const dropped = new Promise<DroppedMessage>((resolve) => {
-      this.rules.push({ direction: opts.direction ?? "both", match, resolve });
-    });
-    return { dropped };
+  /** Every connection so far, open or closed, oldest first. */
+  connections(): ShaperConnection[] {
+    return [...this.conns.values()].map((live) => ({ ...live.info }));
+  }
+
+  private open(): Live[] {
+    return [...this.conns.values()].filter((live) => live.info.open);
   }
 
   /**
-   * Eat the executor's reply to the first `method` request the client sends
-   * from now on: the request reaches the executor and is applied, the client
-   * never hears the result. Resolves once the reply was eaten.
+   * Destroy every open connection both ways: the client's WebSocket gets a
+   * close while the link itself, and the UDP media beside it, is fine. The
+   * listener stays up, so the next dial lands on a working connection.
+   * Returns the ids of the connections cut.
    */
-  dropReplyOnce(method: string): { dropped: Promise<DroppedMessage> } {
-    const dropped = new Promise<DroppedMessage>((resolve) => {
-      this.replyRules.push({ method, resolve });
-    });
-    return { dropped };
+  cut(): number[] {
+    const live = this.open();
+    for (const l of live) l.sever();
+    return live.map((l) => l.info.conn);
   }
 
   /**
-   * Eat every message matching `match` in `direction` (default both) until
-   * `stop()`. `dropped` lists what was eaten so far, each with its time.
+   * The connections open now stay open and forward nothing, either way, for
+   * the rest of their life: no FIN, no RST, while a new dial passes. Bytes
+   * are never dropped mid-message but held back whole, which would corrupt
+   * the stream otherwise. Returns the ids of the connections silenced.
    */
-  dropWhile(opts: { direction?: WsDirection | "both"; match: WsMatch }): { dropped: DroppedMessage[]; stop(): void } {
-    const dropped: DroppedMessage[] = [];
-    const rule: DropRule = { direction: opts.direction ?? "both", match: opts.match, resolve: (d) => dropped.push(d), persistent: true };
+  silence(): number[] {
+    const live = this.open();
+    for (const l of live) l.silent = true;
+    return live.map((l) => l.info.conn);
+  }
+
+  /**
+   * The link goes away: every open connection is cut, and a dial meanwhile
+   * gets no answer until `restore()`. Returns the ids of the connections cut.
+   */
+  blackout(): number[] {
+    this.blackedOut = true;
+    return this.cut();
+  }
+
+  /** The link is back: held dials connect, and new ones pass. */
+  restore(): void {
+    this.blackedOut = false;
+    for (const [client, forget] of this.held) {
+      client.off("error", forget);
+      client.off("close", forget);
+      this.held.delete(client);
+      if (client.destroyed || this.closed) continue;
+      this.attach(client);
+      client.resume();
+    }
+  }
+
+  /**
+   * Arm a rule on messages going in `direction`. `drop` eats a match: the
+   * receiver never sees it, the stream stays valid. `observe` lets it through
+   * and reports it. `once` ends the rule at its first hit. The rule is armed
+   * when this returns, so a message sent after it is seen.
+   */
+  intercept(opts: { direction: WsDirection | "both"; match: WsMatch; once: boolean; action: "drop" | "observe" }): Interception {
+    const seen: InterceptedMessage[] = [];
+    let resolveFirst!: (message: InterceptedMessage) => void;
+    const first = new Promise<InterceptedMessage>((resolve) => (resolveFirst = resolve));
+    const rule: Rule = {
+      ...opts,
+      hit: (message) => {
+        seen.push(message);
+        if (seen.length === 1) resolveFirst(message);
+      },
+    };
     this.rules.push(rule);
     return {
-      dropped,
+      seen,
+      first,
       stop: () => {
         this.rules = this.rules.filter((r) => r !== rule);
       },
     };
   }
 
-  /**
-   * Report the executor's reply to the first `method` request the client
-   * sends from now on, and let it through. Resolves once it crossed.
-   */
-  observeReply(method: string): { reply: Promise<ObservedReply> } {
-    const reply = new Promise<ObservedReply>((resolve) => {
-      this.replyWatches.push({ method, resolve });
-    });
-    return { reply };
-  }
-
-  /** An up request a reply rule or watch waits for: arm the drop or the report of its reply. */
-  private armReply(text: string): void {
-    const watch = this.replyWatches.findIndex((r) => matchRpc(r.method)(text, OPCODE_TEXT));
-    if (watch !== -1) {
-      const [w] = this.replyWatches.splice(watch, 1);
-      this.watchedIds.set(JSON.parse(text).id, w.resolve);
-    }
-    const idx = this.replyRules.findIndex((r) => matchRpc(r.method)(text, OPCODE_TEXT));
-    if (idx === -1) return;
-    const [rule] = this.replyRules.splice(idx, 1);
-    const id = JSON.parse(text).id;
-    this.rules.push({ direction: "down", match: (reply) => isReplyTo(reply, id), resolve: rule.resolve });
-  }
-
-  /** A down message that answers a watched request: report it. */
-  private reportReply(text: string): void {
-    for (const [id, resolve] of this.watchedIds) {
-      if (!isReplyTo(text, id)) continue;
-      this.watchedIds.delete(id);
-      resolve({ reply: JSON.parse(text), at: Date.now() });
-      return;
-    }
+  private hold(client: Socket): void {
+    client.pause();
+    this.sockets.add(client);
+    const forget = () => {
+      this.held.delete(client);
+      this.sockets.delete(client);
+      client.destroy();
+    };
+    this.held.set(client, forget);
+    client.on("error", forget);
+    client.on("close", forget);
   }
 
   private attach(client: Socket): void {
@@ -282,7 +323,17 @@ export class WsShaper {
     client.setNoDelay(true);
     executor.setNoDelay(true);
     this.sockets.add(client).add(executor);
-    this.onEvent({ t: new Date().toISOString(), conn, what: "open" });
+
+    const info: ShaperConnection = { conn, open: true, upBytes: 0, downBytes: 0 };
+    const live: Live = {
+      info,
+      silent: false,
+      sever: () => {
+        client.destroy();
+        executor.destroy();
+      },
+    };
+    this.conns.set(conn, live);
 
     const parsers = { up: new FrameParser(), down: new FrameParser() };
     const pending = { up: null as PendingMessage | null, down: null as PendingMessage | null };
@@ -293,24 +344,28 @@ export class WsShaper {
     let head = Buffer.alloc(0);
 
     const forward = (dir: WsDirection, raws: Buffer[]): void => {
-      for (const raw of raws) if (!dst[dir].destroyed) dst[dir].write(raw);
+      if (live.silent) return;
+      for (const raw of raws) {
+        if (dst[dir].destroyed) continue;
+        dst[dir].write(raw);
+        if (dir === "up") info.upBytes += raw.length;
+        else info.downBytes += raw.length;
+      }
     };
 
     const completeMessage = (dir: WsDirection, msg: PendingMessage): void => {
       const text = Buffer.concat(msg.payloads).toString("utf8");
-      if (dir === "up") this.armReply(text);
-      const idx = this.rules.findIndex((r) => (r.direction === "both" || r.direction === dir) && safeMatch(r.match, text, msg.opcode));
-      if (idx === -1) {
-        forward(dir, msg.raws);
-        if (dir === "down") this.reportReply(text);
-        return;
+      const at = Date.now();
+      let dropped = false;
+      // Every rule's match sees every message (a match may learn from one); a hit acts only in the rule's direction.
+      for (const rule of [...this.rules]) {
+        if (!safeMatch(rule.match, text, dir)) continue;
+        if (rule.direction !== "both" && rule.direction !== dir) continue;
+        if (rule.once) this.rules = this.rules.filter((r) => r !== rule);
+        if (rule.action === "drop") dropped = true;
+        rule.hit({ direction: dir, opcode: msg.opcode, text, bytes: msg.raws.reduce((n, r) => n + r.length, 0), frames: msg.raws.length, at, dropped: rule.action === "drop" });
       }
-      const rule = this.rules[idx];
-      if (!rule.persistent) this.rules.splice(idx, 1);
-      const dropped: DroppedMessage = { direction: dir, opcode: msg.opcode, text, bytes: msg.raws.reduce((n, r) => n + r.length, 0), frames: msg.raws.length, at: Date.now() };
-      this.droppedLog.push(dropped);
-      this.onEvent({ t: new Date().toISOString(), conn, what: "drop", direction: dir, text: text.slice(0, 200) });
-      rule.resolve(dropped);
+      if (!dropped) forward(dir, msg.raws);
     };
 
     const feedFrames = (dir: WsDirection, buf: Buffer): void => {
@@ -371,32 +426,29 @@ export class WsShaper {
       }
     });
 
-    let by: "client" | "executor" | null = null;
-    const drop = (who: "client" | "executor") => () => {
-      if (!by) {
-        by = who;
-        this.onEvent({ t: new Date().toISOString(), conn, what: "close", by });
-      }
+    const gone = () => {
+      info.open = false;
       client.destroy();
       executor.destroy();
       this.sockets.delete(client);
       this.sockets.delete(executor);
     };
-    client.on("error", drop("client"));
-    executor.on("error", drop("executor"));
-    client.on("close", drop("client"));
-    executor.on("close", drop("executor"));
+    client.on("error", gone);
+    executor.on("error", gone);
+    client.on("close", gone);
+    executor.on("close", gone);
   }
 
   close(): void {
+    this.closed = true;
     this.server.close();
     for (const s of this.sockets) s.destroy();
   }
 }
 
-function safeMatch(match: WsMatch, text: string, opcode: number): boolean {
+function safeMatch(match: WsMatch, text: string, direction: WsDirection): boolean {
   try {
-    return match(text, opcode);
+    return match(text, direction);
   } catch {
     return false;
   }

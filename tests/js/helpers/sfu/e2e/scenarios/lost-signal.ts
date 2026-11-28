@@ -16,30 +16,21 @@
  *    other, within `recoverMs` of the moment the proxy ate the message
  *    (its own timestamp, not the end of dave's join);
  *  - the three already in the call hear and see each other in every sample
- *    from the drop until past the dropped call's 30 s RPC timeout (`holdMs`),
- *    so a rebuild a timeout starts is caught;
- *  - nobody records `participant-left`.
+ *    from the drop until `holdMs` after it (past the dropped call's 30 s RPC
+ *    timeout), so a rebuild a timeout starts is caught;
+ *  - nobody records `participant-left`, and dave's media is checked to grow
+ *    like everyone's.
  */
 
 import { all } from "../call.js";
 import { CAMERA } from "../media.js";
 import { e2eScenario, type E2eDefinition } from "../scenario.js";
-import { RunChecks, WsShaper, failsOnDev, rowPassed, type DroppedMessage } from "../../faults/index.js";
+import { within } from "../time.js";
+import { RunChecks, WsShaper, type InterceptedMessage } from "../../faults/index.js";
+import { DROP_TIMEOUT_MS } from "../../faults/timing.js";
 
 const PRESENT = ["alice", "bob", "carol"];
 const EVERYONE = [...PRESENT, "dave"];
-/** How long after the drop is armed (dave's join included) the message must cross the proxy. */
-const DROP_TIMEOUT_MS = 30_000;
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-async function awaitWithin<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout>;
-  const timed = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`after ${ms}ms: ${what}`)), ms);
-  });
-  return Promise.race([promise, timed]).finally(() => clearTimeout(timer));
-}
 
 export interface LostSignalRow {
   id: string;
@@ -48,12 +39,12 @@ export interface LostSignalRow {
   /** The fault's kind in the checks' report. */
   kind: string;
   /** Arm the drop on carol's proxy; `what` names the message for a timeout. */
-  arm(proxy: WsShaper): { dropped: Promise<DroppedMessage>; what: string };
+  arm(proxy: WsShaper): { first: Promise<InterceptedMessage>; what: string };
   /** Throws when the eaten message is not the one the row means to lose. */
-  check?(dropped: DroppedMessage): void;
+  check?(dropped: InterceptedMessage): void;
   /** carol and dave hear, see and list each other within this of the drop. */
   recoverMs: number;
-  /** Watch the call this long after the drop: past a dropped call's 30 s timeout and the rebuild it starts. */
+  /** Watch the call this long after the drop (`timing.ts` names what it must outlast). */
   holdMs: number;
 }
 
@@ -66,47 +57,42 @@ export function lostSignalRow(row: LostSignalRow): ReturnType<typeof e2eScenario
       users: EVERYONE.map((name) => ({ name })),
       neighbourhoods: [{ name: "space", owner: "alice", members: EVERYONE, call: { mode: "designated" } }],
     },
-    unavailable: () => failsOnDev(row.id),
     async run({ world, call: inSpace, step }) {
       const call = inSpace("space", row.id);
       const proxy = new WsShaper(world.users.carol.port);
       await proxy.listen();
-      world.users.carol = { ...world.users.carol, port: proxy.port };
+      world.routeThrough("carol", proxy.port);
       let checks: RunChecks | undefined;
       try {
-        await step("three join and settle", async () => {
-          await call.join(PRESENT);
-          await call.eventually(call.topologyIs("sfu"), 30_000, "topology");
-          await call.eventually(call.rosterIsEveryone(), 60_000, "roster");
-          await call.eventually(call.hearsEveryone(), 60_000, "audio");
-          await call.eventually(call.seesEveryone(CAMERA), 60_000, "video");
-        });
+        await step("three join and settle", () => call.settle(PRESENT));
 
-        checks = new RunChecks(call, { recoverMs: 20_000, maxDepartures: 0 });
+        checks = new RunChecks(call);
         await checks.start();
         const fault = checks.fault(row.kind, ["carol"], { uninterrupted: true });
-        const { dropped, what } = row.arm(proxy);
+        const { first, what } = row.arm(proxy);
         let droppedAt = 0;
+        const everyone = all(call.rosterIsEveryone(), call.hearsEveryone(), call.seesEveryone(CAMERA));
 
         await step(`dave joins; ${what} is lost`, async () => {
           // The wait for the drop starts now, beside the join: the drop can come before the join returns.
           const joined = call.join(["dave"]);
           joined.catch(() => {});
-          const message = await awaitWithin(dropped, DROP_TIMEOUT_MS, `no ${what} crossed carol's proxy`);
+          const message = await within(DROP_TIMEOUT_MS, first, `no ${what} crossed carol's proxy`);
           droppedAt = message.at;
           row.check?.(message);
           await joined;
         });
 
         await step(`carol and dave list, hear and see each other within ${row.recoverMs / 1000} s`, async () => {
-          const remaining = Math.max(1, row.recoverMs - (Date.now() - droppedAt));
-          await call.eventually(all(call.rosterIsEveryone(), call.hearsEveryone(), call.seesEveryone(CAMERA)), remaining, "recovery");
+          const remaining = row.recoverMs - (Date.now() - droppedAt);
+          if (remaining <= 0) throw new Error(`recovery: the ${row.recoverMs}ms bound from the drop had passed when dave's join returned`);
+          await call.eventually(everyone, remaining, "recovery");
         });
 
         await step("the call holds past the dropped call's timeout", async () => {
-          await sleep(Math.max(0, droppedAt + row.holdMs - Date.now()));
+          await call.holds(everyone, Math.max(0, droppedAt + row.holdMs - Date.now()), "the call after the drop");
           fault.end();
-          await call.eventually(all(call.rosterIsEveryone(), call.hearsEveryone(), call.seesEveryone(CAMERA)), 1, "after the hold");
+          await call.eventually(everyone, 1, "after the hold");
         });
 
         await step("nobody left, and media flowed on every pair throughout", async () => {
@@ -114,7 +100,6 @@ export function lostSignalRow(row: LostSignalRow): ReturnType<typeof e2eScenario
           if (violations.length) throw new Error(violations.join("\n"));
         });
         await step("no session reported an error", () => call.eventually(call.noErrors(), 1, "errors"));
-        rowPassed(row.id);
       } finally {
         await checks?.abort();
         proxy.close();
