@@ -190,11 +190,17 @@ const ITEM_SHAPE_JSON: &str = r#"{
     }
 }"#;
 
+/// A second class for the union read, with a title of its own.
+const NOTE_SHAPE_JSON: &str = r#"{
+    "className": "Note",
+    "properties": {
+        "title": {"predicate":"pc://title","required":false}
+    }
+}"#;
+
 /// A parent holding one record and one literal whose text is the address of another node with a
-/// title: the literal is no member, and the node it names is not read in its place, whichever
-/// read asks for the ids (the unpaged read, a `createdAt` page, a union's creation-time order).
-#[tokio::test]
-async fn a_literal_target_is_not_read_as_the_node_its_text_names() {
+/// title.
+fn parent_with_a_literal_target() -> SparqlStore {
     let store = SparqlStore::new(None).unwrap();
     let me = TestSigner::generate();
     add(
@@ -218,16 +224,58 @@ async fn a_literal_target_is_not_read_as_the_node_its_text_names() {
             ),
         ],
     );
+    store
+}
+
+/// The literal is no member, and the node its text names is not read in its place: in the unpaged
+/// read, a page ordered by `createdAt`, and a page ordered by a property (whose order link is
+/// OPTIONAL, so only the selection can leave the literal out).
+#[tokio::test]
+async fn a_literal_target_is_not_read_as_the_node_its_text_names() {
+    let store = parent_with_a_literal_target();
     let scope = json!({ "id": "pc://parent", "predicate": "pc://child" });
     for query in [
         json!({ "parent": scope }),
         json!({ "parent": scope, "order": { "createdAt": "ASC" }, "limit": 10 }),
+        json!({ "parent": scope, "order": { "title": "ASC" }, "limit": 10 }),
     ] {
         let input: ModelQueryInput = serde_json::from_value(query.clone()).unwrap();
         let got = execute_model_query_from_json(&store, "Item", &input, ITEM_SHAPE_JSON)
             .await
             .unwrap()
             .instances;
+        let ids: Vec<&str> = got.iter().filter_map(|i| i["id"].as_str()).collect();
+        assert_eq!(ids, ["pc://item"], "{query}: {got:?}");
+    }
+}
+
+/// The same read over two classes, in a union's id phase and with its creation-time order.
+#[tokio::test]
+async fn a_union_does_not_read_a_literal_target_as_the_node_its_text_names() {
+    use crate::perspectives::model_query::test_helpers::StaticShapeResolver;
+    use crate::perspectives::model_query::union::execute_union_query;
+    let store = parent_with_a_literal_target();
+    let (resolver, _) = StaticShapeResolver::from_json("Item", ITEM_SHAPE_JSON).unwrap();
+    let note =
+        crate::perspectives::model_query::shape::parse_shape_from_json(NOTE_SHAPE_JSON, "Note")
+            .unwrap();
+    resolver.register("Note", note);
+    let scope = json!({ "id": "pc://parent", "predicate": "pc://child" });
+    for query in [
+        json!({ "parent": scope }),
+        json!({ "parent": scope, "order": { "createdAt": "ASC" }, "limit": 10 }),
+        json!({ "parent": scope, "order": { "title": "ASC" }, "limit": 10 }),
+    ] {
+        let input: ModelQueryInput = serde_json::from_value(query.clone()).unwrap();
+        let got = execute_union_query(
+            &store,
+            &["Item".to_string(), "Note".to_string()],
+            &input,
+            &resolver,
+        )
+        .await
+        .unwrap()
+        .instances;
         let ids: Vec<&str> = got.iter().filter_map(|i| i["id"].as_str()).collect();
         assert_eq!(ids, ["pc://item"], "{query}: {got:?}");
     }
@@ -270,4 +318,67 @@ fn a_kind_read_asks_for_its_ids_apart_from_their_links() {
             && !created_at.contains("?source <pc://flag> <pc://task>"),
         "the links are bound to the ids found, not the membership check: {created_at}"
     );
+}
+
+/// An optional-only class under a reverse transitive containment walk that reaches a node whose
+/// id cannot be written as `<...>` (a legacy Flux form): nothing but the walk selects it.
+#[tokio::test]
+async fn a_walk_reaching_a_legacy_id_reads_it_for_a_class_with_no_required_property() {
+    let store = SparqlStore::new(None).unwrap();
+    let me = TestSigner::generate();
+    let legacy = "literal://string:legacyholder";
+    add(
+        &store,
+        [
+            signed(&me, legacy, "ad4m://has_child", "pc://leaf", 1),
+            signed(&me, legacy, "pc://title", "literal:string:legacy", 1),
+            signed(&me, "pc://top", "ad4m://has_child", legacy, 2),
+            signed(&me, "pc://top", "pc://title", "literal:string:top", 2),
+        ],
+    );
+    let query =
+        json!({ "parent": { "ids": ["pc://leaf"], "transitive": true, "direction": "in" } });
+    let input: ModelQueryInput = serde_json::from_value(query.clone()).unwrap();
+    let mut got: Vec<String> =
+        execute_model_query_from_json(&store, "Item", &input, ITEM_SHAPE_JSON)
+            .await
+            .unwrap()
+            .instances
+            .iter()
+            .filter_map(|i| i["id"].as_str().map(str::to_string))
+            .collect();
+    got.sort();
+    assert_eq!(got, [legacy, "pc://top"], "{query}");
+}
+
+/// Required properties whose names end in an annotation's name (`name_proofValid`) share no
+/// variable with the guard: the instance is read by the default guard and by a status guard.
+#[tokio::test]
+async fn a_property_named_like_a_guard_variable_does_not_pin_the_guard() {
+    const SHAPE: &str = r#"{
+        "className": "Odd",
+        "properties": {
+            "name": {"predicate":"pc://name","required":true},
+            "name_proofValid": {"predicate":"pc://np","required":true},
+            "name_status": {"predicate":"pc://ns","required":true}
+        }
+    }"#;
+    let store = SparqlStore::new(None).unwrap();
+    let me = TestSigner::generate();
+    add(
+        &store,
+        [
+            signed(&me, "pc://odd", "pc://name", "literal:string:n", 1),
+            signed(&me, "pc://odd", "pc://np", "literal:string:p", 1),
+            signed(&me, "pc://odd", "pc://ns", "literal:string:s", 1),
+        ],
+    );
+    for query in [json!({}), json!({ "linkStatus": "shared" })] {
+        let input: ModelQueryInput = serde_json::from_value(query.clone()).unwrap();
+        let got = execute_model_query_from_json(&store, "Odd", &input, SHAPE)
+            .await
+            .unwrap()
+            .instances;
+        assert_eq!(got.len(), 1, "{query}: {got:?}");
+    }
 }

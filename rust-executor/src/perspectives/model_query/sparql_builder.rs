@@ -34,8 +34,8 @@ use super::types::{
     ScopeDirection, ShapeResolver, SortKey, SparqlPagination, WhereCondition,
 };
 use super::utils::{
-    emittable_iri, escape_sparql_string, format_literal_number, looks_like_absolute_iri,
-    not_in_filter, validate_iri, values_or_str_filter,
+    binding_values_or_str_filter, emittable_iri, escape_sparql_string, format_literal_number,
+    looks_like_absolute_iri, not_in_filter, validate_iri, values_or_str_filter,
 };
 
 /// The variable a [`Scope::Traverse`] binds its anchor to.
@@ -217,6 +217,7 @@ pub(super) fn build_instance_sparql(
 ) -> InstanceQueryPlan {
     let (conformance, where_extra) = build_query_patterns(shape, query, resolver);
     let guard = LinkGuard::of(query);
+    let selection = selection_of(&conformance, &where_extra);
 
     let needed = instance_link_predicates(shape);
 
@@ -304,8 +305,7 @@ pub(super) fn build_instance_sparql(
                 format!(
                     r#"SELECT DISTINCT ?source{anchor_select} (MIN(?_first_ts_v) AS ?_first_ts) WHERE {{
             {ts_probe}
-{conformance}
-{where_extra}
+{selection}
         }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
                 )
             }
@@ -323,8 +323,7 @@ pub(super) fn build_instance_sparql(
                 let link = order_key_link(guard, "?source", predicate, "?_sort_raw");
                 format!(
                     r#"SELECT DISTINCT ?source{anchor_select} (SAMPLE(?_nv) AS ?_sort_num) (SAMPLE(?_sv) AS ?_sort_str) WHERE {{
-{conformance}
-{where_extra}
+{selection}
             OPTIONAL {{ {link} BIND(STR(<ad4m://fn/parse_literal>(?_sort_raw)) AS ?_sv) BIND(<http://www.w3.org/2001/XMLSchema#double>(STR(<ad4m://fn/parse_literal>(?_sort_raw))) AS ?_nv) }}
         }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
                 )
@@ -333,8 +332,7 @@ pub(super) fn build_instance_sparql(
                 let link = order_key_link(guard, "?source", predicate, "?_proj_t");
                 format!(
                     r#"SELECT DISTINCT ?source{anchor_select} (COUNT(DISTINCT ?_proj_t) AS ?_proj_sort) WHERE {{
-{conformance}
-{where_extra}
+{selection}
             OPTIONAL {{ {link} }}
         }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
                 )
@@ -347,8 +345,7 @@ pub(super) fn build_instance_sparql(
                 let prop_link = order_key_link(guard, "?_rp_rel", prop_pred, "?_rp_raw");
                 format!(
                     r#"SELECT DISTINCT ?source{anchor_select} (SAMPLE(?_rp_num_v) AS ?_rp_num) (SAMPLE(?_rp_str_v) AS ?_rp_str) WHERE {{
-{conformance}
-{where_extra}
+{selection}
             OPTIONAL {{ {rel_link} OPTIONAL {{ {prop_link} BIND(STR(<ad4m://fn/parse_literal>(?_rp_raw)) AS ?_rp_str_v) BIND(<http://www.w3.org/2001/XMLSchema#double>(STR(<ad4m://fn/parse_literal>(?_rp_raw))) AS ?_rp_num_v) }} }}
         }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
                 )
@@ -359,7 +356,7 @@ pub(super) fn build_instance_sparql(
             predicate_filter,
         }
     } else {
-        match ids_query_of(&conformance, &where_extra) {
+        match ids_query_of(&conformance, &selection) {
             // A kind with a membership check reads its ids first, then their links: the
             // two-phase plan with no window.
             Some(ids_query) => InstanceQueryPlan::TwoPhase {
@@ -390,12 +387,16 @@ pub(super) fn build_instance_sparql(
 ///
 /// Ordered by id, the order hydration gave an unpaged read. `isIRI`: a literal target the
 /// membership check binds is no instance, and its text would read back as the node it names.
-fn ids_query_of(conformance: &str, where_extra: &str) -> Option<String> {
-    (!conformance.trim().is_empty()).then(|| {
-        format!(
-            "SELECT DISTINCT ?source WHERE {{\n{conformance}\n{where_extra}\nFILTER(isIRI(?source))\n}} ORDER BY ASC(?source)"
-        )
-    })
+fn ids_query_of(conformance: &str, selection: &str) -> Option<String> {
+    (!conformance.trim().is_empty())
+        .then(|| format!("SELECT DISTINCT ?source WHERE {{\n{selection}\n}} ORDER BY ASC(?source)"))
+}
+
+/// The patterns that select instances, in every id query: the membership check, the `where`,
+/// and `isIRI`, since a literal target the membership check binds is no instance. The order
+/// link of a page is OPTIONAL and cannot make up for it.
+fn selection_of(conformance: &str, where_extra: &str) -> String {
+    format!("{conformance}\n{where_extra}\nFILTER(isIRI(?source))")
 }
 
 /// [`ids_query_of`] for a read's own shape and input.
@@ -405,7 +406,7 @@ pub(super) fn ids_query(
     resolver: Option<&dyn ShapeResolver>,
 ) -> Option<String> {
     let (conformance, where_extra) = build_query_patterns(shape, query, resolver);
-    ids_query_of(&conformance, &where_extra)
+    ids_query_of(&conformance, &selection_of(&conformance, &where_extra))
 }
 
 /// Every instance with its creation time as `?_first_ts`, earliest first: the earliest of the
@@ -570,10 +571,12 @@ pub(super) fn proof_valid_filter(include_unverified: Option<bool>) -> String {
 /// Same rows: the reifier has one value per annotation, and the filter keeps
 /// exactly the rows the constant matched.
 ///
-/// The variable is the reifier's name and the annotation's, so two guarded reifiers in
-/// one query never share it.
+/// The variable is `?_ann_` and the annotation's name and the reifier's, so two guarded
+/// reifiers in one query never share it, and no other generated variable (`?_r{prop}`,
+/// `?_rcf{prop}`, ...) can be it: a required property called `name_proofValid` has the
+/// reifier `?_rname_proofValid`.
 pub(super) fn annotation_is(reifier: &str, name: &str, value: &str) -> String {
-    let var = format!("{reifier}_{name}");
+    let var = format!("?_ann_{name}_{}", reifier.trim_start_matches('?'));
     format!(" {reifier} <ad4m://ontology/{name}> {var} . FILTER({var} = \"{value}\")")
 }
 
@@ -938,8 +941,10 @@ pub(super) fn build_query_patterns(
                             .filter(|(_, node)| seen.insert(node.as_str()))
                             .map(|(_, node)| node.clone())
                             .collect();
-                        conformance_patterns
-                            .push(format!("    {}", values_or_str_filter("source", &reached)));
+                        conformance_patterns.push(format!(
+                            "    {}",
+                            binding_values_or_str_filter("source", &reached)
+                        ));
                         conformance_patterns
                             .extend(not_in_filter("source", &safe_ids).map(|f| format!("    {f}")));
                     }
