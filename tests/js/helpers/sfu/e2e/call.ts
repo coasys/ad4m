@@ -268,13 +268,15 @@ export class Call {
    * Audio and video frames from every other participant grew since `since`
    * (an earlier snapshot of the call, `spanMs` ago): the media flows now, not
    * only did once. A pair is skipped while `since` has no counters for it
-   * (one of them joined after it) or while either process just stood still
-   * (`pausedMs`: the harness stopped, not the call). `among` narrows it to
-   * those participants.
+   * (one of them joined after it). While holding, it is also skipped when
+   * either process just stood still (`pausedMs`: the harness stopped, not the
+   * call), as `hearsEveryone` does; while waiting, a paused sample is not yet
+   * growth, so `eventually` looks again. `among` narrows it to those
+   * participants.
    */
   framesGrow(since: Map<string, Snapshot>, spanMs: number, among?: string[]): Check {
-    return this.pairs((snapshot, other, me, snapshots) => {
-      if ([me, other].some((name) => (snapshots.get(name)?.pausedMs ?? 0) >= PAUSE_MS)) return null;
+    return this.pairs((snapshot, other, me, snapshots, holding) => {
+      if (holding && [me, other].some((name) => (snapshots.get(name)?.pausedMs ?? 0) >= PAUSE_MS)) return null;
       const did = this.did(other);
       const now = snapshot.remotes[did];
       const then = since.get(me)?.remotes[did];
