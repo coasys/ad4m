@@ -221,6 +221,12 @@ pub fn resigned_token(token: &str, edit: impl FnOnce(&mut serde_json::Value)) ->
     .unwrap()
 }
 
+/// Tests that set or clear the one global operator record (or a binding of the shared
+/// main agent in `identity_agents`) serialize on this, held for the whole test: another
+/// test's clear cannot fail this one's login mid-flight. `identity::key_login`'s worlds
+/// hold it; the pattern is `identity::rekey`'s `REKEY`.
+pub static OPERATOR_RECORD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Opens an in-memory database for the grants when no test has opened one. Tests that mint
 /// tokens call this: a token works only while the database holds its grant.
 pub fn ensure_test_db() {
@@ -264,7 +270,7 @@ pub fn granted_token(auth: crate::agent::capabilities::AuthInfo) -> String {
         None => crate::agent::AgentContext::main_agent(),
     };
     let request_id = format!("test-{}", uuid::Uuid::new_v4());
-    crate::agent::grants::mint(agent, auth, Some(request_id), 3600)
+    crate::agent::grants::mint(agent, auth, Some(request_id), 3600, None)
         .expect("the test wallet signs and the test database stores the grant")
         .0
 }

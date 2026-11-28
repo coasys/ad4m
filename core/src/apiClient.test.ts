@@ -1262,6 +1262,55 @@ describe('ApiClient on a network change', () => {
         expect(socket(0).sent.map(m => m.type)).toEqual(['events.watch'])
         client.closeAll()
     })
+
+    it('lets go a socket setToken replaced: the call it carried fails now, not when its close comes', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        const changed = jest.fn()
+        client.onNetworkChange(changed)
+        open()
+        socket(0).open()
+        const write = outcomeOf(call('perspective.addLink', { uuid: 'u' }, { timeoutMs: 120_000 }))
+        await jest.advanceTimersByTimeAsync(0)
+        client.setToken('new')
+        // The write stays in flight on the replaced socket; the new one is dialled.
+        expect(TestSocket.instances).toHaveLength(2)
+        socket(1).open()
+        expect(socket(0).readyState).toBe(1)
+        expect(write()).toBe('pending')
+
+        online()
+        // The replaced socket ran over the gone path too: its close never comes,
+        // so the client lets it go and fails its call with the dropped socket's 503.
+        expect(socket(0).readyState).toBe(2)
+        await jest.advanceTimersByTimeAsync(0)
+        expect(write()).toMatchObject({ name: 'RpcError', status: 503 })
+        expect(TestSocket.instances).toHaveLength(3)
+        socket(2).open()
+        expect(changed).toHaveBeenCalledTimes(1)
+        expect(new URL(socket(2).url).searchParams.get('token')).toBe('new')
+    })
+
+    it('treats the socket setToken dials in place of a network change\'s socket as on the new network', () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        const changed = jest.fn()
+        client.onNetworkChange(changed)
+        open()
+        socket(0).open()
+
+        online()
+        expect(TestSocket.instances).toHaveLength(2)
+        client.setToken('new')
+        // The network change's socket, still connecting, is replaced by one on the new token.
+        expect(TestSocket.instances).toHaveLength(3)
+        online()
+        // A repeat of the change does not drop the replacement while it connects.
+        expect(TestSocket.instances).toHaveLength(3)
+        socket(1).open()
+        expect(changed).not.toHaveBeenCalled()
+        socket(2).open()
+        expect(changed).toHaveBeenCalledTimes(1)
+        expect(socket(2).sent[0].type).toBe('events.watch')
+    })
 })
 
 describe('ApiClient.onReconnect', () => {
@@ -1581,6 +1630,265 @@ describe('ApiClient.reconnectNow', () => {
         } finally {
             delete g.document
         }
+    })
+})
+
+describe('ApiClient.setToken', () => {
+    const tokenOf = (ws: TestSocket) => new URL(ws.url).searchParams.get('token')
+
+    it('replaces a socket opened with a different token: the open socket\'s session is the old principal\'s', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        open()
+        await flush()
+        expect(tokenOf(socket(0))).toBe('old')
+        client.setToken('new')
+        await flush()
+        // Nothing went out on the old socket, so it is let go; the new one carries the token.
+        expect(socket(0).readyState).toBe(3)
+        expect(tokenOf(socket(1))).toBe('new')
+        expect(client.getToken()).toBe('new')
+    })
+
+    it('lets a call in flight on the replaced socket finish there, then lets it go', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        const promise = call('agent.get')
+        await flush()
+        expect(socket(0).sent[0].type).toBe('agent.get')
+        client.setToken('new')
+        // The call stays in flight on the socket it went out on; the new socket still dials.
+        expect(TestSocket.instances).toHaveLength(2)
+        expect(socket(0).readyState).toBe(1)
+        socket(0).reply({ id: socket(0).sent[0].id, result: 'ok' })
+        await expect(promise).resolves.toBe('ok')
+        await flush()
+        expect(socket(0).readyState).toBe(3) // drained: let go
+    })
+
+    it('sends request.cancel on the replaced socket a call went out on when its signal fires', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        const controller = new AbortController()
+        const promise = call('agent.get', {}, { signal: controller.signal })
+        await flush()
+        const req = socket(0).sent[0]
+        client.setToken('new')
+        await flush()
+        expect(socket(1).readyState).toBe(1)
+        controller.abort()
+        await expect(promise).rejects.toMatchObject({ name: 'AbortError' })
+        // The executor knows the call only on the socket it went out on.
+        expect(socket(0).sent[1]).toMatchObject({ type: 'request.cancel', params: { targetId: req.id } })
+        expect(socket(1).sent.some(m => m.type === 'request.cancel')).toBe(false)
+        await flush()
+        expect(socket(0).readyState).toBe(3) // its last call settled: let go
+    })
+
+    it('sends request.cancel on the replaced socket a call that opens something went out on when it times out', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        const promise = call('perspective.subscribe', { uuid: 'u' }, { timeoutMs: 50 })
+        await flush()
+        const req = socket(0).sent[0]
+        client.setToken('new')
+        await expect(promise).rejects.toMatchObject({ name: 'RpcError', status: 408 })
+        expect(socket(0).sent[1]).toMatchObject({ type: 'request.cancel', params: { targetId: req.id } })
+        expect(socket(1).sent.some(m => m.type === 'request.cancel')).toBe(false)
+    })
+
+    it('does not count a replaced socket\'s 1008 against the token it is now on', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        const failed = jest.fn()
+        client.onAuthFailed(failed)
+        open()
+        await flush()
+        client.setToken('new')
+        // The socket dialed with the old token is refused: a verdict on 'old', not on 'new'.
+        socket(0).drop(1008, 'token expired')
+        await flush()
+        expect(failed).not.toHaveBeenCalled()
+        const promise = call('agent.status')
+        await flush()
+        socket(1).reply({ id: socket(1).sent.find(m => m.type === 'agent.status')!.id, result: 'ok' })
+        await expect(promise).resolves.toBe('ok')
+    })
+
+    it('does not count a 401 reply on the replaced socket against the new token', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        const failed = jest.fn()
+        client.onAuthFailed(failed)
+        const stale = call('agent.get')
+        await flush()
+        client.setToken('new')
+        await flush()
+        // The call went out on the old token's socket: its 401 is that token's verdict.
+        socket(0).reply({ id: socket(0).sent[0].id, error: { code: 401, message: 'token expired' } })
+        await expect(stale).rejects.toMatchObject({ status: 401 })
+        expect(failed).not.toHaveBeenCalled()
+        // Calls made now go out on the new token's socket.
+        const promise = call<string>('agent.status')
+        await flush()
+        expect(tokenOf(socket(1))).toBe('new')
+        socket(1).reply({ id: socket(1).sent.find(m => m.type === 'agent.status')!.id, result: 'ok' })
+        await expect(promise).resolves.toBe('ok')
+    })
+
+    it('rejects a read the replaced socket carried rather than serving it under the new token', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        const read = call<string[]>('perspective.all')
+        await flush()
+        client.setToken('new')
+        await flush()
+        expect(socket(1).readyState).toBe(1)
+        // The old socket closes before answering: the read ran as the old principal, so it
+        // is not sent again under the new token — its answer would be the new principal's.
+        socket(0).drop()
+        await expect(read).rejects.toMatchObject({ name: 'RpcError', status: 503 })
+        expect(socket(1).sent.map(m => m.type)).not.toContain('perspective.all')
+    })
+
+    it('rejects a read released on a socket dropped before setToken, not sent under the new token', async () => {
+        jest.useFakeTimers()
+        try {
+            client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+            const read = call('perspective.all')
+            await jest.advanceTimersByTimeAsync(0) // socket 0 opens, the read goes out under 'old'
+            socket(0).drop() // armed for a retry under 'old'
+            client.setToken('new')
+            await jest.advanceTimersByTimeAsync(500) // the reconnect dials 'new'
+            expect(socket(1).readyState).toBe(1)
+            await expect(read).rejects.toMatchObject({ name: 'RpcError', status: 503 })
+            expect(socket(1).sent.map(m => m.type)).not.toContain('perspective.all')
+        } finally {
+            jest.useRealTimers()
+        }
+    })
+
+    it('rejects a read sent tokenless and dropped before setToken, not sent under the new token', async () => {
+        jest.useFakeTimers()
+        try {
+            const read = call('perspective.all')
+            await jest.advanceTimersByTimeAsync(0) // socket 0 opens, the read goes out tokenless
+            socket(0).drop() // armed for a retry under the anonymous principal
+            client.setToken('new')
+            await jest.advanceTimersByTimeAsync(500) // the reconnect dials 'new'
+            expect(socket(1).readyState).toBe(1)
+            // The read went out once, tokenless: answered under 'new' it would serve
+            // the new principal's data.
+            expect(socket(1).sent.map(m => m.type)).not.toContain('perspective.all')
+            await expect(read).rejects.toMatchObject({ name: 'RpcError', status: 503 })
+        } finally {
+            jest.useRealTimers()
+        }
+    })
+
+    it('still retries a tokenless read once on the next socket while no token is set', async () => {
+        jest.useFakeTimers()
+        try {
+            const read = call('perspective.all')
+            await jest.advanceTimersByTimeAsync(0)
+            socket(0).drop()
+            await jest.advanceTimersByTimeAsync(500)
+            expect(socket(1).readyState).toBe(1)
+            const resent = socket(1).sent.find(m => m.type === 'perspective.all')
+            expect(resent).toBeTruthy()
+            socket(1).reply({ id: resent!.id, result: ['p'] })
+            await expect(read).resolves.toEqual(['p'])
+        } finally {
+            jest.useRealTimers()
+        }
+    })
+
+    it('retries a read on the successor when the socket swap keeps the principal', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        const read = call<string[]>('perspective.all')
+        await flush()
+        client.setToken('new')
+        await flush()
+        client.setToken('old') // socket 1 superseded too; socket 2 dials 'old' again
+        await flush()
+        expect(socket(2).readyState).toBe(1)
+        socket(0).drop()
+        expect(socket(2).sent.map(m => m.type)).toContain('perspective.all')
+        socket(2).reply({ id: socket(2).sent.find(m => m.type === 'perspective.all')!.id, result: ['p'] })
+        await expect(read).resolves.toEqual(['p'])
+    })
+
+    it('rejects a subscribe reply that lands on the replaced socket', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        const sub = call('perspective.subscribe', { uuid: 'u', query: 'q' })
+        await flush()
+        client.setToken('new')
+        await flush()
+        // The subscription the reply opens lives on the socket it went out on: answering
+        // with it would hand the caller a subscription that dies when that socket does.
+        socket(0).reply({ id: socket(0).sent[0].id, result: { subscriptionId: 's1', result: [], revision: 0 } })
+        await expect(sub).rejects.toMatchObject({ name: 'RpcError', status: 503 })
+    })
+
+    it('delivers an event once when both sockets carry it after the successor\'s watch', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        const seen = jest.fn()
+        client.on('agent-updated', seen)
+        await flush()
+        client.setToken('new')
+        await flush()
+        // An event emitted after the successor's watch landed reaches both sockets.
+        socket(0).reply(agentUpdated)
+        socket(1).reply(agentUpdated)
+        expect(seen).toHaveBeenCalledTimes(1)
+    })
+
+    it('connects again with a new token after the executor refused the old one', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        const failed = jest.fn()
+        client.onAuthFailed(failed)
+        open()
+        await flush()
+        socket(0).drop(1008, 'token expired')
+        expect(failed).toHaveBeenCalledTimes(1)
+        await expect(call('agent.status')).rejects.toMatchObject({ status: 401 })
+        client.setToken('renewed')
+        await flush()
+        const next = socket(TestSocket.instances.length - 1)
+        expect(TestSocket.instances.length).toBeGreaterThan(1)
+        expect(tokenOf(next)).toBe('renewed')
+    })
+
+    it('reaches the transport through Ad4mClient.setToken', async () => {
+        const { Ad4mClient } = require('./Ad4mClient')
+        const facade = new Ad4mClient(url, 'old', {
+            webSocketImpl: TestSocket as unknown as new (url: string) => WebSocket,
+        })
+        try {
+            facade.setToken('new')
+            facade.on('agent-updated', () => {})
+            await flush()
+            expect(tokenOf(socket(TestSocket.instances.length - 1))).toBe('new')
+        } finally {
+            facade.close()
+        }
+    })
+
+    it('lets a call in flight on the superseded socket settle there when the new token is refused', async () => {
+        client = new ApiClient(url, 'old', TestSocket as unknown as new (url: string) => WebSocket)
+        const failed = jest.fn()
+        client.onAuthFailed(failed)
+        const stale = call<string>('agent.get')
+        const staleOutcome = outcomeOf(stale)
+        await flush()
+        client.setToken('new')
+        const refused = call('agent.status')
+        await flush()
+        // The new token's 401 is its own verdict: the call still in flight on the
+        // superseded socket keeps its own — it settles there, and that socket drains.
+        socket(1).reply({ id: socket(1).sent.find(m => m.type === 'agent.status')!.id, error: { code: 401, message: 'token expired' } })
+        await expect(refused).rejects.toMatchObject({ name: 'RpcError', status: 401 })
+        await flush()
+        expect(staleOutcome()).toBe('pending')
+        expect(socket(0).readyState).toBe(1) // still open: it drains, it is not closed
+        socket(0).reply({ id: socket(0).sent[0].id, result: 'ok' })
+        await expect(stale).resolves.toBe('ok')
+        await flush()
+        expect(socket(0).readyState).toBe(3) // drained: let go
+        expect(failed).toHaveBeenCalledTimes(1)
     })
 })
 

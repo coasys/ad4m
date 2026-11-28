@@ -25,13 +25,13 @@ use uuid::Uuid;
 
 mod ai_sessions;
 mod endpoints;
-mod grants;
+pub(crate) mod grants;
 mod identity;
 mod model_migration;
 mod rekey;
 mod tasks;
 pub use endpoints::InvalidEndpoint;
-pub use grants::GrantRow;
+pub use grants::{GrantKeyRow, GrantRow};
 #[cfg(test)]
 pub(crate) use identity::operator_record_in;
 pub(crate) use identity::set_operator_record_if_empty_in;

@@ -344,7 +344,11 @@ pub async fn owns(ctx: &RequestContext, owner: Owner, id: &str) -> Result<(), Ws
             if grants.is_empty() {
                 return Err(not_found());
             }
-            grants.iter().all(|grant| grant.agent == agent)
+            // An operator-role grant (a key login's) is no agent's: the operator check
+            // below reaches it; a grant on the main agent it sits on does not.
+            grants
+                .iter()
+                .all(|grant| grant.agent == agent && !grant.is_operator())
         }
         Owner::Request => match crate::agent::capabilities::request_target(id) {
             None => return Err(not_found()),
@@ -394,6 +398,35 @@ mod tests {
 
         let app = RequestContext::app_for_test(vec![update]);
         assert!(lock.admit("agent.lock", &Value::Null, &app).await.is_ok());
+    }
+
+    /// An operator-role grant (a key login's) is no app's, though it sits on the main agent:
+    /// a main-agent app naming its request id gets the same 404 a missing grant gives. Only
+    /// the operator reaches it.
+    #[tokio::test]
+    async fn a_main_agent_app_does_not_own_an_operator_role_grant() {
+        crate::test_utils::ensure_test_db();
+        let grant = Grants::global()
+            .insert(
+                crate::agent::grants::LiveGrant::for_test(
+                    "operator-role-grant",
+                    crate::agent::AgentContext::main_agent(),
+                    crate::agent::grants::now() + 3600,
+                )
+                .operator_role(),
+            )
+            .unwrap();
+        let app = RequestContext::app_for_test(vec![
+            crate::agent::capabilities::AGENT_UPDATE_CAPABILITY.clone(),
+        ]);
+        let err = owns(&app, Owner::Grant, &grant.request_id)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, 404, "{}", err.message);
+        let operator = RequestContext::operator_for_test();
+        assert!(owns(&operator, Owner::Grant, &grant.request_id)
+            .await
+            .is_ok());
     }
 
     /// The main agent's apps hold the capability (every app does by default) and still may not
@@ -495,6 +528,57 @@ mod tests {
                 .unwrap_err()
                 .code,
             403
+        );
+    }
+
+    /// A key session is the user acting from a listed device, so it may unlink; an app the
+    /// session approved carries the binding delegated, and may not.
+    #[tokio::test]
+    async fn a_user_login_guard_takes_a_key_session_and_refuses_the_apps_it_approved() {
+        use crate::agent::grants::{KeyBinding, LiveGrant};
+        let update = crate::agent::capabilities::AGENT_UPDATE_CAPABILITY.clone();
+        let guard = Guard::UserLoginOrOperator(update.clone());
+        let method = "identity.unlinkSelf";
+        let on_key = |delegated: bool| {
+            let agent = crate::agent::AgentContext::managed("did:key:alice".to_string());
+            let mut grant = LiveGrant::for_test("token-1", agent.clone(), u64::MAX);
+            // An approval: its request id is not the grant's own.
+            grant.request_id = "request-1".to_string();
+            let binding = KeyBinding::new(
+                "did:scid:coasys:1:alice".into(),
+                "z6MkPhone".into(),
+                "d2".into(),
+                1,
+                0,
+            );
+            grant.key = Some(if delegated {
+                binding.delegate()
+            } else {
+                binding
+            });
+            RequestContext::for_session(
+                crate::agent::session::Session::for_test(crate::agent::session::Principal::Agent(
+                    agent,
+                ))
+                .with_caps(vec![update.clone()])
+                .with_did("did:key:alice")
+                .with_grant(std::sync::Arc::new(grant)),
+            )
+        };
+        assert!(guard
+            .admit(method, &Value::Null, &on_key(false))
+            .await
+            .is_ok());
+        let err = guard
+            .admit(method, &Value::Null, &on_key(true))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (err.code, err.message.as_str()),
+            (
+                403,
+                "identity.unlinkSelf may not be called by an app, a user must call it"
+            )
         );
     }
 

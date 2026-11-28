@@ -241,6 +241,7 @@ mod tests {
     /// old key's state), and the old key still signs nothing.
     #[tokio::test]
     async fn a_rekey_moves_every_place_that_holds_the_main_agents_did() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("ad4m")).unwrap();
         crate::test_utils::setup_wallet();
@@ -357,6 +358,7 @@ mod tests {
     /// The operator record names the operator's identity, not this key: a re-key leaves it.
     #[tokio::test]
     async fn a_rekey_leaves_the_operator_record() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         let dir = tempfile::tempdir().unwrap();
@@ -416,6 +418,7 @@ mod tests {
     /// Snapshot readers remain available while that migration is paused.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn two_rekeys_run_one_after_the_other() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let old = main_agent_in(&dir);
         let owned = PerspectiveHandle::new_with_owner("serial".into(), old.clone());
@@ -452,6 +455,7 @@ mod tests {
     /// A caller that goes away after the key changed does not stop the moves.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_rekey_whose_caller_goes_away_still_moves_every_place() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let old = main_agent_in(&dir);
         let owned = PerspectiveHandle::new_with_owner("dropped".into(), old.clone());
@@ -488,6 +492,7 @@ mod tests {
     /// Places an earlier re-key left on its old key move on the next one.
     #[tokio::test]
     async fn the_next_rekey_moves_what_an_earlier_one_left_behind() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let old = main_agent_in(&dir);
         let owned = PerspectiveHandle::new_with_owner("left".into(), old.clone());
@@ -533,6 +538,7 @@ mod tests {
     /// pass changes nothing.
     #[tokio::test]
     async fn the_start_up_pass_finishes_the_moves_of_an_interrupted_rekey() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let old = main_agent_in(&dir);
         let owned = PerspectiveHandle::new_with_owner("interrupted".into(), old.clone());

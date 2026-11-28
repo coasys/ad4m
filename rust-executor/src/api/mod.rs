@@ -26,6 +26,7 @@ pub mod config_ws;
 pub mod expressions_ws;
 pub mod hosting_ws;
 pub mod identity_ws;
+pub mod key_login_ws;
 pub mod languages_ws;
 pub mod neighbourhoods_ws;
 pub mod perspective_instances_ws;
@@ -302,6 +303,7 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
         listener.local_addr()?
     );
 
+    // The peer address reaches `ws_rpc`: `user.sessionChallenge` budgets by it.
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

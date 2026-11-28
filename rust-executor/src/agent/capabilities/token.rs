@@ -9,6 +9,20 @@ pub fn signing_key_name() -> String {
     get_global_config().signing_key_name()
 }
 
+/// The executor's DID: the `did:key` of its token signing key, the `iss` of every token it
+/// issues, and the audience a key statement names.
+pub fn issuer_did() -> Result<String, AnyError> {
+    let backend = wallet_backend();
+    let name = signing_key_name();
+    backend
+        .get_did_document(&name)
+        .map(|doc| doc.id)
+        .ok_or(anyhow!(
+            "{} did not found. call createMainKey() first",
+            name
+        ))
+}
+
 /// Signs a token for `audience` that expires `expiration_time` seconds from now and names the
 /// managed agent `sub` by its DID (`None`: the main agent). The token carries no capabilities: a token
 /// works only while its grant does, and the grant holds them. Only `agent::grants::mint`
@@ -17,6 +31,41 @@ pub(crate) fn sign_token(
     audience: String,
     expiration_time: u64,
     sub: Option<String>,
+) -> Result<(String, Claims), AnyError> {
+    sign_token_with_id(audience, expiration_time, sub, None)
+}
+
+/// [`sign_token`] with `nonce` as the token's id (`None`: a fresh one). A renewal signs a new
+/// token for the grant it renews, so the token names that grant.
+pub(crate) fn sign_token_with_id(
+    audience: String,
+    expiration_time: u64,
+    sub: Option<String>,
+    nonce: Option<String>,
+) -> Result<(String, Claims), AnyError> {
+    sign_claims(nonce, |issuer| {
+        Claims::new(issuer, audience, expiration_time, sub)
+    })
+}
+
+/// [`sign_token_with_id`] for a token expiring at `expires_at` (Unix seconds) exactly: a
+/// renewal signs the expiry the grant got, so the token and the answered `expiresAt` are one
+/// value whatever the renewal's store read took.
+pub(crate) fn sign_token_expiring_at(
+    audience: String,
+    expires_at: u64,
+    sub: Option<String>,
+    nonce: Option<String>,
+) -> Result<(String, Claims), AnyError> {
+    sign_claims(nonce, |issuer| {
+        Claims::expiring_at(issuer, audience, expires_at, sub)
+    })
+}
+
+/// Signs claims built from the issuer DID, with `nonce` as the id (`None`: a fresh one).
+fn sign_claims(
+    nonce: Option<String>,
+    claims: impl FnOnce(String) -> Claims,
 ) -> Result<(String, Claims), AnyError> {
     let backend = wallet_backend();
     let name = signing_key_name();
@@ -38,7 +87,10 @@ pub(crate) fn sign_token(
         name
     ))?;
 
-    let claims = Claims::new(did_document.id, audience, expiration_time, sub);
+    let mut claims = claims(did_document.id);
+    if let Some(nonce) = nonce {
+        claims = claims.with_nonce(nonce);
+    }
 
     let token = encode(
         &Header::default(),

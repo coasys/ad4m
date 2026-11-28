@@ -153,6 +153,22 @@ export type { SignedRequest } from "./SignedRequest";
 export type { SkippedSource } from "./SkippedSource";
 export type { StoreBehind } from "./StoreBehind";
 export type { StoreInfo } from "./StoreInfo";
+// Key sessions: login with a device key (user.sessionChallenge, user.loginWithKey, ...).
+export type { EndAllSessionsParams } from "./EndAllSessionsParams";
+export type { EndedSessions } from "./EndedSessions";
+export type { KeyPurpose } from "./KeyPurpose";
+export type { KeySessionResult } from "./KeySessionResult";
+export type { KeyStatement } from "./KeyStatement";
+export type { LoginWithKeyParams } from "./LoginWithKeyParams";
+export type { RenewSessionParams } from "./RenewSessionParams";
+export type { RenewedSession } from "./RenewedSession";
+export type { SessionChallenge } from "./SessionChallenge";
+export type { SessionClient } from "./SessionClient";
+export type { SessionInfo } from "./SessionInfo";
+export type { SessionRole } from "./SessionRole";
+export type { SignSessionStatementParams } from "./SignSessionStatementParams";
+export type { SignedKeyStatement } from "./SignedKeyStatement";
+export type { UnsignedKeyStatement } from "./UnsignedKeyStatement";
 // Class registration (perspective.registerShapes, perspective.shapes).
 export type { PropertyShapeJson } from "./PropertyShapeJson";
 export type { RegisterResult } from "./RegisterResult";

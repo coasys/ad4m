@@ -4,6 +4,7 @@
   "hc_admin_port": 12401,
   "hc_app_port": 12402,
   "localhost": true,
+  "public_origins": ["https://staging.ad4m.dev"],
   "run_dapp_server": false,
   "auto_permit_cap_requests": false,
   "multi_user_config": {

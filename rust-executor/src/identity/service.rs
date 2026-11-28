@@ -194,6 +194,12 @@ pub struct IdentityService {
     pub store_keys_source: super::StoreSource,
     /// DID resolution (`identity.resolve`) over the same cache and backend.
     pub resolver: Arc<super::resolver::Resolver>,
+    /// The open challenges of key logins (`user.sessionChallenge`).
+    pub challenges: super::key_login::Challenges,
+    /// The origins a key statement's `audience` may name: `public_origins`, else this
+    /// executor's own loopback origins — and none on a network listener without
+    /// `public_origins` (`Audiences::None`).
+    pub audiences: super::key_login::Audiences,
 }
 
 impl IdentityService {
@@ -792,6 +798,8 @@ mod tests {
             backend,
             cache,
             store_url: None,
+            challenges: Default::default(),
+            audiences: Default::default(),
             store_keys_source: crate::identity::StoreSource::Config,
         }
     }
@@ -826,6 +834,8 @@ mod tests {
             backend,
             cache,
             store_url: None,
+            challenges: Default::default(),
+            audiences: Default::default(),
             store_keys_source: crate::identity::StoreSource::Config,
         };
         assert_eq!(service.status(&agent).await.unwrap().store_behind, None);
@@ -872,6 +882,8 @@ mod tests {
                 backend,
                 cache,
                 store_url: store_url.map(String::from),
+                challenges: Default::default(),
+                audiences: Default::default(),
                 store_keys_source: crate::identity::StoreSource::Config,
             }
         };
@@ -926,6 +938,8 @@ mod tests {
                 backend,
                 cache,
                 store_url: store_url.map(String::from),
+                challenges: Default::default(),
+                audiences: Default::default(),
                 store_keys_source,
             }
             .refuse_without_store_keys()
@@ -978,6 +992,7 @@ mod tests {
     /// with no record `no-operator`, before the claim reaches the store.
     #[tokio::test]
     async fn claim_for_main_refuses_an_offer_of_another_identity_than_the_operator() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         let service = test_service();
@@ -1020,6 +1035,7 @@ mod tests {
 
     #[tokio::test]
     async fn with_an_operator_record_the_main_agent_co_signs_no_incept() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         let service = test_service();
@@ -1060,6 +1076,7 @@ mod tests {
     /// signature): the agent is bound to that person only once a store-signed head covers it.
     #[tokio::test]
     async fn an_agent_is_bound_to_a_person_only_by_a_store_signed_listing() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         use crate::identity::cache::tests::accept_signed;
         use ad4m_identity_core::build::{add_unsigned, cosign};
         crate::test_utils::setup_wallet();
@@ -1106,6 +1123,7 @@ mod tests {
     /// agent's key as a bot, even unexpired and store-signed, binds no agent.
     #[tokio::test]
     async fn a_bot_key_binds_no_agent() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         use crate::identity::cache::tests::accept_signed;
         use ad4m_identity_core::build::{add_unsigned, cosign};
         use ad4m_identity_core::{BotScope, KeyLife};
@@ -1148,6 +1166,7 @@ mod tests {
     /// next read takes the store's branch: a key revoked on the store's branch speaks no more.
     #[tokio::test]
     async fn a_reset_log_takes_the_stores_branch_after_a_fork() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         use crate::identity::cache::tests::{trusting, FakeStore};
         use crate::identity::resolver::key_valid_at_anchor;
         use crate::identity::resolver::test_profiles::{signed_profile, with_record};
@@ -1182,6 +1201,8 @@ mod tests {
             backend,
             cache,
             store_url: None,
+            challenges: Default::default(),
+            audiences: Default::default(),
             store_keys_source: crate::identity::StoreSource::Config,
         };
         let scid = ours.scid();
@@ -1286,6 +1307,8 @@ mod tests {
             backend: as_backend,
             cache,
             store_url: None,
+            challenges: Default::default(),
+            audiences: Default::default(),
             store_keys_source: crate::identity::StoreSource::Config,
         }
     }
@@ -1421,6 +1444,7 @@ mod tests {
     /// for every identity, forever.
     #[tokio::test]
     async fn without_store_keys_publish_refuses_before_the_store_commits() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         let user = crate::test_utils::create_test_user(&format!(
@@ -1441,6 +1465,8 @@ mod tests {
             backend: backend.clone(),
             cache,
             store_url: None,
+            challenges: Default::default(),
+            audiences: Default::default(),
             store_keys_source: crate::identity::StoreSource::Config,
         };
         let incept = incept_listing(&agent, 53);
@@ -1491,6 +1517,7 @@ mod tests {
     /// `first-link` at `publish`, before the store commits it.
     #[tokio::test]
     async fn publish_runs_the_first_link_rule_for_the_main_agents_incept() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
         let main = AgentContext::main_agent();
@@ -1530,6 +1557,7 @@ mod tests {
     /// reads the rest of the log, so the head is accepted and the agent bound.
     #[tokio::test]
     async fn a_replayed_publish_behind_the_stores_head_reads_the_rest_and_binds() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         use ad4m_identity_core::build::{add_unsigned, cosign, Signer};
         crate::test_utils::setup_wallet();
         crate::test_utils::setup_agent();
@@ -1584,6 +1612,7 @@ mod tests {
     /// (a retry would get `gone`).
     #[tokio::test]
     async fn a_claim_keeps_its_join_row_when_the_store_call_fails() {
+        let _op = crate::test_utils::OPERATOR_RECORD.lock().await;
         use crate::identity::types::ClaimOfferParams;
         use ad4m_identity_core::link::OfferString;
         crate::test_utils::setup_wallet();
@@ -1666,6 +1695,7 @@ mod tests {
             },
             Some(format!("unlink-{}", uuid::Uuid::new_v4())),
             3600,
+            None,
         )
         .expect("a grant")
         .1
