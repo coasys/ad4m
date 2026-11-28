@@ -104,7 +104,7 @@ import {
         getAgentKey: async () => {
             return get_agent_key()
         },
-        // Per-language agent key (issue #1099) — distinct languages get
+        // Per-language agent key (issue #1099): distinct languages get
         // distinct cells even when they bundle the same DNA + network seed.
         // No languageAddress argument: the op reads the real one from the
         // isolate's own state, since this global is reachable from any

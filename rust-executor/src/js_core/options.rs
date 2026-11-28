@@ -216,4 +216,22 @@ mod tests {
         assert!(names.contains(&"signature_service"), "{names:?}");
         assert!(names.contains(&"agent_service"), "{names:?}");
     }
+
+    /// deno_core hands every extension's JS to V8 as a one-byte external string, and a debug build
+    /// asserts it is ASCII: one non-ASCII character, even in a comment, panics every language
+    /// runtime a debug test starts. A release build skips the check, so CI does not see it.
+    #[test]
+    fn every_extension_source_is_ascii() {
+        for ext in ad4m_language_extensions() {
+            for file in ext.esm_files.iter().chain(ext.js_files.iter()) {
+                let code = file.load().unwrap();
+                let line = code
+                    .as_str()
+                    .lines()
+                    .position(|line| !line.is_ascii())
+                    .map(|index| index + 1);
+                assert_eq!(line, None, "{} holds a non-ASCII character", file.specifier);
+            }
+        }
+    }
 }
