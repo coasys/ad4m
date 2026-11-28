@@ -480,6 +480,172 @@ mod tests {
         assert_eq!(judge(&facts(early, &device, Some(1))), LinkVerdict::Valid);
     }
 
+    /// A rotation salt: base58btc of 16 zero bytes.
+    const SALT: &str = "1111111111111111";
+
+    /// A log (m0, d1 at seq 0) whose next master is the returned key; the chain is folded from
+    /// real events, not set by hand.
+    fn rotatable() -> (Vec<ad4m_identity_core::Event>, ed25519_dalek::SigningKey) {
+        use ad4m_identity_core::build::{cosign, incept_human, Signer};
+        use ad4m_identity_core::{commitment, encode_x25519_multikey, DeviceKey, KeyLife};
+        let m0 = ed25519_dalek::SigningKey::from_bytes(&[2; 32]);
+        let m1 = ed25519_dalek::SigningKey::from_bytes(&[3; 32]);
+        let d1 = ed25519_dalek::SigningKey::from_bytes(&[4; 32]);
+        let mut incept = incept_human(
+            &m0,
+            commitment(&m1.key(), SALT),
+            vec![DeviceKey {
+                id: "d1".into(),
+                sign: d1.key(),
+                enc: encode_x25519_multikey(&[4; 32]),
+                life: KeyLife::Standing,
+            }],
+        )
+        .expect("incept");
+        cosign(&mut incept, "d1", &d1).expect("cosign");
+        (vec![incept], m1)
+    }
+
+    #[test]
+    fn a_key_a_rotation_drops_is_unlinked_so_links_before_it_stay_valid() {
+        use ad4m_identity_core::build::{rotate, Signer};
+        use ad4m_identity_core::commitment;
+        let (mut events, m1) = rotatable();
+        let m2 = ed25519_dalek::SigningKey::from_bytes(&[5; 32]);
+        let chain = ad4m_identity_core::fold(&events).expect("fold");
+        let event = rotate(
+            &chain,
+            &m1,
+            SALT,
+            Some(commitment(&m2.key(), SALT)),
+            &["d1".to_string()],
+        )
+        .expect("rotate");
+        events.push(event);
+        let chain = ad4m_identity_core::fold(&events).expect("fold");
+        let state = chain.state();
+        let device = state.keys["d1"].sign.clone();
+        assert_eq!(
+            (state.keys["d1"].unlinked, state.keys["d1"].revoked),
+            (Some(1), None)
+        );
+        let listed = SignerLog::Listed { state, trusted: 1 };
+        // anchored before the rotate: valid; at or after it: invalid, as an unlinked key's
+        assert_eq!(judge(&facts(listed, &device, Some(0))), LinkVerdict::Valid);
+        assert_eq!(
+            judge(&facts(listed, &device, Some(1))),
+            LinkVerdict::Invalid(InvalidReason::Unlinked)
+        );
+        // a link counted before is not flagged, however late this executor received it
+        let mut late = facts(listed, &device, Some(0));
+        late.received_at = Some(u64::MAX);
+        late.entered_after_revoke = Some(true);
+        assert_eq!(judge(&late), LinkVerdict::Valid);
+        assert_eq!(key_verdict(state, 1, &device, NOW), KeyVerdict::Unlinked);
+    }
+
+    #[test]
+    fn a_revoke_then_a_rotation_leaves_the_keys_revoked_with_their_since() {
+        use ad4m_identity_core::build::{revoke, rotate, Signer};
+        use ad4m_identity_core::commitment;
+        let (mut events, m1) = rotatable();
+        let m0 = ed25519_dalek::SigningKey::from_bytes(&[2; 32]);
+        let m2 = ed25519_dalek::SigningKey::from_bytes(&[5; 32]);
+        let chain = ad4m_identity_core::fold(&events).expect("fold");
+        events.push(revoke(&chain, &m0, &["d1".to_string()], Some(5_000)).expect("revoke"));
+        let chain = ad4m_identity_core::fold(&events).expect("fold");
+        // the rotation names no key: the revoked one is not unlinked over its revoke
+        events.push(
+            rotate(&chain, &m1, SALT, Some(commitment(&m2.key(), SALT)), &[]).expect("rotate"),
+        );
+        let chain = ad4m_identity_core::fold(&events).expect("fold");
+        let state = chain.state();
+        let device = state.keys["d1"].sign.clone();
+        let record = &state.keys["d1"];
+        assert_eq!(
+            (record.revoked, record.revoked_since, record.unlinked),
+            (Some(1), Some(5_000), None)
+        );
+        let listed = SignerLog::Listed { state, trusted: 2 };
+        // anchored at or after the revoke: invalid; before it, flagged unless it entered
+        // before the revoke and was received before `since`
+        assert_eq!(
+            judge(&facts(listed, &device, Some(1))),
+            LinkVerdict::Invalid(InvalidReason::Revoked)
+        );
+        let mut early = facts(listed, &device, Some(0));
+        early.entered_after_revoke = Some(false);
+        early.received_at = Some(4_999);
+        assert_eq!(judge(&early), LinkVerdict::Valid);
+        early.received_at = Some(5_000);
+        assert_eq!(judge(&early), LinkVerdict::Flagged);
+        assert_eq!(key_verdict(state, 2, &device, NOW), KeyVerdict::Revoked);
+    }
+
+    /// A restore locks out a lost device: the rotation names no key and the explicit revoke
+    /// follows, signed by the new master, with the person's `since`. A thief holding the lost
+    /// device signs a new link with an old anchor (or none): received after the restore, it is
+    /// flagged or invalid, never valid. Under an unlink alone the same link counts as valid.
+    #[test]
+    fn a_restore_revokes_the_lost_device_so_a_new_link_with_an_old_anchor_is_not_valid() {
+        use ad4m_identity_core::build::{revoke, rotate, Signer};
+        use ad4m_identity_core::commitment;
+        let (events, m1) = rotatable();
+        let m2 = ed25519_dalek::SigningKey::from_bytes(&[5; 32]);
+        let next = Some(commitment(&m2.key(), SALT));
+        let chain = ad4m_identity_core::fold(&events).expect("fold");
+
+        // The old lock-out: the rotation unlinks d1. A link anchored below the unlink stays
+        // valid whenever it arrives, and so does one with no anchor.
+        let mut unlinked = events.clone();
+        unlinked
+            .push(rotate(&chain, &m1, SALT, next.clone(), &["d1".to_string()]).expect("rotate"));
+        let folded = ad4m_identity_core::fold(&unlinked).expect("fold");
+        let device = folded.state().keys["d1"].sign.clone();
+        let listed = SignerLog::Listed {
+            state: folded.state(),
+            trusted: 1,
+        };
+        for anchor in [Some(0), None] {
+            let mut f = facts(listed, &device, anchor);
+            f.received_at = Some(9_000);
+            assert_eq!(judge(&f), LinkVerdict::Valid, "unlink alone, {anchor:?}");
+        }
+
+        // The restore: rotate (no key), then revoke signed by m1 with `since`.
+        let mut restored = events.clone();
+        restored.push(rotate(&chain, &m1, SALT, next, &[]).expect("rotate"));
+        let chain = ad4m_identity_core::fold(&restored).expect("fold");
+        restored.push(revoke(&chain, &m1, &["d1".to_string()], Some(5_000)).expect("revoke"));
+        let folded = ad4m_identity_core::fold(&restored).expect("fold");
+        let state = folded.state();
+        let record = &state.keys["d1"];
+        assert_eq!(
+            (record.revoked, record.revoked_since, record.unlinked),
+            (Some(2), Some(5_000), None)
+        );
+        let listed = SignerLog::Listed { state, trusted: 2 };
+        for anchor in [Some(0), Some(1), None] {
+            // received after the restore, order unknown or after the revoke
+            for entered in [None, Some(true)] {
+                let mut f = facts(listed, &device, anchor);
+                f.received_at = Some(9_000);
+                f.entered_after_revoke = entered;
+                assert_eq!(judge(&f), LinkVerdict::Flagged, "{anchor:?} {entered:?}");
+            }
+            // even one this store counted before the revoke: received at or after `since`
+            let mut f = facts(listed, &device, anchor);
+            f.received_at = Some(9_000);
+            f.entered_after_revoke = Some(false);
+            assert_eq!(judge(&f), LinkVerdict::Flagged, "{anchor:?} counted");
+        }
+        // anchored at or after the revoke: invalid
+        let mut f = facts(listed, &device, Some(2));
+        f.received_at = Some(9_000);
+        assert_eq!(judge(&f), LinkVerdict::Invalid(InvalidReason::Revoked));
+        assert_eq!(key_verdict(state, 2, &device, NOW), KeyVerdict::Revoked);
+    }
+
     #[test]
     fn a_revoke_with_a_since_flags_a_link_first_received_at_or_after_it() {
         let (mut state, device, _) = log_with(Some(1));

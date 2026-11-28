@@ -92,7 +92,7 @@ async fn a_miss_on_a_full_rotation_log() {
             master: multikey(&alice.master(i)),
             salt: alice.salt(i),
             next: Some(alice.next(i + 1)),
-            revoke: Vec::new(),
+            unlink: Vec::new(),
         };
         let event = next_event(
             events.last().unwrap(),
@@ -294,7 +294,7 @@ async fn a_rival_at_the_head_of_a_held_full_rotation_log_that_does_not_replay() 
             master: multikey(&alice.master(i)),
             salt: alice.salt(i),
             next: Some(alice.next(i + 1)),
-            revoke: Vec::new(),
+            unlink: Vec::new(),
         };
         let event = next_event(
             events.last().unwrap(),

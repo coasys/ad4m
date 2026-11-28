@@ -76,7 +76,7 @@ pub struct Settings {
     /// at most this, and the whole fold at most twice this. An append past either is
     /// `400 log-too-large`, unless all its events are `rotate`s (the recovery from a stolen
     /// master is never refused by it). A thief can pad the live part to the budget; after the
-    /// owner rotates and revokes the thief's keys, the live part drops and the owner appends
+    /// owner revokes the thief's keys (a rotation only unlinks, which keeps a record live), the live part drops and the owner appends
     /// again, up to the whole-fold bound. A log stolen and padded twice can reach that bound
     /// and stays full. It bounds what a miss in the held folds costs (the parse and hashing of
     /// one log) and keeps every log within it holdable.

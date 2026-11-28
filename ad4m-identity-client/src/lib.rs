@@ -13,12 +13,22 @@
 //!   pushes that failed, and the device's side that takes it from its inbox.
 //! - [`enc`]: the device's enc key, held by the app, and [`WithEncKey`], which opens the
 //!   inbox and the record key here: the executor passes only sealed text.
-//! - [`flows::revoke`]: a `revoke` signed by the current master key, published; with an
-//!   optional `since` for a lost or stolen key.
+//! - [`flows::revoke`]: a `revoke` signed by the current master key, published, with an
+//!   optional `since` for a lost or stolen key; or, with the 12 words, a `rotate` to master *n*+1
+//!   first and then that `revoke` signed by *n*+1 ("Also replace my master key"; a frozen log
+//!   accepts only a `rotate`).
 //! - [`flows::unlink`]: an `unlink` signed by the key itself (it then destroys the key) or by
 //!   the current master key.
+//! - [`flows::rotate`]: master *n*+1 from the 12 words, rebuilt on the new head when another
+//!   event lands first, sent to every app that kept the master key, and the record written. The
+//!   keys a rotation drops are unlinked, never revoked.
+//! - [`flows::restore`]: the 12 words alone find the identity, lock out lost devices (a
+//!   rotation to a fresh master on this device, then a `revoke` of them by it), and link this
+//!   device again.
 //! - [`flows::requests`]: the holder's answer to a device's request (send the master key,
-//!   confirm a revocation).
+//!   confirm a revocation, with the words when it asks for a rotation) and the device's post.
+//! - [`flows::master`] also removes the master key from a device that is not its only holder,
+//!   and gets a device whose key a rotation replaced the new one.
 //! - [`record`]: the private details record, opened, merged and written in one place.
 //!
 //! No custody key: no service keeps a copy of a master key for the person. The library has no
@@ -38,7 +48,9 @@ pub use executor::{ExecutorRpc, RpcError, ViaExecutor};
 pub use secret::Secret;
 #[cfg(any(test, feature = "test-vault"))]
 pub use vault::MemoryVault;
-pub use vault::{MasterSigner, MasterUse, PendingPush, Unlocked, Vault, VaultError};
+pub use vault::{
+    Forgot, MasterSigner, MasterUse, PendingPush, StageToken, Stored, Unlocked, Vault, VaultError,
+};
 
 /// Unix seconds, from the surface.
 pub trait Clock {
@@ -135,6 +147,18 @@ pub enum ClientError {
     /// `canKeepMaster` (and at a link, only on a `device` offer). Never by the record's kind.
     #[error("{0} may not keep the master key")]
     NotAKeeper(String),
+    /// A rotation that precedes a revocation is published (master #`index` is current), and
+    /// the revoke is not: the master key is replaced but the devices are not yet revoked.
+    /// `pending` names what is left: [`flows::revoke::finish_revoke`] publishes only the revoke,
+    /// with a `since` the caller may correct (a call that starts over would rotate again).
+    #[error(
+        "the master key is replaced (master #{}) but the devices are not yet revoked: {cause}",
+        pending.index
+    )]
+    RotatedNotRevoked {
+        pending: flows::revoke::PendingRevoke,
+        cause: String,
+    },
     /// A request asks for a rotation, which needs the 12 words.
     #[error("the request asks for a rotation, which needs the 12 words")]
     NeedsWords,
@@ -157,9 +181,30 @@ pub enum ClientError {
     /// client already opened for the identity: a replayed older version, refused.
     #[error("the store served version {served} of the record, under version {seen} read before")]
     ServedRecordVersion { served: u64, seen: u64 },
+    /// Not written: the stored record's recovery key waits for the current master to re-attest
+    /// it — its attestation is by a master a rotation replaced — and a device write would seal
+    /// the record without it, which the store takes as no recovery key, so the words could no
+    /// longer open it. A device holding the current master re-attests it with a master-signed
+    /// write (`flows::master::reattest_recovery`, which `flows::master::refresh_master` makes
+    /// on its own), then the write goes through.
+    #[error("the record waits for the master to re-attest the recovery key")]
+    RecoveryNeedsReattest,
     /// The record's version moved under every write tried.
     #[error("the private record kept changing; try again")]
     RecordBusy,
+    /// The words derive no master key of the identity: the key index lists no identity whose
+    /// master #0 they derive, or they do not derive its current master. A word that passes the
+    /// checksum can still be the wrong one.
+    #[error("these words are not the identity's: {0}")]
+    NotTheseWords(String),
+    /// Another event landed first on every rotation tried (each `409` rebuilt it on the new
+    /// head).
+    #[error("the log kept changing under the rotation; try again")]
+    LogBusy,
+    /// This device holds the only usable copy of the master key: no other device valid at the
+    /// head that the log lets keep it holds it (per the record). Removing it would leave only the 12 words.
+    #[error("this device holds the only copy of the master key")]
+    OnlyCopy,
     #[error("{0}")]
     Protocol(String),
 }
