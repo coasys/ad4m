@@ -227,7 +227,8 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   str0m timeouts, `LayerSelector::next_wake`, and `SfuPeer::next_sweep_at` (offer resend,
   establishment window, disconnect grace); with none it waits for a packet or a command.
   New code that gives a peer's `Rtc` an input outside those paths must add the peer to
-  `to_poll`, or its output waits for the next unrelated wake. A new time-based sweep over
+  `to_poll`. A wake for another peer does not poll it: its output waits for its own next
+  input or recorded timeout, and with neither it waits forever. A new time-based sweep over
   peers needs its deadline in `next_sweep_at`.
 
 ## Do / don't
