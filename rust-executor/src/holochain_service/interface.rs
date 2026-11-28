@@ -6,6 +6,8 @@ use holochain::prelude::{
     ExternIO, HoloHash, InstallAppPayload, Signal, Signature, ZomeCallResponse,
 };
 use lazy_static::lazy_static;
+
+use crate::agent::AgentContext;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -283,6 +285,12 @@ impl HolochainServiceInterface {
         }
     }
 
+    /// Signs with `HolochainService::sign`, i.e. with whichever key `list_public_keys`
+    /// happens to return first. That was well-defined back when a node had one Holochain
+    /// agent key; since #1099 gave every language its own key, "the first one" names no
+    /// particular language. Has no in-tree caller (`HolochainServiceRequest::Sign` is
+    /// otherwise only ever constructed by `dispatch::tests`'s dispatch-loop checks) and is
+    /// not exposed to language JS at all.
     pub async fn sign(&self, data: String) -> Result<Signature, AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
         self.send(HolochainServiceRequest::Sign(data, response_tx), None)?;
@@ -307,6 +315,13 @@ impl HolochainServiceInterface {
         self.sender.is_closed()
     }
 
+    /// Returns `HolochainService::get_agent_key`'s "first key in lair", not the calling
+    /// language's own agent key. That was well-defined back when a node had one Holochain
+    /// agent key shared by every language; since #1099, lair holds one key per language and
+    /// "the first one" is whichever happened to be created earliest, not this caller's. Has
+    /// no in-tree caller. Kept (not removed) because it is exposed to language JS as
+    /// `getAgentKey()` and a third-party language may call it. Use
+    /// [`Self::agent_key_for_language`] for the calling language's own key.
     pub async fn get_agent_key(&self) -> Result<HoloHash<Agent>, AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
         self.send(HolochainServiceRequest::GetAgentKey(response_tx), None)?;
@@ -339,6 +354,96 @@ impl HolochainServiceInterface {
             HolochainServiceResponse::NewSignKeypair(result) => result,
             _ => unreachable!(),
         }
+    }
+
+    /// Resolve the Holochain agent key of the main agent in one language (issue #1099):
+    /// [`Self::agent_key_for`] with [`AgentContext::main_agent`].
+    pub async fn agent_key_for_language(
+        &self,
+        language_address: &str,
+        app_id: &str,
+    ) -> Result<HoloHash<Agent>, AnyError> {
+        self.agent_key_for(language_address, &AgentContext::main_agent(), app_id)
+            .await
+    }
+
+    /// The agent key stored for `agent` in `language_address` (see [`Self::agent_key_for`]),
+    /// if one is. Never adopts or mints one.
+    pub fn stored_agent_key_for(
+        language_address: &str,
+        agent: &AgentContext,
+    ) -> Result<Option<HoloHash<Agent>>, AnyError> {
+        let stored = crate::db_backend::db_backend()
+            .get_setting(&agent_key_setting(language_address, agent))?;
+        Ok(stored.and_then(|key| holochain::prelude::AgentPubKey::try_from(key.as_str()).ok()))
+    }
+
+    /// Resolve the Holochain agent key of `agent` in one language.
+    ///
+    /// Each language gets its own agent key so that two languages bundling
+    /// the same DNA + network seed produce distinct cells (cell id =
+    /// DNA hash + agent pubkey) instead of colliding on one shared cell
+    /// with last-writer-wins signal routing (issue #1099). Each managed user
+    /// gets its own key in each language on top of that (issue #1775), so a
+    /// user writes and signs in the language's DNAs as its own Holochain agent.
+    /// The main agent's mapping is the one #1099 introduced and is unchanged.
+    /// Resolution order, the same for both:
+    ///
+    /// 1. The mapping stored in Ad4mDb from a previous resolution
+    ///    (`language_agent_key:<language>` for the main agent,
+    ///    `language_agent_key:<language>:<did>` for a managed user).
+    /// 2. Adoption: the key of an app already installed under `app_id` (the
+    ///    language's own app id for the main agent, the user's app id for a
+    ///    user) — for the main agent, an install from before per-language
+    ///    keys keeps its cell, source chain and DHT identity. A user's key is
+    ///    stored before its app is installed, and the per-user installer asks
+    ///    only while the user's app is absent, so a user never adopts: a user
+    ///    app without a stored key is refused (`user_cells`).
+    /// 3. A fresh keypair otherwise.
+    ///
+    /// The resolved key is persisted before it is answered, so every path is
+    /// stable across restarts.
+    ///
+    /// Removing a language leaves its stored mappings, its lair keys, and its
+    /// `LANGUAGE_KEY_LOCKS` entries in place — a reinstall under the same address reuses the
+    /// same keys, matching dev's old behaviour with the single global key, but
+    /// `LANGUAGE_KEY_LOCKS` only ever grows.
+    pub async fn agent_key_for(
+        &self,
+        language_address: &str,
+        agent: &AgentContext,
+        app_id: &str,
+    ) -> Result<HoloHash<Agent>, AnyError> {
+        let setting_key = agent_key_setting(language_address, agent);
+        // Serialize per (language, agent) across lookup → adoption → keygen →
+        // persist: a concurrent caller waits here and then finds the
+        // winner's key in the stored mapping instead of generating its own.
+        let lock = LANGUAGE_KEY_LOCKS
+            .lock()
+            .expect("LANGUAGE_KEY_LOCKS poisoned")
+            .entry(setting_key.clone())
+            .or_default()
+            .clone();
+        let _guard = lock.lock().await;
+
+        // A failed read must propagate: treating it as "no stored key"
+        // would generate and persist a new key over a valid mapping,
+        // silently forking the language's cell identity.
+        if let Some(stored) = crate::db_backend::db_backend().get_setting(&setting_key)? {
+            match holochain::prelude::AgentPubKey::try_from(stored.as_str()) {
+                Ok(key) => return Ok(key),
+                Err(_) => log::warn!(
+                    "Stored agent key {} is in invalid format, re-resolving",
+                    setting_key
+                ),
+            }
+        }
+        let key = match self.get_app_info(app_id.to_string()).await? {
+            Some(app_info) => app_info.agent_pub_key,
+            None => self.new_sign_keypair_random().await?,
+        };
+        crate::db_backend::db_backend().set_setting(&setting_key, &key.to_string())?;
+        Ok(key)
     }
 
     pub async fn get_app_info(&self, app_id: String) -> Result<Option<AppInfo>, AnyError> {
@@ -417,6 +522,22 @@ impl HolochainServiceInterface {
 lazy_static! {
     static ref HOLOCHAIN_SERVICE: Arc<RwLock<Option<HolochainServiceInterface>>> =
         Arc::new(RwLock::new(None));
+
+    /// Serializes `agent_key_for` per (language, agent): without this, two
+    /// concurrent first resolutions of the same language can both observe
+    /// "no stored key, no installed app" and each generate + persist a
+    /// different key — last write wins in the DB while apps may already be
+    /// installed under the losing key (cell id = DNA hash + agent key).
+    static ref LANGUAGE_KEY_LOCKS: std::sync::Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>> =
+        std::sync::Mutex::new(std::collections::HashMap::new());
+}
+
+/// The Ad4mDb setting that stores `agent`'s key in `language_address`.
+fn agent_key_setting(language_address: &str, agent: &AgentContext) -> String {
+    match agent.managed_did() {
+        None => format!("language_agent_key:{}", language_address),
+        Some(did) => format!("language_agent_key:{}:{}", language_address, did),
+    }
 }
 
 /// Set while `HolochainService::init` is running. What `holochain_service_once_started`
