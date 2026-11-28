@@ -2,7 +2,7 @@
 
 The **server link language** (`@coasys/server-link-language`) syncs a neighbourhood's links through one [link server](link-server.md), with end-to-end (E2E) encryption under a **room key**. Each neighbourhood is a **link-server room**, named by the template variable `UID`. The server URL is the template variable `SERVER_URL`. The language uses HTTP for auth, commit and catch-up, and a WebSocket for live diffs and telepresence.
 
-**Why:** A small server that a community runs itself gives fast, predictable sync and telepresence. The server refuses plaintext links in every room from creation, so the link-server operator cannot read any link. The older server-backed link language, `centralized-p-diff-sync`, talks to one fixed host and does not encrypt.
+**Why:** A small server that a community runs itself gives fast, predictable sync and telepresence. The server refuses plaintext links in every room from creation, so the link-server operator cannot read any link. The other server-backed link language, `centralized-p-diff-sync`, talks to one fixed host and does not encrypt.
 
 **Parent:** [Link languages](README.md)
 

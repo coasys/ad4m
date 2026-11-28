@@ -4,7 +4,7 @@ This folder holds the mental models of the ADAM code base: one tree of short pag
 
 ## Rules
 
-1. **One-to-one with the code.** A page describes only what exists in the code beside it. It does not mention open pull requests, plans, paused work or future designs. A "Why" explains the reason for today's design; it does not point at a future one.
+1. **One-to-one with the code.** A page describes only what exists in the code beside it. It describes only the current state: never what the code did before (what a part replaced, what was renamed, moved or removed, an older shape or API, the CHANGELOG) and never what it may do later (open pull requests, plans, paused work, future designs). A "Why" explains the reason for today's design in the present tense; an option that lost is a design trade-off, not a past state of the code.
 2. **No security findings.** Pages do not describe security weaknesses, attacks or missing checks. They do describe, as neutral facts, how access works: that is part of the model.
 3. **The current code, with certainty.** A page states what the current code does, as plain fact. Stale docs, defects and dead or unused code stay out of the pages: a page does not record where other docs disagree with the code, behaviour that looks like a defect, or code that nothing uses.
 

@@ -2,7 +2,7 @@
 
 The **Holochain service** (`HolochainService`) runs an embedded Holochain **conductor** on its own thread and Tokio runtime. Rust code and language isolates reach it through one actor channel (`HolochainServiceInterface`). Languages see it as the `holochain*` functions of `ad4m:host`. The Unyt payment DNA also runs on it. The conductor has one agent key per language (`agent_key_for_language`, kept in the `settings` table as `language_agent_key:<address>`): two languages with the same DNA get two cells, and every agent on the executor uses its language's one cell per DNA.
 
-**Why:** Holochain languages need a conductor: p-diff-sync, the Holochain agent language and the Holochain file-storage language. A conductor inside the executor removes a second daemon. The actor channel lets the conductor's app set change under a write lock while zome calls run concurrently.
+**Why:** Holochain languages need a conductor: p-diff-sync, the Holochain agent language and the Holochain file-storage language. With the conductor inside the executor, no second daemon runs. The actor channel lets the conductor's app set change under a write lock while zome calls run concurrently.
 
 **Parent:** [Executor services](README.md)
 

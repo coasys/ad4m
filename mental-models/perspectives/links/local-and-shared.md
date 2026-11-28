@@ -2,7 +2,7 @@
 
 Every stored link has a **link status**: `Shared` (the default) or `Local`. In a neighbourhood, the executor commits a shared link to the link language, so it reaches other agents; a local link stays in this executor's store. Status decides only whether a link leaves the executor.
 
-**Why:** Apps need private notes, drafts and per-agent state next to shared data, and one graph lets one query read both. A per-link flag was the cheapest way to get this.
+**Why:** Apps need private notes, drafts and per-agent state next to shared data, and one graph lets one query read both. A per-link flag gives this at the lowest cost.
 
 **Parent:** [Links and store](README.md)
 

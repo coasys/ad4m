@@ -2,7 +2,7 @@
 
 A language bundle is an ES module. It exports `init`, `teardown`, `name` and a flat set of functions, grouped into **language capabilities**. The executor reads the exports once at load time and stores the detected `Capability` set. An export that exists is a language capability.
 
-**Why:** A language implements only what it can do: a static store exports `expressionGet`, a write-only drop box exports `perspectiveCommit`. Callers ask `Language::has(Capability::…)` instead of guarding every call. The older shape, a `create(context)` factory that returned one large object, is gone.
+**Why:** A language implements only what it can do: a static store exports `expressionGet`, a write-only drop box exports `perspectiveCommit`. Callers ask `Language::has(Capability::…)` instead of guarding every call.
 
 **Parent:** [Language runtime](README.md)
 

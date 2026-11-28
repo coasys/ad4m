@@ -2,7 +2,7 @@
 
 A **model query** asks for instances of one or more subject classes: `perspective.modelQuery(className, queryJson)`. The executor loads each class's SHACL shape, builds SPARQL from it, runs that on the store, and returns JSON instances with their properties, relations and a total count.
 
-**Why:** The SDK's model classes (`Ad4mModel`) once built and filtered their queries in TypeScript. That moved raw rows over the socket and repeated the logic in every client. With the engine in the executor, MCP tools, live queries, flows and interpretation use the same reader. The shape comes from SHACL stored in the perspective, so the executor needs no client code to read a class.
+**Why:** The executor builds and filters the queries of the SDK's model classes (`Ad4mModel`), so only instances cross the socket and no client repeats the logic. With the engine in the executor, MCP tools, live queries, flows and interpretation use the same reader. The shape comes from SHACL stored in the perspective, so the executor needs no client code to read a class.
 
 **Parent:** [Querying](README.md)
 

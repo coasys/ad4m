@@ -12,7 +12,7 @@ The executor keeps all its state under one **app data path** (default `~/.ad4m`)
 |---|---|---|
 | `ad4m/agent.json` | `AgentStore` ([agent/mod.rs](../../../rust-executor/src/agent/mod.rs)): main DID, DID document, signing key id, encrypted keystore (all agents' keys on a local wallet; an empty string in hosted mode, where `SharedWallet` keeps the default `export` and the keys stay with the hosting service, [wallet.rs](../../../rust-executor/src/wallet.rs)), main profile | `AgentService::try_save` ([agent/mod.rs](../../../rust-executor/src/agent/mod.rs)) |
 | `ad4m/agent.json.legacy` | backup of a legacy-format keystore, until the next direct unlock | `AgentService::unlock` |
-| `ad4m/agentProfile.json` | main agent profile (read first if present) | older executors |
+| `ad4m/agentProfile.json` | main agent profile (read first if present) | `AgentService::store_agent_profile` |
 | `ad4m/users/<email>/profile.json` | managed agent profile | `AgentService::store_managed_agent_profile` |
 | `ad4m_db.sqlite` | `Ad4mDb`: perspective handles, diffs, users, grants, settings, trusted agents, friends, entanglement proofs, notifications, AI endpoints, models, tasks and sessions, billing, email codes, identity rows; and the key-log cache | `Ad4mDb`; the cache: `identity::cache` |
 | `executor.lock` | the lock that lets one executor at a time use the folder | `exit::DataFolderLock` ([exit.rs](../../../rust-executor/src/exit.rs)) |

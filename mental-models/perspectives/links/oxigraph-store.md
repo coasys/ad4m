@@ -24,7 +24,7 @@ Each perspective has one **Oxigraph store** (`SparqlStore`): an RDF store on Roc
 2. `literal:string|number|boolean|json:` targets become typed RDF literals (`target_to_storage_term`). `wireTarget` keeps the exact signed string when the stored form differs, so the signature still verifies.
 3. The store refuses a link whose predicate is `rdf:reifies` or starts with `ad4m://ontology/` or `ad4m://system/` (`is_link_metadata`): such a link would add or delete a fact on another link's reifier. Reads skip such triples as metadata.
 4. A writer mutex serializes link transactions across clones of the store; reads use snapshots.
-5. Startup (`perspectives::initialize_from_db`): open the store, run `migrate_links_from_rusqlite_to_sparql` (links from the earlier SQLite storage), remove links in the metadata vocabulary an older store holds (`purge_link_metadata_links`; a perspective whose sweep fails does not open), then start the instance.
+5. Startup (`perspectives::initialize_from_db`): open the store, run `migrate_links_from_rusqlite_to_sparql` (moves links held in SQLite rows into the store), remove links in the metadata vocabulary that the store holds (`purge_link_metadata_links`; a perspective whose sweep fails does not open), then start the instance.
 6. Hosted executors with `wallet_backend = "shared"` restore `{data}/perspectives/` from a tar.gz snapshot at startup and upload new snapshots periodically (`perspective_snapshot.rs`). Other executors have no automatic backup of their stores; `export_perspective` exports one perspective.
 
 </details>

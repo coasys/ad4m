@@ -32,7 +32,7 @@ Life of the local keystore:
 | Cipher | XChaCha20-Poly1305, fresh nonce per write |
 | File write | atomic (`write_json_atomically`) |
 
-DID documents leave the wallet with public keys only (`DID_DOCUMENT_CONFIG`). `AgentService::load` strips private keys that older executors wrote into `agent.json`.
+DID documents leave the wallet with public keys only (`DID_DOCUMENT_CONFIG`). `AgentService::load` strips any private key it finds in `agent.json`.
 
 A locked wallet makes `Session::open` fail with `AuthError::Locked` for every token except the admin credential. The WebSocket closes with 1013; HTTP answers 503 ([Sessions](../access/sessions.md)).
 

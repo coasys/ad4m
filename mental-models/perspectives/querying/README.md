@@ -2,7 +2,7 @@
 
 The executor answers four kinds of read over one perspective's Oxigraph store. **Link queries** match source, predicate, target and a time range. **SPARQL queries** are read-only and take any graph pattern. **Model queries** return instances of subject classes, built from their SHACL shapes. **Live queries** re-run a SPARQL or model query and push the changes to the caller.
 
-**Why:** Because queries run in the executor, one implementation serves the SDK, MCP tools, the CLI and languages, and only results cross the socket. Model queries moved from the TypeScript SDK into Rust, so filtering, relations and paging run next to the data.
+**Why:** Because queries run in the executor, one implementation serves the SDK, MCP tools, the CLI and languages, and only results cross the socket. Model queries run there too, not in the TypeScript SDK, so filtering, relations and paging run next to the data.
 
 **Parent:** [Perspectives](../README.md)
 

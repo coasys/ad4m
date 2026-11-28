@@ -66,7 +66,7 @@ An AI session's tools act only within the session's `capabilities` intersected w
 - [rust-executor/src/ai_service/harness/](../../../../rust-executor/src/ai_service/harness): `run_with_tools`, `ToolProvider`, `CreditGate`.
 - [rust-executor/src/ai_sessions/](../../../../rust-executor/src/ai_sessions): `service.rs` (turn registry), `run.rs` (one turn), and [db/ai_sessions.rs](../../../../rust-executor/src/db/ai_sessions.rs) (`ai_sessions`, `ai_messages`).
 - [rust-executor/src/api/ai_ws.rs](../../../../rust-executor/src/api/ai_ws.rs), [ai_sessions_ws.rs](../../../../rust-executor/src/api/ai_sessions_ws.rs), [openai_compat/](../../../../rust-executor/src/api/openai_compat): access paths.
-- [rust-executor/src/db/endpoints.rs](../../../../rust-executor/src/db/endpoints.rs), [model_migration.rs](../../../../rust-executor/src/db/model_migration.rs): endpoint rows, and the one-time move from the old model rows.
+- [rust-executor/src/db/endpoints.rs](../../../../rust-executor/src/db/endpoints.rs), [model_migration.rs](../../../../rust-executor/src/db/model_migration.rs): endpoint rows, and the startup rewrite of a `models` table with `api_*` columns into references to endpoints.
 - [rust-executor/src/types/core.rs](../../../../rust-executor/src/types/core.rs): `Model`, `ModelType`, `EndpointKind`, `ModelApiType`.
 - [core/src/ai/AIClient.ts](../../../../core/src/ai/AIClient.ts): the SDK side.
 - [ai-wind-tunnel/](../../../../ai-wind-tunnel): measures each provider and service through a real executor, and writes the recommendations that local AI reads.

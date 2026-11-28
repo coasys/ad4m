@@ -2,7 +2,7 @@
 
 A **managed agent** is an agent that the executor hosts for a **user account** in **multi-user mode**. It has its own DID and its own key in the executor's wallet; `AgentContext::Managed { did }` names it. The user account (`users` row: email, DID, password hash) is only the login. The email resolves to the DID at sign-up, at login and where an RPC parameter names a user. Sessions, perspective ownership, billing and notifications use the DID. A managed agent is an account on the executor: the executor holds its key (in a local wallet, under the operator's passphrase), and the key has no export ([Wallet and keys](../identity/wallet-and-keys.md)). Entanglement proofs are for the main agent only.
 
-**Why:** A host can serve people who run no executor, with the same code that serves the main agent. Everything is keyed by DID. This removed bugs where an email and a DID named the same agent in different places, and it keeps the email out of signed data.
+**Why:** A host can serve people who run no executor, with the same code that serves the main agent. Everything is keyed by DID, so one name identifies an agent in every place, and the email stays out of signed data.
 
 **Parent:** [Executor](README.md)
 
