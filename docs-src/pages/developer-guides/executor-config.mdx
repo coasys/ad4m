@@ -135,7 +135,7 @@ The public address is `sfu_public_addr` if set (it needs `sfu_udp_port`),
 otherwise the address the `sfu_stun_server` reports, asked once at startup. `sfu.status` reports
 `isPublic: true` once the STUN server sees the public address the SFU offers. It also reports
 the SFU's load as two counters since the SFU started: `loopIterations` (passes of its media event
-loop) and `packetsForwarded` (RTP packets written to receivers). Read twice, a difference over the
+loop) and `datagramsSent` (UDP datagrams it sent: RTP, RTCP and ICE). Read twice, a difference over the
 time between the reads gives a rate.
 A fixed port that is taken stops `run`. The public address is read at
 startup only: after the public IP changes, restart the executor.

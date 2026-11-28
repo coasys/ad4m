@@ -18,10 +18,14 @@ import { startWorld, type World } from "../helpers/sfu/e2e/world.js";
  *
  * - the executor's CPU (its process's CPU time over the window, in percent of
  *   one core);
- * - the RTP packets the SFU forwards per second, and the passes its media event
- *   loop makes per second (both read from `sfu.status`, twice, the time apart);
- * - the executor's CPU per thousand forwarded packets, which stays put when the
- *   host is faster or slower in the same way for the packets and the CPU.
+ * - the UDP datagrams the SFU sends per second (RTP, RTCP and ICE), and the
+ *   passes its media event loop makes per second (both read from `sfu.status`,
+ *   twice, the time apart);
+ * - the executor's CPU per thousand datagrams sent, which stays put when the
+ *   host is faster or slower in the same way for the datagrams and the CPU.
+ *
+ * Every tab must stay on the SFU (`report.topology`) before and after the window:
+ * the space falls back to mesh when the SFU fails, and that is not what is measured.
  *
  * The numbers go to `$PERF_RESULTS_DIR/sfu-capacity.json` for the nightly
  * history (`scripts/perf/AGENTS.md`), one series per call size. Without
@@ -43,8 +47,15 @@ const SIZES = (process.env.SFU_CAP_SIZES || "3,8,16").split(",").map((s) => Numb
 const STEADY_MS = Number(process.env.SFU_CAP_STEADY_S || 30) * 1000;
 const [VIDEO_W, VIDEO_H] = (process.env.SFU_CAP_VIDEO || "320x240").split("x").map(Number);
 const CONVERGE_TIMEOUT_MS = 240_000;
+/** One tab's join (getUserMedia, offer, answer). */
+const JOIN_TIMEOUT_MS = 60_000;
+const POLL_MS = 100;
+/** On top of a test's own phases: the browser start, the tabs' setup and their teardown. */
+const TEST_SLACK_MS = 300_000;
 const TABS_PER_BROWSER = 8;
 const MAX_USERS = Math.max(...SIZES);
+/** Per call size, and for the hooks: every join of the largest call, the convergence, the window and the slack. */
+const TEST_TIMEOUT_MS = MAX_USERS * JOIN_TIMEOUT_MS + CONVERGE_TIMEOUT_MS + STEADY_MS + TEST_SLACK_MS;
 const CLK_TCK = Number(execFileSync("getconf", ["CLK_TCK"]).toString().trim());
 
 /** User time plus system time of a process, in clock ticks, from `/proc/<pid>/stat`. */
@@ -59,9 +70,9 @@ interface Measurement {
   participants: number;
   windowS: number;
   cpuPercent: number;
-  packetsPerS: number;
+  datagramsPerS: number;
   loopIterationsPerS: number;
-  cpuMsPerKPacket: number;
+  cpuMsPerKDatagram: number;
 }
 
 interface PerfMetric {
@@ -73,14 +84,31 @@ function perfMetrics(m: Measurement): PerfMetric[] {
   const params = { participants: m.participants };
   return [
     { metric: "sfu_capacity.cpu_percent", value: m.cpuPercent, unit: "percent", better: "lower", params },
-    { metric: "sfu_capacity.packets_per_s", value: m.packetsPerS, unit: "packets/s", better: "higher", params },
+    { metric: "sfu_capacity.datagrams_per_s", value: m.datagramsPerS, unit: "datagrams/s", better: "higher", params },
     { metric: "sfu_capacity.loop_iterations_per_s", value: m.loopIterationsPerS, unit: "iterations/s", better: "lower", params },
-    { metric: "sfu_capacity.cpu_ms_per_kpacket", value: m.cpuMsPerKPacket, unit: "ms", better: "lower", params },
+    { metric: "sfu_capacity.cpu_ms_per_kdatagram", value: m.cpuMsPerKDatagram, unit: "ms", better: "lower", params },
   ];
 }
 
+/** `work`, or an error naming `what` when it takes longer than `ms`: a hang reaches the test's cleanup. */
+async function within<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} took longer than ${ms / 1000} s`)), ms);
+  });
+  try {
+    return await Promise.race([work, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** The tabs whose call is not on the SFU (the space falls back to mesh when the SFU fails). */
+const offSfu = (reps: Record<string, PageReport>) =>
+  Object.entries(reps).filter(([, r]) => r.topology !== "sfu").map(([name, r]) => `${name} is on ${r.topology}`);
+
 describe("SFU capacity: the executor's cost of calls of growing size", function () {
-  this.timeout(0);
+  this.timeout(TEST_TIMEOUT_MS);
 
   let world: World | null = null;
   let server: Server | null = null;
@@ -144,29 +172,31 @@ describe("SFU capacity: the executor's cost of calls of growing size", function 
         const room = `capacity-${size}-${Date.now()}`;
         for (const user of users) {
           const w = world!.users[user.name];
-          await joinCall(user, {
+          await within(joinCall(user, {
             executorUrl: `http://127.0.0.1:${w.port}`, token: w.token, neighbourhoodUrl: world!.url("sfu"),
             room, name: user.name, video: { width: VIDEO_W, height: VIDEO_H },
-          });
+          }), JOIN_TIMEOUT_MS, `${user.name}'s join`);
         }
 
         // Until every tab receives every other, from fresh packets and frames.
         const deadline = Date.now() + CONVERGE_TIMEOUT_MS;
-        let before = await reports(users);
+        // Counted from one baseline, so a poll as short as POLL_MS sees growth.
+        const baseline = await reports(users);
         for (;;) {
-          await new Promise((r) => setTimeout(r, 2_000));
+          await new Promise((r) => setTimeout(r, POLL_MS));
           const now = await reports(users);
-          const problems = problemsOf(users, before, now);
+          const problems = problemsOf(users, baseline, now);
           if (problems.length === 0) break;
           if (Date.now() > deadline) {
             throw new Error(`not every tab received every other within ${CONVERGE_TIMEOUT_MS / 1000} s:\n  ${problems.slice(0, 10).join("\n  ")}`);
           }
-          before = now;
         }
 
         // The window. The SFU's counters and the executor's CPU are read together, at both ends.
         const sfu = world!.users.u1.client.neighbourhood;
         const reportsStart = await reports(users);
+        const offAtStart = offSfu(reportsStart);
+        if (offAtStart.length > 0) throw new Error(`not on the SFU before the window:\n  ${offAtStart.slice(0, 10).join("\n  ")}`);
         const countersStart = await sfu.sfuStatus();
         const ticksStart = cpuTicks(pid);
         const t0 = performance.now();
@@ -176,26 +206,28 @@ describe("SFU capacity: the executor's cost of calls of growing size", function 
         const windowS = (performance.now() - t0) / 1000;
         const reportsEnd = await reports(users);
 
-        // A window in which a tab lost another is not a measurement of a call of this size.
+        // A window in which a tab left the SFU or lost another is not a measurement of a call of this size.
+        const offAtEnd = offSfu(reportsEnd);
+        if (offAtEnd.length > 0) throw new Error(`not on the SFU after the window:\n  ${offAtEnd.slice(0, 10).join("\n  ")}`);
         const lost = problemsOf(users, reportsStart, reportsEnd);
         if (lost.length > 0) throw new Error(`a tab stopped receiving another in the window:\n  ${lost.slice(0, 10).join("\n  ")}`);
 
         const cpuSeconds = (ticksEnd - ticksStart) / CLK_TCK;
-        const packets = countersEnd.packetsForwarded - countersStart.packetsForwarded;
+        const datagrams = countersEnd.datagramsSent - countersStart.datagramsSent;
         const iterations = countersEnd.loopIterations - countersStart.loopIterations;
-        if (packets <= 0 || iterations <= 0) throw new Error(`the SFU counters did not move: ${packets} packets, ${iterations} iterations`);
+        if (datagrams <= 0 || iterations <= 0) throw new Error(`the SFU counters did not move: ${datagrams} datagrams, ${iterations} iterations`);
         const m: Measurement = {
           participants: size,
           windowS,
           cpuPercent: (cpuSeconds / windowS) * 100,
-          packetsPerS: packets / windowS,
+          datagramsPerS: datagrams / windowS,
           loopIterationsPerS: iterations / windowS,
-          cpuMsPerKPacket: (cpuSeconds * 1000) / (packets / 1000),
+          cpuMsPerKDatagram: (cpuSeconds * 1000) / (datagrams / 1000),
         };
         measurements.push(m);
         console.log(
-          `    ${size} participants: executor ${m.cpuPercent.toFixed(1)}% of a core, ${m.packetsPerS.toFixed(0)} packets/s forwarded, ` +
-            `${m.loopIterationsPerS.toFixed(0)} loop passes/s, ${m.cpuMsPerKPacket.toFixed(2)} CPU ms per 1000 packets (window ${windowS.toFixed(1)} s)`,
+          `    ${size} participants: executor ${m.cpuPercent.toFixed(1)}% of a core, ${m.datagramsPerS.toFixed(0)} datagrams/s sent, ` +
+            `${m.loopIterationsPerS.toFixed(0)} loop passes/s, ${m.cpuMsPerKDatagram.toFixed(2)} CPU ms per 1000 datagrams (window ${windowS.toFixed(1)} s)`,
         );
       } finally {
         for (const user of users) {

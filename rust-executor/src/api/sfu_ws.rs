@@ -464,7 +464,7 @@ async fn sfu_status(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, 
         advertised_address: svc.advertised_addr().map(|a| a.to_string()),
         detail: reach.to_string(),
         loop_iterations: counters.loop_iterations.load(Ordering::Relaxed),
-        packets_forwarded: counters.packets_forwarded.load(Ordering::Relaxed),
+        datagrams_sent: counters.datagrams_sent.load(Ordering::Relaxed),
     })?)
 }
 
@@ -798,10 +798,9 @@ pub struct SfuStatus {
     /// and the time between them give passes per second.
     #[ts(type = "number")]
     pub loop_iterations: u64,
-    /// RTP packets the SFU has written to receivers since it started: one
-    /// per receiver for each packet a sender sent.
+    /// UDP datagrams the SFU sent (RTP, RTCP and ICE) since it started.
     #[ts(type = "number")]
-    pub packets_forwarded: u64,
+    pub datagrams_sent: u64,
 }
 
 /// `sfu.cascadeStatus`: the SFU↔SFU pipes that are fully established.
@@ -930,12 +929,12 @@ mod tests {
             advertised_address: None,
             detail: "nat".into(),
             loop_iterations: 7,
-            packets_forwarded: 5,
+            datagrams_sent: 5,
         })
         .unwrap();
         assert_eq!(
             status,
-            json!({ "reachability": "nat", "isPublic": false, "bindAddress": "10.0.0.1:9000", "detail": "nat", "loopIterations": 7, "packetsForwarded": 5 })
+            json!({ "reachability": "nat", "isPublic": false, "bindAddress": "10.0.0.1:9000", "detail": "nat", "loopIterations": 7, "datagramsSent": 5 })
         );
         let behind_nat = serde_json::to_value(SfuStatus {
             reachability: "public".into(),
@@ -944,7 +943,7 @@ mod tests {
             advertised_address: Some("198.51.100.7:40000".into()),
             detail: "public".into(),
             loop_iterations: 0,
-            packets_forwarded: 0,
+            datagrams_sent: 0,
         })
         .unwrap();
         assert_eq!(behind_nat["advertisedAddress"], "198.51.100.7:40000");

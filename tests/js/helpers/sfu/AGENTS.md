@@ -6,7 +6,7 @@ Run commands from `tests/js`. Port conflicts and rebuild requirements: `../../AG
 |---|---|---|
 | `test-sfu-e2e`: single executor, end to end (about 4 min) | local, no Holochain: `pnpm run prepare-test-local` (`test-main-sfu-e2e` does both) | every push, `integration-tests-sfu-e2e` |
 | `test-sfu-browsers`: SFU and mesh calls in real Chromium, Firefox and WebKit, mixed (about 1 min past the world's start) | local, no Holochain: `pnpm run prepare-test-local` (`test-main-sfu-browsers` does both) | nightly, `integration-tests-sfu-browsers` |
-| `test-sfu-capacity`: the executor's CPU, forwarded packets and media-loop passes per second for calls of 3, 8 and 16 participants in Chromium (under 2 min after the prepare step) | local, no Holochain: `pnpm run prepare-test-local` (`test-main-sfu-capacity` does both) | nightly, `integration-tests-sfu-capacity` |
+| `test-sfu-capacity`: the executor's CPU, datagrams sent and media-loop passes per second for calls of 3, 8 and 16 participants in Chromium (under 2 min after the prepare step) | local, no Holochain: `pnpm run prepare-test-local` (`test-main-sfu-capacity` does both) | nightly, `integration-tests-sfu-capacity` |
 | `test-sfu`: `sfu-cascade`, `sfu-session` (T20, T21), `sfu-mesh` (network baselines) | Holochain: `pnpm run prepare-test` | nightly, `integration-tests-sfu` |
 
 - **Browser suite (`tests/js/tests/sfu-browsers.test.ts`, helpers in
@@ -25,11 +25,11 @@ Run commands from `tests/js`. Port conflicts and rebuild requirements: `../../AG
   tab receives every other, it reads `sfu.status` and the executor's `/proc`
   CPU time before and after `SFU_CAP_STEADY_S` (30) seconds and records, per
   size (`SFU_CAP_SIZES`, default `3,8,16`; camera `SFU_CAP_VIDEO`,
-  `320x240`): `sfu_capacity.cpu_percent` (of one core), `packets_per_s`
-  (RTP packets written to receivers), `loop_iterations_per_s` (passes of
-  `SfuServer::event_loop`) and `cpu_ms_per_kpacket`. The counters are
+  `320x240`): `sfu_capacity.cpu_percent` (of one core), `datagrams_per_s`
+  (UDP datagrams the SFU sent: RTP, RTCP and ICE), `loop_iterations_per_s` (passes of
+  `SfuServer::event_loop`) and `cpu_ms_per_kdatagram`. The counters are
   `MediaCounters` in `rust-executor/src/sfu/server.rs`, reported as
-  `loopIterations` and `packetsForwarded` by `sfu.status`: monotonic since the
+  `loopIterations` and `datagramsSent` by `sfu.status`: monotonic since the
   SFU started, so a reader divides a difference by the time. The window runs on
   one host with the browsers, so the CPU figure holds the executor only
   (`/proc/<pid>/stat`), not the tabs. 16 tabs need two Chromium processes: one

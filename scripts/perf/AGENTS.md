@@ -46,8 +46,8 @@ trend page. The full contract is the header of `scripts/perf/perf.mjs`.
     (`tests/js/helpers/sfu/perf.ts`), and the step adds `sfu.suite.duration_ms`.
   - `integration-tests-sfu-capacity`: `tests/js/tests/sfu-capacity.test.ts` writes
     `$PERF_RESULTS_DIR/sfu-capacity.json`: per call size (params `{participants}`)
-    `sfu_capacity.cpu_percent`, `.packets_per_s`, `.loop_iterations_per_s` and
-    `.cpu_ms_per_kpacket`. The packet and pass counts are `sfu.status` counters.
+    `sfu_capacity.cpu_percent`, `.datagrams_per_s`, `.loop_iterations_per_s` and
+    `.cpu_ms_per_kdatagram`. The datagram and pass counts are `sfu.status` counters.
     Their limits are a factor of 1.2 (see `thresholds.json`).
   - `llm-e2e`: raw logs go to `$PERF_RESULTS_DIR/raw`:
     - the Rust tests through `scripts/perf/libtest-timer.mjs`;

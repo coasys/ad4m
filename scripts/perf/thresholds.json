@@ -8,8 +8,8 @@
 
     { "job": "integration-tests-sfu-capacity", "metric": "sfu_capacity.*", "factor": 1.2, "min_delta": 1, "_factor": "20 % around the baseline median. Two local runs differed by 2 % (packets per second, loop passes) to 13 % (CPU at 16 participants). One series per call size (params participants)." },
     { "job": "integration-tests-sfu-capacity", "metric": "sfu_capacity.cpu_percent", "factor": 1.2, "min_delta": 3, "_min_delta": "Percent of one core: 3 participants use 2, 16 use 31 to 35." },
-    { "job": "integration-tests-sfu-capacity", "metric": "sfu_capacity.cpu_ms_per_kpacket", "factor": 1.2, "min_delta": 3 },
-    { "job": "integration-tests-sfu-capacity", "metric": "sfu_capacity.packets_per_s", "factor": 1.2, "min_delta": 25, "_min_delta": "The fake cameras send at a fixed rate, so the packets per second follow the call size, not the host. A drop means the SFU stopped forwarding." },
+    { "job": "integration-tests-sfu-capacity", "metric": "sfu_capacity.cpu_ms_per_kdatagram", "factor": 1.2, "min_delta": 3 },
+    { "job": "integration-tests-sfu-capacity", "metric": "sfu_capacity.datagrams_per_s", "factor": 1.2, "min_delta": 25, "_min_delta": "The fake cameras send at a fixed rate, so the datagrams per second follow the call size, not the host. A drop means the SFU stopped forwarding." },
     { "job": "integration-tests-sfu-capacity", "metric": "sfu_capacity.loop_iterations_per_s", "factor": 1.2, "min_delta": 25 },
 
     { "job": "llm-e2e", "metric": "suite.*", "min_delta": 120 },

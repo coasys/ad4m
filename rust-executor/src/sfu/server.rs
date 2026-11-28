@@ -1290,9 +1290,9 @@ pub struct DeadPeer {
 pub struct MediaCounters {
     /// Passes of the event loop: one per wake (a packet, a timer or a command).
     pub loop_iterations: AtomicU64,
-    /// RTP packets written to receivers: a packet received from a sender counts
-    /// once for each receiver it is forwarded to.
-    pub packets_forwarded: AtomicU64,
+    /// UDP datagrams the SFU sent (RTP, RTCP and ICE), to clients and pipes
+    /// alike. Counted when the socket accepted the datagram.
+    pub datagrams_sent: AtomicU64,
 }
 
 /// The SFU server. Owns the UDP sockets and drives the str0m event loop.
@@ -1748,11 +1748,14 @@ impl SfuServer {
                                     .map(|_| ()),
                                 None => Err(std::io::Error::other("no socket")),
                             };
-                            if let Err(e) = sent {
-                                debug!(
+                            match sent {
+                                Ok(()) => {
+                                    counters.datagrams_sent.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(e) => debug!(
                                     "SFU: failed to send UDP from {} to {}: {}",
                                     transmit.source, transmit.destination, e
-                                );
+                                ),
                             }
                         }
                         Ok(Output::Timeout(t)) => {
@@ -1925,14 +1928,13 @@ impl SfuServer {
 
                 let track = (origin_pid.clone(), data.mid);
                 let keyframe = is_keyframe(&data.codec_extra);
-                // The frame's RTP packets (extended sequence numbers).
-                let packets = (**data.seq_range.end()).saturating_sub(**data.seq_range.start()) + 1;
                 layers.observe(
                     now,
                     &track,
                     data.rid.as_ref(),
                     data.data.len(),
-                    packets,
+                    // The frame's RTP packets (extended sequence numbers).
+                    (**data.seq_range.end()).saturating_sub(**data.seq_range.start()) + 1,
                     data.params.spec().codec.is_audio(),
                 );
                 // A gap in the origin's sequence (e.g. after an outage or an
@@ -1974,11 +1976,7 @@ impl SfuServer {
                             data.rid.as_ref(),
                             data.time,
                         );
-                        if write_forwarded(target_peer, out_mid, data, time) {
-                            counters
-                                .packets_forwarded
-                                .fetch_add(packets, Ordering::Relaxed);
-                        }
+                        write_forwarded(target_peer, out_mid, data, time);
                     }
                 }
             }
@@ -2169,8 +2167,7 @@ async fn recv_any(
 }
 
 /// Write one forwarded packet to `peer`'s outbound `mid`, as the media
-/// relay does for every packet it decided this peer gets. Returns whether it
-/// was written (the `packets_forwarded` counter counts only those).
+/// relay does for every packet it decided this peer gets.
 ///
 /// `data` carries the ORIGIN's payload type, which means nothing to this
 /// peer: every side numbers its own PTs — a browser answers on its own
@@ -2187,9 +2184,9 @@ async fn recv_any(
 /// A peer with no matching codec on `mid` gets nothing; the drop logs
 /// once per (mid, codec) and a failed write once per (mid, error kind)
 /// — never per packet.
-fn write_forwarded(peer: &mut SfuPeer, mid: Mid, data: &MediaData, time: MediaTime) -> bool {
+fn write_forwarded(peer: &mut SfuPeer, mid: Mid, data: &MediaData, time: MediaTime) {
     let Some(writer) = peer.rtc.writer(mid) else {
-        return false;
+        return;
     };
     let pt = writer
         .match_params(data.params)
@@ -2206,7 +2203,7 @@ fn write_forwarded(peer: &mut SfuPeer, mid: Mid, data: &MediaData, time: MediaTi
                 peer.id, mid, codec, data.pt
             );
         }
-        return false;
+        return;
     };
     if let Err(e) = writer.write(pt, data.network_time, time, data.data.clone()) {
         if peer
@@ -2218,9 +2215,7 @@ fn write_forwarded(peer: &mut SfuPeer, mid: Mid, data: &MediaData, time: MediaTi
                 peer.id, mid, e
             );
         }
-        return false;
     }
-    true
 }
 
 /// Remove all `tracks_out` / `tracks_out_rev` entries that reference a
@@ -6214,7 +6209,7 @@ mod tests {
     }
 
     /// A command answered by the loop is at least one more pass; with nobody
-    /// connected, nothing was forwarded.
+    /// connected, nothing was sent.
     #[tokio::test]
     async fn the_loop_counts_its_passes_on_an_idle_server() {
         let server = SfuServer::start(SfuServerConfig {
@@ -6233,7 +6228,26 @@ mod tests {
             .unwrap();
         answer.await.unwrap();
         assert!(passes() > before, "the pass that answered was not counted");
-        assert_eq!(server.counters.packets_forwarded.load(Ordering::Relaxed), 0);
+        assert_eq!(server.counters.datagrams_sent.load(Ordering::Relaxed), 0);
+        let _ = server.command_tx.send(SfuCommand::Shutdown).await;
+    }
+
+    /// A caller that connects makes the SFU answer its STUN and DTLS over UDP:
+    /// every datagram the socket accepted is counted.
+    #[tokio::test]
+    async fn the_datagrams_the_sfu_sent_are_counted() {
+        let server = SfuServer::start(SfuServerConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!(server.counters.datagrams_sent.load(Ordering::Relaxed), 0);
+        call_through(&server, std::net::Ipv4Addr::LOCALHOST.into()).await;
+        assert!(
+            server.counters.datagrams_sent.load(Ordering::Relaxed) > 0,
+            "a connected caller got datagrams that were not counted"
+        );
         let _ = server.command_tx.send(SfuCommand::Shutdown).await;
     }
 
@@ -6821,19 +6835,15 @@ mod tests {
         }
 
         /// Forward every MediaData that landed on `origin`'s peer to
-        /// `target`'s peer, as the event loop's relay does. How many were written.
-        fn relay(origin: &mut CallEnd, target: &mut CallEnd) -> usize {
-            let mut written = 0;
+        /// `target`'s peer, as the event loop's relay does.
+        fn relay(origin: &mut CallEnd, target: &mut CallEnd) {
             for data in origin.peer_seen.media.drain(..) {
                 let track = (origin.pid.clone(), data.mid);
                 let Some(&mid) = target.peer.tracks_out_rev.get(&track) else {
                     continue;
                 };
-                if write_forwarded(&mut target.peer, mid, &data, data.time) {
-                    written += 1;
-                }
+                write_forwarded(&mut target.peer, mid, &data, data.time);
             }
-            written
         }
 
         /// Two callers whose SDPs number the same codecs differently —
@@ -6895,11 +6905,11 @@ mod tests {
             // forwarded on the other's outbound mid as the relay does,
             // and reaches the other caller.
             let (mut at_a, mut at_b) = (Vec::new(), Vec::new());
-            let mut written = 0;
             for _ in 0..100 {
                 exchange(&mut a, now, start);
                 exchange(&mut b, now, start);
-                written += relay(&mut a, &mut b) + relay(&mut b, &mut a);
+                relay(&mut a, &mut b);
+                relay(&mut b, &mut a);
                 at_a.append(&mut a.caller_seen.media);
                 at_b.append(&mut b.caller_seen.media);
                 if at_a.len() >= 2 && at_b.len() >= 2 {
@@ -6907,9 +6917,6 @@ mod tests {
                 }
                 now += Duration::from_millis(1);
             }
-
-            // Every frame that arrived was written, and counted as written.
-            assert_eq!(written, at_a.len() + at_b.len());
 
             // Bob hears Alice on his own numbering: opus 109, VP8 120.
             let opus = at_b
@@ -6982,11 +6989,10 @@ mod tests {
             write_media(&mut a.caller, a.mid_video, Codec::Vp8, 3, VP8_A);
 
             let mut at_b = Vec::new();
-            let mut written = 0;
             for _ in 0..100 {
                 exchange(&mut a, now, start);
                 exchange(&mut b, now, start);
-                written += relay(&mut a, &mut b);
+                relay(&mut a, &mut b);
                 at_b.append(&mut b.caller_seen.media);
                 now += Duration::from_millis(1);
             }
@@ -6999,7 +7005,6 @@ mod tests {
                 .expect("VP8 reached Bob");
             assert_eq!(vp8.pt, Pt::new_with_value(120));
             assert_eq!(at_b.len(), 1, "only VP8 may arrive: {at_b:?}");
-            assert_eq!(written, 1, "a dropped frame is not counted as forwarded");
             assert_eq!(b.peer.drops_logged.len(), 1, "two dropped packets log once");
         }
     }

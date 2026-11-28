@@ -1059,8 +1059,8 @@ jobs:
           destination: test-logs
 
   # What the executor spends on calls of 3, 8 and 16 participants in real
-  # Chromium tabs (tests/js/tests/sfu-capacity.test.ts): its CPU, the RTP
-  # packets the SFU forwards and the passes of its media loop, per second. The
+  # Chromium tabs (tests/js/tests/sfu-capacity.test.ts): its CPU, the UDP
+  # datagrams the SFU sends and the passes of its media loop, per second. The
   # test writes $PERF_RESULTS_DIR/sfu-capacity.json. Nightly only. Like
   # integration-tests-sfu-browsers it builds its own binaries.
   integration-tests-sfu-capacity:

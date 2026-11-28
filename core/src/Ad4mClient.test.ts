@@ -190,7 +190,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'neighbourhood.otherAgents': ['did:other:1', 'did:other:2'],
     'neighbourhood.hasTelepresence': true,
     'neighbourhood.onlineAgents': [{ did: 'did:test:1', status: new Perspective() }],
-    'sfu.status': { reachability: 'nat', isPublic: false, bindAddress: '127.0.0.1:9000', detail: 'nat', loopIterations: 0, packetsForwarded: 0 },
+    'sfu.status': { reachability: 'nat', isPublic: false, bindAddress: '127.0.0.1:9000', detail: 'nat', loopIterations: 0, datagramsSent: 0 },
     'sfu.servesAllMembers': true,
     'neighbourhood.ownOnlineStatus': null,
     'neighbourhood.setOnlineStatus': true,

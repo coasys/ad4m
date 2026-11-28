@@ -28,7 +28,6 @@ detail: string,
  */
 loopIterations: number, 
 /**
- * RTP packets the SFU has written to receivers since it started: one
- * per receiver for each packet a sender sent.
+ * UDP datagrams the SFU sent (RTP, RTCP and ICE) since it started.
  */
-packetsForwarded: number, };
+datagramsSent: number, };
