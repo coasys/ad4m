@@ -1180,6 +1180,11 @@ impl SfuService {
         self.server.advertised.map(|a| a.addr)
     }
 
+    /// The event loop's work counters.
+    pub fn media_counters(&self) -> &super::server::MediaCounters {
+        &self.server.counters
+    }
+
     // ---- Room management ----
 
     /// Whether `room_id` may be opened: refused once the node, or the room's

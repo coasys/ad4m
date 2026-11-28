@@ -8,6 +8,8 @@ A pipeline with `run-nightly-llm: true` runs only this workflow, on `coasys/marv
 Each job has its own serial group, except `llm-e2e` and `coasys-spaces`, which
 share `nightly-llm`. The jobs: `llm-e2e`,
 `integration-tests-sfu`, `integration-tests-sfu-browsers` (see below),
+`integration-tests-sfu-capacity` (executor CPU for 3, 8 and 16 participants,
+recorded in the perf history),
 `coasys-spaces`, `integration-tests-agent-harness`, `feed-scale` and `agent-scale`
 (see "Agent-scale wind tunnel" in `tests/js/AGENTS.md`).
 
