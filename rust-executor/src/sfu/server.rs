@@ -28,6 +28,7 @@ use super::relay::MediaRelay;
 use super::room::{random_upper_half_u64, ParticipantId, RoomId};
 use super::simulcast::{is_keyframe, LayerSelector};
 use super::types::{SfuAnswerRefusal, SfuAnswerResult, SfuCallRenegotiationOffer};
+use str0m::bwe::{Bitrate, BweKind};
 
 /// The call session whose media a track carries, by the id the clients of
 /// this node know it by: a local session's own id, a remote one's
@@ -252,6 +253,10 @@ const PIPE_OFFER_RESEND_LIMIT: u32 = OFFER_BACKOFF_RESENDS;
 
 /// Wait between resends after the back-off, and after a `sfu.callResume`.
 const OFFER_RESEND_STEADY: Duration = Duration::from_secs(30);
+
+/// A client's bandwidth estimate before its first feedback (kbit/s). It
+/// budgets a low layer and the audio; the estimator probes up from there.
+const BWE_START_KBPS: u64 = 800;
 
 /// How often each client peer logs one stats line (str0m's `PeerStats`):
 /// bitrate and bytes in and out, loss each way, RTT, the simulcast layers it
@@ -1375,8 +1380,11 @@ impl SfuServer {
         hosts: &[SocketAddr],
         advertised: Option<(SocketAddr, SocketAddr)>,
     ) -> Result<(Rtc, String), String> {
+        // A client's downlink is estimated (TWCC) so its video layers can
+        // follow it; see `simulcast`. Pipes, which this does not build, do not.
         let mut rtc = Rtc::builder()
             .set_stats_interval(Some(PEER_STATS_INTERVAL))
+            .enable_bwe(Some(Bitrate::kbps(BWE_START_KBPS)))
             .build(Instant::now());
 
         if hosts.is_empty() {
@@ -1453,6 +1461,9 @@ impl SfuServer {
 
                         // Existing origins are offered when a pipe becomes usable
                         // (ICE connected, or its control channel opens), not here.
+                        if !peer.is_pipe {
+                            layers.set_bwe(&pid);
+                        }
                         peers.insert(pid, peer);
                     }
                     Ok(SfuCommand::RemovePeer(pid)) => {
@@ -1461,7 +1472,7 @@ impl SfuServer {
                             info!("SFU: peer {} left room {}", pid, room_id);
                             relay.remove_participant(&pid);
                             quality_preferences.remove(&pid);
-                            layers.forget(&pid);
+                            layers.forget(Instant::now(), &pid);
                             clean_stale_track_refs(&mut peers, &pid, &room_id);
                         }
                     }
@@ -1473,9 +1484,14 @@ impl SfuServer {
                             "SFU: peer {} quality preference set to '{}'",
                             participant_id, preference
                         );
-                        // The layer selector switches on the next packets
-                        // and asks the senders for the keyframes it needs.
-                        quality_preferences.insert(participant_id, preference);
+                        // A peer that has left keeps nothing: ids are never
+                        // reused, so state made for it would never be freed.
+                        if peers.contains_key(&participant_id) {
+                            // The layer selector switches on the next packets
+                            // and asks the senders for the keyframes it needs.
+                            layers.set_ceiling(Instant::now(), &participant_id, &preference);
+                            quality_preferences.insert(participant_id, preference);
+                        }
                     }
                     Ok(SfuCommand::ApplyServerAnswer {
                         participant_id,
@@ -1678,6 +1694,8 @@ impl SfuServer {
             // this tick publishes it once.
             let now = Instant::now();
             let due_resends = sweep_offer_deadlines(&mut peers, now);
+            // A pending upgrade whose hold ended, or whose layer is measured.
+            layers.run_due(now);
 
             // Poll all peers for output
             let mut earliest_timeout = Instant::now() + Duration::from_millis(100);
@@ -1736,6 +1754,18 @@ impl SfuServer {
                             }
                             Event::KeyframeRequest(req) => {
                                 keyframe_requests.push((pid.clone(), req));
+                            }
+                            Event::EgressBitrateEstimate(BweKind::Twcc {
+                                estimate,
+                                can_probe,
+                            }) => {
+                                // REMB is ignored: the budget follows TWCC.
+                                layers.set_estimate(
+                                    Instant::now(),
+                                    pid,
+                                    estimate.as_u64(),
+                                    can_probe,
+                                );
                             }
                             Event::ChannelOpen(cid, label) => {
                                 info!(
@@ -1831,7 +1861,7 @@ impl SfuServer {
                         info!("SFU: peer {} disconnected", pid);
                         relay.remove_participant(pid);
                         quality_preferences.remove(pid);
-                        layers.forget(pid);
+                        layers.forget(now, pid);
                         dead_peers.push(peer.dead_peer(now));
                         false
                     } else {
@@ -1870,8 +1900,16 @@ impl SfuServer {
                 }
 
                 let track = (origin_pid.clone(), data.mid);
-                layers.observe(now, &track, data.rid.as_ref());
                 let keyframe = is_keyframe(&data.codec_extra);
+                layers.observe(
+                    now,
+                    &track,
+                    data.rid.as_ref(),
+                    data.data.len(),
+                    // The frame's RTP packets (extended sequence numbers).
+                    (**data.seq_range.end()).saturating_sub(**data.seq_range.start()) + 1,
+                    data.params.spec().codec.is_audio(),
+                );
                 // A gap in the origin's sequence (e.g. after an outage or an
                 // ICE restart): receivers may need a keyframe to decode again.
                 if !data.contiguous
@@ -1895,14 +1933,8 @@ impl SfuServer {
                     // and needs no layer.
                     if let Some(&out_mid) = target_peer.tracks_out_rev.get(&track) {
                         // One simulcast layer per receiver (see `simulcast`).
-                        let route = layers.route(
-                            now,
-                            target_pid,
-                            &track,
-                            data.rid.as_ref(),
-                            keyframe,
-                            quality_preferences.get(target_pid).map(|s| s.as_str()),
-                        );
+                        let route =
+                            layers.route(now, target_pid, &track, data.rid.as_ref(), keyframe);
                         if let Some(rid) = route.request_keyframe {
                             layer_keyframes.push((origin_pid.clone(), data.mid, Some(rid)));
                         }
@@ -2019,6 +2051,18 @@ impl SfuServer {
                         }
                     }
                 }
+            }
+
+            // What each receiver's transport should probe for.
+            for (pid, bps) in layers.take_demands() {
+                if let Some(peer) = peers.get_mut(&pid) {
+                    peer.rtc.bwe().set_desired_bitrate(Bitrate::bps(bps));
+                }
+            }
+            // Wake for the earliest pending upgrade: the estimator is silent
+            // on a steady link, so no event would run it.
+            if let Some(wake) = layers.next_wake() {
+                earliest_timeout = earliest_timeout.min(wake);
             }
 
             // Read from the UDP sockets with timeout
@@ -3080,6 +3124,35 @@ mod tests {
                 .iter()
                 .any(|l| l.contains("198.51.100.7 40000 typ srflx")),
             "{lines:?}"
+        );
+    }
+
+    /// The receiver's bandwidth estimate comes from the caller's transport-wide
+    /// congestion control reports: its answer must accept both the feedback
+    /// type and the header extension for video.
+    #[test]
+    fn a_video_answer_negotiates_transport_wide_congestion_control() {
+        let local: SocketAddr = "192.168.0.10:40000".parse().unwrap();
+        let mut caller = Rtc::builder().build(Instant::now());
+        let mut change = caller.sdp_api();
+        change.add_media(
+            str0m::media::MediaKind::Video,
+            str0m::media::Direction::SendRecv,
+            None,
+            None,
+            None,
+        );
+        let offer = change.apply().unwrap().0;
+        let (_, answer) = SfuServer::create_rtc_for_offer(offer, &[local], None).unwrap();
+        let answer: serde_json::Value = serde_json::from_str(&answer).unwrap();
+        let sdp = answer["sdp"].as_str().unwrap();
+        assert!(
+            sdp.contains("transport-cc"),
+            "no transport-cc feedback: {sdp}"
+        );
+        assert!(
+            sdp.contains("transport-wide-cc-extensions"),
+            "no transport-wide-cc extension: {sdp}"
         );
     }
 
@@ -6333,6 +6406,34 @@ mod tests {
         let target = call_through(&server, ip("127.0.0.3")).await;
         assert!(server.sockets.bound_addrs().contains(&target));
         call_through(&server, ip("127.0.0.1")).await;
+        let _ = server.command_tx.send(SfuCommand::Shutdown).await;
+    }
+
+    #[tokio::test]
+    async fn a_preference_for_a_peer_that_left_leaves_nothing_behind() {
+        let server = SfuServer::start(SfuServerConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let gone = ParticipantId::next();
+        server
+            .command_tx
+            .send(SfuCommand::SetQualityPreference {
+                participant_id: gone,
+                preference: "low".into(),
+            })
+            .await
+            .unwrap();
+        // The loop handles commands in order: the reply follows the set.
+        let (reply, kept) = tokio::sync::oneshot::channel();
+        server
+            .command_tx
+            .send(SfuCommand::GetQualityPreferences { reply })
+            .await
+            .unwrap();
+        assert!(kept.await.unwrap().is_empty());
         let _ = server.command_tx.send(SfuCommand::Shutdown).await;
     }
 

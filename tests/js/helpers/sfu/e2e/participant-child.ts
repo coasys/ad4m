@@ -13,7 +13,7 @@
 import { Ad4mClient, type Session } from "@coasys/ad4m";
 import { Hearing, PauseWatch, SCREEN, Source, toneSource, videoSource, wrtc } from "./media.js";
 import type { Command, JoinOptions, Snapshot } from "./protocol.js";
-import { failNextOffer, installWebRtc, selectedRemoteAddresses } from "./webrtc.js";
+import { failNextOffer, installWebRtc, selectedRemoteAddresses, sentMedia } from "./webrtc.js";
 
 installWebRtc();
 
@@ -93,6 +93,7 @@ async function snapshot(): Promise<Snapshot> {
     peerStates: state.peerStates,
     recoveries: state.recoveries,
     selectedRemotes: await selectedRemoteAddresses(),
+    sent: await sentMedia(),
     pausedMs: pauses.longestWithin(PAUSE_RECENT_MS),
   };
 }

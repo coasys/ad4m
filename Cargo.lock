@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "ad4m"
-version = "0.13.1-staging.20"
+version = "0.13.1-staging.21"
 dependencies = [
  "ad4m-client",
  "ad4m-executor",
@@ -33,7 +33,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-client"
-version = "0.13.1-staging.20"
+version = "0.13.1-staging.21"
 dependencies = [
  "anyhow",
  "chrono",
@@ -58,7 +58,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-executor"
-version = "0.13.1-staging.20"
+version = "0.13.1-staging.21"
 dependencies = [
  "ad4m-client",
  "ad4m-hash-chain",
@@ -105,6 +105,7 @@ dependencies = [
  "hkdf 0.12.4",
  "holochain",
  "holochain_cli_bundle",
+ "holochain_timestamp",
  "holochain_types",
  "http-body-util",
  "hyper 0.14.32",
@@ -260,7 +261,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-launcher"
-version = "0.13.1-staging.20"
+version = "0.13.1-staging.21"
 dependencies = [
  "ad4m-client",
  "ad4m-executor",
