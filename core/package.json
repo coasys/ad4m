@@ -5,6 +5,27 @@
   "module": "lib/index.js",
   "types": "lib/src/index.d.ts",
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./lib/src/index.d.ts",
+      "import": "./lib/index.js",
+      "require": "./lib/index.cjs"
+    },
+    "./model": {
+      "types": "./lib/src/model-entry.d.ts",
+      "import": "./lib/model.js",
+      "require": "./lib/model.cjs"
+    },
+    "./package.json": "./package.json",
+    "./*": "./*"
+  },
+  "typesVersions": {
+    "*": {
+      "model": [
+        "lib/src/model-entry.d.ts"
+      ]
+    }
+  },
   "scripts": {
     "build": "patch-package && tsc && pnpm run bundle",
     "bundle": "rollup -c rollup.config.js",
@@ -66,5 +87,5 @@
       "pako": "2.1.0"
     }
   },
-  "version": "0.13.1-staging.19"
+  "version": "0.13.1-staging.21"
 }

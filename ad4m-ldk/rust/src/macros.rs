@@ -450,6 +450,22 @@ macro_rules! __ad4m_cap {
         }
     };
 
+    (mount, $lang:ty) => {
+        // `mountShapes` is sync: building the shape envelope is pure
+        // JSON work plus `language_address()`, a sync host import.
+        #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "mountShapes")]
+        pub fn __ad4m_mount_shapes() -> ::std::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue> {
+            let s = __ad4m_with("mountShapes", |l| <$lang as $crate::traits::MountCapability>::mount_shapes(l))??;
+            Ok($crate::__serde::to_js(&s).map_err($crate::errors::LanguageError::from)?)
+        }
+
+        // `mountSnapshot` is async — the record list usually comes from
+        // async host imports, so the shim holds the slot lock across the
+        // await like the other async shims.
+        $crate::__ad4m_async_shim!($lang, MountCapability, "mountSnapshot",
+            __ad4m_mount_snapshot, mount_snapshot, mut, (), []);
+    };
+
     (telepresence, $lang:ty) => {
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "telepresenceSetOnlineStatus")]
         pub fn __ad4m_telepresence_set_online_status(

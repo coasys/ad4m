@@ -46,6 +46,17 @@ import {
         configurable: false,
     });
 
+    // The token of the call this code runs for (or null), for the other
+    // extensions' ops that act as the caller: the HOLOCHAIN_SERVICE ops route
+    // a call to the caller's cell (#1775). The token stays opaque: JS cannot
+    // make one, and handing it on gives an op no more than this code has.
+    Object.defineProperty(globalThis, "__ad4mCallAgent", {
+        value: () => caller(),
+        writable: false,
+        enumerable: false,
+        configurable: false,
+    });
+
     // The host's module evaluation is driven from Rust (`JsCore::load_module_from_source`),
     // not a script call: `__ad4mEnterCallAgent` takes the call's token into the
     // async context the way `__ad4mRunCall` does, and `__ad4mLeaveCallAgent`

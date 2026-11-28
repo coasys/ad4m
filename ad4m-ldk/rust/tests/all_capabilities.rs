@@ -88,6 +88,20 @@ impl TelepresenceCapability for Full {
     }
 }
 
+impl MountCapability for Full {
+    fn mount_shapes(&self) -> LanguageResult<MountShapes> {
+        Ok(MountShapes {
+            version: "1".into(),
+            shapes: Vec::new(),
+        })
+    }
+    async fn mount_snapshot(&mut self) -> LanguageResult<MountSnapshot> {
+        Ok(MountSnapshot {
+            entries: Vec::new(),
+        })
+    }
+}
+
 impl LanguageSourceCapability for Full {
     async fn language_get_source(&self, _address: Address) -> LanguageResult<String> {
         Ok(String::new())
@@ -104,7 +118,7 @@ ad4m_language! {
     language: Full,
     capabilities: [
         expression, perspective_commit, perspective_sync, perspective_query,
-        peers, language_source, telepresence,
+        peers, language_source, telepresence, mount,
     ],
     holochain_signal: true,
 }

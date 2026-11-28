@@ -334,22 +334,28 @@ impl LanguageRuntimeHandle {
         let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
         let queued_at = Instant::now();
         let started = Arc::new(std::sync::OnceLock::new());
-        self.queued.lock().unwrap().insert(id, queued_at);
         // Off the queue report however this call ends: answered, failed, or dropped by a
         // caller that stopped waiting (a timeout, a cancelled RPC).
         let _queued = QueuedEntry {
             queued: &self.queued,
             id,
         };
-        self.tx
-            .send(LanguageRuntimeRequest {
-                operation,
-                response_tx,
-                queued_at,
-                id,
-                started: started.clone(),
-            })
-            .map_err(|e| format!("Language runtime channel closed: {}", e))?;
+        {
+            // The entry goes in and the request into the channel under one hold of the
+            // lock, so a reader of the report that sees the entry knows the request is in the
+            // channel. The send does not block (unbounded channel).
+            let mut queued = self.queued.lock().unwrap();
+            queued.insert(id, queued_at);
+            self.tx
+                .send(LanguageRuntimeRequest {
+                    operation,
+                    response_tx,
+                    queued_at,
+                    id,
+                    started: started.clone(),
+                })
+                .map_err(|e| format!("Language runtime channel closed: {}", e))?;
+        }
 
         let response = if let Some(kind) = kind {
             self.wait_for_call(id, kind, queued_at, response_rx).await

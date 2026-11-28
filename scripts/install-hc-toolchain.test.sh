@@ -43,10 +43,33 @@ EOF
     printf '[workspace]\nmembers = []\n\n[patch.crates-io]\nfoo = { path = "foo" }\n' > "$WORKSPACE/Cargo.toml"
 
     # Fake cargo: fails like the real one when a workspace member's manifest
-    # is missing, otherwise "builds" target/release/hc.
+    # is missing, otherwise "builds" target/release/hc. `cargo install`, like
+    # the real one, refuses to replace a binary it did not install at the asked
+    # version unless --force is given.
     mkdir -p "$TMP/bin"
     cat > "$TMP/bin/cargo" <<'EOF'
 #!/usr/bin/env bash
+if [[ "$1" == install ]]; then
+    shift
+    force=0 root= version=
+    while (( $# )); do
+        case "$1" in
+            --force) force=1 ;;
+            --root) root="$2"; shift ;;
+            --version) version="$2"; shift ;;
+        esac
+        shift
+    done
+    bin="$root/bin/kitsune2-bootstrap-srv"
+    if [[ -e "$bin" && "$force" != 1 ]]; then
+        echo "error: binary \`kitsune2-bootstrap-srv\` already exists in destination" >&2
+        exit 101
+    fi
+    mkdir -p "$root/bin"
+    printf '#!/bin/sh\necho "kitsune2-bootstrap-srv %s"\n' "$version" > "$bin"
+    chmod +x "$bin"
+    exit 0
+fi
 if [[ ! -f crates/fixt/Cargo.toml ]]; then
     echo "error: failed to read \`$PWD/crates/fixt/Cargo.toml\`" >&2
     exit 101
@@ -93,7 +116,30 @@ test_restores_deleted_tracked_files() {
         || fail "stamp file does not hold $REV"
 }
 
-for t in test_fresh_install test_restores_deleted_tracked_files; do
+# The toolchain folder is shared by every branch a runner builds. A branch
+# that pins another kitsune2 leaves its kitsune2-bootstrap-srv there, and the
+# next branch must replace it with its own version.
+test_replaces_another_kitsune_version() {
+    cat >> "$WORKSPACE/Cargo.lock" <<'EOF'
+
+[[package]]
+name = "kitsune2_bootstrap_srv"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+EOF
+    mkdir -p "$WORKSPACE/.hc-toolchain/bin"
+    printf '#!/bin/sh\necho "kitsune2-bootstrap-srv 0.5.1"\n' > "$WORKSPACE/.hc-toolchain/bin/kitsune2-bootstrap-srv"
+    chmod +x "$WORKSPACE/.hc-toolchain/bin/kitsune2-bootstrap-srv"
+    echo 0.5.1 > "$WORKSPACE/.hc-toolchain/.installed_kitsune_version"
+
+    install_toolchain || { fail "install over another kitsune2 version failed"; return; }
+    "$WORKSPACE/.hc-toolchain/bin/kitsune2-bootstrap-srv" | grep -q '0.5.0' \
+        || fail "bin/kitsune2-bootstrap-srv is not 0.5.0"
+    [[ "$(cat "$WORKSPACE/.hc-toolchain/.installed_kitsune_version")" == 0.5.0 ]] \
+        || fail "kitsune2 stamp does not hold 0.5.0"
+}
+
+for t in test_fresh_install test_restores_deleted_tracked_files test_replaces_another_kitsune_version; do
     echo "$t"
     make_fixture
     "$t"

@@ -3,6 +3,7 @@ import type { ImportResult } from "./ImportResult";
 import type { RuntimeImportPerspectiveResult } from "./RuntimeImportPerspectiveResult";
 
 /**
- * `type: "db"` yields import stats; `type: "perspective"` echoes the file's snapshot.
+ * `type: "db"` yields import stats; `type: "perspective"` the counts the
+ * store's bulk load reports.
  */
 export type RuntimeImportResult = ImportResult | RuntimeImportPerspectiveResult;

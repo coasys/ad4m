@@ -20,12 +20,15 @@
 //! ad4m_language! { language: MyLang, capabilities: [perspective_commit] }
 //! ```
 
+extern crate self as ad4m_ldk;
+
 #[doc(hidden)]
 pub mod agent;
 pub mod errors;
 pub mod identity;
 pub mod imports;
 pub mod macros;
+pub mod model;
 pub mod state;
 pub mod token;
 pub mod traits;
@@ -47,6 +50,11 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Must equal the `js_name` of the marker export `ad4m_language!` emits —
 /// the macro expansion checks that at compile time.
 pub const MARKER_EXPORT: &str = "__ad4mAldkVersion";
+
+/// `#[derive(Ad4mModel)]` — describe a mounted class's SHACL shape on
+/// its Rust struct, the counterpart of the TS model decorators. See
+/// [`model`].
+pub use ad4m_model_derive::Ad4mModel;
 
 #[doc(hidden)]
 pub use futures as __futures;
@@ -92,10 +100,12 @@ pub mod prelude {
     pub use crate::ad4m_language;
     pub use crate::errors::{ErrorCode, LanguageError, LanguageResult};
     pub use crate::imports as runtime;
+    pub use crate::model::{MountClassShape, MountShapeBuilder};
     pub use crate::traits::{
         ExpressionCapability, HolochainSignalHandler, IdentityCapability, Language,
-        PeersCapability, PerspectiveCommitCapability, PerspectiveQueryCapability,
+        MountCapability, PeersCapability, PerspectiveCommitCapability, PerspectiveQueryCapability,
         PerspectiveSyncCapability, TelepresenceCapability, TokenCapability,
     };
     pub use crate::types::*;
+    pub use crate::Ad4mModel;
 }

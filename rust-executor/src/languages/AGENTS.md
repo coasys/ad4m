@@ -75,7 +75,16 @@ work instead of reporting busy. A
 instance
 (`a_wasm_language_runs_concurrent_calls_each_as_its_own_agent`,
 `a_sync_export_answers_beside_a_concurrent_wasm_call`,
-`an_ordered_export_on_wasm_still_runs_alone`).
+`an_ordered_export_on_wasm_still_runs_alone`). The user-visible gain is pinned on the
+seeded agent language: `centralized_agent_lookups_overlap_when_marked_and_queue_when_not`
+loads the real centralized-agent-language bundle against a loopback store that holds each
+`GET /v1/agents/{did}` for 200 ms, and 16 concurrent `expressionGet` calls (what
+`agent.byDIDs` sends) overlap (the store sees several open at once, the lot takes well
+under 16 x 200 ms); the same bundle with its marker removed runs them one by one. The test
+needs the bundle: `env -u CARGO_TARGET_DIR bash
+bootstrap-languages/centralized-agent-language/rust-impl/build.sh` (CI builds it beside
+the test WASM language). The `mount` capability's `mount_shapes` is a sync `&self`
+export (it shares the read side); `mount_snapshot` is an ordered `&mut self` one.
 
 The agent a call acts as travels with the call, not with the thread: the
 runtime registers it under the request id and runs the script as
@@ -84,6 +93,8 @@ takes it out once as a `CallAgent` token and keeps it in a V8 async-context
 variable that every await, promise reaction and timer of the call inherits.
 The agent ops sign as that token. With no token they refuse (signing, sealed
 boxes, and `did` / `signingKeyId` too: code with no token acts as no agent).
+So do the `HOLOCHAIN_SERVICE` ops that touch a language's cells
+(`installApp`, `getAppInfo`, `callZomeFunction`, #1775).
 The host's own entries into a language run the same way, with a main-agent
 token (`LanguageRuntime::execute_as_host`): the bundle's evaluation
 (`JsCore::load_module_from_source` evaluates it under the token, which
@@ -134,7 +145,17 @@ The runtime never
 starts a call whose caller has gone, so a deadline error means the call did
 not run. The deadline reads the tokio clock (`tokio::time::Instant`), so a test
 on a paused clock (`start_paused`) reaches it with no real wait
-(`the_deadline_follows_the_paused_tokio_clock`).
+(`the_deadline_follows_the_paused_tokio_clock`). A test with a real runtime
+thread must not pause the clock: the paused clock advances while the test waits
+on the other thread, and deadlines fire early. `call_deadline_tests.rs` uses a
+200 ms deadline there (`short(&handle)`, a clone of the handle with that
+deadline, only for the call whose expiry the test asserts; the calls that must
+start go on the default deadline) and waits for the runtime's running marker
+(`ordered_call_started`, `concurrent_calls_started`) or the queue report
+(`calls_waiting`) instead of sleeping until a call has probably started.
+`send` inserts the queue report's entry and sends the request under one hold of
+the report's lock, so a depth a reader sees counts requests already in the
+channel.
 
 A call that never returns, by kind. A hung ordered call (an `await` nothing
 settles) blocks the language's ordered calls and its own caller for ever; the
