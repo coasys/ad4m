@@ -92,14 +92,14 @@ export function lostSignalRow(row: LostSignalRow): ReturnType<typeof e2eScenario
         await step("the call holds past the dropped call's timeout", async () => {
           await call.holds(everyone, Math.max(0, droppedAt + row.holdMs - Date.now()), "the call after the drop");
           fault.end();
-          await call.eventually(everyone, 1, "after the hold");
+          await call.now(everyone, "after the hold");
         });
 
         await step("nobody left, and media flowed on every pair throughout", async () => {
           const violations = await checks!.stop();
           if (violations.length) throw new Error(violations.join("\n"));
         });
-        await step("no session reported an error", () => call.eventually(call.noErrors(), 1, "errors"));
+        await step("no session reported an error", () => call.now(call.noErrors(), "errors"));
       } finally {
         await checks?.abort();
         proxy.close();

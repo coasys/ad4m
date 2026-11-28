@@ -65,6 +65,6 @@ export const e20TabTakesOver = e2eScenario({
       const problem = replacedProblem(await call.who("u1").snapshot());
       if (problem) throw new Error(problem);
     });
-    await step("no session in the call reported an error", () => call.eventually(call.noErrors(), 1, "errors"));
+    await step("no session in the call reported an error", () => call.now(call.noErrors(), "errors"));
   },
 });

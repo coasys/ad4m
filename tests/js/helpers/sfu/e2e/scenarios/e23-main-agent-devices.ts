@@ -40,6 +40,6 @@ export const e23MainAgentDevices = e2eScenario({
       call.eventually(all(call.hearsEveryone(), call.hearsNoEcho()), 90_000, "audio"));
     await step("both stay listed and heard past the stale bound", () =>
       call.holds(all(call.rosterIsEveryone(), call.hearsEveryone()), PAST_STALE_MS, "past the stale bound"));
-    await step("no session reported an error", () => call.eventually(call.noErrors(), 1, "errors"));
+    await step("no session reported an error", () => call.now(call.noErrors(), "errors"));
   },
 });

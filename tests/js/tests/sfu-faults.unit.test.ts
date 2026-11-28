@@ -7,6 +7,8 @@
 import { expect } from "chai";
 import { createServer, connect, type AddressInfo, type Socket } from "node:net";
 
+import { Call, type Check } from "../helpers/sfu/e2e/call.js";
+import type { Snapshot } from "../helpers/sfu/e2e/protocol.js";
 import { FrameParser, WsShaper, matchEvent, parse, replyTo } from "../helpers/sfu/faults/index.js";
 
 /** One RFC 6455 frame. `ext` forces the length's wire form: 0 (7 bits), 2 (16 bits) or 8 (64 bits). */
@@ -170,3 +172,30 @@ describe("SFU fault layer: WsShaper drops whole messages", () => {
     expect(parse((await rule.first).text)?.id).to.equal(1);
   });
 });
+
+describe("SFU fault layer: Call.eventually keeps its bound", () => {
+  /** A Call whose snapshots take `ms` and always show a healthy call. No processes. */
+  const slowCall = (ms: number): Call =>
+    Object.assign(Object.create(Call.prototype) as Call, {
+      snapshots: () => new Promise<Map<string, Snapshot>>((resolve) => setTimeout(() => resolve(new Map()), ms)),
+    });
+  const ok: Check = () => [];
+
+  it("fails a success whose snapshots came back after the bound", async () => {
+    const started = Date.now();
+    const error = await slowCall(40).eventually(ok, 5, "late").then(() => null, (e: Error) => e);
+    expect(error?.message).to.match(/^late: not true within 5 ms/);
+    expect(Date.now() - started).to.be.below(40);
+  });
+
+  it("passes a success inside the bound", async () => {
+    expect(await slowCall(5).eventually(ok, 1_000, "in time")).to.be.below(1_000);
+  });
+
+  it("now looks once, with no bound", async () => {
+    await slowCall(20).now(ok, "once");
+    const error = await slowCall(1).now(() => ["u1 hears nothing from u2"], "once").then(() => null, (e: Error) => e);
+    expect(error?.message).to.equal("once: not true — u1 hears nothing from u2");
+  });
+});
+

@@ -61,6 +61,6 @@ export const e3TrackChanges = e2eScenario({
       await u1().stopScreen();
       await call.eventually(call.seesFrom("u1", CAMERA), 20_000, "u1's camera after the share");
     });
-    await step("no session reported an error", () => call.eventually(call.noErrors(), 1, "errors"));
+    await step("no session reported an error", () => call.now(call.noErrors(), "errors"));
   },
 });

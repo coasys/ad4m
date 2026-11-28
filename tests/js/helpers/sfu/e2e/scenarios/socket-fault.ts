@@ -66,7 +66,7 @@ export function socketFaultRow(row: SocketFaultRow): ReturnType<typeof e2eScenar
           const violations = await checks!.stop();
           if (violations.length) throw new Error(violations.join("\n"));
         });
-        await step("no session reported an error", () => call.eventually(call.noErrors(), 1, "errors"));
+        await step("no session reported an error", () => call.now(call.noErrors(), "errors"));
       } finally {
         await checks?.abort();
         proxy.close();

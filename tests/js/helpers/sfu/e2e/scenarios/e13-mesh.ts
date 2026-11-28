@@ -34,6 +34,6 @@ export const e13Mesh = e2eScenario({
       await call.eventually(call.rosterIsEveryone(), 60_000, "roster after u4 left");
     });
     await step("the other three still hear each other", () => call.eventually(call.hearsEveryone(), 30_000, "audio among 3"));
-    await step("no session reported an error", () => call.eventually(call.noErrors(), 1, "errors"));
+    await step("no session reported an error", () => call.now(call.noErrors(), "errors"));
   },
 });

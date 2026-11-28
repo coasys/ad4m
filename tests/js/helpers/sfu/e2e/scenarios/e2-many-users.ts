@@ -47,6 +47,6 @@ export const e2ManyUsers = e2eScenario({
       await call.eventually(call.rosterIsEveryone(), 60_000, "roster after u5 rejoined");
       await call.eventually(call.hearsEveryone(), 60_000, "audio after u5 rejoined");
     });
-    await step("no session reported an error", () => call.eventually(call.noErrors(), 1, "errors"));
+    await step("no session reported an error", () => call.now(call.noErrors(), "errors"));
   },
 });

@@ -65,7 +65,7 @@ export const e14AdvertisedAddress = e2eScenario({
         await call.eventually(call.hearsEveryone(), 60_000, "audio after the rejoin");
         await call.eventually(throughTheAdvertisedAddress, 10_000, "selected pairs after the rejoin");
       });
-      await step("no session reported an error", () => call.eventually(call.noErrors(), 1, "errors"));
+      await step("no session reported an error", () => call.now(call.noErrors(), "errors"));
     } finally {
       clearReachOnlyThrough(PUBLISHED, LOCAL, PORT);
     }

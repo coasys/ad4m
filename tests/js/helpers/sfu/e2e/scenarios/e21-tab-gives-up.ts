@@ -47,6 +47,6 @@ export const e21TabGivesUp = e2eScenario({
     });
 
     await step("u1's call stays up for 20 s, nobody's rebuilt", () => call.holds(steady(), 20_000, "call after the tabs gave up"));
-    await step("no session reported an error", () => call.eventually(call.noErrors(), 1, "errors"));
+    await step("no session reported an error", () => call.now(call.noErrors(), "errors"));
   },
 });

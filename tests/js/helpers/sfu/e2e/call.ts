@@ -10,6 +10,7 @@
 import { CAMERA, toneFor } from "./media.js";
 import { Participant } from "./participant.js";
 import type { JoinOptions, Size, Snapshot } from "./protocol.js";
+import { sleep, within } from "./time.js";
 import type { World } from "./world.js";
 
 /**
@@ -30,6 +31,9 @@ export function all(...checks: Check[]): Check {
  * tone is what a receiver calls silence, so a shorter pause cannot explain it.
  */
 const PAUSE_MS = 250;
+
+/** How often `eventually` looks again: root AGENTS.md asks for 100 ms or less when no event signals readiness. */
+const POLL_MS = 100;
 
 export class Call {
   readonly participants: Participant[] = [];
@@ -146,17 +150,42 @@ export class Call {
     await this.eventually(this.seesEveryone(CAMERA), 60_000, "video");
   }
 
+  /**
+   * Retry `check` until it is true, and return how long that took. Being true
+   * counts only when the snapshots that show it came back within `timeoutMs`:
+   * a snapshot started inside the bound and answered after it shows the call
+   * after the bound, so it fails. Each snapshot waits at most the budget left.
+   */
   async eventually(check: Check, timeoutMs: number, label: string): Promise<number> {
     const started = Date.now();
+    const deadline = started + timeoutMs;
     let problems: string[] = [];
     for (;;) {
-      problems = check(await this.snapshots(), false);
-      if (problems.length === 0) return Date.now() - started;
-      if (Date.now() - started > timeoutMs) break;
-      await new Promise((r) => setTimeout(r, 500));
+      try {
+        problems = check(await within(deadline - Date.now(), this.snapshots(), `${label}: snapshots`), false);
+      } catch (error) {
+        problems = [error instanceof Error ? error.message : String(error)];
+        break;
+      }
+      const took = Date.now() - started;
+      if (problems.length === 0) {
+        if (took <= timeoutMs) return took;
+        problems = [`true only after ${took} ms`];
+        break;
+      }
+      if (Date.now() >= deadline) break;
+      await sleep(Math.min(POLL_MS, deadline - Date.now()));
     }
     const shown = problems.slice(0, 12).join("; ") + (problems.length > 12 ? `; … ${problems.length - 12} more` : "");
     throw new Error(`${label}: not true within ${timeoutMs} ms — ${shown}`);
+  }
+
+  /** `check` is true now, on one set of snapshots: there is no bound to wait out. */
+  async now(check: Check, label: string): Promise<void> {
+    const problems = check(await this.snapshots(), false);
+    if (problems.length === 0) return;
+    const shown = problems.slice(0, 12).join("; ") + (problems.length > 12 ? `; … ${problems.length - 12} more` : "");
+    throw new Error(`${label}: not true — ${shown}`);
   }
 
   /** `check` stays true for all of `durationMs`: the first problem fails it. */

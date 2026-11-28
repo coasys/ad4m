@@ -68,7 +68,7 @@ export const e6Network = e2eScenario({
         await sleep(6_000 - (Date.now() - cut));
         net.clear();
         await call.eventually(call.hearsEveryone(), 20_000, "audio after a short outage");
-        await call.eventually(call.rosterIsEveryone(), 1, "roster after a short outage");
+        await call.now(call.rosterIsEveryone(), "roster after a short outage");
         // The same connections carried on: no session saw anyone leave, not even for a moment.
         const after = await departures();
         if (after !== before) throw new Error(`participants left during a short outage: ${before} → ${after}`);
