@@ -15,17 +15,36 @@
 
 use ad4m_ldk::imports as rt;
 use ad4m_ldk::prelude::*;
+use futures_channel::oneshot;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use wasm_bindgen::JsCast;
 
 pub struct TestLang {
     storage_dir: String,
     address: String,
+    /// The sender of each parked `wait:<id>` call: a `release:<id>` sends
+    /// on one and the parked call's future resumes inside the releasing
+    /// call's poll, on the shared wasm-bindgen scheduler. Never borrowed
+    /// across an await.
+    waiters: RefCell<HashMap<String, oneshot::Sender<()>>>,
+    /// Each async export's entry and exit, in the order the isolate saw
+    /// them — `expressionGet("events")` reads it back. The concurrency
+    /// tests assert call ordering from this in-language record rather
+    /// than from task timing outside it. Never borrowed across an await.
+    events: RefCell<Vec<String>>,
 }
 
 impl Language for TestLang {
-    fn name() -> &'static str { "test-wasm-language" }
-    fn version() -> &'static str { "0.1.0" }
-    fn is_public() -> bool { true }
+    fn name() -> &'static str {
+        "test-wasm-language"
+    }
+    fn version() -> &'static str {
+        "0.1.0"
+    }
+    fn is_public() -> bool {
+        true
+    }
 
     async fn init() -> LanguageResult<Self> {
         let storage_dir = rt::language_storage_directory();
@@ -37,7 +56,12 @@ impl Language for TestLang {
             storage_dir, address
         )));
 
-        Ok(Self { storage_dir, address })
+        Ok(Self {
+            storage_dir,
+            address,
+            waiters: RefCell::new(HashMap::new()),
+            events: RefCell::new(Vec::new()),
+        })
     }
 
     fn teardown(&mut self) -> LanguageResult<()> {
@@ -47,8 +71,11 @@ impl Language for TestLang {
     }
 
     /// Spec §5.7 — describe a single interaction so the smoke test can
-    /// exercise the descriptor + execute round-trip.
+    /// exercise the descriptor + execute round-trip. Logs its entry too:
+    /// the concurrency tests check the sync export ran inside another
+    /// call's lock-side window.
     fn interactions(&self, _address: Address) -> Vec<Interaction> {
+        self.events.borrow_mut().push("interactions".to_string());
         vec![Interaction {
             label: "Echo".to_string(),
             name: "echo".to_string(),
@@ -80,6 +107,27 @@ impl Language for TestLang {
 
 impl ExpressionCapability for TestLang {
     async fn expression_create(&mut self, content: serde_json::Value) -> LanguageResult<Address> {
+        self.events.borrow_mut().push("create-start".to_string());
+        let result = self.expression_create_inner(content).await;
+        self.events.borrow_mut().push("create-end".to_string());
+        result
+    }
+
+    async fn expression_get(&self, address: Address) -> LanguageResult<Option<Expression>> {
+        self.events
+            .borrow_mut()
+            .push(format!("get-start:{address}"));
+        let result = self.expression_get_inner(&address).await;
+        self.events.borrow_mut().push(format!("get-end:{address}"));
+        result
+    }
+}
+
+impl TestLang {
+    async fn expression_create_inner(
+        &mut self,
+        content: serde_json::Value,
+    ) -> LanguageResult<Address> {
         // Sign via the host agent — this exercises the agent import.
         // Use the typed wrapper so `content`'s maps serialize as JS
         // objects; the raw import with serde_wasm_bindgen::to_value
@@ -93,8 +141,8 @@ impl ExpressionCapability for TestLang {
         let addr = format!("test:{}", &addr[..addr.len().min(32)]);
 
         // Persist via the storage KV import.
-        let stored: serde_json::Value = serde_wasm_bindgen::from_value(signed)
-            .unwrap_or(serde_json::Value::Null);
+        let stored: serde_json::Value =
+            serde_wasm_bindgen::from_value(signed).unwrap_or(serde_json::Value::Null);
         rt::storage_put(&addr, &serde_json::to_string(&stored)?)?;
 
         rt::emit_signal(::wasm_bindgen::JsValue::from_str(&format!(
@@ -105,10 +153,21 @@ impl ExpressionCapability for TestLang {
         Ok(addr)
     }
 
-    async fn expression_get(&mut self, address: Address) -> LanguageResult<Option<Expression>> {
+    async fn expression_get_inner(&self, address: &Address) -> LanguageResult<Option<Expression>> {
+        // "events" snapshots the export log — the concurrency tests read
+        // call ordering straight from inside the isolate.
+        if address.as_str() == "events" {
+            let events = self.events.borrow().clone();
+            return Ok(Some(Expression {
+                author: rt::agent_did()?,
+                timestamp: String::new(),
+                data: serde_json::json!(events),
+                proof: ExpressionProof::default(),
+            }));
+        }
         // "slow:<ms>:<addr>" waits <ms> ms before reading <addr> — the
-        // runtime tests use it to hold the instance's async export lock
-        // across a real await while another call is queued behind it.
+        // runtime tests use it to hold the instance's lock side across a
+        // real await while another call runs beside it.
         let address = if let Some(rest) = address.strip_prefix("slow:") {
             let (ms, real) = rest.split_once(':').unwrap_or((rest, ""));
             let ms: u32 = ms.parse().unwrap_or(0);
@@ -124,15 +183,91 @@ impl ExpressionCapability for TestLang {
             let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
             real.to_string()
         } else {
-            address
+            address.clone()
         };
+        // "wait:<id>:<challenge>" parks this call's future on a oneshot
+        // receiver registered under <id>; a "release:<id>" sends on its
+        // sender, so the future resumes inside that call's poll on the
+        // shared scheduler. After the wake it answers as its own agent:
+        // the DID in `author` and a signature over <challenge> that a
+        // verifier checks under that DID. The RefCell borrow ends before
+        // the await — a borrow held across it would panic a second
+        // borrow from a call running beside this one.
+        if let Some(rest) = address.strip_prefix("wait:") {
+            let (id, challenge) = rest.split_once(':').unwrap_or((rest, ""));
+            let rx = {
+                let (tx, rx) = oneshot::channel::<()>();
+                self.waiters.borrow_mut().insert(id.to_string(), tx);
+                rx
+            };
+            let _ = rx.await;
+            return Ok(Some(Expression {
+                author: rt::agent_did()?,
+                timestamp: String::new(),
+                data: serde_json::Value::String(challenge.to_string()),
+                proof: ExpressionProof {
+                    signature: rt::agent_sign_string_hex(challenge)?,
+                    key: rt::agent_signing_key_id()?,
+                    ..Default::default()
+                },
+            }));
+        }
+        // "waiting:<id>" answers whether a "wait:<id>" has parked a sender
+        // yet — the gate a test polls so a release lands only once a
+        // waiter is there.
+        if let Some(id) = address.strip_prefix("waiting:") {
+            let waiting = self.waiters.borrow().contains_key(id);
+            return Ok(Some(Expression {
+                author: rt::agent_did()?,
+                timestamp: String::new(),
+                data: serde_json::Value::Bool(waiting),
+                proof: ExpressionProof::default(),
+            }));
+        }
+        // "release:<id>:<challenge>" sends on the sender a "wait:<id>"
+        // parked — waking that call's Rust future inside this call's
+        // poll — and answers as its own agent the same way. `released`
+        // reports a waiter was actually there.
+        if let Some(rest) = address.strip_prefix("release:") {
+            let (id, challenge) = rest.split_once(':').unwrap_or((rest, ""));
+            let released = self
+                .waiters
+                .borrow_mut()
+                .remove(id)
+                .map(|tx| tx.send(()).is_ok())
+                .unwrap_or(false);
+            return Ok(Some(Expression {
+                author: rt::agent_did()?,
+                timestamp: String::new(),
+                data: serde_json::json!({ "released": released }),
+                proof: ExpressionProof {
+                    signature: rt::agent_sign_string_hex(challenge)?,
+                    key: rt::agent_signing_key_id()?,
+                    ..Default::default()
+                },
+            }));
+        }
+        // "whoami" never reaches storage: it answers with an expression
+        // authored by the agent the call runs as — the concurrency tests
+        // read the calling call's own agent token through it.
+        if address == "whoami" {
+            let did = rt::agent_did()?;
+            return Ok(Some(Expression {
+                author: did.clone(),
+                timestamp: String::new(),
+                data: serde_json::Value::String(did),
+                proof: ExpressionProof::default(),
+            }));
+        }
         let raw = rt::storage_get(&address)?;
         if raw.is_null() || raw.is_undefined() {
             return Ok(None);
         }
         // The KV stub returns a JS string; parse it as an Expression envelope.
         let s: String = raw.as_string().unwrap_or_default();
-        if s.is_empty() { return Ok(None); }
+        if s.is_empty() {
+            return Ok(None);
+        }
         let exp: Expression = match serde_json::from_str(&s) {
             Ok(exp) => exp,
             Err(_) => Expression {
@@ -158,11 +293,14 @@ impl PerspectiveQueryCapability for TestLang {
                 request.kind
             )));
         }
-        Ok(QueryResponse { results: request.params })
+        Ok(QueryResponse {
+            results: request.params,
+        })
     }
 }
 
 ad4m_language! {
     language: TestLang,
     capabilities: [expression, perspective_query],
+    concurrent: [expression_get],
 }

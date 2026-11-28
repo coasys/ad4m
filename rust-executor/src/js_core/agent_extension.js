@@ -14,6 +14,22 @@ import {
     const callAgent = new core.AsyncVariable();
     const caller = () => callAgent.get() ?? null;
 
+    // A WASM export's future reads the calling call's token once, at export
+    // entry where the ambient context is still the call's own
+    // (ad4m-ldk `agent::export_future`), and passes it on every agent import
+    // afterwards: wasm-bindgen-futures polls futures under whichever context
+    // scheduled the drain, not under the caller's. `undefined` from a caller
+    // means "no pinned token" (old bundles, JS languages, code outside an
+    // export's poll) and the ambient context answers instead; `null` means
+    // the pinned call has no agent and the op must refuse.
+    const token = (call) => (call === undefined ? caller() : call);
+    Object.defineProperty(globalThis, "__ad4mCallAgentToken", {
+        value: () => callAgent.get() ?? null,
+        writable: false,
+        enumerable: false,
+        configurable: false,
+    });
+
     // The runtime runs every script call as `__ad4mRunCall(id, async () => (script))`.
     Object.defineProperty(globalThis, "__ad4mRunCall", {
         value: (id, fn) => {
@@ -69,22 +85,22 @@ import {
         didDocument: () => {
             return agent_did_document();
         },
-        signingKeyId: () => {
-            return agent_signing_key_id(caller());
+        signingKeyId: (call) => {
+            return agent_signing_key_id(token(call));
         },
-        did: () => {
-            return agent_did(caller());
+        did: (call) => {
+            return agent_did(token(call));
         },
-        createSignedExpression: (data) => {
+        createSignedExpression: (data, call) => {
             try {
-                return agent_create_signed_expression(data, caller());
+                return agent_create_signed_expression(data, token(call));
             } catch (error) {
                 console.error("Error calling agent_create_signed_expression:", error);
                 console.error("Data was:", data)
                 console.log("Falling back to stringified version")
                 try {
                     let stringified = JSON.stringify(data);
-                    let resultString = agent_create_signed_expression_stringified(stringified, caller())
+                    let resultString = agent_create_signed_expression_stringified(stringified, token(call))
                     let result = JSON.parse(resultString);
                     return result;
                 } catch (fallbackError) {
@@ -100,14 +116,14 @@ import {
                 }
             }
         },
-        sign: (payload) => {
-            return agent_sign(payload, caller());
+        sign: (payload, call) => {
+            return agent_sign(payload, token(call));
         },
-        signStringHex: (payload) => {
-            return agent_sign_string_hex(payload, caller());
+        signStringHex: (payload, call) => {
+            return agent_sign_string_hex(payload, token(call));
         },
-        openSealed: (sealed) => {
-            return agent_open_sealed(sealed, caller());
+        openSealed: (sealed, call) => {
+            return agent_open_sealed(sealed, token(call));
         },
         agent: () => {
             return agent();
@@ -118,12 +134,12 @@ import {
         isUnlocked: () => {
             return agent_is_unlocked();
         },
-        createSignedExpressionForUser: (userEmail, data) => {
+        createSignedExpressionForUser: (userEmail, data, call) => {
             if (typeof userEmail !== 'string' || userEmail.trim() === '') {
                 throw new TypeError('userEmail must be a non-empty string');
             }
             try {
-                return agent_create_signed_expression_for_user(userEmail, data, caller());
+                return agent_create_signed_expression_for_user(userEmail, data, token(call));
             } catch (error) {
                 console.error("Error calling agent_create_signed_expression_for_user:", error);
                 console.error("userEmail was:", userEmail);

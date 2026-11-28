@@ -78,10 +78,11 @@ fn transfer() -> TokenTransfer {
 }
 
 /// A test agent language: answers from what it holds and records what it got.
+/// `RefCell` because the read methods take `&self` and still record calls.
 #[derive(Default)]
 pub struct Agent {
-    appended: Vec<AppendRequest>,
-    calls: Vec<String>,
+    appended: std::cell::RefCell<Vec<AppendRequest>>,
+    calls: std::cell::RefCell<Vec<String>>,
 }
 
 impl Language for Agent {
@@ -97,13 +98,14 @@ impl Language for Agent {
 }
 
 impl IdentityCapability for Agent {
-    async fn identity_log(&mut self, did: String, from: u64) -> LanguageResult<Option<LogPage>> {
-        self.calls.push(format!("log {did} {from}"));
-        if self.appended.is_empty() {
+    async fn identity_log(&self, did: String, from: u64) -> LanguageResult<Option<LogPage>> {
+        self.calls.borrow_mut().push(format!("log {did} {from}"));
+        if self.appended.borrow().is_empty() {
             return Ok(None);
         }
         let events: Vec<Value> = self
             .appended
+            .borrow()
             .iter()
             .flat_map(|r| r.events.clone())
             .collect();
@@ -116,8 +118,8 @@ impl IdentityCapability for Agent {
             pauses: Vec::new(),
         }))
     }
-    async fn identity_head(&mut self, did: String) -> LanguageResult<Option<SignedHead>> {
-        self.calls.push(format!("head {did}"));
+    async fn identity_head(&self, did: String) -> LanguageResult<Option<SignedHead>> {
+        self.calls.borrow_mut().push(format!("head {did}"));
         Ok(Some(head()))
     }
     async fn identity_append(
@@ -125,25 +127,27 @@ impl IdentityCapability for Agent {
         did: String,
         req: AppendRequest,
     ) -> LanguageResult<SignedHead> {
-        self.calls.push(format!("append {did}"));
+        self.calls.borrow_mut().push(format!("append {did}"));
         if req.vouch.is_some() && req.pow.is_some() {
             return Err(IdentityErrorCode::Invalid {
                 reason: "vouch and pow".into(),
             }
             .into());
         }
-        self.appended.push(req);
+        self.appended.borrow_mut().push(req);
         Ok(head())
     }
     async fn identity_key_owner(
-        &mut self,
+        &self,
         multikey: String,
         wait_s: u8,
     ) -> LanguageResult<Option<KeyIndexEntry>> {
-        self.calls.push(format!("keyOwner {multikey} {wait_s}"));
+        self.calls
+            .borrow_mut()
+            .push(format!("keyOwner {multikey} {wait_s}"));
         Ok(None)
     }
-    async fn identity_pow_params(&mut self) -> LanguageResult<PowParams> {
+    async fn identity_pow_params(&self) -> LanguageResult<PowParams> {
         Ok(PowParams {
             bits: 22,
             previous_bits: 20,
@@ -183,7 +187,7 @@ impl IdentityCapability for Agent {
         })
     }
     async fn identity_list_offers(
-        &mut self,
+        &self,
         _did: String,
         _req: SignedRequest,
         _wait_s: u8,
@@ -199,7 +203,7 @@ impl IdentityCapability for Agent {
         offer_id: String,
         _req: SignedRequest,
     ) -> LanguageResult<()> {
-        self.calls.push(format!("cancel {offer_id}"));
+        self.calls.borrow_mut().push(format!("cancel {offer_id}"));
         Ok(())
     }
     async fn identity_claim_offer(
@@ -221,7 +225,7 @@ impl IdentityCapability for Agent {
         })
     }
     async fn identity_offer_state(
-        &mut self,
+        &self,
         _did: String,
         _offer_id: String,
         _key: String,
@@ -235,11 +239,11 @@ impl IdentityCapability for Agent {
 }
 
 impl TokenCapability for Agent {
-    async fn token_assets(&mut self) -> LanguageResult<Vec<String>> {
+    async fn token_assets(&self) -> LanguageResult<Vec<String>> {
         Err(TokenErrorCode::Disabled.into())
     }
     async fn token_balance(
-        &mut self,
+        &self,
         _account: String,
         _asset: String,
     ) -> LanguageResult<TokenBalance> {
@@ -255,7 +259,7 @@ impl TokenCapability for Agent {
         Err(TokenErrorCode::Disabled.into())
     }
     async fn token_received(
-        &mut self,
+        &self,
         _cursor: Option<String>,
         _limit: u32,
     ) -> LanguageResult<TransferPage> {
@@ -333,7 +337,7 @@ fn identity_calls_pass_events_through_unchanged() {
         "email"
     );
     assert_eq!(
-        lang.calls,
+        lang.calls.borrow().as_slice(),
         vec![
             "log did:scid:zScid 0",
             "append did:scid:zScid",
@@ -341,6 +345,7 @@ fn identity_calls_pass_events_through_unchanged() {
             "head did:scid:zScid",
             "keyOwner z6MkKey 8"
         ]
+        .as_slice()
     );
 }
 

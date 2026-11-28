@@ -94,12 +94,29 @@ pub fn init_v8_platform() {
     });
 }
 
+/// The app-data path `setup_agent` gives the global AgentService: one temp dir
+/// per test process. The AgentService writes its agent file and user profile
+/// directories under it, and nextest runs every test in its own process with
+/// the crate directory as the working directory, so a fixed relative path had
+/// every process racing on the same `./test_data/ad4m` files — a keystore one
+/// test wrote was another's `is_initialized`/`load`. A `cargo test` run shares
+/// the dir across a process's tests, as the relative path did.
+fn test_data_dir() -> String {
+    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let dir = DIR.get_or_init(|| {
+        let dir = tempfile::tempdir().expect("the per-process test data dir");
+        std::fs::create_dir_all(dir.path().join("ad4m")).expect("the ad4m subdirectory");
+        dir
+    });
+    dir.path().to_string_lossy().into_owned()
+}
+
 pub fn setup_agent() {
     // create_new_keys() reads the global config for signing_key_name().
     // Ensure a default config exists so it does not panic.
     set_global_config(Ad4mConfig::default());
 
-    AgentService::init_global_instance(String::from("test_data"));
+    AgentService::init_global_instance(test_data_dir());
     AgentService::global_instance()
         .lock()
         .expect("couldn't get lock on AgentService")

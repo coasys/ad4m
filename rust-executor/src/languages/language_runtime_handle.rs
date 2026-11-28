@@ -80,10 +80,12 @@ pub struct LanguageRuntimeHandle {
     running: RunningRequest,
     /// The requests sent and not yet started by the runtime (`queue_report`).
     queued: QueuedRequests,
-    /// Set by `load_module` (`is_wasm_bundle`): the language is wasm-bindgen
-    /// output, so every call into it runs ordered, a concurrent-marked one
-    /// included — `send` rewrites such a call's kind before it is sent.
-    wasm: Arc<AtomicBool>,
+    /// Set by `load_module`: the bundle is wasm-bindgen output without the
+    /// ALDK concurrency marker (`is_wasm_bundle` but not `aldk_marked`), so
+    /// every call into it runs ordered — `send` rewrites a concurrent-declared
+    /// call's kind before it is sent, as `is_wasm_bundle` made every WASM
+    /// bundle's calls ordered before the marker existed.
+    unmarked_wasm: Arc<AtomicBool>,
     /// The script calls into this language (`GET /metrics`), shared by every clone.
     pub(crate) call_stats: Arc<crate::metrics::LanguageCallStats>,
 }
@@ -144,7 +146,7 @@ impl LanguageRuntimeHandle {
             call_stats: Arc::default(),
             running,
             queued,
-            wasm: Default::default(),
+            unmarked_wasm: Default::default(),
         })
     }
 
@@ -163,7 +165,7 @@ impl LanguageRuntimeHandle {
             call_stats: Arc::default(),
             running: RunningRequest::default(),
             queued: QueuedRequests::default(),
-            wasm: Default::default(),
+            unmarked_wasm: Default::default(),
         }
     }
 
@@ -197,10 +199,10 @@ impl LanguageRuntimeHandle {
         })
     }
 
-    /// Test-only: mark the language WASM, as `load_module` does on a real bundle.
+    /// Test-only: mark the language an unmarked wasm-bindgen bundle, as `load_module` does.
     #[cfg(test)]
-    pub(crate) fn set_wasm(&self) {
-        self.wasm.store(true, Ordering::SeqCst);
+    pub(crate) fn set_unmarked_wasm(&self) {
+        self.unmarked_wasm.store(true, Ordering::SeqCst);
     }
 
     /// Whether the bundle is wasm-bindgen output (a Rust/ALDK language).
@@ -208,6 +210,15 @@ impl LanguageRuntimeHandle {
     /// import/export names, so bundling cannot rename them.
     fn is_wasm_bundle(source: &str) -> bool {
         source.contains("__wbindgen") || source.contains("__wbg_")
+    }
+
+    /// Whether the bundle's glue names `ad4m_ldk::MARKER_EXPORT` — the marker
+    /// `ad4m_language!` emits to show the bundle was built with a
+    /// concurrency-aware ALDK: its exports pin each call's agent token across
+    /// polls and take the instance-lock side their declared kind says. Only a
+    /// marked WASM bundle may run its calls by their declared kind.
+    fn aldk_marked(source: &str) -> bool {
+        source.contains(ad4m_ldk::MARKER_EXPORT)
     }
 
     /// The error for a call that will not run because the language's running call has run for
@@ -286,12 +297,16 @@ impl LanguageRuntimeHandle {
         let (response_tx, response_rx) = oneshot::channel();
 
         // Only script calls give up: loading a language and its teardown wait for it.
-        // A call sent concurrent runs ordered on a WASM language (`is_wasm_bundle`):
-        // rewritten here, once — the flag is set by `load_module`, which returns before
-        // the first call is sent — so the runtime schedules the kind the operation says.
+        // The runtime schedules the kind the caller declared only on a WASM
+        // bundle that carries the ALDK concurrency marker: its exports pin
+        // their call's agent and take the instance-lock side their kind says.
+        // A WASM bundle without the marker (`unmarked_wasm`, set by
+        // `load_module` before the first call is sent) is serialized — every
+        // call is rewritten to ordered here, so one resumed beside another can
+        // never sign as that call's agent.
         let kind = match &mut operation {
             LanguageOperation::Execute(_, _, kind) => {
-                if *kind == CallKind::Concurrent && self.wasm.load(Ordering::SeqCst) {
+                if *kind == CallKind::Concurrent && self.unmarked_wasm.load(Ordering::SeqCst) {
                     *kind = CallKind::Ordered;
                 }
                 Some(*kind)
@@ -389,7 +404,11 @@ impl LanguageRuntimeHandle {
     /// one at a time with the language's other ordered calls, in send order;
     /// `CallKind::Concurrent` starts it at once beside the other calls — only for a call
     /// that changes no state a later call depends on and needs no position in the send
-    /// order. On a WASM language every call runs ordered (`is_wasm_bundle`).
+    /// order. A WASM language's exports declare their own kind only when the bundle
+    /// carries the ALDK concurrency marker: a `concurrent:` export shares the
+    /// instance's read side, every other export takes the write side alone. On a
+    /// WASM bundle without the marker every call is serialized — `send` rewrites a
+    /// concurrent-declared call to ordered (`load_module`).
     pub(crate) async fn call(
         &self,
         script: String,
@@ -400,16 +419,26 @@ impl LanguageRuntimeHandle {
             .await
     }
 
-    /// Load a language bundle into the runtime. `source` is the bundle's JS text. Marks the
-    /// language WASM when the bundle is wasm-bindgen output, so `send` runs every later call
-    /// ordered (`is_wasm_bundle`).
+    /// Load a language bundle into the runtime. `source` is the bundle's JS text.
+    ///
+    /// A wasm-bindgen bundle whose glue lacks the ALDK concurrency marker
+    /// (`aldk_marked`) predates the ALDK that pins each call's agent and
+    /// splits the instance lock by export kind, so no call on it may run
+    /// beside another. It loads — bundles are content-addressed and ones
+    /// published before the marker keep circulating — but `unmarked_wasm`
+    /// makes `send` force every call on it back to `CallKind::Ordered`, as
+    /// `is_wasm_bundle` did for every WASM bundle before the marker existed.
+    /// Plain-JS and marked bundles are unaffected: theirs keep the declared
+    /// kind.
     pub async fn load_module(
         &self,
         source: String,
         context: LanguageContext,
     ) -> Result<(), String> {
-        self.wasm
-            .store(Self::is_wasm_bundle(&source), Ordering::SeqCst);
+        self.unmarked_wasm.store(
+            Self::is_wasm_bundle(&source) && !Self::aldk_marked(&source),
+            Ordering::SeqCst,
+        );
         self.send(LanguageOperation::LoadModule(source, context))
             .await
             .map(|_| ())

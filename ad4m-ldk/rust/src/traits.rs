@@ -66,13 +66,17 @@ pub trait Language: 'static {
 /// imports (`holochain_call`, HTTP via `fetch`, …). Languages whose
 /// implementation is synchronous can simply write `async fn` — a
 /// future that never suspends has no runtime cost.
+///
+/// `expression_get` takes `&self`: a `&self` method may be declared
+/// `concurrent:` in `ad4m_language!`, sharing the instance's read side
+/// with other concurrent calls; `&mut` methods always run alone.
 pub trait ExpressionCapability: Language {
     fn expression_create(
         &mut self,
         content: serde_json::Value,
     ) -> impl std::future::Future<Output = LanguageResult<Address>>;
     fn expression_get(
-        &mut self,
+        &self,
         address: Address,
     ) -> impl std::future::Future<Output = LanguageResult<Option<Expression>>>;
 }
@@ -93,13 +97,13 @@ pub trait IdentityCapability: Language {
     /// names another host; the executor fetches that host itself over the did:scid host
     /// profile, never through the language.
     fn identity_log(
-        &mut self,
+        &self,
         did: String,
         from: u64,
     ) -> impl std::future::Future<Output = LanguageResult<Option<LogPage>>>;
     /// `GET /v1/heads/{scid}`
     fn identity_head(
-        &mut self,
+        &self,
         did: String,
     ) -> impl std::future::Future<Output = LanguageResult<Option<SignedHead>>>;
     /// `POST /v1/logs/{scid}/events`
@@ -110,14 +114,12 @@ pub trait IdentityCapability: Language {
     ) -> impl std::future::Future<Output = LanguageResult<SignedHead>>;
     /// `GET /v1/keys/{multikey}?wait=` (0–8 seconds)
     fn identity_key_owner(
-        &mut self,
+        &self,
         multikey: String,
         wait_s: u8,
     ) -> impl std::future::Future<Output = LanguageResult<Option<KeyIndexEntry>>>;
     /// `GET /v1/pow`
-    fn identity_pow_params(
-        &mut self,
-    ) -> impl std::future::Future<Output = LanguageResult<PowParams>>;
+    fn identity_pow_params(&self) -> impl std::future::Future<Output = LanguageResult<PowParams>>;
     /// `POST /v1/notes/{scid}`
     fn identity_attach_note(
         &mut self,
@@ -138,7 +140,7 @@ pub trait IdentityCapability: Language {
     ) -> impl std::future::Future<Output = LanguageResult<OfferOpened>>;
     /// `GET /v1/offers/{scid}?wait=`, signed by the current master key.
     fn identity_list_offers(
-        &mut self,
+        &self,
         did: String,
         req: SignedRequest,
         wait_s: u8,
@@ -159,7 +161,7 @@ pub trait IdentityCapability: Language {
     ) -> impl std::future::Future<Output = LanguageResult<ClaimReceipt>>;
     /// `GET /v1/offers/{scid}/{offerId}/state?key=&wait=`
     fn identity_offer_state(
-        &mut self,
+        &self,
         did: String,
         offer_id: String,
         key: String,
@@ -178,9 +180,9 @@ pub trait IdentityCapability: Language {
 /// The executor calls these only on the language at
 /// `system_addresses.agent_language`.
 pub trait TokenCapability: Language {
-    fn token_assets(&mut self) -> impl std::future::Future<Output = LanguageResult<Vec<String>>>;
+    fn token_assets(&self) -> impl std::future::Future<Output = LanguageResult<Vec<String>>>;
     fn token_balance(
-        &mut self,
+        &self,
         account: String,
         asset: String,
     ) -> impl std::future::Future<Output = LanguageResult<TokenBalance>>;
@@ -194,7 +196,7 @@ pub trait TokenCapability: Language {
     ) -> impl std::future::Future<Output = LanguageResult<TokenTransfer>>;
     /// Transfers to the agent, newest last, after `cursor`.
     fn token_received(
-        &mut self,
+        &self,
         cursor: Option<String>,
         limit: u32,
     ) -> impl std::future::Future<Output = LanguageResult<TransferPage>>;
@@ -221,20 +223,20 @@ pub trait PerspectiveQueryCapability: Language {
 /// `peers` capability.
 pub trait PeersCapability: Language {
     fn peers_set_local(&mut self, agents: Vec<Did>) -> LanguageResult<()>;
-    fn peers_remote(&mut self) -> LanguageResult<Vec<Did>>;
+    fn peers_remote(&self) -> LanguageResult<Vec<Did>>;
 }
 
 /// `telepresence` capability.
 pub trait TelepresenceCapability: Language {
     fn telepresence_set_online_status(&mut self, status: serde_json::Value) -> LanguageResult<()>;
-    fn telepresence_get_online_agents(&mut self) -> LanguageResult<serde_json::Value>;
+    fn telepresence_get_online_agents(&self) -> LanguageResult<serde_json::Value>;
     fn telepresence_send_signal(
-        &mut self,
+        &self,
         remote_did: Did,
         payload: serde_json::Value,
     ) -> LanguageResult<serde_json::Value>;
     fn telepresence_send_broadcast(
-        &mut self,
+        &self,
         payload: serde_json::Value,
     ) -> LanguageResult<serde_json::Value>;
 }
@@ -249,7 +251,7 @@ pub trait TelepresenceCapability: Language {
 /// Async because the implementation typically fetches from a remote store.
 pub trait LanguageSourceCapability: Language {
     fn language_get_source(
-        &mut self,
+        &self,
         address: Address,
     ) -> impl std::future::Future<Output = LanguageResult<String>>;
 }
@@ -272,7 +274,7 @@ pub trait HolochainSignalHandler: Language {
 /// `mount.classes` form:
 ///
 /// ```ignore
-/// fn mount_shapes(&mut self) -> LanguageResult<MountShapes> {
+/// fn mount_shapes(&self) -> LanguageResult<MountShapes> {
 ///     Ok(MountShapes::from_classes("1", &[
 ///         GoldenRecord::generate_shacl(),
 ///     ]))
@@ -282,7 +284,7 @@ pub trait HolochainSignalHandler: Language {
 /// `mount_snapshot()` is async because building the record list usually
 /// reaches the remote service through async host imports (`httpFetch`).
 pub trait MountCapability: Language {
-    fn mount_shapes(&mut self) -> LanguageResult<MountShapes>;
+    fn mount_shapes(&self) -> LanguageResult<MountShapes>;
     fn mount_snapshot(
         &mut self,
     ) -> impl std::future::Future<Output = LanguageResult<MountSnapshot>>;

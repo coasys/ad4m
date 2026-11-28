@@ -47,18 +47,45 @@ language publish. Loading, callback registration and teardown run with no call
 beside them. Everything runs on the runtime's one task (`process_requests`):
 the V8 event loop keeps one waker.
 
-A bundle that is wasm-bindgen output (a Rust/ALDK language) runs every call
-ordered, `CallKind::Concurrent` included: `load_module` marks the handle
-(`LanguageRuntimeHandle::is_wasm_bundle` — the `__wbindgen`/`__wbg_` names a
-bundler cannot rename), whose `send` then writes `Ordered` into every call it
-sends; the runtime only ever sees the resolved kind. wasm-bindgen-futures polls
-all of a module's futures from one microtask queue that does not restore each
-task's V8 async context, so a
-call resumed beside another would sign as the other call's agent; and the
-ALDK's async exports hold the instance's one lock across their awaits while
-its sync exports (`interactions`, `expressionInteract`) answer busy when it
-is held — a second call could never run beside an in-flight one correctly
-anyway (`a_wasm_language_runs_concurrent_calls_in_order_as_their_agents`).
+A bundle that is wasm-bindgen output (a Rust/ALDK language) honors its calls'
+declared kind only when it carries the ALDK's concurrency marker,
+`__ad4mAldkVersion` (`ad4m_ldk::MARKER_EXPORT`, an export `ad4m_language!`
+emits since ad4m-ldk 0.13.0-test-1). A wasm-bindgen bundle without it
+(`is_wasm_bundle` in `language_runtime_handle.rs`) still loads — bundles are
+content-addressed and ones published before the marker keep circulating, the
+seed's pinned agent language among them — but every call into it stays
+`CallKind::Ordered`: `load_module` marks it `unmarked_wasm` and `send`
+rewrites a concurrent-declared call's kind, exactly what `is_wasm_bundle`
+did to every WASM bundle's calls before the marker existed. Serialized, an
+older bundle needs none of the two properties below; run beside other calls,
+its exports could read and sign as another call's agent. Two ALDK-side
+properties make overlap safe. First, the agent: a
+wasm-bindgen-futures queue polls all of a module's futures without restoring
+each task's V8 async context, so ALDK pins the call's `CallAgent` token itself
+— `agent::export_future` takes it once at export entry
+(`globalThis.__ad4mCallAgentToken`) and `WithAgent` installs it in a Rust
+thread-local around every poll; the agent imports receive the token as an
+explicit trailing argument (`undefined` falls back to the ambient context, so
+old bundles and old executors keep working). Second, the instance lock: ALDK's
+`ad4m_language!` takes a `concurrent: [...]` list of `&self` exports that share
+the instance's read side — every other export takes the write side alone, and
+a sync read-side export (`interactions`) answers beside in-flight concurrent
+work instead of reporting busy. A
+`&mut self` method can never be concurrent: `&mut` means nobody else holds the
+instance
+(`a_wasm_language_runs_concurrent_calls_each_as_its_own_agent`,
+`a_sync_export_answers_beside_a_concurrent_wasm_call`,
+`an_ordered_export_on_wasm_still_runs_alone`). The user-visible gain is pinned on the
+seeded agent language: `centralized_agent_lookups_overlap_when_marked_and_queue_when_not`
+loads the real centralized-agent-language bundle against a loopback store that holds each
+`GET /v1/agents/{did}` for 200 ms, and 16 concurrent `expressionGet` calls (what
+`agent.byDIDs` sends) overlap: the store sees more than one open at once (the test
+asserts no time bound on this run, a loaded runner can stretch it). The same bundle with
+its marker removed runs them one by one: one open at a time, at least 16 x 200 ms. The test
+needs the bundle: `env -u CARGO_TARGET_DIR bash
+bootstrap-languages/centralized-agent-language/rust-impl/build.sh` (CI builds it beside
+the test WASM language). The `mount` capability's `mount_shapes` is a sync `&self`
+export (it shares the read side); `mount_snapshot` is an ordered `&mut self` one.
 
 The agent a call acts as travels with the call, not with the thread: the
 runtime registers it under the request id and runs the script as

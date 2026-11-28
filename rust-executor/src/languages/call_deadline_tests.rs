@@ -177,6 +177,52 @@ async fn concurrent(handle: &LanguageRuntimeHandle, script: String) -> Result<St
         .await
 }
 
+/// The test language's own export log, read through `expressionGet("events")`:
+/// each export records its entry and exit inside the isolate, so call ordering
+/// is proven there rather than by task completion outside it — a call can end
+/// in the runtime while its caller's task still waits to be polled.
+async fn export_events(handle: &LanguageRuntimeHandle) -> Vec<String> {
+    let answer = within(Duration::from_secs(10), "the events read", async {
+        concurrent(
+            handle,
+            "JSON.stringify(await globalThis.__ad4m_language_instance__.expressionGet(\"events\"))"
+                .into(),
+        )
+        .await
+    })
+    .await
+    .expect("the events read answers");
+    serde_json::from_str::<serde_json::Value>(&answer)
+        .ok()
+        .and_then(|v| v.pointer("/data").cloned())
+        .and_then(|d| serde_json::from_value::<Vec<String>>(d).ok())
+        .expect("the events read returns the export log")
+}
+
+/// Polls the export log until `marker` appears: proof the export has entered
+/// inside the isolate, where a sleep would only guess that it has. Probe
+/// reads share the read side, so use this only while no call waits on the
+/// write side — a probe would queue behind it.
+async fn export_reaches(handle: &LanguageRuntimeHandle, marker: &str) {
+    within(Duration::from_secs(10), marker, async {
+        loop {
+            if export_events(handle).await.iter().any(|e| e == marker) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+}
+
+/// `marker`'s index in the export log, or a panic naming what was seen.
+fn event_pos(events: &[String], marker: &str) -> usize {
+    events
+        .iter()
+        .position(|e| e == marker)
+        .unwrap_or_else(|| panic!("{marker} missing from the export log: {events:?}"))
+}
+
 /// `n` calls, sent in order; each logs its index when it starts and when it ends, after
 /// awaiting a latency that differs from call to call. Returns the start and end logs.
 async fn ordered_burst(handle: &LanguageRuntimeHandle, n: usize) -> (Vec<usize>, Vec<usize>) {
@@ -1320,14 +1366,455 @@ fn wasm_language_bundle() -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
-/// A Rust/ALDK (wasm-bindgen) language runs every call ordered, a `CallKind::Concurrent`
-/// one included: wasm-bindgen-futures polls all of a module's futures from one queue that
-/// does not restore each task's async context, and ALDK's async exports hold the instance's
-/// lock across their awaits — a call beside another's reads would sign as the wrong agent,
-/// and a sync export like `interactions()` would see the busy instance. Below, the read sent
-/// concurrent still runs 600 ms when the create and the interactions() call behind it are
-/// sent; both must wait for it, and the create must still sign as the managed user, not the
-/// main agent.
+/// A wasm-bindgen bundle whose glue lacks the ALDK concurrency marker still
+/// loads — bundles are content-addressed, so ones published before the
+/// marker keep circulating — but every call into it is serialized: `send`
+/// forces `CallKind::Ordered`, as `is_wasm_bundle` did for every WASM
+/// bundle before the marker existed. The "unmarked" bundle here is the
+/// fixture bundle with the marker renamed — still a working wasm-bindgen
+/// bundle, only without the marker.
+///
+/// Alice's slow read and Bob's whoami both go out `CallKind::Concurrent`.
+/// The gate is the runtime's `Running` markers, not a sleep: Alice's call
+/// must hold the one `ordered` slot while it runs and `concurrent` must
+/// stay empty. The serialization proof is the language's own export log:
+/// Bob's export enters only once Alice's has exited — a wrapper task's
+/// completion order would only say when the test executor got around to
+/// polling it, not when the language finished the call. On the marked
+/// bundle the same pair overlaps
+/// (`a_wasm_bundle_with_the_aldk_marker_loads_and_overlaps`).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wasm_bundle_without_the_aldk_marker_loads_and_serializes_calls() {
+    let bundle = wasm_language_bundle()
+        .expect("test-wasm-language bundle missing; run `bash tests/rust-languages/build.sh`");
+    assert!(bundle.contains(ad4m_ldk::MARKER_EXPORT));
+    let unmarked = bundle.replace(ad4m_ldk::MARKER_EXPORT, "__ldkVersionMarker");
+    assert!(!unmarked.contains(ad4m_ldk::MARKER_EXPORT));
+
+    let (alice, bob) = two_users();
+
+    let address = "QmTestWasmUnmarked".to_string();
+    let (handle, dir) = spawn_runtime(&address);
+    let context = LanguageContext::new(
+        crate::agent::did(),
+        crate::agent::signing_key_id(),
+        None,
+        dir.path().to_path_buf(),
+        address.clone(),
+    );
+    handle
+        .load_module(unmarked, context.clone())
+        .await
+        .expect("an unmarked WASM bundle still loads");
+    handle
+        .load_language(context.to_json())
+        .await
+        .expect("the language's init() runs");
+
+    // Alice's slow read parks 600 ms inside the export: on an unmarked
+    // bundle it is rewritten to ordered before it is sent, so it must come
+    // up as THE ordered call — never an entry in `concurrent`.
+    let alice_call = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            handle
+                .call(
+                    "globalThis.__ad4m_language_instance__.expressionGet(\"slow:600:x\")".into(),
+                    AgentContext::managed(alice),
+                    CallKind::Concurrent,
+                )
+                .await
+        }
+    });
+    let running = handle.running_request();
+    within(
+        Duration::from_secs(10),
+        "alice's call to take the ordered slot",
+        async {
+            loop {
+                {
+                    let running = running.lock().unwrap();
+                    assert!(
+                        running.concurrent.is_empty(),
+                        "alice's call ran concurrent on the unmarked WASM bundle"
+                    );
+                    if running.ordered.is_some() {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        },
+    )
+    .await;
+
+    // Bob's read, sent beside hers: queued behind the ordered call, it may
+    // start only once hers has finished — until then `concurrent` stays
+    // empty.
+    let bob_call = tokio::spawn({
+        let handle = handle.clone();
+        let bob = bob.clone();
+        async move {
+            handle
+                .call(
+                    "JSON.stringify(await globalThis.__ad4m_language_instance__.expressionGet(\"whoami\"))"
+                        .into(),
+                    AgentContext::managed(bob),
+                    CallKind::Concurrent,
+                )
+                .await
+        }
+    });
+    within(
+        Duration::from_secs(15),
+        "bob's call to wait for alice's",
+        async {
+            loop {
+                {
+                    let running = running.lock().unwrap();
+                    assert!(
+                        running.concurrent.is_empty(),
+                        "bob's call ran beside alice's on the unmarked WASM bundle"
+                    );
+                    if alice_call.is_finished() && bob_call.is_finished() {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        },
+    )
+    .await;
+
+    // Serialized calls keep their own ambient agent context, so Bob's read
+    // answers as Bob even without the pinned token a marked bundle installs.
+    let bob_answer = bob_call.await.unwrap().expect("bob's read answers");
+    let author = serde_json::from_str::<serde_json::Value>(&bob_answer)
+        .unwrap()
+        .pointer("/author")
+        .and_then(|a| a.as_str())
+        .map(str::to_string);
+    assert_eq!(author.as_deref(), Some(bob.as_str()), "{bob_answer}");
+    alice_call.await.unwrap().expect("alice's read answers");
+
+    // Inside the isolate the serialization is exact: Bob's export entered
+    // only once Alice's had exited.
+    let events = export_events(&handle).await;
+    assert_eq!(
+        events,
+        vec![
+            "get-start:slow:600:x",
+            "get-end:slow:600:x",
+            "get-start:whoami",
+            "get-end:whoami",
+            "get-start:events",
+        ],
+        "the unmarked bundle's calls were not serialized"
+    );
+}
+
+/// The fixture bundle carries the marker — built with this ALDK — so it
+/// loads and its concurrent calls still overlap and answer as their own
+/// agents.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wasm_bundle_with_the_aldk_marker_loads_and_overlaps() {
+    let bundle = wasm_language_bundle()
+        .expect("test-wasm-language bundle missing; run `bash tests/rust-languages/build.sh`");
+    assert!(bundle.contains(ad4m_ldk::MARKER_EXPORT));
+
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+    let alice =
+        crate::test_utils::create_test_user(&format!("alice.{}@example.org", uuid::Uuid::new_v4()));
+    let bob =
+        crate::test_utils::create_test_user(&format!("bob.{}@example.org", uuid::Uuid::new_v4()));
+
+    let address = "QmTestWasmMarked".to_string();
+    let (handle, dir) = spawn_runtime(&address);
+    let context = LanguageContext::new(
+        crate::agent::did(),
+        crate::agent::signing_key_id(),
+        None,
+        dir.path().to_path_buf(),
+        address.clone(),
+    );
+    handle
+        .load_module(bundle, context.clone())
+        .await
+        .expect("the marked WASM bundle loads");
+    handle
+        .load_language(context.to_json())
+        .await
+        .expect("the language's init() runs");
+
+    // Alice's slow read parks inside the export for 600 ms; Bob's whoami,
+    // sent beside it, can only answer first by overlapping — and answers
+    // as Bob. The gate is her export's own log entry: once it is there
+    // she holds the read side — a sleep would only guess at that.
+    let mut slow = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            handle
+                .call(
+                    "globalThis.__ad4m_language_instance__.expressionGet(\"slow:600:x\")".into(),
+                    AgentContext::managed(alice.clone()),
+                    CallKind::Concurrent,
+                )
+                .await
+        }
+    });
+    export_reaches(&handle, "get-start:slow:600:x").await;
+    let fast = within(Duration::from_secs(10), "bob's read", async {
+        handle
+            .call(
+                "JSON.stringify(await globalThis.__ad4m_language_instance__.expressionGet(\"whoami\"))"
+                    .into(),
+                AgentContext::managed(bob.clone()),
+                CallKind::Concurrent,
+            )
+            .await
+    })
+    .await
+    .expect("bob's read answers");
+    let author = serde_json::from_str::<serde_json::Value>(&fast)
+        .unwrap()
+        .pointer("/author")
+        .and_then(|a| a.as_str())
+        .map(str::to_string);
+    assert_eq!(author.as_deref(), Some(bob.as_str()), "{fast}");
+    within(Duration::from_secs(10), "the slow read", &mut slow)
+        .await
+        .unwrap()
+        .expect("the slow read answers");
+
+    // Inside the isolate the overlap is exact: Bob's export finished
+    // while Alice's still held the read side.
+    let events = export_events(&handle).await;
+    assert!(
+        event_pos(&events, "get-end:whoami") < event_pos(&events, "get-end:slow:600:x"),
+        "bob's read waited for alice's slow read instead of overlapping: {events:?}"
+    );
+}
+
+/// The generated bundle of the centralized agent language (the seeded agent
+/// language), when `bash bootstrap-languages/centralized-agent-language/rust-impl/build.sh`
+/// has run.
+fn centralized_agent_bundle() -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../bootstrap-languages/centralized-agent-language/rust-impl/build/bundle.js");
+    std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "centralized-agent-language bundle missing ({path:?}: {e}); run \
+             `env -u CARGO_TARGET_DIR bash bootstrap-languages/centralized-agent-language/rust-impl/build.sh`"
+        )
+    })
+}
+
+/// How long the loopback identity store holds each reply.
+const STORE_DELAY: Duration = Duration::from_millis(200);
+/// How many lookups `agent.byDIDs` keeps in flight (`AGENTS_BY_DIDS_CONCURRENCY`).
+const LOOKUPS: usize = 16;
+
+/// A loopback HTTP server that answers every request `404` after `STORE_DELAY` — the identity
+/// store's reply for an agent it does not know. Returns its base URL and the most requests it
+/// has held open at once: the number the language's calls actually overlapped by, counted on
+/// the server's side of the wire.
+async fn slow_store() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let open = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    tokio::spawn({
+        let peak = peak.clone();
+        async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let (open, peak) = (open.clone(), peak.clone());
+                tokio::spawn(async move {
+                    // A GET with no body: the request ends at its blank line.
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match socket.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let now = open.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    tokio::time::sleep(STORE_DELAY).await;
+                    open.fetch_sub(1, Ordering::SeqCst);
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                });
+            }
+        }
+    });
+    (url, peak)
+}
+
+/// Loads `bundle` as a language whose `storeUrl` is `store_url`, then looks up `LOOKUPS`
+/// unknown agents at once, as `agent.byDIDs` does, each as its own user. Returns the time
+/// they took together; every lookup must answer "no such agent" (the store's 404).
+async fn look_up_agents_together(bundle: String, store_url: &str, address: &str) -> Duration {
+    // The isolate's `fetch` builds its TLS client even for a plain-http URL: it needs the
+    // process-wide rustls provider the executor installs at start.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+    let (handle, dir) = spawn_runtime(address);
+    let context = LanguageContext::new(
+        crate::agent::did(),
+        crate::agent::signing_key_id(),
+        Some(serde_json::json!({ "storeUrl": store_url })),
+        dir.path().to_path_buf(),
+        address.to_string(),
+    );
+    handle
+        .load_module(bundle, context.clone())
+        .await
+        .expect("the centralized agent bundle loads");
+    handle
+        .load_language(context.to_json())
+        .await
+        .expect("the language's init() runs");
+
+    let users: Vec<String> = (0..LOOKUPS)
+        .map(|i| {
+            crate::test_utils::create_test_user(&format!(
+                "lookup{i}.{}@example.org",
+                uuid::Uuid::new_v4()
+            ))
+        })
+        .collect();
+    let started = Instant::now();
+    let lookups: Vec<_> = users
+        .into_iter()
+        .enumerate()
+        .map(|(i, user)| {
+            let handle = handle.clone();
+            tokio::spawn(async move {
+                handle
+                    .call(
+                        format!(
+                            "JSON.stringify(await globalThis.__ad4m_language_instance__.expressionGet(\"did:key:z6MkUnknown{i}\"))"
+                        ),
+                        AgentContext::managed(user),
+                        CallKind::Concurrent,
+                    )
+                    .await
+            })
+        })
+        .collect();
+    for lookup in lookups {
+        let answer = within(Duration::from_secs(30), "an agent lookup", lookup)
+            .await
+            .unwrap()
+            .expect("the lookup answers");
+        // `Ok(None)` crosses wasm-bindgen as `undefined`, which `JSON.stringify` returns as is.
+        assert!(
+            matches!(answer.trim(), "undefined" | "null"),
+            "the store answered 404, so the agent is unknown: {answer}"
+        );
+    }
+    started.elapsed()
+}
+
+/// The user-visible gain of concurrent wasm calls: `agent.byDIDs` asks the seeded agent
+/// language (centralized-agent-language, built with this ALDK, so marked) for `LOOKUPS` agents
+/// at once, and the identity store's replies take `STORE_DELAY` each. The lookups overlap:
+/// the store holds several requests open together and the lot takes far less than
+/// `LOOKUPS * STORE_DELAY`. The same bundle with its marker removed is the control — what
+/// every wasm language did before: it runs the lookups one by one, so the store never holds
+/// two open and the lot takes at least `LOOKUPS * STORE_DELAY`.
+///
+/// The overlap is read off the store's side (its peak of requests held open), which a slow
+/// machine cannot fake. The marked run asserts no time bound, because a loaded runner can
+/// stretch it; its time is printed. The unmarked run's lower bound holds on any machine.
+#[tokio::test(flavor = "multi_thread")]
+async fn centralized_agent_lookups_overlap_when_marked_and_queue_when_not() {
+    let bundle = centralized_agent_bundle();
+    assert!(
+        bundle.contains(ad4m_ldk::MARKER_EXPORT),
+        "the centralized agent bundle was built without this ALDK's marker; rebuild it"
+    );
+    let serial_floor = STORE_DELAY * LOOKUPS as u32;
+
+    let (url, peak) = slow_store().await;
+    let overlapped =
+        look_up_agents_together(bundle.clone(), &url, "QmCentralizedAgentMarked").await;
+    let marked_peak = peak.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        marked_peak > 1,
+        "the store never held two lookups open at once (peak {marked_peak}): the marked language ran them one by one"
+    );
+    // No upper bound on `overlapped`: a loaded runner can stretch it, and the peak above
+    // already shows the overlap. It is printed below.
+
+    let unmarked = bundle.replace(ad4m_ldk::MARKER_EXPORT, "__ldkVersionMarker");
+    assert!(!unmarked.contains(ad4m_ldk::MARKER_EXPORT));
+    let (url, peak) = slow_store().await;
+    let serialized = look_up_agents_together(unmarked, &url, "QmCentralizedAgentUnmarked").await;
+    let unmarked_peak = peak.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        unmarked_peak, 1,
+        "the unmarked language overlapped its lookups"
+    );
+    assert!(
+        serialized >= serial_floor,
+        "{LOOKUPS} serialized lookups took {serialized:?}, under {LOOKUPS} x {STORE_DELAY:?}"
+    );
+    println!(
+        "centralized lookups: marked {overlapped:?} (peak {marked_peak} open), unmarked {serialized:?}"
+    );
+}
+
+/// A plain JS bundle needs no marker: serializing unmarked bundles is for
+/// wasm-bindgen output only — a JS bundle's calls keep their declared kind.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_js_bundle_loads_without_the_marker() {
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+    let address = "QmTestJsBundle".to_string();
+    let (handle, dir) = spawn_runtime(&address);
+    let context = LanguageContext::new(
+        crate::agent::did(),
+        crate::agent::signing_key_id(),
+        None,
+        dir.path().to_path_buf(),
+        address,
+    );
+    let js = r#"
+        export function init() {}
+        export function name() { return "plain-js-test"; }
+        export function version() { return "0.0.1"; }
+        export function isPublic() { return true; }
+    "#;
+    handle
+        .load_module(js.to_string(), context.clone())
+        .await
+        .expect("a JS bundle still loads without the marker");
+    handle
+        .load_language(context.to_json())
+        .await
+        .expect("the JS language's init() runs");
+}
+
+/// On a Rust/ALDK (wasm-bindgen) language each export takes the lock side it
+/// declares: `expressionGet` is `concurrent:` (the shared read side) while
+/// `expressionCreate` needs `&mut self` (the write side, alone). Below, a slow
+/// read holds the read side for 600 ms: the sync `interactions()` export
+/// answers beside it — it only ever reports busy while an ordered call holds
+/// the instance — and the create queued on the write side still runs after
+/// the read, signing as the managed user who called it, not the main agent.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_wasm_language_runs_concurrent_calls_in_order_as_their_agents() {
     let Some(bundle) = wasm_language_bundle() else {
@@ -1373,11 +1860,13 @@ async fn a_wasm_language_runs_concurrent_calls_in_order_as_their_agents() {
             .await
         })
     };
-    // The language runs it ordered, whatever the call says.
-    ordered_call_started(&handle).await;
+    // The gate is the export's own log entry: once it is there the slow
+    // read holds the read side — a sleep would only guess at that.
+    export_reaches(&handle, "get-start:slow:600:x").await;
 
-    // A sync export. Overlapping the read it would see the instance's lock
-    // held (`try_with` → null); ordered, it runs after it and answers for real.
+    // The sync `interactions` export shares the read side: it answers
+    // beside the slow read — it reports "busy" only while an ordered
+    // call holds the instance.
     let interactions = within(Duration::from_secs(10), "interactions", async {
         concurrent(
             &handle,
@@ -1390,11 +1879,12 @@ async fn a_wasm_language_runs_concurrent_calls_in_order_as_their_agents() {
     let interactions = interactions.expect("the interactions call answers");
     assert!(
         interactions.contains("echo"),
-        "interactions() overlapped the read's lock and answered busy: {interactions}"
+        "interactions() answered busy beside a held read: {interactions}"
     );
 
-    // Alice's create, sent while the read still runs, runs after it — and
-    // signs as Alice, never as the agent whose call preceded it.
+    // Alice's create, sent while the read still runs, waits on the write
+    // side and runs after it — and signs as Alice, never as the agent
+    // whose call preceded it.
     let created = within(Duration::from_secs(10), "the create", async {
         handle
             .call(
@@ -1436,20 +1926,443 @@ async fn a_wasm_language_runs_concurrent_calls_in_order_as_their_agents() {
         author, alice,
         "the create signed as {author}, not the managed user"
     );
+
+    // Inside the isolate the lock sides are exact: the sync export ran
+    // inside the read's window, and the write-side export entered only
+    // after the read's export had exited.
+    let events = export_events(&handle).await;
+    let (slow_start, slow_end) = (
+        event_pos(&events, "get-start:slow:600:x"),
+        event_pos(&events, "get-end:slow:600:x"),
+    );
+    let sync = event_pos(&events, "interactions");
+    assert!(
+        sync > slow_start && sync < slow_end,
+        "interactions() did not run inside the slow read's window: {events:?}"
+    );
+    assert!(
+        event_pos(&events, "create-start") > slow_end,
+        "the create's export did not wait for the read's guard: {events:?}"
+    );
 }
 
-/// A concurrent-marked call on a WASM language runs ordered, so its caller's
+/// Two concurrent calls on a WASM language each act as their own agent — and
+/// the wake must carry that too. Alice's `wait` parks her call's future on a
+/// oneshot inside the language; Bob's `release` sends on it, and her future
+/// resumes on the shared wasm-bindgen scheduler inside Bob's poll — where she
+/// answers as Alice only if the export re-installs her pinned agent token
+/// around that poll. Her expression's `author` is the DID `agent_did()`
+/// answered and `proof.signature` signs a challenge unique to this test;
+/// Bob's matching answer is the control — his release ran under his own call.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wasm_language_runs_concurrent_calls_each_as_its_own_agent() {
+    let bundle = wasm_language_bundle()
+        .expect("test-wasm-language bundle missing; run `bash tests/rust-languages/build.sh`");
+
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+    let alice =
+        crate::test_utils::create_test_user(&format!("alice.{}@example.org", uuid::Uuid::new_v4()));
+    let bob =
+        crate::test_utils::create_test_user(&format!("bob.{}@example.org", uuid::Uuid::new_v4()));
+
+    let address = "QmTestWasmConcurrent".to_string();
+    let (handle, dir) = spawn_runtime(&address);
+    let context = LanguageContext::new(
+        crate::agent::did(),
+        crate::agent::signing_key_id(),
+        None,
+        dir.path().to_path_buf(),
+        address.clone(),
+    );
+    handle
+        .load_module(bundle, context.clone())
+        .await
+        .expect("the WASM bundle loads");
+    handle
+        .load_language(context.to_json())
+        .await
+        .expect("the language's init() runs");
+
+    let wait_key = format!("wait-{}", uuid::Uuid::new_v4());
+    let alice_challenge = format!("alice-{}", uuid::Uuid::new_v4());
+    let bob_challenge = format!("bob-{}", uuid::Uuid::new_v4());
+
+    // Alice's wait registers a sender inside the language, then parks her
+    // call's future on the receiver until a release sends on it.
+    let alice_call = tokio::spawn({
+        let handle = handle.clone();
+        let alice = alice.clone();
+        let script = format!(
+            "JSON.stringify(await globalThis.__ad4m_language_instance__.expressionGet({}))",
+            serde_json::to_string(&format!("wait:{wait_key}:{alice_challenge}")).unwrap()
+        );
+        async move {
+            handle
+                .call(script, AgentContext::managed(alice), CallKind::Concurrent)
+                .await
+        }
+    });
+
+    // Gate on the event — her sender is registered inside the language —
+    // not on a sleep that would only guess she got that far. A call that
+    // has already ended can never park: hers ending here is the failure
+    // (a refused token, an agent that did not resolve), not this wait's
+    // timeout.
+    let parked = within(Duration::from_secs(10), "alice's wait to park", async {
+        loop {
+            if alice_call.is_finished() {
+                break false;
+            }
+            let probe = concurrent(
+                &handle,
+                format!(
+                    "JSON.stringify(await globalThis.__ad4m_language_instance__.expressionGet(\"waiting:{wait_key}\"))"
+                ),
+            )
+            .await
+            .expect("the waiting probe answers");
+            let waiting = serde_json::from_str::<serde_json::Value>(&probe)
+                .ok()
+                .and_then(|v| v.pointer("/data").and_then(|d| d.as_bool()))
+                .unwrap_or(false);
+            if waiting {
+                break true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    if !parked {
+        panic!(
+            "alice's wait call ended before it parked: {:?}",
+            alice_call.await
+        );
+    }
+
+    // Bob's release sends on Alice's sender: her parked future resumes
+    // inside his poll on the shared scheduler. His answer signs as Bob.
+    let bob_answer = within(Duration::from_secs(10), "bob's release", async {
+        handle
+            .call(
+                format!(
+                    "JSON.stringify(await globalThis.__ad4m_language_instance__.expressionGet({}))",
+                    serde_json::to_string(&format!("release:{wait_key}:{bob_challenge}")).unwrap()
+                ),
+                AgentContext::managed(bob.clone()),
+                CallKind::Concurrent,
+            )
+            .await
+    })
+    .await
+    .expect("bob's release answers");
+    let bob_expression: serde_json::Value = serde_json::from_str(&bob_answer).unwrap();
+    let released = bob_expression
+        .pointer("/data/released")
+        .and_then(|r| r.as_bool())
+        .unwrap_or(false);
+    if !released && alice_call.is_finished() {
+        panic!(
+            "alice's wait call ended before bob's release: {:?}",
+            alice_call.await
+        );
+    }
+    assert!(
+        released,
+        "bob's release found no parked wait to wake: {bob_answer}"
+    );
+    assert_eq!(
+        bob_expression.pointer("/author").and_then(|a| a.as_str()),
+        Some(bob.as_str()),
+        "bob's release reported a different agent: {bob_answer}"
+    );
+    let bob_signature = bob_expression
+        .pointer("/proof/signature")
+        .and_then(|s| s.as_str())
+        .expect("bob's release carries a signature");
+    assert!(
+        crate::agent::signatures::verify_string_signed_by_did(&bob, &bob_challenge, bob_signature)
+            .unwrap_or(false),
+        "bob's release did not sign his challenge as bob"
+    );
+
+    // Alice's parked future resumed inside bob's release poll; her answer
+    // must still name and sign as Alice — the token pinned at her export
+    // entry, not the ambient context of the poll that woke her.
+    let alice_answer = within(Duration::from_secs(10), "alice's wait", alice_call)
+        .await
+        .unwrap()
+        .expect("alice's wait answers");
+    let alice_expression: serde_json::Value = serde_json::from_str(&alice_answer).unwrap();
+    assert_eq!(
+        alice_expression.pointer("/author").and_then(|a| a.as_str()),
+        Some(alice.as_str()),
+        "alice's resumed call answered as a different agent: {alice_answer}"
+    );
+    let alice_signature = alice_expression
+        .pointer("/proof/signature")
+        .and_then(|s| s.as_str())
+        .expect("alice's wait carries a signature");
+    assert!(
+        crate::agent::signatures::verify_string_signed_by_did(
+            &alice,
+            &alice_challenge,
+            alice_signature
+        )
+        .unwrap_or(false),
+        "alice's resumed call signed her challenge as a different agent"
+    );
+}
+
+/// The lock side is the export's, not the call's: a slow `expressionGet`
+/// sent ordered still takes the shared read side (the export is declared
+/// `concurrent:`), so a read sent concurrent runs beside it instead of
+/// waiting 600 ms behind it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_ordered_call_on_wasm_does_not_block_a_concurrent_read() {
+    let Some(bundle) = wasm_language_bundle() else {
+        eprintln!(
+            "test-wasm-language bundle missing; run `bash tests/rust-languages/build.sh` — skipping"
+        );
+        return;
+    };
+
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+
+    let address = "QmTestWasmOrderedSlow".to_string();
+    let (handle, dir) = spawn_runtime(&address);
+    let context = LanguageContext::new(
+        crate::agent::did(),
+        crate::agent::signing_key_id(),
+        None,
+        dir.path().to_path_buf(),
+        address.clone(),
+    );
+    handle
+        .load_module(bundle, context.clone())
+        .await
+        .expect("the WASM bundle loads");
+    handle
+        .load_language(context.to_json())
+        .await
+        .expect("the language's init() runs");
+
+    let mut slow = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            handle
+                .execute(
+                    "globalThis.__ad4m_language_instance__.expressionGet(\"slow:600:x\")".into(),
+                )
+                .await
+        }
+    });
+    // The gate is the export's own log entry: once it is there the slow
+    // read holds the read side — a sleep would only guess at that.
+    export_reaches(&handle, "get-start:slow:600:x").await;
+
+    let read = within(Duration::from_secs(10), "the concurrent read", async {
+        concurrent(
+            &handle,
+            "globalThis.__ad4m_language_instance__.expressionGet(\"whoami\")".into(),
+        )
+        .await
+    })
+    .await;
+    read.expect("the concurrent read answers beside the slow ordered call");
+
+    within(Duration::from_secs(10), "the slow read", &mut slow)
+        .await
+        .unwrap()
+        .expect("the slow read answers");
+
+    // Inside the isolate the overlap is exact: the concurrent read's
+    // export finished while the ordered call's read still held.
+    let events = export_events(&handle).await;
+    assert!(
+        event_pos(&events, "get-end:whoami") < event_pos(&events, "get-end:slow:600:x"),
+        "the concurrent read waited for the ordered call's read side: {events:?}"
+    );
+}
+
+/// The sync `interactions` export takes the read side without waiting: it
+/// answers while a concurrent async export's future is suspended, not
+/// "busy" — busy is only for a held write side (an ordered call).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sync_export_answers_beside_a_concurrent_wasm_call() {
+    let Some(bundle) = wasm_language_bundle() else {
+        eprintln!(
+            "test-wasm-language bundle missing; run `bash tests/rust-languages/build.sh` — skipping"
+        );
+        return;
+    };
+
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+
+    let address = "QmTestWasmSyncBeside".to_string();
+    let (handle, dir) = spawn_runtime(&address);
+    let context = LanguageContext::new(
+        crate::agent::did(),
+        crate::agent::signing_key_id(),
+        None,
+        dir.path().to_path_buf(),
+        address.clone(),
+    );
+    handle
+        .load_module(bundle, context.clone())
+        .await
+        .expect("the WASM bundle loads");
+    handle
+        .load_language(context.to_json())
+        .await
+        .expect("the language's init() runs");
+
+    let mut slow = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            concurrent(
+                &handle,
+                "globalThis.__ad4m_language_instance__.expressionGet(\"slow:600:x\")".into(),
+            )
+            .await
+        }
+    });
+    // The gate is the export's own log entry: once it is there the slow
+    // read holds the read side — a sleep would only guess at that.
+    export_reaches(&handle, "get-start:slow:600:x").await;
+
+    let answer = within(Duration::from_secs(10), "the sync export", async {
+        concurrent(
+            &handle,
+            "JSON.stringify(globalThis.__ad4m_language_instance__.interactions(\"expr://x\"))"
+                .into(),
+        )
+        .await
+    })
+    .await
+    .expect("the sync export answers");
+    assert!(answer.contains("echo"), "unexpected answer: {answer}");
+
+    within(Duration::from_secs(10), "the slow read", &mut slow)
+        .await
+        .unwrap()
+        .expect("the slow read answers");
+
+    // Inside the isolate the proof is exact: the sync export ran inside
+    // the slow read's window rather than waiting for it to end.
+    let events = export_events(&handle).await;
+    let sync = event_pos(&events, "interactions");
+    assert!(
+        sync > event_pos(&events, "get-start:slow:600:x")
+            && sync < event_pos(&events, "get-end:slow:600:x"),
+        "the sync export did not run inside the slow read's window: {events:?}"
+    );
+}
+
+/// `expressionCreate` needs `&mut self`, so its export takes the write
+/// side and runs alone: sent beside a slow concurrent read its export
+/// enters only once the read's export has exited. The read's hold is
+/// gated on the export log — not a sleep that only guesses it got that
+/// far — and the exclusivity check compares export entry and exit inside
+/// the isolate, not elapsed time outside it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ordered_export_on_wasm_still_runs_alone() {
+    let Some(bundle) = wasm_language_bundle() else {
+        eprintln!(
+            "test-wasm-language bundle missing; run `bash tests/rust-languages/build.sh` — skipping"
+        );
+        return;
+    };
+
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+
+    let address = "QmTestWasmWriteAlone".to_string();
+    let (handle, dir) = spawn_runtime(&address);
+    let context = LanguageContext::new(
+        crate::agent::did(),
+        crate::agent::signing_key_id(),
+        None,
+        dir.path().to_path_buf(),
+        address.clone(),
+    );
+    handle
+        .load_module(bundle, context.clone())
+        .await
+        .expect("the WASM bundle loads");
+    handle
+        .load_language(context.to_json())
+        .await
+        .expect("the language's init() runs");
+    handle
+        .execute("(globalThis.__log = [], 0)".into())
+        .await
+        .unwrap();
+
+    let mut slow = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            concurrent(
+                &handle,
+                "globalThis.__ad4m_language_instance__.expressionGet(\"slow:1500:x\")".into(),
+            )
+            .await
+        }
+    });
+    export_reaches(&handle, "get-start:slow:1500:x").await;
+
+    // The create's script marks its start in __log; its export then
+    // queues on the write side behind the held read.
+    let created = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            concurrent(
+                &handle,
+                "(globalThis.__log.push(\"create-started\"), await globalThis.__ad4m_language_instance__.expressionCreate({note: \"write side\"}))".into(),
+            )
+            .await
+        }
+    });
+    log_reaches(&handle, r#"["create-started"]"#).await;
+
+    let addr = within(Duration::from_secs(10), "the create", created)
+        .await
+        .unwrap()
+        .expect("the create answers");
+    assert!(
+        addr.contains("test:"),
+        "unexpected expression address: {addr}"
+    );
+
+    within(Duration::from_secs(10), "the slow read", &mut slow)
+        .await
+        .unwrap()
+        .expect("the slow read answers");
+
+    // Inside the isolate the exclusivity is exact: the write-side export
+    // entered only after the read's export exited — no elapsed-time
+    // margin to get wrong.
+    let events = export_events(&handle).await;
+    assert!(
+        event_pos(&events, "create-start") > event_pos(&events, "get-end:slow:1500:x"),
+        "the create's export entered before the read's had exited: {events:?}"
+    );
+}
+
+/// A concurrent-marked call on an unmarked WASM bundle runs ordered, so its caller's
 /// deadline is the ordered one: behind a running call already past the
 /// deadline it is refused at once (not queued to wait out the concurrent
 /// deadline); behind one approaching it, it gets the busy error when that
 /// call passes the deadline — the error names the running call, not "did not
-/// start". `set_wasm` plays `load_module`'s share of the flag.
+/// start". `set_unmarked_wasm` plays `load_module`'s share of the flag.
 #[tokio::test]
 async fn a_concurrent_call_on_wasm_gets_the_ordered_deadline() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let handle = LanguageRuntimeHandle::from_channel("QmWasmDeadline".into(), tx)
         .with_call_deadline(Duration::from_millis(500));
-    handle.set_wasm();
+    handle.set_unmarked_wasm();
     let running = handle.running_request();
 
     // Already past the deadline: refused at once, never queued.

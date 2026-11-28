@@ -212,7 +212,7 @@ impl Language for MountLang {
 }
 
 impl MountCapability for MountLang {
-    fn mount_shapes(&mut self) -> LanguageResult<MountShapes> {
+    fn mount_shapes(&self) -> LanguageResult<MountShapes> {
         Ok(MountShapes::from_classes_at(
             "1",
             &[GoldenRecord::<()>::generate_shacl()],

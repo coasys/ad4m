@@ -72,7 +72,7 @@ impl ExpressionCapability for NoteStore {
     }
 
     async fn expression_get(
-        &mut self,
+        &self,
         address: Address,
     ) -> LanguageResult<Option<Expression>> {
         let body = rt::http_get(&format!("https://example.com/notes/{}", address))
@@ -87,6 +87,7 @@ ad4m_language! {
     language: NoteStore,
     capabilities: [expression],
     holochain_signal: false,
+    concurrent: [expression_get],
 }
 ```
 
@@ -95,6 +96,46 @@ AD4M executor looks for — one per capability method. The WASM export
 table ends up minimal: the executor introspects it at load time and
 caches the capability set, so what you export is what the runtime
 thinks your Language can do.
+
+## Calls, concurrency and the instance lock
+
+The executor may run several calls into your Language at once
+(`CallKind::Concurrent` reads beside ordered writes). Every export the
+macro emits goes through one instance lock with two sides:
+
+- An export listed in `concurrent: [...]` takes the **read** side — any
+  number of them (and the synchronous read-side exports like
+  `interactions`) run at the same time. Only `&self` methods may be
+  listed: the read side shares the instance, so a method that needs
+  `&mut self` can never be concurrent.
+- Every other export takes the **write** side — it runs alone, waiting
+  until in-flight read-side calls drop their guards.
+
+So a concurrent read that awaits inside its export does not stall the
+language: other reads and the sync exports answer beside it, while a
+`&mut` export (e.g. `expressionCreate`) still waits for it to finish —
+the read side is shared, the write side exclusive. Internal mutation
+inside a `&self` export needs a `RefCell`/`Mutex` of your own — but never
+hold a `RefCell` borrow across an `.await`: every call's future polls on
+the module's one thread, so a borrow held while your future parks is a
+borrow another call's poll can hit, and `RefCell` panics on a second
+borrow (aborting the whole WASM module). Take the borrow, read or write,
+drop it — then await.
+
+`ad4m_language!` also emits a `__ad4mAldkVersion` marker export carrying
+the ALDK version. Only a wasm-bindgen bundle that carries it runs its
+calls by their declared kind: a bundle built by an older ALDK pins no
+agent token and has no per-export lock side, so the executor serializes
+every call into it — each runs ordered, whatever the caller declared.
+The bundle still loads (published bundles keep circulating); rebuild
+with this ALDK or later for the declared kinds.
+
+Each call's host-agent operations (`rt::agent_did()`, `rt::agent_sign()`,
+…) act as the agent that placed the call, even across awaits: the macro
+captures the call's agent token at export entry and re-installs it
+around every poll of the export's future, passing it explicitly to the
+host imports. You don't need to do anything for this — just don't cache
+agent answers across calls.
 
 ## What this crate gives you
 
@@ -152,9 +193,11 @@ struct Thing {
 }
 
 // ThingStore implements `Language` (with `interactions` and
-// `expression_interact`) and `ExpressionCapability`.
+// `expression_interact`) and `ExpressionCapability`. `mount_shapes` is a
+// sync `&self` export like `interactions` (it answers beside concurrent
+// reads); `mount_snapshot` takes `&mut self` and runs alone.
 impl MountCapability for ThingStore {
-    fn mount_shapes(&mut self) -> LanguageResult<MountShapes> {
+    fn mount_shapes(&self) -> LanguageResult<MountShapes> {
         // Change the version when the classes change.
         Ok(MountShapes::from_classes("1", &[Thing::generate_shacl()]))
     }

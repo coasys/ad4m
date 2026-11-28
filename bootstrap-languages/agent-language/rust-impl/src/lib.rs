@@ -13,9 +13,7 @@ use serde::Serialize;
 const DNA_NICK: &str = "agent-store";
 const ZOME_NAME: &str = "agent_store";
 
-const HAPP_BUNDLE: &[u8] = include_bytes!(
-    "../../hc-dna/workdir/ad4m-agent-language.happ"
-);
+const HAPP_BUNDLE: &[u8] = include_bytes!("../../hc-dna/workdir/ad4m-agent-language.happ");
 
 #[derive(Serialize)]
 struct DnaRegistration<'a> {
@@ -26,17 +24,26 @@ struct DnaRegistration<'a> {
 pub struct AgentLanguage;
 
 impl Language for AgentLanguage {
-    fn name() -> &'static str { "agent-expression-store" }
-    fn version() -> &'static str { "0.1.0" }
-    fn is_public() -> bool { false }
+    fn name() -> &'static str {
+        "agent-expression-store"
+    }
+    fn version() -> &'static str {
+        "0.1.0"
+    }
+    fn is_public() -> bool {
+        false
+    }
 
     async fn init() -> LanguageResult<Self> {
-        let dnas = [DnaRegistration { nick: DNA_NICK, bundle: HAPP_BUNDLE }];
+        let dnas = [DnaRegistration {
+            nick: DNA_NICK,
+            bundle: HAPP_BUNDLE,
+        }];
         rt::holochain_register_dnas_typed(&dnas[..])
             .await
-            .map_err(|e| LanguageError::internal(format!(
-                "holochain_register_dnas failed: {:?}", e
-            )))?;
+            .map_err(|e| {
+                LanguageError::internal(format!("holochain_register_dnas failed: {:?}", e))
+            })?;
         Ok(AgentLanguage)
     }
 }
@@ -48,19 +55,22 @@ impl ExpressionCapability for AgentLanguage {
     ) -> LanguageResult<Address> {
         // Validate that content looks like an Agent object: must have
         // `did` and `perspective.links`.
-        let did = content.get("did").and_then(|v| v.as_str())
-            .ok_or_else(|| LanguageError::invalid_input(
-                "Content must be an Agent object (missing did)"
-            ))?
+        let did = content
+            .get("did")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                LanguageError::invalid_input("Content must be an Agent object (missing did)")
+            })?
             .to_string();
 
-        let has_links = content.get("perspective")
+        let has_links = content
+            .get("perspective")
             .and_then(|p| p.get("links"))
             .and_then(|l| l.as_array())
             .is_some();
         if !has_links {
             return Err(LanguageError::invalid_input(
-                "Content must be an Agent object (missing perspective.links)"
+                "Content must be an Agent object (missing perspective.links)",
             ));
         }
 
@@ -68,17 +78,20 @@ impl ExpressionCapability for AgentLanguage {
         let my_did = rt::agent_did()?;
         if did != my_did {
             return Err(LanguageError::permission_denied(
-                "Can't set Agent Expression for foreign DID - only for self"
+                "Can't set Agent Expression for foreign DID - only for self",
             ));
         }
 
         // Default optional fields and strip link proof validity markers,
         // matching the JS implementation.
         if content.get("directMessageLanguage").is_none() {
-            content.as_object_mut().unwrap()
+            content
+                .as_object_mut()
+                .unwrap()
                 .insert("directMessageLanguage".to_string(), serde_json::Value::Null);
         }
-        if let Some(links) = content.get_mut("perspective")
+        if let Some(links) = content
+            .get_mut("perspective")
             .and_then(|p| p.get_mut("links"))
             .and_then(|l| l.as_array_mut())
         {
@@ -98,22 +111,20 @@ impl ExpressionCapability for AgentLanguage {
         let signed = rt::agent_create_signed_expression_typed(&content)?;
         rt::holochain_call(DNA_NICK, ZOME_NAME, "create_agent_expression", signed)
             .await
-            .map_err(|e| LanguageError::internal(format!(
-                "create_agent_expression failed: {:?}", e
-            )))?;
+            .map_err(|e| {
+                LanguageError::internal(format!("create_agent_expression failed: {:?}", e))
+            })?;
 
         Ok(did)
     }
 
-    async fn expression_get(
-        &mut self,
-        address: Address,
-    ) -> LanguageResult<Option<Expression>> {
-        let result = rt::holochain_call_typed(DNA_NICK, ZOME_NAME, "get_agent_expression", &address)
-            .await
-            .map_err(|e| LanguageError::internal(format!(
-                "get_agent_expression failed: {:?}", e
-            )))?;
+    async fn expression_get(&self, address: Address) -> LanguageResult<Option<Expression>> {
+        let result =
+            rt::holochain_call_typed(DNA_NICK, ZOME_NAME, "get_agent_expression", &address)
+                .await
+                .map_err(|e| {
+                    LanguageError::internal(format!("get_agent_expression failed: {:?}", e))
+                })?;
 
         if result.is_null() || result.is_undefined() {
             return Ok(None);
@@ -121,10 +132,9 @@ impl ExpressionCapability for AgentLanguage {
 
         // The zome returns an AgentExpression whose shape matches the
         // generic Expression envelope (author + timestamp + data + proof).
-        let exp: Expression = serde_wasm_bindgen::from_value(result)
-            .map_err(|e| LanguageError::internal(format!(
-                "deserializing AgentExpression: {}", e
-            )))?;
+        let exp: Expression = serde_wasm_bindgen::from_value(result).map_err(|e| {
+            LanguageError::internal(format!("deserializing AgentExpression: {}", e))
+        })?;
         Ok(Some(exp))
     }
 }
@@ -133,4 +143,5 @@ ad4m_language! {
     language: AgentLanguage,
     capabilities: [expression],
     holochain_signal: false,
+    concurrent: [expression_get],
 }
