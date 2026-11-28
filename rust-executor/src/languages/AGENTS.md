@@ -79,8 +79,9 @@ instance
 seeded agent language: `centralized_agent_lookups_overlap_when_marked_and_queue_when_not`
 loads the real centralized-agent-language bundle against a loopback store that holds each
 `GET /v1/agents/{did}` for 200 ms, and 16 concurrent `expressionGet` calls (what
-`agent.byDIDs` sends) overlap (the store sees several open at once, the lot takes well
-under 16 x 200 ms); the same bundle with its marker removed runs them one by one. The test
+`agent.byDIDs` sends) overlap: the store sees more than one open at once (the test
+asserts no time bound on this run, a loaded runner can stretch it). The same bundle with
+its marker removed runs them one by one: one open at a time, at least 16 x 200 ms. The test
 needs the bundle: `env -u CARGO_TARGET_DIR bash
 bootstrap-languages/centralized-agent-language/rust-impl/build.sh` (CI builds it beside
 the test WASM language). The `mount` capability's `mount_shapes` is a sync `&self`
