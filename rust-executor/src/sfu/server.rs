@@ -6456,8 +6456,10 @@ mod tests {
     }
 
     /// A command sent to an idle loop (no packet, no timer due) is handled
-    /// at once, not at the next 100 ms wake.
-    #[tokio::test]
+    /// at once, not at the next 100 ms wake. The clock is paused: tokio
+    /// advances it only when every task is idle, so a loop that waits for its
+    /// timer moves the clock 100 ms, and one that wakes on the command does not.
+    #[tokio::test(start_paused = true)]
     async fn a_command_wakes_an_idle_loop_at_once() {
         let server = SfuServer::start(SfuServerConfig {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
@@ -6467,7 +6469,7 @@ mod tests {
         .unwrap();
         let ask = || async {
             let (reply, answer) = tokio::sync::oneshot::channel();
-            let sent = std::time::Instant::now();
+            let sent = tokio::time::Instant::now();
             server
                 .command_tx
                 .send(SfuCommand::GetQualityPreferences { reply })
@@ -6483,8 +6485,8 @@ mod tests {
             slowest = slowest.max(ask().await);
         }
         assert!(
-            slowest < Duration::from_millis(50),
-            "a command waited {slowest:?} on an idle loop"
+            slowest < Duration::from_millis(1),
+            "a command waited {slowest:?} of paused time on an idle loop"
         );
         let _ = server.command_tx.send(SfuCommand::Shutdown).await;
     }
