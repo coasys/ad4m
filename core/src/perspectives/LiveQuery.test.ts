@@ -33,15 +33,19 @@ describe('applyUpdate', () => {
 function fakeClient() {
     let listener: ((u: QueryUpdate | QueryLagged) => void) | undefined;
     let reconnect: (() => void) | undefined;
+    let endedListener: ((e: { subscriptionIds: string[], perspectiveUuid: string, reason: string }) => void) | undefined;
     const client = {
         onQueryUpdate: (cb: (u: QueryUpdate | QueryLagged) => void) => { listener = cb; return () => { listener = undefined; }; },
         onReconnect: (cb: () => void) => { reconnect = cb; return () => { reconnect = undefined; }; },
+        onSubscriptionEnded: (cb: (e: { subscriptionIds: string[], perspectiveUuid: string, reason: string }) => void) => { endedListener = cb; return () => { endedListener = undefined; }; },
         resyncSubscription: jest.fn(),
         disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
     const update = (subscriptionId: string, revision: number, added: any[] = [], removed: any[] = []) =>
         listener?.({ subscriptionId, revision, added, removed });
-    return { client, update, send: (u: QueryUpdate | QueryLagged) => listener?.(u), reconnect: () => reconnect?.() };
+    const end = (subscriptionIds: string[], reason = 'not-authorized', perspectiveUuid = 'p') =>
+        endedListener?.({ subscriptionIds, perspectiveUuid, reason });
+    return { client, update, end, send: (u: QueryUpdate | QueryLagged) => listener?.(u), reconnect: () => reconnect?.() };
 }
 
 function deferred<T>() {
@@ -603,6 +607,79 @@ describe('LiveQuery', () => {
             expect(openCall).toHaveBeenCalledTimes(3);
             expect(live.getSnapshot().data).toEqual(['x']);
         });
+    });
+
+    it('subscription-ended stops the query and reports the reason; resubscribe gets a fresh baseline', async () => {
+        const { client, update, end } = fakeClient();
+        const statuses: LiveQueryStatus[] = [];
+        let opens = 0;
+        const live = open(client, async () => {
+            opens++;
+            return { subscriptionId: `s${opens}`, result: [opens], revision: 0 };
+        });
+        live.onStatus(s => statuses.push(s));
+        expect(await live.first).toEqual([1]);
+        update('s1', 1, [2]);
+        expect(live.getSnapshot().data).toEqual([1, 2]);
+
+        end(['s1']);
+        expect(statuses).toEqual([{ state: 'ended', reason: 'not-authorized' }]);
+        // Updates to the dead id change nothing.
+        update('s1', 2, [9]);
+        expect(live.getSnapshot().data).toEqual([1, 2]);
+        // It does not re-open on its own.
+        await tick();
+        expect(opens).toBe(1);
+
+        // An explicit resubscribe opens a fresh subscription with a fresh baseline.
+        await live.resubscribe();
+        expect(opens).toBe(2);
+        expect(live.getSnapshot().data).toEqual([2]);
+        update('s2', 1, [3]);
+        expect(live.getSnapshot().data).toEqual([2, 3]);
+    });
+
+    it('an ended query stays ended through a reconnect and a failed resync; only resubscribe reopens it', async () => {
+        const { client, send, end, reconnect } = fakeClient();
+        let failResync!: (e: unknown) => void;
+        client.resyncSubscription = jest.fn(() => new Promise((_, reject) => { failResync = reject; }));
+        let opens = 0;
+        const live = open(client, async () => {
+            opens++;
+            return { subscriptionId: `s${opens}`, result: [opens], revision: 0 };
+        });
+        expect(await live.first).toEqual([1]);
+        // A resync is in flight when the executor ends the subscription.
+        send({ lagged: true } as any);
+        expect(client.resyncSubscription).toHaveBeenCalledTimes(1);
+        end(['s1']);
+
+        // Neither a transport reconnect nor the failing resync reopens an ended query.
+        reconnect();
+        await tick();
+        failResync(new Error('gone'));
+        await tick();
+        await tick();
+        expect(opens).toBe(1);
+        expect(live.getSnapshot().reopening).toBe(false);
+
+        // Only the owner's resubscribe does.
+        await live.resubscribe();
+        expect(opens).toBe(2);
+        expect(live.getSnapshot().data).toEqual([2]);
+    });
+
+    it('ignores a subscription-ended for another id or perspective', async () => {
+        const { client, end, update } = fakeClient();
+        const statuses: any[] = [];
+        const live = open(client, async () => ({ subscriptionId: 's1', result: [1], revision: 0 }));
+        live.onStatus(s => statuses.push(s));
+        await live.first;
+        end(['other']);
+        end(['s1'], 'not-authorized', 'other-perspective');
+        update('s1', 1, [2]);
+        expect(live.getSnapshot().data).toEqual([1, 2]);
+        expect(statuses).toEqual([]);
     });
 });
 

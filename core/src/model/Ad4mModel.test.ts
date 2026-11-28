@@ -1330,6 +1330,7 @@ function liveHarness(initial: any = { instances: [], totalCount: 0 }) {
       reconnectListeners.add(cb);
       return () => reconnectListeners.delete(cb);
     }),
+    onSubscriptionEnded: jest.fn(() => () => {}),
     disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     resyncSubscription: jest.fn(),
   };

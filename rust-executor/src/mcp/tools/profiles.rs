@@ -102,6 +102,7 @@ fn make_profile_link(
         status: None,
         verdict: None,
         person: None,
+        by_bot: None,
     })
 }
 

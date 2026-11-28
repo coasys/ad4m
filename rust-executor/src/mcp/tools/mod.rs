@@ -212,12 +212,26 @@ impl ServerHandler for Ad4mMcpHandler {
             .admit_tool_call(&tool_name, RequestAuth::of(&context))
             .await
         {
-            // The link writes the tool makes count for its caller's agent
-            // (`GET /metrics`), as they do for an RPC call
+            // A bot's write gives its reason as the tool's `reason` argument: the RPC calls the
+            // tool makes carry it (`request_context`). The link writes the tool makes count for
+            // its caller's agent (`GET /metrics`), as they do for an RPC call
             // (`metrics::as_caller` in `HandlerMap::dispatch`).
             Ok(this) => {
+                let reason = request
+                    .arguments
+                    .as_ref()
+                    .and_then(|arguments| arguments.get("reason"))
+                    .and_then(Value::as_str)
+                    .map(crate::bots::cut_reason);
                 let did = this.session().await.ok().and_then(|s| s.acts_as_did());
-                crate::metrics::as_caller(did.as_deref(), this.dispatch_tool(request, context))
+                crate::bots::MCP_REASON
+                    .scope(
+                        reason,
+                        crate::metrics::as_caller(
+                            did.as_deref(),
+                            this.dispatch_tool(request, context),
+                        ),
+                    )
                     .await
             }
             Err(refusal) => Ok(refusal),
@@ -259,7 +273,23 @@ impl Ad4mMcpHandler {
         let this = self.for_request(&auth);
         let caller = this.caller(auth).await;
         if !AUTH_TOOLS.contains(&tool_name) {
-            if let Err(refusal) = authenticated(caller) {
+            let refusal = match authenticated(caller) {
+                Err(refusal) => Some(refusal),
+                // A bot calls only the tools that run RPC methods, each of which its grant
+                // checks; the others reach the executor another way. A managed agent the
+                // registry cannot classify (not loaded) calls nothing: `classify`.
+                Ok(session) => match session.managed_did().map(crate::bots::classify) {
+                    Some(Err(e)) => Some(e.message),
+                    Some(Ok(Some(_))) if !crate::bots::BOT_MCP_TOOLS.contains(&tool_name) => {
+                        Some(format!(
+                            "{}: a bot may not call the tool {tool_name}",
+                            crate::bots::BOT_GRANT
+                        ))
+                    }
+                    _ => None,
+                },
+            };
+            if let Some(refusal) = refusal {
                 return Err(CallToolResult::error(vec![Content::text(
                     json!({ "error": refusal }).to_string(),
                 )]));
@@ -285,6 +315,11 @@ pub(crate) fn request_context(session: Arc<Session>) -> crate::types::RequestCon
         cancel_token: None,
         session,
         connection_id: None,
+        // The `reason` argument of the tool call this runs in, if any.
+        reason: crate::bots::MCP_REASON
+            .try_with(Clone::clone)
+            .ok()
+            .flatten(),
         peer: None,
         query_slots: None,
     }
@@ -1238,6 +1273,72 @@ mod agent_context_tests {
             panic!("a proxied caller without a token reached get_my_did");
         };
         assert_eq!(refusal.is_error, Some(true));
+    }
+
+    /// A bot's session calls only the tools that run an RPC method its grant checks, and a
+    /// tool call's `reason` argument becomes the reason of the methods it runs.
+    #[tokio::test]
+    async fn a_bot_calls_only_the_tools_its_grant_checks_and_gives_its_reason() {
+        ensure_test_db();
+        let email = "mcp.bot@bots.ad4m";
+        let did = crate::test_utils::create_test_user(email);
+        let token = crate::user_management::generate_user_jwt(email, "test").unwrap();
+        let handler = handler(&token);
+        // A person's session calls any tool.
+        assert!(handler
+            .admit_tool_call("list_perspectives", RequestAuth::default())
+            .await
+            .is_ok());
+
+        crate::bots::remember(crate::db::BotRow {
+            did: did.clone(),
+            username: email.to_string(),
+            name: "helper".to_string(),
+            owner: "scid1".to_string(),
+            offer_id: "offer1".to_string(),
+            created_at: 1,
+            grant: crate::db::BotGrantRow {
+                spaces: vec![],
+                can: vec!["read".to_string()],
+                expires: None,
+                state: "active".to_string(),
+                version: 1,
+                updated_at: 1,
+            },
+        });
+        let Err(refusal) = handler
+            .admit_tool_call("list_perspectives", RequestAuth::default())
+            .await
+        else {
+            panic!("a bot reached list_perspectives");
+        };
+        let text = serde_json::to_string(&refusal.content).unwrap();
+        assert!(
+            text.contains("bot-grant: a bot may not call the tool list_perspectives"),
+            "{text}"
+        );
+        for tool in crate::bots::BOT_MCP_TOOLS {
+            assert!(
+                handler
+                    .admit_tool_call(tool, RequestAuth::default())
+                    .await
+                    .is_ok(),
+                "{tool}"
+            );
+        }
+        // Every tool a bot may call is a tool.
+        for tool in crate::bots::BOT_MCP_TOOLS {
+            assert!(handler.tool_router.has_route(tool), "{tool} is no tool");
+        }
+
+        let session = handler.session().await.unwrap();
+        let reason = crate::bots::MCP_REASON
+            .scope(Some("sort the inbox".to_string()), async {
+                request_context(session.clone()).reason
+            })
+            .await;
+        assert_eq!(reason.as_deref(), Some("sort the inbox"));
+        assert_eq!(request_context(session).reason, None);
     }
 
     #[test]

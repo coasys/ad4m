@@ -693,6 +693,7 @@ mod prolog_test {
                 status: None,
                 verdict: None,
                 person: None,
+                by_bot: None,
             },
             DecoratedLinkExpression {
                 author: "test_author".to_string(),
@@ -712,6 +713,7 @@ mod prolog_test {
                 status: None,
                 verdict: None,
                 person: None,
+                by_bot: None,
             },
         ];
 

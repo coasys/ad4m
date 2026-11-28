@@ -33,6 +33,7 @@ use super::sparql_store::EvalStop;
 use crate::agent::signatures::TestSigner;
 use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus, PerspectiveDiff};
 
+mod bot_votes;
 mod cache_and_marks;
 mod content_addressed_uri;
 mod grant_dating;

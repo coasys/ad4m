@@ -19,6 +19,7 @@ describe('perspective.liveSparql', () => {
       subscribe,
       onQueryUpdate: () => () => {},
       onReconnect: (cb: () => void) => { reconnects.add(cb); return () => reconnects.delete(cb); },
+      onSubscriptionEnded: () => () => {},
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     } as any;
     return { client, reconnects };

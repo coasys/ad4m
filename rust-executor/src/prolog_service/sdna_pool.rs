@@ -423,6 +423,7 @@ mod tests {
             status: None,
             verdict: None,
             person: None,
+            by_bot: None,
         }];
 
         // Set up test data in the complete pool first

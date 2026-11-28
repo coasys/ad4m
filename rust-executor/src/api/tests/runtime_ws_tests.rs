@@ -280,6 +280,7 @@ async fn operator_imports_a_perspective_snapshot_into_the_store() {
                 status: Some(LinkStatus::Shared),
                 verdict: None,
                 person: None,
+                by_bot: None,
             }
         })
         .collect();

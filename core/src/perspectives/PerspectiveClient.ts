@@ -18,6 +18,7 @@ import type { TranscriptTurn } from "../generated/api";
 import type { AgentMessage } from "../generated/api/AgentMessage";
 import type { AgentReply } from "../generated/api/AgentReply";
 import type { PerspectiveQueryLinksParams } from "../generated/api/PerspectiveQueryLinksParams";
+import type { SubscriptionEndedEvent } from "../generated/api/SubscriptionEndedEvent";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 import type { FlowFiredEntry } from "../generated/api/FlowFiredEntry";
 import type {
@@ -193,6 +194,14 @@ export class PerspectiveClient {
     /** Every `query-subscription-update` event on this client's socket. */
     onQueryUpdate(cb: (update: QueryUpdate | QueryLagged) => void): () => void {
         return this.#apiClient.on('query-subscription-update', cb)
+    }
+
+    /** The executor ended live query subscriptions on this connection — e.g.
+     *  a bot's grant paused or narrowed — with their ids, the perspective and
+     *  the reason. The subscriptions are gone; {@link subscribe}
+     *  opens a fresh one ({@link LiveQuery.resubscribe} does it for a live query). */
+    onSubscriptionEnded(cb: (ended: SubscriptionEndedEvent) => void): () => void {
+        return this.#apiClient.on('subscription-ended', cb)
     }
 
     /** The current result and revision of a live query, after a revision gap. */

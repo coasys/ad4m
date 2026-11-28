@@ -3868,6 +3868,7 @@ function makeLiveClient(
       return () => {};
     }),
     onReconnect: vi.fn(() => () => {}),
+    onSubscriptionEnded: vi.fn(() => () => {}),
     disposeQuerySubscription: vi.fn(() => Promise.resolve(true)),
     resyncSubscription: vi.fn(() => Promise.resolve()),
   };

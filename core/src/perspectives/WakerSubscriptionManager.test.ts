@@ -1317,6 +1317,7 @@ describe('WakerSubscriptionManager', () => {
       modelQuery: () => Promise.resolve({ instances: [], totalCount: 0 }),
       onQueryUpdate: (cb: (update: any) => void) => { updates.push(cb); return () => {}; },
       onReconnect: () => () => {},
+      onSubscriptionEnded: () => () => {},
       disposeQuerySubscription: () => Promise.resolve(),
       resyncSubscription: () => Promise.resolve(),
       subscribe: (_uuid: string, target: any) => {
