@@ -6,7 +6,7 @@
 //! survive that fold (#1046 §3, §4):
 //!
 //! - **Annotation links.** A link on the instance whose predicate the shape does
-//!   not declare is never fetched (the instance query binds `VALUES ?predicate`
+//!   not declare is never fetched (the instance query filters `?predicate`
 //!   to the shape's predicates) and would be ignored by hydration anyway. A
 //!   role-revocation tombstone (`ad4m://flow/role_grant_revoked`) is exactly
 //!   such a link, so a class-layer read could not see a revocation — the
@@ -51,7 +51,7 @@ use std::collections::BTreeMap;
 
 use super::sparql_builder::{link_status_filter, local_status_filter, proof_valid_filter};
 use super::types::{IncludeValue, ModelQueryInput, ModelShape, ShapeResolver};
-use super::utils::{emittable_iri, values_or_str_filter};
+use super::utils::{emittable_iri, predicate_in_filter, values_or_str_filter};
 use crate::perspectives::sparql_store::{status_from_str, EvalStop, SparqlStore};
 use crate::types::LinkStatus;
 
@@ -222,11 +222,8 @@ pub(super) async fn attach_links(
     let mut found: BTreeMap<String, BTreeMap<String, Vec<Value>>> = BTreeMap::new();
     if !ids.is_empty() {
         let source_constraint = values_or_str_filter("source", &ids);
-        let predicate_values = predicates
-            .iter()
-            .map(|p| format!("<{p}>"))
-            .collect::<Vec<_>>()
-            .join(" ");
+        // A filter, not `VALUES`: see `predicate_in_filter`.
+        let predicate_filter = predicate_in_filter(&predicates);
         let local_status = local_status_filter(shape);
         let link_status = link_status_filter(link_status);
         let proof_valid = proof_valid_filter(include_unverified);
@@ -235,8 +232,7 @@ pub(super) async fn attach_links(
         let sparql = format!(
             r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofAnchor ?proofValid ?person ?byBot ?judgementVersion ?rowStatus WHERE {{
     {source_constraint}
-    VALUES ?predicate {{ {predicate_values} }}
-    ?source ?predicate ?target .
+{predicate_filter}    ?source ?predicate ?target .
     ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .

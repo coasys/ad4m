@@ -43,7 +43,30 @@ several tasks must serialize itself, as `unyt_service::call_alliance_zome` does.
   polls up to 120 s then **panics**, so prefer the other two in anything not on the
   critical boot path.
 - DHT is full-arc: use `GetStrategy::Local`; cross-agent flakiness is gossip timing
-  (see root `AGENTS.md`). K2 spaces exist only after `join`; `add_agent_infos` on a
+  (see "Holochain DHT and GetStrategy" below). K2 spaces exist only after `join`; `add_agent_infos` on a
   missing space returns `K2SpaceNotFound`.
 - Local test networking: bootstrap and relay URLs must both be `http://` for a local
   bootstrap-srv, or cross-node traffic silently dies.
+
+## Holochain DHT and GetStrategy
+
+**Important**: Holochain currently only implements **full-arc (full-sync) DHT mode** where every node gossips and stores all data. This means:
+
+- `GetStrategy::Local` is the correct choice for DHT lookups because all nodes will eventually have all data once gossip completes
+- `GetStrategy::Network` is NOT needed until Holochain implements actual sharding/partial-arc storage
+- Flaky tests related to cross-agent data visibility are **gossip timing issues**, not strategy issues
+- The fix for such flaky tests is to add retry logic with appropriate timeouts, not to change from Local to Network strategy
+
+When debugging cross-agent communication issues:
+1. First check if it's a gossip timing issue (data not yet propagated)
+2. Add retry logic in tests rather than changing GetStrategy
+3. Ensure agent info exchange is working (K2 spaces must exist before adding agent infos)
+
+## Holochain K2 Spaces (Kitsune2)
+
+After the Holochain 0.7.0 update with PR #5550:
+- K2 spaces are only created by the `join` function
+- `add_agent_infos` will NOT create spaces - they must exist first
+- If trying to add agent info for a space that doesn't exist, you'll get `K2SpaceNotFound`
+- Retry logic should handle this by waiting for spaces to be created, then skipping if they truly don't exist (agent not in that DNA)
+
