@@ -309,12 +309,19 @@ impl IdentityBackend for AgentLanguageBackend {
         req: Option<&SignedRequest>,
     ) -> Result<(), IdentityError> {
         let req = req.map(json).transpose()?.unwrap_or(Value::Null);
-        self.call(
-            Capability::IdentityPutAgent,
-            &[json(record)?, req],
-            CallKind::Ordered,
-        )
-        .await
+        let put = self
+            .call(
+                Capability::IdentityPutAgent,
+                &[json(record)?, req],
+                CallKind::Ordered,
+            )
+            .await;
+        // The record is the profile `expressionGet` answers: a reader must not get the one
+        // cached before (even a put that reported failure may have been applied).
+        LanguageController::global_instance()
+            .forget_agent_profile(&record.did)
+            .await;
+        put
     }
 
     async fn agent_version(&self, did: &str) -> Result<Option<u64>, IdentityError> {
