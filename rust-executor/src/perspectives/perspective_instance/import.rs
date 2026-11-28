@@ -26,9 +26,10 @@ impl PerspectiveInstance {
     ///
     /// The import publishes nothing to the link language. In a
     /// neighbourhood perspective the imported Shared links sit in the
-    /// store like links written while offline: the normal sync
-    /// (`share_links_missing_remotely`) may publish the ones peers lack
-    /// later. Local links never leave the store.
+    /// store like links written while offline. A load that wrote links
+    /// bumps the fallback generation, so the next sync
+    /// (`share_links_missing_remotely`) publishes the Shared ones peers
+    /// lack. Local links never leave the store.
     ///
     /// A task of its own runs the load and everything after it: the RPC that
     /// asked may be cancelled (the socket drops the handler's future), and a
@@ -60,6 +61,17 @@ impl PerspectiveInstance {
         })
         .await
         .map_err(|e| deno_core::anyhow::anyhow!("import task join: {}", e))??;
+
+        if stats.imported > 0 {
+            // No pending row is written, and the counters do not split Shared
+            // from Local (a missing status imports as Shared). An idle
+            // fallback would keep the last compare and never publish them.
+            // Inbound sync is not this path: those links are already remote.
+            // The ordinary write path commits, so its Shared links are queued.
+            // The boot-time rusqlite migration and `sync_existing_links_to_sparql`
+            // run on a new instance, before any compare.
+            self.fallback_generation.fetch_add(1, Ordering::AcqRel);
+        }
 
         // The load wrote no diff, so nothing downstream knows the graph
         // changed. Invalidate first — every cached or pooled view of the

@@ -1270,6 +1270,366 @@ async fn the_fallback_loop_never_pushes_from_an_old_languages_short_mirror() {
     );
 }
 
+/// `fake`'s commit, with a render that answers `remote` and counts calls.
+fn counting_language(
+    fake: &Arc<FakeLanguage>,
+    remote: Vec<LinkExpression>,
+    renders: &Arc<AtomicUsize>,
+) -> Language {
+    let fake = fake.clone();
+    let renders = renders.clone();
+    Language::with_test_commit(
+        "fake-link-language".to_string(),
+        Arc::new(move |diff| fake.commit(diff)),
+    )
+    .with_test_render(Arc::new(move || {
+        renders.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(Perspective {
+            links: remote.clone(),
+        }))
+    }))
+}
+
+/// Staging 2026-11-27: the fallback calls `render()` every 5 minutes even
+/// when the remote already holds every shared link and nothing is queued.
+/// That call runs synchronously on the language thread and stalls every
+/// other call on it. A later pass with nothing unsent must not render.
+/// Changing the link language compares once more.
+#[tokio::test(start_paused = true)]
+async fn a_later_fallback_does_not_render_the_room_when_nothing_is_unsent() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let shared = store_many_shared(&perspective, "l", 40);
+    let renders = Arc::new(AtomicUsize::new(0));
+    *perspective.link_language.write().await = Some(counting_language(&fake, shared, &renders));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert_eq!(renders.load(Ordering::SeqCst), 1);
+    assert_eq!(fake.attempts(), 0, "the room already has every shared link");
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert_eq!(
+        renders.load(Ordering::SeqCst),
+        1,
+        "a second pass with nothing unsent does not render"
+    );
+
+    perspective.link_language_changed();
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert_eq!(
+        renders.load(Ordering::SeqCst),
+        2,
+        "a link-language change compares again"
+    );
+}
+
+/// A queued diff is something the fallback still has to look at, so the
+/// next pass renders even after a completed compare.
+#[tokio::test(start_paused = true)]
+async fn a_later_fallback_still_renders_when_a_diff_is_unsent() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let shared = store_many_shared(&perspective, "l", 40);
+    let renders = Arc::new(AtomicUsize::new(0));
+    *perspective.link_language.write().await = Some(counting_language(&fake, shared, &renders));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+    // In the store as well as the queue: the fallback only commits local
+    // Shared links, so a target that exists only in the queue never reaches
+    // `commit` and this assertion would hold even if the unsent exclusion broke.
+    store_shared(&perspective, "queued");
+    enqueue(&perspective, &add("queued"));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert_eq!(renders.load(Ordering::SeqCst), 2);
+    assert_eq!(fake.attempts(), 0, "the queue owns the unsent link");
+}
+
+/// A short mirror is not a completed compare: the pass refuses and the
+/// next one renders again.
+#[tokio::test(start_paused = true)]
+async fn a_fallback_that_saw_a_short_mirror_renders_again() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let shared = store_many_shared(&perspective, "l", 100);
+    let renders = Arc::new(AtomicUsize::new(0));
+    *perspective.link_language.write().await =
+        Some(counting_language(&fake, shared[..10].to_vec(), &renders));
+
+    assert!(!perspective.ensure_public_links_are_shared().await);
+    assert!(!perspective.ensure_public_links_are_shared().await);
+    assert_eq!(renders.load(Ordering::SeqCst), 2);
+    assert_eq!(fake.attempts(), 0);
+}
+
+/// Publish always renders, including after a fallback has compared the room.
+#[tokio::test(start_paused = true)]
+async fn a_publish_still_renders_after_the_room_was_compared() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let shared = store_many_shared(&perspective, "l", 40);
+    let renders = Arc::new(AtomicUsize::new(0));
+    *perspective.link_language.write().await = Some(counting_language(&fake, shared, &renders));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert!(perspective.share_links_after_publish().await);
+    assert_eq!(renders.load(Ordering::SeqCst), 2);
+    assert_eq!(fake.attempts(), 0);
+}
+
+/// `{"links":[…]}` for `import_links_file`, the shape `runtime.exportData` writes.
+fn export_file(links: Vec<DecoratedLinkExpression>) -> tempfile::NamedTempFile {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let snapshot = crate::types::domain::Perspective { links };
+    std::fs::write(file.path(), serde_json::to_string(&snapshot).unwrap()).unwrap();
+    file
+}
+
+/// One compare has finished. Importing a Shared link writes it with no
+/// pending row, so the next fallback must still commit it.
+#[tokio::test]
+async fn an_import_after_a_compare_is_published_by_the_next_fallback() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let shared = store_many_shared(&perspective, "l", 40);
+    let renders = Arc::new(AtomicUsize::new(0));
+    *perspective.link_language.write().await = Some(counting_language(&fake, shared, &renders));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert_eq!(renders.load(Ordering::SeqCst), 1);
+    assert_eq!(fake.attempts(), 0);
+
+    let imported = LinkExpression {
+        status: Some(LinkStatus::Shared),
+        ..link("did:key:alice", "imported")
+    };
+    let file = export_file(vec![(imported, LinkStatus::Shared).into()]);
+    let stats = perspective
+        .import_links_file(file.path())
+        .await
+        .expect("the import succeeds");
+    assert_eq!(stats.imported, 1);
+    assert_eq!(pending(&perspective), 0, "an import leaves no pending row");
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert_eq!(
+        renders.load(Ordering::SeqCst),
+        2,
+        "the import is not covered by the compare that already finished"
+    );
+    assert_eq!(fake.committed(), vec!["+imported".to_string()]);
+}
+
+/// A compare succeeds. A later pass runs because a diff is queued, and its
+/// render fails. The pending loop then drains that row. The next fallback
+/// has an empty queue and must still compare.
+#[tokio::test(start_paused = true)]
+async fn a_failed_compare_after_a_success_is_retried_once_the_queue_drains() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let shared = store_many_shared(&perspective, "l", 40);
+    let renders = Arc::new(AtomicUsize::new(0));
+    let fail_render = Arc::new(AtomicBool::new(false));
+    let (fake_c, renders_c, fail_c, remote) = (
+        fake.clone(),
+        renders.clone(),
+        fail_render.clone(),
+        shared.clone(),
+    );
+    *perspective.link_language.write().await = Some(
+        Language::with_test_commit(
+            "fake-link-language".to_string(),
+            Arc::new(move |diff| fake_c.commit(diff)),
+        )
+        .with_test_render(Arc::new(move || {
+            renders_c.fetch_add(1, Ordering::SeqCst);
+            if fail_c.load(Ordering::SeqCst) {
+                Err(anyhow!("render failed"))
+            } else {
+                Ok(Some(Perspective {
+                    links: remote.clone(),
+                }))
+            }
+        })),
+    );
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert_eq!(renders.load(Ordering::SeqCst), 1);
+
+    enqueue(&perspective, &add("queued"));
+    fail_render.store(true, Ordering::SeqCst);
+    assert!(
+        !perspective.ensure_public_links_are_shared().await,
+        "the render error fails the pass"
+    );
+    assert_eq!(renders.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        pending(&perspective),
+        1,
+        "the failed pass does not drain the queue"
+    );
+
+    fail_render.store(false, Ordering::SeqCst);
+    let task = start_loop(&perspective);
+    run_until(Duration::from_secs(60), || pending(&perspective) == 0)
+        .await
+        .expect("the pending loop drains its row");
+    task.abort();
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert_eq!(
+        renders.load(Ordering::SeqCst),
+        3,
+        "the failed compare is retried after the queue drains"
+    );
+}
+
+/// The remote's revision changing means its store may have lost links. The
+/// next fallback compares. An idle pass with the same revision does not render.
+#[tokio::test(start_paused = true)]
+async fn a_changed_remote_revision_makes_the_next_fallback_compare() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let shared = store_many_shared(&perspective, "l", 40);
+    let renders = Arc::new(AtomicUsize::new(0));
+    let revision = Arc::new(std::sync::Mutex::new(Some("rev-1".to_string())));
+    let (renders_c, revision_c, remote) = (renders.clone(), revision.clone(), shared.clone());
+    *perspective.link_language.write().await = Some(
+        counting_language(&fake, remote, &renders_c)
+            .with_test_revision(Arc::new(move || Ok(revision_c.lock().unwrap().clone()))),
+    );
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert_eq!(renders.load(Ordering::SeqCst), 1);
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert_eq!(
+        renders.load(Ordering::SeqCst),
+        1,
+        "the same revision does not render"
+    );
+
+    *revision.lock().unwrap() = Some("rev-2".to_string());
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert_eq!(
+        renders.load(Ordering::SeqCst),
+        2,
+        "a new remote revision compares again"
+    );
+    assert_eq!(fake.attempts(), 0, "the room still holds every shared link");
+}
+
+/// A language with no revision still compares on every Nth idle pass, and
+/// an idle pass before that does not render.
+#[tokio::test(start_paused = true)]
+async fn every_nth_idle_fallback_compares_when_the_revision_does_not_change() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    let shared = store_many_shared(&perspective, "l", 40);
+    let renders = Arc::new(AtomicUsize::new(0));
+    *perspective.link_language.write().await = Some(counting_language(&fake, shared, &renders));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert_eq!(renders.load(Ordering::SeqCst), 1);
+
+    let n = crate::perspectives::fallback_sync::FALLBACK_FORCED_COMPARE_EVERY_N_PASSES;
+    for i in 1..n {
+        assert!(perspective.ensure_public_links_are_shared().await);
+        assert_eq!(
+            renders.load(Ordering::SeqCst),
+            1,
+            "idle pass {i} of {n} does not render"
+        );
+    }
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert_eq!(renders.load(Ordering::SeqCst), 2, "idle pass {n} compares");
+}
+
+/// `link_language_changed` bumps the generation before `attach_link_language`
+/// stores the new language (`register_local_agents` awaits first). A compare
+/// in that window still has the old language. It must not count as a compare
+/// of the language that then gets stored.
+#[tokio::test]
+async fn a_compare_that_starts_before_the_new_language_is_stored_does_not_count_for_it() {
+    let fake = Arc::new(FakeLanguage::default());
+    let perspective = neighbourhood_perspective(&fake).await;
+    perspective
+        .persisted
+        .update(|h| h.owners = Some(vec!["did:key:owner-a".to_string()]))
+        .await;
+    let shared = store_many_shared(&perspective, "l", 5);
+    let old_renders = Arc::new(AtomicUsize::new(0));
+    *perspective.link_language.write().await =
+        Some(counting_language(&fake, shared.clone(), &old_renders));
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert_eq!(old_renders.load(Ordering::SeqCst), 1);
+    // What `update_perspective_with` does before attach runs.
+    perspective.link_language_changed();
+
+    let address = format!("QmAttachRace{}", Uuid::new_v4().simple());
+    let (tx, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    LanguageController::global_instance()
+        .set_runtime_for_test(
+            &address,
+            Some(
+                crate::languages::language_runtime_handle::LanguageRuntimeHandle::from_channel(
+                    address.clone(),
+                    tx,
+                ),
+            ),
+        )
+        .await;
+    crate::languages::capability::register_capabilities(
+        &address,
+        HashSet::from([crate::languages::capability::Capability::PeersLocal]),
+    );
+
+    let new_renders = Arc::new(AtomicUsize::new(0));
+    let (new_renders_c, remote) = (new_renders.clone(), shared.clone());
+    let new_language = Language::with_test_commit(address.clone(), Arc::new(|_| Ok(None)))
+        .with_test_render(Arc::new(move || {
+            new_renders_c.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(Perspective {
+                links: remote.clone(),
+            }))
+        }));
+    let nh = perspective.persisted.load().neighbourhood.clone().unwrap();
+    let attaching = perspective.clone();
+    let attach =
+        tokio::spawn(async move { attaching.attach_link_language(&nh, new_language).await });
+
+    let request = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("attach did not call peersSetLocal")
+        .unwrap();
+    // Still the old language: the new one is not stored until this returns.
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert_eq!(old_renders.load(Ordering::SeqCst), 2);
+    assert_eq!(new_renders.load(Ordering::SeqCst), 0);
+
+    request
+        .response_tx
+        .send(Ok("null".to_string()))
+        .expect("the runtime is still waiting");
+    tokio::time::timeout(Duration::from_secs(5), attach)
+        .await
+        .expect("attach did not finish")
+        .unwrap();
+
+    assert!(perspective.ensure_public_links_are_shared().await);
+    assert_eq!(
+        new_renders.load(Ordering::SeqCst),
+        1,
+        "the compare of the previous language does not cover the one just stored"
+    );
+
+    LanguageController::global_instance()
+        .set_runtime_for_test(&address, None)
+        .await;
+    crate::languages::capability::remove_capabilities(&address);
+}
+
 /// A failed push after publish queues the shared links no queued or parked
 /// diff holds: a link already waiting in the queue is not queued twice, so
 /// the queue sends it once.
