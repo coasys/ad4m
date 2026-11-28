@@ -244,6 +244,16 @@ describe("SFU fault layer: RunChecks judges a joiner inside an uninterrupted win
     expect(violations).to.have.length(1);
     expect(violations[0]).to.match(/^during lost-answer on carol \(t\+2500ms\): carol hears nothing from dave/);
   });
+
+  it("a stall on one joiner pair counts although another pair of the joiner is still connecting", () => {
+    const violations = judge([
+      at(1_500, { alice: [], carol: [] }),
+      at(2_500, { alice: [], carol: [], dave: ["alice"] }),
+      at(3_500, { alice: [], carol: ["dave"], dave: ["alice"] }),
+    ]);
+    expect(violations).to.have.length(1);
+    expect(violations[0]).to.match(/^during lost-answer on carol \(t\+2500ms\): carol hears nothing from dave/);
+  });
 });
 
 describe("SFU fault layer: RunChecks baselines come from whole collections", () => {
