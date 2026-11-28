@@ -280,6 +280,7 @@ export class Hearing {
     for (const participant of participants) {
       for (const track of participant.stream.getTracks()) {
         if (!this.receivers.has(track.id)) this.receivers.set(track.id, new Receiver(track));
+        this.owners.set(track.id, participant);
       }
     }
   }
@@ -320,8 +321,9 @@ export class Hearing {
     for (const [id, receiver] of this.receivers) {
       if (held.has(id)) continue;
       receiver.stop();
-      const owner = this.owners.get(id)!;
-      this.retired.push({ owner, audio: receiver.track.kind === "audio" ? receiver.frames : 0, video: receiver.track.kind === "audio" ? 0 : receiver.frames });
+      const owner = this.owners.get(id);
+      // A receiver with no known owner is credited to no one.
+      if (owner) this.retired.push({ owner, audio: receiver.track.kind === "audio" ? receiver.frames : 0, video: receiver.track.kind === "audio" ? 0 : receiver.frames });
       this.receivers.delete(id);
       this.owners.delete(id);
     }
