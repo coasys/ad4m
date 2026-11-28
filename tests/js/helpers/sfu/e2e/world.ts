@@ -57,6 +57,8 @@ export interface World {
   restartExecutor(): Promise<void>;
   /** The ports this world's traffic uses: the executor's API (TCP) and its SFU (UDP). */
   ports(): Promise<number[]>;
+  /** The executor's process id (changes with `restartExecutor`). */
+  executorPid(): number;
   stop(): Promise<void>;
 }
 
@@ -165,6 +167,10 @@ export async function startWorld(spec: WorldSpec): Promise<World> {
         // The operator's view of the SFU, read only to aim the network impairment.
         const { bindAddress } = await admin.neighbourhood.sfuStatus();
         return [port, Number(bindAddress.split(":").pop())];
+      },
+      executorPid: () => {
+        if (!executor?.pid) throw new Error(`${spec.id} executor is not running`);
+        return executor.pid;
       },
       restartExecutor: async () => {
         const old = executor!;

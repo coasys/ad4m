@@ -29,6 +29,7 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use ts_rs::TS;
 
@@ -455,12 +456,15 @@ async fn serves_all_members(params: Value, ctx: Arc<RequestContext>) -> Result<V
 async fn sfu_status(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let svc = service()?;
     let reach = svc.reachability();
+    let counters = svc.media_counters();
     Ok(serde_json::to_value(SfuStatus {
         reachability: reach.label().to_string(),
         is_public: reach.is_public(),
         bind_address: svc.local_addr().to_string(),
         advertised_address: svc.advertised_addr().map(|a| a.to_string()),
         detail: reach.to_string(),
+        loop_iterations: counters.loop_iterations.load(Ordering::Relaxed),
+        datagrams_sent: counters.datagrams_sent.load(Ordering::Relaxed),
     })?)
 }
 
@@ -790,6 +794,13 @@ pub struct SfuStatus {
     pub advertised_address: Option<String>,
     /// Human-readable reachability detail.
     pub detail: String,
+    /// Passes of the SFU's media event loop since it started. Two readings
+    /// and the time between them give passes per second.
+    #[ts(type = "number")]
+    pub loop_iterations: u64,
+    /// UDP datagrams the SFU sent (RTP, RTCP and ICE) since it started.
+    #[ts(type = "number")]
+    pub datagrams_sent: u64,
 }
 
 /// `sfu.cascadeStatus`: the SFU↔SFU pipes that are fully established.
@@ -917,11 +928,13 @@ mod tests {
             bind_address: "10.0.0.1:9000".into(),
             advertised_address: None,
             detail: "nat".into(),
+            loop_iterations: 7,
+            datagrams_sent: 5,
         })
         .unwrap();
         assert_eq!(
             status,
-            json!({ "reachability": "nat", "isPublic": false, "bindAddress": "10.0.0.1:9000", "detail": "nat" })
+            json!({ "reachability": "nat", "isPublic": false, "bindAddress": "10.0.0.1:9000", "detail": "nat", "loopIterations": 7, "datagramsSent": 5 })
         );
         let behind_nat = serde_json::to_value(SfuStatus {
             reachability: "public".into(),
@@ -929,6 +942,8 @@ mod tests {
             bind_address: "10.0.0.1:40000".into(),
             advertised_address: Some("198.51.100.7:40000".into()),
             detail: "public".into(),
+            loop_iterations: 0,
+            datagrams_sent: 0,
         })
         .unwrap();
         assert_eq!(behind_nat["advertisedAddress"], "198.51.100.7:40000");

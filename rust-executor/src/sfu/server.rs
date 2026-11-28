@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::mem::Discriminant;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
@@ -1282,6 +1283,18 @@ pub struct DeadPeer {
     pub healthy_stretch: bool,
 }
 
+/// How much work the event loop has done since it started. Monotonic: a
+/// reader takes two readings and divides by the time between them to get a
+/// rate (`sfu.status`).
+#[derive(Debug, Default)]
+pub struct MediaCounters {
+    /// Passes of the event loop: one per wake (a packet, a timer or a command).
+    pub loop_iterations: AtomicU64,
+    /// UDP datagrams the SFU sent (RTP, RTCP and ICE), to clients and pipes
+    /// alike. Counted when the socket accepted the datagram.
+    pub datagrams_sent: AtomicU64,
+}
+
 /// The SFU server. Owns the UDP sockets and drives the str0m event loop.
 pub struct SfuServer {
     /// The address the SFU reports as bound: the explicit one, or in the LAN
@@ -1299,6 +1312,8 @@ pub struct SfuServer {
     /// Notifications about peers whose RTC connection died. Unbounded: a
     /// dropped notification would leave the peer's room slot taken for good.
     pub dead_peer_rx: StdMutex<Option<mpsc::UnboundedReceiver<DeadPeer>>>,
+    /// What the event loop has done since it started.
+    pub counters: Arc<MediaCounters>,
 }
 
 impl SfuServer {
@@ -1352,7 +1367,13 @@ impl SfuServer {
         let (command_tx, command_rx) = mpsc::channel(256);
         let (dead_peer_tx, dead_peer_rx) = mpsc::unbounded_channel();
 
-        tokio::spawn(Self::event_loop(sockets.clone(), command_rx, dead_peer_tx));
+        let counters = Arc::new(MediaCounters::default());
+        tokio::spawn(Self::event_loop(
+            sockets.clone(),
+            command_rx,
+            dead_peer_tx,
+            counters.clone(),
+        ));
 
         Ok(Self {
             local_addr,
@@ -1361,6 +1382,7 @@ impl SfuServer {
             reachability,
             command_tx,
             dead_peer_rx: StdMutex::new(Some(dead_peer_rx)),
+            counters,
         })
     }
 
@@ -1425,6 +1447,7 @@ impl SfuServer {
         media: MediaSockets,
         mut command_rx: mpsc::Receiver<SfuCommand>,
         dead_peer_tx: mpsc::UnboundedSender<DeadPeer>,
+        counters: Arc<MediaCounters>,
     ) {
         let mut peers: HashMap<ParticipantId, SfuPeer> = HashMap::new();
         let mut relay = MediaRelay::new();
@@ -1441,6 +1464,7 @@ impl SfuServer {
         );
 
         loop {
+            counters.loop_iterations.fetch_add(1, Ordering::Relaxed);
             if media.version() != sockets_version {
                 (sockets_version, sockets) = media.snapshot();
                 info!(
@@ -1724,11 +1748,14 @@ impl SfuServer {
                                     .map(|_| ()),
                                 None => Err(std::io::Error::other("no socket")),
                             };
-                            if let Err(e) = sent {
-                                debug!(
+                            match sent {
+                                Ok(()) => {
+                                    counters.datagrams_sent.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(e) => debug!(
                                     "SFU: failed to send UDP from {} to {}: {}",
                                     transmit.source, transmit.destination, e
-                                );
+                                ),
                             }
                         }
                         Ok(Output::Timeout(t)) => {
@@ -6179,6 +6206,49 @@ mod tests {
                 .unwrap()
         );
         assert!(server.reachability.is_public(), "{}", server.reachability);
+    }
+
+    /// A command answered by the loop is at least one more pass; with nobody
+    /// connected, nothing was sent.
+    #[tokio::test]
+    async fn the_loop_counts_its_passes_on_an_idle_server() {
+        let server = SfuServer::start(SfuServerConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let passes = || server.counters.loop_iterations.load(Ordering::Relaxed);
+        let before = passes();
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        server
+            .command_tx
+            .send(SfuCommand::GetQualityPreferences { reply })
+            .await
+            .unwrap();
+        answer.await.unwrap();
+        assert!(passes() > before, "the pass that answered was not counted");
+        assert_eq!(server.counters.datagrams_sent.load(Ordering::Relaxed), 0);
+        let _ = server.command_tx.send(SfuCommand::Shutdown).await;
+    }
+
+    /// A caller that connects makes the SFU answer its STUN and DTLS over UDP:
+    /// every datagram the socket accepted is counted.
+    #[tokio::test]
+    async fn the_datagrams_the_sfu_sent_are_counted() {
+        let server = SfuServer::start(SfuServerConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!(server.counters.datagrams_sent.load(Ordering::Relaxed), 0);
+        call_through(&server, std::net::Ipv4Addr::LOCALHOST.into()).await;
+        assert!(
+            server.counters.datagrams_sent.load(Ordering::Relaxed) > 0,
+            "a connected caller got datagrams that were not counted"
+        );
+        let _ = server.command_tx.send(SfuCommand::Shutdown).await;
     }
 
     #[tokio::test]

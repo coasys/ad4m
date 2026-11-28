@@ -1058,6 +1058,46 @@ jobs:
           path: test-artifacts
           destination: test-logs
 
+  # What the executor spends on calls of 3, 8 and 16 participants in real
+  # Chromium tabs (tests/js/tests/sfu-capacity.test.ts): its CPU, the UDP
+  # datagrams the SFU sends and the passes of its media loop, per second. The
+  # test writes $PERF_RESULTS_DIR/sfu-capacity.json. Nightly only. Like
+  # integration-tests-sfu-browsers it builds its own binaries.
+  integration-tests-sfu-capacity:
+    machine: true
+    resource_class: coasys/marvin
+    environment:
+      PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: debian13-x64
+      PLAYWRIGHT_BROWSERS_PATH: /home/marvin/.cache/ms-playwright-debian13
+    steps:
+      - setup_integration_test_environment:
+          local: true
+          build_binaries: true
+      - run:
+          name: Install Chromium
+          command: |
+            cd ./tests/js
+            PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1 pnpm exec playwright-core install chromium
+            sudo apt-get update -qq
+            ./scripts/install-browser-deps.sh
+      - run:
+          name: Prepare the local test languages
+          command: cd ./tests/js && pnpm run prepare-test-local
+      - perf_setup
+      - run:
+          name: Run the SFU capacity measurement
+          command: |
+            mkdir -p "${TEST_ARTIFACTS:?}"
+            set -o pipefail
+            cd ./tests/js && SFU_BROWSERS_REQUIRED=1 pnpm run test-sfu-capacity 2>&1 | tee "$TEST_ARTIFACTS/sfu-capacity.log"
+          no_output_timeout: 30m
+      - perf_finish:
+          job: integration-tests-sfu-capacity
+      - store_artifacts:
+          when: always
+          path: test-artifacts
+          destination: sfu-capacity-logs
+
   # Multi-node suite over the server-link-language: Alice + Bob on local
   # languages (no Holochain), links syncing through a link-server the suite
   # starts (tests/js/tests/integration-server-link.test.ts).
@@ -1870,6 +1910,8 @@ workflows:
           serial-group: << pipeline.project.slug >>/nightly-sfu
       - integration-tests-sfu-browsers:
           serial-group: << pipeline.project.slug >>/nightly-sfu-browsers
+      - integration-tests-sfu-capacity:
+          serial-group: << pipeline.project.slug >>/nightly-sfu-capacity
       - coasys-spaces:
           serial-group: << pipeline.project.slug >>/nightly-llm
       - integration-tests-agent-harness:

@@ -21,4 +21,13 @@ advertisedAddress?: string,
 /**
  * Human-readable reachability detail.
  */
-detail: string, };
+detail: string, 
+/**
+ * Passes of the SFU's media event loop since it started. Two readings
+ * and the time between them give passes per second.
+ */
+loopIterations: number, 
+/**
+ * UDP datagrams the SFU sent (RTP, RTCP and ICE) since it started.
+ */
+datagramsSent: number, };
