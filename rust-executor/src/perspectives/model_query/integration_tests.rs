@@ -2928,7 +2928,7 @@ async fn test_full_model_query_where_ops_not() {
 // -----------------------------------------------------------------------
 // build_instance_sparql: predicate projection tests
 //
-// Verifies that the VALUES ?predicate clause correctly excludes
+// Verifies that the `FILTER(?predicate IN …)` clause correctly excludes
 // collection properties that have SPARQL getters (i.e. typed @HasMany
 // relations resolved by evaluate_getters) while retaining scalar
 // properties, flags, and raw-predicate collections without getters.
@@ -3001,7 +3001,7 @@ fn make_shape(props: Vec<ShapeProperty>) -> ModelShape {
 #[tokio::test]
 async fn test_build_instance_sparql_scalar_only_model_uses_values_clause() {
     // A model with only scalar properties (like ChannelSummary) should
-    // produce a VALUES ?predicate clause listing only those predicates.
+    // produce a predicate filter listing only those predicates.
     let shape = make_shape(vec![
         scalar_prop("type", "flux://entry_type", true, true),
         scalar_prop("name", "flux://name", false, false),
@@ -3011,8 +3011,8 @@ async fn test_build_instance_sparql_scalar_only_model_uses_values_clause() {
     let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(
-        sparql.contains("VALUES ?predicate"),
-        "Should have VALUES clause, got:\n{}",
+        sparql.contains("FILTER(?predicate IN"),
+        "Should have the predicate filter, got:\n{}",
         sparql
     );
     assert!(sparql.contains("<flux://entry_type>"));
@@ -3045,8 +3045,8 @@ async fn test_build_instance_sparql_excludes_getter_backed_collections() {
     let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(
-        sparql.contains("VALUES ?predicate"),
-        "Should have VALUES clause"
+        sparql.contains("FILTER(?predicate IN"),
+        "Should have the predicate filter"
     );
     assert!(sparql.contains("<flux://entry_type>"));
     assert!(sparql.contains("<flux://name>"));
@@ -3078,7 +3078,7 @@ async fn test_build_instance_sparql_retains_raw_predicate_collections() {
     let query = ModelQueryInput::default();
     let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
-    assert!(sparql.contains("VALUES ?predicate"));
+    assert!(sparql.contains("FILTER(?predicate IN"));
     assert!(sparql.contains("<flux://entry_type>"));
     assert!(
         sparql.contains("<flux://has_participant>"),
@@ -3109,7 +3109,7 @@ async fn test_build_instance_sparql_shared_predicate_mixed_getter() {
     let query = ModelQueryInput::default();
     let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
-    assert!(sparql.contains("VALUES ?predicate"));
+    assert!(sparql.contains("FILTER(?predicate IN"));
     // ad4m://has_child should appear because raw_children needs it
     assert!(
         sparql.contains("<ad4m://has_child>"),
@@ -3120,14 +3120,14 @@ async fn test_build_instance_sparql_shared_predicate_mixed_getter() {
 #[tokio::test]
 async fn test_build_instance_sparql_empty_shape_falls_back_to_wildcard() {
     // A shape with no properties at all should fall back to the
-    // unrestricted wildcard (no VALUES clause).
+    // unrestricted wildcard (no predicate filter).
     let shape = make_shape(vec![]);
     let query = ModelQueryInput::default();
     let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(
-        !sparql.contains("VALUES ?predicate"),
-        "Empty shape should produce wildcard (no VALUES clause)"
+        !sparql.contains("FILTER(?predicate IN"),
+        "Empty shape should produce wildcard (no predicate filter)"
     );
     // Should still have the basic pattern
     assert!(sparql.contains("?source ?predicate ?target"));
@@ -3145,16 +3145,16 @@ async fn test_build_instance_sparql_values_clause_is_deduplicated() {
     let query = ModelQueryInput::default();
     let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
-    assert!(sparql.contains("VALUES ?predicate"));
+    assert!(sparql.contains("FILTER(?predicate IN"));
     // Count occurrences of the shared predicate in the VALUES clause
     let values_line = sparql
         .lines()
-        .find(|l| l.contains("VALUES ?predicate"))
+        .find(|l| l.contains("FILTER(?predicate IN"))
         .unwrap();
     let count = values_line.matches("<ns://shared_pred>").count();
     assert_eq!(
         count, 1,
-        "Shared predicate should appear exactly once in VALUES clause"
+        "Shared predicate should appear exactly once in the predicate filter"
     );
 }
 
@@ -9397,7 +9397,7 @@ fn links_query(keys: &[&str]) -> ModelQueryInput {
 /// the full signed link.
 ///
 /// Before `links` there was no way to reach it through the class layer at all:
-/// the instance query binds `VALUES ?predicate` to the shape's predicates and
+/// the instance query keeps `?predicate` to the shape's predicates and
 /// hydration drops the rest, so a revoked role kept voting unless the caller
 /// went around `model_query` to raw `get_links`. Fails on `dev`: `__links` is
 /// absent (the `links` key is ignored by deserialization).
