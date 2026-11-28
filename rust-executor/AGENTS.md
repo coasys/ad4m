@@ -218,6 +218,18 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   that is not open at the time keeps the retired DID as owner until a later unlock moves it.
   `identity.custodyStatus` is the custody channel (`identity/custody.rs`).
 
+- **The SFU media loop has no tick** (`sfu/server.rs`, `SfuServer::event_loop`). A packet,
+  a command, a due timer or written media drives only the peers it touches: the loop keeps a
+  `to_poll` set, and polls each peer in it until str0m returns `Output::Timeout`
+  (recorded in `PeerTimers`). A packet finds its peer through `PeerRoutes`, a
+  `(local, remote)` address map that is only a hint: the peer it names must still `accepts`
+  the packet, else the peers are searched. The loop sleeps until the earliest of the peers'
+  str0m timeouts, `LayerSelector::next_wake`, and `SfuPeer::next_sweep_at` (offer resend,
+  establishment window, disconnect grace); with none it waits for a packet or a command.
+  New code that gives a peer's `Rtc` an input outside those paths must add the peer to
+  `to_poll`, or its output waits for the next unrelated wake. A new time-based sweep over
+  peers needs its deadline in `next_sweep_at`.
+
 ## Do / don't
 
 - Don't add to `perspective_instance.rs`, `db.rs`, `languages/mod.rs`, `ai_service/mod.rs`: they are

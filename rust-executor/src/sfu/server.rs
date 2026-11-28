@@ -457,6 +457,25 @@ impl SfuPeer {
         }
     }
 
+    /// The next instant a sweep of ours has work for this peer with no event
+    /// to cause it: the offer deadline, the establishment window, the end of
+    /// the disconnect grace. The sweeps are [`sweep_offer_deadlines`] and
+    /// [`end_expired_peers`]; this is when each can first act. A deadline
+    /// the sweep has already acted on has moved or ended the peer.
+    pub fn next_sweep_at(&self) -> Option<Instant> {
+        let offer = self.pending.as_ref().map(|pending| pending.next_deadline);
+        let establish = (!self.had_path && self.end_reason.is_none())
+            .then(|| self.created_at + PEER_ESTABLISH_TIMEOUT);
+        let disconnect = self.disconnected_since.map(|since| {
+            let grace_end = since + ICE_DISCONNECT_GRACE;
+            match &self.ice_restart {
+                Some(restart) => grace_end.max(restart.since + ICE_RESTART_GRACE),
+                None => grace_end,
+            }
+        });
+        [offer, establish, disconnect].into_iter().flatten().min()
+    }
+
     /// The session whose media this peer's inbound track `mid` carries. A
     /// client peer sends its own; a pipe carries other nodes' sessions, as
     /// their offers named them. A mid no offer named (a node on an older
@@ -1436,6 +1455,14 @@ impl SfuServer {
         let mut first_read = 0usize;
         // A command that ended the wait below; the drain at the top handles it.
         let mut woken: Option<SfuCommand> = None;
+        // Which peer a packet's addresses belong to, and when each peer's
+        // str0m next needs `Input::Timeout`.
+        let mut routes = PeerRoutes::default();
+        let mut timers = PeerTimers::default();
+        // The peers str0m must be polled for before the loop waits: each one
+        // that took an input (packet, timer, command, written media) since
+        // its last poll.
+        let mut to_poll: HashSet<ParticipantId> = HashSet::new();
 
         info!(
             "SFU event loop started on {:?}",
@@ -1471,6 +1498,7 @@ impl SfuServer {
                         if !peer.is_pipe {
                             layers.set_bwe(&pid);
                         }
+                        to_poll.insert(pid.clone());
                         peers.insert(pid, peer);
                     }
                     Ok(SfuCommand::RemovePeer(pid)) => {
@@ -1480,6 +1508,9 @@ impl SfuServer {
                             relay.remove_participant(&pid);
                             quality_preferences.remove(&pid);
                             layers.forget(Instant::now(), &pid);
+                            routes.forget(&pid);
+                            timers.forget(&pid);
+                            to_poll.remove(&pid);
                             clean_stale_track_refs(&mut peers, &pid, &room_id);
                         }
                     }
@@ -1518,6 +1549,7 @@ impl SfuServer {
                             });
                             // Settled before the deadline sweep below: an answer
                             // in the tick of a resend cancels that resend.
+                            to_poll.insert(participant_id.clone());
                             peer.settle_answer(&id, &sdp_answer_json)
                             // Deferred tracks drain AFTER poll_output — see
                             // the post-poll sweep below.  Draining here would
@@ -1556,6 +1588,7 @@ impl SfuServer {
                             );
                             continue;
                         }
+                        to_poll.insert(participant_id.clone());
                         apply_pipe_renegotiation_offer(
                             peer,
                             &sdp_offer_json,
@@ -1575,6 +1608,7 @@ impl SfuServer {
                             );
                             continue;
                         };
+                        to_poll.insert(participant_id.clone());
                         match parse_trickle_candidate(&candidate_sdp) {
                             Ok(None) => {
                                 debug!("SFU: end-of-candidates for {}", participant_id);
@@ -1630,6 +1664,7 @@ impl SfuServer {
                                             target_pid, channel_label, e
                                         );
                                     }
+                                    to_poll.insert(target_pid.clone());
                                 }
                             }
                         }
@@ -1703,9 +1738,16 @@ impl SfuServer {
             let due_resends = sweep_offer_deadlines(&mut peers, now);
             // A pending upgrade whose hold ended, or whose layer is measured.
             layers.run_due(now);
+            // A peer whose str0m timeout came gets its `Input::Timeout`.
+            for pid in timers.take_due(now) {
+                if let Some(peer) = peers.get_mut(&pid) {
+                    let _ = peer.rtc.handle_input(Input::Timeout(now));
+                    to_poll.insert(pid);
+                }
+            }
 
-            // Poll all peers for output
-            let mut earliest_timeout = Instant::now() + Duration::from_millis(100);
+            // Poll the peers that took an input since their last poll, until
+            // each one reports its next timeout.
             let mut media_to_relay: Vec<(ParticipantId, MediaData)> = Vec::new();
             let mut tracks_opened: Vec<(ParticipantId, Mid, MediaKind)> = Vec::new();
             // Pipe peers that reached ICE Connected/Completed, or opened a
@@ -1717,7 +1759,11 @@ impl SfuServer {
             let mut data_received: Vec<(ParticipantId, crate::sfu::types::SfuDataMessage)> =
                 Vec::new();
 
-            for (pid, peer) in peers.iter_mut() {
+            for pid in std::mem::take(&mut to_poll) {
+                let pid = &pid;
+                let Some(peer) = peers.get_mut(pid) else {
+                    continue;
+                };
                 loop {
                     if !peer.rtc.is_alive() {
                         break;
@@ -1739,7 +1785,7 @@ impl SfuServer {
                             }
                         }
                         Ok(Output::Timeout(t)) => {
-                            earliest_timeout = earliest_timeout.min(t);
+                            timers.set(pid.clone(), t);
                             break;
                         }
                         Ok(Output::Event(event)) => match event {
@@ -1869,6 +1915,8 @@ impl SfuServer {
                         relay.remove_participant(pid);
                         quality_preferences.remove(pid);
                         layers.forget(now, pid);
+                        routes.forget(pid);
+                        timers.forget(pid);
                         dead_peers.push(peer.dead_peer(now));
                         false
                     } else {
@@ -1957,6 +2005,7 @@ impl SfuServer {
                             data.time,
                         );
                         write_forwarded(target_peer, out_mid, data, time);
+                        to_poll.insert(target_pid.clone());
                     }
                 }
             }
@@ -1964,6 +2013,7 @@ impl SfuServer {
                 if let Some(mut writer) = peers.get_mut(&origin_pid).and_then(|p| p.rtc.writer(mid))
                 {
                     let _ = writer.request_keyframe(rid, KeyframeRequestKind::Pli);
+                    to_poll.insert(origin_pid);
                 }
             }
 
@@ -1998,6 +2048,9 @@ impl SfuServer {
                     if let Some((sdp_offer_json, track_mapping)) =
                         apply_deferred_tracks(peer, Instant::now())
                     {
+                        // Only an offer changed str0m. A drain that made none
+                        // would be tried again at once, and spin the loop.
+                        to_poll.insert(pid.clone());
                         let offer_id = peer
                             .pending
                             .as_ref()
@@ -2016,6 +2069,7 @@ impl SfuServer {
             }
 
             let adds_per_target = outbound_adds(&mut peers, &tracks_opened, &pipes_usable);
+            to_poll.extend(adds_per_target.keys().cloned());
 
             for (target_pid, sdp_offer_json, track_mapping) in
                 offer_new_tracks(&mut peers, adds_per_target)
@@ -2055,6 +2109,7 @@ impl SfuServer {
                     if let Some(origin_peer) = peers.get_mut(&origin_pid) {
                         if let Some(mut writer) = origin_peer.rtc.writer(origin_mid) {
                             let _ = writer.request_keyframe(rid, req.kind);
+                            to_poll.insert(origin_pid);
                         }
                     }
                 }
@@ -2064,16 +2119,26 @@ impl SfuServer {
             for (pid, bps) in layers.take_demands() {
                 if let Some(peer) = peers.get_mut(&pid) {
                     peer.rtc.bwe().set_desired_bitrate(Bitrate::bps(bps));
+                    to_poll.insert(pid);
                 }
             }
-            // Wake for the earliest pending upgrade: the estimator is silent
-            // on a steady link, so no event would run it.
-            if let Some(wake) = layers.next_wake() {
-                earliest_timeout = earliest_timeout.min(wake);
+
+            // Inputs made above are polled before the loop waits.
+            if !to_poll.is_empty() {
+                continue;
             }
 
-            // Read from the UDP sockets with timeout
-            let duration = (earliest_timeout - Instant::now()).max(Duration::from_millis(1));
+            // Sleep until the earliest of: a peer's str0m timeout, a sweep
+            // deadline of ours, a pending layer upgrade. Nothing else is a
+            // timer: a packet or a command ends the wait.
+            let wake = [
+                timers.earliest(),
+                layers.next_wake(),
+                peers.values().filter_map(SfuPeer::next_sweep_at).min(),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             first_read = first_read.wrapping_add(1);
 
             tokio::select! {
@@ -2092,12 +2157,19 @@ impl SfuServer {
                                     },
                                 );
 
-                                // Demultiplex: find which peer accepts this packet
-                                if let Some((_pid, peer)) = peers.iter_mut().find(|(_, p)| p.rtc.accepts(&input)) {
+                                // Demultiplex: the peer behind this address, or
+                                // the one that accepts it when it is new.
+                                let target = routes.resolve(
+                                    (destination, source),
+                                    |pid| peers.get(pid).is_some_and(|p| p.rtc.accepts(&input)),
+                                    peers.keys(),
+                                );
+                                if let Some(peer) = target.as_ref().and_then(|pid| peers.get_mut(pid)) {
                                     if let Err(e) = peer.rtc.handle_input(input) {
                                         warn!("SFU: peer input error: {:?}", e);
                                         peer.rtc.disconnect();
                                     }
+                                    to_poll.extend(target);
                                 }
                             }
                         }
@@ -2117,15 +2189,9 @@ impl SfuServer {
                         }
                     }
                 }
-                _ = tokio::time::sleep(duration) => {
-                    // Timeout — drive all peers forward
+                _ = sleep_until_wake(wake) => {
+                    // A timer came: the top of the loop drives what is due.
                 }
-            }
-
-            // Drive time forward for all peers
-            let now = Instant::now();
-            for (_pid, peer) in peers.iter_mut() {
-                let _ = peer.rtc.handle_input(Input::Timeout(now));
             }
         }
     }
@@ -2757,6 +2823,97 @@ struct DueResend {
     offer_id: String,
     sdp: String,
     track_mapping: Vec<crate::sfu::TrackMapEntry>,
+}
+
+/// The local and remote address of a packet, `(destination, source)` as the
+/// event loop reads them: the socket it arrived on and the sender.
+type PacketPath = (SocketAddr, SocketAddr);
+
+/// Which peer a packet's addresses belong to, so a packet finds its peer
+/// without asking every peer. An entry is a hint, never the answer: the peer
+/// it names must still accept the packet (str0m's `Rtc::accepts`), else the
+/// entry is dropped and the peers are searched again. A path that moved (ICE
+/// restart, a new candidate pair) therefore cannot send packets to the peer
+/// that used to own it.
+#[derive(Default)]
+struct PeerRoutes {
+    by_path: HashMap<PacketPath, ParticipantId>,
+}
+
+impl PeerRoutes {
+    /// The peer for a packet on `path`. `accepts` says whether a peer takes
+    /// the packet; `peers` is every peer, searched when `path` is unknown or
+    /// its entry no longer holds. The peer found is remembered for `path`.
+    fn resolve<'a>(
+        &mut self,
+        path: PacketPath,
+        accepts: impl Fn(&ParticipantId) -> bool,
+        peers: impl IntoIterator<Item = &'a ParticipantId>,
+    ) -> Option<ParticipantId> {
+        if let Some(known) = self.by_path.get(&path) {
+            if accepts(known) {
+                return Some(known.clone());
+            }
+            self.by_path.remove(&path);
+        }
+        let found = peers.into_iter().find(|pid| accepts(pid))?.clone();
+        self.by_path.insert(path, found.clone());
+        Some(found)
+    }
+
+    /// `pid` left: its paths go with it.
+    fn forget(&mut self, pid: &ParticipantId) {
+        self.by_path.retain(|_, owner| owner != pid);
+    }
+}
+
+/// When each peer's str0m next needs `Input::Timeout`: the last
+/// `Output::Timeout` it returned. A peer is polled after every input, so its
+/// entry is always the one str0m asked for last.
+#[derive(Default)]
+struct PeerTimers {
+    next: HashMap<ParticipantId, Instant>,
+}
+
+impl PeerTimers {
+    fn set(&mut self, pid: ParticipantId, at: Instant) {
+        self.next.insert(pid, at);
+    }
+
+    fn forget(&mut self, pid: &ParticipantId) {
+        self.next.remove(pid);
+    }
+
+    fn earliest(&self) -> Option<Instant> {
+        self.next.values().min().copied()
+    }
+
+    /// The peers whose timeout is at or before `now`, removed: each is
+    /// driven and polled, and the poll sets its next one.
+    fn take_due(&mut self, now: Instant) -> Vec<ParticipantId> {
+        let due: Vec<ParticipantId> = self
+            .next
+            .iter()
+            .filter(|(_, at)| **at <= now)
+            .map(|(pid, _)| pid.clone())
+            .collect();
+        for pid in &due {
+            self.next.remove(pid);
+        }
+        due
+    }
+}
+
+/// Sleep until `wake`, at least 1 ms (a deadline already past must not spin
+/// the loop), or forever when there is none.
+async fn sleep_until_wake(wake: Option<Instant>) {
+    match wake {
+        Some(at) => {
+            let at = at.max(Instant::now() + Duration::from_millis(1));
+            tokio::time::sleep_until(at.into()).await
+        }
+        None => std::future::pending().await,
+    }
 }
 
 /// Name and end every peer whose ICE time has run out. A peer already ended
@@ -6427,6 +6584,28 @@ mod tests {
         let _ = server.command_tx.send(SfuCommand::Shutdown).await;
     }
 
+    /// Callers that reach the loop on the same socket at the same time are
+    /// told apart by address and by their ICE credentials: each one's STUN
+    /// and DTLS reach its own peer, and each is polled for its replies.
+    #[tokio::test]
+    async fn callers_connect_through_one_loop_at_the_same_time() {
+        let server = SfuServer::start(SfuServerConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let loopback = "127.0.0.1".parse::<std::net::IpAddr>().unwrap();
+        let (a, b, c) = tokio::join!(
+            call_through(&server, loopback),
+            call_through(&server, loopback),
+            call_through(&server, loopback),
+        );
+        assert_eq!(a, b);
+        assert_eq!(b, c);
+        let _ = server.command_tx.send(SfuCommand::Shutdown).await;
+    }
+
     #[tokio::test]
     async fn a_preference_for_a_peer_that_left_leaves_nothing_behind() {
         let server = SfuServer::start(SfuServerConfig {
@@ -6456,7 +6635,7 @@ mod tests {
     }
 
     /// A command sent to an idle loop (no packet, no timer due) is handled
-    /// at once, not at the next 100 ms wake.
+    /// at once, not at the next timer.
     #[tokio::test]
     async fn a_command_wakes_an_idle_loop_at_once() {
         let server = SfuServer::start(SfuServerConfig {
@@ -6487,6 +6666,197 @@ mod tests {
             "a command waited {slowest:?} on an idle loop"
         );
         let _ = server.command_tx.send(SfuCommand::Shutdown).await;
+    }
+
+    /// A fake `accepts`: which peer takes which path, and how often each
+    /// peer was asked.
+    #[derive(Default)]
+    struct FakeAccepts {
+        owners: std::cell::RefCell<HashMap<PacketPath, ParticipantId>>,
+        asked: std::cell::RefCell<HashMap<ParticipantId, usize>>,
+    }
+
+    impl FakeAccepts {
+        fn own(&self, path: PacketPath, pid: &ParticipantId) {
+            self.owners.borrow_mut().insert(path, pid.clone());
+        }
+
+        fn accepts(&self, path: PacketPath, pid: &ParticipantId) -> bool {
+            *self.asked.borrow_mut().entry(pid.clone()).or_default() += 1;
+            self.owners.borrow().get(&path) == Some(pid)
+        }
+
+        fn asked(&self, pid: &ParticipantId) -> usize {
+            self.asked.borrow().get(pid).copied().unwrap_or(0)
+        }
+    }
+
+    fn path(remote_port: u16) -> PacketPath {
+        (
+            "127.0.0.1:7000".parse().unwrap(),
+            SocketAddr::from(([10, 0, 0, 2], remote_port)),
+        )
+    }
+
+    /// A packet on a path the loop has seen asks one peer, not all of them,
+    /// so the packet drives that peer and no other.
+    #[test]
+    fn a_known_path_is_resolved_without_asking_the_other_peers() {
+        let (a, b, c) = (
+            ParticipantId::next(),
+            ParticipantId::next(),
+            ParticipantId::next(),
+        );
+        let all = [a.clone(), b.clone(), c.clone()];
+        let fake = FakeAccepts::default();
+        fake.own(path(1), &a);
+        fake.own(path(2), &b);
+        let mut routes = PeerRoutes::default();
+
+        // The first packet of a path searches.
+        assert_eq!(
+            routes.resolve(path(1), |pid| fake.accepts(path(1), pid), all.iter()),
+            Some(a.clone())
+        );
+        let (b_asked, c_asked) = (fake.asked(&b), fake.asked(&c));
+        let a_asked = fake.asked(&a);
+
+        // The next ones ask the owner alone.
+        for _ in 0..10 {
+            assert_eq!(
+                routes.resolve(path(1), |pid| fake.accepts(path(1), pid), all.iter()),
+                Some(a.clone())
+            );
+        }
+        assert_eq!(fake.asked(&a), a_asked + 10);
+        assert_eq!(
+            fake.asked(&b),
+            b_asked,
+            "peer B is not asked about A's path"
+        );
+        assert_eq!(
+            fake.asked(&c),
+            c_asked,
+            "peer C is not asked about A's path"
+        );
+    }
+
+    /// After an ICE restart A's old address belongs to B (or to nobody). The
+    /// entry for it names A, A no longer accepts it, so the packet goes to
+    /// B, never to A.
+    #[test]
+    fn a_path_that_moved_to_another_peer_is_not_misrouted() {
+        let (a, b) = (ParticipantId::next(), ParticipantId::next());
+        let all = [a.clone(), b.clone()];
+        let fake = FakeAccepts::default();
+        let mut routes = PeerRoutes::default();
+        fake.own(path(1), &a);
+        assert_eq!(
+            routes.resolve(path(1), |pid| fake.accepts(path(1), pid), all.iter()),
+            Some(a.clone())
+        );
+
+        // A restarts ICE and moves to port 9; B takes A's old port.
+        fake.own(path(9), &a);
+        fake.own(path(1), &b);
+        assert_eq!(
+            routes.resolve(path(1), |pid| fake.accepts(path(1), pid), all.iter()),
+            Some(b.clone()),
+            "the stale entry for A must not take the packet"
+        );
+        assert_eq!(
+            routes.resolve(path(9), |pid| fake.accepts(path(9), pid), all.iter()),
+            Some(a.clone())
+        );
+
+        // The old port is nobody's now: no peer, and no entry left behind.
+        fake.owners.borrow_mut().remove(&path(1));
+        assert_eq!(
+            routes.resolve(path(1), |pid| fake.accepts(path(1), pid), all.iter()),
+            None
+        );
+        assert!(!routes.by_path.contains_key(&path(1)));
+    }
+
+    #[test]
+    fn a_peer_that_left_keeps_no_route() {
+        let (a, b) = (ParticipantId::next(), ParticipantId::next());
+        let fake = FakeAccepts::default();
+        fake.own(path(1), &a);
+        fake.own(path(2), &b);
+        let mut routes = PeerRoutes::default();
+        let all = [a.clone(), b.clone()];
+        routes.resolve(path(1), |pid| fake.accepts(path(1), pid), all.iter());
+        routes.resolve(path(2), |pid| fake.accepts(path(2), pid), all.iter());
+        routes.forget(&a);
+        assert_eq!(routes.by_path.len(), 1);
+        assert_eq!(routes.by_path.get(&path(2)), Some(&b));
+    }
+
+    /// A silent peer wakes the loop only when its own str0m asks to, and an
+    /// empty loop does not wake at all: there is no fixed tick.
+    #[test]
+    fn the_peer_timers_wake_for_the_earliest_timeout_and_for_nothing_else() {
+        let now = Instant::now();
+        let (a, b) = (ParticipantId::next(), ParticipantId::next());
+        let mut timers = PeerTimers::default();
+        assert_eq!(timers.earliest(), None, "no peer, no wake");
+
+        timers.set(a.clone(), now + Duration::from_secs(5));
+        timers.set(b.clone(), now + Duration::from_secs(2));
+        assert_eq!(
+            timers.earliest(),
+            Some(now + Duration::from_secs(2)),
+            "the wake is the peer's own timeout, not capped at 100 ms"
+        );
+
+        // Only the peer whose time came is driven.
+        assert!(timers.take_due(now + Duration::from_secs(1)).is_empty());
+        assert_eq!(
+            timers.take_due(now + Duration::from_secs(2)),
+            vec![b.clone()]
+        );
+        assert_eq!(timers.earliest(), Some(now + Duration::from_secs(5)));
+        timers.forget(&a);
+        assert_eq!(timers.earliest(), None);
+    }
+
+    /// Each sweep deadline of a peer is a wake: the sweep can act at that
+    /// instant and not before.
+    #[test]
+    fn each_sweep_deadline_of_a_peer_is_a_wake() {
+        let (_caller, mut peer) = connected_pair();
+        // Never connected: the establishment window.
+        assert_eq!(
+            peer.next_sweep_at(),
+            Some(peer.created_at + PEER_ESTABLISH_TIMEOUT)
+        );
+        let at = peer.created_at + PEER_ESTABLISH_TIMEOUT;
+        assert!(!peer.never_established(at - Duration::from_millis(1)));
+        assert!(peer.never_established(at));
+
+        // Connected, nothing pending, not disconnected: nothing to wake for.
+        peer.had_path = true;
+        assert_eq!(peer.next_sweep_at(), None);
+
+        // Disconnected: the end of the grace.
+        let down = Instant::now();
+        peer.disconnected_since = Some(down);
+        let grace_end = down + ICE_DISCONNECT_GRACE;
+        assert_eq!(peer.next_sweep_at(), Some(grace_end));
+        assert!(!peer.stayed_disconnected(grace_end - Duration::from_millis(1)));
+        assert!(peer.stayed_disconnected(grace_end));
+
+        // An ICE restart in flight extends it to the restart's grace.
+        peer.ice_restart = Some(IceRestart {
+            since: down + Duration::from_secs(1),
+            again: false,
+            candidates: Vec::new(),
+        });
+        let restart_end = down + Duration::from_secs(1) + ICE_RESTART_GRACE;
+        assert_eq!(peer.next_sweep_at(), Some(restart_end));
+        assert!(!peer.stayed_disconnected(restart_end - Duration::from_millis(1)));
+        assert!(peer.stayed_disconnected(restart_end));
     }
 
     #[test]
