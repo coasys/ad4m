@@ -8,8 +8,8 @@
 //! perspective directly.
 //!
 //! The buffered ops are handed to `apply_with_overlay` by the engine after
-//! the pass terminates (v3 §6 — writes only cross the overlay gate at pass
-//! boundary, not mid-loop). Design: [[planning/llm-harness-design-2026-08-21-v3.md]] §6.
+//! the pass terminates: writes cross the overlay gate only at the pass
+//! boundary, never mid-loop.
 //!
 //! ## Why decorator, not new dynamic MCP tools
 //!
@@ -166,8 +166,8 @@ pub fn class_propose_shape_from_shacl(class: &ShaclClass) -> ClassProposeShape {
 ///
 /// The class list is fixed at construction — new perspective classes
 /// registered mid-pass will NOT appear until the next pass. This matches
-/// the design v3 §6 guarantee that the tool surface a pass advertises is
-/// stable for the duration of that pass.
+/// the guarantee that the tool surface a pass advertises stays stable for
+/// the duration of that pass.
 pub struct ProposeWritesProvider<P: ToolProvider + ?Sized> {
     inner: Arc<P>,
     classes: Vec<ClassProposeShape>,

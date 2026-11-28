@@ -184,10 +184,7 @@ async fn get_interactions(params: Value, _ctx: Arc<RequestContext>) -> Result<Va
     Ok(serde_json::to_value(Vec::<InteractionMeta>::new())?)
 }
 
-async fn interact_expression(
-    params: Value,
-    _ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
+async fn interact_expression(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let url = params.require_str("url")?;
     let body: InteractionCallWrapper = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -200,7 +197,7 @@ async fn interact_expression(
     if let Ok((lang_address, _)) = LanguageController::parse_expr_url(&decoded_url) {
         if controller.is_language_loaded(&lang_address).await {
             match controller
-                .expression_interact(&decoded_url, &body.interaction_call)
+                .expression_interact(&decoded_url, &body.interaction_call, &ctx.acts_as())
                 .await
             {
                 Ok(Some(result)) => return Ok(Value::String(result)),

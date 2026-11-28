@@ -52,6 +52,12 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   after its write (`register_shapes`, `import_perspective`, the publish path); a reload that
   rebuilds the store clears too. So an IRI key and a name key never hold a stale or crossed shape.
   `get_shape(class)` → `Arc<ModelShape>`, `class` a target class IRI or a name.
+- An action link (`ad4m://constructor` and `ad4m://destructor` on the shape, `ad4m://setter`,
+  `ad4m://adder` and `ad4m://remover` on a property shape) targets a literal that holds a JSON
+  array of `Command` (`perspective_instance.rs`, read by `parse_actions_from_literal`):
+  `action` (`addLink`, `removeLink`, `setSingleTarget`, `collectionSetter`), `source`,
+  `predicate`, `target`, optional `local`. `execute_commands` puts the instance address in
+  place of `this` and each parameter's value in place of its name (`value`).
 - `register_shapes` compares the own links a shape gives with the own links stored, as
   triples. Equal sets write nothing (`unchanged`); otherwise one Shared diff adds what is
   missing and removes every copy of each stale own link. Copies of an expected triple stay
@@ -220,3 +226,8 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   pins the links and the SDK test decodes the same file, so update it in the same change.
 - Flow transition URIs are `{ns}{flow}.transition/{from}/{to}/{action}`, each part
   percent-encoded; `SHACLFlow.transitionUri` in core builds the same string.
+
+- Merge-up gotcha: a branch made before the `PersistedHandle` migration
+  (`perspective_instance/persisted_handle.rs`) still calls `persisted.lock()`.
+  That call is now `load()`, `snapshot()` or `update(|h| ...)`. After a merge-up the
+  tests fail with `E0599`. Port the call sites.

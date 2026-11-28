@@ -6,8 +6,6 @@
 //! `call_tool_by_name`) which live in `harness_bridge.rs`. The provider
 //! itself has no policy — filtering (e.g. read-only) is caller-composed via
 //! `FilteredProvider`, not baked in here.
-//!
-//! Design: [[planning/llm-harness-design-2026-08-21-v3.md]] §6.
 
 use super::Ad4mMcpHandler;
 use crate::ai_service::harness::provider::{ToolProvider, ToolSchema};

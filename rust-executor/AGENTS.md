@@ -1,11 +1,8 @@
 # rust-executor — agent guide
 
-Crate `ad4m-executor` (lib `rust_executor`). The AD4M runtime. Refactoring plan and
-conventions: `../planning/rust-executor-refactoring-spec-2026-09-04.md`. Read the
-"Conventions" section there before adding files.
-
-`CLAUDE.md` next to this file is a Claude Code entrypoint (`@AGENTS.md`). Edit this
-file; keep `CLAUDE.md` as `@AGENTS.md`.
+Crate `ad4m-executor` (lib `rust_executor`). The AD4M runtime. The "spec item" notes in
+the `AGENTS.md` files under `src/` refer to the refactoring spec
+(`planning/rust-executor-refactoring-spec-2026-09-04.md`) in open PR #970, which has not reached `dev`.
 
 ## Build and test
 
@@ -21,7 +18,8 @@ cargo test --release -- --test-threads=1 <name>   # one test
 cd .. && pnpm run test-main                        # JS integration suites against built binary; pkill -9 ad4m-executor first
 ```
 
-`--release` and `--test-threads=1` are required (see `.claude/skills/rust-executor-testing.md`).
+`--release` and `--test-threads=1` are required: the tests share global singletons, and some
+are time-sensitive and expect a release build.
 
 **Where a create or join spends its time:** `grep 'timing:'` in the executor log. Each line is
 `timing: <step> [address] <ms>ms` (`logging::span`), logged when the step ends. `applyTemplate`,
@@ -226,6 +224,17 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 - Don't add to `perspective_instance.rs`, `db.rs`, `languages/mod.rs`, `ai_service/mod.rs`: they are
   being split (spec items 3, 4, 9). Put new code in a new file with its own `impl` block.
 - New directory ⇒ add an `AGENTS.md` (≤ 40 lines: purpose, files, entry points, invariants,
-  "do not") and a sibling `CLAUDE.md` containing only `@AGENTS.md`.
+  "do not"). No `CLAUDE.md` (see the root `AGENTS.md`).
 - Mechanical moves and behaviour changes in separate commits.
-- Stale docs in this dir: `LOGGING.md` is current. Anything named `PHASE1_*` is obsolete.
+
+## Lib-test prerequisites and target dirs
+
+- On a fresh checkout, lib tests do not compile until two build outputs exist,
+  in this order. First run `pnpm build-dapp` at the repo root: it produces
+  `rust-executor/dapp/dist`, which `dapp_server.rs` embeds with `include_dir!`.
+  Then run `rust-executor/scripts/build-deno-snapshot.sh` (the same as
+  `pnpm build` here): it compiles the executor lib, so it needs `dapp/dist`.
+- A gate uses its own `CARGO_TARGET_DIR` per worktree. A shared one can run a
+  stale test binary.
+- `bootstrap-languages` builds ignore `CARGO_TARGET_DIR`. Run them with
+  `env -u CARGO_TARGET_DIR`.

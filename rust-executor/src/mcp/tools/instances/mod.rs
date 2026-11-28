@@ -12,8 +12,7 @@
 //! one social DNA loaded, ~85 with two — and it changes at runtime as
 //! neighbourhoods are joined. That breaks every statically-declared
 //! integration (plugin manifests, agent tool configs, docs) and degrades LLM
-//! tool selection long before hard limits bite. Design and trade-offs:
-//! `planning/mcp-tool-surface-redesign-2026-09-06.md`.
+//! tool selection long before hard limits bite.
 //!
 //! Correctness is unchanged. Every write through the typed tools is validated
 //! against the class's SHACL shape *before* anything is written
